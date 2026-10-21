@@ -6,6 +6,8 @@
 pub mod db;
 pub mod error;
 pub mod model;
+pub mod photo_filename;
+pub mod scanner;
 
 pub use db::Db;
 pub use error::{CoreError, Result};
