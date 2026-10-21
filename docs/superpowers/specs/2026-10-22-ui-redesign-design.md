@@ -271,6 +271,7 @@ New `App` state:
 - `inspector_collapsed`, `inspector_epoch`
 - `hovered_nav: Option<Screen>`, `hovered_photo: Option<i64>`
 - `grid_columns: usize` (updated from the window width during render)
+- `grid_epoch: u64` (incremented when the photo set is reloaded)
 - `thumbnail_colors: HashMap<i64, u32>`
 - `selection_epoch`, `previous_preview: Option<Arc<RenderImage>>`,
   `previous_color: Option<u32>`
@@ -281,8 +282,9 @@ New `App` state:
 - `daemon_age_secs: Option<i64>` (derived from `daemon_heartbeat`)
 - `demo_assets: Option<DemoAssets>` (photo dir + thumbnail dir)
 - Focus handles: `photo_grid_focus`, `quick_look_close_focus`,
-  `quick_look_favorite_focus`, `quick_look_compress_focus`,
-  `quick_look_trash_focus`, `quick_look_add_tag_focus`
+  `quick_look_details_focus`, `quick_look_favorite_focus`,
+  `quick_look_compress_focus`, `quick_look_trash_focus`,
+  `quick_look_add_tag_focus`
 
 The header subtitle uses `daemon_age_secs`: "最終同期 N秒前" when the daemon
 is active, "デーモン停止" otherwise, "デモデータ" in demo mode. No new DB
