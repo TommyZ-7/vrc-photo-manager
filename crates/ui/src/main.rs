@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -176,6 +177,12 @@ impl App {
         app.message = message;
         if let Some(id) = app.photos.first().map(|photo| photo.id) {
             app.select_photo(id, cx);
+        }
+        if !app.demo
+            && !app.daemon_active
+            && let Err(error) = spawn_daemon_process()
+        {
+            app.message = Some(format!("デーモンを起動できません: {error}"));
         }
         app.start_auto_refresh(cx);
         app
@@ -2360,7 +2367,48 @@ fn format_label(format: &CompressionFormat) -> String {
     .to_string()
 }
 
+fn daemon_binary_path() -> Option<PathBuf> {
+    let name = if cfg!(target_os = "windows") {
+        "vrc-photo-daemon.exe"
+    } else {
+        "vrc-photo-daemon"
+    };
+    std::env::current_exe()
+        .ok()?
+        .parent()
+        .map(|parent| parent.join(name))
+}
+
+fn spawn_daemon_process() -> Result<(), String> {
+    let path = daemon_binary_path().ok_or_else(|| "daemon binary path not found".to_string())?;
+    if !path.is_file() {
+        return Err(format!("{} が見つかりません", path.display()));
+    }
+    Command::new(&path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn run_background_supervisor() -> Result<(), String> {
+    let path = daemon_binary_path().ok_or_else(|| "daemon binary path not found".to_string())?;
+    if !path.is_file() {
+        return Err(format!("{} が見つかりません", path.display()));
+    }
+    let mut child = Command::new(&path)
+        .spawn()
+        .map_err(|error| error.to_string())?;
+    child.wait().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 fn main() {
+    if std::env::args().any(|arg| arg == "--background") {
+        if let Err(error) = run_background_supervisor() {
+            eprintln!("{error}");
+        }
+        return;
+    }
     gpui_kit::application().run(|cx| {
         cx.text_system()
             .add_fonts(vec![Cow::Borrowed(

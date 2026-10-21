@@ -1,0 +1,48 @@
+name = "vrc-photo-manager"
+productName = "VRC Photo Manager"
+version = "0.1.0"
+identifier = "com.tommyz.vrc-photo-manager"
+description = "VRChat photo library with log-based world/player context and built-in compression."
+longDescription = "Index VRChat screenshots, link them to the world and players from VRChat output logs and XMP metadata, then search and compress them locally."
+homepage = "https://github.com/TommyZ-7/vrc-photo-manager"
+authors = ["TommyZ7"]
+licenseFile = "LICENSE"
+category = "Photography"
+outDir = "dist"
+binariesDir = "target/release"
+beforePackagingCommand = "cargo build --release -p vrc-photo-ui -p vrc-photo-daemon"
+formats = ["deb", "appimage", "pacman"]
+icons = ["packaging/icons/icon.png"]
+
+[[binaries]]
+path = "vrc-photo-manager"
+main = true
+
+[[binaries]]
+path = "vrc-photo-daemon"
+
+[linux]
+generateDesktopEntry = true
+
+[deb]
+depends = [
+  "libxkbcommon0",
+  "libxkbcommon-x11-0",
+  "libwayland-client0",
+  "libvulkan1",
+  "libx11-6",
+  "libxcb1",
+  "libfontconfig1",
+  "libfreetype6",
+]
+
+[pacman]
+depends = [
+  "libxkbcommon",
+  "wayland",
+  "vulkan-icd-loader",
+  "libx11",
+  "libxcb",
+  "fontconfig",
+  "freetype2",
+]

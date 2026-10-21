@@ -1,0 +1,118 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'Packager.toml'
+      - 'packaging/**'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Install Linux dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            cmake \
+            ninja-build \
+            clang \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libx11-xcb-dev \
+            libxcb-xkb-dev \
+            libwayland-dev \
+            libvulkan-dev \
+            libx11-dev \
+            libxcb1-dev \
+            libfontconfig1-dev \
+            libfreetype6-dev \
+            file
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-packager
+        run: cargo install cargo-packager --locked --version 0.11.8
+
+      - name: Build Linux packages
+        run: cargo packager --release
+
+      - name: List artifacts
+        run: ls -lh dist
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Publish release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          git fetch --tags --force
+          PREV=$(git tag --list 'v*.*.*' --sort=-v:refname | grep -vxF "$TAG" | head -n1 || true)
+          if [ -n "$PREV" ]; then
+            RANGE="$PREV..$TAG"
+            TITLE_SUFFIX=" (changes since $PREV)"
+            COMPARE="**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV}...${TAG}"
+          else
+            RANGE="$TAG"
+            TITLE_SUFFIX=""
+            COMPARE="_First release._"
+          fi
+          pick() { git log "$RANGE" --no-merges --pretty=format:'- %s (%h)' "$@" || true; }
+          ADDED=$(pick --grep='^feat' -i)
+          FIXED=$(pick --grep='^fix' -i)
+          IMPROVED=$(pick --invert-grep --grep='^feat' --grep='^fix' -i)
+          [ -n "$ADDED" ] || ADDED="- none"
+          [ -n "$FIXED" ] || FIXED="- none"
+          [ -n "$IMPROVED" ] || IMPROVED="- none"
+          cat > /tmp/release-notes.md <<NOTES
+          ## $TAG$TITLE_SUFFIX
+
+          ### ✨ Added
+          $ADDED
+
+          ### 🔧 Improved
+          $IMPROVED
+
+          ### 🐛 Fixed
+          $FIXED
+
+          ---
+          $COMPARE
+          NOTES
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" --title "$TAG" --notes-file /tmp/release-notes.md dist/*
+          fi
