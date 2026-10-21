@@ -24,6 +24,12 @@ pub struct AppSettings {
     pub estimated_link: bool,
     pub thumbnail_cache_mb: u64,
     pub compression_workers: usize,
+    #[serde(default)]
+    pub ui_sidebar_collapsed: bool,
+    #[serde(default)]
+    pub ui_inspector_collapsed: bool,
+    #[serde(default)]
+    pub ui_reduce_motion: bool,
 }
 
 impl Default for AppSettings {
@@ -40,6 +46,9 @@ impl Default for AppSettings {
             estimated_link: true,
             thumbnail_cache_mb: 2048,
             compression_workers: 1,
+            ui_sidebar_collapsed: false,
+            ui_inspector_collapsed: false,
+            ui_reduce_motion: false,
         }
     }
 }
@@ -212,6 +221,27 @@ mod tests {
         assert_eq!(loaded.photo_roots, settings.photo_roots);
         assert_eq!(loaded.log_dir, settings.log_dir);
         assert_eq!(loaded.language, "en");
+    }
+
+    #[test]
+    fn settings_deserialize_without_ui_fields() {
+        let json = r#"{
+            "photo_roots": [],
+            "log_dir": null,
+            "managed_dir": null,
+            "language": "ja",
+            "autostart": true,
+            "tray": true,
+            "auto_compress": true,
+            "auto_compress_backlog": false,
+            "estimated_link": true,
+            "thumbnail_cache_mb": 2048,
+            "compression_workers": 1
+        }"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+        assert!(!settings.ui_sidebar_collapsed);
+        assert!(!settings.ui_inspector_collapsed);
+        assert!(!settings.ui_reduce_motion);
     }
 
     #[test]
