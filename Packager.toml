@@ -27,6 +27,7 @@ generateDesktopEntry = true
 [deb]
 depends = [
   "libxkbcommon0",
+  "libxkbcommon-x11-0",
   "libwayland-client0",
   "libvulkan1",
   "libx11-6",

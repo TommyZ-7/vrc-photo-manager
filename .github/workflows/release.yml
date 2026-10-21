@@ -38,6 +38,9 @@ jobs:
             ninja-build \
             clang \
             libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libx11-xcb-dev \
+            libxcb-xkb-dev \
             libwayland-dev \
             libvulkan-dev \
             libx11-dev \
