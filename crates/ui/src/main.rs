@@ -1599,7 +1599,14 @@ impl App {
             }))
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 this.select_photo(id, cx);
-                window.focus(&this.photo_grid_focus, cx);
+                if this.screen == Screen::Photos {
+                    window.focus(&this.photo_grid_focus, cx);
+                } else {
+                    // Keep focus on a handle that is actually mounted. Search
+                    // cards reuse this handler, but its grid is Photos-only.
+                    let handle = this.world_input.read(cx).focus_handle(cx);
+                    window.focus(&handle, cx);
+                }
                 if let ClickEvent::Mouse(click) = event
                     && click.down.click_count >= 2
                 {
@@ -1951,7 +1958,7 @@ impl App {
             .flex_shrink_0()
             .gap(px(8.))
             .child(
-                Button::new("open-detail")
+                Button::new("open-viewer")
                     .label("全画面表示")
                     .small()
                     .primary()
