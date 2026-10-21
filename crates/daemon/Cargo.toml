@@ -16,6 +16,7 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow.workspace = true
+auto-launch = "0.6"
 chrono.workspace = true
 clap.workspace = true
 notify = "8"

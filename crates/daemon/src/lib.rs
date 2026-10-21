@@ -59,6 +59,7 @@ pub struct Daemon {
     tray_enabled: bool,
     thumbnail_tx: Option<mpsc::Sender<i64>>,
     thumbnail_handle: Option<JoinHandle<()>>,
+    last_autostart_check: std::time::Instant,
 }
 
 impl Daemon {
@@ -107,6 +108,7 @@ impl Daemon {
             tray_enabled,
             thumbnail_tx: None,
             thumbnail_handle: None,
+            last_autostart_check: std::time::Instant::now(),
         })
     }
 
@@ -183,6 +185,7 @@ impl Daemon {
         self.ingest_logs()?;
         self.link_unlinked()?;
         self.setup_watchers()?;
+        self.apply_autostart(self.settings.autostart);
         self.ensure_tray();
         self.start_workers();
 
@@ -217,6 +220,10 @@ impl Daemon {
                 self.last_log_poll = std::time::Instant::now();
             }
             self.refresh_status().ok();
+            if self.last_autostart_check.elapsed() >= Duration::from_secs(10) {
+                self.refresh_autostart_setting();
+                self.last_autostart_check = std::time::Instant::now();
+            }
             self.poll_tray();
             thread::sleep(SCAN_INTERVAL);
         }
@@ -386,6 +393,41 @@ impl Daemon {
             .as_ref()
             .map(|tail| tail.path.to_string_lossy().to_string());
         Ok(())
+    }
+
+    fn refresh_autostart_setting(&mut self) {
+        let enabled = {
+            let db = self.db.lock().unwrap();
+            AppSettings::load(&db)
+                .map(|settings| settings.autostart)
+                .unwrap_or(self.settings.autostart)
+        };
+        if enabled != self.settings.autostart {
+            self.settings.autostart = enabled;
+            self.apply_autostart(enabled);
+        }
+    }
+
+    fn apply_autostart(&self, enabled: bool) {
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
+        let exe = exe.to_string_lossy();
+        let mut builder = auto_launch::AutoLaunchBuilder::new();
+        builder.set_app_name("VRC Photo Manager").set_app_path(&exe);
+        match builder.build() {
+            Ok(auto) => {
+                let result = if enabled {
+                    auto.enable()
+                } else {
+                    auto.disable()
+                };
+                if let Err(error) = result {
+                    tracing::warn!(%error, enabled, "cannot update autostart");
+                }
+            }
+            Err(error) => tracing::warn!(%error, "cannot build autostart entry"),
+        }
     }
 
     fn ensure_tray(&mut self) {
