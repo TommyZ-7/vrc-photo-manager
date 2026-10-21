@@ -83,7 +83,11 @@ pub struct App {
     world_input: Entity<InputState>,
     player_input: Entity<InputState>,
     tag_input: Entity<InputState>,
+    photo_root_input: Entity<InputState>,
+    log_dir_input: Entity<InputState>,
     search_results: Option<Vec<Photo>>,
+    search_favorite: bool,
+    search_days: Option<i64>,
     message: Option<String>,
     demo: bool,
 }
@@ -91,10 +95,27 @@ pub struct App {
 impl App {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (db, demo, mut message) = open_database();
+        let initial_settings = AppSettings::load(&db).unwrap_or_default();
         let world_input = cx.new(|cx| InputState::new(window, cx).placeholder("ワールド名 / ID"));
         let player_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("プレイヤー名 / ID"));
         let tag_input = cx.new(|cx| InputState::new(window, cx).placeholder("タグ"));
+        let photo_root_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("例: C:/Users/you/Pictures/VRChat")
+                .default_value(
+                    initial_settings
+                        .photo_roots
+                        .first()
+                        .cloned()
+                        .unwrap_or_default(),
+                )
+        });
+        let log_dir_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("例: C:/Users/you/AppData/LocalLow/VRChat/VRChat")
+                .default_value(initial_settings.log_dir.clone().unwrap_or_default())
+        });
         let mut app = Self {
             db,
             screen: Screen::Photos,
@@ -118,7 +139,11 @@ impl App {
             world_input,
             player_input,
             tag_input,
+            photo_root_input,
+            log_dir_input,
             search_results: None,
+            search_favorite: false,
+            search_days: Some(7),
             message: None,
             demo,
         };
@@ -265,13 +290,18 @@ impl App {
         let world = self.world_input.read(cx).value().to_string();
         let player = self.player_input.read(cx).value().to_string();
         let tag = self.tag_input.read(cx).value().to_string();
+        let from_utc = self
+            .search_days
+            .map(|days| Utc::now().timestamp() - days * 86_400);
         self.search_results = Some(
             self.db
                 .search_photos_text(
                     Some(world.as_str()),
                     Some(player.as_str()),
                     Some(tag.as_str()),
-                    false,
+                    self.search_favorite,
+                    from_utc,
+                    None,
                     300,
                 )
                 .unwrap_or_default(),
@@ -1316,6 +1346,39 @@ impl App {
                         .child(self.filter_field("プレイヤー", Input::new(&self.player_input)))
                         .child(self.filter_field("タグ", Input::new(&self.tag_input)))
                         .child(
+                            v_flex()
+                                .gap_1()
+                                .child(div().text_xs().text_color(rgb(MUTED)).child("日時"))
+                                .child(
+                                    h_flex()
+                                        .gap_1()
+                                        .child(self.preset_button("今日", Some(1), cx))
+                                        .child(self.preset_button("7日", Some(7), cx))
+                                        .child(self.preset_button("30日", Some(30), cx))
+                                        .child(self.preset_button("すべて", None, cx)),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(MUTED))
+                                        .child("お気に入りのみ"),
+                                )
+                                .child(div().flex_1())
+                                .child(
+                                    Switch::new("search-favorite")
+                                        .checked(self.search_favorite)
+                                        .on_click(cx.listener(|this, value, _, cx| {
+                                            this.search_favorite = *value;
+                                            this.run_search(cx);
+                                        })),
+                                ),
+                        )
+                        .child(
                             h_flex()
                                 .gap_2()
                                 .child(
@@ -1378,6 +1441,29 @@ impl App {
                         }),
                 ),
         )
+    }
+
+    fn preset_button(
+        &self,
+        label: &str,
+        days: Option<i64>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let active = self.search_days == days;
+        div()
+            .id(SharedString::from(format!("preset-{label}")))
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(if active { rgb(BLUE_DARK) } else { rgb(PANEL_2) })
+            .text_xs()
+            .text_color(if active { rgb(0xffffff) } else { rgb(MUTED) })
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.search_days = days;
+                this.run_search(cx);
+            }))
+            .child(label.to_string())
     }
 
     fn filter_field(&self, label: &str, input: Input) -> impl IntoElement {
@@ -1493,19 +1579,54 @@ impl App {
             .gap_4()
             .child(div().text_lg().font_semibold().child("設定"))
             .child(
-                self.settings_panel(
-                    "ライブラリ",
-                    &[
-                        ("写真フォルダ", self.settings.photo_roots.join("\n")),
-                        (
-                            "ログフォルダ",
-                            self.settings
-                                .log_dir
-                                .clone()
-                                .unwrap_or_else(|| "未設定".to_string()),
-                        ),
-                    ],
-                ),
+                v_flex()
+                    .p_4()
+                    .gap_3()
+                    .rounded_lg()
+                    .bg(rgb(PANEL))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .child(div().text_sm().font_semibold().child("ライブラリ"))
+                    .child(self.filter_field("写真フォルダ", Input::new(&self.photo_root_input)))
+                    .child(self.filter_field("ログフォルダ", Input::new(&self.log_dir_input)))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                Button::new("save-paths")
+                                    .label("パスを保存")
+                                    .small()
+                                    .primary()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let root =
+                                            this.photo_root_input.read(cx).value().to_string();
+                                        let log = this.log_dir_input.read(cx).value().to_string();
+                                        this.settings.photo_roots = if root.trim().is_empty() {
+                                            Vec::new()
+                                        } else {
+                                            vec![root.trim().to_string()]
+                                        };
+                                        this.settings.log_dir = if log.trim().is_empty() {
+                                            None
+                                        } else {
+                                            Some(log.trim().to_string())
+                                        };
+                                        let _ = this.settings.save(&this.db);
+                                        this.message = Some(
+                                            "保存しました。デーモン再起動で監視に反映されます。"
+                                                .to_string(),
+                                        );
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MUTED_2))
+                                    .child("デーモン実行中は再起動後に反映"),
+                            ),
+                    ),
             )
             .child(
                 v_flex()
@@ -1555,34 +1676,6 @@ impl App {
                         self.settings.language, self.settings.thumbnail_cache_mb
                     ))),
             )
-    }
-
-    fn settings_panel(&self, title: &str, rows: &[(&str, String)]) -> impl IntoElement {
-        v_flex()
-            .p_4()
-            .gap_2()
-            .rounded_lg()
-            .bg(rgb(PANEL))
-            .border_1()
-            .border_color(rgb(BORDER))
-            .child(div().text_sm().font_semibold().child(title.to_string()))
-            .children(rows.iter().map(|(label, value)| {
-                v_flex()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(MUTED_2))
-                            .child(label.to_string()),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .font_family("monospace")
-                            .text_color(rgb(MUTED))
-                            .child(value.clone()),
-                    )
-            }))
     }
 
     fn setting_switch(

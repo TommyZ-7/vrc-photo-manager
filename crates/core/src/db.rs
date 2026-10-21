@@ -375,6 +375,8 @@ impl Db {
         player: Option<&str>,
         tag: Option<&str>,
         favorite: bool,
+        from_utc: Option<i64>,
+        to_utc: Option<i64>,
         limit: i64,
     ) -> Result<Vec<Photo>> {
         let mut clauses = vec!["p.status = 'present'".to_string()];
@@ -412,6 +414,14 @@ impl Db {
         }
         if favorite {
             clauses.push("p.is_favorite = 1".to_string());
+        }
+        if let Some(from) = from_utc {
+            clauses.push("p.captured_at_utc >= ?".to_string());
+            values.push(Value::Integer(from));
+        }
+        if let Some(to) = to_utc {
+            clauses.push("p.captured_at_utc <= ?".to_string());
+            values.push(Value::Integer(to));
         }
 
         let sql = format!(
