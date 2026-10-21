@@ -14,6 +14,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use smallvec::SmallVec;
 use vrc_photo_core::db::Db;
+use vrc_photo_core::importer::{self, ImportMode};
 use vrc_photo_core::model::{
     CompressionFormat, CompressionProfile, Derivative, LibraryStats, NewPhoto, Photo, PhotoContext,
     PhotoPlayer, QueueStatus,
@@ -21,6 +22,7 @@ use vrc_photo_core::model::{
 use vrc_photo_core::settings::AppSettings;
 use vrc_photo_core::thumbnail;
 use vrc_photo_core::time;
+use vrc_photo_core::{linker, scanner};
 
 const BG: u32 = 0x0f1115;
 const PANEL: u32 = 0x161a20;
@@ -87,6 +89,7 @@ pub struct App {
     tag_edit_input: Entity<InputState>,
     photo_root_input: Entity<InputState>,
     log_dir_input: Entity<InputState>,
+    import_dir_input: Entity<InputState>,
     search_results: Option<Vec<Photo>>,
     search_favorite: bool,
     search_days: Option<i64>,
@@ -121,6 +124,11 @@ impl App {
                 .placeholder("例: C:/Users/you/AppData/LocalLow/VRChat/VRChat")
                 .default_value(initial_settings.log_dir.clone().unwrap_or_default())
         });
+        let import_dir_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("取り込み先フォルダ")
+                .default_value(initial_settings.import_dir().display().to_string())
+        });
         let mut app = Self {
             db,
             screen: Screen::Photos,
@@ -148,6 +156,7 @@ impl App {
             tag_edit_input,
             photo_root_input,
             log_dir_input,
+            import_dir_input,
             search_results: None,
             search_favorite: false,
             search_days: Some(7),
@@ -573,13 +582,20 @@ impl App {
                     .child(self.badge("日時", MUTED, PANEL_2))
                     .child(self.badge("タグ", MUTED, PANEL_2))
                     .child(
-                        Button::new("import")
-                            .label("取り込み")
+                        Button::new("import-copy")
+                            .label("コピー取込")
+                            .small()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.import_dialog(ImportMode::Copy, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("import-move")
+                            .label("移動取込")
                             .small()
                             .primary()
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.message = Some("取り込みは次のバッチで実装します".to_string());
-                                cx.notify();
+                                this.import_dialog(ImportMode::Move, cx);
                             })),
                     ),
             )
@@ -1146,6 +1162,26 @@ impl App {
                             .child(self.policy_button("置換（ゴミ箱）", "replace", cx)),
                     )
                     .child(
+                        Button::new("add-profile")
+                            .label("＋ プロファイル")
+                            .small()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let profile = CompressionProfile {
+                                    name: format!("新規プロファイル {}", this.profiles.len() + 1),
+                                    auto_enabled: false,
+                                    ..CompressionProfile::default()
+                                };
+                                let _ = this.db.save_profile(&profile);
+                                this.profiles = this.db.list_profiles().unwrap_or_default();
+                                this.profile_index = this
+                                    .profiles
+                                    .iter()
+                                    .position(|item| item.id == profile.id)
+                                    .unwrap_or(0);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
                         Button::new("manual-compress")
                             .label("手動圧縮")
                             .small()
@@ -1225,6 +1261,15 @@ impl App {
                             .child(self.queue_panel(cx)),
                     ),
             )
+    }
+
+    fn edit_profile(&mut self, edit: impl FnOnce(&mut CompressionProfile), cx: &mut Context<Self>) {
+        if let Some(profile) = self.profiles.get_mut(self.profile_index) {
+            edit(profile);
+            let profile = profile.clone();
+            let _ = self.db.save_profile(&profile);
+        }
+        cx.notify();
     }
 
     fn profile_editor(
@@ -1359,14 +1404,87 @@ impl App {
                 ),
             )
             .child(self.meta_row("サフィックス", profile.suffix.clone()))
-            .child(self.meta_row(
-                "リサイズ",
-                if profile.resize_enabled {
-                    format!("{} × {}", profile.width, profile.height)
-                } else {
-                    "なし".to_string()
-                },
-            ))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_xs().text_color(rgb(MUTED)).child("リサイズ"))
+                    .child(
+                        Switch::new("profile-resize")
+                            .checked(profile.resize_enabled)
+                            .on_click(cx.listener(|this, checked, _, cx| {
+                                this.edit_profile(|profile| profile.resize_enabled = *checked, cx);
+                            })),
+                    )
+                    .when(profile.resize_enabled, |this| {
+                        this.child(
+                            h_flex()
+                                .gap_1()
+                                .children(
+                                    [
+                                        ("HD", 1280u32, 720u32),
+                                        ("FHD", 1920, 1080),
+                                        ("2K", 2560, 1440),
+                                        ("4K", 3840, 2160),
+                                    ]
+                                    .into_iter()
+                                    .map(
+                                        |(label, width, height)| {
+                                            div()
+                                                .id(SharedString::from(format!("resize-{label}")))
+                                                .px_2()
+                                                .py_1()
+                                                .rounded_md()
+                                                .bg(rgb(PANEL_2))
+                                                .text_xs()
+                                                .text_color(rgb(MUTED))
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.edit_profile(
+                                                        |profile| {
+                                                            profile.resize_enabled = true;
+                                                            profile.width = width;
+                                                            profile.height = height;
+                                                        },
+                                                        cx,
+                                                    );
+                                                }))
+                                                .child(label)
+                                        },
+                                    ),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(MUTED_2))
+                                        .child(format!("{} × {}", profile.width, profile.height)),
+                                ),
+                        )
+                    })
+                    .when(profile.resize_enabled, |this| {
+                        this.child(
+                            h_flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(MUTED_2))
+                                        .child("アスペクト比維持"),
+                                )
+                                .child(
+                                    Switch::new("profile-aspect")
+                                        .checked(profile.maintain_aspect)
+                                        .on_click(cx.listener(|this, checked, _, cx| {
+                                            this.edit_profile(
+                                                |profile| profile.maintain_aspect = *checked,
+                                                cx,
+                                            );
+                                        })),
+                                ),
+                        )
+                    }),
+            )
             .child(
                 div()
                     .p_2()
@@ -1569,6 +1687,56 @@ impl App {
         )
     }
 
+    fn import_dialog(&mut self, mode: ImportMode, cx: &mut Context<Self>) {
+        let Some(files) = rfd::FileDialog::new()
+            .add_filter("画像", &["png", "jpg", "jpeg"])
+            .pick_files()
+        else {
+            return;
+        };
+        let dest = self.settings.import_dir();
+        let result = match importer::import_files(&files, &dest, mode) {
+            Ok(result) => result,
+            Err(error) => {
+                self.message = Some(format!("取り込みに失敗: {error}"));
+                cx.notify();
+                return;
+            }
+        };
+        let dest_string = dest.to_string_lossy().to_string();
+        if !self
+            .settings
+            .photo_roots
+            .iter()
+            .any(|root| root == &dest_string)
+        {
+            self.settings.photo_roots.push(dest_string.clone());
+            let _ = self.settings.save(&self.db);
+        }
+        let root_id = match self.db.add_root(&dest_string, "managed") {
+            Ok(id) => id,
+            Err(error) => {
+                self.message = Some(format!("取り込み先を登録できません: {error}"));
+                cx.notify();
+                return;
+            }
+        };
+        let report = scanner::scan_and_index(&self.db, root_id, &dest).unwrap_or_default();
+        let _ = linker::relink_unlinked(&self.db, 1000);
+        for id in &report.new_ids {
+            if let Ok(Some(photo)) = self.db.photo_by_id(*id) {
+                let _ = thumbnail::ensure_thumbnail(*id, Path::new(&photo.abs_path));
+            }
+        }
+        self.reload();
+        self.message = Some(format!(
+            "{} 枚を取り込みました（{} 枚スキップ）",
+            result.imported.len(),
+            result.skipped
+        ));
+        cx.notify();
+    }
+
     fn policy_button(&self, label: &str, policy: &str, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.compress_policy == policy;
         let policy = policy.to_string();
@@ -1743,6 +1911,7 @@ impl App {
                     .child(div().text_sm().font_semibold().child("ライブラリ"))
                     .child(self.filter_field("写真フォルダ", Input::new(&self.photo_root_input)))
                     .child(self.filter_field("ログフォルダ", Input::new(&self.log_dir_input)))
+                    .child(self.filter_field("取り込み先", Input::new(&self.import_dir_input)))
                     .child(
                         h_flex()
                             .gap_2()
@@ -1756,6 +1925,8 @@ impl App {
                                         let root =
                                             this.photo_root_input.read(cx).value().to_string();
                                         let log = this.log_dir_input.read(cx).value().to_string();
+                                        let imported =
+                                            this.import_dir_input.read(cx).value().to_string();
                                         this.settings.photo_roots = if root.trim().is_empty() {
                                             Vec::new()
                                         } else {
@@ -1765,6 +1936,11 @@ impl App {
                                             None
                                         } else {
                                             Some(log.trim().to_string())
+                                        };
+                                        this.settings.managed_dir = if imported.trim().is_empty() {
+                                            None
+                                        } else {
+                                            Some(imported.trim().to_string())
                                         };
                                         let _ = this.settings.save(&this.db);
                                         this.message = Some(

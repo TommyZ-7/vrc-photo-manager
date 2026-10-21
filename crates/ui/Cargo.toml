@@ -15,6 +15,7 @@ anyhow.workspace = true
 chrono.workspace = true
 gpui-kit = "=0.8.0"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+rfd = "0.17"
 smallvec = "1"
 trash = "5"
 vrc-photo-core = { path = "../core" }

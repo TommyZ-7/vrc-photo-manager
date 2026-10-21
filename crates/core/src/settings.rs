@@ -13,6 +13,9 @@ pub struct AppSettings {
     pub photo_roots: Vec<String>,
     /// VRChat output log directory.
     pub log_dir: Option<String>,
+    /// Optional folder for imported photos.
+    #[serde(default)]
+    pub managed_dir: Option<String>,
     pub language: String,
     pub autostart: bool,
     pub tray: bool,
@@ -28,6 +31,7 @@ impl Default for AppSettings {
         Self {
             photo_roots: Vec::new(),
             log_dir: None,
+            managed_dir: None,
             language: "ja".to_string(),
             autostart: true,
             tray: true,
@@ -71,6 +75,16 @@ impl AppSettings {
 
     pub fn log_dir(&self) -> Option<PathBuf> {
         self.log_dir.as_deref().map(PathBuf::from)
+    }
+
+    /// Folder used by the optional import feature.
+    pub fn import_dir(&self) -> PathBuf {
+        self.managed_dir
+            .as_deref()
+            .filter(|dir| !dir.trim().is_empty())
+            .map(PathBuf::from)
+            .or_else(|| crate::data_dir().map(|dir| dir.join("imported")))
+            .unwrap_or_else(|| PathBuf::from("imported"))
     }
 }
 
