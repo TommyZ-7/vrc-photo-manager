@@ -47,6 +47,8 @@ const SIDEBAR_COLLAPSED: f32 = 78.0;
 const MIN_CARD_WIDTH: f32 = 170.0;
 const GRID_GAP: f32 = 16.0;
 const INSPECTOR_WIDTH: f32 = 330.0;
+const INSPECTOR_CARD_WIDTH: f32 = 314.0;
+const INSPECTOR_MARGIN: f32 = 16.0;
 const VIEWER_DETAILS_WIDTH: f32 = 380.0;
 const WORKSPACE_PAD_X: f32 = 44.0;
 const CARD_INTRO_SECS: f32 = 0.6;
@@ -135,6 +137,7 @@ pub struct App {
     daemon_age_secs: Option<i64>,
     photos: Vec<Photo>,
     selected: Option<i64>,
+    selection_epoch: u64,
     selected_photo: Option<Photo>,
     selected_players: Vec<PhotoPlayer>,
     selected_tags: Vec<String>,
@@ -148,6 +151,8 @@ pub struct App {
     intro_seen: HashMap<i64, Instant>,
     photo_grid_focus: FocusHandle,
     preview: Option<Arc<RenderImage>>,
+    previous_preview: Option<Arc<RenderImage>>,
+    previous_color: Option<u32>,
     profiles: Vec<CompressionProfile>,
     profile_index: usize,
     stats: LibraryStats,
@@ -216,6 +221,7 @@ impl App {
             daemon_age_secs: None,
             photos: Vec::new(),
             selected: None,
+            selection_epoch: 0,
             selected_photo: None,
             selected_players: Vec::new(),
             selected_tags: Vec::new(),
@@ -229,6 +235,8 @@ impl App {
             intro_seen: HashMap::new(),
             photo_grid_focus,
             preview: None,
+            previous_preview: None,
+            previous_color: None,
             profiles: Vec::new(),
             profile_index: 0,
             stats: LibraryStats::default(),
@@ -300,10 +308,7 @@ impl App {
         self.jobs = self.db.list_jobs(20).unwrap_or_default();
         self.refresh_monitor();
         if let Some(id) = self.selected {
-            self.selected_photo = self.db.photo_by_id(id).ok().flatten();
-            self.selected_players = self.db.photo_players(id).unwrap_or_default();
-            self.selected_tags = self.db.photo_tags(id).unwrap_or_default();
-            self.selected_derivatives = self.db.derivatives_for_photo(id).unwrap_or_default();
+            self.load_selected_meta(id);
         }
         if count != self.photos.len() as i64 {
             self.reload();
@@ -461,12 +466,25 @@ impl App {
             .unwrap_or_else(|| scene_color(photo.world_name.as_deref().unwrap_or("")))
     }
 
-    fn load_selected(&mut self, id: i64) {
+    fn selected_color(&self) -> u32 {
+        self.selected_photo
+            .as_ref()
+            .map(|photo| self.color_for(photo))
+            .unwrap_or(BG)
+    }
+
+    /// Reloads the metadata for a photo without decoding its 1200 px preview.
+    /// Favorite and tag edits use this so the preview does not flash.
+    fn load_selected_meta(&mut self, id: i64) {
         self.selected = Some(id);
         self.selected_photo = self.db.photo_by_id(id).ok().flatten();
         self.selected_players = self.db.photo_players(id).unwrap_or_default();
         self.selected_tags = self.db.photo_tags(id).unwrap_or_default();
         self.selected_derivatives = self.db.derivatives_for_photo(id).unwrap_or_default();
+    }
+
+    fn load_selected(&mut self, id: i64) {
+        self.load_selected_meta(id);
         self.preview = self
             .selected_photo
             .as_ref()
@@ -476,6 +494,15 @@ impl App {
     fn select_photo(&mut self, id: i64, cx: &mut Context<Self>) {
         if self.delete_armed != Some(id) {
             self.delete_armed = None;
+        }
+        if self.selected != Some(id) {
+            let previous_color = self
+                .selected_photo
+                .as_ref()
+                .map(|photo| self.color_for(photo));
+            self.previous_preview = self.preview.take();
+            self.previous_color = previous_color;
+            self.selection_epoch = self.selection_epoch.wrapping_add(1);
         }
         self.load_selected(id);
         cx.notify();
@@ -1003,7 +1030,6 @@ impl App {
     }
 
     fn photos_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let inspector_visible = !self.inspector_collapsed;
         v_flex()
             .flex_1()
             .min_h_0()
@@ -1013,7 +1039,7 @@ impl App {
                     .flex_1()
                     .min_h_0()
                     .child(self.photo_list(cx))
-                    .when(inspector_visible, |this| this.child(self.inspector(cx))),
+                    .child(self.inspector_column(cx)),
             )
     }
 
@@ -1413,77 +1439,275 @@ impl App {
             .into_any_element()
     }
 
-    fn inspector(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let Some(photo) = &self.selected_photo else {
+    fn inspector_column(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let collapsed = self.inspector_collapsed;
+        let mut column = v_flex().h_full().flex_shrink_0().overflow_hidden();
+        if !collapsed {
+            column = column.child(self.inspector(cx));
+        }
+        column
+            .with_animation(
+                ("inspector-column", self.inspector_epoch),
+                Animation::new(if self.inspector_epoch == 0 {
+                    Duration::ZERO
+                } else {
+                    Duration::from_millis(300)
+                })
+                .with_easing(ease_motion)
+                .with_max_fps(60.0),
+                move |el, t| {
+                    let from = if collapsed { INSPECTOR_WIDTH } else { 0.0 };
+                    let to = if collapsed { 0.0 } else { INSPECTOR_WIDTH };
+                    el.w(px(from + (to - from) * t))
+                },
+            )
+            .into_any_element()
+    }
+
+    fn inspector(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(photo) = self.selected_photo.as_ref() else {
             return v_flex()
-                .w(px(300.))
+                .w(px(INSPECTOR_CARD_WIDTH))
                 .h_full()
-                .border_l_1()
-                .border_color(rgb(BORDER))
-                .bg(rgb(PANEL))
-                .p_4()
+                .flex_shrink_0()
+                .mr(px(INSPECTOR_MARGIN))
+                .py(px(INSPECTOR_MARGIN))
                 .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(MUTED))
-                        .child("写真を選択してください"),
+                    glass_panel()
+                        .flex_1()
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .justify_center()
+                        .gap(px(6.))
+                        .px(px(20.))
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .font_medium()
+                                .text_color(rgb(TEXT))
+                                .child("写真を選択してください"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(MUTED_2))
+                                .child("ライブラリから写真を選ぶと、ここに情報が表示されます。"),
+                        ),
                 )
                 .into_any_element();
         };
+
         let id = photo.id;
-        v_flex()
-            .w(px(300.))
-            .h_full()
-            .border_l_1()
-            .border_color(rgb(BORDER))
-            .bg(rgb(PANEL))
-            .p_4()
-            .gap_2()
-            .overflow_y_scrollbar()
+        let current_color = self.selected_color();
+        let previous_color = self.previous_color.unwrap_or(current_color);
+        let selection_epoch = self.selection_epoch;
+        let previous_preview = self.previous_preview.clone();
+        let current_preview = self.preview.clone();
+        let thumbnail = self.thumbnails.get(&id).cloned();
+        let compressed = self.compressed_ids.contains(&id);
+        let world = photo
+            .world_name
+            .clone()
+            .unwrap_or_else(|| "未紐付け".to_string());
+        let players = self
+            .selected_players
+            .iter()
+            .map(|player| player.display_name.clone())
+            .collect::<Vec<_>>();
+        let tags = self.selected_tags.clone();
+        let fade = || {
+            Animation::new(Duration::from_millis(260))
+                .with_easing(ease_motion)
+                .with_max_fps(60.0)
+        };
+        let section = |label: &'static str| {
+            div()
+                .text_size(px(10.))
+                .font_semibold()
+                .text_color(rgb(MUTED_2))
+                .child(label)
+        };
+        let pill = |text: String| {
+            div()
+                .px(px(7.))
+                .py(px(2.))
+                .rounded_full()
+                .bg(rgba(0xffffff0f))
+                .border_1()
+                .border_color(rgba(0xffffff12))
+                .text_size(px(10.))
+                .text_color(rgb(MUTED))
+                .child(text)
+        };
+
+        let mut card = v_flex()
+            .relative()
+            .flex_1()
+            .w_full()
+            .min_h_0()
+            .overflow_hidden()
+            .rounded(px(18.))
+            .border_1()
+            .border_color(rgba(0xffffff14))
+            .bg(rgb(current_color))
+            .shadow(vec![
+                BoxShadow::new(px(0.), px(22.), rgba(0x00000073).into()).blur_radius(px(48.)),
+            ]);
+
+        // 1. Solid tint, lerped from the previous photo's average color.
+        card = card.child(
+            div()
+                .absolute()
+                .size_full()
+                .bg(rgb(current_color))
+                .with_animation(("inspector-tint", selection_epoch), fade(), move |el, t| {
+                    el.bg(rgb(lerp_color(previous_color, current_color, t)))
+                }),
+        );
+
+        // 2. The selected 256 px thumbnail, upscaled and softened by opacity.
+        if let Some(thumbnail) = thumbnail {
+            card = card.child(
+                div()
+                    .absolute()
+                    .top(px(-24.))
+                    .left(px(-24.))
+                    .right(px(-24.))
+                    .bottom(px(-24.))
+                    .opacity(0.45)
+                    .child(
+                        gpui_kit::img(thumbnail)
+                            .object_fit(ObjectFit::Cover)
+                            .size_full(),
+                    ),
+            );
+        }
+
+        // 3. Scrim so the metadata stays legible over bright photos.
+        card = card.child(div().absolute().size_full().bg(linear_gradient(
+            180.,
+            linear_color_stop(rgba(0x090d13cc), 0.),
+            linear_color_stop(rgba(0x090d13f7), 1.),
+        )));
+
+        let mut preview_frame = div()
+            .relative()
+            .w_full()
+            .flex_shrink_0()
+            .aspect_ratio(16.0 / 10.0)
+            .overflow_hidden()
+            .rounded(px(12.))
+            .border_1()
+            .border_color(rgba(0xffffff1f))
+            .bg(rgb(current_color))
+            .shadow(vec![
+                BoxShadow::new(px(0.), px(16.), rgba(0x000000a6).into()).blur_radius(px(32.)),
+            ]);
+        if let Some(previous) = previous_preview.as_ref() {
+            preview_frame = preview_frame.child(
+                div()
+                    .absolute()
+                    .size_full()
+                    .child(
+                        gpui_kit::img(previous.clone())
+                            .object_fit(ObjectFit::Cover)
+                            .size_full(),
+                    )
+                    .with_animation(
+                        ("inspector-preview-old", selection_epoch),
+                        fade(),
+                        move |el, t| el.opacity(1.0 - t),
+                    ),
+            );
+        }
+        if let Some(preview) = current_preview.as_ref() {
+            preview_frame = preview_frame.child(
+                div()
+                    .absolute()
+                    .size_full()
+                    .child(
+                        gpui_kit::img(preview.clone())
+                            .object_fit(ObjectFit::Cover)
+                            .size_full(),
+                    )
+                    .with_animation(
+                        ("inspector-preview-new", selection_epoch),
+                        fade(),
+                        move |el, t| el.opacity(t),
+                    ),
+            );
+        } else {
+            preview_frame = preview_frame.child(
+                div()
+                    .absolute()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(10.))
+                    .text_color(rgb(MUTED_2))
+                    .child("プレビューを読み込めません"),
+            );
+        }
+
+        let header = h_flex()
+            .flex_shrink_0()
+            .items_center()
+            .justify_between()
             .child(
-                v_flex()
-                    .h(px(150.))
-                    .w_full()
-                    .rounded_md()
-                    .bg(rgb(scene_color(photo.world_name.as_deref().unwrap_or(""))))
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .when_some(self.preview.clone(), |this, preview| {
-                        this.child(
-                            gpui_kit::img(preview)
-                                .object_fit(ObjectFit::Cover)
-                                .size_full(),
-                        )
-                    }),
-            )
-            .child(
-                div().text_sm().font_semibold().text_color(rgb(TEXT)).child(
-                    photo
-                        .world_name
-                        .clone()
-                        .unwrap_or_else(|| "未紐付け".to_string()),
-                ),
+                div()
+                    .text_size(px(10.))
+                    .font_semibold()
+                    .text_color(rgb(MUTED_2))
+                    .child("選択中"),
             )
             .child(
                 div()
-                    .text_xs()
+                    .text_size(px(10.))
+                    .font_family("monospace")
                     .text_color(rgb(MUTED_2))
-                    .child(photo.captured_at_local.clone()),
+                    .child("Space で開く"),
+            );
+
+        let title = v_flex()
+            .min_w_0()
+            .gap(px(3.))
+            .child(
+                div()
+                    .min_w_0()
+                    .text_size(px(17.))
+                    .font_semibold()
+                    .text_color(rgb(TEXT))
+                    .truncate()
+                    .child(world.clone()),
             )
             .child(
-                h_flex()
-                    .gap_1()
-                    .when(photo.world_name.is_some(), |this| {
-                        this.child(self.badge("文脈あり", BLUE, 0x14283d))
-                    })
-                    .when(photo.is_favorite, |this| {
-                        this.child(self.badge("★", PURPLE, 0x241a2e))
-                    }),
-            )
-            .child(self.meta_row(
-                "ワールドID",
-                photo.world_name.clone().unwrap_or_else(|| "—".to_string()),
-            ))
+                div()
+                    .min_w_0()
+                    .text_size(px(10.))
+                    .font_family("monospace")
+                    .text_color(rgb(MUTED_2))
+                    .truncate()
+                    .child(photo.captured_at_local.clone()),
+            );
+
+        let mut badges = h_flex().flex_wrap().gap(px(5.));
+        if photo.world_name.is_some() {
+            badges = badges.child(self.badge("文脈あり", BLUE, 0x14283d));
+        }
+        if photo.is_favorite {
+            badges = badges.child(self.badge("★ お気に入り", AMBER, 0x2a2111));
+        }
+        if compressed {
+            badges = badges.child(self.badge("圧縮済", GREEN, 0x102a24));
+        } else {
+            badges = badges.child(self.badge("未圧縮", AMBER, 0x2a2111));
+        }
+
+        let meta = v_flex()
+            .gap(px(4.))
+            .child(self.meta_row("ワールド", world))
             .child(self.meta_row(
                 "インスタンス",
                 photo.instance_id.clone().unwrap_or_else(|| "—".to_string()),
@@ -1497,61 +1721,83 @@ impl App {
             .child(self.meta_row(
                 "撮影者",
                 photo.author.clone().unwrap_or_else(|| "—".to_string()),
-            ))
-            .child(self.section_label("撮影時のプレイヤー"))
+            ));
+
+        let players_block = v_flex()
+            .min_w_0()
+            .gap(px(6.))
+            .child(section("撮影時のプレイヤー"))
             .child(
                 h_flex()
                     .flex_wrap()
-                    .gap_1()
-                    .children(self.selected_players.iter().map(|player| {
-                        div()
-                            .px(px(6.))
-                            .py(px(2.))
-                            .rounded_md()
-                            .bg(rgb(PANEL_2))
-                            .text_xs()
-                            .text_color(rgb(MUTED))
-                            .child(player.display_name.clone())
+                    .gap(px(4.))
+                    .when(players.is_empty(), |this| this.child(pill("—".to_string())))
+                    .children(players.iter().map(|name| pill(name.clone()))),
+            );
+
+        let tags_block = v_flex().min_w_0().gap(px(6.)).child(section("タグ")).child(
+            h_flex()
+                .flex_wrap()
+                .gap(px(4.))
+                .when(tags.is_empty(), |this| this.child(pill("—".to_string())))
+                .children(tags.iter().map(|tag| pill(format!("#{tag}")))),
+        );
+
+        let body = v_flex()
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scrollbar()
+            .gap(px(12.))
+            .child(preview_frame)
+            .child(title)
+            .child(badges)
+            .child(meta)
+            .child(players_block)
+            .child(tags_block);
+
+        let actions = v_flex()
+            .flex_shrink_0()
+            .gap(px(8.))
+            .child(
+                Button::new("open-detail")
+                    .label("詳細を開く")
+                    .small()
+                    .primary()
+                    .w_full()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.load_selected_meta(id);
+                        this.screen = Screen::Detail;
+                        cx.notify();
                     })),
             )
-            .child(self.section_label("タグ"))
             .child(
-                h_flex()
-                    .flex_wrap()
-                    .gap_1()
-                    .children(self.selected_tags.iter().map(|tag| {
-                        div()
-                            .px(px(6.))
-                            .py(px(2.))
-                            .rounded_md()
-                            .bg(rgb(PANEL_2))
-                            .text_xs()
-                            .text_color(rgb(MUTED))
-                            .child(format!("#{tag}"))
-                    })),
-            )
-            .child(div().flex_1())
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("open-detail")
-                            .label("詳細を開く")
-                            .small()
-                            .primary()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.load_selected(id);
-                                this.screen = Screen::Detail;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("compress-selected")
-                            .label("圧縮")
-                            .small()
-                            .on_click(cx.listener(|this, _, _, cx| this.enqueue_selected(cx))),
-                    ),
-            )
+                Button::new("compress-selected")
+                    .label("圧縮")
+                    .small()
+                    .w_full()
+                    .on_click(cx.listener(|this, _, _, cx| this.enqueue_selected(cx))),
+            );
+
+        card = card.child(
+            v_flex()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .w_full()
+                .p(px(18.))
+                .gap(px(12.))
+                .child(header)
+                .child(body)
+                .child(actions),
+        );
+
+        v_flex()
+            .w(px(INSPECTOR_CARD_WIDTH))
+            .h_full()
+            .flex_shrink_0()
+            .mr(px(INSPECTOR_MARGIN))
+            .py(px(INSPECTOR_MARGIN))
+            .child(card)
             .into_any_element()
     }
 
@@ -1675,7 +1921,7 @@ impl App {
                                                 let favorite = !photo.is_favorite;
                                                 move |this, _, _, cx| {
                                                     let _ = this.db.set_favorite(id, favorite);
-                                                    this.load_selected(id);
+                                                    this.load_selected_meta(id);
                                                     cx.notify();
                                                 }
                                             })),
@@ -1750,7 +1996,7 @@ impl App {
                                                 tags.push(tag);
                                             }
                                             let _ = this.db.set_photo_tags(id, &tags);
-                                            this.load_selected(id);
+                                            this.load_selected_meta(id);
                                             cx.notify();
                                         }),
                                     )),
@@ -2758,15 +3004,23 @@ impl App {
 
     fn meta_row(&self, label: &str, value: String) -> impl IntoElement {
         h_flex()
-            .gap_2()
-            .text_xs()
+            .gap(px(8.))
+            .text_size(px(10.))
             .child(
                 div()
                     .w(px(86.))
+                    .flex_shrink_0()
                     .text_color(rgb(MUTED_2))
                     .child(label.to_string()),
             )
-            .child(div().flex_1().min_w_0().text_color(rgb(MUTED)).child(value))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_color(rgb(MUTED))
+                    .truncate()
+                    .child(value),
+            )
     }
 
     fn section_label(&self, label: &str) -> impl IntoElement {
@@ -3424,9 +3678,10 @@ mod tests {
     // `use super::*` would also import GPUI's `test` attribute macro through
     // `gpui_kit::*`, shadowing the built-in `#[test]` and recursing forever.
     use super::{
-        DemoAssets, average_bgra, demo_thumb_path, ease_motion, format_count, grid_available_width,
-        grid_columns, lerp_color, next_focus_index, parse_args, parse_window_size,
-        sidebar_reveal_width, sidebar_width, stagger_value, step_index, viewer_details_width,
+        DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH, average_bgra,
+        demo_thumb_path, ease_motion, format_count, grid_available_width, grid_columns, lerp_color,
+        next_focus_index, parse_args, parse_window_size, sidebar_reveal_width, sidebar_width,
+        stagger_value, step_index, viewer_details_width,
     };
 
     #[test]
@@ -3437,6 +3692,13 @@ mod tests {
         assert_eq!(sidebar_reveal_width(false, 1.0), 130.0);
         assert_eq!(sidebar_reveal_width(true, 0.0), 130.0);
         assert_eq!(sidebar_reveal_width(true, 1.0), 0.0);
+    }
+
+    #[test]
+    fn inspector_card_and_margin_fill_the_column() {
+        assert_eq!(INSPECTOR_CARD_WIDTH, 314.0);
+        assert_eq!(INSPECTOR_MARGIN, 16.0);
+        assert_eq!(INSPECTOR_CARD_WIDTH + INSPECTOR_MARGIN, INSPECTOR_WIDTH);
     }
 
     #[test]
