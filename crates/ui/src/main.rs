@@ -587,6 +587,7 @@ impl App {
                     .px(px(2.))
                     .gap(px(10.))
                     .items_center()
+                    .when(collapsed, |this| this.justify_center().gap(px(0.)))
                     .child(
                         div()
                             .size(px(34.))
@@ -787,6 +788,13 @@ impl App {
                     .hover(|this| this.bg(rgb(0x161d28)).text_color(rgb(TEXT)))
             })
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if !this.sidebar_collapsed {
+                    if this.hovered_nav.is_some() {
+                        this.hovered_nav = None;
+                        cx.notify();
+                    }
+                    return;
+                }
                 let next = hovered.then_some(screen);
                 if this.hovered_nav != next {
                     this.hovered_nav = next;
@@ -811,24 +819,35 @@ impl App {
             })
             .child(icon_element)
             .child(label_block)
-            .when(collapsed && self.hovered_nav == Some(screen), |this| {
-                this.child(
-                    div()
-                        .absolute()
-                        .left(px(56.))
-                        .top(px(8.))
-                        .px(px(8.))
-                        .py(px(5.))
-                        .rounded(px(7.))
-                        .bg(rgb(0x161c26))
-                        .border_1()
-                        .border_color(rgb(BORDER_STRONG))
-                        .text_size(px(10.))
-                        .text_color(rgb(TEXT))
-                        .whitespace_nowrap()
-                        .child(label),
-                )
-            })
+            .into_any_element()
+    }
+
+    fn nav_tooltip(&self) -> AnyElement {
+        let Some(screen) = self.hovered_nav.filter(|_| self.sidebar_collapsed) else {
+            return div().into_any_element();
+        };
+        let index = match screen {
+            Screen::Photos | Screen::Detail => 0,
+            Screen::Search => 1,
+            Screen::Compression => 2,
+            Screen::Monitor => 3,
+            Screen::Settings => 4,
+        };
+
+        div()
+            .absolute()
+            .left(px(86.))
+            .top(px(62. + index as f32 * 43. + 8.))
+            .px(px(8.))
+            .py(px(5.))
+            .rounded(px(7.))
+            .bg(rgb(0x161c26))
+            .border_1()
+            .border_color(rgb(BORDER_STRONG))
+            .text_size(px(10.))
+            .text_color(rgb(TEXT))
+            .whitespace_nowrap()
+            .child(screen.title())
             .into_any_element()
     }
 
@@ -2537,6 +2556,7 @@ impl Render for App {
                     .child(self.topbar(cx))
                     .child(self.content(cx)),
             )
+            .child(self.nav_tooltip())
             .child(self.rail_toggle(cx))
     }
 }
