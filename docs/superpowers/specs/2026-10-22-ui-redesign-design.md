@@ -74,7 +74,15 @@ next to the grid; every control is text-first.
   CSS transforms (`scale`, `rotate`) on arbitrary elements. Motion uses
   opacity, width, and small positional offsets.
 - GPUI animations are keyed by element ID. Re-triggering requires changing the
-  ID (an animation epoch) so a new animation state is created.
+  ID (an animation epoch) so a new animation state is created. A one-shot
+  `HashSet::insert` gate is not enough for the card intro: the animation
+  element must stay mounted for its full duration, so the intro stores each
+  photo's first-seen `Instant` and keeps the wrapper until its duration
+  elapses.
+- The component theme is forced light by `gpui_component::init`. Set
+  `Theme::change(ThemeMode::Dark, None, cx)` once after `gpui_kit::init` so
+  Button/Input/Switch/Tooltip match the dark UI; do not patch buttons
+  individually.
 - `App::reduce_motion` defaults to false and does not read OS preferences.
   The app must set it from its own setting.
 - Existing `AppSettings` JSON must keep deserializing. New fields need
@@ -288,7 +296,7 @@ New `App` state:
   Option<FocusHandle>`, `quick_look_focus_index`
 - `quick_look_details_open`, `quick_look_details_epoch`
 - `quick_look_photo_ids: Vec<i64>`, `quick_look_index: usize`
-- `intro_seen: HashSet<i64>` (cleared on a new grid generation)
+- `intro_seen: HashMap<i64, Instant>` (first-seen time per photo; cleared on a new grid generation so the intro can replay for a new set)
 - `daemon_age_secs: Option<i64>` (derived from `daemon_heartbeat`)
 - `demo_assets: Option<DemoAssets>` (photo dir + thumbnail dir)
 - Focus handles: `photo_grid_focus`, `quick_look_close_focus`,

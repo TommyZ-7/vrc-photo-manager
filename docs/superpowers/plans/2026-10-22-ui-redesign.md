@@ -19,6 +19,7 @@
 - No element-level backdrop blur. Use an upscaled thumbnail + scrim for the inspector and a dark background for the full-screen viewer.
 - No CSS `scale`/`rotate` transforms; animate opacity, width, and small offsets only.
 - All `Animation::new(...)` calls use `.with_easing(ease_motion)` unless the animator already applies `stagger_value` (which applies the easing itself).
+- Set the gpui-kit component theme to dark once after `gpui_kit::init` (`Theme::change(ThemeMode::Dark, None, cx)`); do not use per-button custom variants to compensate for the light default.
 - New `AppSettings` fields must use `#[serde(default)]` so old JSON still deserializes.
 - Do not trigger image loads or DB queries from animation closures.
 - Keep existing import, search, compression, monitor, settings, tag, favorite, and trash behavior.
@@ -119,7 +120,7 @@ fn grid_columns(available_width: f32) -> usize {
 }
 ```
 
-`grid_available_width` subtracts the inspector column only when it is not collapsed. `viewer_details_width` interpolates 0..380 for the full-screen details panel. `format_count` rules: `< 1000` plain; `1000..=9999` comma-separated; `>= 10_000` compact with one decimal below 100k (`12.8k`) and no decimal at 100k+ (`100k`). `average_bgra` treats input as BGRA, ignores alpha `< 8`, and returns `0xRRGGBB`; empty/transparent input returns `0`. `lerp_color` interpolates each channel with `.round()` and clamps `t` to 0..1. `ease_motion` solves the cubic Bezier `(0.22, 0.8, 0.24, 1)` with 8 Newton iterations and clamps the result to 0..1. `stagger_value` uses `delay = min(index, 8) * 0.04`, `total = 0.6 + delay`, `local = ((elapsed * total - delay) / 0.6).clamp(0.0, 1.0)`, then `ease_motion(local)`. `next_focus_index` wraps in both directions and returns 0 for `len == 0`. `step_index` clamps the current index into `0..len`, applies the signed delta with saturation, and clamps to the ends; it returns 0 for `len == 0`. `parse_window_size` accepts `<width>x<height>` or `X`, requires both numbers, and rejects dimensions below 320×240.
+`grid_available_width` subtracts the inspector column only when it is not collapsed. `viewer_details_width` interpolates 0..380 for the full-screen details panel. `format_count` rules: `< 1000` plain; `1000..=9999` comma-separated; `>= 10_000` compact with one decimal below 100k (`12.8k`) and no decimal at 100k+ (`100k`). `average_bgra` treats input as BGRA (`bytes.as_chunks::<4>()`), ignores alpha `< 8`, and returns `0xRRGGBB`; empty/transparent input returns `0`. `lerp_color` interpolates each channel with `.round()` and clamps `t` to 0..1. `ease_motion` solves the cubic Bezier `(0.22, 0.8, 0.24, 1)` with 8 Newton iterations and clamps the result to 0..1. `stagger_value` uses `delay = min(index, 8) * 0.04`, `total = 0.6 + delay`, `local = ((elapsed * total - delay) / 0.6).clamp(0.0, 1.0)`, then `ease_motion(local)`. `next_focus_index` wraps in both directions and returns 0 for `len == 0`. `step_index` clamps the current index into `0..len`, applies the signed delta with saturation, and clamps to the ends; it returns 0 for `len == 0`. `parse_window_size` accepts `<width>x<height>` or `X`, requires both numbers, and rejects dimensions below 320×240.
 
 - [ ] **Step 3: Add the failing tests**
 
@@ -599,7 +600,7 @@ git commit -m "feat: add collapsible icon rail sidebar"
   - `enum PhotoCardLayout { Grid { index: usize }, Fixed }`
   - `fn photo_card(&mut self, photo: &Photo, layout: PhotoCardLayout, cx: &mut Context<Self>) -> AnyElement`
   - `fn photos_header(&mut self, cx: &mut Context<Self>) -> AnyElement`
-- `App` gains `grid_columns: usize`, `grid_epoch: u64`, `thumbnail_colors: HashMap<i64, u32>`, `hovered_photo: Option<i64>`, `intro_seen: HashSet<i64>`, `photo_grid_focus: FocusHandle`.
+- `App` gains `grid_columns: usize`, `grid_epoch: u64`, `thumbnail_colors: HashMap<i64, u32>`, `hovered_photo: Option<i64>`, `intro_seen: HashMap<i64, Instant>`, `photo_grid_focus: FocusHandle`.
 - Produces `fn color_for(&self, photo: &Photo) -> u32`.
 
 - [ ] **Step 1: Add the grid state and color extraction**
@@ -673,7 +674,7 @@ let hovered = self.hovered_photo == Some(id);
     },
 )
 ```
-- Intro: if `layout == Grid` and `self.intro_seen.insert(id)` and `index < 24`, wrap with:
+- Intro: for `layout == Grid`, `index < 24`, and while the photo's first-seen time is within its animation duration, wrap with the animation. Record `self.intro_seen.entry(id).or_insert_with(Instant::now)` on first render; keep the wrapper mounted until `now.duration_since(started) >= duration`; never re-add it after that (until the next grid epoch). The ID is stable across frames so the animation advances. Wrap with:
 ```rust
 .with_animation(
     SharedString::from(format!("card-intro-{grid_epoch}-{id}")),
