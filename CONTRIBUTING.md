@@ -1,13 +1,29 @@
 # Contributing
 
-## 最初に読む
+Issue / PR を歓迎します。English is welcome.
 
-- [AGENTS.md](AGENTS.md): ブランチ運用、CI、リリースのルール
-- [docs/README.md](docs/README.md): 現行ドキュメントの索引
-- [docs/development.md](docs/development.md): 環境構築と実行
-- [docs/testing.md](docs/testing.md): テストと手動確認
+## 外部コントリビューター
 
-## 開発フロー
+1. 大きな変更は、着手前に Issue で相談する。
+2. `main` を最新にして fork し、作業ブランチを切る（`feat/...`, `fix/...`, `docs/...`）。
+3. 変更を実装し、ローカル検証を実行する。
+
+   ```bash
+   cargo fmt --all -- --check
+   cargo clippy --workspace --all-targets -- -D warnings
+   cargo test --workspace
+   ```
+
+4. ドキュメントを更新する（下記）。
+5. PR を作成し、テンプレートの項目を埋める。
+
+- `main` への直接 push はできません。
+- 初回の PR は、GitHub の仕様によりワークフロー実行にメンテナーの承認が必要です。
+- レビューと返信は best-effort です。
+- バグ修正は再現テストを同じ PR に含めてください。
+- 脆弱性は公開 Issue ではなく [SECURITY.md](SECURITY.md) へ報告してください。
+
+## メンテナー
 
 1. `main` を最新にする。
 2. `git worktree` で作業ブランチを切る。
@@ -16,19 +32,12 @@
    git worktree add ../vrc-photo-manager-<topic> -b <type>/<topic>
    ```
 
-3. 変更を実装する。
-4. ローカル検証を直列で実行する。
+3. 変更を実装し、ローカル検証を直列で実行する。
+4. ドキュメントを更新する（下記）。
+5. PRを作成し、CIが緑になってからマージする。
 
-   ```bash
-   cargo fmt --all -- --check
-   cargo clippy --workspace --all-targets -- -D warnings
-   cargo test --workspace
-   ```
-
-5. ドキュメントを更新する（下記）。
-6. PRを作成し、CIが緑になってからマージする。
-
-`main` への直接push、force push、ブランチ削除は禁止されている（branch protection）。
+`main` への直接 push、force push、`main` の削除は禁止されている（branch protection）。
+マージ後は作業ブランチを削除する。
 
 ## コミット
 
@@ -61,6 +70,7 @@ deb / AppImage / pacmanに影響する変更は、PRでReleaseワークフロー
 - 認証情報、Cookie、生ログをコミットしない。
 - 個人情報を含むフィクスチャは匿名化する。
 - ネットワーク通信を追加する場合は、ADRとプライバシー文書を更新する。
+- 脆弱性の報告は [SECURITY.md](SECURITY.md) を使う。
 
 ## ライセンス
 

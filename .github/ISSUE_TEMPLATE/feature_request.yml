@@ -1,0 +1,51 @@
+name: 機能要望
+description: 新機能や改善を提案する（English is welcome）
+title: "[Feature]: "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提案ありがとうございます。English is welcome.
+        実装を伴う大きな変更は、着手前にこの Issue で相談します。
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 解決したい課題
+      description: 現状のどこが不便か
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 提案
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 検討した代替案
+    validations:
+      required: false
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 利用環境
+      options:
+        - Windows
+        - Linux
+        - 両方
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 確認
+      options:
+        - label: 既存の Issue を検索した
+          required: true
