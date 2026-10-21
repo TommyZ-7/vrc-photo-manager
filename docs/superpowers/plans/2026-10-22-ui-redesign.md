@@ -599,7 +599,7 @@ git commit -m "feat: add collapsible icon rail sidebar"
   - `enum PhotoCardLayout { Grid { index: usize }, Fixed }`
   - `fn photo_card(&mut self, photo: &Photo, layout: PhotoCardLayout, cx: &mut Context<Self>) -> AnyElement`
   - `fn photos_header(&mut self, cx: &mut Context<Self>) -> AnyElement`
-- `App` gains `grid_columns: usize`, `grid_epoch: u64`, `thumbnail_colors: HashMap<i64, u32>`, `intro_seen: HashSet<i64>`, `photo_grid_focus: FocusHandle`.
+- `App` gains `grid_columns: usize`, `grid_epoch: u64`, `thumbnail_colors: HashMap<i64, u32>`, `hovered_photo: Option<i64>`, `intro_seen: HashSet<i64>`, `photo_grid_focus: FocusHandle`.
 - Produces `fn color_for(&self, photo: &Photo) -> u32`.
 
 - [ ] **Step 1: Add the grid state and color extraction**
@@ -632,7 +632,7 @@ Keep the existing `topbar` for non-Photos screens. Skip it when `self.screen == 
 
 - [ ] **Step 3: Implement `photos_header`**
 
-`photos_header` returns both the header row and the filter row in a `v_flex`. `photos_screen` returns a `v_flex` with `photos_header` on top and the grid + inspector row below.
+`photos_header` returns both the header row and the filter row in a `v_flex`. `photos_screen` returns a `v_flex` with `photos_header` on top and the grid + inspector row below. Until Task 7, hide the old inspector when `inspector_collapsed` is true (no animation); Task 7 replaces it with the animated column.
 
 - Height 72 px, `.px(px(26.))`, horizontal layout, bottom border.
 - Left: "ライブラリ" at 24 px semibold; subtitle at 10 px `MUTED_2` with `format_count(photo_count) + " 枚 · " + format_bytes(total_bytes) + sync text`.
