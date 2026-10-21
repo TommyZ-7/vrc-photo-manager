@@ -320,7 +320,7 @@ impl App {
             demo_assets,
         };
         app.ensure_profiles();
-        app.reload();
+        app.reload(cx);
         if app.photos.is_empty() {
             message.get_or_insert_with(|| {
                 "写真がありません。VRChatの写真フォルダを設定するか、--demo で起動してください。"
@@ -368,7 +368,7 @@ impl App {
             self.load_selected_meta(id);
         }
         if count != self.photos.len() as i64 {
-            self.reload();
+            self.reload(cx);
         }
         cx.notify();
     }
@@ -410,7 +410,7 @@ impl App {
         self.profiles = self.db.list_profiles().unwrap_or_default();
     }
 
-    fn reload(&mut self) {
+    fn reload(&mut self, cx: &mut Context<Self>) {
         self.grid_epoch = self.grid_epoch.wrapping_add(1);
         self.intro_seen.clear();
         self.hovered_photo = None;
@@ -432,6 +432,7 @@ impl App {
         self.load_thumbnails();
         self.jobs = self.db.list_jobs(20).unwrap_or_default();
         self.settings = AppSettings::load(&self.db).unwrap_or_default();
+        cx.set_reduce_motion(self.settings.ui_reduce_motion);
         self.refresh_monitor();
         if let Some(id) = self.selected {
             self.load_selected(id);
@@ -721,7 +722,7 @@ impl App {
                 self.preview = None;
                 self.delete_armed = None;
                 self.message = Some("写真をゴミ箱へ移動しました".to_string());
-                self.reload();
+                self.reload(cx);
             }
             Err(error) => {
                 self.delete_armed = None;
@@ -754,7 +755,7 @@ impl App {
                 } else {
                     "圧縮ジョブをキューに追加しました（元画像を保持）".to_string()
                 });
-                self.reload();
+                self.reload(cx);
             }
             Err(error) => self.message = Some(format!("キュー追加に失敗: {error}")),
         }
@@ -1201,7 +1202,7 @@ impl App {
                     .label("再読込")
                     .small()
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.reload();
+                        this.reload(cx);
                         cx.notify();
                     })),
             )
@@ -3098,7 +3099,7 @@ impl App {
                 let _ = thumbnail::ensure_thumbnail(*id, Path::new(&photo.abs_path));
             }
         }
-        self.reload();
+        self.reload(cx);
         self.message = Some(format!(
             "{} 枚を取り込みました（{} 枚スキップ）",
             result.imported.len(),
@@ -3182,7 +3183,7 @@ impl App {
                             .label("再読込")
                             .small()
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.reload();
+                                this.reload(cx);
                                 cx.notify();
                             })),
                     ),
@@ -3404,7 +3405,7 @@ impl App {
                             .label("設定を再読込")
                             .small()
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.reload();
+                                this.reload(cx);
                                 cx.notify();
                             })),
                     )
