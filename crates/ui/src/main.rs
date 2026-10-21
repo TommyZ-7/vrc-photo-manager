@@ -88,6 +88,8 @@ pub struct App {
     search_results: Option<Vec<Photo>>,
     search_favorite: bool,
     search_days: Option<i64>,
+    compress_policy: String,
+    delete_armed: Option<i64>,
     message: Option<String>,
     demo: bool,
 }
@@ -144,6 +146,8 @@ impl App {
             search_results: None,
             search_favorite: false,
             search_days: Some(7),
+            compress_policy: "keep".to_string(),
+            delete_armed: None,
             message: None,
             demo,
         };
@@ -265,20 +269,65 @@ impl App {
     }
 
     fn select_photo(&mut self, id: i64, cx: &mut Context<Self>) {
+        if self.delete_armed != Some(id) {
+            self.delete_armed = None;
+        }
         self.load_selected(id);
+        cx.notify();
+    }
+
+    fn trash_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(photo) = &self.selected_photo else {
+            return;
+        };
+        let id = photo.id;
+        let path = photo.abs_path.clone();
+        if self.delete_armed != Some(id) {
+            self.delete_armed = Some(id);
+            self.message = Some("もう一度押すとOSゴミ箱へ移動します。".to_string());
+            cx.notify();
+            return;
+        }
+        match trash::delete(&path) {
+            Ok(_) => {
+                let _ = self.db.mark_missing(id);
+                self.selected = None;
+                self.selected_photo = None;
+                self.selected_players.clear();
+                self.selected_tags.clear();
+                self.selected_derivatives.clear();
+                self.preview = None;
+                self.delete_armed = None;
+                self.message = Some("写真をゴミ箱へ移動しました".to_string());
+                self.reload();
+            }
+            Err(error) => {
+                self.delete_armed = None;
+                self.message = Some(format!("ゴミ箱へ移動できません: {error}"));
+            }
+        }
         cx.notify();
     }
 
     fn enqueue_selected(&mut self, cx: &mut Context<Self>) {
         let Some(photo) = &self.selected_photo else {
+            self.message = Some("先に写真を選択してください".to_string());
+            cx.notify();
             return;
         };
         let Some(profile) = self.profiles.first() else {
+            self.message = Some("圧縮プロファイルがありません".to_string());
+            cx.notify();
             return;
         };
-        match self.db.enqueue_job(photo.id, &profile.id, "keep") {
+        let policy = self.compress_policy.clone();
+        match self.db.enqueue_job(photo.id, &profile.id, &policy) {
             Ok(_) => {
-                self.message = Some("圧縮ジョブをキューに追加しました".to_string());
+                self.message = Some(if policy == "replace" {
+                    "圧縮ジョブを追加しました（成功後に元画像をゴミ箱へ移動）".to_string()
+                } else {
+                    "圧縮ジョブをキューに追加しました（元画像を保持）".to_string()
+                });
                 self.reload();
             }
             Err(error) => self.message = Some(format!("キュー追加に失敗: {error}")),
@@ -984,6 +1033,19 @@ impl App {
                                     ),
                             )
                             .child(
+                                Button::new("trash-photo")
+                                    .label(if self.delete_armed == Some(id) {
+                                        "本当にゴミ箱へ移動"
+                                    } else {
+                                        "ゴミ箱へ移動"
+                                    })
+                                    .small()
+                                    .danger()
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.trash_selected(cx)),
+                                    ),
+                            )
+                            .child(
                                 Button::new("detail-back")
                                     .label("一覧に戻る")
                                     .small()
@@ -1019,6 +1081,12 @@ impl App {
                             ),
                     )
                     .child(div().flex_1())
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(self.policy_button("元画像を保持", "keep", cx))
+                            .child(self.policy_button("置換（ゴミ箱）", "replace", cx)),
+                    )
                     .child(
                         Button::new("manual-compress")
                             .label("手動圧縮")
@@ -1441,6 +1509,25 @@ impl App {
                         }),
                 ),
         )
+    }
+
+    fn policy_button(&self, label: &str, policy: &str, cx: &mut Context<Self>) -> impl IntoElement {
+        let active = self.compress_policy == policy;
+        let policy = policy.to_string();
+        div()
+            .id(SharedString::from(format!("policy-{label}")))
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .bg(if active { rgb(BLUE_DARK) } else { rgb(PANEL_2) })
+            .text_xs()
+            .text_color(if active { rgb(0xffffff) } else { rgb(MUTED) })
+            .cursor_pointer()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.compress_policy = policy.clone();
+                cx.notify();
+            }))
+            .child(label.to_string())
     }
 
     fn preset_button(

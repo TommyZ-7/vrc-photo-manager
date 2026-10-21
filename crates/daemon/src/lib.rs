@@ -606,6 +606,13 @@ fn process_job(db: &Arc<Mutex<Db>>, job: &CompressionJob) -> Result<()> {
     };
 
     let result = compressor::compress_image(Path::new(&photo.abs_path), &profile)?;
+    if !result.output_path.is_file()
+        || std::fs::metadata(&result.output_path)
+            .map(|meta| meta.len() == 0)
+            .unwrap_or(true)
+    {
+        anyhow::bail!("compressed output is missing or empty");
+    }
     let db = db.lock().unwrap();
     db.add_derivative(
         photo.id,
@@ -617,6 +624,11 @@ fn process_job(db: &Arc<Mutex<Db>>, job: &CompressionJob) -> Result<()> {
         &profile.id,
         &job.policy,
     )?;
+    if job.policy == "replace" {
+        trash::delete(&photo.abs_path)
+            .map_err(|error| anyhow::anyhow!("cannot move original to trash: {error}"))?;
+        db.mark_missing(photo.id)?;
+    }
     db.update_job(
         &job.id,
         QueueStatus::Completed,

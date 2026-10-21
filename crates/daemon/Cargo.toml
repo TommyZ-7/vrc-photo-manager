@@ -19,6 +19,7 @@ anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
 notify = "8"
+trash = "5"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 vrc-photo-core = { path = "../core" }
