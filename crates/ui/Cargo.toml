@@ -1,0 +1,17 @@
+[package]
+name = "vrc-photo-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "vrc-photo-manager"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+gpui-kit = "=0.8.0"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+vrc-photo-core = { path = "../core" }
