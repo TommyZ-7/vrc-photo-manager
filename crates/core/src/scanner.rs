@@ -26,6 +26,7 @@ pub struct ScanReport {
     pub found: usize,
     pub indexed: usize,
     pub skipped: usize,
+    pub new_ids: Vec<i64>,
 }
 
 /// Recursively scans a VRChat photo root.
@@ -155,8 +156,14 @@ pub fn scan_and_index(db: &Db, root_id: i64, root: &Path) -> Result<ScanReport> 
             mtime: photo.mtime,
             blake3: None,
         };
+        let existed = db.photo_by_path(&new_photo.abs_path)?.is_some();
         match db.upsert_photo(&new_photo) {
-            Ok(_) => report.indexed += 1,
+            Ok(id) => {
+                report.indexed += 1;
+                if !existed {
+                    report.new_ids.push(id);
+                }
+            }
             Err(error) => {
                 tracing::warn!(path = %new_photo.abs_path, %error, "cannot index photo");
                 report.skipped += 1;
