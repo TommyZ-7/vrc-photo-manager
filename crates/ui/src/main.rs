@@ -177,7 +177,37 @@ impl App {
         if let Some(id) = app.photos.first().map(|photo| photo.id) {
             app.select_photo(id, cx);
         }
+        app.start_auto_refresh(cx);
         app
+    }
+
+    fn start_auto_refresh(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(3)).await;
+                if this.update(cx, |this, cx| this.refresh_live(cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn refresh_live(&mut self, cx: &mut Context<Self>) {
+        let count = self.db.count_photos().unwrap_or(0);
+        self.stats = self.db.stats().unwrap_or_default();
+        self.jobs = self.db.list_jobs(20).unwrap_or_default();
+        self.refresh_monitor();
+        if let Some(id) = self.selected {
+            self.selected_photo = self.db.photo_by_id(id).ok().flatten();
+            self.selected_players = self.db.photo_players(id).unwrap_or_default();
+            self.selected_tags = self.db.photo_tags(id).unwrap_or_default();
+            self.selected_derivatives = self.db.derivatives_for_photo(id).unwrap_or_default();
+        }
+        if count != self.photos.len() as i64 {
+            self.reload();
+        }
+        cx.notify();
     }
 
     fn ensure_profiles(&mut self) {
@@ -610,16 +640,11 @@ impl App {
 
     fn photo_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let photos = self.photos.clone();
-        let cards: Vec<AnyElement> = photos
-            .iter()
-            .map(|photo| self.photo_card(photo, cx).into_any_element())
-            .collect();
+        let rows = photos.len().div_ceil(4);
         v_flex()
-            .id("photo-scroll")
             .flex_1()
             .min_w_0()
             .h_full()
-            .overflow_y_scrollbar()
             .p_5()
             .gap_4()
             .child(
@@ -628,12 +653,6 @@ impl App {
                     .font_semibold()
                     .text_color(rgb(TEXT))
                     .child("最近の写真"),
-            )
-            .child(
-                h_flex()
-                    .flex_wrap()
-                    .gap_3()
-                    .children(cards),
             )
             .when(photos.is_empty(), |this| {
                 this.child(
@@ -646,6 +665,38 @@ impl App {
                         .text_sm()
                         .text_color(rgb(MUTED))
                         .child("写真がありません。デーモンを起動するか、--demo でサンプルを表示できます。"),
+                )
+            })
+            .when(!photos.is_empty(), |this| {
+                this.child(
+                    uniform_list(
+                        "photo-grid",
+                        rows,
+                        cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
+                            range
+                                .map(|row| {
+                                    h_flex()
+                                        .h(px(170.))
+                                        .gap_3()
+                                        .children(
+                                            (0..4)
+                                                .filter_map(|column| {
+                                                    photos
+                                                        .get(row * 4 + column)
+                                                        .map(|photo| {
+                                                            this.photo_card(photo, cx)
+                                                                .into_any_element()
+                                                        })
+                                                })
+                                                .collect::<Vec<_>>(),
+                                        )
+                                        .into_any_element()
+                                })
+                                .collect::<Vec<_>>()
+                        }),
+                    )
+                    .flex_1()
+                    .min_h_0(),
                 )
             })
     }
