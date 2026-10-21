@@ -26,6 +26,9 @@ struct Args {
     /// Process all pending compression jobs and exit (implies --once unless run alone).
     #[arg(long)]
     compress_pending: bool,
+    /// Disable the tray icon and run headless.
+    #[arg(long)]
+    no_tray: bool,
     /// Print the resolved data directory and exit.
     #[arg(long)]
     print_data_dir: bool,
@@ -54,6 +57,9 @@ fn main() -> Result<()> {
         .unwrap_or_else(|| PathBuf::from("vrc-photo-manager.db"));
     let mut daemon = Daemon::open(db_path, args.photo_dir, args.log_dir)
         .context("cannot start VRC Photo Manager daemon")?;
+    if args.no_tray {
+        daemon.set_tray_enabled(false);
+    }
 
     if args.once || args.compress_pending {
         daemon.run_once()?;

@@ -17,6 +17,9 @@ use vrc_photo_core::model::{CompressionJob, CompressionProfile, QueueStatus};
 use vrc_photo_core::scanner::{ScanReport, scan_and_index};
 use vrc_photo_core::settings::{AppSettings, detect_vrchat_paths};
 
+mod tray;
+use tray::{Tray, TrayAction};
+
 const PARSER_VERSION: &str = "1";
 const SCAN_INTERVAL: Duration = Duration::from_millis(500);
 const LOG_INTERVAL: Duration = Duration::from_millis(750);
@@ -51,6 +54,8 @@ pub struct Daemon {
     photo_dirty: bool,
     last_scan: std::time::Instant,
     last_log_poll: std::time::Instant,
+    tray: Option<Tray>,
+    tray_enabled: bool,
 }
 
 impl Daemon {
@@ -81,6 +86,7 @@ impl Daemon {
             settings.log_dir = Some(path.to_string_lossy().to_string());
         }
         settings.save(&db).context("cannot save settings")?;
+        let tray_enabled = settings.tray;
 
         Ok(Self {
             db: Arc::new(Mutex::new(db)),
@@ -94,11 +100,20 @@ impl Daemon {
             photo_dirty: true,
             last_scan: std::time::Instant::now() - SCAN_INTERVAL,
             last_log_poll: std::time::Instant::now() - LOG_INTERVAL,
+            tray: None,
+            tray_enabled,
         })
     }
 
     pub fn status(&self) -> Arc<Mutex<DaemonStatus>> {
         self.status.clone()
+    }
+
+    pub fn set_tray_enabled(&mut self, enabled: bool) {
+        self.tray_enabled = enabled;
+        if !enabled {
+            self.tray = None;
+        }
     }
 
     pub fn set_paused(&self, paused: bool) {
@@ -151,6 +166,7 @@ impl Daemon {
         self.ingest_logs()?;
         self.link_unlinked()?;
         self.setup_watchers()?;
+        self.ensure_tray();
         self.start_workers();
 
         tracing::info!(
@@ -184,6 +200,7 @@ impl Daemon {
                 self.last_log_poll = std::time::Instant::now();
             }
             self.refresh_status().ok();
+            self.poll_tray();
             thread::sleep(SCAN_INTERVAL);
         }
         self.shutdown();
@@ -349,6 +366,37 @@ impl Daemon {
         Ok(())
     }
 
+    fn ensure_tray(&mut self) {
+        if !self.tray_enabled || self.tray.is_some() {
+            return;
+        }
+        match Tray::new() {
+            Ok(tray) => self.tray = Some(tray),
+            Err(error) => {
+                tracing::warn!(%error, "tray unavailable; continuing headless");
+                self.tray_enabled = false;
+            }
+        }
+    }
+
+    fn poll_tray(&mut self) {
+        self.ensure_tray();
+        let status = self
+            .status
+            .lock()
+            .map(|status| status.clone())
+            .unwrap_or_default();
+        let Some(tray) = self.tray.as_mut() else {
+            return;
+        };
+        match tray.poll(&status) {
+            TrayAction::Noop => {}
+            TrayAction::TogglePause(paused) => self.set_paused(paused),
+            TrayAction::Quit => self.running.store(false, Ordering::Relaxed),
+            TrayAction::OpenUi => tray::open_ui(),
+        }
+    }
+
     fn setup_watchers(&mut self) -> Result<()> {
         if self.watcher_rx.is_some() {
             return Ok(());
@@ -422,6 +470,7 @@ impl Daemon {
             let db = self.db.lock().unwrap();
             let _ = tail.ingestor.finish(&db, chrono::Utc::now().timestamp());
         }
+        self.tray = None;
         self.stop_workers();
     }
 }
