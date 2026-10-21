@@ -214,6 +214,7 @@ impl App {
     fn new(window: &mut Window, cx: &mut Context<Self>, options: &LaunchOptions) -> Self {
         let (db, demo, mut message, demo_assets) = open_database(options);
         let initial_settings = AppSettings::load(&db).unwrap_or_default();
+        cx.set_reduce_motion(initial_settings.ui_reduce_motion);
         let world_input = cx.new(|cx| InputState::new(window, cx).placeholder("ワールド名 / ID"));
         let player_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("プレイヤー名 / ID"));
@@ -3262,6 +3263,13 @@ impl App {
             )
     }
 
+    fn set_reduce_motion(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        self.settings.ui_reduce_motion = enabled;
+        let _ = self.settings.save(&self.db);
+        cx.set_reduce_motion(enabled);
+        cx.notify();
+    }
+
     fn settings_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .flex_1()
@@ -3356,7 +3364,37 @@ impl App {
                         self.settings.auto_compress,
                         cx,
                         |settings, value| settings.auto_compress = value,
-                    )),
+                    ))
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_3()
+                            .py_1()
+                            .child(
+                                v_flex()
+                                    .gap(px(0.))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(TEXT))
+                                            .child("アニメーションを減らす"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(rgb(MUTED_2))
+                                            .child("画面遷移とカードの動きを抑制します"),
+                                    ),
+                            )
+                            .child(div().flex_1())
+                            .child(
+                                Switch::new("reduce-motion")
+                                    .checked(self.settings.ui_reduce_motion)
+                                    .on_click(cx.listener(|this, value, _, cx| {
+                                        this.set_reduce_motion(*value, cx);
+                                    })),
+                            ),
+                    ),
             )
             .child(
                 h_flex()
