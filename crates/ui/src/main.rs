@@ -3,10 +3,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use chrono::Utc;
-use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::switch::Switch;
@@ -145,7 +145,7 @@ pub struct App {
     grid_columns: usize,
     grid_epoch: u64,
     hovered_photo: Option<i64>,
-    intro_seen: HashSet<i64>,
+    intro_seen: HashMap<i64, Instant>,
     photo_grid_focus: FocusHandle,
     preview: Option<Arc<RenderImage>>,
     profiles: Vec<CompressionProfile>,
@@ -226,7 +226,7 @@ impl App {
             grid_columns: 0,
             grid_epoch: 0,
             hovered_photo: None,
-            intro_seen: HashSet::new(),
+            intro_seen: HashMap::new(),
             photo_grid_focus,
             preview: None,
             profiles: Vec::new(),
@@ -1035,12 +1035,6 @@ impl App {
         );
         let message = self.message.clone();
         let inspector_collapsed = self.inspector_collapsed;
-        // gpui-kit's default component theme is light; ghost labels would be
-        // unreadable on the dark surface, so the text buttons use our tokens.
-        let text_button = ButtonCustomVariant::new(cx)
-            .foreground(rgb(TEXT).into())
-            .hover(rgba(0x1a2130ff).into())
-            .active(rgba(0x232b38ff).into());
 
         v_flex()
             .flex_shrink_0()
@@ -1095,7 +1089,7 @@ impl App {
                                         "詳細を隠す"
                                     })
                                     .small()
-                                    .custom(text_button)
+                                    .ghost()
                                     .tooltip("詳細パネル (Ctrl+I)")
                                     .on_click(
                                         cx.listener(|this, _, _, cx| this.toggle_inspector(cx)),
@@ -1105,7 +1099,7 @@ impl App {
                                 Button::new("import-copy")
                                     .label("コピー取込")
                                     .small()
-                                    .custom(text_button)
+                                    .ghost()
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.import_dialog(ImportMode::Copy, cx);
                                     })),
@@ -1249,8 +1243,18 @@ impl App {
             PhotoCardLayout::Grid { index } => Some(index),
             PhotoCardLayout::Fixed => None,
         };
-        let intro = grid_index.is_some_and(|index| index < 24 && self.intro_seen.insert(id));
         let intro_index = grid_index.unwrap_or(0);
+        let intro_total =
+            CARD_INTRO_SECS + intro_index.min(CARD_STAGGER_MAX) as f32 * CARD_STAGGER_SECS;
+        let intro_started = match grid_index {
+            Some(index) if index < 24 => {
+                Some(*self.intro_seen.entry(id).or_insert_with(Instant::now))
+            }
+            _ => None,
+        };
+        let intro = intro_started.is_some_and(|started| {
+            Instant::now().duration_since(started).as_secs_f32() < intro_total
+        });
         let grid_epoch = self.grid_epoch;
 
         let mut thumb = div()
@@ -1368,9 +1372,15 @@ impl App {
             .w_full()
             .cursor_pointer()
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                let next = hovered.then_some(id);
-                if this.hovered_photo != next {
-                    this.hovered_photo = next;
+                // Hover listeners fire in reverse paint order, so the
+                // entering card must win over the leaving card's clear.
+                if *hovered {
+                    if this.hovered_photo != Some(id) {
+                        this.hovered_photo = Some(id);
+                        cx.notify();
+                    }
+                } else if this.hovered_photo == Some(id) {
+                    this.hovered_photo = None;
                     cx.notify();
                 }
             }))
@@ -3132,7 +3142,7 @@ fn average_bgra(bytes: &[u8]) -> u32 {
     let mut green = 0u64;
     let mut red = 0u64;
     let mut count = 0u64;
-    for pixel in bytes.chunks_exact(4) {
+    for pixel in bytes.as_chunks::<4>().0 {
         if pixel[3] < 8 {
             continue;
         }
@@ -3384,6 +3394,8 @@ fn main() {
                 )])
                 .expect("load Noto Sans JP");
             gpui_kit::init(cx);
+            // gpui_component::init forces the light theme; the app is dark-only.
+            gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
             cx.bind_keys([
                 KeyBinding::new("ctrl-b", ToggleSidebar, None),
                 KeyBinding::new("cmd-b", ToggleSidebar, None),
