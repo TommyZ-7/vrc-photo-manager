@@ -25,20 +25,33 @@ use vrc_photo_core::thumbnail;
 use vrc_photo_core::time;
 use vrc_photo_core::{linker, scanner};
 
-const BG: u32 = 0x0f1115;
-const PANEL: u32 = 0x161a20;
-const PANEL_2: u32 = 0x1b2028;
-const SIDEBAR: u32 = 0x12151a;
-const BORDER: u32 = 0x262c36;
-const TEXT: u32 = 0xe9edf5;
-const MUTED: u32 = 0x9aa4b2;
-const MUTED_2: u32 = 0x6f7a89;
-const BLUE: u32 = 0x3b9eff;
-const BLUE_DARK: u32 = 0x0078d4;
-const GREEN: u32 = 0x34d399;
+const BG: u32 = 0x07090d;
+const PANEL: u32 = 0x121722;
+const PANEL_2: u32 = 0x1a2130;
+const SIDEBAR: u32 = 0x0d1119;
+const BORDER: u32 = 0x232b38;
+const BORDER_STRONG: u32 = 0x364256;
+const TEXT: u32 = 0xeef3fb;
+const MUTED: u32 = 0xa3adbd;
+const MUTED_2: u32 = 0x768196;
+const BLUE: u32 = 0x66b3ff;
+const BLUE_DARK: u32 = 0x2f8fea;
+const ACCENT_SOFT: u32 = 0x1a2f47;
+const GREEN: u32 = 0x5eead4;
 const AMBER: u32 = 0xfbbf24;
-const RED: u32 = 0xf87171;
-const PURPLE: u32 = 0xc084fc;
+const RED: u32 = 0xfb7185;
+const PURPLE: u32 = 0xb79cff;
+
+const SIDEBAR_EXPANDED: f32 = 238.0;
+const SIDEBAR_COLLAPSED: f32 = 78.0;
+const MIN_CARD_WIDTH: f32 = 170.0;
+const GRID_GAP: f32 = 16.0;
+const INSPECTOR_WIDTH: f32 = 330.0;
+const VIEWER_DETAILS_WIDTH: f32 = 380.0;
+const WORKSPACE_PAD_X: f32 = 44.0;
+const CARD_INTRO_SECS: f32 = 0.6;
+const CARD_STAGGER_SECS: f32 = 0.04;
+const CARD_STAGGER_MAX: usize = 8;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
@@ -2337,6 +2350,165 @@ fn format_bytes(bytes: u64) -> String {
     )
 }
 
+fn format_count(value: i64) -> String {
+    if value < 1_000 {
+        return value.to_string();
+    }
+    if value < 10_000 {
+        return format!("{},{:03}", value / 1_000, value % 1_000);
+    }
+    let tenths = ((value as f64 / 1_000.0) * 10.0).round() as i64;
+    if tenths >= 1_000 {
+        format!("{}k", tenths / 10)
+    } else {
+        format!("{}.{}k", tenths / 10, tenths % 10)
+    }
+}
+
+fn average_bgra(bytes: &[u8]) -> u32 {
+    let mut blue = 0u64;
+    let mut green = 0u64;
+    let mut red = 0u64;
+    let mut count = 0u64;
+    for pixel in bytes.chunks_exact(4) {
+        if pixel[3] < 8 {
+            continue;
+        }
+        blue += u64::from(pixel[0]);
+        green += u64::from(pixel[1]);
+        red += u64::from(pixel[2]);
+        count += 1;
+    }
+    if count == 0 {
+        return 0;
+    }
+    let blue = (blue / count) as u32;
+    let green = (green / count) as u32;
+    let red = (red / count) as u32;
+    (red << 16) | (green << 8) | blue
+}
+
+fn lerp_color(from: u32, to: u32, t: f32) -> u32 {
+    let t = t.clamp(0.0, 1.0);
+    let channel = |shift: u32| {
+        let from = ((from >> shift) & 0xff) as f32;
+        let to = ((to >> shift) & 0xff) as f32;
+        (((from + (to - from) * t).round() as u32) & 0xff) << shift
+    };
+    channel(16) | channel(8) | channel(0)
+}
+
+fn cubic_bezier(t: f64, p1: f64, p2: f64) -> f64 {
+    let mt = 1.0 - t;
+    3.0 * mt * mt * t * p1 + 3.0 * mt * t * t * p2 + t * t * t
+}
+
+fn cubic_bezier_slope(t: f64, p1: f64, p2: f64) -> f64 {
+    let mt = 1.0 - t;
+    3.0 * mt * mt * p1 + 6.0 * mt * t * (p2 - p1) + 3.0 * t * t * (1.0 - p2)
+}
+
+fn ease_motion(t: f32) -> f32 {
+    let x = t.clamp(0.0, 1.0);
+    if x <= 0.0 {
+        return 0.0;
+    }
+    if x >= 1.0 {
+        return 1.0;
+    }
+    let x = f64::from(x);
+    let mut guess = x;
+    for _ in 0..8 {
+        let curve = cubic_bezier(guess, 0.22, 0.24);
+        let slope = cubic_bezier_slope(guess, 0.22, 0.24);
+        if slope.abs() < 1e-9 {
+            break;
+        }
+        guess = (guess - (curve - x) / slope).clamp(0.0, 1.0);
+    }
+    cubic_bezier(guess, 0.8, 1.0).clamp(0.0, 1.0) as f32
+}
+
+fn stagger_value(elapsed: f32, index: usize) -> f32 {
+    let delay = index.min(CARD_STAGGER_MAX) as f32 * CARD_STAGGER_SECS;
+    let total = CARD_INTRO_SECS + delay;
+    let local = ((elapsed * total - delay) / CARD_INTRO_SECS).clamp(0.0, 1.0);
+    ease_motion(local)
+}
+
+fn next_focus_index(current: usize, len: usize, reverse: bool) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let current = current.min(len - 1);
+    if reverse {
+        if current == 0 { len - 1 } else { current - 1 }
+    } else {
+        (current + 1) % len
+    }
+}
+
+fn step_index(current: usize, len: usize, delta: isize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    let base = current.min(len - 1) as isize;
+    (base.saturating_add(delta)).clamp(0, len as isize - 1) as usize
+}
+
+fn parse_window_size(value: &str) -> Option<(f32, f32)> {
+    let (width, height) = value.split_once(['x', 'X'])?;
+    let width: f32 = width.trim().parse().ok()?;
+    let height: f32 = height.trim().parse().ok()?;
+    if !width.is_finite() || !height.is_finite() || width < 320.0 || height < 240.0 {
+        return None;
+    }
+    Some((width, height))
+}
+
+fn sidebar_width(collapsed: bool) -> f32 {
+    if collapsed {
+        SIDEBAR_COLLAPSED
+    } else {
+        SIDEBAR_EXPANDED
+    }
+}
+
+fn sidebar_reveal_width(collapsed: bool, t: f32) -> f32 {
+    let (from, to) = if collapsed {
+        (130.0, 0.0)
+    } else {
+        (0.0, 130.0)
+    };
+    from + (to - from) * t
+}
+
+fn grid_available_width(
+    window_width: f32,
+    sidebar_collapsed: bool,
+    inspector_collapsed: bool,
+) -> f32 {
+    let inspector = if inspector_collapsed {
+        0.0
+    } else {
+        INSPECTOR_WIDTH
+    };
+    (window_width - sidebar_width(sidebar_collapsed) - inspector - WORKSPACE_PAD_X).max(0.0)
+}
+
+fn viewer_details_width(open: bool, t: f32) -> f32 {
+    let (from, to) = if open {
+        (0.0, VIEWER_DETAILS_WIDTH)
+    } else {
+        (VIEWER_DETAILS_WIDTH, 0.0)
+    };
+    from + (to - from) * t
+}
+
+fn grid_columns(available_width: f32) -> usize {
+    (((available_width + GRID_GAP) / (MIN_CARD_WIDTH + GRID_GAP)).floor() as usize).max(1)
+}
+
 fn short_date(value: &str) -> String {
     value
         .split('.')
@@ -2426,4 +2598,118 @@ fn main() {
         })
         .expect("open window");
     });
+}
+
+#[cfg(test)]
+mod tests {
+    // `use super::*` would also import GPUI's `test` attribute macro through
+    // `gpui_kit::*`, shadowing the built-in `#[test]` and recursing forever.
+    use super::{
+        average_bgra, ease_motion, format_count, grid_available_width, grid_columns, lerp_color,
+        next_focus_index, parse_window_size, sidebar_reveal_width, sidebar_width, stagger_value,
+        step_index, viewer_details_width,
+    };
+
+    #[test]
+    fn sidebar_widths_match_the_rail() {
+        assert_eq!(sidebar_width(false), 238.0);
+        assert_eq!(sidebar_width(true), 78.0);
+        assert_eq!(sidebar_reveal_width(false, 0.0), 0.0);
+        assert_eq!(sidebar_reveal_width(false, 1.0), 130.0);
+        assert_eq!(sidebar_reveal_width(true, 0.0), 130.0);
+        assert_eq!(sidebar_reveal_width(true, 1.0), 0.0);
+    }
+
+    #[test]
+    fn grid_columns_adapt_to_window_rail_and_inspector() {
+        assert_eq!(grid_columns(grid_available_width(1280.0, false, false)), 3);
+        assert_eq!(grid_columns(grid_available_width(1440.0, false, false)), 4);
+        assert_eq!(grid_columns(grid_available_width(1280.0, true, false)), 4);
+        assert_eq!(grid_columns(grid_available_width(1440.0, true, false)), 5);
+        assert_eq!(grid_columns(grid_available_width(1280.0, false, true)), 5);
+        assert_eq!(grid_columns(grid_available_width(1440.0, false, true)), 6);
+        assert_eq!(grid_columns(grid_available_width(1080.0, false, false)), 2);
+        assert_eq!(grid_columns(grid_available_width(1080.0, false, true)), 4);
+        assert_eq!(grid_columns(0.0), 1);
+    }
+
+    #[test]
+    fn viewer_details_width_opens_and_closes() {
+        assert_eq!(viewer_details_width(false, 0.0), 380.0);
+        assert_eq!(viewer_details_width(false, 1.0), 0.0);
+        assert_eq!(viewer_details_width(true, 0.0), 0.0);
+        assert_eq!(viewer_details_width(true, 1.0), 380.0);
+    }
+
+    #[test]
+    fn compact_count_uses_k_for_large_libraries() {
+        assert_eq!(format_count(0), "0");
+        assert_eq!(format_count(999), "999");
+        assert_eq!(format_count(1_234), "1,234");
+        assert_eq!(format_count(12_842), "12.8k");
+        assert_eq!(format_count(100_000), "100k");
+    }
+
+    #[test]
+    fn average_bgra_ignores_transparent_pixels() {
+        let bytes = [0, 0, 255, 255, 255, 0, 0, 255, 255, 255, 255, 0];
+        assert_eq!(average_bgra(&bytes), 0x7f007f);
+        assert_eq!(average_bgra(&[0, 0, 0, 0]), 0);
+    }
+
+    #[test]
+    fn lerp_color_hits_both_ends_and_midpoint() {
+        assert_eq!(lerp_color(0x000000, 0xffffff, 0.0), 0x000000);
+        assert_eq!(lerp_color(0x000000, 0xffffff, 1.0), 0xffffff);
+        assert_eq!(lerp_color(0x000000, 0xffffff, 0.5), 0x808080);
+    }
+
+    #[test]
+    fn ease_motion_is_monotonic_and_clamped() {
+        assert_eq!(ease_motion(0.0), 0.0);
+        assert!((ease_motion(1.0) - 1.0).abs() < 1e-4);
+        let mut previous = 0.0;
+        for step in 0..=100 {
+            let value = ease_motion(step as f32 / 100.0);
+            assert!(value >= previous - 1e-5);
+            previous = value;
+        }
+        assert!(ease_motion(0.5) > 0.5);
+    }
+
+    #[test]
+    fn stagger_value_waits_for_the_card_delay() {
+        assert_eq!(stagger_value(0.0, 0), 0.0);
+        assert!((stagger_value(1.0, 0) - 1.0).abs() < 1e-4);
+        let total = 0.6 + 0.32;
+        assert!(stagger_value(0.32 / total, 8) < 1e-4);
+        assert!((stagger_value(1.0, 8) - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn focus_cycle_wraps_in_both_directions() {
+        assert_eq!(next_focus_index(0, 5, false), 1);
+        assert_eq!(next_focus_index(4, 5, false), 0);
+        assert_eq!(next_focus_index(0, 5, true), 4);
+        assert_eq!(next_focus_index(3, 5, true), 2);
+        assert_eq!(next_focus_index(0, 0, false), 0);
+    }
+
+    #[test]
+    fn viewer_step_clamps_at_both_ends() {
+        assert_eq!(step_index(1, 5, -1), 0);
+        assert_eq!(step_index(0, 5, -1), 0);
+        assert_eq!(step_index(2, 5, 1), 3);
+        assert_eq!(step_index(4, 5, 1), 4);
+        assert_eq!(step_index(0, 0, 1), 0);
+    }
+
+    #[test]
+    fn window_size_parser_accepts_wxh() {
+        assert_eq!(parse_window_size("1440x900"), Some((1440.0, 900.0)));
+        assert_eq!(parse_window_size("1440X900"), Some((1440.0, 900.0)));
+        assert_eq!(parse_window_size("0x900"), None);
+        assert_eq!(parse_window_size("1440,900"), None);
+        assert_eq!(parse_window_size("1440x"), None);
+    }
 }
