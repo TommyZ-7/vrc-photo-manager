@@ -3,6 +3,7 @@
 //! The core crate is intentionally free of UI and process concerns so that the
 //! daemon and the gpui application can share it.
 
+pub mod compressor;
 pub mod db;
 pub mod error;
 pub mod linker;

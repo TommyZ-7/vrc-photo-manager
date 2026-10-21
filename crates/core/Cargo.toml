@@ -11,6 +11,11 @@ blake3.workspace = true
 chrono.workspace = true
 dirs.workspace = true
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+imgref.workspace = true
+jpegxl-rs.workspace = true
+ravif.workspace = true
+rgb.workspace = true
+webp.workspace = true
 regex.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
