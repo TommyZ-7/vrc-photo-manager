@@ -1,0 +1,1923 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VRC Photo Manager — 画面案</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0b0d11;
+    --bg-2: #101318;
+    --panel: #161a20;
+    --panel-2: #1b2028;
+    --panel-3: #222833;
+    --line: rgba(255, 255, 255, 0.08);
+    --line-strong: rgba(255, 255, 255, 0.14);
+    --text: #e9edf5;
+    --muted: #9aa4b2;
+    --muted-2: #6f7a89;
+    --accent: #3b9eff;
+    --accent-2: #0078d4;
+    --accent-soft: rgba(59, 158, 255, 0.14);
+    --green: #34d399;
+    --green-soft: rgba(52, 211, 153, 0.12);
+    --amber: #fbbf24;
+    --amber-soft: rgba(251, 191, 36, 0.12);
+    --red: #f87171;
+    --red-soft: rgba(248, 113, 113, 0.12);
+    --purple: #c084fc;
+    --purple-soft: rgba(192, 132, 252, 0.12);
+    --radius: 12px;
+    --radius-sm: 8px;
+    --shadow: 0 30px 80px rgba(0, 0, 0, 0.45);
+    --font: "Segoe UI", "Noto Sans JP", "Hiragino Sans", "Yu Gothic UI", system-ui, -apple-system, sans-serif;
+    --mono: ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background:
+      radial-gradient(1100px 600px at 12% -10%, rgba(59, 158, 255, 0.12), transparent 60%),
+      radial-gradient(900px 500px at 90% 0%, rgba(192, 132, 252, 0.08), transparent 55%),
+      var(--bg);
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 14px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  button, input, select, textarea { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  a { color: inherit; }
+  .icon { width: 18px; height: 18px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .icon-sm { width: 15px; height: 15px; }
+
+  .page {
+    max-width: 1520px;
+    margin: 0 auto;
+    padding: 40px 28px 64px;
+  }
+
+  /* ---------- page header ---------- */
+  .page-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 28px;
+    align-items: end;
+    padding-bottom: 26px;
+  }
+  .eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+  }
+  .eyebrow::before {
+    content: "";
+    width: 22px;
+    height: 1px;
+    background: var(--accent);
+  }
+  h1 {
+    margin: 0;
+    font-size: clamp(28px, 4vw, 44px);
+    line-height: 1.15;
+    letter-spacing: -0.03em;
+    font-weight: 700;
+  }
+  .lede {
+    margin: 12px 0 0;
+    max-width: 720px;
+    color: var(--muted);
+    font-size: 14px;
+  }
+  .meta-row { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--muted);
+    font-size: 11px;
+    white-space: nowrap;
+  }
+  .pill strong { color: var(--text); font-weight: 600; }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    margin-top: 22px;
+    padding: 12px 16px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: rgba(255, 255, 255, 0.02);
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .swatch { width: 9px; height: 9px; border-radius: 3px; display: inline-block; }
+
+  /* ---------- screen tabs ---------- */
+  .screen-tabs {
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    display: flex;
+    gap: 8px;
+    overflow-x: auto;
+    padding: 12px 0;
+    margin: 26px 0 18px;
+    background: linear-gradient(180deg, var(--bg) 72%, rgba(11, 13, 17, 0));
+    backdrop-filter: blur(10px);
+    scrollbar-width: none;
+  }
+  .screen-tabs::-webkit-scrollbar { display: none; }
+  .tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 14px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--panel);
+    color: var(--muted);
+    font-size: 12px;
+    white-space: nowrap;
+    transition: 150ms ease;
+  }
+  .tab span { color: var(--muted-2); font-family: var(--mono); font-size: 10px; }
+  .tab:hover { border-color: var(--line-strong); color: var(--text); }
+  .tab.active {
+    background: var(--accent-soft);
+    border-color: rgba(59, 158, 255, 0.45);
+    color: #cfe8ff;
+  }
+  .tab.active span { color: var(--accent); }
+
+  /* ---------- app window ---------- */
+  .window {
+    height: 810px;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--line-strong);
+    border-radius: 16px;
+    background: var(--bg-2);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .titlebar {
+    height: 40px;
+    flex: 0 0 40px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 0 14px;
+    background: #14171c;
+    border-bottom: 1px solid var(--line);
+    user-select: none;
+  }
+  .traffic { display: flex; gap: 7px; }
+  .traffic i { width: 11px; height: 11px; border-radius: 50%; display: block; }
+  .traffic i:nth-child(1) { background: #ff5f57; }
+  .traffic i:nth-child(2) { background: #febc2e; }
+  .traffic i:nth-child(3) { background: #28c840; }
+  .titlebar-title { font-size: 12px; color: var(--muted); }
+  .titlebar-title strong { color: var(--text); font-weight: 600; }
+  .titlebar-right { margin-left: auto; display: flex; align-items: center; gap: 14px; color: var(--muted); font-size: 11px; }
+  .live { display: inline-flex; align-items: center; gap: 6px; color: var(--green); }
+  .live::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.12); }
+
+  .window-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 208px minmax(0, 1fr); }
+  .sidebar {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding: 14px 10px;
+    background: #12151a;
+    border-right: 1px solid var(--line);
+  }
+  .brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 18px; }
+  .brand-mark {
+    width: 32px; height: 32px; border-radius: 9px;
+    display: grid; place-items: center;
+    background: linear-gradient(145deg, #3b9eff, #7c5cff);
+    color: white; font-size: 12px; font-weight: 800; letter-spacing: -0.04em;
+    box-shadow: 0 6px 18px rgba(59, 158, 255, 0.25);
+  }
+  .brand-name { font-size: 12px; font-weight: 700; line-height: 1.2; }
+  .brand-sub { font-size: 10px; color: var(--muted-2); }
+
+  .nav { display: grid; gap: 3px; }
+  .nav-item {
+    display: flex; align-items: center; gap: 10px;
+    width: 100%; padding: 9px 10px;
+    border: 0; border-radius: 8px;
+    background: transparent; color: var(--muted);
+    font-size: 12px; text-align: left;
+  }
+  .nav-item:hover { background: rgba(255, 255, 255, 0.04); color: var(--text); }
+  .nav-item.active { background: rgba(59, 158, 255, 0.12); color: #d7ecff; }
+  .nav-item.active .icon { color: var(--accent); }
+  .nav-item .count { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--muted-2); }
+
+  .sidebar-bottom { margin-top: auto; display: grid; gap: 10px; }
+  .storage-card {
+    padding: 12px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.02);
+  }
+  .storage-card .label { font-size: 10px; color: var(--muted-2); display: flex; justify-content: space-between; }
+  .storage-card .value { font-size: 12px; font-weight: 600; margin-top: 2px; }
+  .meter { height: 4px; border-radius: 999px; background: rgba(255, 255, 255, 0.08); margin-top: 8px; overflow: hidden; }
+  .meter i { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+  .user-row { display: flex; align-items: center; gap: 9px; padding: 8px; border-radius: 9px; }
+  .user-row:hover { background: rgba(255, 255, 255, 0.04); }
+  .avatar {
+    width: 26px; height: 26px; border-radius: 50%;
+    display: grid; place-items: center;
+    background: linear-gradient(145deg, #334155, #1e293b);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    font-size: 9px; font-weight: 700; color: #dbeafe;
+    flex: 0 0 auto;
+  }
+  .user-row .name { font-size: 11px; font-weight: 600; }
+  .user-row .role { font-size: 9px; color: var(--muted-2); }
+
+  .workspace { position: relative; min-width: 0; overflow: auto; background: #0f1217; }
+  .screen { display: none; min-height: 100%; }
+  .screen.active { display: block; animation: fade 160ms ease; }
+  @keyframes fade { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+
+  .statusbar {
+    height: 30px; flex: 0 0 30px;
+    display: flex; align-items: center; gap: 18px;
+    padding: 0 14px;
+    border-top: 1px solid var(--line);
+    background: #12151a;
+    color: var(--muted-2); font-size: 10px;
+  }
+  .statusbar .right { margin-left: auto; display: flex; gap: 16px; }
+
+  /* ---------- common ---------- */
+  .toolbar {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--line);
+    background: rgba(22, 26, 32, 0.72);
+    position: sticky; top: 0; z-index: 5;
+    backdrop-filter: blur(12px);
+  }
+  .searchbox {
+    display: flex; align-items: center; gap: 8px;
+    min-width: 220px; flex: 1 1 260px;
+    padding: 8px 11px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: #0d1014;
+    color: var(--muted-2);
+  }
+  .searchbox input { width: 100%; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 12px; }
+  .searchbox input::placeholder { color: var(--muted-2); }
+  kbd {
+    padding: 2px 5px; border: 1px solid var(--line); border-radius: 4px;
+    background: rgba(255, 255, 255, 0.04); color: var(--muted);
+    font-family: var(--mono); font-size: 9px;
+  }
+  .chips { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 6px 9px;
+    border: 1px solid var(--line); border-radius: 999px;
+    background: rgba(255, 255, 255, 0.02); color: var(--muted);
+    font-size: 10px; white-space: nowrap;
+  }
+  .chip:hover { border-color: var(--line-strong); color: var(--text); }
+  .chip.active { background: var(--accent-soft); border-color: rgba(59, 158, 255, 0.4); color: #cfe8ff; }
+  .chip .x { color: var(--muted-2); margin-left: 2px; }
+  .toolbar-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .count { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .count strong { color: var(--text); }
+
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    padding: 7px 11px;
+    border: 1px solid var(--line); border-radius: 8px;
+    background: rgba(255, 255, 255, 0.03); color: var(--text);
+    font-size: 11px; font-weight: 600; white-space: nowrap;
+  }
+  .btn:hover { border-color: var(--line-strong); background: rgba(255, 255, 255, 0.06); }
+  .btn.primary { background: var(--accent-2); border-color: transparent; color: white; }
+  .btn.primary:hover { background: #1a8ae5; }
+  .btn.ghost { background: transparent; color: var(--muted); }
+  .btn.danger { background: var(--red-soft); border-color: rgba(248, 113, 113, 0.3); color: #fecaca; }
+  .btn.icon-only { padding: 7px; }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  .badge {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 2px 6px; border-radius: 5px;
+    font-size: 9px; font-weight: 700; line-height: 1.5;
+    letter-spacing: 0.02em;
+  }
+  .badge.green { background: var(--green-soft); color: var(--green); border: 1px solid rgba(52, 211, 153, 0.28); }
+  .badge.amber { background: var(--amber-soft); color: var(--amber); border: 1px solid rgba(251, 191, 36, 0.28); }
+  .badge.blue { background: var(--accent-soft); color: #8cc8ff; border: 1px solid rgba(59, 158, 255, 0.3); }
+  .badge.purple { background: var(--purple-soft); color: var(--purple); border: 1px solid rgba(192, 132, 252, 0.3); }
+  .badge.gray { background: rgba(255, 255, 255, 0.06); color: var(--muted); border: 1px solid var(--line); }
+
+  .panel {
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--panel);
+    padding: 16px;
+  }
+  .panel h3 { margin: 0 0 12px; font-size: 12px; font-weight: 700; color: var(--text); }
+  .muted { color: var(--muted); }
+  .tiny { font-size: 10px; color: var(--muted-2); }
+  .mono { font-family: var(--mono); }
+
+  /* ---------- photo grid ---------- */
+  .photos-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; min-height: 100%; }
+  .grid-scroll { padding: 16px 18px 32px; min-width: 0; }
+  .date-head { display: flex; align-items: baseline; gap: 8px; margin: 4px 0 10px; }
+  .date-head h2 { margin: 0; font-size: 12px; font-weight: 700; color: #cfd8e3; }
+  .date-head span { font-size: 10px; color: var(--muted-2); }
+  .photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; margin-bottom: 22px; }
+  .photo {
+    display: block; width: 100%; padding: 0;
+    border: 0; background: transparent; text-align: left;
+    border-radius: 10px;
+  }
+  .photo:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .thumb {
+    position: relative;
+    aspect-ratio: 16 / 10;
+    overflow: hidden;
+    border-radius: 9px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    background:
+      radial-gradient(circle at 74% 22%, rgba(255, 255, 255, 0.92) 0 2.4%, transparent 2.7%),
+      radial-gradient(circle at 18% 82%, var(--c), transparent 58%),
+      linear-gradient(155deg, var(--s1), var(--s2));
+    box-shadow: inset 0 0 40px rgba(0, 0, 0, 0.22);
+    transition: transform 150ms ease, border-color 150ms ease;
+  }
+  .photo:hover .thumb { transform: translateY(-2px); border-color: rgba(255, 255, 255, 0.24); }
+  .photo.selected .thumb { outline: 2px solid var(--accent); outline-offset: 2px; border-color: transparent; }
+  .thumb::before {
+    content: "";
+    position: absolute; left: -10%; right: -10%; bottom: 26%; height: 26%;
+    background: radial-gradient(ellipse at 50% 100%, rgba(255, 255, 255, 0.14), transparent 65%);
+  }
+  .thumb::after {
+    content: "";
+    position: absolute; left: 0; right: 0; bottom: 0; height: 34%;
+    background: rgba(4, 6, 10, 0.58);
+    clip-path: polygon(0 66%, 6% 58%, 10% 63%, 16% 44%, 21% 55%, 27% 38%, 33% 56%, 39% 49%, 45% 61%, 51% 40%, 57% 54%, 63% 34%, 69% 52%, 75% 45%, 81% 58%, 88% 48%, 94% 56%, 100% 50%, 100% 100%, 0 100%);
+  }
+  .scene-rooftop { --s1: #111a33; --s2: #2b1b4d; --c: rgba(80, 120, 255, 0.5); }
+  .scene-cat { --s1: #2b1516; --s2: #6b2c1b; --c: rgba(255, 122, 61, 0.45); }
+  .scene-aqua { --s1: #062b33; --s2: #0b5c63; --c: rgba(34, 211, 238, 0.4); }
+  .scene-sunset { --s1: #4a1b2f; --s2: #b45309; --c: rgba(255, 159, 67, 0.48); }
+  .scene-neon { --s1: #1a0b2e; --s2: #4c1d95; --c: rgba(255, 61, 190, 0.45); }
+  .scene-cabin { --s1: #14251a; --s2: #3f4a22; --c: rgba(163, 230, 53, 0.3); }
+  .scene-snow { --s1: #1b2a3d; --s2: #7c93a8; --c: rgba(191, 219, 254, 0.4); }
+  .scene-space { --s1: #090b1a; --s2: #1e1b4b; --c: rgba(129, 140, 248, 0.4); }
+  .thumb .fav {
+    position: absolute; top: 7px; right: 8px;
+    color: #fde68a; font-size: 12px; text-shadow: 0 1px 6px rgba(0, 0, 0, 0.7);
+  }
+  .thumb .badges { position: absolute; top: 7px; left: 7px; display: flex; gap: 4px; }
+  .thumb .badge { backdrop-filter: blur(6px); background-color: rgba(9, 12, 16, 0.55); }
+  .thumb .badge.green { color: #6ee7b7; }
+  .thumb .badge.amber { color: #fcd34d; }
+  .photo-meta { padding: 6px 2px 0; }
+  .photo-title { font-size: 11px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .photo-sub { font-size: 9.5px; color: var(--muted-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+
+  /* ---------- inspector ---------- */
+  .inspector {
+    border-left: 1px solid var(--line);
+    background: #12151a;
+    padding: 14px;
+    overflow: auto;
+  }
+  .inspector-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .inspector-head span { font-size: 10px; font-weight: 700; color: var(--muted-2); letter-spacing: 0.08em; text-transform: uppercase; }
+  .inspector .thumb.large { aspect-ratio: 16 / 10; margin-bottom: 12px; }
+  .inspector h2 { margin: 0; font-size: 14px; line-height: 1.35; }
+  .inspector .date { margin-top: 2px; font-size: 10px; color: var(--muted-2); }
+  .inspector-badges { display: flex; flex-wrap: wrap; gap: 5px; margin: 9px 0 12px; }
+  .meta-list { display: grid; gap: 7px; margin: 12px 0; }
+  .meta-row { display: grid; grid-template-columns: 74px minmax(0, 1fr); gap: 8px; font-size: 10px; }
+  .meta-row dt { color: var(--muted-2); }
+  .meta-row dd { margin: 0; color: #cfd8e3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .section-label { font-size: 9px; font-weight: 700; color: var(--muted-2); letter-spacing: 0.09em; text-transform: uppercase; margin: 14px 0 7px; }
+  .player-stack { display: flex; flex-wrap: wrap; gap: 5px; }
+  .player-chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 3px 7px 3px 3px;
+    border: 1px solid var(--line); border-radius: 999px;
+    background: rgba(255, 255, 255, 0.03);
+    font-size: 9.5px; color: #cfd8e3;
+  }
+  .player-chip .avatar { width: 18px; height: 18px; font-size: 7px; }
+  .tag-row { display: flex; flex-wrap: wrap; gap: 5px; }
+  .tag {
+    padding: 3px 7px; border-radius: 5px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--line);
+    color: var(--muted); font-size: 9.5px;
+  }
+  .tag::before { content: "#"; color: var(--muted-2); margin-right: 2px; }
+  .inspector-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 14px; }
+  .inspector-actions .btn { width: 100%; }
+  .session-strip { display: flex; gap: 6px; margin-top: 8px; }
+  .session-strip .thumb { flex: 1; aspect-ratio: 1; border-radius: 6px; }
+
+  /* ---------- detail ---------- */
+  .detail-layout { display: grid; grid-template-columns: minmax(0, 1fr) 330px; min-height: 100%; }
+  .detail-main { padding: 16px 18px 26px; min-width: 0; }
+  .detail-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .detail-toolbar .filename { font-family: var(--mono); font-size: 10px; color: var(--muted-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .detail-toolbar .right { margin-left: auto; display: flex; gap: 6px; }
+  .preview {
+    position: relative;
+    aspect-ratio: 16 / 9;
+    border-radius: 12px;
+    border: 1px solid var(--line-strong);
+    overflow: hidden;
+    display: grid;
+    place-items: center;
+    background:
+      radial-gradient(circle at 72% 25%, rgba(255, 255, 255, 0.92) 0 1.3%, transparent 1.6%),
+      radial-gradient(circle at 18% 82%, var(--c), transparent 58%),
+      linear-gradient(155deg, var(--s1), var(--s2));
+  }
+  .preview::after {
+    content: "";
+    position: absolute; left: 0; right: 0; bottom: 0; height: 32%;
+    background: rgba(4, 6, 10, 0.62);
+    clip-path: polygon(0 66%, 5% 55%, 9% 62%, 14% 40%, 19% 55%, 25% 32%, 31% 52%, 37% 44%, 43% 60%, 49% 36%, 55% 51%, 61% 28%, 67% 48%, 74% 40%, 81% 56%, 87% 45%, 94% 54%, 100% 48%, 100% 100%, 0 100%);
+  }
+  .preview-label {
+    position: absolute; left: 14px; bottom: 12px; z-index: 1;
+    font-size: 10px; color: rgba(255, 255, 255, 0.72);
+    background: rgba(0, 0, 0, 0.35); border: 1px solid rgba(255, 255, 255, 0.12);
+    padding: 4px 8px; border-radius: 6px; backdrop-filter: blur(8px);
+  }
+  .preview-controls {
+    position: absolute; right: 12px; bottom: 12px; z-index: 1;
+    display: flex; align-items: center; gap: 4px;
+    padding: 3px; border-radius: 7px;
+    background: rgba(8, 10, 14, 0.6); border: 1px solid rgba(255, 255, 255, 0.12);
+    backdrop-filter: blur(8px);
+  }
+  .preview-controls button {
+    border: 0; background: transparent; color: rgba(255, 255, 255, 0.7);
+    width: 24px; height: 22px; border-radius: 4px; font-size: 11px;
+  }
+  .preview-controls button:hover { background: rgba(255, 255, 255, 0.1); color: white; }
+  .preview-controls .zoom { font-family: var(--mono); font-size: 9px; padding: 0 4px; color: rgba(255, 255, 255, 0.7); }
+  .filmstrip { display: flex; gap: 7px; margin-top: 12px; overflow-x: auto; padding-bottom: 4px; }
+  .filmstrip .thumb { width: 84px; flex: 0 0 84px; aspect-ratio: 16 / 10; border-radius: 6px; }
+  .filmstrip .thumb.active { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+  .detail-side { border-left: 1px solid var(--line); background: #12151a; padding: 16px; overflow: auto; }
+  .detail-side h2 { margin: 0; font-size: 17px; line-height: 1.3; }
+  .detail-side .sub { margin-top: 3px; font-size: 10px; color: var(--muted-2); }
+  .detail-badges { display: flex; flex-wrap: wrap; gap: 5px; margin: 11px 0 14px; }
+  .info-note {
+    display: flex; gap: 8px; align-items: flex-start;
+    padding: 9px 10px; border-radius: 8px;
+    background: var(--accent-soft); border: 1px solid rgba(59, 158, 255, 0.22);
+    color: #a9d4ff; font-size: 10px; line-height: 1.5;
+  }
+  .history { display: grid; gap: 6px; }
+  .history-row {
+    display: grid; grid-template-columns: 52px minmax(0, 1fr) auto; gap: 8px;
+    align-items: center;
+    padding: 7px 8px; border: 1px solid var(--line); border-radius: 7px;
+    background: rgba(255, 255, 255, 0.02); font-size: 10px;
+  }
+  .history-row .fmt { font-weight: 700; color: #cfd8e3; }
+  .history-row .bar { height: 4px; border-radius: 999px; background: rgba(255, 255, 255, 0.08); overflow: hidden; }
+  .history-row .bar i { display: block; height: 100%; background: var(--green); border-radius: inherit; }
+  .history-row .save { color: var(--green); font-family: var(--mono); font-size: 9px; }
+  .note-box {
+    width: 100%; min-height: 64px; resize: vertical;
+    border: 1px solid var(--line); border-radius: 8px;
+    background: #0d1014; color: var(--text);
+    padding: 8px 9px; font-size: 10.5px; line-height: 1.5; outline: 0;
+  }
+  .note-box:focus { border-color: rgba(59, 158, 255, 0.5); }
+  .detail-actions { display: grid; gap: 6px; margin-top: 14px; }
+  .detail-actions .row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+
+  /* ---------- compression ---------- */
+  .screen-inner { padding: 18px; }
+  .page-title { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 16px; }
+  .page-title h2 { margin: 0; font-size: 18px; letter-spacing: -0.02em; }
+  .page-title p { margin: 3px 0 0; font-size: 10.5px; color: var(--muted); }
+  .page-title .right { margin-left: auto; display: flex; gap: 7px; }
+  .compression-layout { display: grid; grid-template-columns: 270px minmax(0, 1fr); gap: 14px; }
+  .profile-list { display: grid; gap: 8px; align-content: start; }
+  .profile-card {
+    width: 100%; text-align: left;
+    padding: 11px; border: 1px solid var(--line); border-radius: 9px;
+    background: var(--panel); color: var(--text);
+  }
+  .profile-card:hover { border-color: var(--line-strong); }
+  .profile-card.active { border-color: rgba(59, 158, 255, 0.5); background: rgba(59, 158, 255, 0.07); }
+  .profile-card .top { display: flex; align-items: center; gap: 7px; }
+  .profile-card .name { font-size: 11px; font-weight: 700; }
+  .profile-card .meta { margin-top: 4px; font-size: 9.5px; color: var(--muted-2); }
+  .profile-card .auto { margin-left: auto; }
+  .switch {
+    position: relative; width: 28px; height: 16px; flex: 0 0 28px;
+    border: 1px solid var(--line-strong); border-radius: 999px;
+    background: rgba(255, 255, 255, 0.08); display: inline-block;
+    transition: 150ms ease;
+  }
+  .switch::after {
+    content: ""; position: absolute; top: 2px; left: 2px;
+    width: 10px; height: 10px; border-radius: 50%;
+    background: #cbd5e1; transition: 150ms ease;
+  }
+  .switch.on { background: rgba(59, 158, 255, 0.45); border-color: rgba(59, 158, 255, 0.6); }
+  .switch.on::after { left: 14px; background: white; }
+
+  .editor { border: 1px solid var(--line); border-radius: 11px; background: var(--panel); padding: 14px; }
+  .editor-head { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
+  .editor-head h3 { margin: 0; font-size: 13px; }
+  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px 18px; }
+  .field { display: grid; gap: 5px; }
+  .field.full { grid-column: 1 / -1; }
+  .field > label { font-size: 9.5px; color: var(--muted-2); font-weight: 600; }
+  .segmented { display: flex; gap: 3px; padding: 3px; border: 1px solid var(--line); border-radius: 7px; background: #0d1014; }
+  .segmented button {
+    flex: 1; border: 0; border-radius: 5px; padding: 5px 7px;
+    background: transparent; color: var(--muted); font-size: 9.5px; font-weight: 700;
+  }
+  .segmented button.active { background: var(--panel-3); color: white; }
+  .slider-row { display: flex; align-items: center; gap: 9px; }
+  .slider-row input[type="range"] { flex: 1; accent-color: var(--accent); }
+  .slider-row .val { font-family: var(--mono); font-size: 10px; color: var(--text); min-width: 28px; text-align: right; }
+  .input {
+    width: 100%; padding: 6px 8px;
+    border: 1px solid var(--line); border-radius: 6px;
+    background: #0d1014; color: var(--text); font-size: 10px; outline: 0;
+  }
+  .input:focus { border-color: rgba(59, 158, 255, 0.5); }
+  .inline { display: flex; align-items: center; gap: 7px; }
+  .inline .muted { font-size: 9.5px; }
+  .checkline { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--muted); }
+  .checkline input { accent-color: var(--accent); }
+  .auto-note {
+    margin-top: 14px; padding: 9px 10px;
+    border-radius: 7px; border: 1px solid rgba(52, 211, 153, 0.22);
+    background: var(--green-soft); color: #a7f3d0; font-size: 10px;
+  }
+  .editor-actions { display: flex; justify-content: space-between; margin-top: 14px; }
+
+  .stats-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; margin-top: 14px; }
+  .stat {
+    border: 1px solid var(--line); border-radius: 9px; background: var(--panel);
+    padding: 10px 12px;
+  }
+  .stat .label { font-size: 9px; color: var(--muted-2); }
+  .stat .value { font-size: 17px; font-weight: 700; margin-top: 1px; letter-spacing: -0.02em; }
+  .stat .value.green { color: var(--green); }
+
+  .queue { margin-top: 14px; border: 1px solid var(--line); border-radius: 11px; background: var(--panel); overflow: hidden; }
+  .queue-head { display: flex; align-items: center; gap: 8px; padding: 10px 13px; border-bottom: 1px solid var(--line); }
+  .queue-head h3 { margin: 0; font-size: 11px; }
+  .queue-head .right { margin-left: auto; display: flex; gap: 6px; }
+  .job { display: grid; grid-template-columns: 22px minmax(0, 1fr) 130px 70px; gap: 9px; align-items: center; padding: 8px 13px; border-top: 1px solid var(--line); }
+  .job:first-of-type { border-top: 0; }
+  .job .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); justify-self: center; }
+  .job.done .dot { background: var(--green); }
+  .job.fail .dot { background: var(--red); }
+  .job .name { font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .job .sub { font-size: 9px; color: var(--muted-2); }
+  .progress { height: 5px; border-radius: 999px; background: rgba(255, 255, 255, 0.08); overflow: hidden; }
+  .progress i { display: block; height: 100%; border-radius: inherit; background: var(--accent); }
+  .job.done .progress i { background: var(--green); }
+  .job.fail .progress i { background: var(--red); }
+  .job .pct { font-family: var(--mono); font-size: 9px; color: var(--muted); text-align: right; }
+
+  /* ---------- search ---------- */
+  .search-layout { display: grid; grid-template-columns: 290px minmax(0, 1fr); min-height: 100%; }
+  .filter-panel { border-right: 1px solid var(--line); background: #12151a; padding: 16px; overflow: auto; }
+  .filter-panel h2 { margin: 0 0 3px; font-size: 14px; }
+  .filter-panel .sub { font-size: 10px; color: var(--muted-2); margin-bottom: 14px; }
+  .filter-group { padding: 12px 0; border-top: 1px solid var(--line); }
+  .filter-group:first-of-type { border-top: 0; padding-top: 0; }
+  .filter-group > label { display: block; font-size: 9.5px; font-weight: 700; color: var(--muted-2); letter-spacing: 0.04em; margin-bottom: 7px; }
+  .filter-input {
+    width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: 7px;
+    background: #0d1014; color: var(--text); font-size: 10px; outline: 0;
+  }
+  .filter-input:focus { border-color: rgba(59, 158, 255, 0.5); }
+  .selected-list { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+  .preset-row { display: flex; gap: 5px; flex-wrap: wrap; }
+  .preset {
+    padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px;
+    background: transparent; color: var(--muted); font-size: 9.5px;
+  }
+  .preset.active { background: var(--accent-soft); border-color: rgba(59, 158, 255, 0.4); color: #cfe8ff; }
+  .date-row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 7px; }
+  .search-results { padding: 16px 18px 30px; min-width: 0; }
+  .result-head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .result-head h2 { margin: 0; font-size: 15px; }
+  .result-head .sub { font-size: 10px; color: var(--muted-2); }
+  .result-head .right { margin-left: auto; display: flex; align-items: center; gap: 7px; }
+  .active-filters { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 12px; }
+  .empty-hint {
+    display: flex; align-items: center; gap: 7px;
+    padding: 8px 10px; border-radius: 7px;
+    background: var(--amber-soft); border: 1px solid rgba(251, 191, 36, 0.24);
+    color: #fde68a; font-size: 10px; margin-bottom: 12px;
+  }
+
+  /* ---------- monitor ---------- */
+  .monitor-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .monitor-card { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 12px; }
+  .monitor-card .label { font-size: 9px; color: var(--muted-2); display: flex; align-items: center; gap: 5px; }
+  .monitor-card .value { font-size: 15px; font-weight: 700; margin-top: 4px; letter-spacing: -0.02em; }
+  .monitor-card .sub { font-size: 9px; color: var(--muted-2); margin-top: 2px; }
+  .monitor-card.green { border-color: rgba(52, 211, 153, 0.25); background: linear-gradient(180deg, rgba(52, 211, 153, 0.08), var(--panel)); }
+  .monitor-card.green .value { color: var(--green); }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+  .player-list { display: grid; gap: 6px; }
+  .player-row { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-top: 1px solid var(--line); }
+  .player-row:first-child { border-top: 0; }
+  .player-row .name { font-size: 10.5px; font-weight: 600; }
+  .player-row .id { font-size: 8.5px; color: var(--muted-2); font-family: var(--mono); }
+  .player-row .time { margin-left: auto; font-size: 9px; color: var(--muted-2); font-family: var(--mono); }
+  .timeline { display: grid; gap: 0; }
+  .event { display: grid; grid-template-columns: 42px 14px minmax(0, 1fr); gap: 8px; min-height: 36px; }
+  .event .time { font-family: var(--mono); font-size: 9px; color: var(--muted-2); padding-top: 2px; text-align: right; }
+  .event .line { position: relative; display: flex; justify-content: center; }
+  .event .line::before { content: ""; position: absolute; top: 0; bottom: 0; width: 1px; background: var(--line); }
+  .event .line i { position: relative; z-index: 1; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-top: 5px; box-shadow: 0 0 0 3px #161a20; }
+  .event.green .line i { background: var(--green); }
+  .event.amber .line i { background: var(--amber); }
+  .event .body { padding-bottom: 10px; }
+  .event .body .title { font-size: 10.5px; }
+  .event .body .sub { font-size: 9px; color: var(--muted-2); }
+  .path-list { display: grid; gap: 7px; }
+  .path-row { display: flex; align-items: center; gap: 8px; padding: 7px 8px; border: 1px solid var(--line); border-radius: 7px; background: rgba(255, 255, 255, 0.02); }
+  .path-row .path { font-family: var(--mono); font-size: 9.5px; color: #cfd8e3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .path-row .ok { margin-left: auto; color: var(--green); font-size: 9px; white-space: nowrap; }
+  .warning {
+    display: flex; gap: 8px; align-items: flex-start;
+    padding: 10px 12px; border-radius: 8px;
+    border: 1px solid rgba(251, 191, 36, 0.24); background: var(--amber-soft);
+    color: #fde68a; font-size: 10px; line-height: 1.5;
+  }
+
+  /* ---------- settings ---------- */
+  .settings-layout { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 16px; }
+  .settings-nav { display: grid; gap: 3px; align-content: start; }
+  .settings-nav button {
+    text-align: left; border: 0; border-radius: 7px; padding: 7px 9px;
+    background: transparent; color: var(--muted); font-size: 10.5px;
+  }
+  .settings-nav button:hover { background: rgba(255, 255, 255, 0.04); color: var(--text); }
+  .settings-nav button.active { background: var(--accent-soft); color: #cfe8ff; }
+  .settings-content { display: grid; gap: 10px; align-content: start; }
+  .setting-row { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-top: 1px solid var(--line); }
+  .setting-row:first-of-type { border-top: 0; padding-top: 0; }
+  .setting-row .text { min-width: 0; }
+  .setting-row .title { font-size: 10.5px; font-weight: 600; }
+  .setting-row .desc { font-size: 9px; color: var(--muted-2); margin-top: 1px; }
+  .setting-row .control { margin-left: auto; display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+  .setting-row .path { font-family: var(--mono); font-size: 9px; color: var(--muted); max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .danger-panel { border-color: rgba(248, 113, 113, 0.28); background: linear-gradient(180deg, rgba(248, 113, 113, 0.06), var(--panel)); }
+
+  /* ---------- modal ---------- */
+  .modal {
+    position: fixed; inset: 0; z-index: 100;
+    display: none; align-items: center; justify-content: center;
+    padding: 24px;
+    background: rgba(4, 6, 10, 0.68);
+    backdrop-filter: blur(8px);
+  }
+  .modal.open { display: flex; }
+  .modal-card {
+    width: min(520px, 100%);
+    border: 1px solid var(--line-strong); border-radius: 14px;
+    background: #15191f; box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6);
+    overflow: hidden;
+  }
+  .modal-head { display: flex; align-items: center; gap: 8px; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  .modal-head h2 { margin: 0; font-size: 14px; }
+  .modal-head .x { margin-left: auto; border: 0; background: transparent; color: var(--muted); font-size: 16px; line-height: 1; padding: 4px; }
+  .modal-body { padding: 16px; display: grid; gap: 13px; }
+  .modal-body .summary { display: flex; gap: 10px; align-items: center; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255, 255, 255, 0.02); }
+  .modal-body .summary .thumb { width: 64px; flex: 0 0 64px; aspect-ratio: 16 / 10; }
+  .modal-body .summary .name { font-size: 11px; font-weight: 600; }
+  .modal-body .summary .sub { font-size: 9px; color: var(--muted-2); }
+  .radio-card { display: flex; gap: 8px; align-items: flex-start; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255, 255, 255, 0.02); }
+  .radio-card:has(input:checked) { border-color: rgba(59, 158, 255, 0.45); background: var(--accent-soft); }
+  .radio-card input { margin-top: 2px; accent-color: var(--accent); }
+  .radio-card .title { font-size: 10.5px; font-weight: 600; }
+  .radio-card .desc { font-size: 9px; color: var(--muted-2); margin-top: 1px; }
+  .modal-foot { display: flex; justify-content: flex-end; gap: 7px; padding: 12px 16px; border-top: 1px solid var(--line); }
+
+  /* ---------- notes / flow ---------- */
+  .section-head { display: flex; align-items: end; gap: 14px; margin: 52px 0 16px; }
+  .section-head h2 { margin: 0; font-size: 20px; letter-spacing: -0.02em; }
+  .section-head p { margin: 0 0 3px; color: var(--muted); font-size: 11px; }
+  .notes-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+  .note-card {
+    border: 1px solid var(--line); border-radius: var(--radius);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0.01));
+    padding: 16px;
+  }
+  .note-card .num { font-family: var(--mono); font-size: 9px; color: var(--accent); letter-spacing: 0.08em; }
+  .note-card h3 { margin: 5px 0 7px; font-size: 13px; }
+  .note-card p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.65; }
+  .note-card ul { margin: 9px 0 0; padding-left: 16px; color: var(--muted); font-size: 10.5px; line-height: 1.7; }
+  .note-card li::marker { color: var(--muted-2); }
+
+  .flow {
+    display: flex; align-items: stretch; gap: 8px; flex-wrap: wrap;
+    padding: 20px; border: 1px solid var(--line); border-radius: var(--radius);
+    background: rgba(255, 255, 255, 0.02);
+  }
+  .flow-step {
+    flex: 1 1 140px; min-width: 130px;
+    padding: 12px; border: 1px solid var(--line); border-radius: 9px;
+    background: var(--panel);
+  }
+  .flow-step .k { font-family: var(--mono); font-size: 9px; color: var(--accent); }
+  .flow-step .t { font-size: 11px; font-weight: 700; margin-top: 3px; }
+  .flow-step .d { font-size: 9.5px; color: var(--muted-2); margin-top: 2px; }
+  .flow-arrow { display: grid; place-items: center; color: var(--muted-2); font-size: 16px; flex: 0 0 18px; }
+
+  footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: 12px; color: var(--muted-2); font-size: 10px; }
+  footer .right { margin-left: auto; }
+
+  /* ---------- responsive ---------- */
+  @media (max-width: 1180px) {
+    .photos-layout { grid-template-columns: minmax(0, 1fr); }
+    .inspector { display: none; }
+    .detail-layout { grid-template-columns: minmax(0, 1fr); }
+    .detail-side { border-left: 0; border-top: 1px solid var(--line); }
+    .notes-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .monitor-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  @media (max-width: 980px) {
+    .page { padding: 28px 16px 48px; }
+    .page-head { grid-template-columns: 1fr; }
+    .meta-row { justify-content: flex-start; }
+    .window { height: 760px; }
+    .window-body { grid-template-columns: 64px minmax(0, 1fr); }
+    .brand-name, .brand-sub, .nav-item span:not(.icon), .nav-item .count, .storage-card, .user-row .name, .user-row .role { display: none; }
+    .brand { justify-content: center; padding: 4px 0 16px; }
+    .nav-item { justify-content: center; padding: 10px; }
+    .user-row { justify-content: center; }
+    .compression-layout { grid-template-columns: 1fr; }
+    .search-layout { grid-template-columns: 240px minmax(0, 1fr); }
+    .settings-layout { grid-template-columns: 1fr; }
+    .settings-nav { display: flex; flex-wrap: wrap; }
+    .two-col { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 720px) {
+    .window { height: auto; min-height: 700px; }
+    .window-body { grid-template-columns: 56px minmax(0, 1fr); }
+    .screen { min-height: 660px; }
+    .notes-grid { grid-template-columns: 1fr; }
+    .monitor-grid { grid-template-columns: 1fr; }
+    .search-layout { grid-template-columns: 1fr; }
+    .filter-panel { border-right: 0; border-bottom: 1px solid var(--line); }
+    .photo-grid { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
+    .form-grid { grid-template-columns: 1fr; }
+    .stats-row { grid-template-columns: 1fr; }
+    .job { grid-template-columns: 16px minmax(0, 1fr) 80px; }
+    .job .pct { display: none; }
+  }
+  @media print {
+    body { background: white; color: black; }
+    .screen-tabs { display: none; }
+    .screen { display: block !important; }
+    .window { height: auto; }
+  }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-photo" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+  <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></symbol>
+  <symbol id="i-activity" viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7l-2-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2Z"/></symbol>
+  <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 2 3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2Z"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="m5 3 14 9-14 9V3Z"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-arrow-left" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7M19 12H5"/></symbol>
+  <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></symbol>
+  <symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5M3 12a9 3 0 0 0 18 0"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5M21 12a9 9 0 0 1-15 6.7L3 16M3 21v-5h5"/></symbol>
+  <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-5-5L5 21"/></symbol>
+</svg>
+
+<div class="page">
+  <header class="page-head">
+    <div>
+      <div class="eyebrow">UI design / v0.1</div>
+      <h1>VRChat写真管理ソフト</h1>
+      <p class="lede">写真一覧・詳細・圧縮・検索・ログ監視を一つに。gpui-kit前提の画面案です。上のタブで画面を切り替えられます。写真をクリックすると詳細画面が開きます。</p>
+      <div class="legend">
+        <span><i class="swatch" style="background: var(--green)"></i>圧縮済み</span>
+        <span><i class="swatch" style="background: var(--amber)"></i>文脈未紐付け</span>
+        <span><i class="swatch" style="background: var(--accent)"></i>選択中</span>
+        <span><i class="swatch" style="background: var(--purple)"></i>お気に入り</span>
+        <span>10万枚想定 / 仮想グリッド</span>
+      </div>
+    </div>
+    <div class="meta-row">
+      <span class="pill"><strong>gpui-kit</strong> 0.8</span>
+      <span class="pill">Windows / Linux</span>
+      <span class="pill">Dark</span>
+      <span class="pill">日本語 / English</span>
+    </div>
+  </header>
+
+  <nav class="screen-tabs" aria-label="画面一覧">
+    <button class="tab active" data-screen="photos"><span>01</span>写真一覧</button>
+    <button class="tab" data-screen="detail"><span>02</span>写真詳細</button>
+    <button class="tab" data-screen="compression"><span>03</span>圧縮設定</button>
+    <button class="tab" data-screen="search"><span>04</span>検索</button>
+    <button class="tab" data-screen="monitor"><span>05</span>ログ監視</button>
+    <button class="tab" data-screen="settings"><span>06</span>設定</button>
+  </nav>
+
+  <div class="window" role="application" aria-label="VRC Photo Manager 画面案">
+    <div class="titlebar">
+      <div class="traffic"><i></i><i></i><i></i></div>
+      <div class="titlebar-title"><strong>VRC Photo Manager</strong> <span id="windowCrumb">— ライブラリ</span></div>
+      <div class="titlebar-right">
+        <span class="live">監視中 · Midnight Rooftop</span>
+        <span>21:16</span>
+      </div>
+    </div>
+
+    <div class="window-body">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">VP</div>
+          <div>
+            <div class="brand-name">VRC Photo</div>
+            <div class="brand-sub">Manager</div>
+          </div>
+        </div>
+        <nav class="nav" aria-label="メインナビゲーション">
+          <button class="nav-item active" data-screen="photos"><svg class="icon"><use href="#i-photo"/></svg><span>写真</span><span class="count">12,842</span></button>
+          <button class="nav-item" data-screen="search"><svg class="icon"><use href="#i-search"/></svg><span>検索</span></button>
+          <button class="nav-item" data-screen="compression"><svg class="icon"><use href="#i-sliders"/></svg><span>圧縮</span></button>
+          <button class="nav-item" data-screen="monitor"><svg class="icon"><use href="#i-activity"/></svg><span>監視</span></button>
+          <button class="nav-item" data-screen="settings"><svg class="icon"><use href="#i-settings"/></svg><span>設定</span></button>
+        </nav>
+        <div class="sidebar-bottom">
+          <div class="storage-card">
+            <div class="label"><span>ライブラリ</span><span>48.2 GB</span></div>
+            <div class="value">12,842 枚</div>
+            <div class="meter"><i style="width: 62%"></i></div>
+          </div>
+          <div class="storage-card">
+            <div class="label"><span>サムネイル</span><span>1.2 / 2.0 GB</span></div>
+            <div class="meter"><i style="width: 60%"></i></div>
+          </div>
+          <div class="user-row">
+            <div class="avatar">TZ</div>
+            <div><div class="name">TommyZ</div><div class="role">ローカルライブラリ</div></div>
+          </div>
+        </div>
+      </aside>
+
+      <main class="workspace" id="workspace">
+
+        <!-- ========== 01 PHOTOS ========== -->
+        <section class="screen active" data-screen="photos">
+          <div class="toolbar">
+            <div class="searchbox">
+              <svg class="icon icon-sm"><use href="#i-search"/></svg>
+              <input type="text" placeholder="ワールド、プレイヤー、タグで検索…" aria-label="検索">
+              <kbd>Ctrl K</kbd>
+            </div>
+            <div class="chips">
+              <button class="chip active">ワールド: すべて <svg class="icon icon-sm"><use href="#i-chevron"/></svg></button>
+              <button class="chip">プレイヤー <svg class="icon icon-sm"><use href="#i-chevron"/></svg></button>
+              <button class="chip">日時 <svg class="icon icon-sm"><use href="#i-chevron"/></svg></button>
+              <button class="chip">タグ <svg class="icon icon-sm"><use href="#i-chevron"/></svg></button>
+              <button class="chip" title="お気に入りのみ"><svg class="icon icon-sm"><use href="#i-star"/></svg></button>
+            </div>
+            <div class="toolbar-right">
+              <span class="count"><strong>12,842</strong> 枚</span>
+              <button class="btn ghost icon-only" title="表示切替"><svg class="icon icon-sm"><use href="#i-image"/></svg></button>
+              <button class="btn primary"><svg class="icon icon-sm"><use href="#i-plus"/></svg>取り込み</button>
+            </div>
+          </div>
+
+          <div class="photos-layout">
+            <div class="grid-scroll">
+              <div class="date-head"><h2>2026年10月21日</h2><span>9枚</span></div>
+              <div class="photo-grid">
+                <button class="photo selected" data-photo data-title="Midnight Rooftop" data-date="2026-10-21 21:14:03" data-players="8" data-size="12.4 MB" data-scene="scene-rooftop">
+                  <div class="thumb scene-rooftop">
+                    <div class="badges"><span class="badge green">圧縮済</span></div>
+                    <span class="fav">★</span>
+                  </div>
+                  <div class="photo-meta"><div class="photo-title">Midnight Rooftop</div><div class="photo-sub">21:14 · 8人 · 12.4 MB</div></div>
+                </button>
+                <button class="photo" data-photo data-title="The Black Cat" data-date="2026-10-21 20:02:11" data-players="14" data-size="9.8 MB" data-scene="scene-cat">
+                  <div class="thumb scene-cat"><div class="badges"><span class="badge green">圧縮済</span></div></div>
+                  <div class="photo-meta"><div class="photo-title">The Black Cat</div><div class="photo-sub">20:02 · 14人 · 9.8 MB</div></div>
+                </button>
+                <button class="photo" data-photo data-title="Furality Aqua" data-date="2026-10-21 19:31:47" data-players="22" data-size="14.1 MB" data-scene="scene-aqua">
+                  <div class="thumb scene-aqua"><div class="badges"><span class="badge amber">未紐付け</span></div></div>
+                  <div class="photo-meta"><div class="photo-title">Furality Aqua</div><div class="photo-sub">19:31 · 22人 · 14.1 MB</div></div>
+                </button>
+                <button class="photo" data-photo data-title="Sunset Bar" data-date="2026-10-21 18:47:20" data-players="6" data-size="8.2 MB" data-scene="scene-sunset">
+                  <div class="thumb scene-sunset"><div class="badges"><span class="badge green">圧縮済</span></div></div>
+                  <div class="photo-meta"><div class="photo-title">Sunset Bar</div><div class="photo-sub">18:47 · 6人 · 8.2 MB</div></div>
+                </button>
+                <button class="photo" data-photo data-title="Neon District" data-date="2026-10-21 17:22:09" data-players="11" data-size="10.5 MB" data-scene="scene-neon">
+                  <div class="thumb scene-neon"><div class="badges"><span class="badge green">圧縮済</span></div></div>
+                  <div class="photo-meta"><div class="photo-title">Neon District</div><div class="photo-sub">17:22 · 11人 · 10.5 MB</div></div>
+                </button>
+                <button class="photo" data-photo data-title="Cozy Cabin" data-date="2026-10-21 16:08:55" data-players="4" data-size="7.1 MB" data-scene="scene-cabin">
+                  <div class="thumb scene-cabin"><div class="badges"><span class="badge green">圧縮済</span></div></div>
+                  <div class="photo-meta"><div class="photo-title">Cozy Cabin</div><div class="photo-sub">16:08 · 4人 · 7.1 MB</div></div>
+                </button>
+                <button class="photo" data-photo data-title="Snowfield" data-date="2026-10-21 15:12:31" data-players="9" data-size="11.3 MB" data-scene="scene-snow">
+                  <div class="thumb scene-snow"><div class="badges"><span class="badge amber">未紐付け</span></div></div>
+                  <div class="photo-meta"><div class="photo-title">Snowfield</div><div class="photo-sub">15:12 · 9人 · 11.3 MB</div></div>
+                </button>
+                <button class="photo" data-photo data-title="Deep Space" data-date="2026-10-21 14:05:18" data-players="3" data-size="13.0 MB" data-scene="scene-space">
+                  <div class="thumb scene-space"><div class="badges"><span class="badge green">圧縮済</span></div><span class="fav">★</span></div>
+                  <div class="photo-meta"><div class="photo-title">Deep Space</div><div class="photo-sub">14:05 · 3人 · 13.0 MB</div></div>
+                </button>
+                <button class="photo" data-photo data-title="Midnight Rooftop" data-date="2026-10-21 13:44:02" data-players="7" data-size="9.2 MB" data-scene="scene-rooftop">
+                  <div class="thumb scene-rooftop"><div class="badges"><span class="badge green">圧縮済</span></div></div>
+                  <div class="photo-meta"><div class="photo-title">Midnight Rooftop</div><div class="photo-sub">13:44 · 7人 · 9.2 MB</div></div>
+                </button>
+              </div>
+
+              <div class="date-head"><h2>2026年10月20日</h2><span>6枚</span></div>
+              <div class="photo-grid">
+                <button class="photo" data-photo data-title="The Black Cat" data-date="2026-10-20 23:20:44" data-players="12" data-size="8.8 MB" data-scene="scene-cat">
+                  <div class="thumb scene-cat"><div class="badges"><span class="badge green">圧縮済</span></div></div>
+                  <div class="photo-meta"><div class="photo-title">The Black Cat</div><div class="photo-sub">23:20 · 12人 · 8.8 MB</div></div>
+                </button>
+                <button class="photo" data-photo data-title="Furality Aqua" data-date="2026-10-20 22:03:12" data-players="18" data-size="12.7 MB" data-scene="scene-aqua">
+                  <div class="thumb scene-aqua"><div class="badges"><span class="badge green">圧縮済</span></div></div>
+                  <div class="photo-meta"><div class="photo-title">Furality Aqua</div><div class="photo-sub">22:03 · 18人 · 12.7 MB</div></div>
+                </button>
+                <button class="photo" data-photo data-title="Sunset Bar" data-date="2026-10-20 21:15:37" data-players="5" data-size="6.9 MB" data-scene="scene-sunset">
+                  <div class="thumb scene-sunset"><div class="badges"><span class="badge green">圧縮済</span></div></div>
+                  <div class="photo-meta"><div class="photo-title">Sunset Bar</div><div class="photo-sub">21:15 · 5人 · 6.9 MB</div></div>
+                </button>
+                <button class="photo" data-photo data-title="Neon District" data-date="2026-10-20 20:42:05" data-players="10" data-size="10.1 MB" data-scene="scene-neon">
+                  <div class="thumb scene-neon"><div class="badges"><span class="badge amber">未紐付け</span></div></div>
+                  <div class="photo-meta"><div class="photo-title">Neon District</div><div class="photo-sub">20:42 · 10人 · 10.1 MB</div></div>
+                </button>
+                <button class="photo" data-photo data-title="Cozy Cabin" data-date="2026-10-20 19:30:51" data-players="4" data-size="7.5 MB" data-scene="scene-cabin">
+                  <div class="thumb scene-cabin"><div class="badges"><span class="badge green">圧縮済</span></div></div>
+                  <div class="photo-meta"><div class="photo-title">Cozy Cabin</div><div class="photo-sub">19:30 · 4人 · 7.5 MB</div></div>
+                </button>
+                <button class="photo" data-photo data-title="Snowfield" data-date="2026-10-20 18:11:26" data-players="8" data-size="11.0 MB" data-scene="scene-snow">
+                  <div class="thumb scene-snow"><div class="badges"><span class="badge green">圧縮済</span></div></div>
+                  <div class="photo-meta"><div class="photo-title">Snowfield</div><div class="photo-sub">18:11 · 8人 · 11.0 MB</div></div>
+                </button>
+              </div>
+            </div>
+
+            <aside class="inspector" aria-label="写真の詳細">
+              <div class="inspector-head"><span>選択中</span><button class="btn ghost icon-only" aria-label="閉じる"><svg class="icon icon-sm"><use href="#i-x"/></svg></button></div>
+              <div class="thumb large scene-rooftop" id="inspectorThumb"></div>
+              <h2 id="inspectorTitle">Midnight Rooftop</h2>
+              <div class="date" id="inspectorDate">2026-10-21 21:14:03</div>
+              <div class="inspector-badges">
+                <span class="badge green">圧縮済み</span>
+                <span class="badge blue">文脈 高信頼</span>
+                <span class="badge purple">★ お気に入り</span>
+              </div>
+              <dl class="meta-list">
+                <div class="meta-row"><dt>ワールドID</dt><dd class="mono">wrld_5f3b…c21a</dd></div>
+                <div class="meta-row"><dt>インスタンス</dt><dd>friends+ · jp</dd></div>
+                <div class="meta-row"><dt>撮影者</dt><dd>TommyZ</dd></div>
+                <div class="meta-row"><dt>解像度</dt><dd>3840 × 2160</dd></div>
+                <div class="meta-row"><dt>サイズ</dt><dd>12.4 MB → 1.8 MB</dd></div>
+                <div class="meta-row"><dt>取得元</dt><dd>ログ + XMP</dd></div>
+              </dl>
+              <div class="section-label">撮影時のプレイヤー <span id="inspectorPlayers" style="color: var(--muted-2)">8人</span></div>
+              <div class="player-stack">
+                <span class="player-chip"><span class="avatar" style="background: linear-gradient(145deg,#0ea5e9,#1d4ed8)">TZ</span>TommyZ</span>
+                <span class="player-chip"><span class="avatar" style="background: linear-gradient(145deg,#f472b6,#be185d)">MI</span>Mio</span>
+                <span class="player-chip"><span class="avatar" style="background: linear-gradient(145deg,#34d399,#047857)">KE</span>Kenta</span>
+                <span class="player-chip"><span class="avatar" style="background: linear-gradient(145deg,#c084fc,#7e22ce)">LU</span>Lua</span>
+                <span class="player-chip"><span class="avatar" style="background: linear-gradient(145deg,#fbbf24,#b45309)">NO</span>Nox</span>
+                <span class="player-chip"><span class="avatar" style="background: linear-gradient(145deg,#f87171,#b91c1c)">SO</span>Sora</span>
+                <span class="player-chip"><span class="avatar" style="background: linear-gradient(145deg,#94a3b8,#475569)">YU</span>Yui</span>
+                <span class="player-chip"><span class="avatar" style="background: linear-gradient(145deg,#2dd4bf,#0f766e)">+1</span></span>
+              </div>
+              <div class="section-label">タグ</div>
+              <div class="tag-row"><span class="tag">夜</span><span class="tag">屋上</span><span class="tag">フレンド</span><span class="tag">イベント</span></div>
+              <div class="section-label">同じセッション</div>
+              <div class="session-strip">
+                <div class="thumb scene-rooftop"></div>
+                <div class="thumb scene-rooftop"></div>
+                <div class="thumb scene-rooftop"></div>
+                <div class="thumb scene-rooftop"></div>
+                <div class="thumb scene-rooftop"></div>
+              </div>
+              <div class="inspector-actions">
+                <button class="btn primary" data-open-detail>詳細を開く</button>
+                <button class="btn" data-open-compress>圧縮…</button>
+                <button class="btn ghost"><svg class="icon icon-sm"><use href="#i-folder"/></svg>フォルダ</button>
+                <button class="btn ghost"><svg class="icon icon-sm"><use href="#i-trash"/></svg>ゴミ箱</button>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <!-- ========== 02 DETAIL ========== -->
+        <section class="screen" data-screen="detail">
+          <div class="detail-layout">
+            <div class="detail-main">
+              <div class="detail-toolbar">
+                <button class="btn ghost" data-screen="photos"><svg class="icon icon-sm"><use href="#i-arrow-left"/></svg>一覧へ</button>
+                <div class="filename" id="detailFileName">VRChat_2026-10-21_21-14-03.221_3840x2160.png</div>
+                <div class="right">
+                  <button class="btn ghost icon-only" title="お気に入り"><svg class="icon icon-sm"><use href="#i-star"/></svg></button>
+                  <button class="btn ghost icon-only" title="フォルダを開く"><svg class="icon icon-sm"><use href="#i-folder"/></svg></button>
+                  <button class="btn ghost icon-only" title="ゴミ箱へ"><svg class="icon icon-sm"><use href="#i-trash"/></svg></button>
+                </div>
+              </div>
+              <div class="preview scene-rooftop" id="detailPreview">
+                <div class="preview-label" id="detailMetaLabel">3840 × 2160 · PNG · 12.4 MB</div>
+                <div class="preview-controls">
+                  <button aria-label="縮小">−</button>
+                  <span class="zoom">100%</span>
+                  <button aria-label="拡大">＋</button>
+                  <button aria-label="全体表示">⛶</button>
+                </div>
+              </div>
+              <div class="filmstrip">
+                <div class="thumb scene-rooftop active"></div>
+                <div class="thumb scene-rooftop"></div>
+                <div class="thumb scene-rooftop"></div>
+                <div class="thumb scene-rooftop"></div>
+                <div class="thumb scene-rooftop"></div>
+                <div class="thumb scene-rooftop"></div>
+                <div class="thumb scene-rooftop"></div>
+                <div class="thumb scene-rooftop"></div>
+              </div>
+            </div>
+            <aside class="detail-side">
+              <h2 id="detailTitle">Midnight Rooftop</h2>
+              <div class="sub" id="detailDate">2026-10-21 21:14:03 · 8人 · friends+ / jp</div>
+              <div class="detail-badges">
+                <span class="badge green">圧縮済み</span>
+                <span class="badge blue">文脈 高信頼</span>
+                <span class="badge purple">★</span>
+              </div>
+              <div class="info-note">
+                <svg class="icon icon-sm" style="margin-top:1px"><use href="#i-activity"/></svg>
+                <div>ログとXMPから紐付け済み。ワールドID <span class="mono">wrld_5f3b…c21a</span>、撮影時の同接8人を記録しています。</div>
+              </div>
+
+              <div class="section-label">ファイル</div>
+              <dl class="meta-list">
+                <div class="meta-row"><dt>解像度</dt><dd>3840 × 2160</dd></div>
+                <div class="meta-row"><dt>元サイズ</dt><dd id="detailSize">12.4 MB</dd></div>
+                <div class="meta-row"><dt>圧縮後</dt><dd>1.8 MB (WebP)</dd></div>
+                <div class="meta-row"><dt>パス</dt><dd class="mono">Pictures/VRChat/…png</dd></div>
+                <div class="meta-row"><dt>更新日時</dt><dd>2026-10-21 21:14:05</dd></div>
+              </dl>
+
+              <div class="section-label">撮影時のプレイヤー</div>
+              <div class="player-stack">
+                <span class="player-chip"><span class="avatar" style="background: linear-gradient(145deg,#0ea5e9,#1d4ed8)">TZ</span>TommyZ</span>
+                <span class="player-chip"><span class="avatar" style="background: linear-gradient(145deg,#f472b6,#be185d)">MI</span>Mio</span>
+                <span class="player-chip"><span class="avatar" style="background: linear-gradient(145deg,#34d399,#047857)">KE</span>Kenta</span>
+                <span class="player-chip"><span class="avatar" style="background: linear-gradient(145deg,#c084fc,#7e22ce)">LU</span>Lua</span>
+                <span class="player-chip"><span class="avatar" style="background: linear-gradient(145deg,#fbbf24,#b45309)">NO</span>Nox</span>
+                <span class="player-chip"><span class="avatar" style="background: linear-gradient(145deg,#f87171,#b91c1c)">SO</span>Sora</span>
+                <span class="player-chip"><span class="avatar" style="background: linear-gradient(145deg,#94a3b8,#475569)">YU</span>Yui</span>
+                <span class="player-chip"><span class="avatar" style="background: linear-gradient(145deg,#2dd4bf,#0f766e)">+1</span></span>
+              </div>
+
+              <div class="section-label">タグ</div>
+              <div class="tag-row"><span class="tag">夜</span><span class="tag">屋上</span><span class="tag">フレンド</span><span class="tag">イベント</span><span class="tag">+ 追加</span></div>
+
+              <div class="section-label">圧縮履歴</div>
+              <div class="history">
+                <div class="history-row"><span class="fmt">WebP</span><div class="bar"><i style="width: 14%"></i></div><span class="save">1.8 MB · 85%</span></div>
+                <div class="history-row"><span class="fmt">AVIF</span><div class="bar"><i style="width: 10%"></i></div><span class="save">1.2 MB · 90%</span></div>
+                <div class="history-row"><span class="fmt">JXL</span><div class="bar"><i style="width: 12%"></i></div><span class="save">1.5 MB · 88%</span></div>
+              </div>
+
+              <div class="section-label">メモ</div>
+              <textarea class="note-box" placeholder="この写真についてのメモ…">Mioさんと屋上で。空の色がきれいだった。</textarea>
+
+              <div class="detail-actions">
+                <div class="row">
+                  <button class="btn primary" data-open-compress><svg class="icon icon-sm"><use href="#i-sliders"/></svg>圧縮</button>
+                  <button class="btn"><svg class="icon icon-sm"><use href="#i-refresh"/></svg>再紐付け</button>
+                </div>
+                <button class="btn danger"><svg class="icon icon-sm"><use href="#i-trash"/></svg>ゴミ箱へ移動</button>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <!-- ========== 03 COMPRESSION ========== -->
+        <section class="screen" data-screen="compression">
+          <div class="screen-inner">
+            <div class="page-title">
+              <div>
+                <h2>圧縮設定</h2>
+                <p>新規写真に自動適用するプロファイルを管理します。自動圧縮は元画像を保持します。</p>
+              </div>
+              <div class="right">
+                <button class="btn" data-open-compress>手動圧縮…</button>
+                <button class="btn primary"><svg class="icon icon-sm"><use href="#i-plus"/></svg>プロファイル追加</button>
+              </div>
+            </div>
+
+            <div class="compression-layout">
+              <div class="profile-list">
+                <button class="profile-card active" data-profile="WebP 高品質">
+                  <div class="top"><span class="name">WebP 高品質</span><span class="badge green auto">自動</span><span class="switch on" aria-label="有効"></span></div>
+                  <div class="meta">WebP · Q82 · リサイズなし · 1.8 MB 平均</div>
+                </button>
+                <button class="profile-card" data-profile="AVIF 容量優先">
+                  <div class="top"><span class="name">AVIF 容量優先</span><span class="badge green auto">自動</span><span class="switch on" aria-label="有効"></span></div>
+                  <div class="meta">AVIF · Q68 · S6 · 1.2 MB 平均</div>
+                </button>
+                <button class="profile-card" data-profile="JPEG XL ロスレス">
+                  <div class="top"><span class="name">JPEG XL ロスレス</span><span class="badge gray auto">手動</span><span class="switch" aria-label="無効"></span></div>
+                  <div class="meta">JXL · Lossless · S4 · 4K保持</div>
+                </button>
+                <button class="profile-card" data-profile="サムネイル用 WebP">
+                  <div class="top"><span class="name">サムネイル用 WebP</span><span class="badge gray auto">手動</span><span class="switch" aria-label="無効"></span></div>
+                  <div class="meta">WebP · Q75 · 512px · 120 KB 平均</div>
+                </button>
+                <button class="profile-card" data-profile="JPEG 互換用">
+                  <div class="top"><span class="name">JPEG 互換用</span><span class="badge gray auto">手動</span><span class="switch" aria-label="無効"></span></div>
+                  <div class="meta">JPEG · Q88 · 元サイズ保持</div>
+                </button>
+              </div>
+
+              <div>
+                <div class="editor">
+                  <div class="editor-head">
+                    <h3 id="editorTitle">WebP 高品質</h3>
+                    <span class="badge green">自動圧縮 ON</span>
+                    <span class="badge gray">使用中 8,421枚</span>
+                  </div>
+                  <div class="form-grid">
+                    <div class="field full">
+                      <label>形式</label>
+                      <div class="segmented">
+                        <button>JPEG</button><button class="active">WebP</button><button>AVIF</button><button>JPEG XL</button>
+                      </div>
+                    </div>
+                    <div class="field">
+                      <label>品質</label>
+                      <div class="slider-row"><input type="range" min="1" max="100" value="82"><span class="val">82</span></div>
+                    </div>
+                    <div class="field">
+                      <label>エンコード速度（AVIF / JXL）</label>
+                      <div class="inline"><input type="range" min="1" max="10" value="6" disabled style="flex:1; accent-color: var(--accent)"><span class="muted">—</span></div>
+                    </div>
+                    <div class="field">
+                      <label>ロスレス</label>
+                      <div class="checkline"><span class="switch" aria-label="ロスレス"></span><span class="muted">WebP / AVIF / JXL のみ</span></div>
+                    </div>
+                    <div class="field">
+                      <label>リサイズ</label>
+                      <div class="inline"><span class="switch on" aria-label="リサイズ"></span><span class="muted">幅</span><input class="input" style="width:64px" value="3840"><span class="muted">×</span><input class="input" style="width:64px" value="2160"></div>
+                    </div>
+                    <div class="field">
+                      <label>アスペクト比</label>
+                      <div class="checkline"><span class="switch on" aria-label="アスペクト比維持"></span><span class="muted">維持する</span></div>
+                    </div>
+                    <div class="field">
+                      <label>出力先</label>
+                      <input class="input" value="compressed/" aria-label="出力先">
+                    </div>
+                    <div class="field">
+                      <label>サフィックス</label>
+                      <input class="input" value="_webp" aria-label="サフィックス">
+                    </div>
+                    <div class="field full">
+                      <div class="checkline"><input type="checkbox" checked> <span>このプロファイルを新規写真へ自動適用する</span></div>
+                    </div>
+                  </div>
+                  <div class="auto-note">自動圧縮では元画像を必ず保持します。「置換」は手動圧縮のときだけ選択できます。</div>
+                  <div class="editor-actions">
+                    <button class="btn danger"><svg class="icon icon-sm"><use href="#i-trash"/></svg>削除</button>
+                    <div style="display:flex; gap:6px"><button class="btn">キャンセル</button><button class="btn primary">保存</button></div>
+                  </div>
+                </div>
+
+                <div class="stats-row">
+                  <div class="stat"><div class="label">総圧縮数</div><div class="value">8,421</div></div>
+                  <div class="stat"><div class="label">削減容量</div><div class="value green">38.2 GB</div></div>
+                  <div class="stat"><div class="label">平均圧縮率</div><div class="value">72.4%</div></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="queue">
+              <div class="queue-head">
+                <h3>圧縮キュー</h3>
+                <span class="badge blue">2 処理中</span>
+                <div class="right"><button class="btn ghost">失敗を再試行</button><button class="btn ghost">完了をクリア</button></div>
+              </div>
+              <div class="job">
+                <span class="dot"></span>
+                <div><div class="name">VRChat_2026-10-21_21-14-03.221_3840x2160.png</div><div class="sub">WebP 高品質 · 12.4 MB → 1.8 MB</div></div>
+                <div class="progress"><i style="width:72%"></i></div>
+                <div class="pct">72%</div>
+              </div>
+              <div class="job">
+                <span class="dot"></span>
+                <div><div class="name">VRChat_2026-10-21_20-02-11.008_3840x2160.png</div><div class="sub">AVIF 容量優先 · 9.8 MB → 1.1 MB</div></div>
+                <div class="progress"><i style="width:34%"></i></div>
+                <div class="pct">34%</div>
+              </div>
+              <div class="job done">
+                <span class="dot"></span>
+                <div><div class="name">VRChat_2026-10-21_19-31-47.512_3840x2160.png</div><div class="sub">WebP 高品質 · 14.1 MB → 2.0 MB</div></div>
+                <div class="progress"><i style="width:100%"></i></div>
+                <div class="pct">完了</div>
+              </div>
+              <div class="job fail">
+                <span class="dot"></span>
+                <div><div class="name">VRChat_2026-10-21_18-47-20.104_3840x2160.png</div><div class="sub">出力先に書き込みできません</div></div>
+                <div class="progress"><i style="width:100%"></i></div>
+                <div class="pct">失敗</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ========== 04 SEARCH ========== -->
+        <section class="screen" data-screen="search">
+          <div class="search-layout">
+            <aside class="filter-panel">
+              <h2>絞り込み</h2>
+              <div class="sub">カテゴリ間はAND、カテゴリ内はOR</div>
+
+              <div class="filter-group">
+                <label>ワールド</label>
+                <input class="filter-input" placeholder="ワールド名 / ID" value="Midnight">
+                <div class="selected-list">
+                  <span class="chip active">Midnight Rooftop <span class="x">×</span></span>
+                  <span class="chip active">The Black Cat <span class="x">×</span></span>
+                </div>
+              </div>
+
+              <div class="filter-group">
+                <label>プレイヤー</label>
+                <input class="filter-input" placeholder="表示名 / ユーザーID" value="Mio">
+                <div class="selected-list">
+                  <span class="chip active">Mio <span class="x">×</span></span>
+                  <span class="chip active">Kenta <span class="x">×</span></span>
+                </div>
+              </div>
+
+              <div class="filter-group">
+                <label>日時</label>
+                <div class="preset-row">
+                  <button class="preset">今日</button>
+                  <button class="preset active">7日</button>
+                  <button class="preset">30日</button>
+                  <button class="preset">今年</button>
+                </div>
+                <div class="date-row">
+                  <input class="filter-input" type="date" value="2026-10-15">
+                  <input class="filter-input" type="date" value="2026-10-21">
+                </div>
+              </div>
+
+              <div class="filter-group">
+                <label>タグ</label>
+                <div class="selected-list">
+                  <span class="chip active">夜 <span class="x">×</span></span>
+                  <span class="chip">屋上</span>
+                  <span class="chip">イベント</span>
+                  <span class="chip">フレンド</span>
+                  <span class="chip">+ 追加</span>
+                </div>
+              </div>
+
+              <div class="filter-group">
+                <label>状態</label>
+                <div class="checkline"><input type="checkbox"> <span>お気に入りのみ</span></div>
+                <div class="checkline" style="margin-top:5px"><input type="checkbox"> <span>未紐付けのみ</span></div>
+                <div class="checkline" style="margin-top:5px"><input type="checkbox" checked> <span>圧縮済みを含む</span></div>
+              </div>
+
+              <button class="btn ghost" style="width:100%; margin-top:4px">条件をクリア</button>
+            </aside>
+
+            <div class="search-results">
+              <div class="result-head">
+                <h2>1,284 枚</h2>
+                <span class="sub">12,842 枚中</span>
+                <div class="right">
+                  <select class="input" style="width:120px" aria-label="並び順">
+                    <option>撮影日時 新しい順</option>
+                    <option>撮影日時 古い順</option>
+                    <option>サイズ 大きい順</option>
+                    <option>ワールド名順</option>
+                  </select>
+                  <button class="btn ghost icon-only" title="表示切替"><svg class="icon icon-sm"><use href="#i-image"/></svg></button>
+                </div>
+              </div>
+
+              <div class="active-filters">
+                <span class="chip active">ワールド: Midnight Rooftop ×</span>
+                <span class="chip active">ワールド: The Black Cat ×</span>
+                <span class="chip active">プレイヤー: Mio ×</span>
+                <span class="chip active">プレイヤー: Kenta ×</span>
+                <span class="chip active">7日 ×</span>
+                <span class="chip active">タグ: 夜 ×</span>
+              </div>
+
+              <div class="empty-hint">
+                <svg class="icon icon-sm"><use href="#i-activity"/></svg>
+                この条件で未紐付けの写真が3枚あります。ログ監視を再解析すると紐付けできる可能性があります。
+              </div>
+
+              <div class="photo-grid">
+                <button class="photo" data-photo data-title="Midnight Rooftop" data-date="2026-10-21 21:14:03" data-players="8" data-size="12.4 MB" data-scene="scene-rooftop">
+                  <div class="thumb scene-rooftop"><div class="badges"><span class="badge green">圧縮済</span></div><span class="fav">★</span></div>
+                  <div class="photo-meta"><div class="photo-title">Midnight Rooftop</div><div class="photo-sub">21:14 · 8人 · 12.4 MB</div></div>
+                </button>
+                <button class="photo" data-photo data-title="Midnight Rooftop" data-date="2026-10-21 13:44:02" data-players="7" data-size="9.2 MB" data-scene="scene-rooftop">
+                  <div class="thumb scene-rooftop"><div class="badges"><span class="badge green">圧縮済</span></div></div>
+                  <div class="photo-meta"><div class="photo-title">Midnight Rooftop</div><div class="photo-sub">13:44 · 7人 · 9.2 MB</div></div>
+                </button>
+                <button class="photo" data-photo data-title="The Black Cat" data-date="2026-10-21 20:02:11" data-players="14" data-size="9.8 MB" data-scene="scene-cat">
+                  <div class="thumb scene-cat"><div class="badges"><span class="badge green">圧縮済</span></div></div>
+                  <div class="photo-meta"><div class="photo-title">The Black Cat</div><div class="photo-sub">20:02 · 14人 · 9.8 MB</div></div>
+                </button>
+                <button class="photo" data-photo data-title="The Black Cat" data-date="2026-10-20 23:20:44" data-players="12" data-size="8.8 MB" data-scene="scene-cat">
+                  <div class="thumb scene-cat"><div class="badges"><span class="badge green">圧縮済</span></div></div>
+                  <div class="photo-meta"><div class="photo-title">The Black Cat</div><div class="photo-sub">23:20 · 12人 · 8.8 MB</div></div>
+                </button>
+                <button class="photo" data-photo data-title="Midnight Rooftop" data-date="2026-10-20 22:40:18" data-players="9" data-size="11.7 MB" data-scene="scene-rooftop">
+                  <div class="thumb scene-rooftop"><div class="badges"><span class="badge green">圧縮済</span></div></div>
+                  <div class="photo-meta"><div class="photo-title">Midnight Rooftop</div><div class="photo-sub">22:40 · 9人 · 11.7 MB</div></div>
+                </button>
+                <button class="photo" data-photo data-title="The Black Cat" data-date="2026-10-20 20:05:33" data-players="15" data-size="10.2 MB" data-scene="scene-cat">
+                  <div class="thumb scene-cat"><div class="badges"><span class="badge green">圧縮済</span></div></div>
+                  <div class="photo-meta"><div class="photo-title">The Black Cat</div><div class="photo-sub">20:05 · 15人 · 10.2 MB</div></div>
+                </button>
+                <button class="photo" data-photo data-title="Midnight Rooftop" data-date="2026-10-19 23:11:09" data-players="6" data-size="8.4 MB" data-scene="scene-rooftop">
+                  <div class="thumb scene-rooftop"><div class="badges"><span class="badge amber">未紐付け</span></div></div>
+                  <div class="photo-meta"><div class="photo-title">Midnight Rooftop</div><div class="photo-sub">23:11 · 6人 · 8.4 MB</div></div>
+                </button>
+                <button class="photo" data-photo data-title="Midnight Rooftop" data-date="2026-10-18 21:02:44" data-players="10" data-size="12.9 MB" data-scene="scene-rooftop">
+                  <div class="thumb scene-rooftop"><div class="badges"><span class="badge green">圧縮済</span></div><span class="fav">★</span></div>
+                  <div class="photo-meta"><div class="photo-title">Midnight Rooftop</div><div class="photo-sub">21:02 · 10人 · 12.9 MB</div></div>
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ========== 05 MONITOR ========== -->
+        <section class="screen" data-screen="monitor">
+          <div class="screen-inner">
+            <div class="page-title">
+              <div>
+                <h2>ログ監視</h2>
+                <p>VRChatの出力ログを解析し、ワールドとプレイヤーの入退室を記録します。</p>
+              </div>
+              <div class="right">
+                <button class="btn" id="pauseBtn"><svg class="icon icon-sm"><use href="#i-pause"/></svg><span>一時停止</span></button>
+                <button class="btn primary"><svg class="icon icon-sm"><use href="#i-refresh"/></svg>過去ログを再解析</button>
+              </div>
+            </div>
+
+            <div class="monitor-grid">
+              <div class="monitor-card green">
+                <div class="label"><span class="live">監視中</span></div>
+                <div class="value">稼働中</div>
+                <div class="sub">デーモン · 14分</div>
+              </div>
+              <div class="monitor-card">
+                <div class="label"><svg class="icon icon-sm"><use href="#i-monitor"/></svg>現在のワールド</div>
+                <div class="value" style="font-size:13px">Midnight Rooftop</div>
+                <div class="sub">friends+ · jp · 21:02 参加</div>
+              </div>
+              <div class="monitor-card">
+                <div class="label"><svg class="icon icon-sm"><use href="#i-photo"/></svg>同接プレイヤー</div>
+                <div class="value">8人</div>
+                <div class="sub">入室 12 · 退室 4</div>
+              </div>
+              <div class="monitor-card">
+                <div class="label"><svg class="icon icon-sm"><use href="#i-activity"/></svg>最終ログ解析</div>
+                <div class="value" style="font-size:15px">2秒前</div>
+                <div class="sub">未解析行 0 · セッション 1</div>
+              </div>
+            </div>
+
+            <div class="two-col">
+              <div class="panel">
+                <h3>現在のセッション</h3>
+                <div class="player-list">
+                  <div class="player-row"><span class="avatar" style="background: linear-gradient(145deg,#0ea5e9,#1d4ed8)">TZ</span><div><div class="name">TommyZ</div><div class="id">usr_8f2a…91c</div></div><div class="time">21:02</div></div>
+                  <div class="player-row"><span class="avatar" style="background: linear-gradient(145deg,#f472b6,#be185d)">MI</span><div><div class="name">Mio</div><div class="id">usr_3b7c…a02</div></div><div class="time">21:12</div></div>
+                  <div class="player-row"><span class="avatar" style="background: linear-gradient(145deg,#34d399,#047857)">KE</span><div><div class="name">Kenta</div><div class="id">usr_c19d…77e</div></div><div class="time">21:08</div></div>
+                  <div class="player-row"><span class="avatar" style="background: linear-gradient(145deg,#c084fc,#7e22ce)">LU</span><div><div class="name">Lua</div><div class="id">usr_5a1e…30b</div></div><div class="time">21:04</div></div>
+                  <div class="player-row"><span class="avatar" style="background: linear-gradient(145deg,#fbbf24,#b45309)">NO</span><div><div class="name">Nox</div><div class="id">usr_9d0f…5c8</div></div><div class="time">21:03</div></div>
+                  <div class="player-row"><span class="avatar" style="background: linear-gradient(145deg,#f87171,#b91c1c)">SO</span><div><div class="name">Sora</div><div class="id">usr_1e6b…e14</div></div><div class="time">21:02</div></div>
+                </div>
+              </div>
+
+              <div class="panel">
+                <h3>最近のイベント</h3>
+                <div class="timeline">
+                  <div class="event green"><div class="time">21:14</div><div class="line"><i></i></div><div class="body"><div class="title">写真を検知 → 文脈を紐付け</div><div class="sub">VRChat_…21-14-03.png · 8人</div></div></div>
+                  <div class="event"><div class="time">21:14</div><div class="line"><i></i></div><div class="body"><div class="title">自動圧縮をキューに追加</div><div class="sub">WebP 高品質 · 12.4 MB</div></div></div>
+                  <div class="event green"><div class="time">21:12</div><div class="line"><i></i></div><div class="body"><div class="title">Mio が参加</div><div class="sub">usr_3b7c…a02</div></div></div>
+                  <div class="event green"><div class="time">21:08</div><div class="line"><i></i></div><div class="body"><div class="title">Kenta が参加</div><div class="sub">usr_c19d…77e</div></div></div>
+                  <div class="event"><div class="time">21:02</div><div class="line"><i></i></div><div class="body"><div class="title">Midnight Rooftop に参加</div><div class="sub">wrld_5f3b…c21a:12345~region(jp)</div></div></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="panel" style="margin-bottom:12px">
+              <h3>監視パス</h3>
+              <div class="path-list">
+                <div class="path-row"><svg class="icon icon-sm"><use href="#i-activity"/></svg><span class="path">C:\Users\tommy\AppData\LocalLow\VRChat\VRChat</span><span class="ok">● 監視中</span></div>
+                <div class="path-row"><svg class="icon icon-sm"><use href="#i-photo"/></svg><span class="path">C:\Users\tommy\Pictures\VRChat</span><span class="ok">● 監視中</span></div>
+                <div class="path-row"><svg class="icon icon-sm"><use href="#i-folder"/></svg><span class="path">D:\VRCPhotos\Library</span><span class="ok" style="color: var(--muted-2)">参照のみ</span></div>
+              </div>
+            </div>
+
+            <div class="warning">
+              <svg class="icon icon-sm" style="margin-top:1px"><use href="#i-activity"/></svg>
+              <div>VRChat本体は出力ログを24時間で削除します。アプリ側には解析済みイベントだけを保存しているため、VRChatが削除したログの再解析はできません。</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- ========== 06 SETTINGS ========== -->
+        <section class="screen" data-screen="settings">
+          <div class="screen-inner">
+            <div class="page-title">
+              <div>
+                <h2>設定</h2>
+                <p>ライブラリ、監視、起動、表示、データ管理を設定します。</p>
+              </div>
+            </div>
+
+            <div class="settings-layout">
+              <nav class="settings-nav" aria-label="設定カテゴリ">
+                <button class="active">一般</button>
+                <button>ライブラリ</button>
+                <button>監視</button>
+                <button>圧縮</button>
+                <button>データ</button>
+              </nav>
+
+              <div class="settings-content">
+                <div class="panel">
+                  <h3>写真フォルダ</h3>
+                  <div class="setting-row">
+                    <div class="text"><div class="title">VRChat写真フォルダ（参照）</div><div class="path">C:\Users\tommy\Pictures\VRChat</div></div>
+                    <div class="control"><span class="badge green">監視中</span><button class="btn">変更…</button></div>
+                  </div>
+                  <div class="setting-row">
+                    <div class="text"><div class="title">管理ライブラリ（取り込み先）</div><div class="path">D:\VRCPhotos\Library</div></div>
+                    <div class="control"><span class="badge gray">任意</span><button class="btn">変更…</button></div>
+                  </div>
+                  <div class="setting-row">
+                    <div class="text"><div class="title">起動時のスキャン</div><div class="desc">前回から変更されたファイルだけを差分スキャンします</div></div>
+                    <div class="control"><span class="switch on" aria-label="起動時スキャン"></span></div>
+                  </div>
+                </div>
+
+                <div class="panel">
+                  <h3>VRChatログ</h3>
+                  <div class="setting-row">
+                    <div class="text"><div class="title">ログフォルダ（自動検出）</div><div class="path">C:\Users\tommy\AppData\LocalLow\VRChat\VRChat</div></div>
+                    <div class="control"><span class="badge green">検出済み</span><button class="btn">変更…</button></div>
+                  </div>
+                  <div class="setting-row">
+                    <div class="text"><div class="title">推定紐付け</div><div class="desc">セッション境界の前後3秒を低信頼度で紐付けます</div></div>
+                    <div class="control"><span class="switch on" aria-label="推定紐付け"></span></div>
+                  </div>
+                  <div class="setting-row">
+                    <div class="text"><div class="title">過去ログを再解析</div><div class="desc">存在するログから写真の文脈を再構築します</div></div>
+                    <div class="control"><button class="btn"><svg class="icon icon-sm"><use href="#i-refresh"/></svg>実行</button></div>
+                  </div>
+                </div>
+
+                <div class="panel">
+                  <h3>起動と常駐</h3>
+                  <div class="setting-row">
+                    <div class="text"><div class="title">OSログイン時に自動起動</div><div class="desc">VRChatと同時に監視を開始します</div></div>
+                    <div class="control"><span class="switch on" aria-label="自動起動"></span></div>
+                  </div>
+                  <div class="setting-row">
+                    <div class="text"><div class="title">トレイ常駐</div><div class="desc">UIを閉じても監視と自動圧縮を継続します</div></div>
+                    <div class="control"><span class="switch on" aria-label="トレイ常駐"></span></div>
+                  </div>
+                  <div class="setting-row">
+                    <div class="text"><div class="title">閉じるボタン</div><div class="desc">ウィンドウを閉じたときの動作</div></div>
+                    <div class="control"><select class="input" style="width:130px"><option>トレイへ格納</option><option>終了する</option></select></div>
+                  </div>
+                </div>
+
+                <div class="panel">
+                  <h3>表示と言語</h3>
+                  <div class="setting-row">
+                    <div class="text"><div class="title">言語</div></div>
+                    <div class="control"><select class="input" style="width:120px"><option>日本語</option><option>English</option></select></div>
+                  </div>
+                  <div class="setting-row">
+                    <div class="text"><div class="title">テーマ</div></div>
+                    <div class="control"><select class="input" style="width:120px"><option>ダーク</option><option>ライト</option><option>システム</option></select></div>
+                  </div>
+                  <div class="setting-row">
+                    <div class="text"><div class="title">サムネイルサイズ</div></div>
+                    <div class="control"><input type="range" min="128" max="384" value="220" style="width:130px; accent-color: var(--accent)"><span class="tiny mono">220px</span></div>
+                  </div>
+                </div>
+
+                <div class="panel">
+                  <h3>キャッシュとデータ</h3>
+                  <div class="setting-row">
+                    <div class="text"><div class="title">サムネイルキャッシュ</div><div class="desc">1.2 GB / 2.0 GB</div></div>
+                    <div class="control"><button class="btn">クリア</button></div>
+                  </div>
+                  <div class="setting-row">
+                    <div class="text"><div class="title">データベース</div><div class="desc">写真 12,842枚 · イベント 48,201件 · 286 MB</div></div>
+                    <div class="control"><button class="btn">バックアップ</button><button class="btn">VACUUM</button></div>
+                  </div>
+                </div>
+
+                <div class="panel danger-panel">
+                  <h3 style="color:#fecaca">データ管理</h3>
+                  <div class="setting-row">
+                    <div class="text"><div class="title">アプリデータを削除</div><div class="desc">DBとサムネイルを削除します。写真ファイルは削除しません。</div></div>
+                    <div class="control"><button class="btn danger">削除…</button></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+      </main>
+    </div>
+
+    <div class="statusbar">
+      <span>12,842 枚 · 48.2 GB</span>
+      <span>表示中 15 枚</span>
+      <span>選択 1 枚</span>
+      <span class="right"><span>最終スキャン 21:15</span><span>DB 286 MB</span><span>v0.1.0</span></span>
+    </div>
+  </div>
+
+  <div class="section-head">
+    <h2>画面ごとの意図</h2>
+    <p>実装時に迷わないためのメモ</p>
+  </div>
+  <div class="notes-grid">
+    <div class="note-card">
+      <div class="num">01 / PHOTOS</div>
+      <h3>写真一覧</h3>
+      <p>10万枚を前提に、可視範囲だけを描画する仮想グリッド。日付グループと状態バッジで、探す前の全体像をつかめる。</p>
+      <ul>
+        <li>圧縮済み・未紐付け・お気に入りを色とラベルで併記</li>
+        <li>選択中の写真は右インスペクタで即時確認</li>
+        <li>ダブルクリックまたは「詳細を開く」で詳細へ</li>
+      </ul>
+    </div>
+    <div class="note-card">
+      <div class="num">02 / DETAIL</div>
+      <h3>写真詳細</h3>
+      <p>8K写真でもUIスレッドを止めないよう、長辺2048pxのプレビューを使う。文脈の取得元と信頼度を明示する。</p>
+      <ul>
+        <li>ログ / XMP / 両方 / 手動をバッジで表示</li>
+        <li>同接プレイヤー、タグ、メモ、圧縮履歴を1画面に集約</li>
+        <li>置換は手動時のみ。実行前に確認ダイアログ</li>
+      </ul>
+    </div>
+    <div class="note-card">
+      <div class="num">03 / COMPRESSION</div>
+      <h3>圧縮設定</h3>
+      <p>自動圧縮は元画像を保持して別ファイルを生成する固定運用。手動実行のときだけ「置換」を選べる。</p>
+      <ul>
+        <li>形式・品質・速度・リサイズ・出力先をプロファイル化</li>
+        <li>キューはDB永続化。失敗ジョブを再試行できる</li>
+        <li>統計はDBから集計し、プロファイル別に表示</li>
+      </ul>
+    </div>
+    <div class="note-card">
+      <div class="num">04 / SEARCH</div>
+      <h3>検索</h3>
+      <p>ワールド、プレイヤー、日時、タグ、お気に入りをカテゴリ間AND・カテゴリ内ORで組み合わせる。</p>
+      <ul>
+        <li>選択条件をチップで常時表示し、個別解除できる</li>
+        <li>未紐付け件数を出し、再解析への導線を用意</li>
+        <li>フリーテキスト検索はMVP外。必要時にFTS5を追加</li>
+      </ul>
+    </div>
+    <div class="note-card">
+      <div class="num">05 / MONITOR</div>
+      <h3>ログ監視</h3>
+      <p>常駐デーモンの状態、現在のワールド、同接者、イベント、監視パスを1画面で確認できる。</p>
+      <ul>
+        <li>24時間でログが消える制約を明示</li>
+        <li>一時停止・再開、過去ログ再解析をここから実行</li>
+        <li>未解析行や最終解析時刻を診断情報として表示</li>
+      </ul>
+    </div>
+    <div class="note-card">
+      <div class="num">06 / SETTINGS</div>
+      <h3>設定</h3>
+      <p>パスは自動検出を優先し、失敗時だけ手動指定させる。危険操作は最後に分離する。</p>
+      <ul>
+        <li>自動起動、トレイ常駐、言語、テーマ、キャッシュ上限</li>
+        <li>再スキャン、過去ログ再解析、DBバックアップ</li>
+        <li>アプリデータ削除は写真ファイルを消さない</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="section-head">
+    <h2>画面の流れ</h2>
+    <p>撮影から検索・圧縮までの基本導線</p>
+  </div>
+  <div class="flow">
+    <div class="flow-step"><div class="k">STEP 01</div><div class="t">VRChatで撮影</div><div class="d">PNGが写真フォルダに保存される</div></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step"><div class="k">STEP 02</div><div class="t">写真を検知</div><div class="d">デーモンが新規ファイルを索引化</div></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step"><div class="k">STEP 03</div><div class="t">ログと紐付け</div><div class="d">撮影時刻からワールド・同接者を特定</div></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step"><div class="k">STEP 04</div><div class="t">一覧・検索</div><div class="d">文脈、日時、タグで写真を探す</div></div>
+    <div class="flow-arrow">→</div>
+    <div class="flow-step"><div class="k">STEP 05</div><div class="t">圧縮</div><div class="d">自動は保持、手動は置換も選択</div></div>
+  </div>
+
+  <footer>
+    <span>VRC Photo Manager — 画面案 v0.1</span>
+    <span>2026-10-21</span>
+    <span>gpui-kit 0.8 / Windows・Linux / 10万枚想定</span>
+    <span class="right">実装前のデザイン検討用。写真はプレースホルダーです。</span>
+  </footer>
+</div>
+
+<!-- manual compression modal -->
+<div class="modal" id="compressModal" role="dialog" aria-modal="true" aria-labelledby="compressTitle">
+  <div class="modal-card">
+    <div class="modal-head">
+      <h2 id="compressTitle">手動圧縮</h2>
+      <button class="x" data-close-modal aria-label="閉じる">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="summary">
+        <div class="thumb scene-rooftop"></div>
+        <div>
+          <div class="name" id="modalPhotoTitle">Midnight Rooftop</div>
+          <div class="sub">12枚を選択中 · 3840 × 2160 · PNG</div>
+        </div>
+        <span class="badge blue" style="margin-left:auto">12枚</span>
+      </div>
+
+      <div class="field">
+        <label>プロファイル</label>
+        <select class="input" aria-label="プロファイル">
+          <option>WebP 高品質（Q82）</option>
+          <option>AVIF 容量優先（Q68 / S6）</option>
+          <option>JPEG XL ロスレス</option>
+          <option>JPEG 互換用（Q88）</option>
+        </select>
+      </div>
+
+      <div class="field">
+        <label>元画像の扱い</label>
+        <label class="radio-card">
+          <input type="radio" name="policy" checked>
+          <div><div class="title">元画像を保持（推奨）</div><div class="desc">圧縮版を別ファイルで生成します。元画像は変更しません。</div></div>
+        </label>
+        <label class="radio-card" style="margin-top:6px">
+          <input type="radio" name="policy">
+          <div><div class="title">置換（元画像はゴミ箱へ）</div><div class="desc">圧縮ファイルのデコード検証に成功した後、元画像をOSゴミ箱へ移動します。</div></div>
+        </label>
+        <label class="radio-card" style="margin-top:6px">
+          <input type="radio" name="policy">
+          <div><div class="title">圧縮版のみ表示</div><div class="desc">元画像は保持し、一覧・詳細では圧縮版を優先表示します。</div></div>
+        </label>
+      </div>
+
+      <div class="warning">
+        <svg class="icon icon-sm" style="margin-top:1px"><use href="#i-activity"/></svg>
+        <div>「置換」は取り消せません。失敗時は元画像が残るように実装します。</div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" data-close-modal>キャンセル</button>
+      <button class="btn primary" data-close-modal><svg class="icon icon-sm"><use href="#i-play"/></svg>12枚を圧縮</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const screens = Array.from(document.querySelectorAll('.screen'));
+  const tabs = Array.from(document.querySelectorAll('.tab'));
+  const navItems = Array.from(document.querySelectorAll('.nav-item'));
+  const crumb = document.getElementById('windowCrumb');
+
+  const labels = {
+    photos: 'ライブラリ',
+    detail: '写真詳細',
+    compression: '圧縮設定',
+    search: '検索',
+    monitor: 'ログ監視',
+    settings: '設定'
+  };
+
+  function showScreen(name) {
+    screens.forEach(s => s.classList.toggle('active', s.dataset.screen === name));
+    tabs.forEach(t => t.classList.toggle('active', t.dataset.screen === name));
+    const navFor = name === 'detail' ? 'photos' : name;
+    navItems.forEach(n => n.classList.toggle('active', n.dataset.screen === navFor));
+    if (crumb) crumb.textContent = '— ' + (labels[name] || '');
+    const ws = document.getElementById('workspace');
+    if (ws) ws.scrollTop = 0;
+  }
+
+  tabs.forEach(t => t.addEventListener('click', () => showScreen(t.dataset.screen)));
+  navItems.forEach(n => n.addEventListener('click', () => showScreen(n.dataset.screen)));
+  document.querySelectorAll('[data-screen]').forEach(el => {
+    if (!el.classList.contains('tab') && !el.classList.contains('nav-item') && !el.classList.contains('screen')) {
+      el.addEventListener('click', () => showScreen(el.dataset.screen));
+    }
+  });
+
+  // photo selection + detail
+  const photos = Array.from(document.querySelectorAll('.photo'));
+  const detailTitle = document.getElementById('detailTitle');
+  const detailDate = document.getElementById('detailDate');
+  const detailSize = document.getElementById('detailSize');
+  const detailPreview = document.getElementById('detailPreview');
+  const inspectorTitle = document.getElementById('inspectorTitle');
+  const inspectorDate = document.getElementById('inspectorDate');
+  const inspectorThumb = document.getElementById('inspectorThumb');
+  const inspectorPlayers = document.getElementById('inspectorPlayers');
+  const detailFileName = document.getElementById('detailFileName');
+  const detailMetaLabel = document.getElementById('detailMetaLabel');
+
+  function updateDetail(photo) {
+    const title = photo.dataset.title || 'Untitled';
+    const date = photo.dataset.date || '';
+    const players = photo.dataset.players || '';
+    const size = photo.dataset.size || '';
+    const scene = photo.dataset.scene || 'scene-rooftop';
+    const stamp = date.replaceAll(':', '-').replace(' ', '_');
+
+    if (detailTitle) detailTitle.textContent = title;
+    if (detailDate) detailDate.textContent = `${date} · ${players}人 · friends+ / jp`;
+    if (detailSize) detailSize.textContent = size;
+    if (detailPreview) detailPreview.className = 'preview ' + scene;
+    if (detailFileName) detailFileName.textContent = `VRChat_${stamp}_3840x2160.png`;
+    if (detailMetaLabel) detailMetaLabel.textContent = `3840 × 2160 · PNG · ${size}`;
+    if (inspectorTitle) inspectorTitle.textContent = title;
+    if (inspectorDate) inspectorDate.textContent = date;
+    if (inspectorPlayers) inspectorPlayers.textContent = players + '人';
+    if (inspectorThumb) inspectorThumb.className = 'thumb large ' + scene;
+    const modalTitle = document.getElementById('modalPhotoTitle');
+    if (modalTitle) modalTitle.textContent = title;
+  }
+
+  photos.forEach(p => {
+    p.addEventListener('click', () => {
+      photos.forEach(x => x.classList.remove('selected'));
+      p.classList.add('selected');
+      updateDetail(p);
+    });
+    p.addEventListener('dblclick', () => {
+      updateDetail(p);
+      showScreen('detail');
+    });
+  });
+
+  document.querySelectorAll('[data-open-detail]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const selected = document.querySelector('.photo.selected') || photos[0];
+      if (selected) updateDetail(selected);
+      showScreen('detail');
+    });
+  });
+
+  // manual compression modal
+  const modal = document.getElementById('compressModal');
+  document.querySelectorAll('[data-open-compress]').forEach(btn => {
+    btn.addEventListener('click', () => modal && modal.classList.add('open'));
+  });
+  document.querySelectorAll('[data-close-modal]').forEach(btn => {
+    btn.addEventListener('click', () => modal && modal.classList.remove('open'));
+  });
+  if (modal) {
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) modal.classList.remove('open');
+    });
+  }
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && modal) modal.classList.remove('open');
+  });
+
+  // chips toggle
+  document.querySelectorAll('.chip').forEach(chip => {
+    chip.addEventListener('click', (e) => {
+      if (e.target.classList.contains('x')) {
+        chip.remove();
+        return;
+      }
+      chip.classList.toggle('active');
+    });
+  });
+
+  // compression profile selection
+  const profileCards = Array.from(document.querySelectorAll('.profile-card'));
+  const editorTitle = document.getElementById('editorTitle');
+  profileCards.forEach(card => {
+    card.addEventListener('click', (e) => {
+      if (e.target.closest('.switch')) {
+        e.target.closest('.switch').classList.toggle('on');
+        e.stopPropagation();
+        return;
+      }
+      profileCards.forEach(c => c.classList.remove('active'));
+      card.classList.add('active');
+      if (editorTitle) editorTitle.textContent = card.dataset.profile || 'プロファイル';
+    });
+  });
+
+  // pause/resume
+  const pauseBtn = document.getElementById('pauseBtn');
+  if (pauseBtn) {
+    pauseBtn.addEventListener('click', () => {
+      const label = pauseBtn.querySelector('span');
+      const use = pauseBtn.querySelector('use');
+      const paused = pauseBtn.dataset.paused === '1';
+      pauseBtn.dataset.paused = paused ? '0' : '1';
+      if (label) label.textContent = paused ? '一時停止' : '再開';
+      if (use) use.setAttribute('href', paused ? '#i-pause' : '#i-play');
+      pauseBtn.classList.toggle('primary', !paused);
+    });
+  }
+
+  // search presets
+  document.querySelectorAll('.preset').forEach(p => {
+    p.addEventListener('click', () => {
+      p.parentElement.querySelectorAll('.preset').forEach(x => x.classList.remove('active'));
+      p.classList.add('active');
+    });
+  });
+
+  // initial
+  showScreen('photos');
+})();
+</script>
+</body>
+</html>

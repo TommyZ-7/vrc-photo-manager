@@ -24,7 +24,9 @@ pub const DB_FILE_NAME: &str = "library.db";
 
 /// Returns the per-user data directory for the application.
 pub fn data_dir() -> Option<std::path::PathBuf> {
-    dirs::data_dir().map(|dir| dir.join("vrc-photo-manager"))
+    dirs::data_local_dir()
+        .or_else(dirs::data_dir)
+        .map(|dir| dir.join("vrc-photo-manager"))
 }
 
 /// Returns the default SQLite path.

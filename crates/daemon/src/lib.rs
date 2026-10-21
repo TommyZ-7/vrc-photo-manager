@@ -61,6 +61,7 @@ pub struct Daemon {
     thumbnail_handle: Option<JoinHandle<()>>,
     last_autostart_check: std::time::Instant,
     last_heartbeat: std::time::Instant,
+    thumbnail_dir: PathBuf,
 }
 
 impl Daemon {
@@ -92,6 +93,8 @@ impl Daemon {
         }
         settings.save(&db).context("cannot save settings")?;
         let tray_enabled = settings.tray;
+        let thumbnail_dir = vrc_photo_core::thumbnail::thumbnails_dir()
+            .unwrap_or_else(|| PathBuf::from("thumbnails"));
 
         Ok(Self {
             db: Arc::new(Mutex::new(db)),
@@ -111,11 +114,16 @@ impl Daemon {
             thumbnail_handle: None,
             last_autostart_check: std::time::Instant::now(),
             last_heartbeat: std::time::Instant::now() - Duration::from_secs(10),
+            thumbnail_dir,
         })
     }
 
     pub fn status(&self) -> Arc<Mutex<DaemonStatus>> {
         self.status.clone()
+    }
+
+    pub fn set_thumbnail_dir(&mut self, path: PathBuf) {
+        self.thumbnail_dir = path;
     }
 
     pub fn set_tray_enabled(&mut self, enabled: bool) {
@@ -147,7 +155,7 @@ impl Daemon {
                     .map(|photo| photo.abs_path)
             };
             if let Some(path) = path {
-                let _ = thumbnail::ensure_thumbnail(*id, Path::new(&path));
+                let _ = thumbnail::ensure_thumbnail_in(*id, Path::new(&path), &self.thumbnail_dir);
             }
         }
         self.ingest_logs()?;
@@ -535,9 +543,10 @@ impl Daemon {
             let (tx, rx) = mpsc::channel();
             let db = self.db.clone();
             let running = self.running.clone();
+            let cache_dir = self.thumbnail_dir.clone();
             let handle = thread::Builder::new()
                 .name("thumbnails".to_string())
-                .spawn(move || thumbnail_loop(db, running, rx))
+                .spawn(move || thumbnail_loop(db, running, rx, cache_dir))
                 .expect("cannot spawn thumbnail worker");
             self.thumbnail_tx = Some(tx.clone());
             self.thumbnail_handle = Some(handle);
@@ -610,7 +619,12 @@ fn enqueue_auto_jobs(db: &Db, new_ids: &[i64]) -> Result<()> {
     Ok(())
 }
 
-fn thumbnail_loop(db: Arc<Mutex<Db>>, running: Arc<AtomicBool>, rx: Receiver<i64>) {
+fn thumbnail_loop(
+    db: Arc<Mutex<Db>>,
+    running: Arc<AtomicBool>,
+    rx: Receiver<i64>,
+    cache_dir: PathBuf,
+) {
     while running.load(Ordering::Relaxed) {
         match rx.recv_timeout(Duration::from_millis(500)) {
             Ok(id) => {
@@ -622,7 +636,7 @@ fn thumbnail_loop(db: Arc<Mutex<Db>>, running: Arc<AtomicBool>, rx: Receiver<i64
                         .map(|photo| photo.abs_path)
                 };
                 if let Some(path) = path {
-                    let _ = thumbnail::ensure_thumbnail(id, Path::new(&path));
+                    let _ = thumbnail::ensure_thumbnail_in(id, Path::new(&path), &cache_dir);
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
@@ -796,6 +810,7 @@ mod tests {
 
         let db_path = dir.path().join("library.db");
         let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
         daemon.run_once().unwrap();
 
         let db = Db::open(&db_path).unwrap();
@@ -829,6 +844,7 @@ mod tests {
 
         let db_path = dir.path().join("library.db");
         let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
         {
             let db = Db::open(&db_path).unwrap();
             db.save_profile(&CompressionProfile {

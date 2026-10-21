@@ -19,9 +19,20 @@ pub fn thumbnail_path(photo_id: i64) -> Option<PathBuf> {
 /// The file is written atomically. Returns `None` when the source is missing
 /// or cannot be decoded, so callers can keep a placeholder.
 pub fn ensure_thumbnail(photo_id: i64, source: &Path) -> Result<Option<PathBuf>> {
-    let Some(output) = thumbnail_path(photo_id) else {
+    let Some(cache_dir) = thumbnails_dir() else {
         return Ok(None);
     };
+    ensure_thumbnail_in(photo_id, source, &cache_dir)
+}
+
+/// Same as [`ensure_thumbnail`] but with an explicit cache directory. Used by
+/// tests and by callers that keep the cache outside the user data directory.
+pub fn ensure_thumbnail_in(
+    photo_id: i64,
+    source: &Path,
+    cache_dir: &Path,
+) -> Result<Option<PathBuf>> {
+    let output = cache_dir.join(format!("{photo_id}.webp"));
     if output.is_file()
         && fs::metadata(&output)
             .map(|meta| meta.len() > 0)
@@ -66,20 +77,23 @@ mod tests {
         RgbaImage::from_pixel(640, 360, Rgba([10, 20, 30, 255]))
             .save(&source)
             .unwrap();
-        let first = ensure_thumbnail(999_999, &source)
+        let first = ensure_thumbnail_in(999_999, &source, dir.path())
             .unwrap()
             .expect("thumbnail");
         assert!(first.is_file());
         let size = image::image_dimensions(&first).unwrap();
         assert!(size.0 <= THUMBNAIL_MAX && size.1 <= THUMBNAIL_MAX);
-        let second = ensure_thumbnail(999_999, &source).unwrap().expect("cached");
+        let second = ensure_thumbnail_in(999_999, &source, dir.path())
+            .unwrap()
+            .expect("cached");
         assert_eq!(first, second);
     }
 
     #[test]
     fn missing_source_is_not_an_error() {
+        let dir = tempdir().unwrap();
         assert!(
-            ensure_thumbnail(999_998, Path::new("/no/such/file.png"))
+            ensure_thumbnail_in(999_998, Path::new("/no/such/file.png"), dir.path())
                 .unwrap()
                 .is_none()
         );
