@@ -21,7 +21,7 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-タグpushでReleaseワークフローが走り、GitHub Releaseに3形式が添付される。
+タグpushでReleaseワークフローが走り、GitHub ReleaseにLinux 3形式とWindowsインストーラが添付される。
 
 ## 3. 生成物
 
@@ -32,12 +32,13 @@ git push origin v0.1.0
 | Debian | `vrc-photo-manager_0.1.0_amd64.deb` | `/usr/bin` にUIとデーモン、desktop entry、アイコン |
 | AppImage | `vrc-photo-manager_0.1.0_x86_64.AppImage` | UIとデーモンを同梱した単一ファイル |
 | pacman | `vrc-photo-manager_0.1.0_x86_64.tar.gz` + `PKGBUILD` | Arch Linux向け |
+| NSIS | `vrc-photo-manager_0.1.0_x64-setup.exe` | Windowsインストーラ（UIとデーモン） |
 
 `Packager.toml` の設定:
 
 - `productName = "VRC Photo Manager"`
 - `identifier = "com.tommyz.vrc-photo-manager"`
-- `formats = ["deb", "appimage", "pacman"]`
+- `formats = ["deb", "appimage", "pacman"]`（Windowsジョブは `-f nsis` で上書き）
 - `beforePackagingCommand = "cargo build --release -p vrc-photo-ui -p vrc-photo-daemon"`
 - `binariesDir = "target/release"` / `outDir = "dist"`
 - アイコン: `packaging/icons/icon.png`（512px）
@@ -76,9 +77,10 @@ ls -lh dist
 - `push: tags: ['v*.*.*']`
 - `pull_request`（release-relevant pathsのみ）
 - `workflow_dispatch`
-- Ubuntuランナーで依存を入れ、`cargo packager --release`
-- `dist/*` をworkflow artifactとして保存
-- タグ時のみ `gh release create/upload` で公開
+- Ubuntuランナー: 依存を入れ、`cargo packager --release`
+- Windowsランナー: `cargo packager --release -f nsis`（NSISは自動取得）
+- 両ジョブの `dist/*` をworkflow artifactとして保存
+- タグ時のみ `publish` ジョブが両artifactをまとめて `gh release create/upload` で公開
 
 Releaseノートは前回タグとの差分から `feat:` / `fix:` / その他を分類して生成する。
 
@@ -114,7 +116,7 @@ Required check名を変更した場合は、GitHubのbranch protectionも更新�
 
 ## 10. 未対応
 
-- Windowsインストーラ（MSI/NSIS）
+- MSIインストーラ（WiX）
 - 自動アップデート
 - コード署名
 - systemdユーザーサービス
