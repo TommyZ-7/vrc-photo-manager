@@ -1157,54 +1157,58 @@ impl App {
             .into_any_element()
     }
 
-    fn topbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn screen_header(
+        &self,
+        title: &'static str,
+        subtitle: String,
+        message: Option<String>,
+        actions: Vec<AnyElement>,
+    ) -> AnyElement {
         h_flex()
-            .h(px(54.))
-            .px_5()
-            .gap_3()
+            .h(px(72.))
+            .flex_shrink_0()
+            .px(px(26.))
+            .gap(px(14.))
             .items_center()
             .border_b_1()
             .border_color(rgb(BORDER))
             .child(
-                div()
-                    .text_lg()
-                    .font_semibold()
-                    .text_color(rgb(TEXT))
-                    .child(self.screen.title()),
-            )
-            .when_some(self.message.clone(), |this, message| {
-                this.child(div().text_xs().text_color(rgb(AMBER)).child(message))
-            })
-            .child(div().flex_1())
-            .child(
-                h_flex()
-                    .gap_1()
-                    .items_center()
-                    .child(div().size(px(7.)).rounded_full().bg(if self.daemon_active {
-                        rgb(GREEN)
-                    } else {
-                        rgb(MUTED_2)
-                    }))
+                v_flex()
+                    .flex_shrink_0()
+                    .gap(px(2.))
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(rgb(MUTED))
-                            .child(if self.daemon_active {
-                                "監視中"
-                            } else {
-                                "デーモン停止"
-                            }),
+                            .text_size(px(24.))
+                            .font_semibold()
+                            .text_color(rgb(TEXT))
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED_2))
+                            .child(subtitle),
                     ),
             )
             .child(
-                Button::new("reload")
-                    .label("再読込")
-                    .small()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.reload(cx);
-                        cx.notify();
-                    })),
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .when_some(message, |this, message| {
+                        this.text_size(px(10.))
+                            .text_color(rgb(AMBER))
+                            .truncate()
+                            .child(message)
+                    }),
             )
+            .child(
+                h_flex()
+                    .flex_shrink_0()
+                    .items_center()
+                    .gap(px(8.))
+                    .children(actions),
+            )
+            .into_any_element()
     }
 
     fn content(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -3268,102 +3272,146 @@ impl App {
     fn monitor_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .flex_1()
-            .overflow_y_scrollbar()
-            .p_5()
-            .gap_4()
+            .min_h_0()
+            .child(self.screen_header(
+                "ログ監視",
+                "VRChatの出力ログからワールドとプレイヤーを記録します。".to_string(),
+                self.message.clone(),
+                vec![
+                    Button::new("monitor-refresh")
+                        .label("再読込")
+                        .small()
+                        .ghost()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.reload(cx);
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                ],
+            ))
             .child(
-                h_flex()
-                    .items_center()
-                    .gap_3()
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .px(px(26.))
+                    .pt(px(22.))
+                    .pb(px(26.))
+                    .gap(px(24.))
                     .child(
-                        v_flex()
-                            .child(div().text_lg().font_semibold().child("ログ監視"))
-                            .child(div().text_xs().text_color(rgb(MUTED)).child("VRChatの出力ログからワールドとプレイヤーを記録します。")),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        Button::new("monitor-refresh")
-                            .label("再読込")
-                            .small()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.reload(cx);
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_3()
-                    .child(self.stat_card(
-                        "監視",
-                        if self.daemon_active {
-                            "稼働中".to_string()
-                        } else if self.settings.log_dir.is_some() {
-                            "停止中".to_string()
-                        } else {
-                            "未設定".to_string()
-                        },
-                    ))
-                    .child(self.stat_card("現在のワールド", self.monitor_world.clone().unwrap_or_else(|| "待機".to_string())))
-                    .child(self.stat_card("同接", format!("{} 人", self.monitor_players.len())))
-                    .child(self.stat_card("写真", format!("{} 枚", self.stats.photo_count))),
-            )
-            .child(
-                h_flex()
-                    .gap_4()
-                    .items_start()
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .p_4()
-                            .gap_2()
-                            .rounded_lg()
-                            .bg(rgb(PANEL))
-                            .border_1()
-                            .border_color(rgb(BORDER))
-                            .child(div().text_sm().font_semibold().child("現在のセッション"))
-                            .child(self.meta_row("インスタンス", self.monitor_instance.clone().unwrap_or_else(|| "—".to_string())))
-                            .child(div().text_xs().text_color(rgb(MUTED_2)).child(if self.monitor_players.is_empty() {
-                                "プレイヤー情報はまだありません"
-                            } else {
-                                "入室中のプレイヤー"
-                            }))
-                            .children(self.monitor_players.iter().map(|player| {
-                                div().text_xs().text_color(rgb(MUTED)).child(player.clone())
-                            })),
+                        h_flex()
+                            .gap(px(16.))
+                            .child(self.stat_card(
+                                "監視",
+                                if self.daemon_active {
+                                    "稼働中".to_string()
+                                } else if self.settings.log_dir.is_some() {
+                                    "停止中".to_string()
+                                } else {
+                                    "未設定".to_string()
+                                },
+                            ))
+                            .child(self.stat_card(
+                                "現在のワールド",
+                                self.monitor_world.clone().unwrap_or_else(|| "待機".to_string()),
+                            ))
+                            .child(self.stat_card(
+                                "同接",
+                                format!("{} 人", self.monitor_players.len()),
+                            ))
+                            .child(self.stat_card(
+                                "写真",
+                                format!("{} 枚", self.stats.photo_count),
+                            )),
                     )
                     .child(
-                        v_flex()
-                            .flex_1()
-                            .p_4()
-                            .gap_2()
-                            .rounded_lg()
-                            .bg(rgb(PANEL))
-                            .border_1()
-                            .border_color(rgb(BORDER))
-                            .child(div().text_sm().font_semibold().child("監視パス"))
-                            .children(self.settings.photo_roots.iter().map(|path| {
-                                div().text_xs().font_family("monospace").text_color(rgb(MUTED)).child(path.clone())
-                            }))
+                        h_flex()
+                            .gap(px(24.))
+                            .items_start()
                             .child(
-                                div()
-                                    .text_xs()
-                                    .font_family("monospace")
-                                    .text_color(rgb(MUTED))
-                                    .child(self.settings.log_dir.clone().unwrap_or_else(|| "ログフォルダ未設定".to_string())),
+                                glass_panel()
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .p(px(16.))
+                                    .gap(px(10.))
+                                    .bg(rgb(PANEL))
+                                    .child(
+                                        div()
+                                            .text_size(px(17.))
+                                            .font_semibold()
+                                            .text_color(rgb(TEXT))
+                                            .child("現在のセッション"),
+                                    )
+                                    .child(self.meta_row(
+                                        "インスタンス",
+                                        self.monitor_instance
+                                            .clone()
+                                            .unwrap_or_else(|| "—".to_string()),
+                                    ))
+                                    .child(self.section_label(if self.monitor_players.is_empty() {
+                                        "プレイヤー情報はまだありません"
+                                    } else {
+                                        "入室中のプレイヤー"
+                                    }))
+                                    .children(self.monitor_players.iter().map(|player| {
+                                        div()
+                                            .text_size(px(12.))
+                                            .text_color(rgb(MUTED))
+                                            .child(player.clone())
+                                    })),
+                            )
+                            .child(
+                                glass_panel()
+                                    .flex()
+                                    .flex_col()
+                                    .flex_1()
+                                    .p(px(16.))
+                                    .gap(px(10.))
+                                    .bg(rgb(PANEL))
+                                    .child(
+                                        div()
+                                            .text_size(px(17.))
+                                            .font_semibold()
+                                            .text_color(rgb(TEXT))
+                                            .child("監視パス"),
+                                    )
+                                    .children(self.settings.photo_roots.iter().map(|path| {
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(px(10.))
+                                            .font_family("monospace")
+                                            .text_color(rgb(MUTED))
+                                            .child(path.clone())
+                                    }))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(px(10.))
+                                            .font_family("monospace")
+                                            .text_color(rgb(MUTED))
+                                            .child(
+                                                self.settings
+                                                    .log_dir
+                                                    .clone()
+                                                    .unwrap_or_else(|| "ログフォルダ未設定".to_string()),
+                                            ),
+                                    ),
                             ),
+                    )
+                    .child(
+                        div()
+                            .p(px(14.))
+                            .rounded(px(14.))
+                            .bg(rgba(0x2a2412))
+                            .border_1()
+                            .border_color(rgba(0xfbbf2440))
+                            .text_size(px(12.))
+                            .text_color(rgb(AMBER))
+                            .child("VRChat本体は出力ログを24時間で削除します。アプリ側には解析済みイベントだけを保存します。"),
                     ),
-            )
-            .child(
-                div()
-                    .p_3()
-                    .rounded_md()
-                    .bg(rgb(0x2a2412))
-                    .border_1()
-                    .border_color(rgb(0x5c4a1f))
-                    .text_xs()
-                    .text_color(rgb(0xfde68a))
-                    .child("VRChat本体は出力ログを24時間で削除します。アプリ側には解析済みイベントだけを保存します。"),
             )
     }
 
@@ -3377,145 +3425,198 @@ impl App {
     fn settings_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .flex_1()
-            .overflow_y_scrollbar()
-            .p_5()
-            .gap_4()
-            .child(div().text_lg().font_semibold().child("設定"))
+            .min_h_0()
+            .child(self.screen_header(
+                "設定",
+                "ライブラリと起動オプション".to_string(),
+                self.message.clone(),
+                Vec::new(),
+            ))
             .child(
                 v_flex()
-                    .p_4()
-                    .gap_3()
-                    .rounded_lg()
-                    .bg(rgb(PANEL))
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .child(div().text_sm().font_semibold().child("ライブラリ"))
-                    .child(self.filter_field("写真フォルダ", Input::new(&self.photo_root_input)))
-                    .child(self.filter_field("ログフォルダ", Input::new(&self.log_dir_input)))
-                    .child(self.filter_field("取り込み先", Input::new(&self.import_dir_input)))
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .px(px(26.))
+                    .pt(px(22.))
+                    .pb(px(26.))
+                    .gap(px(24.))
+                    .child(
+                        glass_panel()
+                            .flex()
+                            .flex_col()
+                            .p(px(24.))
+                            .gap(px(16.))
+                            .bg(rgb(PANEL))
+                            .child(
+                                div()
+                                    .text_size(px(17.))
+                                    .font_semibold()
+                                    .text_color(rgb(TEXT))
+                                    .child("ライブラリ"),
+                            )
+                            .child(
+                                self.filter_field(
+                                    "写真フォルダ",
+                                    Input::new(&self.photo_root_input),
+                                ),
+                            )
+                            .child(
+                                self.filter_field("ログフォルダ", Input::new(&self.log_dir_input)),
+                            )
+                            .child(self.filter_field(
+                                "取り込み先",
+                                Input::new(&self.import_dir_input),
+                            ))
+                            .child(
+                                h_flex()
+                                    .gap(px(8.))
+                                    .items_center()
+                                    .child(
+                                        Button::new("save-paths")
+                                            .label("パスを保存")
+                                            .small()
+                                            .primary()
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                let root = this
+                                                    .photo_root_input
+                                                    .read(cx)
+                                                    .value()
+                                                    .to_string();
+                                                let log = this
+                                                    .log_dir_input
+                                                    .read(cx)
+                                                    .value()
+                                                    .to_string();
+                                                let imported = this
+                                                    .import_dir_input
+                                                    .read(cx)
+                                                    .value()
+                                                    .to_string();
+                                                this.settings.photo_roots =
+                                                    if root.trim().is_empty() {
+                                                        Vec::new()
+                                                    } else {
+                                                        vec![root.trim().to_string()]
+                                                    };
+                                                this.settings.log_dir = if log.trim().is_empty() {
+                                                    None
+                                                } else {
+                                                    Some(log.trim().to_string())
+                                                };
+                                                this.settings.managed_dir =
+                                                    if imported.trim().is_empty() {
+                                                        None
+                                                    } else {
+                                                        Some(imported.trim().to_string())
+                                                    };
+                                                let _ = this.settings.save(&this.db);
+                                                this.message = Some(
+                                                    "保存しました。デーモン再起動で監視に反映されます。"
+                                                        .to_string(),
+                                                );
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(10.))
+                                            .text_color(rgb(MUTED_2))
+                                            .child("デーモン実行中は再起動後に反映"),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        glass_panel()
+                            .flex()
+                            .flex_col()
+                            .p(px(24.))
+                            .gap(px(16.))
+                            .bg(rgb(PANEL))
+                            .child(
+                                div()
+                                    .text_size(px(17.))
+                                    .font_semibold()
+                                    .text_color(rgb(TEXT))
+                                    .child("起動と圧縮"),
+                            )
+                            .child(self.setting_switch(
+                                "自動起動",
+                                "OSログイン時にデーモンを起動",
+                                self.settings.autostart,
+                                cx,
+                                |settings, value| settings.autostart = value,
+                            ))
+                            .child(self.setting_switch(
+                                "トレイ常駐",
+                                "UIを閉じても監視を継続",
+                                self.settings.tray,
+                                cx,
+                                |settings, value| settings.tray = value,
+                            ))
+                            .child(self.setting_switch(
+                                "自動圧縮",
+                                "新規写真に自動で圧縮を適用",
+                                self.settings.auto_compress,
+                                cx,
+                                |settings, value| settings.auto_compress = value,
+                            ))
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap(px(12.))
+                                    .py(px(2.))
+                                    .child(
+                                        v_flex()
+                                            .gap(px(2.))
+                                            .child(
+                                                div()
+                                                    .text_size(px(12.))
+                                                    .text_color(rgb(TEXT))
+                                                    .child("アニメーションを減らす"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(10.))
+                                                    .text_color(rgb(MUTED_2))
+                                                    .child(
+                                                        "画面遷移とカードの動きを抑制します",
+                                                    ),
+                                            ),
+                                    )
+                                    .child(div().flex_1())
+                                    .child(
+                                        Switch::new("reduce-motion")
+                                            .checked(self.settings.ui_reduce_motion)
+                                            .on_click(cx.listener(|this, value, _, cx| {
+                                                this.set_reduce_motion(*value, cx);
+                                            })),
+                                    ),
+                            ),
+                    )
                     .child(
                         h_flex()
-                            .gap_2()
-                            .items_center()
+                            .gap(px(8.))
                             .child(
-                                Button::new("save-paths")
-                                    .label("パスを保存")
+                                Button::new("settings-reload")
+                                    .label("設定を再読込")
                                     .small()
-                                    .primary()
+                                    .ghost()
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        let root =
-                                            this.photo_root_input.read(cx).value().to_string();
-                                        let log = this.log_dir_input.read(cx).value().to_string();
-                                        let imported =
-                                            this.import_dir_input.read(cx).value().to_string();
-                                        this.settings.photo_roots = if root.trim().is_empty() {
-                                            Vec::new()
-                                        } else {
-                                            vec![root.trim().to_string()]
-                                        };
-                                        this.settings.log_dir = if log.trim().is_empty() {
-                                            None
-                                        } else {
-                                            Some(log.trim().to_string())
-                                        };
-                                        this.settings.managed_dir = if imported.trim().is_empty() {
-                                            None
-                                        } else {
-                                            Some(imported.trim().to_string())
-                                        };
-                                        let _ = this.settings.save(&this.db);
-                                        this.message = Some(
-                                            "保存しました。デーモン再起動で監視に反映されます。"
-                                                .to_string(),
-                                        );
+                                        this.reload(cx);
                                         cx.notify();
                                     })),
                             )
                             .child(
                                 div()
-                                    .text_xs()
+                                    .text_size(px(10.))
                                     .text_color(rgb(MUTED_2))
-                                    .child("デーモン実行中は再起動後に反映"),
+                                    .child(format!(
+                                        "言語: {} · サムネイルキャッシュ: {} MB",
+                                        self.settings.language, self.settings.thumbnail_cache_mb
+                                    )),
                             ),
                     ),
-            )
-            .child(
-                v_flex()
-                    .p_4()
-                    .gap_3()
-                    .rounded_lg()
-                    .bg(rgb(PANEL))
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .child(div().text_sm().font_semibold().child("起動と圧縮"))
-                    .child(self.setting_switch(
-                        "自動起動",
-                        "OSログイン時にデーモンを起動",
-                        self.settings.autostart,
-                        cx,
-                        |settings, value| settings.autostart = value,
-                    ))
-                    .child(self.setting_switch(
-                        "トレイ常駐",
-                        "UIを閉じても監視を継続",
-                        self.settings.tray,
-                        cx,
-                        |settings, value| settings.tray = value,
-                    ))
-                    .child(self.setting_switch(
-                        "自動圧縮",
-                        "新規写真に自動で圧縮を適用",
-                        self.settings.auto_compress,
-                        cx,
-                        |settings, value| settings.auto_compress = value,
-                    ))
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap_3()
-                            .py_1()
-                            .child(
-                                v_flex()
-                                    .gap(px(0.))
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(rgb(TEXT))
-                                            .child("アニメーションを減らす"),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(rgb(MUTED_2))
-                                            .child("画面遷移とカードの動きを抑制します"),
-                                    ),
-                            )
-                            .child(div().flex_1())
-                            .child(
-                                Switch::new("reduce-motion")
-                                    .checked(self.settings.ui_reduce_motion)
-                                    .on_click(cx.listener(|this, value, _, cx| {
-                                        this.set_reduce_motion(*value, cx);
-                                    })),
-                            ),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("settings-reload")
-                            .label("設定を再読込")
-                            .small()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.reload(cx);
-                                cx.notify();
-                            })),
-                    )
-                    .child(div().text_xs().text_color(rgb(MUTED_2)).child(format!(
-                        "言語: {} · サムネイルキャッシュ: {} MB",
-                        self.settings.language, self.settings.thumbnail_cache_mb
-                    ))),
             )
     }
 
@@ -3529,20 +3630,20 @@ impl App {
     ) -> impl IntoElement {
         h_flex()
             .items_center()
-            .gap_3()
-            .py_1()
+            .gap(px(12.))
+            .py(px(2.))
             .child(
                 v_flex()
-                    .gap(px(0.))
+                    .gap(px(2.))
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(12.))
                             .text_color(rgb(TEXT))
                             .child(label.to_string()),
                     )
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(10.))
                             .text_color(rgb(MUTED_2))
                             .child(description.to_string()),
                     ),
@@ -3560,25 +3661,26 @@ impl App {
     }
 
     fn stat_card(&self, label: &str, value: String) -> impl IntoElement {
-        v_flex()
+        glass_panel()
+            .flex()
+            .flex_col()
             .flex_1()
-            .p_3()
-            .gap_1()
-            .rounded_lg()
+            .min_w_0()
+            .p(px(16.))
+            .gap(px(6.))
             .bg(rgb(PANEL))
-            .border_1()
-            .border_color(rgb(BORDER))
             .child(
                 div()
-                    .text_xs()
+                    .text_size(px(10.))
                     .text_color(rgb(MUTED_2))
                     .child(label.to_string()),
             )
             .child(
                 div()
-                    .text_lg()
+                    .text_size(px(17.))
                     .font_semibold()
                     .text_color(rgb(TEXT))
+                    .truncate()
                     .child(value),
             )
     }
@@ -3591,6 +3693,7 @@ impl App {
                 div()
                     .w(px(86.))
                     .flex_shrink_0()
+                    .text_size(px(10.))
                     .text_color(rgb(MUTED_2))
                     .child(label.to_string()),
             )
@@ -3598,10 +3701,19 @@ impl App {
                 div()
                     .flex_1()
                     .min_w_0()
+                    .text_size(px(10.))
                     .text_color(rgb(MUTED))
                     .truncate()
                     .child(value),
             )
+    }
+
+    fn section_label(&self, label: &str) -> impl IntoElement {
+        div()
+            .text_size(px(10.))
+            .font_semibold()
+            .text_color(rgb(MUTED_2))
+            .child(label.to_string())
     }
 
     fn badge(&self, text: &str, fg: u32, bg: u32) -> impl IntoElement {
@@ -3625,10 +3737,7 @@ impl Render for App {
             self.sidebar_collapsed,
             self.inspector_collapsed,
         ));
-        let mut workspace = v_flex().flex_1().min_w_0().h_full();
-        if self.screen != Screen::Photos {
-            workspace = workspace.child(self.topbar(cx));
-        }
+        let workspace = v_flex().flex_1().min_w_0().h_full();
         let root = h_flex()
             .relative()
             .size_full()
