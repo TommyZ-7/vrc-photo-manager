@@ -264,7 +264,10 @@ switch.
 - Preview: selection cross-fades over 260 ms. Keep the previous preview for
   the duration; stack the old and new layers and animate opacity. The
   inspector tint is lerped from `previous_color` to the new average color
-  over the same 260 ms.
+  over the same 260 ms. Gate the cross-fade on `selection_changed_at`; once
+  the 260 ms window has elapsed, render the current photo/tint statically and
+  drop the previous preview, so collapsing/expanding the inspector or
+  returning from another screen never replays the old transition.
 - Full-screen viewer: the whole viewer fades in over 240 ms; the details
   panel width animates over 300 ms; a newly selected photo fades in over
   220 ms. No scale transform.
@@ -290,8 +293,8 @@ New `App` state:
 - `grid_columns: usize` (updated from the window width during render)
 - `grid_epoch: u64` (incremented when the photo set is reloaded)
 - `thumbnail_colors: HashMap<i64, u32>`
-- `selection_epoch`, `previous_preview: Option<Arc<RenderImage>>`,
-  `previous_color: Option<u32>`
+- `selection_epoch`, `selection_changed_at: Option<Instant>`,
+  `previous_preview: Option<Arc<RenderImage>>`, `previous_color: Option<u32>`
 - `quick_look_open`, `quick_look_epoch`, `quick_look_return_focus:
   Option<FocusHandle>`, `quick_look_focus_index`
 - `quick_look_details_open`, `quick_look_details_epoch`

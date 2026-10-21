@@ -718,7 +718,7 @@ git commit -m "feat: redesign photo grid with adaptive columns"
 - Modify: `crates/ui/src/main.rs` (`select_photo` ~333-340; `inspector` ~790-930; `load_selected` ~321-332)
 
 **Interfaces:**
-- `App` gains `selection_epoch: u64`, `previous_preview: Option<Arc<RenderImage>>`, `previous_color: Option<u32>`.
+- `App` gains `selection_epoch: u64`, `selection_changed_at: Option<Instant>`, `previous_preview: Option<Arc<RenderImage>>`, `previous_color: Option<u32>`.
 - Produces `fn selected_color(&self) -> u32`, `fn load_selected_meta(&mut self, id: i64)`. The inspector's detail action is rewired in Task 8.
 - Produces `fn inspector(&mut self, cx: &mut Context<Self>) -> AnyElement` (the 314 px card) and `fn inspector_column(&mut self, cx: &mut Context<Self>) -> AnyElement` (the animated 330 px column).
 
@@ -729,7 +729,7 @@ Add `load_selected_meta(id)` that updates `selected`, `selected_photo`, `selecte
 - [ ] **Step 2: Record the transition on selection**
 
 In `select_photo`:
-- If the id differs from the current selection, set `previous_preview = self.preview.clone()`, `previous_color = self.selected_photo.as_ref().map(|p| self.color_for(p))`, and increment `selection_epoch`.
+- If the id differs from the current selection, set `previous_preview = self.preview.clone()`, `previous_color = self.selected_photo.as_ref().map(|p| self.color_for(p))`, set `selection_changed_at = Some(Instant::now())`, and increment `selection_epoch`.
 - Then call `load_selected(id)`.
 
 `selected_color()` returns `color_for(selected_photo)`.
@@ -761,10 +761,11 @@ When `inspector_collapsed` is true, render the column empty (no card content); w
   2. Selected photo's 256 px thumbnail, absolute at -24 px on all four edges, `ObjectFit::Cover`, opacity 0.45.
   3. Dark `linear_gradient(180.0, rgba(0x090d13cc), rgba(0x090d13f7))`.
   4. Content on top.
-- Cross-fade:
+- Cross-fade, only while `selection_changed_at` is within 260 ms:
   - Wrap the background/tint layers with `with_animation(("inspector-tint", selection_epoch), Animation::new(260ms), ...)`.
   - For the tint, use `lerp_color(previous_color.unwrap_or(current), current, t)`.
   - For the preview, stack `previous_preview` at opacity `1-t` and `self.preview` at opacity `t`. If there is no previous preview, fade the current in.
+  - Once the 260 ms window has elapsed, render the current tint/preview statically (opacity 1, no old layer) and clear `previous_preview`/`previous_color`; this prevents replay on collapse/expand or returning from Detail.
 - Content:
   - Header: "選択中" uppercase 10 px `MUTED_2` + "Space で開く" 10 px.
   - Preview: 16:10, rounded 12, border, image `Cover`, shadow.
