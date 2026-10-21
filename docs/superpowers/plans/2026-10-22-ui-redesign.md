@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Rebuild the GPUI UI around a photo-first, glass-like library with an adaptive grid, a collapsible icon rail, a full Quick Look detail overlay, and restrained motion.
+**Goal:** Rebuild the GPUI UI around a photo-first, glass-like library with an adaptive grid, a collapsible icon rail, a toggleable inspector, a full-screen image viewer with a toggleable detail panel, and restrained motion.
 
-**Architecture:** Keep `crates/ui/src/main.rs` as the single UI file. Replace the token values, add pure layout/motion/color helpers with unit tests, then layer the new shell, sidebar, grid, inspector, and Quick Look on top of the existing screens. Move the old detail screen body into a reusable `detail_body` rendered by Quick Look. Add two persisted settings fields and a demo fixture generator so the visual result can be verified end to end.
+**Architecture:** Keep `crates/ui/src/main.rs` as the single UI file. Replace the token values, add pure layout/motion/color helpers with unit tests, then layer the new shell, sidebar, grid, inspector, and full-screen viewer on top of the existing screens. Move the old detail screen body into a reusable `detail_body` rendered by the viewer. Add three persisted settings fields (sidebar, inspector, reduced motion) and a demo fixture generator so the visual result can be verified end to end.
 
 **Tech Stack:** Rust 2024, gpui-kit 0.8.0 / gpui-pre 0.3.9, SQLite via `vrc_photo_core`, `image` 0.25.
 
@@ -16,7 +16,7 @@
 - Do not add a direct `gpui` dependency or bump `gpui-kit = "=0.8.0"`.
 - Do not split `crates/ui/src/main.rs` into modules in this work.
 - Photo grid stays `uniform_list` with fixed row height; only the column count varies.
-- No element-level backdrop blur. Use an upscaled thumbnail + scrim for the inspector and a dark scrim for Quick Look.
+- No element-level backdrop blur. Use an upscaled thumbnail + scrim for the inspector and a dark background for the full-screen viewer.
 - No CSS `scale`/`rotate` transforms; animate opacity, width, and small offsets only.
 - All `Animation::new(...)` calls use `.with_easing(ease_motion)` unless the animator already applies `stagger_value` (which applies the easing itself).
 - New `AppSettings` fields must use `#[serde(default)]` so old JSON still deserializes.
@@ -31,17 +31,20 @@
 These are the failure modes most likely to bite a user and are easy to miss in a visual redesign. Each has a test or a manual check in its owning task.
 
 1. Existing settings JSON without `ui_sidebar_collapsed` / `ui_reduce_motion` must not reset the entire settings record. (Task 2)
-2. Resizing across 1280/1440 and toggling the rail must recompute columns without stale `uniform_list` rows, panics, or thumbnail re-decodes. (Tasks 6, 10)
-3. Space/Enter while typing in the search or settings inputs must not open Quick Look; `Ctrl/Cmd+B` and `Ctrl/Cmd+K` must still work. (Tasks 4, 8, 10)
+2. Resizing across 1280/1440, toggling the rail, and toggling the inspector must recompute columns without stale `uniform_list` rows, panics, or thumbnail re-decodes. (Tasks 6, 7, 10)
+3. Space/Enter while typing in the search or settings inputs must not open the viewer; `Ctrl/Cmd+B`, `Ctrl/Cmd+I`, and `Ctrl/Cmd+K` must still work. (Tasks 4, 8, 10)
 4. Missing preview/thumbnail/demo files must show a placeholder, not a panic; trash failures must surface a message. (Tasks 3, 6, 8)
-5. Quick Look must return focus to the grid after Esc/backdrop/close, and repeated open/close must not leave focus stranded. (Task 8)
+5. The viewer must return focus to the grid after Esc/image-area click/close, and repeated open/close or details toggles must not leave focus stranded. (Task 8)
 6. Reduced motion must render the final state immediately and schedule no animation frames. (Task 9)
 7. The first-24-card intro must not replay on every scroll or re-decode thumbnails. (Tasks 6, 10)
 8. The demo fixture must not write into the user's real thumbnail cache or collide with real photo IDs. (Task 3)
+9. The inspector toggle (header button and `Ctrl+I`) must stay in sync with the persisted state and leave no blank column or stale grid when hidden. (Tasks 4, 7, 10)
+10. The full-screen viewer must close only on Esc, the close button, or a click on the dark area around the image — not on the image or details panel. (Task 8)
+11. `Ctrl/Cmd+B`, `Ctrl/Cmd+I`, and `Ctrl/Cmd+K` must be ignored while the viewer is open. (Tasks 4, 8)
 
 ---
 
-# PR1 — Shell, sidebar, photos, Quick Look
+# PR1 — Shell, sidebar, photos, full-screen viewer
 
 Branch: `feat/ui-redesign-core` in a new worktree cut from updated `main`.
 
@@ -59,13 +62,15 @@ Branch: `feat/ui-redesign-core` in a new worktree cut from updated `main`.
   - `const MIN_CARD_WIDTH: f32 = 170.0`
   - `const GRID_GAP: f32 = 16.0`
   - `const INSPECTOR_WIDTH: f32 = 330.0`
+  - `const VIEWER_DETAILS_WIDTH: f32 = 380.0`
   - `const WORKSPACE_PAD_X: f32 = 44.0`
   - `const CARD_INTRO_SECS: f32 = 0.6`
   - `const CARD_STAGGER_SECS: f32 = 0.04`
   - `const CARD_STAGGER_MAX: usize = 8`
   - `fn sidebar_width(collapsed: bool) -> f32`
   - `fn sidebar_reveal_width(collapsed: bool, t: f32) -> f32`
-  - `fn grid_available_width(window_width: f32, collapsed: bool) -> f32`
+  - `fn grid_available_width(window_width: f32, sidebar_collapsed: bool, inspector_collapsed: bool) -> f32`
+  - `fn viewer_details_width(open: bool, t: f32) -> f32`
   - `fn grid_columns(available_width: f32) -> usize`
   - `fn format_count(value: i64) -> String`
   - `fn average_bgra(bytes: &[u8]) -> u32`
@@ -93,8 +98,18 @@ fn sidebar_reveal_width(collapsed: bool, t: f32) -> f32 {
     from + (to - from) * t
 }
 
-fn grid_available_width(window_width: f32, collapsed: bool) -> f32 {
-    (window_width - sidebar_width(collapsed) - INSPECTOR_WIDTH - WORKSPACE_PAD_X).max(0.0)
+fn grid_available_width(
+    window_width: f32,
+    sidebar_collapsed: bool,
+    inspector_collapsed: bool,
+) -> f32 {
+    let inspector = if inspector_collapsed { 0.0 } else { INSPECTOR_WIDTH };
+    (window_width - sidebar_width(sidebar_collapsed) - inspector - WORKSPACE_PAD_X).max(0.0)
+}
+
+fn viewer_details_width(open: bool, t: f32) -> f32 {
+    let (from, to) = if open { (0.0, VIEWER_DETAILS_WIDTH) } else { (VIEWER_DETAILS_WIDTH, 0.0) };
+    from + (to - from) * t
 }
 
 fn grid_columns(available_width: f32) -> usize {
@@ -102,7 +117,7 @@ fn grid_columns(available_width: f32) -> usize {
 }
 ```
 
-`format_count` rules: `< 1000` plain; `1000..=9999` comma-separated; `>= 10_000` compact with one decimal below 100k (`12.8k`) and no decimal at 100k+ (`100k`). `average_bgra` treats input as BGRA, ignores alpha `< 8`, and returns `0xRRGGBB`; empty/transparent input returns `0`. `lerp_color` interpolates each channel with `.round()` and clamps `t` to 0..1. `ease_motion` solves the cubic Bezier `(0.22, 0.8, 0.24, 1)` with 8 Newton iterations and clamps the result to 0..1. `stagger_value` uses `delay = min(index, 8) * 0.04`, `total = 0.6 + delay`, `local = ((elapsed * total - delay) / 0.6).clamp(0.0, 1.0)`, then `ease_motion(local)`. `next_focus_index` wraps in both directions and returns 0 for `len == 0`. `parse_window_size` accepts `<width>x<height>` or `X`, requires both numbers, and rejects dimensions below 320×240.
+`grid_available_width` subtracts the inspector column only when it is not collapsed. `viewer_details_width` interpolates 0..380 for the full-screen details panel. `format_count` rules: `< 1000` plain; `1000..=9999` comma-separated; `>= 10_000` compact with one decimal below 100k (`12.8k`) and no decimal at 100k+ (`100k`). `average_bgra` treats input as BGRA, ignores alpha `< 8`, and returns `0xRRGGBB`; empty/transparent input returns `0`. `lerp_color` interpolates each channel with `.round()` and clamps `t` to 0..1. `ease_motion` solves the cubic Bezier `(0.22, 0.8, 0.24, 1)` with 8 Newton iterations and clamps the result to 0..1. `stagger_value` uses `delay = min(index, 8) * 0.04`, `total = 0.6 + delay`, `local = ((elapsed * total - delay) / 0.6).clamp(0.0, 1.0)`, then `ease_motion(local)`. `next_focus_index` wraps in both directions and returns 0 for `len == 0`. `parse_window_size` accepts `<width>x<height>` or `X`, requires both numbers, and rejects dimensions below 320×240.
 
 - [ ] **Step 3: Add the failing tests**
 
@@ -124,13 +139,24 @@ mod tests {
     }
 
     #[test]
-    fn grid_columns_adapt_to_window_and_rail() {
-        assert_eq!(grid_columns(grid_available_width(1280.0, false)), 3);
-        assert_eq!(grid_columns(grid_available_width(1440.0, false)), 4);
-        assert_eq!(grid_columns(grid_available_width(1280.0, true)), 4);
-        assert_eq!(grid_columns(grid_available_width(1440.0, true)), 5);
-        assert_eq!(grid_columns(grid_available_width(1080.0, false)), 2);
+    fn grid_columns_adapt_to_window_rail_and_inspector() {
+        assert_eq!(grid_columns(grid_available_width(1280.0, false, false)), 3);
+        assert_eq!(grid_columns(grid_available_width(1440.0, false, false)), 4);
+        assert_eq!(grid_columns(grid_available_width(1280.0, true, false)), 4);
+        assert_eq!(grid_columns(grid_available_width(1440.0, true, false)), 5);
+        assert_eq!(grid_columns(grid_available_width(1280.0, false, true)), 5);
+        assert_eq!(grid_columns(grid_available_width(1440.0, false, true)), 6);
+        assert_eq!(grid_columns(grid_available_width(1080.0, false, false)), 2);
+        assert_eq!(grid_columns(grid_available_width(1080.0, false, true)), 4);
         assert_eq!(grid_columns(0.0), 1);
+    }
+
+    #[test]
+    fn viewer_details_width_opens_and_closes() {
+        assert_eq!(viewer_details_width(false, 0.0), 380.0);
+        assert_eq!(viewer_details_width(false, 1.0), 0.0);
+        assert_eq!(viewer_details_width(true, 0.0), 0.0);
+        assert_eq!(viewer_details_width(true, 1.0), 380.0);
     }
 
     #[test]
@@ -201,7 +227,7 @@ mod tests {
 - [ ] **Step 4: Run the tests**
 
 Run: `cargo test -p vrc-photo-ui`
-Expected: all 9 tests pass.
+Expected: all 10 tests pass.
 
 - [ ] **Step 5: Commit**
 
@@ -210,13 +236,13 @@ git add crates/ui/src/main.rs
 git commit -m "feat: add UI redesign tokens and helpers"
 ```
 
-## Task 2: Persist sidebar and reduced-motion settings
+## Task 2: Persist sidebar, inspector, and reduced-motion settings
 
 **Files:**
 - Modify: `crates/core/src/settings.rs` (~10-45, tests ~197-223)
 
 **Interfaces:**
-- Produces: `AppSettings.ui_sidebar_collapsed: bool` and `AppSettings.ui_reduce_motion: bool`, both defaulting to `false` and both annotated `#[serde(default)]`.
+- Produces: `AppSettings.ui_sidebar_collapsed: bool`, `AppSettings.ui_inspector_collapsed: bool`, and `AppSettings.ui_reduce_motion: bool`, all defaulting to `false` and all annotated `#[serde(default)]`.
 
 - [ ] **Step 1: Write the backward-compatibility test**
 
@@ -240,6 +266,7 @@ fn settings_deserialize_without_ui_fields() {
     }"#;
     let settings: AppSettings = serde_json::from_str(json).unwrap();
     assert!(!settings.ui_sidebar_collapsed);
+    assert!(!settings.ui_inspector_collapsed);
     assert!(!settings.ui_reduce_motion);
 }
 ```
@@ -257,10 +284,12 @@ In the struct:
 #[serde(default)]
 pub ui_sidebar_collapsed: bool,
 #[serde(default)]
+pub ui_inspector_collapsed: bool,
+#[serde(default)]
 pub ui_reduce_motion: bool,
 ```
 
-In `Default`: both `false`. Do not add a struct-level `#[serde(default)]`; keep the change scoped to the new fields.
+In `Default`: all three `false`. Do not add a struct-level `#[serde(default)]`; keep the change scoped to the new fields.
 
 - [ ] **Step 4: Run the settings tests**
 
@@ -271,7 +300,7 @@ Expected: PASS, including the existing roundtrip test.
 
 ```bash
 git add crates/core/src/settings.rs
-git commit -m "feat: persist sidebar and reduced-motion preferences"
+git commit -m "feat: persist sidebar, inspector, and reduced-motion preferences"
 ```
 
 ## Task 3: Launch options and demo fixtures
@@ -392,16 +421,20 @@ git commit -m "feat: add demo fixtures and window sizing"
 - Produces on `App`:
   - `sidebar_collapsed: bool`
   - `sidebar_motion_epoch: u64`
+  - `inspector_collapsed: bool`
+  - `inspector_epoch: u64`
   - `hovered_nav: Option<Screen>`
   - `daemon_age_secs: Option<i64>`
-- Produces actions: `ToggleSidebar`, `FocusSearch` (namespace `ui`).
-- Produces methods: `toggle_sidebar(&mut self, cx: &mut Context<Self>)`, `focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>)`.
+- Produces actions: `ToggleSidebar`, `ToggleInspector`, `FocusSearch` (namespace `ui`).
+- Produces methods: `toggle_sidebar(&mut self, cx: &mut Context<Self>)`, `toggle_inspector(&mut self, cx: &mut Context<Self>)`, `focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>)`.
 
 - [ ] **Step 1: Add the state and initialize it**
 
 In `App::new`:
 - `sidebar_collapsed = initial_settings.ui_sidebar_collapsed`
 - `sidebar_motion_epoch = 0`
+- `inspector_collapsed = initial_settings.ui_inspector_collapsed`
+- `inspector_epoch = 0`
 - `hovered_nav = None`
 - `daemon_age_secs = None`
 
@@ -410,10 +443,12 @@ In `refresh_monitor`, after reading `daemon_heartbeat`, compute `daemon_age_secs
 - [ ] **Step 2: Add the actions and handlers**
 
 ```rust
-gpui_kit::actions!(ui, [ToggleSidebar, FocusSearch]);
+gpui_kit::actions!(ui, [ToggleSidebar, ToggleInspector, FocusSearch]);
 ```
 
 `toggle_sidebar` flips the flag, increments `sidebar_motion_epoch`, writes `ui_sidebar_collapsed` into `self.settings`, saves, and calls `cx.notify()`.
+
+`toggle_inspector` flips `inspector_collapsed`, increments `inspector_epoch`, writes `ui_inspector_collapsed`, saves, and notifies. It is ignored while the full-screen viewer is open (Task 8).
 
 `focus_search` sets `self.screen = Screen::Search`, focuses `self.world_input` via `window.focus(&self.world_input.read(cx).focus_handle(cx), cx)`, and notifies. If the input is not yet in the focus tree, defer the focus with `window.defer(cx, ...)`.
 
@@ -425,6 +460,8 @@ In `main`, after `gpui_kit::init(cx)`:
 cx.bind_keys([
     KeyBinding::new("ctrl-b", ToggleSidebar, None),
     KeyBinding::new("cmd-b", ToggleSidebar, None),
+    KeyBinding::new("ctrl-i", ToggleInspector, None),
+    KeyBinding::new("cmd-i", ToggleInspector, None),
     KeyBinding::new("ctrl-k", FocusSearch, None),
     KeyBinding::new("cmd-k", FocusSearch, None),
 ]);
@@ -443,13 +480,13 @@ Run: `cargo test -p vrc-photo-ui`
 Expected: PASS.
 
 Run: `cargo run -p vrc-photo-ui -- --demo`
-Expected: `Ctrl+B` does not crash yet (the sidebar still has the old visual); `Ctrl+K` switches to Search and focuses the world input.
+Expected: `Ctrl+B` and `Ctrl+I` update the persisted flags without crashing yet (the visual changes land in Tasks 5 and 7); `Ctrl+K` switches to Search and focuses the world input.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add crates/ui/src/main.rs
-git commit -m "feat: add sidebar state and keyboard actions"
+git commit -m "feat: add sidebar/inspector state and keyboard actions"
 ```
 
 ## Task 5: Collapsible icon-rail sidebar
@@ -468,7 +505,7 @@ git commit -m "feat: add sidebar state and keyboard actions"
 
 - [ ] **Step 1: Add the shared surface helpers**
 
-Implement `glass_panel()` and `chip()` as free functions near the other UI helpers. Use `BoxShadow::new(px(0.), px(24.), rgba(0x00000060)).blur_radius(px(60.))` plus an inset `BoxShadow::new(px(0.), px(1.), rgba(0xffffff0d)).inset().blur_radius(px(0.))`. These helpers are reused by the inspector, Quick Look, and PR2 screens.
+Implement `glass_panel()` and `chip()` as free functions near the other UI helpers. Use `BoxShadow::new(px(0.), px(24.), rgba(0x00000060)).blur_radius(px(60.))` plus an inset `BoxShadow::new(px(0.), px(1.), rgba(0xffffff0d)).inset().blur_radius(px(0.))`. These helpers are reused by the inspector, the viewer, and PR2 screens.
 
 - [ ] **Step 2: Replace the sidebar shell**
 
@@ -574,7 +611,11 @@ Clear `thumbnail_colors` at the start. In `reload`, increment `grid_epoch` and c
 In `Render::render`, before building the root:
 ```rust
 let width: f32 = window.viewport_size().width.into();
-self.grid_columns = grid_columns(grid_available_width(width, self.sidebar_collapsed));
+self.grid_columns = grid_columns(grid_available_width(
+    width,
+    self.sidebar_collapsed,
+    self.inspector_collapsed,
+));
 ```
 Keep the existing `topbar` for non-Photos screens. Skip it when `self.screen == Screen::Photos`; that screen renders its own `photos_header` inside `photos_screen`.
 
@@ -586,7 +627,7 @@ Keep the existing `topbar` for non-Photos screens. Skip it when `self.screen == 
 - Left: "ライブラリ" at 24 px semibold; subtitle at 10 px `MUTED_2` with `format_count(photo_count) + " 枚 · " + format_bytes(total_bytes) + sync text`.
 - Sync text: "デモデータ" when `demo_assets.is_some()`; "最終同期 N秒前" when `daemon_age_secs` is `Some(age)` and `age < 20`; "デーモン停止" otherwise.
 - Message: `self.message` at 10 px `AMBER`, `.flex_1().min_w_0()`, ellipsis.
-- Right: "コピー取込" and "移動取込" text buttons, primary on move.
+- Right: a "詳細" / "詳細を隠す" text toggle (calls `toggle_inspector`, tooltip `Ctrl+I`) and the "コピー取込" / "移動取込" text buttons (primary on move).
 - Below the header, a filter row at 26 px horizontal padding, 14 px bottom:
   - Chips "ワールド" (active), "プレイヤー", "日時", "タグ" — static, no click handlers.
   - Right: "並び: 新しい順" at 10 px `MUTED_2`.
@@ -608,7 +649,7 @@ Expanded grid card:
 - Selected: 2 px `BLUE` border (or an outer ring via border + shadow) and a soft `BLUE` shadow.
 - Badges: "圧縮済" mint dot/text when compressed; "未圧縮" amber dot/text when not; favorite amber dot at top-right.
 - Meta: world name 12 px semibold with `.truncate()` (fallback "未紐付け"); second line 10 px `MUTED_2` with `short_date` + `format_bytes`.
-- Click: `select_photo(id, cx)`, `window.focus(&self.photo_grid_focus, cx)`, and if `ClickEvent::Mouse(m)` has `m.down.click_count >= 2`, open Quick Look (Task 8). Until Task 8, the double-click can only select.
+- Click: `select_photo(id, cx)`, `window.focus(&self.photo_grid_focus, cx)`, and if `ClickEvent::Mouse(m)` has `m.down.click_count >= 2`, open the full-screen viewer (Task 8). Until Task 8, the double-click can only select.
 - Hover: `on_hover` updates `self.hovered_photo`; wrap the card with:
 ```rust
 let hovered = self.hovered_photo == Some(id);
@@ -647,10 +688,10 @@ Run: `cargo test -p vrc-photo-ui`
 Expected: PASS.
 
 Run: `cargo run -p vrc-photo-ui -- --demo --window-size 1280x820`
-Expected: 3 columns with the sidebar expanded, 4 columns collapsed; cards are ~212 px wide; no thumbnail reload on animation.
+Expected: 3 columns with the sidebar expanded and the inspector visible; 4 columns with the sidebar collapsed; 5 columns with the inspector hidden. No thumbnail reload on animation.
 
 Run: `cargo run -p vrc-photo-ui -- --demo --window-size 1440x900`
-Expected: 4 columns expanded, 5 columns collapsed.
+Expected: 4 columns expanded with the inspector visible; 5 columns with the sidebar collapsed; 6 columns with the inspector hidden.
 
 - [ ] **Step 8: Commit**
 
@@ -667,7 +708,7 @@ git commit -m "feat: redesign photo grid with adaptive columns"
 **Interfaces:**
 - `App` gains `selection_epoch: u64`, `previous_preview: Option<Arc<RenderImage>>`, `previous_color: Option<u32>`.
 - Produces `fn selected_color(&self) -> u32`, `fn load_selected_meta(&mut self, id: i64)`. The inspector's detail action is rewired in Task 8.
-- Produces `fn inspector(&mut self, cx: &mut Context<Self>) -> AnyElement`.
+- Produces `fn inspector(&mut self, cx: &mut Context<Self>) -> AnyElement` (the 314 px card) and `fn inspector_column(&mut self, cx: &mut Context<Self>) -> AnyElement` (the animated 330 px column).
 
 - [ ] **Step 1: Split metadata loading from preview loading**
 
@@ -683,7 +724,26 @@ In `select_photo`:
 
 - [ ] **Step 3: Rebuild the inspector**
 
-- `inspector()` returns a 330 px column; the card is 314 px wide with 16 px top/bottom/right margins inside the column. Full height, rounded 18, `overflow_hidden`, `.relative()`.
+- `inspector()` returns the 314 px card with 16 px top/bottom/right margins. `inspector_column()` wraps it in a 330 px column with `.h_full()` and `.overflow_hidden()`, and animates the column width:
+```rust
+let collapsed = self.inspector_collapsed;
+.with_animation(
+    ("inspector-column", self.inspector_epoch),
+    Animation::new(if self.inspector_epoch == 0 {
+        Duration::ZERO
+    } else {
+        Duration::from_millis(300)
+    })
+    .with_easing(ease_motion),
+    move |el, t| {
+        let from = if collapsed { INSPECTOR_WIDTH } else { 0.0 };
+        let to = if collapsed { 0.0 } else { INSPECTOR_WIDTH };
+        el.w(px(from + (to - from) * t))
+    },
+)
+```
+When `inspector_collapsed` is true, render the column empty (no card content); when false, render the card. `photos_screen` uses `inspector_column()`.
+- The card is full height, rounded 18, `overflow_hidden`, `.relative()`.
 - Background stack:
   1. Base solid color `rgb(selected_color())` (or the previous color during the transition).
   2. Selected photo's 256 px thumbnail, absolute at -24 px on all four edges, `ObjectFit::Cover`, opacity 0.45.
@@ -699,7 +759,7 @@ In `select_photo`:
   - Title 17 px semibold; date 10 px mono `MUTED_2`; badges for context/favorite/compressed.
   - Meta rows: ワールド, インスタンス, 解像度, サイズ, 取得元, 撮影者. Update the shared `meta_row` helper to 10 px label/value with `.truncate()`.
   - Players and tags as pills (reuse the existing content).
-  - Actions at the bottom: full-width "クイックルック" primary and "圧縮" secondary, both text buttons. Until Task 8 wires Quick Look, keep the existing detail-screen action behind the first button so the intermediate commit is usable.
+  - Actions at the bottom: full-width "詳細を開く" primary (renamed to "全画面表示" in Task 8) and "圧縮" secondary, both text buttons. Keep the existing detail-screen action behind the first button so the intermediate commit is usable.
 - Empty state: a quiet card with "写真を選択してください".
 
 - [ ] **Step 4: Verify**
@@ -708,7 +768,7 @@ Run: `cargo test -p vrc-photo-ui`
 Expected: PASS.
 
 Run: `cargo run -p vrc-photo-ui -- --demo`
-Expected: selecting a photo animates the tint and preview; the inspector background visibly picks up the photo's palette; metadata edits do not flash/re-decode the preview.
+Expected: selecting a photo animates the tint and preview; the inspector background visibly picks up the photo's palette; metadata edits do not flash/re-decode the preview; the header's "詳細" toggle and `Ctrl+I` collapse the column to 0 and expand it back, and the grid gains/loses columns.
 
 - [ ] **Step 5: Commit**
 
@@ -717,7 +777,7 @@ git add crates/ui/src/main.rs
 git commit -m "feat: add photo-tinted glass inspector"
 ```
 
-## Task 8: Quick Look overlay and detail consolidation
+## Task 8: Full-screen viewer and detail consolidation
 
 **Files:**
 - Modify: `crates/ui/src/main.rs` (`Screen` ~43-64; `App` ~66-101; `new` ~104-189; `trash_selected` ~341-373; `detail_screen` ~932-1192; `render` ~2167-2183)
@@ -729,10 +789,13 @@ git commit -m "feat: add photo-tinted glass inspector"
   - `quick_look_epoch: u64`
   - `quick_look_return_focus: Option<FocusHandle>`
   - `quick_look_focus_index: usize`
-  - focus handles `quick_look_close_focus`, `quick_look_favorite_focus`, `quick_look_compress_focus`, `quick_look_trash_focus`, `quick_look_add_tag_focus`
+  - `quick_look_details_open: bool`
+  - `quick_look_details_epoch: u64`
+  - focus handles `quick_look_close_focus`, `quick_look_details_focus`, `quick_look_favorite_focus`, `quick_look_compress_focus`, `quick_look_trash_focus`, `quick_look_add_tag_focus`
 - Produces:
   - `fn open_quick_look(&mut self, window: &mut Window, cx: &mut Context<Self>)`
   - `fn close_quick_look(&mut self, window: &mut Window, cx: &mut Context<Self>)`
+  - `fn toggle_quick_look_details(&mut self, window: &mut Window, cx: &mut Context<Self>)`
   - `fn cycle_quick_look_focus(&mut self, reverse: bool, window: &mut Window, cx: &mut Context<Self>)`
   - `fn quick_look_focus_order(&self, cx: &App) -> Vec<FocusHandle>`
   - `fn detail_body(&mut self, photo: &Photo, cx: &mut Context<Self>) -> impl IntoElement`
@@ -750,13 +813,14 @@ git commit -m "feat: add photo-tinted glass inspector"
 
 - [ ] **Step 1: Add the state, focus handles, and actions**
 
-Create the five focus handles in `App::new` with `cx.focus_handle()`. Initialize `quick_look_open = false`, `quick_look_epoch = 0`, `quick_look_return_focus = None`, `quick_look_focus_index = 0`.
+Create the six focus handles in `App::new` with `cx.focus_handle()`. Initialize `quick_look_open = false`, `quick_look_epoch = 0`, `quick_look_return_focus = None`, `quick_look_focus_index = 0`, `quick_look_details_open = false`, `quick_look_details_epoch = 0`.
 
-Extend the existing `gpui_kit::actions!(ui, [...])` block with the four Quick Look actions:
+Extend the existing `gpui_kit::actions!(ui, [...])` block with the five viewer actions:
 
 ```rust
 gpui_kit::actions!(ui, [
     ToggleSidebar,
+    ToggleInspector,
     FocusSearch,
     OpenQuickLook,
     CloseQuickLook,
@@ -782,12 +846,13 @@ Attach the handlers on the root element:
 .on_action(cx.listener(|this, _: &QuickLookPrevFocus, window, cx| this.cycle_quick_look_focus(true, window, cx)))
 ```
 
-- [ ] **Step 2: Implement open/close and focus**
+- [ ] **Step 2: Implement open/close, details toggle, and focus**
 
 `open_quick_look`:
 - Return if `self.selected_photo.is_none()` or already open.
 - `self.quick_look_return_focus = window.focused(cx);`
 - `self.quick_look_open = true; self.quick_look_epoch += 1; self.quick_look_focus_index = 0;`
+- Keep `quick_look_details_open` at its current value (initial false, then the session remembers the last toggle). Reset `quick_look_details_epoch = 0` so the remembered panel state renders immediately without an entrance animation; only explicit toggles animate.
 - `window.focus(&self.quick_look_close_focus, cx);`
 - `cx.notify();`
 
@@ -798,44 +863,64 @@ If the close button is not yet in the focus tree on the same frame, defer the fo
 - Restore `quick_look_return_focus.take()` with `window.focus(..., cx)`; if none, focus `self.photo_grid_focus`.
 - `cx.notify();`
 
-`quick_look_focus_order(cx)` returns, in order: close, favorite, compress, trash, `self.tag_edit_input.read(cx).focus_handle(cx)`, add-tag.
+`toggle_quick_look_details`:
+- Flip `quick_look_details_open`, increment `quick_look_details_epoch`.
+- Always focus `self.quick_look_details_focus` so focus never remains inside a hidden panel.
+- `cx.notify();`
+
+`quick_look_focus_order(cx)` returns, in visual order: close, details toggle, then, only when `quick_look_details_open`, favorite, `self.tag_edit_input.read(cx).focus_handle(cx)`, add-tag, compress, trash.
 
 `cycle_quick_look_focus(reverse, window, cx)` uses `next_focus_index` and focuses the chosen handle. Update `quick_look_focus_index`.
 
-Ignore `ToggleSidebar` and `FocusSearch` while `quick_look_open` is true (early return in their handlers).
+Ignore `ToggleSidebar`, `ToggleInspector`, and `FocusSearch` while `quick_look_open` is true (early return in their handlers).
 
 - [ ] **Step 3: Remove the Detail screen and extract `detail_body`**
 
 - Delete `Screen::Detail` and its `title`, `content`, and sidebar-active references.
 - Delete `detail_screen`.
 - Create `detail_body(photo, cx)` from the old detail screen's right column, minus the back/header controls:
-  - title at 24 px, favorite toggle, date at 10 px mono
+  - title at 24 px with `.truncate()`, favorite toggle, date at 10 px mono
   - meta rows (ワールド, インスタンス, 取得元, 撮影者, ファイル, 解像度, サイズ)
   - players, tags, tag input + add button
   - compression history
   - memo
-  - compress, trash (two-step), and any remaining status text
+  - compress and trash (two-step)
 - Use `load_selected_meta` for favorite/tag updates.
-- The tag-add button and favorite/compress/trash buttons must be focusable text buttons using the Quick Look focus handles.
+- The tag-add button and favorite/compress/trash buttons must be focusable text buttons using the viewer focus handles.
 
-- [ ] **Step 4: Implement the overlay**
+- [ ] **Step 4: Implement the full-screen overlay**
 
 `quick_look(cx)`:
 - `let Some(photo) = self.selected_photo.clone() else { return div().into_any_element(); };`
-- Overlay: `h_flex().absolute().top(px(0.)).left(px(0.)).right(px(0.)).bottom(px(0.)).p(px(24.)).items_center().justify_center().key_context("quick_look")`.
-- Scrim: absolute at 0 on all four edges, `rgba(0x04070bcc)`, `.on_click` close.
-- Card: `.w(px(1080.))`, `.max_w(relative(0.9))`, `.h(px(640.))`, rounded 22, border `rgba(0xffffff14)`, `bg(rgba(0x0e131bdc))`, shadow. Add a no-op `on_click` so clicks inside the card do not reach the scrim. Fits inside the 1080×700 minimum with 24 px overlay padding. Wrap with `with_animation(("quick-look", epoch), 380ms, ...)` for opacity + 18 px rise. Scrim fades over 240 ms.
-- Left 62%: preview `Contain`, dark matte, caption at bottom with world name + date. If `self.preview` is None, show a placeholder card with `color_for(photo)`.
-- Right 38%: scrollable info pane:
-  - top row: "クイックルック" 10 px uppercase + close button ("閉じる Esc") using `quick_look_close_focus`.
-  - message line if `self.message` is Some.
-  - `detail_body(&photo, cx)`.
-- Close button, scrim click, and Esc all call `close_quick_look`.
-- Trash handler: call `trash_selected(cx)`; if `self.selected.is_none()` after it, close the overlay.
+- Root: `v_flex()` absolute at 0 on all four edges, `size_full`, `bg(rgb(0x05070a))`, `key_context("quick_look")`. Wrap the root in `with_animation(("viewer", self.quick_look_epoch), Animation::new(Duration::from_millis(240)).with_easing(ease_motion), |el, t| el.opacity(t))` for a fade-in. Add a full-window tint layer as the first child (behind the top bar and content row) at ~13% alpha using `rgba((color_for(&photo) << 8) | 0x22)` so the background picks up the photo's palette.
+- Top bar: 56 px, `h_flex`, horizontal padding 20, bottom border `rgba(0xffffff12)`, translucent dark background.
+  - Left: "閉じる Esc" focusable text button using `quick_look_close_focus`.
+  - Middle: file name at 12 px `MUTED`, `.truncate()`, `.flex_1()`.
+  - Right: "詳細" / "詳細を閉じる" focusable text button using `quick_look_details_focus`; calls `toggle_quick_look_details`.
+- Content row: `h_flex().flex_1().min_h_0()`.
+  - Image area: `flex_1`, `h_full`, `relative`, transparent over the tinted root, `.items_center().justify_center()`, `.p(px(24.))`, `.on_click` closes the viewer. Center an image container with `.aspect_ratio(if photo.height > 0 { photo.width as f32 / photo.height as f32 } else { 16.0 / 9.0 })`, `.max_w(relative(0.92))`, `.max_h(relative(0.92))`; the 1200 px preview fills it with `ObjectFit::Contain`. Attach a no-op `on_click` to the image container so clicking the photo does not close the viewer, while clicking the letterbox (the image area) does. If `self.preview` is None, show a placeholder card tinted with `color_for(photo)` and the text "プレビューを読み込めません".
+  - Details panel: always render the panel wrapper so the width can animate; render the `detail_body` content only when `quick_look_details_open`. Wrap the panel in `with_animation`:
+```rust
+let open = self.quick_look_details_open;
+.with_animation(
+    ("viewer-details", self.quick_look_details_epoch),
+    Animation::new(if self.quick_look_details_epoch == 0 {
+        Duration::ZERO
+    } else {
+        Duration::from_millis(300)
+    })
+    .with_easing(ease_motion),
+    move |el, t| el.w(px(viewer_details_width(open, t))).overflow_hidden(),
+)
+```
+The panel is `h_full`, `bg(rgba(0x0e131bdc))`, and contains a scrollable `detail_body(&photo, cx)`. Add 16 px padding and a left border only when open. When closed, width 0 and no content.
+- The viewer stays open on favorite/tag/compress; trash closes it:
+  - Trash handler: call `trash_selected(cx)`; if `self.selected.is_none()` after it, close the overlay.
+  - Compression keeps the overlay open; the panel shows `self.message` above `detail_body`.
 
 - [ ] **Step 5: Wire the entry points**
 
-- Inspector "クイックルック": `on_click` calls `open_quick_look`.
+- Rename the inspector's primary action to "全画面表示" and wire its `on_click` to `open_quick_look`.
 - Card double-click (Task 6): call `open_quick_look` when `click_count >= 2`.
 - `Space`/`Enter` on the focused grid: action `OpenQuickLook`.
 - Remove the old "詳細を開く" route.
@@ -847,18 +932,20 @@ Expected: PASS.
 
 Run: `cargo run -p vrc-photo-ui -- --demo`
 Expected:
-- Double-click, Space, and the inspector button open Quick Look.
-- Esc, the scrim, and the close button close it.
-- Favorite, tag add, compress, and two-step trash work in the overlay.
-- Trash closes the overlay.
-- Focus returns to the grid after closing.
-- Tab/Shift+Tab cycle close → favorite → compress → trash → tag input → add-tag.
+- Double-click, Space, and the inspector button open the full-screen viewer.
+- The details panel starts closed; the top-bar "詳細" button opens/closes it; the image area expands when it closes.
+- Clicking the dark area around the image closes the viewer; clicking the image or panel does not.
+- Esc and the close button close it.
+- Favorite, tag add, compress, and two-step trash work in the panel.
+- Trash closes the viewer.
+- Focus returns to the grid after closing, and is moved to the details toggle when the panel closes.
+- Tab/Shift+Tab cycle close → details → (when open) favorite → tag input → add-tag → compress → trash.
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add crates/ui/src/main.rs
-git commit -m "feat: add quick look and consolidate photo detail"
+git commit -m "feat: add full-screen viewer and consolidate photo detail"
 ```
 
 ## Task 9: Reduced-motion setting
@@ -887,7 +974,7 @@ Do not use OS-specific detection.
 
 - [ ] **Step 3: Audit manual transitions**
 
-Any motion that does not go through `with_animation` must check `cx.reduce_motion()` and skip the transition. In practice, the helpers in this plan all use `with_animation`; verify the sidebar, cards, inspector, and Quick Look all use it.
+Any motion that does not go through `with_animation` must check `cx.reduce_motion()` and skip the transition. In practice, the helpers in this plan all use `with_animation`; verify the sidebar, cards, inspector, and viewer all use it.
 
 - [ ] **Step 4: Verify**
 
@@ -933,7 +1020,9 @@ Repeat for:
 - 1280×820 collapsed (`Ctrl+B`)
 - 1440×900 expanded
 - 1440×900 collapsed
-- Quick Look open
+- inspector hidden (`Ctrl+I`)
+- full-screen viewer with details closed
+- full-screen viewer with details open
 - Settings with reduced motion on
 
 Attach the screenshots to the PR (do not commit them).
@@ -941,11 +1030,11 @@ Attach the screenshots to the PR (do not commit them).
 - [ ] **Step 3: Manual checklist**
 
 - Sidebar toggle/persistence/Ctrl+B/tooltips.
-- Grid columns 3/4 at 1280/1440 expanded; +1 collapsed.
+- Inspector toggle/persistence/Ctrl+I; grid columns 3/5 at 1280 and 4/6 at 1440; +1 when the sidebar collapses.
 - Card hover/intro; no thumbnail re-decode on scroll or resize.
 - Inspector tint and preview cross-fade.
-- Quick Look open/close paths, focus return, tag/favorite/compress/trash.
-- Space/Enter while typing in Search/Settings does not open Quick Look.
+- Full-screen viewer open paths (double-click/Space/button), details toggle (top-bar button), image-area click closes, focus return, tag/favorite/compress/trash.
+- Space/Enter while typing in Search/Settings does not open the viewer.
 - Search, compression, monitor, settings still work.
 - Demo reset and window-size flags work.
 
@@ -953,7 +1042,7 @@ Attach the screenshots to the PR (do not commit them).
 
 ```bash
 git push -u origin feat/ui-redesign-core
-gh pr create --title "feat: redesign GPUI shell, photo grid, and quick look" --body-file /tmp/opencode/pr1.md
+gh pr create --title "feat: redesign GPUI shell, photo grid, and full-screen viewer" --body-file /tmp/opencode/pr1.md
 ```
 
 PR body: summary, screenshots, test commands, Windows deferred to #9, `Closes #27` only if PR2 is merged in the same release (otherwise use `Refs #27`). Since PR2 completes the issue, use `Refs #27` in PR1 and `Closes #27` in PR2.
@@ -1023,7 +1112,7 @@ Run: `cargo test -p vrc-photo-ui`
 Expected: PASS.
 
 Run: `cargo run -p vrc-photo-ui -- --demo`
-Expected: world/player/tag/date/favorite search still works; results show fixed-width cards; double-click opens Quick Look (Space is validated on the Photos grid).
+Expected: world/player/tag/date/favorite search still works; results show fixed-width cards; double-click opens the full-screen viewer (Space is validated on the Photos grid).
 
 - [ ] **Step 4: Commit**
 
@@ -1111,8 +1200,9 @@ PR body: summary, screenshots, test commands, `Closes #27`.
 - [ ] **Step 1: Update `docs/ui.md`**
 
 - Sidebar: 238/78 px, five icons, toggle, `Ctrl/Cmd+B`, persisted state.
-- Photos: adaptive columns with the 1280/1440 results, 330 px inspector, glass approximation.
-- Quick Look: replaces the detail screen; entry points; focus behavior; actions.
+- Photos: adaptive columns (3/5 at 1280, 4/6 at 1440 depending on inspector/sidebar state), 330 px inspector column, inspector show/hide, glass approximation.
+- Full-screen viewer: replaces the detail screen; entry points; top-bar details toggle; focus behavior; actions.
+- Inspector show/hide and `Ctrl/Cmd+I`.
 - Keyboard shortcuts table.
 - Motion: durations/easing, reduced-motion setting.
 - Tokens: new palette, 8 px grid, 26 px outer padding, 10/12/17/24 type scale.
@@ -1137,7 +1227,7 @@ gh pr create --title "docs: document redesigned UI" --body "Updates docs/ui.md f
 ## Self-Review Notes
 
 - PR1 covers every acceptance item except the full token pass on Compression/Search/Monitor/Settings; those are PR2.
-- PR1 removes the dedicated Detail screen. If the owner's later library-flow instructions want a full-screen detail view, reuse `detail_body` instead of duplicating metadata/actions.
+- PR1 removes the dedicated Detail screen and implements the specified full-screen viewer with a toggleable details panel, reusing `detail_body`.
 - The `--demo` fixture is a QA aid, not a product feature; it must never write into the real thumbnail cache.
 - `docs/ui.md` is deliberately a separate PR to respect the project's no-mixed-docs/code rule.
-- The only unresolved product item is the next library browsing flow, which the owner will specify after reviewing this plan. It does not block PR1 or PR2 as scoped.
+- The library browsing flow is now specified: the grid/inspector stay, the inspector toggles, and double-click opens the full-screen viewer with a toggleable details panel. Arrow-key navigation remains out of scope (#12).

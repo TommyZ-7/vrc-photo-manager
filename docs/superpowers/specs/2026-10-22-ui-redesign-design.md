@@ -22,13 +22,16 @@ next to the grid; every control is text-first.
 ## 2. Goals
 
 - Apply one design-token set to every screen: Photos, Search, Compression,
-  Monitor, Settings, and Quick Look.
+  Monitor, Settings, and the full-screen viewer.
 - Make the photo grid comfortable at 1280×820 and 1440×900 by deriving the
   column count from the available width.
 - Add a collapsible sidebar (238 px ↔ 78 px) with a floating toggle,
   `Ctrl/Cmd+B`, tooltips in rail mode, and persisted state.
-- Make Quick Look the primary detail surface: preview, metadata, players,
-  tags, compression history, memo, favorite, compression, and trash.
+- Make the full-screen viewer the primary detail surface: preview, metadata,
+  players, tags, compression history, memo, favorite, compression, and trash.
+- Let the library's right inspector be shown/hidden without leaving the grid.
+- Open a full-screen image on double-click, with a Google Photos-style
+  toggleable right detail panel.
 - Add restrained motion: 150–450 ms, `cubic-bezier(.22,.8,.24,1)`-equivalent,
   card stagger, hover lift, preview cross-fade, and modal entrance. Respect a
   user setting for reduced motion.
@@ -85,28 +88,30 @@ These were confirmed with the project owner during planning.
 
 | Area | Decision |
 |---|---|
-| Delivery | 2 PRs. PR1: shell, sidebar, Photos grid/inspector, Quick Look, motion, reduced-motion setting. PR2: Compression, Search, Monitor, Settings token pass. |
-| Detail screen | Consolidate into Quick Look. Remove the dedicated `Screen::Detail` route; extract its body into a shared `detail_body` used by Quick Look. A future full-screen view can reuse it when the library flow is redesigned. |
-| Library browsing flow | Not finalized here. The owner will give further instructions after reviewing this plan. Build Quick Look as the primary detail surface and keep the grid/inspector shell easy to replace. |
-| Grid | Adaptive columns. Minimum card width 170 px, gap 16 px. At 1280×820 with the sidebar expanded: 3 columns (~212 px cards). At 1440×900 expanded: 4 columns (~195 px). Collapsing the sidebar adds one column. |
+| Delivery | 2 PRs. PR1: shell, sidebar, Photos grid/inspector toggle, full-screen viewer, motion, reduced-motion setting. PR2: Compression, Search, Monitor, Settings token pass. |
+| Detail screen | Consolidate into the full-screen viewer. Remove the dedicated `Screen::Detail` route; extract its body into a shared `detail_body` used by the viewer's right panel. |
+| Library browsing flow | Specified: the library keeps its current grid + right inspector structure. The inspector can be shown/hidden. Double-click (and Space/Enter/button) opens a full-screen image viewer; its right detail panel is independently toggleable. |
+| Inspector visibility | Persisted as `ui_inspector_collapsed` (default false = visible). A text toggle in the library header and `Ctrl/Cmd+I` flip it. The column width animates over 300 ms; the grid recomputes columns from the target state. |
+| Full-screen details | 380 px right panel, closed on the first open. Toggle with the top-bar text button; later opens remember the last toggle for the session. Image area stays centered and expands when the panel closes. |
+| Grid | Adaptive columns. Minimum card width 170 px, gap 16 px. At 1280×820 with the sidebar and inspector visible: 3 columns (~212 px cards); with the inspector hidden: 5. At 1440×900: 4 with the inspector visible, 6 hidden. Collapsing the sidebar adds one column. |
 | Storage card | Keep photo count + total library bytes. Do not add disk-capacity APIs or a usage meter. |
 | Reduced motion | A persisted Settings switch, applied through `cx.set_reduce_motion`. No OS-specific detection. |
 | Windows QA | Deferred to #9. Linux screenshots at 1280×820 and 1440×900 are required for #27. |
 | Search/filter | Appearance only. The existing four library badges become chips; no new filtering. `Ctrl/Cmd+K` goes to the Search screen and focuses the world input. |
 | Message feedback | Keep the existing `message` string, shown in the screen header. No new toast/timer component. |
-| Quick Look actions | All existing detail operations move in: favorite, tag add, compress, trash (two-step), history, memo. No "open folder" action (it does not exist today). |
+| Full-screen actions | All existing detail operations move into the right panel: favorite, tag add, compress, trash (two-step), history, memo. No "open folder" action (it does not exist today). |
 | Nav counts | Photos shows the library count. Compression shows the queued/running job count when non-zero. Search, Monitor, and Settings have no count; Monitor uses its status dot. |
 | Nav icons | Photos `GalleryVerticalEnd`, Search `Search`, Compression `Minimize`, Monitor `Eye`, Settings `Settings`. |
 | Icons elsewhere | Text buttons. No icon-only controls except the sidebar toggle (with a tooltip). |
 | Inspector blur | Upscaled 256 px thumbnail + translucent scrim + gradient. No new blur path. |
 | Thumbnail color | Average color of the loaded 256 px thumbnail, fallback to the existing `scene_color(world)`. |
-| Preview fit | Quick Look uses `ObjectFit::Contain` on a dark matte so photos are never cropped. |
+| Preview fit | The full-screen viewer uses `ObjectFit::Contain` on a dark matte so photos are never cropped. |
 | Demo/QA data | Extend `--demo` with generated sample images/thumbnails and a temp file-backed DB so previews, color extraction, trash, and restart persistence can be exercised. Add `--demo-reset` and `--window-size WxH` for repeatable screenshots. |
-| Quick Look focus scope | Tab/Shift+Tab cycle every interactive Quick Look control: close, favorite, compress, trash, tag input, add-tag. The shell is inert while the overlay is open; global `Ctrl/Cmd+B` and `Ctrl/Cmd+K` are ignored. |
+| Viewer focus scope | Tab/Shift+Tab cycle every interactive viewer control in visual order: close, details toggle, and (when the panel is open) favorite, tag input, add-tag, compress, trash. The shell is inert while the viewer is open; global `Ctrl/Cmd+B`, `Ctrl/Cmd+K`, and `Ctrl/Cmd+I` are ignored. |
 | Card stagger scope | The intro runs for the first 24 cards of each grid generation, with the stagger index capped at 8. A `seen` set prevents replay when `uniform_list` remounts a row after scrolling. |
 | Last sync | Derived from `daemon_heartbeat` age. No new DB field. Show "最終同期 N秒前" while active, "デーモン停止" otherwise, and "デモデータ" in demo mode. |
-| Small windows | Set a 1080×700 minimum window size and keep the inspector visible. At 1080 expanded the grid uses 2 columns; collapsing adds one. |
-| Quick Look feedback | The info pane shows the existing `message` string. Compression keeps the overlay open so the confirmation is visible. |
+| Small windows | Set a 1080×700 minimum window size and keep the inspector toggleable. At 1080 with the inspector visible the grid uses 2 columns; hiding the inspector or collapsing the sidebar adds columns. |
+| Viewer feedback | The right panel shows the existing `message` string. Compression keeps the viewer open so the confirmation is visible. |
 | Inspector tint | Lerp the solid tint from the previous average color to the new one over 260 ms; cross-fade the preview image separately. |
 
 ## 7. Visual system
@@ -140,11 +145,11 @@ Spacing follows an 8 px grid for layout (8/16/24/32). The workspace uses a
 
 Type scale: 10 / 12 / 17 / 24 px. Use `.text_size(px(...))` explicitly; do
 not rely on `.text_xs()` / `.text_lg()` for the new layout. The 24 px size is
-for screen titles and the Quick Look title; 17 px for inspector titles and
+for screen titles and the full-screen viewer's detail title; 17 px for inspector titles and
 section headings; 12 px body; 10 px metadata, labels, counts, and buttons.
 
-Radii: 20 px outer floating surfaces, 18 px inspector, 22 px Quick Look
-card, 14 px photo cards, 8 px buttons/chips, 999 px pills.
+Radii: 20 px outer floating surfaces, 18 px inspector, 14 px photo cards,
+8 px buttons/chips, 999 px pills.
 
 Glass approximation: translucent dark fills (`rgba(0x141922c4)`), a 1 px
 light border, and an inset top highlight shadow. The ambient background uses
@@ -172,35 +177,49 @@ No new dependencies.
   sync, message text, and import buttons ("コピー取込", "移動取込").
 - Filter row: the four existing badges become chips. They remain
   non-interactive (appearance only). A right-aligned "並び: 新しい順" label.
+- Header: a text toggle "詳細" / "詳細を隠す" (plus `Ctrl/Cmd+I`) shows or
+  hides the inspector.
 - Content: grid (left) + inspector column (right, 330 px). The inspector card
   is 314 px wide with 16 px top/bottom/right margins inside that column.
+  Hiding the inspector animates the column to 0 over 300 ms; the grid expands
+  and recomputes its column count from the target state.
 - Grid: adaptive columns, 16 px gaps, 128 px image area, fixed row height.
   Cards keep the existing selection, compressed, unlinked, and favorite
   signals. The selected card gets a 2 px accent ring and a soft glow.
 - Inspector: glass card with an upscaled thumbnail background at low opacity,
   a dark gradient scrim, a 16:10 preview, title/date/badges, metadata,
-  players, tags, and two full-width text actions: "クイックルック" and "圧縮".
+  players, tags, and two full-width text actions: "全画面表示" and "圧縮".
 - Empty state: a quiet card with the existing guidance text.
 
-### 7.4 Quick Look
+### 7.4 Full-screen viewer
 
-- Full-window overlay above the shell. Dark scrim; the card is 1080×640
-  with a 22 px radius, capped at 90% of the window width. This fits inside
-  the 1080×700 minimum window with a 24 px overlay padding.
-- Left: the 1200 px preview, `Contain`, dark matte, caption with world and
-  date. Right: a scrollable info pane using the shared `detail_body`.
-- Close: "閉じる Esc" button, `Esc`, or a click on the scrim.
-- Focus: opening focuses the close button; `Tab`/`Shift+Tab` cycle **every**
-  interactive Quick Look control (close, favorite, compress, trash, tag input,
-  add-tag); closing restores the previously focused element (the photo grid
-  in normal use). The shell is inert while the overlay is open: pointer events
-  hit the scrim, and `Ctrl/Cmd+B` / `Ctrl/Cmd+K` are ignored.
-- The overlay stays open across metadata edits (favorite, tag) and closes
+- Full-window overlay above the shell. Dark background with a subtle tint
+  from the selected photo's average color.
+- Top bar (56 px): "閉じる Esc" on the left, file name in the middle, and a
+  "詳細" / "詳細を閉じる" toggle on the right. Text buttons only.
+- Content row: image area (flex) + details panel (380 px when open, 0 when
+  closed). The image uses the 1200 px preview, `Contain`, centered with 24 px
+  padding. The panel is scrollable and uses the shared `detail_body`.
+- Double-click a photo card to open. Space/Enter while the grid is focused
+  and the inspector's "全画面表示" button are equivalent entry points.
+- Details panel: closed on the first open. Toggle with the top-bar text
+  button. The panel width animates over 300 ms; the image area expands to
+  fill the space. Later opens remember the last toggle for the session.
+- Close: "閉じる Esc", `Esc`, or a click on the dark image-area background
+  (not the image itself, not the panel). The image sits in an aspect-ratio
+  box so the photo and the letterbox have distinct click targets.
+- Focus: opening focuses the close button; `Tab`/`Shift+Tab` cycle the close
+  button, the details toggle, and, when the panel is open, favorite, tag
+  input, add-tag, compress, and trash. Closing restores the previously
+  focused element (the photo grid in normal use). The shell is inert while
+  the viewer is open: pointer events hit the viewer, and global
+  `Ctrl/Cmd+B`, `Ctrl/Cmd+K`, `Ctrl/Cmd+I` are ignored.
+- The viewer stays open across metadata edits (favorite, tag) and closes
   after a successful trash.
-- Compression keeps the overlay open; the info pane shows the existing
-  `message` string so the confirmation is visible.
-- No `Screen::Detail` route. The detail body is shared so a future
-  full-screen mode can be added without duplicating metadata/actions.
+- Compression keeps the viewer open; the panel shows the existing `message`
+  string so the confirmation is visible.
+- No `Screen::Detail` route. The full-screen viewer hosts the shared detail
+  body; any future alternate detail surface can reuse it.
 
 ### 7.5 Other screens (PR2)
 
@@ -216,6 +235,10 @@ switch.
   helper, not a new dependency.
 - Sidebar: width 440 ms; labels/counts fade in/out over ~320 ms. An epoch is
   incremented on toggle so the animation re-triggers.
+- Library inspector: column width 300 ms; content disappears at the toggle
+  while the column collapses, and the grid reflows once from the target state.
+- Full-screen details: panel width 300 ms; the image area expands/contracts
+  with it. The top bar and panel use the same glass surface.
 - Cards: first appearance 600 ms with a 40 ms per-card stagger, capped at
   8 steps (max ~320 ms delay). Only the first 24 cards of a grid generation
   animate; a `seen` set keyed by photo ID prevents replay when
@@ -226,8 +249,8 @@ switch.
   the duration; stack the old and new layers and animate opacity. The
   inspector tint is lerped from `previous_color` to the new average color
   over the same 260 ms.
-- Quick Look: scrim fades over 240 ms; card fades and rises 18 px over
-  380 ms. No scale transform.
+- Full-screen viewer: the whole viewer fades in over 240 ms; the details
+  panel width animates over 300 ms. No scale transform.
 - Reduced motion: `with_animation` automatically renders the end state when
   `cx.reduce_motion()` is true. Non-animation transitions must also be
   short-circuited by checking the setting.
@@ -236,14 +259,16 @@ switch.
 
 ## 9. State and persistence
 
-New `AppSettings` fields (both `#[serde(default)]`):
+New `AppSettings` fields (all `#[serde(default)]`):
 
 - `ui_sidebar_collapsed: bool` (default false)
+- `ui_inspector_collapsed: bool` (default false = visible)
 - `ui_reduce_motion: bool` (default false)
 
 New `App` state:
 
 - `sidebar_collapsed`, `sidebar_motion_epoch`
+- `inspector_collapsed`, `inspector_epoch`
 - `hovered_nav: Option<Screen>`, `hovered_photo: Option<i64>`
 - `grid_columns: usize` (updated from the window width during render)
 - `thumbnail_colors: HashMap<i64, u32>`
@@ -251,6 +276,7 @@ New `App` state:
   `previous_color: Option<u32>`
 - `quick_look_open`, `quick_look_epoch`, `quick_look_return_focus:
   Option<FocusHandle>`, `quick_look_focus_index`
+- `quick_look_details_open`, `quick_look_details_epoch`
 - `intro_seen: HashSet<i64>` (cleared on a new grid generation)
 - `daemon_age_secs: Option<i64>` (derived from `daemon_heartbeat`)
 - `demo_assets: Option<DemoAssets>` (photo dir + thumbnail dir)
@@ -288,10 +314,11 @@ Keyboard bindings (registered in `main()` with `cx.bind_keys`):
 | Binding | Context | Action |
 |---|---|---|
 | `ctrl-b` / `cmd-b` | global | Toggle sidebar |
+| `ctrl-i` / `cmd-i` | global | Toggle library inspector |
 | `ctrl-k` / `cmd-k` | global | Go to Search, focus world input |
-| `space` / `enter` | `photo_grid` | Open Quick Look |
-| `escape` | `quick_look` | Close Quick Look |
-| `tab` / `shift-tab` | `quick_look` | Cycle Quick Look focus |
+| `space` / `enter` | `photo_grid` | Open full-screen viewer |
+| `escape` | `quick_look` | Close full-screen viewer |
+| `tab` / `shift-tab` | `quick_look` | Cycle viewer focus |
 
 The photo grid is a single focus stop. Clicking a card focuses it, so
 Space/Enter operate on the selected photo. Typing in an input never reaches
@@ -303,25 +330,24 @@ the grid bindings.
 - `cargo clippy --workspace --all-targets -- -D warnings`
 - `cargo test --workspace`
 - Unit tests for: easing endpoints/monotonicity, color averaging, color
-  interpolation, grid columns at 1280/1440 expanded/collapsed, compact count,
-  stagger boundaries, focus wrap, window-size parsing, and old-settings
+  interpolation, grid columns at 1280/1440 with the sidebar and inspector
+  shown/hidden, viewer-details width interpolation, compact count, stagger
+  boundaries, focus wrap, window-size parsing, and old-settings
   deserialization.
 - Manual Linux demo (`--demo`) at 1280×820 and 1440×900, screenshots attached
   to the PR:
   - sidebar toggle, persistence after restart, tooltips
+  - inspector show/hide, persistence, and grid columns with it hidden
   - grid columns at both sizes and in rail mode
   - selection cross-fade and inspector background color
-  - Quick Look open/close paths, focus return, tag/favorite/compress/trash
+  - full-screen viewer open/close paths, details toggle, focus return,
+    tag/favorite/compress/trash
   - reduced-motion switch
   - search/compression/monitor/settings behavior unchanged
 - Windows visual verification is tracked in #9.
 
 ## 11. Open items
 
-- The owner will specify the next library browsing flow after reviewing the
-  plan. That flow may replace the inspector/Quick Look entry points. Keep
-  `detail_body` reusable and keep navigation decisions out of the shared
-  components.
 - `docs/ui.md` must be updated in a separate docs-only PR (project rule: do
   not mix code and docs in one PR). The mock file may be added to `main` in
   the same docs PR.
