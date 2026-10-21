@@ -119,3 +119,11 @@ cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warni
 - Verify publication:
   `gh release view <tag> --json assets --jq '.assets[].name'` and body check
   `gh release view <tag> --json body --jq .body`
+
+## 8. External issues / PRs
+
+- 新規 Issue は `triage` ラベルで受け、再現確認後に `needs-repro` /
+  `platform:*` / `area:*` を付与する。
+- 外部 fork の PR は初回のみ Actions の承認が必要。承認前にコードを実行しない。
+- マージ条件は §5 と同じ。マージ後は head ブランチを削除する。
+- セキュリティ報告は公開 Issue で扱わず、`SECURITY.md` の非公開レポートへ誘導する。

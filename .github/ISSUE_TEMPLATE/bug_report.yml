@@ -1,0 +1,97 @@
+name: バグ報告
+description: 不具合を報告する（English is welcome）
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        バグ報告ありがとうございます。English is welcome.
+
+        VRChat のユーザーID・表示名・ワールド名・ローカルパス・生ログには個人情報が含まれます。貼る前に必ず除去してください。
+        脆弱性や個人情報の漏えいは、公開 Issue ではなく [SECURITY.md](https://github.com/TommyZ-7/vrc-photo-manager/blob/main/SECURITY.md) の非公開レポートへお願いします。
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: 概要
+      description: 何が起きたかを1〜2行で
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 再現手順
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期待する動作
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 実際の動作
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: バージョン
+      description: "リリースタグ（例: v0.1.1）または commit hash"
+      placeholder: v0.1.1
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: インストール方法
+      options:
+        - deb
+        - AppImage
+        - pacman
+        - Windows installer (NSIS)
+        - ソースからビルド
+        - その他 / 不明
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS / デスクトップ環境
+      description: "例: Windows 11 24H2、Ubuntu 24.04 (Wayland)、Fedora 41 (X11)"
+      placeholder: Ubuntu 24.04 (Wayland)
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: ログ
+      description: RUST_LOG=debug で再実行したときのログ（個人情報を除去）
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 確認
+      options:
+        - label: 最新リリースで再現することを確認した
+          required: true
+        - label: 既存の Issue を検索した
+          required: true
+        - label: 個人情報を除去した
+          required: true
