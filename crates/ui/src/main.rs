@@ -138,6 +138,7 @@ pub struct App {
     photos: Vec<Photo>,
     selected: Option<i64>,
     selection_epoch: u64,
+    selection_changed_at: Option<Instant>,
     selected_photo: Option<Photo>,
     selected_players: Vec<PhotoPlayer>,
     selected_tags: Vec<String>,
@@ -222,6 +223,7 @@ impl App {
             photos: Vec::new(),
             selected: None,
             selection_epoch: 0,
+            selection_changed_at: None,
             selected_photo: None,
             selected_players: Vec::new(),
             selected_tags: Vec::new(),
@@ -503,6 +505,7 @@ impl App {
             self.previous_preview = self.preview.take();
             self.previous_color = previous_color;
             self.selection_epoch = self.selection_epoch.wrapping_add(1);
+            self.selection_changed_at = Some(Instant::now());
         }
         self.load_selected(id);
         cx.notify();
@@ -1465,6 +1468,16 @@ impl App {
     }
 
     fn inspector(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let transitioning = self
+            .selection_changed_at
+            .is_some_and(|at| at.elapsed() < Duration::from_millis(260));
+        if !transitioning {
+            // The cross-fade snapshot is only valid for the selection window.
+            // Keeping it would replay the old photo when the inspector remounts
+            // after a collapse or a trip through Screen::Detail.
+            self.previous_preview = None;
+            self.previous_color = None;
+        }
         let Some(photo) = self.selected_photo.as_ref() else {
             return v_flex()
                 .w(px(INSPECTOR_CARD_WIDTH))
@@ -1555,16 +1568,19 @@ impl App {
                 BoxShadow::new(px(0.), px(22.), rgba(0x00000073).into()).blur_radius(px(48.)),
             ]);
 
-        // 1. Solid tint, lerped from the previous photo's average color.
-        card = card.child(
-            div()
-                .absolute()
-                .size_full()
-                .bg(rgb(current_color))
+        // 1. Solid tint, lerped from the previous photo's average color only
+        // while the selection is fresh; a remount renders the current tint
+        // statically so the old color cannot flash back.
+        let tint_layer = div().absolute().size_full().bg(rgb(current_color));
+        card = card.child(if transitioning {
+            tint_layer
                 .with_animation(("inspector-tint", selection_epoch), fade(), move |el, t| {
                     el.bg(rgb(lerp_color(previous_color, current_color, t)))
-                }),
-        );
+                })
+                .into_any_element()
+        } else {
+            tint_layer.into_any_element()
+        });
 
         // 2. The selected 256 px thumbnail, upscaled and softened by opacity.
         if let Some(thumbnail) = thumbnail {
@@ -1591,6 +1607,13 @@ impl App {
             linear_color_stop(rgba(0x090d13f7), 1.),
         )));
 
+        let image_layer = |image: Arc<RenderImage>| {
+            div().absolute().size_full().child(
+                gpui_kit::img(image)
+                    .object_fit(ObjectFit::Cover)
+                    .size_full(),
+            )
+        };
         let mut preview_frame = div()
             .relative()
             .w_full()
@@ -1604,40 +1627,25 @@ impl App {
             .shadow(vec![
                 BoxShadow::new(px(0.), px(16.), rgba(0x000000a6).into()).blur_radius(px(32.)),
             ]);
-        if let Some(previous) = previous_preview.as_ref() {
-            preview_frame = preview_frame.child(
-                div()
-                    .absolute()
-                    .size_full()
-                    .child(
-                        gpui_kit::img(previous.clone())
-                            .object_fit(ObjectFit::Cover)
-                            .size_full(),
-                    )
-                    .with_animation(
-                        ("inspector-preview-old", selection_epoch),
-                        fade(),
-                        move |el, t| el.opacity(1.0 - t),
-                    ),
-            );
+        if transitioning {
+            if let Some(previous) = previous_preview.as_ref() {
+                preview_frame = preview_frame.child(image_layer(previous.clone()).with_animation(
+                    ("inspector-preview-old", selection_epoch),
+                    fade(),
+                    move |el, t| el.opacity(1.0 - t),
+                ));
+            }
+            if let Some(preview) = current_preview.as_ref() {
+                preview_frame = preview_frame.child(image_layer(preview.clone()).with_animation(
+                    ("inspector-preview-new", selection_epoch),
+                    fade(),
+                    move |el, t| el.opacity(t),
+                ));
+            }
+        } else if let Some(preview) = current_preview.as_ref() {
+            preview_frame = preview_frame.child(image_layer(preview.clone()));
         }
-        if let Some(preview) = current_preview.as_ref() {
-            preview_frame = preview_frame.child(
-                div()
-                    .absolute()
-                    .size_full()
-                    .child(
-                        gpui_kit::img(preview.clone())
-                            .object_fit(ObjectFit::Cover)
-                            .size_full(),
-                    )
-                    .with_animation(
-                        ("inspector-preview-new", selection_epoch),
-                        fade(),
-                        move |el, t| el.opacity(t),
-                    ),
-            );
-        } else {
+        if current_preview.is_none() {
             preview_frame = preview_frame.child(
                 div()
                     .absolute()
