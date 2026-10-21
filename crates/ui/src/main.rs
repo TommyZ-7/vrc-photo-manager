@@ -6,10 +6,10 @@ use std::time::{Duration, SystemTime};
 
 use chrono::Utc;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::*;
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::switch::Switch;
+use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use smallvec::SmallVec;
@@ -90,7 +90,8 @@ impl App {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (db, demo, mut message) = open_database();
         let world_input = cx.new(|cx| InputState::new(window, cx).placeholder("ワールド名 / ID"));
-        let player_input = cx.new(|cx| InputState::new(window, cx).placeholder("プレイヤー名 / ID"));
+        let player_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("プレイヤー名 / ID"));
         let tag_input = cx.new(|cx| InputState::new(window, cx).placeholder("タグ"));
         let mut app = Self {
             db,
@@ -171,7 +172,10 @@ impl App {
     }
 
     fn reload(&mut self) {
-        self.photos = self.db.list_photos(300, 0, vrc_photo_core::model::PhotoSort::Newest).unwrap_or_default();
+        self.photos = self
+            .db
+            .list_photos(300, 0, vrc_photo_core::model::PhotoSort::Newest)
+            .unwrap_or_default();
         self.profiles = self.db.list_profiles().unwrap_or_default();
         self.stats = self.db.stats().unwrap_or_default();
         self.compressed_ids = self
@@ -332,8 +336,14 @@ impl App {
             )
     }
 
-    fn nav_item(&self, label: &'static str, screen: Screen, cx: &mut Context<Self>) -> impl IntoElement {
-        let active = self.screen == screen || (screen == Screen::Photos && self.screen == Screen::Detail);
+    fn nav_item(
+        &self,
+        label: &'static str,
+        screen: Screen,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let active =
+            self.screen == screen || (screen == Screen::Photos && self.screen == Screen::Detail);
         h_flex()
             .id(label)
             .w_full()
@@ -342,13 +352,19 @@ impl App {
             .gap_2()
             .rounded_md()
             .cursor_pointer()
-            .when(active, |this| this.bg(rgb(0x1b2a3b)).text_color(rgb(0xd7ecff)))
+            .when(active, |this| {
+                this.bg(rgb(0x1b2a3b)).text_color(rgb(0xd7ecff))
+            })
             .when(!active, |this| this.text_color(rgb(MUTED)))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.screen = screen;
                 cx.notify();
             }))
-            .child(div().size(px(6.)).rounded_full().bg(if active { rgb(BLUE) } else { rgb(MUTED_2) }))
+            .child(div().size(px(6.)).rounded_full().bg(if active {
+                rgb(BLUE)
+            } else {
+                rgb(MUTED_2)
+            }))
             .child(div().text_sm().child(label))
     }
 
@@ -493,7 +509,10 @@ impl App {
     fn photo_card(&self, photo: &Photo, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self.selected == Some(photo.id);
         let id = photo.id;
-        let world = photo.world_name.clone().unwrap_or_else(|| "未紐付け".to_string());
+        let world = photo
+            .world_name
+            .clone()
+            .unwrap_or_else(|| "未紐付け".to_string());
         let compressed = self.compressed_ids.contains(&photo.id);
         v_flex()
             .id(SharedString::from(format!("photo-{id}")))
@@ -546,11 +565,15 @@ impl App {
             .child(
                 h_flex()
                     .gap_1()
-                    .when(compressed, |this| this.child(self.badge("圧縮済", GREEN, 0x112a22)))
+                    .when(compressed, |this| {
+                        this.child(self.badge("圧縮済", GREEN, 0x112a22))
+                    })
                     .when(photo.world_name.is_none(), |this| {
                         this.child(self.badge("未紐付け", AMBER, 0x2a2412))
                     })
-                    .when(photo.is_favorite, |this| this.child(self.badge("★", PURPLE, 0x241a2e))),
+                    .when(photo.is_favorite, |this| {
+                        this.child(self.badge("★", PURPLE, 0x241a2e))
+                    }),
             )
     }
 
@@ -563,7 +586,12 @@ impl App {
                 .border_color(rgb(BORDER))
                 .bg(rgb(PANEL))
                 .p_4()
-                .child(div().text_xs().text_color(rgb(MUTED)).child("写真を選択してください"))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .child("写真を選択してください"),
+                )
                 .into_any_element();
         };
         let id = photo.id;
@@ -585,15 +613,20 @@ impl App {
                     .border_1()
                     .border_color(rgb(BORDER))
                     .when_some(self.preview.clone(), |this, preview| {
-                        this.child(gpui_kit::img(preview).object_fit(ObjectFit::Cover).size_full())
+                        this.child(
+                            gpui_kit::img(preview)
+                                .object_fit(ObjectFit::Cover)
+                                .size_full(),
+                        )
                     }),
             )
             .child(
-                div()
-                    .text_sm()
-                    .font_semibold()
-                    .text_color(rgb(TEXT))
-                    .child(photo.world_name.clone().unwrap_or_else(|| "未紐付け".to_string())),
+                div().text_sm().font_semibold().text_color(rgb(TEXT)).child(
+                    photo
+                        .world_name
+                        .clone()
+                        .unwrap_or_else(|| "未紐付け".to_string()),
+                ),
             )
             .child(
                 div()
@@ -611,14 +644,24 @@ impl App {
                         this.child(self.badge("★", PURPLE, 0x241a2e))
                     }),
             )
-            .child(self.meta_row("ワールドID", photo.world_name.clone().unwrap_or_else(|| "—".to_string())))
-            .child(self.meta_row("インスタンス", photo.instance_id.clone().unwrap_or_else(|| "—".to_string())))
             .child(self.meta_row(
-                "解像度",
-                format!("{} × {}", photo.width, photo.height),
+                "ワールドID",
+                photo.world_name.clone().unwrap_or_else(|| "—".to_string()),
             ))
+            .child(self.meta_row(
+                "インスタンス",
+                photo.instance_id.clone().unwrap_or_else(|| "—".to_string()),
+            ))
+            .child(self.meta_row("解像度", format!("{} × {}", photo.width, photo.height)))
             .child(self.meta_row("サイズ", format_bytes(photo.file_size)))
-            .child(self.meta_row("取得元", photo.link_method.clone().unwrap_or_else(|| "—".to_string())))
+            .child(self.meta_row(
+                "取得元",
+                photo.link_method.clone().unwrap_or_else(|| "—".to_string()),
+            ))
+            .child(self.meta_row(
+                "撮影者",
+                photo.author.clone().unwrap_or_else(|| "—".to_string()),
+            ))
             .child(self.section_label("撮影時のプレイヤー"))
             .child(
                 h_flex()
@@ -680,11 +723,19 @@ impl App {
         let Some(photo) = &self.selected_photo else {
             return v_flex()
                 .p_5()
-                .child(div().text_sm().text_color(rgb(MUTED)).child("写真を選択してください"))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(MUTED))
+                        .child("写真を選択してください"),
+                )
                 .into_any_element();
         };
         let id = photo.id;
-        let title = photo.world_name.clone().unwrap_or_else(|| "未紐付け".to_string());
+        let title = photo
+            .world_name
+            .clone()
+            .unwrap_or_else(|| "未紐付け".to_string());
         v_flex()
             .flex_1()
             .min_h_0()
@@ -705,7 +756,13 @@ impl App {
                                 cx.notify();
                             })),
                     )
-                    .child(div().flex_1().text_xs().text_color(rgb(MUTED_2)).child(photo.file_name.clone()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(rgb(MUTED_2))
+                            .child(photo.file_name.clone()),
+                    )
                     .child(
                         Button::new("detail-compress")
                             .label("圧縮")
@@ -794,42 +851,49 @@ impl App {
                                     .text_color(rgb(MUTED_2))
                                     .child(photo.captured_at_local.clone()),
                             )
-                            .child(self.meta_row("ワールド", photo.world_name.clone().unwrap_or_else(|| "—".to_string())))
-                            .child(self.meta_row("インスタンス", photo.instance_id.clone().unwrap_or_else(|| "—".to_string())))
-                            .child(self.meta_row("取得元", photo.link_method.clone().unwrap_or_else(|| "—".to_string())))
+                            .child(self.meta_row(
+                                "ワールド",
+                                photo.world_name.clone().unwrap_or_else(|| "—".to_string()),
+                            ))
+                            .child(self.meta_row(
+                                "インスタンス",
+                                photo.instance_id.clone().unwrap_or_else(|| "—".to_string()),
+                            ))
+                            .child(self.meta_row(
+                                "取得元",
+                                photo.link_method.clone().unwrap_or_else(|| "—".to_string()),
+                            ))
+                            .child(self.meta_row(
+                                "撮影者",
+                                photo.author.clone().unwrap_or_else(|| "—".to_string()),
+                            ))
                             .child(self.meta_row("ファイル", photo.file_name.clone()))
                             .child(self.section_label("撮影時のプレイヤー"))
-                            .child(
-                                h_flex()
-                                    .flex_wrap()
-                                    .gap_1()
-                                    .children(self.selected_players.iter().map(|player| {
-                                        div()
-                                            .px(px(6.))
-                                            .py(px(2.))
-                                            .rounded_md()
-                                            .bg(rgb(PANEL_2))
-                                            .text_xs()
-                                            .text_color(rgb(MUTED))
-                                            .child(player.display_name.clone())
-                                    })),
-                            )
+                            .child(h_flex().flex_wrap().gap_1().children(
+                                self.selected_players.iter().map(|player| {
+                                    div()
+                                        .px(px(6.))
+                                        .py(px(2.))
+                                        .rounded_md()
+                                        .bg(rgb(PANEL_2))
+                                        .text_xs()
+                                        .text_color(rgb(MUTED))
+                                        .child(player.display_name.clone())
+                                }),
+                            ))
                             .child(self.section_label("タグ"))
-                            .child(
-                                h_flex()
-                                    .flex_wrap()
-                                    .gap_1()
-                                    .children(self.selected_tags.iter().map(|tag| {
-                                        div()
-                                            .px(px(6.))
-                                            .py(px(2.))
-                                            .rounded_md()
-                                            .bg(rgb(PANEL_2))
-                                            .text_xs()
-                                            .text_color(rgb(MUTED))
-                                            .child(format!("#{tag}"))
-                                    })),
-                            )
+                            .child(h_flex().flex_wrap().gap_1().children(
+                                self.selected_tags.iter().map(|tag| {
+                                    div()
+                                        .px(px(6.))
+                                        .py(px(2.))
+                                        .rounded_md()
+                                        .bg(rgb(PANEL_2))
+                                        .text_xs()
+                                        .text_color(rgb(MUTED))
+                                        .child(format!("#{tag}"))
+                                }),
+                            ))
                             .child(self.section_label("圧縮履歴"))
                             .when(self.selected_derivatives.is_empty(), |this| {
                                 this.child(
@@ -858,7 +922,12 @@ impl App {
                                     .border_color(rgb(BORDER))
                                     .text_xs()
                                     .text_color(rgb(MUTED))
-                                    .child(photo.note.clone().unwrap_or_else(|| "メモはまだありません".to_string())),
+                                    .child(
+                                        photo
+                                            .note
+                                            .clone()
+                                            .unwrap_or_else(|| "メモはまだありません".to_string()),
+                                    ),
                             )
                             .child(
                                 Button::new("detail-back")
@@ -890,10 +959,9 @@ impl App {
                         v_flex()
                             .child(div().text_lg().font_semibold().child("圧縮設定"))
                             .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(MUTED))
-                                    .child("自動圧縮は元画像を保持します。置換は手動実行時のみです。"),
+                                div().text_xs().text_color(rgb(MUTED)).child(
+                                    "自動圧縮は元画像を保持します。置換は手動実行時のみです。",
+                                ),
                             ),
                     )
                     .child(div().flex_1())
@@ -909,43 +977,48 @@ impl App {
                 h_flex()
                     .gap_4()
                     .items_start()
-                    .child(
-                        v_flex()
-                            .w(px(280.))
-                            .gap_2()
-                            .children(self.profiles.iter().enumerate().map(|(index, profile)| {
-                                let active = index == self.profile_index;
-                                let auto = profile.auto_enabled;
-                                let title = profile.name.clone();
-                                let meta = format!(
-                                    "{} · Q{} · {}",
-                                    format_label(&profile.format),
-                                    profile.quality,
-                                    if profile.lossless { "Lossless" } else { "Lossy" }
-                                );
-                                v_flex()
-                                    .id(SharedString::from(format!("profile-{index}")))
-                                    .p_3()
-                                    .gap_1()
-                                    .rounded_lg()
-                                    .bg(if active { rgb(0x16283d) } else { rgb(PANEL) })
-                                    .border_1()
-                                    .border_color(if active { rgb(BLUE) } else { rgb(BORDER) })
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.profile_index = index;
-                                        cx.notify();
-                                    }))
-                                    .child(
-                                        h_flex()
-                                            .items_center()
-                                            .gap_2()
-                                            .child(div().text_sm().font_semibold().child(title))
-                                            .child(self.badge(if auto { "自動" } else { "手動" }, if auto { GREEN } else { MUTED }, if auto { 0x112a22 } else { PANEL_2 })),
-                                    )
-                                    .child(div().text_xs().text_color(rgb(MUTED)).child(meta))
-                            })),
-                    )
+                    .child(v_flex().w(px(280.)).gap_2().children(
+                        self.profiles.iter().enumerate().map(|(index, profile)| {
+                            let active = index == self.profile_index;
+                            let auto = profile.auto_enabled;
+                            let title = profile.name.clone();
+                            let meta = format!(
+                                "{} · Q{} · {}",
+                                format_label(&profile.format),
+                                profile.quality,
+                                if profile.lossless {
+                                    "Lossless"
+                                } else {
+                                    "Lossy"
+                                }
+                            );
+                            v_flex()
+                                .id(SharedString::from(format!("profile-{index}")))
+                                .p_3()
+                                .gap_1()
+                                .rounded_lg()
+                                .bg(if active { rgb(0x16283d) } else { rgb(PANEL) })
+                                .border_1()
+                                .border_color(if active { rgb(BLUE) } else { rgb(BORDER) })
+                                .cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.profile_index = index;
+                                    cx.notify();
+                                }))
+                                .child(
+                                    h_flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(div().text_sm().font_semibold().child(title))
+                                        .child(self.badge(
+                                            if auto { "自動" } else { "手動" },
+                                            if auto { GREEN } else { MUTED },
+                                            if auto { 0x112a22 } else { PANEL_2 },
+                                        )),
+                                )
+                                .child(div().text_xs().text_color(rgb(MUTED)).child(meta))
+                        }),
+                    ))
                     .child(
                         v_flex()
                             .flex_1()
@@ -957,8 +1030,13 @@ impl App {
                             .child(
                                 h_flex()
                                     .gap_3()
-                                    .child(self.stat_card("総圧縮数", self.stats.compressed_count.to_string()))
-                                    .child(self.stat_card("写真", self.stats.photo_count.to_string()))
+                                    .child(self.stat_card(
+                                        "総圧縮数",
+                                        self.stats.compressed_count.to_string(),
+                                    ))
+                                    .child(
+                                        self.stat_card("写真", self.stats.photo_count.to_string()),
+                                    )
                                     .child(self.stat_card(
                                         "圧縮後合計",
                                         format_bytes(self.db.derivative_bytes().unwrap_or(0)),
@@ -969,7 +1047,11 @@ impl App {
             )
     }
 
-    fn profile_editor(&self, profile: &CompressionProfile, cx: &mut Context<Self>) -> impl IntoElement {
+    fn profile_editor(
+        &self,
+        profile: &CompressionProfile,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let index = self.profile_index;
         v_flex()
             .p_4()
@@ -999,9 +1081,8 @@ impl App {
                     ),
             )
             .child(
-                h_flex()
-                    .gap_2()
-                    .children([
+                h_flex().gap_2().children(
+                    [
                         CompressionFormat::Jpeg,
                         CompressionFormat::Webp,
                         CompressionFormat::Avif,
@@ -1030,13 +1111,20 @@ impl App {
                                 cx.notify();
                             }))
                             .child(label)
-                    })),
+                    }),
+                ),
             )
             .child(
                 h_flex()
                     .items_center()
                     .gap_2()
-                    .child(div().w(px(80.)).text_xs().text_color(rgb(MUTED)).child("品質"))
+                    .child(
+                        div()
+                            .w(px(80.))
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .child("品質"),
+                    )
                     .child(
                         Button::new("quality-minus")
                             .label("−")
@@ -1050,7 +1138,13 @@ impl App {
                                 cx.notify();
                             })),
                     )
-                    .child(div().w(px(36.)).text_sm().font_semibold().child(profile.quality.to_string()))
+                    .child(
+                        div()
+                            .w(px(36.))
+                            .text_sm()
+                            .font_semibold()
+                            .child(profile.quality.to_string()),
+                    )
                     .child(
                         Button::new("quality-plus")
                             .label("＋")
@@ -1064,13 +1158,26 @@ impl App {
                                 cx.notify();
                             })),
                     )
-                    .child(div().text_xs().text_color(rgb(MUTED_2)).child(if profile.lossless {
-                        "ロスレス"
-                    } else {
-                        "品質を調整"
-                    })),
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED_2))
+                            .child(if profile.lossless {
+                                "ロスレス"
+                            } else {
+                                "品質を調整"
+                            }),
+                    ),
             )
-            .child(self.meta_row("出力先", profile.output_dir.clone().unwrap_or_else(|| "compressed/".to_string())))
+            .child(
+                self.meta_row(
+                    "出力先",
+                    profile
+                        .output_dir
+                        .clone()
+                        .unwrap_or_else(|| "compressed/".to_string()),
+                ),
+            )
             .child(self.meta_row("サフィックス", profile.suffix.clone()))
             .child(self.meta_row(
                 "リサイズ",
@@ -1108,11 +1215,7 @@ impl App {
                     .border_b_1()
                     .border_color(rgb(BORDER))
                     .child(div().text_sm().font_semibold().child("圧縮キュー"))
-                    .child(self.badge(
-                        &format!("{} 件", self.jobs.len()),
-                        BLUE,
-                        0x14283d,
-                    )),
+                    .child(self.badge(&format!("{} 件", self.jobs.len()), BLUE, 0x14283d)),
             )
             .children(self.jobs.iter().take(8).map(|job| {
                 let status = match job.status {
@@ -1157,94 +1260,111 @@ impl App {
     }
 
     fn search_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let results = self.search_results.clone().unwrap_or_else(|| self.photos.clone());
+        let results = self
+            .search_results
+            .clone()
+            .unwrap_or_else(|| self.photos.clone());
         let cards: Vec<AnyElement> = results
             .iter()
             .map(|photo| self.photo_card(photo, cx).into_any_element())
             .collect();
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .child(
-                        v_flex()
-                            .w(px(290.))
-                            .h_full()
-                            .bg(rgb(SIDEBAR))
-                            .border_r_1()
-                            .border_color(rgb(BORDER))
-                            .p_4()
-                            .gap_3()
-                            .child(div().text_sm().font_semibold().child("絞り込み"))
-                            .child(div().text_xs().text_color(rgb(MUTED_2)).child("カテゴリ間はAND、カテゴリ内はOR"))
-                            .child(self.filter_field("ワールド", Input::new(&self.world_input)))
-                            .child(self.filter_field("プレイヤー", Input::new(&self.player_input)))
-                            .child(self.filter_field("タグ", Input::new(&self.tag_input)))
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .child(
-                                        Button::new("search-run")
-                                            .label("検索")
-                                            .small()
-                                            .primary()
-                                            .on_click(cx.listener(|this, _, _, cx| this.run_search(cx))),
-                                    )
-                                    .child(
-                                        Button::new("search-clear")
-                                            .label("クリア")
-                                            .small()
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.search_results = None;
-                                                cx.notify();
-                                            })),
-                                    ),
-                            )
-                            .child(div().text_xs().text_color(rgb(MUTED_2)).child("結果は最大300枚です")),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .overflow_y_scrollbar()
-                            .p_5()
-                            .gap_3()
-                            .child(
-                                h_flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(div().text_lg().font_semibold().child(format!("{} 枚", results.len())))
-                                    .child(div().text_xs().text_color(rgb(MUTED_2)).child("検索結果")),
-                            )
-                            .child(
-                                h_flex()
-                                    .flex_wrap()
-                                    .gap_3()
-                                    .children(cards),
-                            )
-                            .when(results.is_empty(), |this| {
-                                this.child(
-                                    div()
-                                        .p_5()
-                                        .rounded_lg()
-                                        .bg(rgb(PANEL))
-                                        .text_sm()
-                                        .text_color(rgb(MUTED))
-                                        .child("条件に一致する写真がありません"),
+        v_flex().flex_1().min_h_0().child(
+            h_flex()
+                .flex_1()
+                .min_h_0()
+                .child(
+                    v_flex()
+                        .w(px(290.))
+                        .h_full()
+                        .bg(rgb(SIDEBAR))
+                        .border_r_1()
+                        .border_color(rgb(BORDER))
+                        .p_4()
+                        .gap_3()
+                        .child(div().text_sm().font_semibold().child("絞り込み"))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(MUTED_2))
+                                .child("カテゴリ間はAND、カテゴリ内はOR"),
+                        )
+                        .child(self.filter_field("ワールド", Input::new(&self.world_input)))
+                        .child(self.filter_field("プレイヤー", Input::new(&self.player_input)))
+                        .child(self.filter_field("タグ", Input::new(&self.tag_input)))
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    Button::new("search-run")
+                                        .label("検索")
+                                        .small()
+                                        .primary()
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.run_search(cx)),
+                                        ),
                                 )
-                            }),
-                    ),
-            )
+                                .child(
+                                    Button::new("search-clear")
+                                        .label("クリア")
+                                        .small()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.search_results = None;
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(MUTED_2))
+                                .child("結果は最大300枚です"),
+                        ),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .overflow_y_scrollbar()
+                        .p_5()
+                        .gap_3()
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_lg()
+                                        .font_semibold()
+                                        .child(format!("{} 枚", results.len())),
+                                )
+                                .child(div().text_xs().text_color(rgb(MUTED_2)).child("検索結果")),
+                        )
+                        .child(h_flex().flex_wrap().gap_3().children(cards))
+                        .when(results.is_empty(), |this| {
+                            this.child(
+                                div()
+                                    .p_5()
+                                    .rounded_lg()
+                                    .bg(rgb(PANEL))
+                                    .text_sm()
+                                    .text_color(rgb(MUTED))
+                                    .child("条件に一致する写真がありません"),
+                            )
+                        }),
+                ),
+        )
     }
 
     fn filter_field(&self, label: &str, input: Input) -> impl IntoElement {
         v_flex()
             .gap_1()
-            .child(div().text_xs().text_color(rgb(MUTED)).child(label.to_string()))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .child(label.to_string()),
+            )
             .child(input.w_full())
     }
 
@@ -1348,13 +1468,21 @@ impl App {
             .p_5()
             .gap_4()
             .child(div().text_lg().font_semibold().child("設定"))
-            .child(self.settings_panel(
-                "ライブラリ",
-                &[
-                    ("写真フォルダ", self.settings.photo_roots.join("\n")),
-                    ("ログフォルダ", self.settings.log_dir.clone().unwrap_or_else(|| "未設定".to_string())),
-                ],
-            ))
+            .child(
+                self.settings_panel(
+                    "ライブラリ",
+                    &[
+                        ("写真フォルダ", self.settings.photo_roots.join("\n")),
+                        (
+                            "ログフォルダ",
+                            self.settings
+                                .log_dir
+                                .clone()
+                                .unwrap_or_else(|| "未設定".to_string()),
+                        ),
+                    ],
+                ),
+            )
             .child(
                 v_flex()
                     .p_4()
@@ -1398,12 +1526,10 @@ impl App {
                                 cx.notify();
                             })),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(MUTED_2))
-                            .child(format!("言語: {} · サムネイルキャッシュ: {} MB", self.settings.language, self.settings.thumbnail_cache_mb)),
-                    ),
+                    .child(div().text_xs().text_color(rgb(MUTED_2)).child(format!(
+                        "言語: {} · サムネイルキャッシュ: {} MB",
+                        self.settings.language, self.settings.thumbnail_cache_mb
+                    ))),
             )
     }
 
@@ -1419,7 +1545,12 @@ impl App {
             .children(rows.iter().map(|(label, value)| {
                 v_flex()
                     .gap_1()
-                    .child(div().text_xs().text_color(rgb(MUTED_2)).child(label.to_string()))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED_2))
+                            .child(label.to_string()),
+                    )
                     .child(
                         div()
                             .text_xs()
@@ -1445,8 +1576,18 @@ impl App {
             .child(
                 v_flex()
                     .gap(px(0.))
-                    .child(div().text_xs().text_color(rgb(TEXT)).child(label.to_string()))
-                    .child(div().text_xs().text_color(rgb(MUTED_2)).child(description.to_string())),
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(TEXT))
+                            .child(label.to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED_2))
+                            .child(description.to_string()),
+                    ),
             )
             .child(div().flex_1())
             .child(
@@ -1469,15 +1610,31 @@ impl App {
             .bg(rgb(PANEL))
             .border_1()
             .border_color(rgb(BORDER))
-            .child(div().text_xs().text_color(rgb(MUTED_2)).child(label.to_string()))
-            .child(div().text_lg().font_semibold().text_color(rgb(TEXT)).child(value))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(MUTED_2))
+                    .child(label.to_string()),
+            )
+            .child(
+                div()
+                    .text_lg()
+                    .font_semibold()
+                    .text_color(rgb(TEXT))
+                    .child(value),
+            )
     }
 
     fn meta_row(&self, label: &str, value: String) -> impl IntoElement {
         h_flex()
             .gap_2()
             .text_xs()
-            .child(div().w(px(86.)).text_color(rgb(MUTED_2)).child(label.to_string()))
+            .child(
+                div()
+                    .w(px(86.))
+                    .text_color(rgb(MUTED_2))
+                    .child(label.to_string()),
+            )
             .child(div().flex_1().min_w_0().text_color(rgb(MUTED)).child(value))
     }
 
@@ -1585,7 +1742,11 @@ fn seed_demo(db: &Db) {
             })
             .unwrap();
         let world_id = db
-            .upsert_world(&format!("wrld_demo_{}", index % worlds.len()), Some(world), Some("demo"))
+            .upsert_world(
+                &format!("wrld_demo_{}", index % worlds.len()),
+                Some(world),
+                Some("demo"),
+            )
             .unwrap();
         db.set_photo_context(&PhotoContext {
             photo_id: id,
@@ -1595,6 +1756,7 @@ fn seed_demo(db: &Db) {
             instance_id: Some(format!("{}~region(jp)", 12000 + index)),
             link_method: "demo".to_string(),
             confidence: 1.0,
+            author: Some("TommyZ".to_string()),
             linked_at: Utc::now().to_rfc3339(),
         })
         .unwrap();
@@ -1651,7 +1813,11 @@ fn format_bytes(bytes: u64) -> String {
     }
     const UNITS: [&str; 4] = ["B", "KB", "MB", "GB"];
     let index = ((bytes as f64).log(1024.0).floor() as usize).min(UNITS.len() - 1);
-    format!("{:.1} {}", bytes as f64 / 1024f64.powi(index as i32), UNITS[index])
+    format!(
+        "{:.1} {}",
+        bytes as f64 / 1024f64.powi(index as i32),
+        UNITS[index]
+    )
 }
 
 fn short_date(value: &str) -> String {

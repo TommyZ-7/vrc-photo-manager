@@ -170,10 +170,14 @@ CREATE TABLE IF NOT EXISTS app_settings (
 );
 "#;
 
+const SCHEMA_V2: &str = r#"
+ALTER TABLE photo_context ADD COLUMN author TEXT;
+"#;
+
 const PHOTO_SELECT: &str = "p.id, p.root_id, p.rel_path, p.abs_path, p.file_name, \
     p.captured_at_utc, p.captured_at_local, p.tz_offset_sec, p.width, p.height, \
     p.file_size, p.mtime, p.blake3, p.status, p.is_favorite, p.note, \
-    c.world_name, c.instance_id, c.link_method, c.confidence";
+    c.world_name, c.instance_id, c.link_method, c.confidence, c.author";
 
 const PHOTO_FROM: &str = " FROM photos p LEFT JOIN photo_context c ON c.photo_id = p.id ";
 
@@ -222,6 +226,14 @@ impl Db {
                 params![now_string()],
             )?;
             self.conn.pragma_update(None, "user_version", 1)?;
+        }
+        if version < 2 {
+            self.conn.execute_batch(SCHEMA_V2)?;
+            self.conn.execute(
+                "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (2, ?1)",
+                params![now_string()],
+            )?;
+            self.conn.pragma_update(None, "user_version", 2)?;
         }
         Ok(())
     }
@@ -614,13 +626,13 @@ impl Db {
     pub fn set_photo_context(&self, context: &PhotoContext) -> Result<()> {
         self.conn.execute(
             "INSERT INTO photo_context(photo_id, session_id, world_id, world_name, instance_id, \
-                link_method, confidence, linked_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+                link_method, confidence, author, linked_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
              ON CONFLICT(photo_id) DO UPDATE SET \
                 session_id = excluded.session_id, world_id = excluded.world_id, \
                 world_name = excluded.world_name, instance_id = excluded.instance_id, \
                 link_method = excluded.link_method, confidence = excluded.confidence, \
-                linked_at = excluded.linked_at",
+                author = excluded.author, linked_at = excluded.linked_at",
             params![
                 context.photo_id,
                 context.session_id,
@@ -629,6 +641,7 @@ impl Db {
                 context.instance_id,
                 context.link_method,
                 context.confidence,
+                context.author,
                 context.linked_at,
             ],
         )?;
@@ -640,7 +653,7 @@ impl Db {
             .conn
             .query_row(
                 "SELECT photo_id, session_id, world_id, world_name, instance_id, \
-                    link_method, confidence, linked_at FROM photo_context WHERE photo_id = ?1",
+                    link_method, confidence, author, linked_at FROM photo_context WHERE photo_id = ?1",
                 params![photo_id],
                 |row| {
                     Ok(PhotoContext {
@@ -651,7 +664,8 @@ impl Db {
                         instance_id: row.get(4)?,
                         link_method: row.get(5)?,
                         confidence: row.get(6)?,
-                        linked_at: row.get(7)?,
+                        author: row.get(7)?,
+                        linked_at: row.get(8)?,
                     })
                 },
             )
@@ -1075,6 +1089,7 @@ fn row_to_photo(row: &Row<'_>) -> rusqlite::Result<Photo> {
         instance_id: row.get(17)?,
         link_method: row.get(18)?,
         confidence: row.get(19)?,
+        author: row.get(20)?,
     })
 }
 
@@ -1163,6 +1178,7 @@ mod tests {
             instance_id: Some("123~region(jp)".to_string()),
             link_method: "log".to_string(),
             confidence: 1.0,
+            author: None,
             linked_at: now_string(),
         };
         db.set_photo_context(&ctx).unwrap();

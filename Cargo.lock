@@ -7278,6 +7278,8 @@ dependencies = [
  "image",
  "imgref",
  "jpegxl-rs",
+ "png 0.18.1",
+ "quick-xml",
  "ravif",
  "regex",
  "rgb",

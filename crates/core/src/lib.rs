@@ -8,6 +8,7 @@ pub mod db;
 pub mod error;
 pub mod linker;
 pub mod log_parser;
+pub mod metadata;
 pub mod model;
 pub mod photo_filename;
 pub mod scanner;

@@ -184,6 +184,7 @@ pub struct Photo {
     pub instance_id: Option<String>,
     pub link_method: Option<String>,
     pub confidence: Option<f64>,
+    pub author: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -195,6 +196,7 @@ pub struct PhotoContext {
     pub instance_id: Option<String>,
     pub link_method: String,
     pub confidence: f64,
+    pub author: Option<String>,
     pub linked_at: String,
 }
 
