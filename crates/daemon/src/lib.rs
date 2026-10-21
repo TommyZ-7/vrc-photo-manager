@@ -60,6 +60,7 @@ pub struct Daemon {
     thumbnail_tx: Option<mpsc::Sender<i64>>,
     thumbnail_handle: Option<JoinHandle<()>>,
     last_autostart_check: std::time::Instant,
+    last_heartbeat: std::time::Instant,
 }
 
 impl Daemon {
@@ -109,6 +110,7 @@ impl Daemon {
             thumbnail_tx: None,
             thumbnail_handle: None,
             last_autostart_check: std::time::Instant::now(),
+            last_heartbeat: std::time::Instant::now() - Duration::from_secs(10),
         })
     }
 
@@ -134,6 +136,7 @@ impl Daemon {
     }
 
     pub fn run_once(&mut self) -> Result<()> {
+        self.write_heartbeat();
         let report = self.scan_photos()?;
         for id in &report.new_ids {
             let path = {
@@ -184,6 +187,7 @@ impl Daemon {
         self.scan_photos()?;
         self.ingest_logs()?;
         self.link_unlinked()?;
+        self.write_heartbeat();
         self.setup_watchers()?;
         self.apply_autostart(self.settings.autostart);
         self.ensure_tray();
@@ -223,6 +227,9 @@ impl Daemon {
             if self.last_autostart_check.elapsed() >= Duration::from_secs(10) {
                 self.refresh_autostart_setting();
                 self.last_autostart_check = std::time::Instant::now();
+            }
+            if self.last_heartbeat.elapsed() >= Duration::from_secs(10) {
+                self.write_heartbeat();
             }
             self.poll_tray();
             thread::sleep(SCAN_INTERVAL);
@@ -269,7 +276,15 @@ impl Daemon {
                 continue;
             }
             let root_id = db.add_root(&root.to_string_lossy(), "reference")?;
+            let existing = db.photos_for_root(root_id)?;
             let root_report = scan_and_index(&db, root_id, &root)?;
+            let seen: std::collections::HashSet<&str> =
+                root_report.seen_paths.iter().map(String::as_str).collect();
+            for (id, path) in existing {
+                if !seen.contains(path.as_str()) {
+                    let _ = db.mark_missing(id);
+                }
+            }
             report.found += root_report.found;
             report.indexed += root_report.indexed;
             report.skipped += root_report.skipped;
@@ -393,6 +408,16 @@ impl Daemon {
             .as_ref()
             .map(|tail| tail.path.to_string_lossy().to_string());
         Ok(())
+    }
+
+    fn write_heartbeat(&mut self) {
+        if let Ok(db) = self.db.lock() {
+            let _ = db.set_setting(
+                "daemon_heartbeat",
+                &chrono::Utc::now().timestamp().to_string(),
+            );
+        }
+        self.last_heartbeat = std::time::Instant::now();
     }
 
     fn refresh_autostart_setting(&mut self) {
@@ -784,6 +809,11 @@ mod tests {
         let players = db.photo_players(photo.id).unwrap();
         assert_eq!(players.len(), 1);
         assert_eq!(players[0].display_name, "Mio");
+
+        std::fs::remove_file(&photo_path).unwrap();
+        daemon.run_once().unwrap();
+        let photo = db.photo_by_id(photo.id).unwrap().unwrap();
+        assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Missing);
     }
 
     #[test]

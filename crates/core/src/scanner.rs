@@ -27,6 +27,7 @@ pub struct ScanReport {
     pub indexed: usize,
     pub skipped: usize,
     pub new_ids: Vec<i64>,
+    pub seen_paths: Vec<String>,
 }
 
 /// Recursively scans a VRChat photo root.
@@ -142,6 +143,9 @@ pub fn scan_and_index(db: &Db, root_id: i64, root: &Path) -> Result<ScanReport> 
         ..Default::default()
     };
     for photo in photos {
+        report
+            .seen_paths
+            .push(photo.path.to_string_lossy().to_string());
         let new_photo = NewPhoto {
             root_id,
             rel_path: photo.rel_path,

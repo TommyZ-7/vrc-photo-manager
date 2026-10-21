@@ -80,9 +80,11 @@ pub struct App {
     monitor_world: Option<String>,
     monitor_instance: Option<String>,
     monitor_players: Vec<String>,
+    daemon_active: bool,
     world_input: Entity<InputState>,
     player_input: Entity<InputState>,
     tag_input: Entity<InputState>,
+    tag_edit_input: Entity<InputState>,
     photo_root_input: Entity<InputState>,
     log_dir_input: Entity<InputState>,
     search_results: Option<Vec<Photo>>,
@@ -102,6 +104,7 @@ impl App {
         let player_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("プレイヤー名 / ID"));
         let tag_input = cx.new(|cx| InputState::new(window, cx).placeholder("タグ"));
+        let tag_edit_input = cx.new(|cx| InputState::new(window, cx).placeholder("タグを追加"));
         let photo_root_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("例: C:/Users/you/Pictures/VRChat")
@@ -138,9 +141,11 @@ impl App {
             monitor_world: None,
             monitor_instance: None,
             monitor_players: Vec::new(),
+            daemon_active: false,
             world_input,
             player_input,
             tag_input,
+            tag_edit_input,
             photo_root_input,
             log_dir_input,
             search_results: None,
@@ -227,6 +232,14 @@ impl App {
 
     fn refresh_monitor(&mut self) {
         let now = Utc::now().timestamp();
+        self.daemon_active = self
+            .db
+            .get_setting("daemon_heartbeat")
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse::<i64>().ok())
+            .map(|timestamp| now - timestamp < 20)
+            .unwrap_or(false);
         self.monitor_world = None;
         self.monitor_instance = None;
         self.monitor_players.clear();
@@ -486,8 +499,21 @@ impl App {
                 h_flex()
                     .gap_1()
                     .items_center()
-                    .child(div().size(px(7.)).rounded_full().bg(rgb(GREEN)))
-                    .child(div().text_xs().text_color(rgb(MUTED)).child("監視中")),
+                    .child(div().size(px(7.)).rounded_full().bg(if self.daemon_active {
+                        rgb(GREEN)
+                    } else {
+                        rgb(MUTED_2)
+                    }))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .child(if self.daemon_active {
+                                "監視中"
+                            } else {
+                                "デーモン停止"
+                            }),
+                    ),
             )
             .child(
                 Button::new("reload")
@@ -997,6 +1023,31 @@ impl App {
                                         .child(format!("#{tag}"))
                                 }),
                             ))
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(Input::new(&self.tag_edit_input).flex_1())
+                                    .child(Button::new("add-tag").label("追加").small().on_click(
+                                        cx.listener(move |this, _, _, cx| {
+                                            let tag = this
+                                                .tag_edit_input
+                                                .read(cx)
+                                                .value()
+                                                .trim()
+                                                .to_string();
+                                            if tag.is_empty() {
+                                                return;
+                                            }
+                                            let mut tags = this.selected_tags.clone();
+                                            if !tags.contains(&tag) {
+                                                tags.push(tag);
+                                            }
+                                            let _ = this.db.set_photo_tags(id, &tags);
+                                            this.load_selected(id);
+                                            cx.notify();
+                                        }),
+                                    )),
+                            )
                             .child(self.section_label("圧縮履歴"))
                             .when(self.selected_derivatives.is_empty(), |this| {
                                 this.child(
