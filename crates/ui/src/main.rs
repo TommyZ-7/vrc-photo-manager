@@ -36,7 +36,6 @@ const TEXT: u32 = 0xeef3fb;
 const MUTED: u32 = 0xa3adbd;
 const MUTED_2: u32 = 0x768196;
 const BLUE: u32 = 0x66b3ff;
-const BLUE_DARK: u32 = 0x2f8fea;
 const ACCENT_SOFT: u32 = 0x1a2f47;
 const GREEN: u32 = 0x5eead4;
 const AMBER: u32 = 0xfbbf24;
@@ -2995,129 +2994,161 @@ impl App {
             .search_results
             .clone()
             .unwrap_or_else(|| self.photos.clone());
+        let message = self.message.clone();
         let cards: Vec<AnyElement> = results
             .iter()
             .map(|photo| self.photo_card(photo, PhotoCardLayout::Fixed, cx))
             .collect();
-        v_flex().flex_1().min_h_0().child(
-            h_flex()
-                .flex_1()
-                .min_h_0()
-                .child(
-                    v_flex()
-                        .w(px(290.))
-                        .h_full()
-                        .bg(rgb(SIDEBAR))
-                        .border_r_1()
-                        .border_color(rgb(BORDER))
-                        .p_4()
-                        .gap_3()
-                        .child(div().text_sm().font_semibold().child("絞り込み"))
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(MUTED_2))
-                                .child("カテゴリ間はAND、カテゴリ内はOR"),
-                        )
-                        .child(self.filter_field("ワールド", Input::new(&self.world_input)))
-                        .child(self.filter_field("プレイヤー", Input::new(&self.player_input)))
-                        .child(self.filter_field("タグ", Input::new(&self.tag_input)))
-                        .child(
-                            v_flex()
-                                .gap_1()
-                                .child(div().text_xs().text_color(rgb(MUTED)).child("日時"))
-                                .child(
-                                    h_flex()
-                                        .gap_1()
-                                        .child(self.preset_button("今日", Some(1), cx))
-                                        .child(self.preset_button("7日", Some(7), cx))
-                                        .child(self.preset_button("30日", Some(30), cx))
-                                        .child(self.preset_button("すべて", None, cx)),
-                                ),
-                        )
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(MUTED))
-                                        .child("お気に入りのみ"),
-                                )
-                                .child(div().flex_1())
-                                .child(
-                                    Switch::new("search-favorite")
-                                        .checked(self.search_favorite)
-                                        .on_click(cx.listener(|this, value, _, cx| {
-                                            this.search_favorite = *value;
-                                            this.run_search(cx);
-                                        })),
-                                ),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .child(
-                                    Button::new("search-run")
-                                        .label("検索")
-                                        .small()
-                                        .primary()
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| this.run_search(cx)),
-                                        ),
-                                )
-                                .child(
-                                    Button::new("search-clear")
-                                        .label("クリア")
-                                        .small()
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.search_results = None;
-                                            cx.notify();
-                                        })),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(rgb(MUTED_2))
-                                .child("結果は最大300枚です"),
-                        ),
-                )
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .h_full()
-                        .overflow_y_scrollbar()
-                        .p_5()
-                        .gap_3()
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_lg()
-                                        .font_semibold()
-                                        .child(format!("{} 枚", results.len())),
-                                )
-                                .child(div().text_xs().text_color(rgb(MUTED_2)).child("検索結果")),
-                        )
-                        .child(h_flex().flex_wrap().gap_3().children(cards))
-                        .when(results.is_empty(), |this| {
-                            this.child(
+        h_flex()
+            .flex_1()
+            .min_h_0()
+            .items_stretch()
+            .child(
+                glass_panel()
+                    .flex()
+                    .flex_col()
+                    .w(px(290.))
+                    .flex_shrink_0()
+                    .my(px(22.))
+                    .ml(px(26.))
+                    .p(px(16.))
+                    .gap(px(14.))
+                    .rounded(px(20.))
+                    .bg(rgb(PANEL))
+                    .child(
+                        div()
+                            .text_size(px(17.))
+                            .font_semibold()
+                            .text_color(rgb(TEXT))
+                            .child("絞り込み"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED_2))
+                            .child("カテゴリ間はAND、カテゴリ内はOR"),
+                    )
+                    .child(self.filter_field("ワールド", Input::new(&self.world_input)))
+                    .child(self.filter_field("プレイヤー", Input::new(&self.player_input)))
+                    .child(self.filter_field("タグ", Input::new(&self.tag_input)))
+                    .child(
+                        v_flex()
+                            .gap(px(6.))
+                            .child(
                                 div()
-                                    .p_5()
-                                    .rounded_lg()
-                                    .bg(rgb(PANEL))
-                                    .text_sm()
-                                    .text_color(rgb(MUTED))
-                                    .child("条件に一致する写真がありません"),
+                                    .text_size(px(10.))
+                                    .text_color(rgb(MUTED_2))
+                                    .child("日時"),
                             )
-                        }),
-                ),
-        )
+                            .child(
+                                h_flex()
+                                    .gap(px(4.))
+                                    .child(self.preset_button("今日", Some(1), cx))
+                                    .child(self.preset_button("7日", Some(7), cx))
+                                    .child(self.preset_button("30日", Some(30), cx))
+                                    .child(self.preset_button("すべて", None, cx)),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(MUTED))
+                                    .child("お気に入りのみ"),
+                            )
+                            .child(div().flex_1())
+                            .child(
+                                Switch::new("search-favorite")
+                                    .checked(self.search_favorite)
+                                    .on_click(cx.listener(|this, value, _, cx| {
+                                        this.search_favorite = *value;
+                                        this.run_search(cx);
+                                    })),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap(px(8.))
+                            .child(
+                                Button::new("search-run")
+                                    .label("検索")
+                                    .small()
+                                    .primary()
+                                    .on_click(cx.listener(|this, _, _, cx| this.run_search(cx))),
+                            )
+                            .child(
+                                Button::new("search-clear")
+                                    .label("クリア")
+                                    .small()
+                                    .ghost()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.search_results = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED_2))
+                            .child("結果は最大300枚です"),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .overflow_y_scrollbar()
+                    .px(px(26.))
+                    .pt(px(22.))
+                    .pb(px(26.))
+                    .gap(px(18.))
+                    .child(
+                        v_flex()
+                            .gap(px(4.))
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .child(
+                                        div()
+                                            .text_size(px(24.))
+                                            .font_semibold()
+                                            .text_color(rgb(TEXT))
+                                            .child(format!("{} 枚", results.len())),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(10.))
+                                            .text_color(rgb(MUTED_2))
+                                            .child("検索結果"),
+                                    ),
+                            )
+                            .when_some(message, |this, message| {
+                                this.child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .text_color(rgb(AMBER))
+                                        .truncate()
+                                        .child(message),
+                                )
+                            }),
+                    )
+                    .child(h_flex().flex_wrap().gap(px(16.)).children(cards))
+                    .when(results.is_empty(), |this| {
+                        this.child(
+                            glass_panel()
+                                .p(px(20.))
+                                .text_size(px(12.))
+                                .text_color(rgb(MUTED))
+                                .child("条件に一致する写真がありません"),
+                        )
+                    }),
+            )
     }
 
     fn import_dialog(&mut self, mode: ImportMode, cx: &mut Context<Self>) {
@@ -3203,12 +3234,17 @@ impl App {
         let active = self.search_days == days;
         div()
             .id(SharedString::from(format!("preset-{label}")))
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .bg(if active { rgb(BLUE_DARK) } else { rgb(PANEL_2) })
-            .text_xs()
-            .text_color(if active { rgb(0xffffff) } else { rgb(MUTED) })
+            .px(px(8.))
+            .py(px(3.))
+            .rounded_full()
+            .bg(if active {
+                rgb(ACCENT_SOFT)
+            } else {
+                rgb(PANEL_2)
+            })
+            .text_size(px(10.))
+            .font_medium()
+            .text_color(if active { rgb(BLUE) } else { rgb(MUTED) })
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.search_days = days;
@@ -3219,11 +3255,11 @@ impl App {
 
     fn filter_field(&self, label: &str, input: Input) -> impl IntoElement {
         v_flex()
-            .gap_1()
+            .gap(px(6.))
             .child(
                 div()
-                    .text_xs()
-                    .text_color(rgb(MUTED))
+                    .text_size(px(10.))
+                    .text_color(rgb(MUTED_2))
                     .child(label.to_string()),
             )
             .child(input.w_full())
