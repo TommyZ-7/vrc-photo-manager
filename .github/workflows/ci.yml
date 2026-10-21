@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - 'LICENSE'
+      - 'packaging/**/*.md'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.check.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: check
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          FILES=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
+          echo "Changed files:"
+          echo "$FILES"
+          if [ -z "$FILES" ]; then
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if echo "$FILES" | grep -qvE '(^docs/|\.md$|(^|/)LICENSE$|^packaging/.*\.md$)'; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  test:
+    needs: changes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Docs-only fast pass
+        if: needs.changes.outputs.docs_only == 'true'
+        run: echo "Docs-only change, skipping heavy checks."
+
+      - name: Install Linux dependencies
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            pkg-config \
+            cmake \
+            ninja-build \
+            clang \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libvulkan-dev \
+            libx11-dev \
+            libxcb1-dev \
+            libfontconfig1-dev \
+            libfreetype6-dev
+
+      - name: Install Rust
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust
+        if: needs.changes.outputs.docs_only != 'true'
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        if: needs.changes.outputs.docs_only != 'true'
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        if: needs.changes.outputs.docs_only != 'true'
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        if: needs.changes.outputs.docs_only != 'true'
+        run: cargo test --workspace
