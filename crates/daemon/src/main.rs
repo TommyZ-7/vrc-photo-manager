@@ -55,6 +55,22 @@ fn main() -> Result<()> {
         .db
         .or_else(vrc_photo_core::default_db_path)
         .unwrap_or_else(|| PathBuf::from("vrc-photo-manager.db"));
+    let _instance = if args.once || args.compress_pending {
+        None
+    } else {
+        match single_instance::SingleInstance::new("vrc-photo-manager-daemon") {
+            Ok(instance) if instance.is_single() => Some(instance),
+            Ok(_) => {
+                eprintln!("vrc-photo-daemon is already running");
+                return Ok(());
+            }
+            Err(error) => {
+                tracing::warn!(%error, "cannot acquire single-instance lock; continuing");
+                None
+            }
+        }
+    };
+
     let mut daemon = Daemon::open(db_path, args.photo_dir, args.log_dir)
         .context("cannot start VRC Photo Manager daemon")?;
     if args.no_tray {
