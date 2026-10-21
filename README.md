@@ -24,7 +24,7 @@ VRChatの写真を、撮影時のワールド・同接プレイヤー・日時�
 - [docs/README.md](docs/README.md) — 開発ドキュメントの索引
 - [docs/architecture.md](docs/architecture.md) — 全体構成
 - [docs/development.md](docs/development.md) — 環境構築・実行
-- [docs/release.md](docs/release.md) — リリースとLinuxパッケージ
+- [docs/release.md](docs/release.md) — リリースとパッケージ
 - [docs/roadmap.md](docs/roadmap.md) — 残作業と優先度
 - [CONTRIBUTING.md](CONTRIBUTING.md) — 開発フロー
 

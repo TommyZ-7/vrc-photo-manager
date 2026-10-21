@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: セキュリティ上の問題（非公開）
+    url: https://github.com/TommyZ-7/vrc-photo-manager/security/advisories/new
+    about: 脆弱性や個人情報の漏えいは公開 Issue に書かず、こちらから報告してください。
+  - name: 使い方の質問
+    url: https://github.com/TommyZ-7/vrc-photo-manager/discussions/categories/q-a
+    about: バグかどうか判断できない質問は Discussions へ。
