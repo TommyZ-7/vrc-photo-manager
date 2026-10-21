@@ -2250,7 +2250,16 @@ struct DemoAssets {
 fn prepare_demo(reset: bool) -> Result<(Db, DemoAssets), String> {
     let root = std::env::temp_dir().join("vrc-photo-manager-demo");
     if reset {
-        let _ = std::fs::remove_dir_all(&root);
+        match std::fs::remove_dir_all(&root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "demo ディレクトリを削除できません ({}): {error}",
+                    root.display()
+                ));
+            }
+        }
     }
     let photo_dir = root.join("photos");
     let thumb_dir = root.join("thumbnails");
