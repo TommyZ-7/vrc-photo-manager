@@ -19,6 +19,15 @@ VRChatの写真を、撮影時のワールド・同接プレイヤー・日時�
 - トレイ常駐、自動起動、デーモンのハートビート表示
 - 外部削除された写真の `missing` 検出
 
+## ドキュメント
+
+- [docs/README.md](docs/README.md) — 開発ドキュメントの索引
+- [docs/architecture.md](docs/architecture.md) — 全体構成
+- [docs/development.md](docs/development.md) — 環境構築・実行
+- [docs/release.md](docs/release.md) — リリースとLinuxパッケージ
+- [docs/roadmap.md](docs/roadmap.md) — 残作業と優先度
+- [CONTRIBUTING.md](CONTRIBUTING.md) — 開発フロー
+
 ## 構成
 
 ```text
