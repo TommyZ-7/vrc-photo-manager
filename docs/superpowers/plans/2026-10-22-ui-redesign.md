@@ -41,6 +41,7 @@ These are the failure modes most likely to bite a user and are easy to miss in a
 9. The inspector toggle (header button and `Ctrl+I`) must stay in sync with the persisted state and leave no blank column or stale grid when hidden. (Tasks 4, 7, 10)
 10. The full-screen viewer must close only on Esc, the close button, or a click on the dark area around the image — not on the image or details panel. (Task 8)
 11. `Ctrl/Cmd+B`, `Ctrl/Cmd+I`, and `Ctrl/Cmd+K` must be ignored while the viewer is open. (Tasks 4, 8)
+12. Viewer previous/next must use the list it was opened from (Photos or Search), clamp at the ends, and not steal Left/Right from the tag input. (Tasks 8, 12)
 
 ---
 
@@ -78,6 +79,7 @@ Branch: `feat/ui-redesign-core` in a new worktree cut from updated `main`.
   - `fn ease_motion(t: f32) -> f32`
   - `fn stagger_value(elapsed: f32, index: usize) -> f32`
   - `fn next_focus_index(current: usize, len: usize, reverse: bool) -> usize`
+  - `fn step_index(current: usize, len: usize, delta: isize) -> usize`
   - `fn parse_window_size(value: &str) -> Option<(f32, f32)>`
 
 - [ ] **Step 1: Replace the palette values and add the new tokens**
@@ -117,7 +119,7 @@ fn grid_columns(available_width: f32) -> usize {
 }
 ```
 
-`grid_available_width` subtracts the inspector column only when it is not collapsed. `viewer_details_width` interpolates 0..380 for the full-screen details panel. `format_count` rules: `< 1000` plain; `1000..=9999` comma-separated; `>= 10_000` compact with one decimal below 100k (`12.8k`) and no decimal at 100k+ (`100k`). `average_bgra` treats input as BGRA, ignores alpha `< 8`, and returns `0xRRGGBB`; empty/transparent input returns `0`. `lerp_color` interpolates each channel with `.round()` and clamps `t` to 0..1. `ease_motion` solves the cubic Bezier `(0.22, 0.8, 0.24, 1)` with 8 Newton iterations and clamps the result to 0..1. `stagger_value` uses `delay = min(index, 8) * 0.04`, `total = 0.6 + delay`, `local = ((elapsed * total - delay) / 0.6).clamp(0.0, 1.0)`, then `ease_motion(local)`. `next_focus_index` wraps in both directions and returns 0 for `len == 0`. `parse_window_size` accepts `<width>x<height>` or `X`, requires both numbers, and rejects dimensions below 320×240.
+`grid_available_width` subtracts the inspector column only when it is not collapsed. `viewer_details_width` interpolates 0..380 for the full-screen details panel. `format_count` rules: `< 1000` plain; `1000..=9999` comma-separated; `>= 10_000` compact with one decimal below 100k (`12.8k`) and no decimal at 100k+ (`100k`). `average_bgra` treats input as BGRA, ignores alpha `< 8`, and returns `0xRRGGBB`; empty/transparent input returns `0`. `lerp_color` interpolates each channel with `.round()` and clamps `t` to 0..1. `ease_motion` solves the cubic Bezier `(0.22, 0.8, 0.24, 1)` with 8 Newton iterations and clamps the result to 0..1. `stagger_value` uses `delay = min(index, 8) * 0.04`, `total = 0.6 + delay`, `local = ((elapsed * total - delay) / 0.6).clamp(0.0, 1.0)`, then `ease_motion(local)`. `next_focus_index` wraps in both directions and returns 0 for `len == 0`. `step_index` clamps the current index into `0..len`, applies the signed delta with saturation, and clamps to the ends; it returns 0 for `len == 0`. `parse_window_size` accepts `<width>x<height>` or `X`, requires both numbers, and rejects dimensions below 320×240.
 
 - [ ] **Step 3: Add the failing tests**
 
@@ -214,6 +216,15 @@ mod tests {
     }
 
     #[test]
+    fn viewer_step_clamps_at_both_ends() {
+        assert_eq!(step_index(1, 5, -1), 0);
+        assert_eq!(step_index(0, 5, -1), 0);
+        assert_eq!(step_index(2, 5, 1), 3);
+        assert_eq!(step_index(4, 5, 1), 4);
+        assert_eq!(step_index(0, 0, 1), 0);
+    }
+
+    #[test]
     fn window_size_parser_accepts_wxh() {
         assert_eq!(parse_window_size("1440x900"), Some((1440.0, 900.0)));
         assert_eq!(parse_window_size("1440X900"), Some((1440.0, 900.0)));
@@ -227,7 +238,7 @@ mod tests {
 - [ ] **Step 4: Run the tests**
 
 Run: `cargo test -p vrc-photo-ui`
-Expected: all 10 tests pass.
+Expected: all 11 tests pass.
 
 - [ ] **Step 5: Commit**
 
@@ -791,10 +802,14 @@ git commit -m "feat: add photo-tinted glass inspector"
   - `quick_look_focus_index: usize`
   - `quick_look_details_open: bool`
   - `quick_look_details_epoch: u64`
-  - focus handles `quick_look_close_focus`, `quick_look_details_focus`, `quick_look_favorite_focus`, `quick_look_compress_focus`, `quick_look_trash_focus`, `quick_look_add_tag_focus`
+  - `quick_look_photo_ids: Vec<i64>`
+  - `quick_look_index: usize`
+  - focus handles `quick_look_close_focus`, `quick_look_prev_focus`, `quick_look_next_focus`, `quick_look_details_focus`, `quick_look_favorite_focus`, `quick_look_compress_focus`, `quick_look_trash_focus`, `quick_look_add_tag_focus`
 - Produces:
   - `fn open_quick_look(&mut self, window: &mut Window, cx: &mut Context<Self>)`
   - `fn close_quick_look(&mut self, window: &mut Window, cx: &mut Context<Self>)`
+  - `fn step_viewer_photo(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>)`
+  - `fn viewer_source_ids(&self) -> Vec<i64>`
   - `fn toggle_quick_look_details(&mut self, window: &mut Window, cx: &mut Context<Self>)`
   - `fn cycle_quick_look_focus(&mut self, reverse: bool, window: &mut Window, cx: &mut Context<Self>)`
   - `fn quick_look_focus_order(&self, cx: &App) -> Vec<FocusHandle>`
@@ -809,11 +824,11 @@ git commit -m "feat: add photo-tinted glass inspector"
         cx: &mut Context<Self>,
         on_activate: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + Clone + 'static,
     ) -> AnyElement`
-- Actions: `OpenQuickLook`, `CloseQuickLook`, `QuickLookNextFocus`, `QuickLookPrevFocus`.
+- Actions: `OpenQuickLook`, `CloseQuickLook`, `ViewerPreviousPhoto`, `ViewerNextPhoto`, `QuickLookNextFocus`, `QuickLookPrevFocus`.
 
 - [ ] **Step 1: Add the state, focus handles, and actions**
 
-Create the six focus handles in `App::new` with `cx.focus_handle()`. Initialize `quick_look_open = false`, `quick_look_epoch = 0`, `quick_look_return_focus = None`, `quick_look_focus_index = 0`, `quick_look_details_open = false`, `quick_look_details_epoch = 0`.
+Create the eight focus handles in `App::new` with `cx.focus_handle()`. Initialize `quick_look_open = false`, `quick_look_epoch = 0`, `quick_look_return_focus = None`, `quick_look_focus_index = 0`, `quick_look_details_open = false`, `quick_look_details_epoch = 0`, `quick_look_photo_ids = Vec::new()`, `quick_look_index = 0`.
 
 Extend the existing `gpui_kit::actions!(ui, [...])` block with the five viewer actions:
 
@@ -824,6 +839,8 @@ gpui_kit::actions!(ui, [
     FocusSearch,
     OpenQuickLook,
     CloseQuickLook,
+    ViewerPreviousPhoto,
+    ViewerNextPhoto,
     QuickLookNextFocus,
     QuickLookPrevFocus,
 ]);
@@ -834,6 +851,8 @@ Add bindings:
 KeyBinding::new("space", OpenQuickLook, Some("photo_grid")),
 KeyBinding::new("enter", OpenQuickLook, Some("photo_grid")),
 KeyBinding::new("escape", CloseQuickLook, Some("quick_look")),
+KeyBinding::new("left", ViewerPreviousPhoto, Some("viewer_nav")),
+KeyBinding::new("right", ViewerNextPhoto, Some("viewer_nav")),
 KeyBinding::new("tab", QuickLookNextFocus, Some("quick_look")),
 KeyBinding::new("shift-tab", QuickLookPrevFocus, Some("quick_look")),
 ```
@@ -842,6 +861,8 @@ Attach the handlers on the root element:
 ```rust
 .on_action(cx.listener(|this, _: &OpenQuickLook, window, cx| this.open_quick_look(window, cx)))
 .on_action(cx.listener(|this, _: &CloseQuickLook, window, cx| this.close_quick_look(window, cx)))
+.on_action(cx.listener(|this, _: &ViewerPreviousPhoto, window, cx| this.step_viewer_photo(-1, window, cx)))
+.on_action(cx.listener(|this, _: &ViewerNextPhoto, window, cx| this.step_viewer_photo(1, window, cx)))
 .on_action(cx.listener(|this, _: &QuickLookNextFocus, window, cx| this.cycle_quick_look_focus(false, window, cx)))
 .on_action(cx.listener(|this, _: &QuickLookPrevFocus, window, cx| this.cycle_quick_look_focus(true, window, cx)))
 ```
@@ -851,12 +872,25 @@ Attach the handlers on the root element:
 `open_quick_look`:
 - Return if `self.selected_photo.is_none()` or already open.
 - `self.quick_look_return_focus = window.focused(cx);`
+- `self.quick_look_photo_ids = self.viewer_source_ids();`
+- `self.quick_look_index = self.quick_look_photo_ids.iter().position(|id| Some(*id) == self.selected).unwrap_or(0);`
 - `self.quick_look_open = true; self.quick_look_epoch += 1; self.quick_look_focus_index = 0;`
 - Keep `quick_look_details_open` at its current value (initial false, then the session remembers the last toggle). Reset `quick_look_details_epoch = 0` so the remembered panel state renders immediately without an entrance animation; only explicit toggles animate.
 - `window.focus(&self.quick_look_close_focus, cx);`
 - `cx.notify();`
 
 If the close button is not yet in the focus tree on the same frame, defer the focus with `window.defer(cx, |window, cx| window.focus(&close_focus, cx));`.
+
+`viewer_source_ids()`:
+- If `self.screen == Screen::Search` and `self.search_results` is `Some`, use those photo IDs.
+- Otherwise use `self.photos` IDs.
+- If the resulting list is empty or does not contain the selected ID, return `vec![selected_id]`.
+
+`step_viewer_photo(delta, window, cx)`:
+- Return if the viewer is closed or `quick_look_photo_ids` is empty.
+- Compute `next = step_index(self.quick_look_index, self.quick_look_photo_ids.len(), delta)`.
+- If `next == self.quick_look_index`, return (clamped at the end).
+- Set `quick_look_index = next`, call `self.select_photo(self.quick_look_photo_ids[next], cx)`, and notify. The viewer stays open and the library selection updates behind it. Keep the current focus on the top-bar navigation button; do not move focus.
 
 `close_quick_look`:
 - `self.quick_look_open = false;`
@@ -868,7 +902,7 @@ If the close button is not yet in the focus tree on the same frame, defer the fo
 - Always focus `self.quick_look_details_focus` so focus never remains inside a hidden panel.
 - `cx.notify();`
 
-`quick_look_focus_order(cx)` returns, in visual order: close, details toggle, then, only when `quick_look_details_open`, favorite, `self.tag_edit_input.read(cx).focus_handle(cx)`, add-tag, compress, trash.
+`quick_look_focus_order(cx)` returns, in visual order: close, previous, next, details toggle, then, only when `quick_look_details_open`, favorite, `self.tag_edit_input.read(cx).focus_handle(cx)`, add-tag, compress, trash.
 
 `cycle_quick_look_focus(reverse, window, cx)` uses `next_focus_index` and focuses the chosen handle. Update `quick_look_focus_index`.
 
@@ -893,12 +927,13 @@ Ignore `ToggleSidebar`, `ToggleInspector`, and `FocusSearch` while `quick_look_o
 `quick_look(cx)`:
 - `let Some(photo) = self.selected_photo.clone() else { return div().into_any_element(); };`
 - Root: `v_flex()` absolute at 0 on all four edges, `size_full`, `bg(rgb(0x05070a))`, `key_context("quick_look")`. Wrap the root in `with_animation(("viewer", self.quick_look_epoch), Animation::new(Duration::from_millis(240)).with_easing(ease_motion), |el, t| el.opacity(t))` for a fade-in. Add a full-window tint layer as the first child (behind the top bar and content row) at ~13% alpha using `rgba((color_for(&photo) << 8) | 0x22)` so the background picks up the photo's palette.
-- Top bar: 56 px, `h_flex`, horizontal padding 20, bottom border `rgba(0xffffff12)`, translucent dark background.
+- Top bar: 56 px, `h_flex`, horizontal padding 20, bottom border `rgba(0xffffff12)`, translucent dark background, `.key_context("viewer_nav")`.
   - Left: "閉じる Esc" focusable text button using `quick_look_close_focus`.
+  - Then "前へ" and "次へ" focusable text buttons using `quick_look_prev_focus` / `quick_look_next_focus`; they call `step_viewer_photo(-1/1, window, cx)`. Always render both; navigation clamps at the ends (muted at the boundary).
   - Middle: file name at 12 px `MUTED`, `.truncate()`, `.flex_1()`.
   - Right: "詳細" / "詳細を閉じる" focusable text button using `quick_look_details_focus`; calls `toggle_quick_look_details`.
 - Content row: `h_flex().flex_1().min_h_0()`.
-  - Image area: `flex_1`, `h_full`, `relative`, transparent over the tinted root, `.items_center().justify_center()`, `.p(px(24.))`, `.on_click` closes the viewer. Center an image container with `.aspect_ratio(if photo.height > 0 { photo.width as f32 / photo.height as f32 } else { 16.0 / 9.0 })`, `.max_w(relative(0.92))`, `.max_h(relative(0.92))`; the 1200 px preview fills it with `ObjectFit::Contain`. Attach a no-op `on_click` to the image container so clicking the photo does not close the viewer, while clicking the letterbox (the image area) does. If `self.preview` is None, show a placeholder card tinted with `color_for(photo)` and the text "プレビューを読み込めません".
+  - Image area: `flex_1`, `h_full`, `relative`, transparent over the tinted root, `.items_center().justify_center()`, `.p(px(24.))`, `.on_click` closes the viewer. Center an image container with `.aspect_ratio(if photo.height > 0 { photo.width as f32 / photo.height as f32 } else { 16.0 / 9.0 })`, `.max_w(relative(0.92))`, `.max_h(relative(0.92))`; wrap it in `with_animation(SharedString::from(format!("viewer-photo-{}-{}", photo.id, self.quick_look_epoch)), Animation::new(Duration::from_millis(220)).with_easing(ease_motion), |el, t| el.opacity(t))`. The 1200 px preview fills it with `ObjectFit::Contain`. Attach a no-op `on_click` to the image container so clicking the photo does not close the viewer, while clicking the letterbox (the image area) does. If `self.preview` is None, show a placeholder card tinted with `color_for(photo)` and the text "プレビューを読み込めません".
   - Details panel: always render the panel wrapper so the width can animate; render the `detail_body` content only when `quick_look_details_open`. Wrap the panel in `with_animation`:
 ```rust
 let open = self.quick_look_details_open;
@@ -933,13 +968,14 @@ Expected: PASS.
 Run: `cargo run -p vrc-photo-ui -- --demo`
 Expected:
 - Double-click, Space, and the inspector button open the full-screen viewer.
+- "前へ" / "次へ" and Left/Right move through the current Photos list or Search results; they clamp at the first/last photo; the library selection follows. Left/Right do not navigate while the tag input is focused.
 - The details panel starts closed; the top-bar "詳細" button opens/closes it; the image area expands when it closes.
 - Clicking the dark area around the image closes the viewer; clicking the image or panel does not.
 - Esc and the close button close it.
 - Favorite, tag add, compress, and two-step trash work in the panel.
 - Trash closes the viewer.
 - Focus returns to the grid after closing, and is moved to the details toggle when the panel closes.
-- Tab/Shift+Tab cycle close → details → (when open) favorite → tag input → add-tag → compress → trash.
+- Tab/Shift+Tab cycle close → previous → next → details → (when open) favorite → tag input → add-tag → compress → trash.
 
 - [ ] **Step 7: Commit**
 
@@ -1033,7 +1069,7 @@ Attach the screenshots to the PR (do not commit them).
 - Inspector toggle/persistence/Ctrl+I; grid columns 3/5 at 1280 and 4/6 at 1440; +1 when the sidebar collapses.
 - Card hover/intro; no thumbnail re-decode on scroll or resize.
 - Inspector tint and preview cross-fade.
-- Full-screen viewer open paths (double-click/Space/button), details toggle (top-bar button), image-area click closes, focus return, tag/favorite/compress/trash.
+- Full-screen viewer open paths (double-click/Space/button), details toggle (top-bar button), previous/next at both ends, image-area click closes, focus return, tag/favorite/compress/trash.
 - Space/Enter while typing in Search/Settings does not open the viewer.
 - Search, compression, monitor, settings still work.
 - Demo reset and window-size flags work.
@@ -1112,7 +1148,7 @@ Run: `cargo test -p vrc-photo-ui`
 Expected: PASS.
 
 Run: `cargo run -p vrc-photo-ui -- --demo`
-Expected: world/player/tag/date/favorite search still works; results show fixed-width cards; double-click opens the full-screen viewer (Space is validated on the Photos grid).
+Expected: world/player/tag/date/favorite search still works; results show fixed-width cards; double-click opens the full-screen viewer (Space is validated on the Photos grid); previous/next stays within the Search results.
 
 - [ ] **Step 4: Commit**
 
@@ -1201,7 +1237,7 @@ PR body: summary, screenshots, test commands, `Closes #27`.
 
 - Sidebar: 238/78 px, five icons, toggle, `Ctrl/Cmd+B`, persisted state.
 - Photos: adaptive columns (3/5 at 1280, 4/6 at 1440 depending on inspector/sidebar state), 330 px inspector column, inspector show/hide, glass approximation.
-- Full-screen viewer: replaces the detail screen; entry points; top-bar details toggle; focus behavior; actions.
+- Full-screen viewer: replaces the detail screen; entry points; top-bar details toggle; previous/next buttons and Left/Right; focus behavior; actions.
 - Inspector show/hide and `Ctrl/Cmd+I`.
 - Keyboard shortcuts table.
 - Motion: durations/easing, reduced-motion setting.

@@ -31,7 +31,7 @@ next to the grid; every control is text-first.
   players, tags, compression history, memo, favorite, compression, and trash.
 - Let the library's right inspector be shown/hidden without leaving the grid.
 - Open a full-screen image on double-click, with a Google Photos-style
-  toggleable right detail panel.
+  toggleable right detail panel and previous/next navigation.
 - Add restrained motion: 150–450 ms, `cubic-bezier(.22,.8,.24,1)`-equivalent,
   card stagger, hover lift, preview cross-fade, and modal entrance. Respect a
   user setting for reduced motion.
@@ -47,8 +47,9 @@ next to the grid; every control is text-first.
 - Date-grouped sections in the photo grid. `uniform_list` needs uniform row
   heights; the grid stays a flat newest-first virtual list.
 - A custom window titlebar or window controls. The native titlebar remains.
-- Arrow-key photo navigation, keyboard shortcut expansion beyond the ones
-  listed here, or the other items in #12.
+- Library-grid arrow-key navigation (the viewer's Left/Right is in scope),
+  keyboard shortcut expansion beyond the ones listed here, or the other
+  items in #12.
 - Windows visual verification. It is deferred to #9 (real-device/package QA).
 
 ## 4. Anti-goals
@@ -93,6 +94,7 @@ These were confirmed with the project owner during planning.
 | Library browsing flow | Specified: the library keeps its current grid + right inspector structure. The inspector can be shown/hidden. Double-click (and Space/Enter/button) opens a full-screen image viewer; its right detail panel is independently toggleable. |
 | Inspector visibility | Persisted as `ui_inspector_collapsed` (default false = visible). A text toggle in the library header and `Ctrl/Cmd+I` flip it. The column width animates over 300 ms; the grid recomputes columns from the target state. |
 | Full-screen details | 380 px right panel, closed on the first open. Toggle with the top-bar text button; later opens remember the last toggle for the session. Image area stays centered and expands when the panel closes. |
+| Full-screen navigation | "前へ" / "次へ" text buttons in the top bar, plus Left/Right keys while focus is in the top bar. Navigation uses the current Photos list or the current Search results, clamps at the ends, and updates the library selection behind the viewer. Keys do not navigate while a details-panel input has focus. |
 | Grid | Adaptive columns. Minimum card width 170 px, gap 16 px. At 1280×820 with the sidebar and inspector visible: 3 columns (~212 px cards); with the inspector hidden: 5. At 1440×900: 4 with the inspector visible, 6 hidden. Collapsing the sidebar adds one column. |
 | Storage card | Keep photo count + total library bytes. Do not add disk-capacity APIs or a usage meter. |
 | Reduced motion | A persisted Settings switch, applied through `cx.set_reduce_motion`. No OS-specific detection. |
@@ -107,7 +109,7 @@ These were confirmed with the project owner during planning.
 | Thumbnail color | Average color of the loaded 256 px thumbnail, fallback to the existing `scene_color(world)`. |
 | Preview fit | The full-screen viewer uses `ObjectFit::Contain` on a dark matte so photos are never cropped. |
 | Demo/QA data | Extend `--demo` with generated sample images/thumbnails and a temp file-backed DB so previews, color extraction, trash, and restart persistence can be exercised. Add `--demo-reset` and `--window-size WxH` for repeatable screenshots. |
-| Viewer focus scope | Tab/Shift+Tab cycle every interactive viewer control in visual order: close, details toggle, and (when the panel is open) favorite, tag input, add-tag, compress, trash. The shell is inert while the viewer is open; global `Ctrl/Cmd+B`, `Ctrl/Cmd+K`, and `Ctrl/Cmd+I` are ignored. |
+| Viewer focus scope | Tab/Shift+Tab cycle every interactive viewer control in visual order: close, previous, next, details toggle, and (when the panel is open) favorite, tag input, add-tag, compress, trash. The shell is inert while the viewer is open; global `Ctrl/Cmd+B`, `Ctrl/Cmd+K`, and `Ctrl/Cmd+I` are ignored. |
 | Card stagger scope | The intro runs for the first 24 cards of each grid generation, with the stagger index capped at 8. A `seen` set prevents replay when `uniform_list` remounts a row after scrolling. |
 | Last sync | Derived from `daemon_heartbeat` age. No new DB field. Show "最終同期 N秒前" while active, "デーモン停止" otherwise, and "デモデータ" in demo mode. |
 | Small windows | Set a 1080×700 minimum window size and keep the inspector toggleable. At 1080 with the inspector visible the grid uses 2 columns; hiding the inspector or collapsing the sidebar adds columns. |
@@ -195,13 +197,19 @@ No new dependencies.
 
 - Full-window overlay above the shell. Dark background with a subtle tint
   from the selected photo's average color.
-- Top bar (56 px): "閉じる Esc" on the left, file name in the middle, and a
-  "詳細" / "詳細を閉じる" toggle on the right. Text buttons only.
+- Top bar (56 px): "閉じる Esc" on the left, "前へ" / "次へ" navigation
+  buttons, the file name, and a "詳細" / "詳細を閉じる" toggle on the right.
+  Text buttons only. The top bar carries the `viewer_nav` key context; Left/
+  Right navigate while focus is in the top bar. The buttons clamp at the
+  first/last photo (no-op at the boundary).
 - Content row: image area (flex) + details panel (380 px when open, 0 when
   closed). The image uses the 1200 px preview, `Contain`, centered with 24 px
   padding. The panel is scrollable and uses the shared `detail_body`.
 - Double-click a photo card to open. Space/Enter while the grid is focused
   and the inspector's "全画面表示" button are equivalent entry points.
+- Navigation source: the current Photos list, or the current Search results
+  when opened from Search. The viewer keeps its own index into that list and
+  updates the library selection (grid + inspector) as it moves.
 - Details panel: closed on the first open. Toggle with the top-bar text
   button. The panel width animates over 300 ms; the image area expands to
   fill the space. Later opens remember the last toggle for the session.
@@ -209,8 +217,8 @@ No new dependencies.
   (not the image itself, not the panel). The image sits in an aspect-ratio
   box so the photo and the letterbox have distinct click targets.
 - Focus: opening focuses the close button; `Tab`/`Shift+Tab` cycle the close
-  button, the details toggle, and, when the panel is open, favorite, tag
-  input, add-tag, compress, and trash. Closing restores the previously
+  button, previous, next, the details toggle, and, when the panel is open,
+  favorite, tag input, add-tag, compress, and trash. Closing restores the previously
   focused element (the photo grid in normal use). The shell is inert while
   the viewer is open: pointer events hit the viewer, and global
   `Ctrl/Cmd+B`, `Ctrl/Cmd+K`, `Ctrl/Cmd+I` are ignored.
@@ -250,7 +258,8 @@ switch.
   inspector tint is lerped from `previous_color` to the new average color
   over the same 260 ms.
 - Full-screen viewer: the whole viewer fades in over 240 ms; the details
-  panel width animates over 300 ms. No scale transform.
+  panel width animates over 300 ms; a newly selected photo fades in over
+  220 ms. No scale transform.
 - Reduced motion: `with_animation` automatically renders the end state when
   `cx.reduce_motion()` is true. Non-animation transitions must also be
   short-circuited by checking the setting.
@@ -278,10 +287,12 @@ New `App` state:
 - `quick_look_open`, `quick_look_epoch`, `quick_look_return_focus:
   Option<FocusHandle>`, `quick_look_focus_index`
 - `quick_look_details_open`, `quick_look_details_epoch`
+- `quick_look_photo_ids: Vec<i64>`, `quick_look_index: usize`
 - `intro_seen: HashSet<i64>` (cleared on a new grid generation)
 - `daemon_age_secs: Option<i64>` (derived from `daemon_heartbeat`)
 - `demo_assets: Option<DemoAssets>` (photo dir + thumbnail dir)
 - Focus handles: `photo_grid_focus`, `quick_look_close_focus`,
+  `quick_look_prev_focus`, `quick_look_next_focus`,
   `quick_look_details_focus`, `quick_look_favorite_focus`,
   `quick_look_compress_focus`, `quick_look_trash_focus`,
   `quick_look_add_tag_focus`
@@ -320,6 +331,7 @@ Keyboard bindings (registered in `main()` with `cx.bind_keys`):
 | `ctrl-k` / `cmd-k` | global | Go to Search, focus world input |
 | `space` / `enter` | `photo_grid` | Open full-screen viewer |
 | `escape` | `quick_look` | Close full-screen viewer |
+| `left` / `right` | `viewer_nav` | Previous / next photo |
 | `tab` / `shift-tab` | `quick_look` | Cycle viewer focus |
 
 The photo grid is a single focus stop. Clicking a card focuses it, so
@@ -342,8 +354,8 @@ the grid bindings.
   - inspector show/hide, persistence, and grid columns with it hidden
   - grid columns at both sizes and in rail mode
   - selection cross-fade and inspector background color
-  - full-screen viewer open/close paths, details toggle, focus return,
-    tag/favorite/compress/trash
+  - full-screen viewer open/close paths, details toggle, previous/next at
+    the ends, focus return, tag/favorite/compress/trash
   - reduced-motion switch
   - search/compression/monitor/settings behavior unchanged
 - Windows visual verification is tracked in #9.
