@@ -12,6 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
 gpui-kit = "=0.8.0"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+smallvec = "1"
 vrc-photo-core = { path = "../core" }

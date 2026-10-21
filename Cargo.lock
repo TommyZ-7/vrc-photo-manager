@@ -7313,8 +7313,10 @@ name = "vrc-photo-ui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "gpui-kit",
  "image",
+ "smallvec",
  "vrc-photo-core",
 ]
 
