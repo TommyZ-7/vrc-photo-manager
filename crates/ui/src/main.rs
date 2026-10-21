@@ -125,7 +125,6 @@ pub struct App {
     sidebar_motion_epoch: u64,
     inspector_collapsed: bool,
     inspector_epoch: u64,
-    #[allow(dead_code)] // Read by the sidebar hover styling in the next task.
     hovered_nav: Option<Screen>,
     daemon_age_secs: Option<i64>,
     photos: Vec<Photo>,
@@ -379,6 +378,7 @@ impl App {
     fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
         self.sidebar_collapsed = !self.sidebar_collapsed;
         self.sidebar_motion_epoch = self.sidebar_motion_epoch.wrapping_add(1);
+        self.hovered_nav = None;
         self.settings.ui_sidebar_collapsed = self.sidebar_collapsed;
         let _ = self.settings.save(&self.db);
         cx.notify();
@@ -526,109 +526,359 @@ impl App {
         cx.notify();
     }
 
-    fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
-            .w(px(210.))
+    fn sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let collapsed = self.sidebar_collapsed;
+        let epoch = self.sidebar_motion_epoch;
+        let reveal_duration = if epoch == 0 {
+            Duration::ZERO
+        } else {
+            Duration::from_millis(320)
+        };
+        let photo_count = format_count(self.stats.photo_count);
+        let pending_jobs = self
+            .jobs
+            .iter()
+            .filter(|job| matches!(job.status, QueueStatus::Pending | QueueStatus::Processing))
+            .count();
+        let compression_count = (pending_jobs > 0).then(|| format_count(pending_jobs as i64));
+
+        let brand_text = v_flex()
+            .min_w_0()
+            .gap(px(0.))
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .font_semibold()
+                    .text_color(rgb(TEXT))
+                    .child("VRC Photo"),
+            )
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(rgb(MUTED_2))
+                    .child(format!("Manager · {photo_count}枚")),
+            )
+            .with_animation(
+                SharedString::from(format!("sidebar-brand-{epoch}")),
+                Animation::new(reveal_duration)
+                    .with_easing(ease_motion)
+                    .with_max_fps(60.0),
+                move |el, t| {
+                    el.w(px(sidebar_reveal_width(collapsed, t)))
+                        .opacity(if collapsed { 1.0 - t } else { t })
+                },
+            );
+
+        let body = v_flex()
+            .relative()
+            .flex_shrink_0()
             .h_full()
+            .py(px(16.))
+            .px(px(12.))
+            .gap(px(3.))
             .bg(rgb(SIDEBAR))
             .border_r_1()
-            .border_color(rgb(BORDER))
-            .p_3()
-            .gap_1()
+            .border_color(rgba(0xffffff14))
             .child(
                 h_flex()
+                    .h(px(34.))
+                    .px(px(2.))
+                    .gap(px(10.))
                     .items_center()
-                    .gap_2()
-                    .px_2()
-                    .py_3()
                     .child(
                         div()
-                            .size(px(30.))
-                            .rounded_md()
-                            .bg(rgb(BLUE_DARK))
+                            .size(px(34.))
+                            .rounded(px(10.))
                             .flex()
                             .items_center()
                             .justify_center()
-                            .text_xs()
+                            .bg(linear_gradient(
+                                135.,
+                                linear_color_stop(rgb(BLUE), 0.),
+                                linear_color_stop(rgb(PURPLE), 1.),
+                            ))
+                            .text_size(px(12.))
                             .font_semibold()
                             .text_color(rgb(0xffffff))
                             .child("VP"),
                     )
-                    .child(
-                        v_flex()
-                            .gap(px(0.))
-                            .child(div().text_sm().font_semibold().child("VRC Photo"))
-                            .child(div().text_xs().text_color(rgb(MUTED_2)).child("Manager")),
-                    ),
+                    .child(brand_text),
             )
-            .child(div().h(px(8.)))
-            .child(self.nav_item("写真", Screen::Photos, cx))
-            .child(self.nav_item("検索", Screen::Search, cx))
-            .child(self.nav_item("圧縮", Screen::Compression, cx))
-            .child(self.nav_item("監視", Screen::Monitor, cx))
-            .child(self.nav_item("設定", Screen::Settings, cx))
+            .child(div().h(px(12.)))
+            .child(self.nav_item(
+                "写真",
+                Screen::Photos,
+                IconName::GalleryVerticalEnd,
+                Some(photo_count.clone()),
+                cx,
+            ))
+            .child(self.nav_item("検索", Screen::Search, IconName::Search, None, cx))
+            .child(self.nav_item(
+                "圧縮",
+                Screen::Compression,
+                IconName::Minimize,
+                compression_count,
+                cx,
+            ))
+            .child(self.nav_item("監視", Screen::Monitor, IconName::Eye, None, cx))
+            .child(self.nav_item("設定", Screen::Settings, IconName::Settings, None, cx))
             .child(div().flex_1())
+            .when(!collapsed, |this| {
+                this.child(
+                    v_flex()
+                        .p(px(11.))
+                        .gap(px(3.))
+                        .rounded(px(13.))
+                        .bg(rgb(PANEL))
+                        .border_1()
+                        .border_color(rgba(0xffffff0f))
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(MUTED_2))
+                                .child("ライブラリ"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .font_semibold()
+                                .text_color(rgb(TEXT))
+                                .child(format!("{photo_count} 枚")),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(MUTED))
+                                .child(format_bytes(self.stats.total_bytes)),
+                        ),
+                )
+            })
             .child(
-                div()
-                    .p_3()
-                    .rounded_md()
-                    .bg(rgb(PANEL))
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .child(div().text_xs().text_color(rgb(MUTED_2)).child("ライブラリ"))
+                h_flex()
+                    .h(px(26.))
+                    .gap(px(7.))
+                    .items_center()
+                    .when(collapsed, |this| this.justify_center())
+                    .when(!collapsed, |this| this.px(px(9.)))
                     .child(
                         div()
-                            .text_sm()
-                            .font_semibold()
-                            .child(format!("{} 枚", self.stats.photo_count)),
+                            .size(px(6.))
+                            .rounded_full()
+                            .bg(rgb(if self.daemon_active { GREEN } else { MUTED_2 })),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(MUTED))
-                            .child(format_bytes(self.stats.total_bytes)),
-                    ),
+                    .when(!collapsed, |this| {
+                        this.child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(if self.daemon_active { MUTED } else { MUTED_2 }))
+                                .child(if self.daemon_active {
+                                    "監視中"
+                                } else {
+                                    "デーモン停止"
+                                }),
+                        )
+                    }),
             )
             .child(
                 div()
-                    .px_2()
-                    .py_2()
-                    .text_xs()
+                    .h(px(20.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_size(px(if collapsed { 9. } else { 10. }))
                     .text_color(rgb(MUTED_2))
-                    .child(if self.demo { "DEMO DATA" } else { "v0.1.0" }),
-            )
+                    .child(if self.demo_assets.is_some() {
+                        "DEMO DATA".to_string()
+                    } else {
+                        format!("v{}", env!("CARGO_PKG_VERSION"))
+                    }),
+            );
+
+        body.with_animation(
+            ("sidebar", epoch),
+            Animation::new(if epoch == 0 {
+                Duration::ZERO
+            } else {
+                Duration::from_millis(440)
+            })
+            .with_easing(ease_motion)
+            .with_max_fps(60.0),
+            move |el, t| {
+                let from = sidebar_width(!collapsed);
+                let to = sidebar_width(collapsed);
+                el.w(px(from + (to - from) * t))
+            },
+        )
+        .into_any_element()
     }
 
     fn nav_item(
-        &self,
+        &mut self,
         label: &'static str,
         screen: Screen,
+        icon: IconName,
+        count: Option<String>,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
         let active =
             self.screen == screen || (screen == Screen::Photos && self.screen == Screen::Detail);
+        let collapsed = self.sidebar_collapsed;
+        let epoch = self.sidebar_motion_epoch;
+        let reveal_duration = if epoch == 0 {
+            Duration::ZERO
+        } else {
+            Duration::from_millis(320)
+        };
+        let icon_color = if active { BLUE } else { MUTED };
+        let icon_element = if active {
+            Icon::new(icon)
+                .with_size(px(17.))
+                .text_color(rgb(icon_color))
+        } else {
+            Icon::new(icon).with_size(px(17.))
+        };
+
+        let label_block = h_flex()
+            .min_w_0()
+            .items_center()
+            .justify_between()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .child(div().text_size(px(12.)).child(label))
+            .when_some(count, |this, count| {
+                this.child(
+                    div()
+                        .text_size(px(10.))
+                        .font_family("monospace")
+                        .text_color(rgb(if active { BLUE } else { MUTED_2 }))
+                        .child(count),
+                )
+            })
+            .with_animation(
+                SharedString::from(format!("sidebar-label-{label}-{epoch}")),
+                Animation::new(reveal_duration)
+                    .with_easing(ease_motion)
+                    .with_max_fps(60.0),
+                move |el, t| {
+                    el.w(px(sidebar_reveal_width(collapsed, t)))
+                        .opacity(if collapsed { 1.0 - t } else { t })
+                },
+            );
+
         h_flex()
             .id(label)
+            .relative()
+            .h(px(40.))
             .w_full()
-            .px_3()
-            .py_2()
-            .gap_2()
-            .rounded_md()
+            .rounded(px(11.))
             .cursor_pointer()
+            .items_center()
+            .when(collapsed, |this| this.justify_center())
+            .when(!collapsed, |this| this.px(px(11.)).gap(px(11.)))
             .when(active, |this| {
-                this.bg(rgb(0x1b2a3b)).text_color(rgb(0xd7ecff))
+                this.bg(rgb(ACCENT_SOFT)).text_color(rgb(0xeaf4ff))
             })
-            .when(!active, |this| this.text_color(rgb(MUTED)))
+            .when(!active, |this| {
+                this.text_color(rgb(MUTED))
+                    .hover(|this| this.bg(rgb(0x161d28)).text_color(rgb(TEXT)))
+            })
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                let next = hovered.then_some(screen);
+                if this.hovered_nav != next {
+                    this.hovered_nav = next;
+                    cx.notify();
+                }
+            }))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.screen = screen;
                 cx.notify();
             }))
-            .child(div().size(px(6.)).rounded_full().bg(if active {
-                rgb(BLUE)
-            } else {
-                rgb(MUTED_2)
-            }))
-            .child(div().text_sm().child(label))
+            .when(active, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top(px(11.))
+                        .left(px(if collapsed { 5. } else { -1. }))
+                        .w(px(2.))
+                        .h(px(18.))
+                        .rounded_full()
+                        .bg(rgb(BLUE)),
+                )
+            })
+            .child(icon_element)
+            .child(label_block)
+            .when(collapsed && self.hovered_nav == Some(screen), |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .left(px(56.))
+                        .top(px(8.))
+                        .px(px(8.))
+                        .py(px(5.))
+                        .rounded(px(7.))
+                        .bg(rgb(0x161c26))
+                        .border_1()
+                        .border_color(rgb(BORDER_STRONG))
+                        .text_size(px(10.))
+                        .text_color(rgb(TEXT))
+                        .whitespace_nowrap()
+                        .child(label),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn rail_toggle(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let collapsed = self.sidebar_collapsed;
+        let epoch = self.sidebar_motion_epoch;
+        let icon = if collapsed {
+            IconName::ChevronRight
+        } else {
+            IconName::ChevronLeft
+        };
+        let tooltip = if collapsed {
+            "サイドバーを展開 (Ctrl+B)"
+        } else {
+            "サイドバーを最小化 (Ctrl+B)"
+        };
+
+        div()
+            .absolute()
+            .top(px(18.))
+            .left(px(sidebar_width(collapsed) - 12.))
+            .child(
+                Button::new("rail-toggle")
+                    .ghost()
+                    .icon(icon)
+                    .tooltip(tooltip)
+                    .size(px(24.))
+                    .rounded_full()
+                    .bg(rgb(0x131923))
+                    .border_1()
+                    .border_color(rgb(BORDER_STRONG))
+                    .text_color(rgb(MUTED))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
+            )
+            .with_animation(
+                ("rail-toggle", epoch),
+                Animation::new(if epoch == 0 {
+                    Duration::ZERO
+                } else {
+                    Duration::from_millis(440)
+                })
+                .with_easing(ease_motion)
+                .with_max_fps(60.0),
+                move |el, t| {
+                    let from = sidebar_width(!collapsed);
+                    let to = sidebar_width(collapsed);
+                    el.left(px(from + (to - from) * t - 12.))
+                },
+            )
+            .into_any_element()
     }
 
     fn topbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2269,6 +2519,7 @@ impl App {
 impl Render for App {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
+            .relative()
             .size_full()
             .bg(rgb(BG))
             .font_family("Noto Sans JP")
@@ -2286,6 +2537,7 @@ impl Render for App {
                     .child(self.topbar(cx))
                     .child(self.content(cx)),
             )
+            .child(self.rail_toggle(cx))
     }
 }
 
@@ -2551,6 +2803,32 @@ fn load_preview(path: &Path) -> Option<Arc<RenderImage>> {
     }
     let frame = image::Frame::new(buffer);
     Some(Arc::new(RenderImage::new(SmallVec::from_elem(frame, 1))))
+}
+
+fn glass_panel() -> Div {
+    div()
+        .rounded(px(18.))
+        .bg(rgba(0x141922c4))
+        .border_1()
+        .border_color(rgba(0xffffff14))
+        .shadow(vec![
+            BoxShadow::new(px(0.), px(24.), rgba(0x00000060).into()).blur_radius(px(60.)),
+            BoxShadow::new(px(0.), px(1.), rgba(0xffffff0d).into())
+                .inset()
+                .blur_radius(px(0.)),
+        ])
+}
+
+fn chip(label: &str, active: bool) -> Div {
+    div()
+        .px(px(8.))
+        .py(px(3.))
+        .rounded_full()
+        .text_size(px(10.))
+        .font_medium()
+        .bg(rgb(if active { ACCENT_SOFT } else { PANEL_2 }))
+        .text_color(rgb(if active { BLUE } else { MUTED }))
+        .child(label.to_string())
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -2829,34 +3107,36 @@ fn main() {
         }
         return;
     }
-    gpui_kit::application().run(move |cx| {
-        cx.text_system()
-            .add_fonts(vec![Cow::Borrowed(
-                include_bytes!("../assets/NotoSansJP.ttf").as_slice(),
-            )])
-            .expect("load Noto Sans JP");
-        gpui_kit::init(cx);
-        cx.bind_keys([
-            KeyBinding::new("ctrl-b", ToggleSidebar, None),
-            KeyBinding::new("cmd-b", ToggleSidebar, None),
-            KeyBinding::new("ctrl-i", ToggleInspector, None),
-            KeyBinding::new("cmd-i", ToggleInspector, None),
-            KeyBinding::new("ctrl-k", FocusSearch, None),
-            KeyBinding::new("cmd-k", FocusSearch, None),
-        ]);
-        let (width, height) = options.window_size;
-        let window_options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(width), px(height)), cx)),
-            window_min_size: Some(size(px(1080.), px(700.))),
-            ..Default::default()
-        };
-        let (_, app) = gpui_kit::open_window(window_options, cx, |window, cx| {
-            window.set_window_title("VRC Photo Manager");
-            cx.new(|cx| App::new(window, cx, &options))
-        })
-        .expect("open window");
-        register_global_actions(cx, app);
-    });
+    gpui_kit::application()
+        .with_assets(gpui_kit::assets::Assets)
+        .run(move |cx| {
+            cx.text_system()
+                .add_fonts(vec![Cow::Borrowed(
+                    include_bytes!("../assets/NotoSansJP.ttf").as_slice(),
+                )])
+                .expect("load Noto Sans JP");
+            gpui_kit::init(cx);
+            cx.bind_keys([
+                KeyBinding::new("ctrl-b", ToggleSidebar, None),
+                KeyBinding::new("cmd-b", ToggleSidebar, None),
+                KeyBinding::new("ctrl-i", ToggleInspector, None),
+                KeyBinding::new("cmd-i", ToggleInspector, None),
+                KeyBinding::new("ctrl-k", FocusSearch, None),
+                KeyBinding::new("cmd-k", FocusSearch, None),
+            ]);
+            let (width, height) = options.window_size;
+            let window_options = WindowOptions {
+                window_bounds: Some(WindowBounds::centered(size(px(width), px(height)), cx)),
+                window_min_size: Some(size(px(1080.), px(700.))),
+                ..Default::default()
+            };
+            let (_, app) = gpui_kit::open_window(window_options, cx, |window, cx| {
+                window.set_window_title("VRC Photo Manager");
+                cx.new(|cx| App::new(window, cx, &options))
+            })
+            .expect("open window");
+            register_global_actions(cx, app);
+        });
 }
 
 #[cfg(test)]
