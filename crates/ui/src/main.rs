@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use chrono::Utc;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::switch::Switch;
@@ -54,6 +54,12 @@ const CARD_STAGGER_SECS: f32 = 0.04;
 const CARD_STAGGER_MAX: usize = 8;
 
 gpui_kit::actions!(ui, [ToggleSidebar, ToggleInspector, FocusSearch]);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PhotoCardLayout {
+    Grid { index: usize },
+    Fixed,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
@@ -135,6 +141,12 @@ pub struct App {
     selected_derivatives: Vec<Derivative>,
     compressed_ids: HashSet<i64>,
     thumbnails: HashMap<i64, Arc<RenderImage>>,
+    thumbnail_colors: HashMap<i64, u32>,
+    grid_columns: usize,
+    grid_epoch: u64,
+    hovered_photo: Option<i64>,
+    intro_seen: HashSet<i64>,
+    photo_grid_focus: FocusHandle,
     preview: Option<Arc<RenderImage>>,
     profiles: Vec<CompressionProfile>,
     profile_index: usize,
@@ -192,6 +204,7 @@ impl App {
                 .placeholder("取り込み先フォルダ")
                 .default_value(initial_settings.import_dir().display().to_string())
         });
+        let photo_grid_focus = cx.focus_handle();
         let mut app = Self {
             db,
             screen: Screen::Photos,
@@ -209,6 +222,12 @@ impl App {
             selected_derivatives: Vec::new(),
             compressed_ids: HashSet::new(),
             thumbnails: HashMap::new(),
+            thumbnail_colors: HashMap::new(),
+            grid_columns: 0,
+            grid_epoch: 0,
+            hovered_photo: None,
+            intro_seen: HashSet::new(),
+            photo_grid_focus,
             preview: None,
             profiles: Vec::new(),
             profile_index: 0,
@@ -246,6 +265,12 @@ impl App {
         app.message = message;
         if let Some(id) = app.photos.first().map(|photo| photo.id) {
             app.select_photo(id, cx);
+            // The grid is not mounted until the first frame, so focus it once
+            // the initial render has attached it to the focus tree.
+            let photo_grid_focus = app.photo_grid_focus.clone();
+            window.defer(cx, move |window, cx| {
+                window.focus(&photo_grid_focus, cx);
+            });
         }
         if !app.demo
             && !app.daemon_active
@@ -324,6 +349,9 @@ impl App {
     }
 
     fn reload(&mut self) {
+        self.grid_epoch = self.grid_epoch.wrapping_add(1);
+        self.intro_seen.clear();
+        self.hovered_photo = None;
         self.photos = self
             .db
             .list_photos(300, 0, vrc_photo_core::model::PhotoSort::Newest)
@@ -406,6 +434,7 @@ impl App {
 
     fn load_thumbnails(&mut self) {
         self.thumbnails.clear();
+        self.thumbnail_colors.clear();
         for photo in self.photos.iter().take(300) {
             let path = match &self.demo_assets {
                 Some(assets) => demo_thumb_path(assets, photo.id),
@@ -415,9 +444,21 @@ impl App {
                 },
             };
             if let Some(image) = load_render(&path) {
+                let color = image
+                    .as_bytes(0)
+                    .map(average_bgra)
+                    .unwrap_or_else(|| scene_color(photo.world_name.as_deref().unwrap_or("")));
+                self.thumbnail_colors.insert(photo.id, color);
                 self.thumbnails.insert(photo.id, image);
             }
         }
+    }
+
+    fn color_for(&self, photo: &Photo) -> u32 {
+        self.thumbnail_colors
+            .get(&photo.id)
+            .copied()
+            .unwrap_or_else(|| scene_color(photo.world_name.as_deref().unwrap_or("")))
     }
 
     fn load_selected(&mut self, id: i64) {
@@ -962,200 +1003,404 @@ impl App {
     }
 
     fn photos_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let inspector_visible = !self.inspector_collapsed;
         v_flex()
             .flex_1()
             .min_h_0()
-            .child(
-                h_flex()
-                    .px_5()
-                    .py_3()
-                    .gap_2()
-                    .items_center()
-                    .border_b_1()
-                    .border_color(rgb(BORDER))
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_xs()
-                            .text_color(rgb(MUTED))
-                            .child(format!(
-                                "{} 枚 · 圧縮済み {} 枚 · 選択 {}",
-                                self.stats.photo_count,
-                                self.stats.compressed_count,
-                                if self.selected.is_some() { 1 } else { 0 }
-                            )),
-                    )
-                    .child(self.badge("ワールド", BLUE, 0x14283d))
-                    .child(self.badge("プレイヤー", MUTED, PANEL_2))
-                    .child(self.badge("日時", MUTED, PANEL_2))
-                    .child(self.badge("タグ", MUTED, PANEL_2))
-                    .child(
-                        Button::new("import-copy")
-                            .label("コピー取込")
-                            .small()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.import_dialog(ImportMode::Copy, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("import-move")
-                            .label("移動取込")
-                            .small()
-                            .primary()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.import_dialog(ImportMode::Move, cx);
-                            })),
-                    ),
-            )
+            .child(self.photos_header(cx))
             .child(
                 h_flex()
                     .flex_1()
                     .min_h_0()
                     .child(self.photo_list(cx))
-                    .child(self.inspector(cx)),
+                    .when(inspector_visible, |this| this.child(self.inspector(cx))),
             )
+    }
+
+    fn photos_header(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let sync = if self.demo_assets.is_some() {
+            "デモデータ".to_string()
+        } else if let Some(age) = self.daemon_age_secs
+            && age < 20
+        {
+            format!("最終同期 {age}秒前")
+        } else {
+            "デーモン停止".to_string()
+        };
+        let subtitle = format!(
+            "{} 枚 · {} · {}",
+            format_count(self.stats.photo_count),
+            format_bytes(self.stats.total_bytes),
+            sync
+        );
+        let message = self.message.clone();
+        let inspector_collapsed = self.inspector_collapsed;
+        // gpui-kit's default component theme is light; ghost labels would be
+        // unreadable on the dark surface, so the text buttons use our tokens.
+        let text_button = ButtonCustomVariant::new(cx)
+            .foreground(rgb(TEXT).into())
+            .hover(rgba(0x1a2130ff).into())
+            .active(rgba(0x232b38ff).into());
+
+        v_flex()
+            .flex_shrink_0()
+            .child(
+                h_flex()
+                    .h(px(72.))
+                    .flex_shrink_0()
+                    .px(px(26.))
+                    .gap(px(14.))
+                    .items_center()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        v_flex()
+                            .flex_shrink_0()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .text_size(px(24.))
+                                    .font_semibold()
+                                    .text_color(rgb(TEXT))
+                                    .child("ライブラリ"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(MUTED_2))
+                                    .child(subtitle),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .when_some(message, |this, message| {
+                                this.text_size(px(10.))
+                                    .text_color(rgb(AMBER))
+                                    .truncate()
+                                    .child(message)
+                            }),
+                    )
+                    .child(
+                        h_flex()
+                            .flex_shrink_0()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                Button::new("inspector-toggle")
+                                    .label(if inspector_collapsed {
+                                        "詳細"
+                                    } else {
+                                        "詳細を隠す"
+                                    })
+                                    .small()
+                                    .custom(text_button)
+                                    .tooltip("詳細パネル (Ctrl+I)")
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.toggle_inspector(cx)),
+                                    ),
+                            )
+                            .child(
+                                Button::new("import-copy")
+                                    .label("コピー取込")
+                                    .small()
+                                    .custom(text_button)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.import_dialog(ImportMode::Copy, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("import-move")
+                                    .label("移動取込")
+                                    .small()
+                                    .primary()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.import_dialog(ImportMode::Move, cx);
+                                    })),
+                            ),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .px(px(26.))
+                    .pt(px(12.))
+                    .pb(px(14.))
+                    .gap(px(8.))
+                    .items_center()
+                    .child(chip("ワールド", true))
+                    .child(chip("プレイヤー", false))
+                    .child(chip("日時", false))
+                    .child(chip("タグ", false))
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED_2))
+                            .child("並び: 新しい順"),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn photo_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let photos = self.photos.clone();
-        let rows = photos.len().div_ceil(4);
-        v_flex()
+        let columns = self.grid_columns.max(1);
+        let rows = photos.len().div_ceil(columns);
+        let mut container = v_flex()
             .flex_1()
             .min_w_0()
             .h_full()
-            .p_5()
-            .gap_4()
-            .child(
+            .items_stretch()
+            .pl(px(26.))
+            .pr(px(18.))
+            .pb(px(18.));
+        if photos.is_empty() {
+            container = container.child(
                 div()
-                    .text_sm()
-                    .font_semibold()
-                    .text_color(rgb(TEXT))
-                    .child("最近の写真"),
-            )
-            .when(photos.is_empty(), |this| {
-                this.child(
-                    div()
-                        .p_6()
-                        .rounded_lg()
-                        .bg(rgb(PANEL))
-                        .border_1()
-                        .border_color(rgb(BORDER))
-                        .text_sm()
-                        .text_color(rgb(MUTED))
-                        .child("写真がありません。デーモンを起動するか、--demo でサンプルを表示できます。"),
-                )
-            })
-            .when(!photos.is_empty(), |this| {
-                this.child(
-                    uniform_list(
-                        "photo-grid",
-                        rows,
-                        cx.processor(move |this, range: std::ops::Range<usize>, _window, cx| {
-                            range
-                                .map(|row| {
-                                    h_flex()
-                                        .h(px(170.))
-                                        .gap_3()
-                                        .children(
-                                            (0..4)
-                                                .filter_map(|column| {
-                                                    photos
-                                                        .get(row * 4 + column)
-                                                        .map(|photo| {
-                                                            this.photo_card(photo, cx)
-                                                                .into_any_element()
-                                                        })
-                                                })
-                                                .collect::<Vec<_>>(),
-                                        )
-                                        .into_any_element()
-                                })
-                                .collect::<Vec<_>>()
-                        }),
-                    )
+                    .mt(px(18.))
+                    .max_w(px(560.))
+                    .p(px(20.))
+                    .rounded(px(18.))
+                    .bg(rgb(PANEL))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .text_size(px(12.))
+                    .text_color(rgb(MUTED))
+                    .child(
+                        "写真がありません。VRChatの写真フォルダを設定するか、--demo でサンプルを表示できます。",
+                    ),
+            );
+        } else {
+            container = container.child(
+                v_flex()
+                    .id("photo-grid")
                     .flex_1()
-                    .min_h_0(),
-                )
-            })
+                    .w_full()
+                    .min_w_0()
+                    .min_h_0()
+                    .track_focus(&self.photo_grid_focus)
+                    .key_context("photo_grid")
+                    .tab_stop(true)
+                    .child(
+                        uniform_list(
+                            SharedString::from(format!("photo-grid-{columns}")),
+                            rows,
+                            cx.processor(
+                                move |this, range: std::ops::Range<usize>, _window, cx| {
+                                    let mut rendered = Vec::with_capacity(range.len());
+                                    for row in range {
+                                        let mut line = h_flex()
+                                            .h(px(196.))
+                                            .w_full()
+                                            .min_w_0()
+                                            .items_start()
+                                            .gap(px(16.));
+                                        for column in 0..columns {
+                                            let index = row * columns + column;
+                                            match photos.get(index) {
+                                                Some(photo) => {
+                                                    line = line.child(this.photo_card(
+                                                        photo,
+                                                        PhotoCardLayout::Grid { index },
+                                                        cx,
+                                                    ));
+                                                }
+                                                None => {
+                                                    line = line.child(div().flex_1());
+                                                }
+                                            }
+                                        }
+                                        rendered.push(line);
+                                    }
+                                    rendered
+                                },
+                            ),
+                        )
+                        // Room for the first row's -4 px hover lift.
+                        .pt(px(4.))
+                        .flex_1()
+                        .w_full()
+                        .min_w_0()
+                        .min_h_0(),
+                    ),
+            );
+        }
+        container
     }
 
-    fn photo_card(&self, photo: &Photo, cx: &mut Context<Self>) -> impl IntoElement {
-        let selected = self.selected == Some(photo.id);
+    fn photo_card(
+        &mut self,
+        photo: &Photo,
+        layout: PhotoCardLayout,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let id = photo.id;
+        let selected = self.selected == Some(id);
+        let compressed = self.compressed_ids.contains(&id);
         let world = photo
             .world_name
             .clone()
             .unwrap_or_else(|| "未紐付け".to_string());
-        let compressed = self.compressed_ids.contains(&photo.id);
-        let thumbnail = self.thumbnails.get(&photo.id).cloned();
-        v_flex()
+        let thumbnail = self.thumbnails.get(&id).cloned();
+        let color = self.color_for(photo);
+        let hovered = self.hovered_photo == Some(id);
+        let grid_index = match layout {
+            PhotoCardLayout::Grid { index } => Some(index),
+            PhotoCardLayout::Fixed => None,
+        };
+        let intro = grid_index.is_some_and(|index| index < 24 && self.intro_seen.insert(id));
+        let intro_index = grid_index.unwrap_or(0);
+        let grid_epoch = self.grid_epoch;
+
+        let mut thumb = div()
+            .relative()
+            .h(px(128.))
+            .w_full()
+            .rounded(px(14.))
+            .overflow_hidden()
+            .bg(rgb(color))
+            .border_2()
+            .border_color(if selected { rgb(BLUE) } else { rgb(BORDER) });
+        if selected {
+            thumb = thumb.shadow(vec![
+                BoxShadow::new(px(0.), px(8.), rgba(0x66b3ff4d).into()).blur_radius(px(24.)),
+            ]);
+        }
+        if let Some(image) = thumbnail {
+            thumb = thumb.child(
+                gpui_kit::img(image)
+                    .object_fit(ObjectFit::Cover)
+                    .size_full(),
+            );
+        }
+        let status_color = if compressed { GREEN } else { AMBER };
+        thumb = thumb
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .h(px(56.))
+                    .bg(linear_gradient(
+                        180.,
+                        linear_color_stop(rgba(0x07090d00), 0.),
+                        linear_color_stop(rgba(0x07090dcc), 1.),
+                    )),
+            )
+            .child(
+                h_flex()
+                    .absolute()
+                    .left(px(9.))
+                    .bottom(px(8.))
+                    .gap(px(5.))
+                    .items_center()
+                    .child(div().size(px(5.)).rounded_full().bg(rgb(status_color)))
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .font_medium()
+                            .text_color(rgb(status_color))
+                            .child(if compressed { "圧縮済" } else { "未圧縮" }),
+                    ),
+            )
+            .when(photo.is_favorite, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top(px(9.))
+                        .right(px(9.))
+                        .size(px(7.))
+                        .rounded_full()
+                        .bg(rgb(AMBER))
+                        .shadow(vec![
+                            BoxShadow::new(px(0.), px(0.), rgba(0x00000080).into())
+                                .blur_radius(px(3.)),
+                        ]),
+                )
+            });
+
+        let body = v_flex().min_w_0().gap(px(8.)).child(thumb).child(
+            v_flex()
+                .min_w_0()
+                .gap(px(3.))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .font_semibold()
+                        .text_color(rgb(TEXT))
+                        .truncate()
+                        .child(world),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(rgb(MUTED_2))
+                        .truncate()
+                        .child(format!(
+                            "{} · {}",
+                            short_date(&photo.captured_at_local),
+                            format_bytes(photo.file_size)
+                        )),
+                ),
+        );
+        let body: AnyElement = if intro {
+            body.with_animation(
+                SharedString::from(format!("card-intro-{grid_epoch}-{id}")),
+                Animation::new(Duration::from_secs_f32(
+                    CARD_INTRO_SECS + intro_index.min(CARD_STAGGER_MAX) as f32 * CARD_STAGGER_SECS,
+                ))
+                .with_max_fps(60.0),
+                move |el, t| {
+                    let value = stagger_value(t, intro_index);
+                    el.opacity(value).relative().top(px(14.0 * (1.0 - value)))
+                },
+            )
+            .into_any_element()
+        } else {
+            body.into_any_element()
+        };
+
+        let card = v_flex()
             .id(SharedString::from(format!("photo-{id}")))
-            .w(px(168.))
-            .gap_1()
+            .relative()
+            .w_full()
             .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _, cx| this.select_photo(id, cx)))
-            .child(
-                div()
-                    .h(px(100.))
-                    .w_full()
-                    .rounded_md()
-                    .bg(rgb(scene_color(&world)))
-                    .border_1()
-                    .border_color(if selected { rgb(BLUE) } else { rgb(BORDER) })
-                    .relative()
-                    .when_some(thumbnail, |this, image| {
-                        this.child(
-                            gpui_kit::img(image)
-                                .object_fit(ObjectFit::Cover)
-                                .size_full(),
-                        )
-                    })
-                    .child(
-                        div()
-                            .absolute()
-                            .top(px(10.))
-                            .right(px(10.))
-                            .size(px(10.))
-                            .rounded_full()
-                            .bg(rgb(0xffffff)),
-                    ),
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                let next = hovered.then_some(id);
+                if this.hovered_photo != next {
+                    this.hovered_photo = next;
+                    cx.notify();
+                }
+            }))
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                this.select_photo(id, cx);
+                window.focus(&this.photo_grid_focus, cx);
+                if let ClickEvent::Mouse(click) = event
+                    && click.down.click_count >= 2
+                {
+                    // Task 8 opens the full-screen viewer here.
+                }
+            }))
+            .child(body);
+
+        // The animation wrapper is the flex item, so the grid sizing lives on
+        // it; sizing the inner card alone would let rows overflow.
+        div()
+            .relative()
+            .when(grid_index.is_some(), |this| this.flex_1().min_w_0())
+            .when(grid_index.is_none(), |this| this.w(px(190.)))
+            .child(card)
+            .with_animation(
+                SharedString::from(format!("card-hover-{id}-{hovered}")),
+                Animation::new(Duration::from_millis(180)).with_easing(ease_motion),
+                move |el, t| {
+                    let offset = if hovered { -4.0 * t } else { -4.0 * (1.0 - t) };
+                    el.relative().top(px(offset))
+                },
             )
-            .child(
-                div()
-                    .text_xs()
-                    .font_semibold()
-                    .text_color(rgb(TEXT))
-                    .child(world),
-            )
-            .child(
-                h_flex()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(MUTED_2))
-                            .child(short_date(&photo.captured_at_local)),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(MUTED_2))
-                            .child(format_bytes(photo.file_size)),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_1()
-                    .when(compressed, |this| {
-                        this.child(self.badge("圧縮済", GREEN, 0x112a22))
-                    })
-                    .when(photo.world_name.is_none(), |this| {
-                        this.child(self.badge("未紐付け", AMBER, 0x2a2412))
-                    })
-                    .when(photo.is_favorite, |this| {
-                        this.child(self.badge("★", PURPLE, 0x241a2e))
-                    }),
-            )
+            .into_any_element()
     }
 
     fn inspector(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1993,7 +2238,7 @@ impl App {
             .unwrap_or_else(|| self.photos.clone());
         let cards: Vec<AnyElement> = results
             .iter()
-            .map(|photo| self.photo_card(photo, cx).into_any_element())
+            .map(|photo| self.photo_card(photo, PhotoCardLayout::Fixed, cx))
             .collect();
         v_flex().flex_1().min_h_0().child(
             h_flex()
@@ -2536,7 +2781,17 @@ impl App {
 }
 
 impl Render for App {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let width: f32 = window.viewport_size().width.into();
+        self.grid_columns = grid_columns(grid_available_width(
+            width,
+            self.sidebar_collapsed,
+            self.inspector_collapsed,
+        ));
+        let mut workspace = v_flex().flex_1().min_w_0().h_full();
+        if self.screen != Screen::Photos {
+            workspace = workspace.child(self.topbar(cx));
+        }
         h_flex()
             .relative()
             .size_full()
@@ -2548,14 +2803,7 @@ impl Render for App {
                 cx.listener(|this, _: &FocusSearch, window, cx| this.focus_search(window, cx)),
             )
             .child(self.sidebar(cx))
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .child(self.topbar(cx))
-                    .child(self.content(cx)),
-            )
+            .child(workspace.child(self.content(cx)))
             .child(self.nav_tooltip())
             .child(self.rail_toggle(cx))
     }
