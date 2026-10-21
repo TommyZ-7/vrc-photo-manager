@@ -2506,26 +2506,47 @@ impl App {
 
     fn compression_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let profile = self.profiles.get(self.profile_index).cloned();
+        let message = self.message.clone();
         v_flex()
             .flex_1()
             .min_h_0()
             .overflow_y_scrollbar()
-            .p_5()
-            .gap_4()
+            .px(px(26.))
+            .pt(px(22.))
+            .pb(px(26.))
+            .gap(px(24.))
             .child(
                 h_flex()
                     .items_center()
-                    .gap_3()
+                    .gap(px(14.))
                     .child(
                         v_flex()
-                            .child(div().text_lg().font_semibold().child("圧縮設定"))
+                            .flex_shrink_0()
+                            .gap(px(2.))
                             .child(
-                                div().text_xs().text_color(rgb(MUTED)).child(
+                                div()
+                                    .text_size(px(24.))
+                                    .font_semibold()
+                                    .text_color(rgb(TEXT))
+                                    .child("圧縮設定"),
+                            )
+                            .child(
+                                div().text_size(px(10.)).text_color(rgb(MUTED_2)).child(
                                     "自動圧縮は元画像を保持します。置換は手動実行時のみです。",
                                 ),
                             ),
                     )
-                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .when_some(message, |this, message| {
+                                this.text_size(px(10.))
+                                    .text_color(rgb(AMBER))
+                                    .truncate()
+                                    .child(message)
+                            }),
+                    )
                     .child(
                         h_flex()
                             .gap_1()
@@ -2562,9 +2583,9 @@ impl App {
             )
             .child(
                 h_flex()
-                    .gap_4()
+                    .gap(px(24.))
                     .items_start()
-                    .child(v_flex().w(px(280.)).gap_2().children(
+                    .child(v_flex().w(px(280.)).gap(px(8.)).children(
                         self.profiles.iter().enumerate().map(|(index, profile)| {
                             let active = index == self.profile_index;
                             let auto = profile.auto_enabled;
@@ -2579,14 +2600,14 @@ impl App {
                                     "Lossy"
                                 }
                             );
-                            v_flex()
+                            glass_panel()
                                 .id(SharedString::from(format!("profile-{index}")))
-                                .p_3()
-                                .gap_1()
-                                .rounded_lg()
-                                .bg(if active { rgb(0x16283d) } else { rgb(PANEL) })
-                                .border_1()
-                                .border_color(if active { rgb(BLUE) } else { rgb(BORDER) })
+                                .flex()
+                                .flex_col()
+                                .p(px(14.))
+                                .gap(px(6.))
+                                .bg(rgb(if active { ACCENT_SOFT } else { PANEL }))
+                                .border_color(rgb(if active { BLUE } else { BORDER }))
                                 .cursor_pointer()
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.profile_index = index;
@@ -2595,22 +2616,33 @@ impl App {
                                 .child(
                                     h_flex()
                                         .items_center()
-                                        .gap_2()
-                                        .child(div().text_sm().font_semibold().child(title))
+                                        .gap(px(8.))
+                                        .child(
+                                            div()
+                                                .text_size(px(12.))
+                                                .font_semibold()
+                                                .text_color(rgb(if active { BLUE } else { MUTED }))
+                                                .child(title),
+                                        )
                                         .child(self.badge(
                                             if auto { "自動" } else { "手動" },
                                             if auto { GREEN } else { MUTED },
                                             if auto { 0x112a22 } else { PANEL_2 },
                                         )),
                                 )
-                                .child(div().text_xs().text_color(rgb(MUTED)).child(meta))
+                                .child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .text_color(rgb(if active { MUTED } else { MUTED_2 }))
+                                        .child(meta),
+                                )
                         }),
                     ))
                     .child(
                         v_flex()
                             .flex_1()
                             .min_w_0()
-                            .gap_4()
+                            .gap(px(24.))
                             .when_some(profile, |this, profile| {
                                 this.child(self.profile_editor(&profile, cx))
                             })
@@ -2649,18 +2681,23 @@ impl App {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let index = self.profile_index;
-        v_flex()
-            .p_4()
-            .gap_3()
-            .rounded_lg()
+        glass_panel()
+            .flex()
+            .flex_col()
+            .p(px(16.))
+            .gap(px(14.))
             .bg(rgb(PANEL))
-            .border_1()
-            .border_color(rgb(BORDER))
             .child(
                 h_flex()
                     .items_center()
-                    .gap_2()
-                    .child(div().text_sm().font_semibold().child(profile.name.clone()))
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .text_size(px(17.))
+                            .font_semibold()
+                            .text_color(rgb(TEXT))
+                            .child(profile.name.clone()),
+                    )
                     .child(self.badge(&format_label(&profile.format), BLUE, 0x14283d))
                     .child(div().flex_1())
                     .child(
@@ -2677,7 +2714,7 @@ impl App {
                     ),
             )
             .child(
-                h_flex().gap_2().children(
+                h_flex().gap(px(4.)).children(
                     [
                         CompressionFormat::Jpeg,
                         CompressionFormat::Webp,
@@ -2691,12 +2728,17 @@ impl App {
                         let selected_format = format.clone();
                         div()
                             .id(SharedString::from(format!("format-{}", format.as_str())))
-                            .px_3()
-                            .py_1()
-                            .rounded_md()
-                            .bg(if active { rgb(BLUE_DARK) } else { rgb(PANEL_2) })
-                            .text_xs()
-                            .text_color(if active { rgb(0xffffff) } else { rgb(MUTED) })
+                            .px(px(10.))
+                            .py(px(5.))
+                            .rounded(px(8.))
+                            .bg(if active {
+                                rgb(ACCENT_SOFT)
+                            } else {
+                                rgba(0x00000000)
+                            })
+                            .text_size(px(12.))
+                            .font_medium()
+                            .text_color(if active { rgb(BLUE) } else { rgb(MUTED) })
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if let Some(profile) = this.profiles.get_mut(index) {
@@ -2717,7 +2759,7 @@ impl App {
                     .child(
                         div()
                             .w(px(80.))
-                            .text_xs()
+                            .text_size(px(12.))
                             .text_color(rgb(MUTED))
                             .child("品質"),
                     )
@@ -2737,8 +2779,9 @@ impl App {
                     .child(
                         div()
                             .w(px(36.))
-                            .text_sm()
+                            .text_size(px(12.))
                             .font_semibold()
+                            .text_color(rgb(TEXT))
                             .child(profile.quality.to_string()),
                     )
                     .child(
@@ -2754,16 +2797,13 @@ impl App {
                                 cx.notify();
                             })),
                     )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(MUTED_2))
-                            .child(if profile.lossless {
-                                "ロスレス"
-                            } else {
-                                "品質を調整"
-                            }),
-                    ),
+                    .child(div().text_size(px(10.)).text_color(rgb(MUTED_2)).child(
+                        if profile.lossless {
+                            "ロスレス"
+                        } else {
+                            "品質を調整"
+                        },
+                    )),
             )
             .child(
                 self.meta_row(
@@ -2779,7 +2819,12 @@ impl App {
                 h_flex()
                     .items_center()
                     .gap_2()
-                    .child(div().text_xs().text_color(rgb(MUTED)).child("リサイズ"))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgb(MUTED))
+                            .child("リサイズ"),
+                    )
                     .child(
                         Switch::new("profile-resize")
                             .checked(profile.resize_enabled)
@@ -2801,14 +2846,25 @@ impl App {
                                     .into_iter()
                                     .map(
                                         |(label, width, height)| {
+                                            let active =
+                                                profile.width == width && profile.height == height;
                                             div()
                                                 .id(SharedString::from(format!("resize-{label}")))
-                                                .px_2()
-                                                .py_1()
-                                                .rounded_md()
-                                                .bg(rgb(PANEL_2))
-                                                .text_xs()
-                                                .text_color(rgb(MUTED))
+                                                .px(px(8.))
+                                                .py(px(4.))
+                                                .rounded(px(8.))
+                                                .bg(if active {
+                                                    rgb(ACCENT_SOFT)
+                                                } else {
+                                                    rgba(0x00000000)
+                                                })
+                                                .text_size(px(10.))
+                                                .font_medium()
+                                                .text_color(if active {
+                                                    rgb(BLUE)
+                                                } else {
+                                                    rgb(MUTED)
+                                                })
                                                 .cursor_pointer()
                                                 .on_click(cx.listener(move |this, _, _, cx| {
                                                     this.edit_profile(
@@ -2826,7 +2882,7 @@ impl App {
                                 )
                                 .child(
                                     div()
-                                        .text_xs()
+                                        .text_size(px(10.))
                                         .text_color(rgb(MUTED_2))
                                         .child(format!("{} × {}", profile.width, profile.height)),
                                 ),
@@ -2839,7 +2895,7 @@ impl App {
                                 .gap_2()
                                 .child(
                                     div()
-                                        .text_xs()
+                                        .text_size(px(12.))
                                         .text_color(rgb(MUTED_2))
                                         .child("アスペクト比維持"),
                                 )
@@ -2858,32 +2914,37 @@ impl App {
             )
             .child(
                 div()
-                    .p_2()
-                    .rounded_md()
-                    .bg(rgb(0x112a22))
+                    .p(px(12.))
+                    .rounded(px(8.))
+                    .bg(rgba(0x102a24))
                     .border_1()
-                    .border_color(rgb(0x1f5c47))
-                    .text_xs()
-                    .text_color(rgb(0x8ce6c4))
+                    .border_color(rgba(0x5eead433))
+                    .text_size(px(10.))
+                    .text_color(rgb(GREEN))
                     .child("自動圧縮では元画像を必ず保持します。"),
             )
     }
 
     fn queue_panel(&self, _cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
-            .rounded_lg()
+        glass_panel()
+            .flex()
+            .flex_col()
             .bg(rgb(PANEL))
-            .border_1()
-            .border_color(rgb(BORDER))
             .child(
                 h_flex()
-                    .px_4()
-                    .py_3()
-                    .gap_2()
+                    .px(px(16.))
+                    .py(px(14.))
+                    .gap(px(8.))
                     .items_center()
                     .border_b_1()
                     .border_color(rgb(BORDER))
-                    .child(div().text_sm().font_semibold().child("圧縮キュー"))
+                    .child(
+                        div()
+                            .text_size(px(17.))
+                            .font_semibold()
+                            .text_color(rgb(TEXT))
+                            .child("圧縮キュー"),
+                    )
                     .child(self.badge(&format!("{} 件", self.jobs.len()), BLUE, 0x14283d)),
             )
             .children(self.jobs.iter().take(8).map(|job| {
@@ -2895,9 +2956,9 @@ impl App {
                     QueueStatus::Cancelled => ("取消", MUTED, PANEL_2),
                 };
                 h_flex()
-                    .px_4()
-                    .py_2()
-                    .gap_2()
+                    .px(px(16.))
+                    .py(px(10.))
+                    .gap(px(8.))
                     .items_center()
                     .border_b_1()
                     .border_color(rgb(BORDER))
@@ -2906,13 +2967,14 @@ impl App {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_xs()
+                            .text_size(px(12.))
                             .text_color(rgb(TEXT))
+                            .truncate()
                             .child(format!("photo #{}", job.photo_id)),
                     )
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(10.))
                             .text_color(rgb(MUTED_2))
                             .child(format!("{:.0}%", job.progress * 100.0)),
                     )
@@ -2920,8 +2982,8 @@ impl App {
             .when(self.jobs.is_empty(), |this| {
                 this.child(
                     div()
-                        .p_4()
-                        .text_xs()
+                        .p(px(16.))
+                        .text_size(px(12.))
                         .text_color(rgb(MUTED_2))
                         .child("キューは空です"),
                 )
@@ -3113,12 +3175,17 @@ impl App {
         let policy = policy.to_string();
         div()
             .id(SharedString::from(format!("policy-{label}")))
-            .px_2()
-            .py_1()
-            .rounded_md()
-            .bg(if active { rgb(BLUE_DARK) } else { rgb(PANEL_2) })
-            .text_xs()
-            .text_color(if active { rgb(0xffffff) } else { rgb(MUTED) })
+            .px(px(10.))
+            .py(px(5.))
+            .rounded(px(8.))
+            .bg(if active {
+                rgb(ACCENT_SOFT)
+            } else {
+                rgba(0x00000000)
+            })
+            .text_size(px(12.))
+            .font_medium()
+            .text_color(if active { rgb(BLUE) } else { rgb(MUTED) })
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.compress_policy = policy.clone();
@@ -3505,9 +3572,10 @@ impl App {
         div()
             .px(px(7.))
             .py(px(2.))
-            .rounded_md()
+            .rounded(px(8.))
             .bg(rgb(bg))
-            .text_xs()
+            .text_size(px(10.))
+            .font_medium()
             .text_color(rgb(fg))
             .child(text.to_string())
     }
