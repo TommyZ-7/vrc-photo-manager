@@ -355,6 +355,64 @@ impl Db {
         Ok(count)
     }
 
+    /// Text search used by the UI. Empty filters are ignored; categories are
+    /// combined with AND.
+    pub fn search_photos_text(
+        &self,
+        world: Option<&str>,
+        player: Option<&str>,
+        tag: Option<&str>,
+        favorite: bool,
+        limit: i64,
+    ) -> Result<Vec<Photo>> {
+        let mut clauses = vec!["p.status = 'present'".to_string()];
+        let mut values: Vec<Value> = Vec::new();
+
+        if let Some(query) = world.map(str::trim).filter(|query| !query.is_empty()) {
+            let like = format!("%{query}%");
+            clauses.push(
+                "(c.world_name LIKE ? OR c.instance_id LIKE ? OR EXISTS (\
+                    SELECT 1 FROM worlds w WHERE w.id = c.world_id AND w.world_id LIKE ?))"
+                    .to_string(),
+            );
+            values.push(Value::Text(like.clone()));
+            values.push(Value::Text(like.clone()));
+            values.push(Value::Text(like));
+        }
+        if let Some(query) = player.map(str::trim).filter(|query| !query.is_empty()) {
+            let like = format!("%{query}%");
+            clauses.push(
+                "EXISTS (SELECT 1 FROM photo_players pp WHERE pp.photo_id = p.id \
+                 AND (pp.display_name LIKE ? OR pp.user_id LIKE ?))"
+                    .to_string(),
+            );
+            values.push(Value::Text(like.clone()));
+            values.push(Value::Text(like));
+        }
+        if let Some(query) = tag.map(str::trim).filter(|query| !query.is_empty()) {
+            let like = format!("%{query}%");
+            clauses.push(
+                "EXISTS (SELECT 1 FROM photo_tags pt JOIN tags t ON t.id = pt.tag_id \
+                 WHERE pt.photo_id = p.id AND t.name LIKE ?)"
+                    .to_string(),
+            );
+            values.push(Value::Text(like));
+        }
+        if favorite {
+            clauses.push("p.is_favorite = 1".to_string());
+        }
+
+        let sql = format!(
+            "SELECT {PHOTO_SELECT}{PHOTO_FROM} WHERE {} \
+             ORDER BY p.captured_at_utc DESC, p.id DESC LIMIT ?",
+            clauses.join(" AND ")
+        );
+        values.push(Value::Integer(limit.max(1)));
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(values), row_to_photo)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn unlinked_photos(&self, limit: i64) -> Result<Vec<Photo>> {
         let sql = format!(
             "SELECT {PHOTO_SELECT}{PHOTO_FROM} WHERE c.photo_id IS NULL \
