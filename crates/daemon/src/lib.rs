@@ -14,7 +14,8 @@ use vrc_photo_core::db::Db;
 use vrc_photo_core::linker;
 use vrc_photo_core::log_parser::LogIngestor;
 use vrc_photo_core::model::{CompressionJob, CompressionProfile, QueueStatus};
-use vrc_photo_core::scanner::{ScanReport, scan_and_index};
+use vrc_photo_core::photo_filename::is_source_photo;
+use vrc_photo_core::scanner::{ScanReport, scan_and_index, scan_one};
 use vrc_photo_core::settings::{AppSettings, detect_vrchat_paths};
 use vrc_photo_core::thumbnail;
 
@@ -52,8 +53,7 @@ pub struct Daemon {
     watcher_rx: Option<Receiver<notify::Result<notify::Event>>>,
     log_tail: Option<LogTail>,
     workers: Vec<JoinHandle<()>>,
-    photo_dirty: bool,
-    last_scan: std::time::Instant,
+    dirty_paths: Vec<PathBuf>,
     last_log_poll: std::time::Instant,
     tray: Option<Tray>,
     tray_enabled: bool,
@@ -105,8 +105,7 @@ impl Daemon {
             watcher_rx: None,
             log_tail: None,
             workers: Vec::new(),
-            photo_dirty: true,
-            last_scan: std::time::Instant::now() - SCAN_INTERVAL,
+            dirty_paths: Vec::new(),
             last_log_poll: std::time::Instant::now() - LOG_INTERVAL,
             tray: None,
             tray_enabled,
@@ -218,12 +217,10 @@ impl Daemon {
                 continue;
             }
             self.poll_watchers();
-            if self.photo_dirty && self.last_scan.elapsed() >= SCAN_INTERVAL {
-                if let Err(error) = self.scan_photos() {
-                    tracing::error!(%error, "photo scan failed");
-                }
-                self.photo_dirty = false;
-                self.last_scan = std::time::Instant::now();
+            if !self.dirty_paths.is_empty()
+                && let Err(error) = self.index_dirty_paths()
+            {
+                tracing::error!(%error, "incremental photo scan failed");
             }
             if self.last_log_poll.elapsed() >= LOG_INTERVAL {
                 if let Err(error) = self.ingest_logs() {
@@ -267,6 +264,50 @@ impl Daemon {
                 let db = self.db.lock().unwrap();
                 self.settings.save(&db)?;
             }
+        }
+        Ok(())
+    }
+
+    fn index_dirty_paths(&mut self) -> Result<()> {
+        let mut paths = std::mem::take(&mut self.dirty_paths);
+        if paths.is_empty() {
+            return Ok(());
+        }
+        paths.sort();
+        paths.dedup();
+        let roots = self.settings.photo_roots();
+        let mut new_ids = Vec::new();
+        {
+            let db = self.db.lock().unwrap();
+            for path in paths {
+                let Some(root) = roots.iter().find(|root| path.starts_with(root)) else {
+                    continue;
+                };
+                let root_id = db.add_root(&root.to_string_lossy(), "reference")?;
+                if path.is_file() {
+                    if let Some(scanned) = scan_one(root, &path) {
+                        let abs_path = scanned.path.to_string_lossy().to_string();
+                        let existed = db.photo_by_path(&abs_path)?.is_some();
+                        let id = db.upsert_photo(&scanned.into_new_photo(root_id))?;
+                        if !existed {
+                            new_ids.push(id);
+                        }
+                    }
+                } else if let Some(photo) = db.photo_by_path(&path.to_string_lossy())? {
+                    db.mark_missing(photo.id)?;
+                }
+            }
+            if self.settings.auto_compress && !new_ids.is_empty() {
+                enqueue_auto_jobs(&db, &new_ids)?;
+            }
+        }
+        if let Some(tx) = &self.thumbnail_tx {
+            for id in &new_ids {
+                let _ = tx.send(*id);
+            }
+        }
+        if !new_ids.is_empty() {
+            self.link_unlinked()?;
         }
         Ok(())
     }
@@ -530,7 +571,17 @@ impl Daemon {
                             | notify::EventKind::Modify(_)
                             | notify::EventKind::Remove(_)
                     ) {
-                        self.photo_dirty = true;
+                        for path in event.paths {
+                            if path
+                                .components()
+                                .any(|part| part.as_os_str() == "compressed")
+                            {
+                                continue;
+                            }
+                            if is_source_photo(&path) {
+                                self.dirty_paths.push(path);
+                            }
+                        }
                     }
                 }
                 Err(error) => tracing::warn!(%error, "photo watcher error"),
@@ -869,6 +920,41 @@ mod tests {
         assert_eq!(derivatives.len(), 1);
         assert!(Path::new(&derivatives[0].path).is_file());
         assert!(derivatives[0].file_size > 0);
+    }
+
+    #[test]
+    fn incremental_events_index_and_mark_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let db_path = dir.path().join("library.db");
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir.clone()), Some(log_dir)).unwrap();
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+
+        let path = photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        image::RgbaImage::from_pixel(4, 3, image::Rgba([10, 20, 30, 255]))
+            .save(&path)
+            .unwrap();
+        daemon.dirty_paths.push(path.clone());
+        daemon.index_dirty_paths().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        let photo = db
+            .photo_by_path(path.to_str().unwrap())
+            .unwrap()
+            .expect("indexed");
+        assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Present);
+
+        std::fs::remove_file(&path).unwrap();
+        daemon.dirty_paths.push(path.clone());
+        daemon.index_dirty_paths().unwrap();
+        let photo = db
+            .photo_by_path(path.to_str().unwrap())
+            .unwrap()
+            .expect("row");
+        assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Missing);
     }
 
     #[test]

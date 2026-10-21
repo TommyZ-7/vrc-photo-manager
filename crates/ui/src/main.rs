@@ -214,6 +214,9 @@ impl App {
             .list_photos(300, 0, vrc_photo_core::model::PhotoSort::Newest)
             .unwrap_or_default();
         self.profiles = self.db.list_profiles().unwrap_or_default();
+        if self.profile_index >= self.profiles.len() {
+            self.profile_index = 0;
+        }
         self.stats = self.db.stats().unwrap_or_default();
         self.compressed_ids = self
             .db
@@ -328,7 +331,11 @@ impl App {
             cx.notify();
             return;
         };
-        let Some(profile) = self.profiles.first() else {
+        let Some(profile) = self
+            .profiles
+            .get(self.profile_index)
+            .or_else(|| self.profiles.first())
+        else {
             self.message = Some("圧縮プロファイルがありません".to_string());
             cx.notify();
             return;
@@ -1645,7 +1652,16 @@ impl App {
             .child(
                 h_flex()
                     .gap_3()
-                    .child(self.stat_card("監視", if self.settings.log_dir.is_some() { "稼働中".to_string() } else { "未設定".to_string() }))
+                    .child(self.stat_card(
+                        "監視",
+                        if self.daemon_active {
+                            "稼働中".to_string()
+                        } else if self.settings.log_dir.is_some() {
+                            "停止中".to_string()
+                        } else {
+                            "未設定".to_string()
+                        },
+                    ))
                     .child(self.stat_card("現在のワールド", self.monitor_world.clone().unwrap_or_else(|| "待機".to_string())))
                     .child(self.stat_card("同接", format!("{} 人", self.monitor_players.len())))
                     .child(self.stat_card("写真", format!("{} 枚", self.stats.photo_count))),
