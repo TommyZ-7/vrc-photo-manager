@@ -355,6 +355,16 @@ impl Db {
         Ok(count)
     }
 
+    pub fn unlinked_photos(&self, limit: i64) -> Result<Vec<Photo>> {
+        let sql = format!(
+            "SELECT {PHOTO_SELECT}{PHOTO_FROM} WHERE c.photo_id IS NULL \
+             AND p.status = 'present' ORDER BY p.captured_at_utc DESC LIMIT ?1"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![limit.max(1)], row_to_photo)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn count_photos(&self) -> Result<i64> {
         let count = self.conn.query_row(
             "SELECT COUNT(*) FROM photos WHERE status = 'present'",

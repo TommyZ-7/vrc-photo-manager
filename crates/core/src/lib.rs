@@ -5,9 +5,12 @@
 
 pub mod db;
 pub mod error;
+pub mod linker;
+pub mod log_parser;
 pub mod model;
 pub mod photo_filename;
 pub mod scanner;
+pub mod time;
 
 pub use db::Db;
 pub use error::{CoreError, Result};

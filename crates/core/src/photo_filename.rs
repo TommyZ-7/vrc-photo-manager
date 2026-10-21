@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
-use chrono::{DateTime, Local, NaiveDate, NaiveTime, Offset, TimeZone, Utc};
+use chrono::{NaiveDate, NaiveTime};
 use regex::Regex;
 
 /// Timestamp and dimensions decoded from a VRChat screenshot filename.
@@ -43,17 +43,12 @@ pub fn parse_photo_filename(file_name: &str) -> Option<ParsedPhotoName> {
 
     let date = NaiveDate::from_ymd_opt(year, month, day)?;
     let time = NaiveTime::from_hms_milli_opt(hour, minute, second, millis)?;
-    let naive = date.and_time(time);
-    let local = Local.from_local_datetime(&naive);
-    let local = local
-        .single()
-        .or_else(|| local.earliest())
-        .or_else(|| local.latest())?;
+    let stamp = crate::time::from_naive(date.and_time(time))?;
 
     Some(ParsedPhotoName {
-        captured_at_utc: local.with_timezone(&Utc).timestamp(),
-        captured_at_local: naive.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
-        tz_offset_sec: local.offset().fix().local_minus_utc(),
+        captured_at_utc: stamp.utc,
+        captured_at_local: stamp.local,
+        tz_offset_sec: stamp.offset_sec,
         width,
         height,
     })
@@ -61,12 +56,11 @@ pub fn parse_photo_filename(file_name: &str) -> Option<ParsedPhotoName> {
 
 /// Fallback for files whose name does not match the VRChat pattern.
 pub fn from_modified_time(modified: std::time::SystemTime) -> ParsedPhotoName {
-    let utc: DateTime<Utc> = DateTime::from(modified);
-    let local = utc.with_timezone(&Local);
+    let stamp = crate::time::from_system_time(modified);
     ParsedPhotoName {
-        captured_at_utc: utc.timestamp(),
-        captured_at_local: local.format("%Y-%m-%d %H:%M:%S%.3f").to_string(),
-        tz_offset_sec: local.offset().fix().local_minus_utc(),
+        captured_at_utc: stamp.utc,
+        captured_at_local: stamp.local,
+        tz_offset_sec: stamp.offset_sec,
         width: 0,
         height: 0,
     }
