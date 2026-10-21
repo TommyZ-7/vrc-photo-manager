@@ -53,6 +53,8 @@ const CARD_INTRO_SECS: f32 = 0.6;
 const CARD_STAGGER_SECS: f32 = 0.04;
 const CARD_STAGGER_MAX: usize = 8;
 
+gpui_kit::actions!(ui, [ToggleSidebar, ToggleInspector, FocusSearch]);
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Photos,
@@ -119,6 +121,13 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> LaunchOptions {
 pub struct App {
     db: Db,
     screen: Screen,
+    sidebar_collapsed: bool,
+    sidebar_motion_epoch: u64,
+    inspector_collapsed: bool,
+    inspector_epoch: u64,
+    #[allow(dead_code)] // Read by the sidebar hover styling in the next task.
+    hovered_nav: Option<Screen>,
+    daemon_age_secs: Option<i64>,
     photos: Vec<Photo>,
     selected: Option<i64>,
     selected_photo: Option<Photo>,
@@ -187,6 +196,12 @@ impl App {
         let mut app = Self {
             db,
             screen: Screen::Photos,
+            sidebar_collapsed: initial_settings.ui_sidebar_collapsed,
+            sidebar_motion_epoch: 0,
+            inspector_collapsed: initial_settings.ui_inspector_collapsed,
+            inspector_epoch: 0,
+            hovered_nav: None,
+            daemon_age_secs: None,
             photos: Vec::new(),
             selected: None,
             selected_photo: None,
@@ -336,14 +351,14 @@ impl App {
 
     fn refresh_monitor(&mut self) {
         let now = Utc::now().timestamp();
-        self.daemon_active = self
+        self.daemon_age_secs = self
             .db
             .get_setting("daemon_heartbeat")
             .ok()
             .flatten()
             .and_then(|value| value.parse::<i64>().ok())
-            .map(|timestamp| now - timestamp < 20)
-            .unwrap_or(false);
+            .map(|timestamp| (now - timestamp).max(0));
+        self.daemon_active = self.daemon_age_secs.is_some_and(|age| age < 20);
         self.monitor_world = None;
         self.monitor_instance = None;
         self.monitor_players.clear();
@@ -359,6 +374,34 @@ impl App {
                     .collect();
             }
         }
+    }
+
+    fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_collapsed = !self.sidebar_collapsed;
+        self.sidebar_motion_epoch = self.sidebar_motion_epoch.wrapping_add(1);
+        self.settings.ui_sidebar_collapsed = self.sidebar_collapsed;
+        let _ = self.settings.save(&self.db);
+        cx.notify();
+    }
+
+    fn toggle_inspector(&mut self, cx: &mut Context<Self>) {
+        self.inspector_collapsed = !self.inspector_collapsed;
+        self.inspector_epoch = self.inspector_epoch.wrapping_add(1);
+        self.settings.ui_inspector_collapsed = self.inspector_collapsed;
+        let _ = self.settings.save(&self.db);
+        cx.notify();
+    }
+
+    fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.screen = Screen::Search;
+        let focus_handle = self.world_input.read(cx).focus_handle(cx);
+        window.focus(&focus_handle, cx);
+        // The search screen may not be mounted yet when the action fires, so
+        // retry after the deferred update has attached the input to the tree.
+        window.defer(cx, move |window, cx| {
+            window.focus(&focus_handle, cx);
+        });
+        cx.notify();
     }
 
     fn load_thumbnails(&mut self) {
@@ -2229,6 +2272,11 @@ impl Render for App {
             .size_full()
             .bg(rgb(BG))
             .font_family("Noto Sans JP")
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
+            .on_action(cx.listener(|this, _: &ToggleInspector, _, cx| this.toggle_inspector(cx)))
+            .on_action(
+                cx.listener(|this, _: &FocusSearch, window, cx| this.focus_search(window, cx)),
+            )
             .child(self.sidebar(cx))
             .child(
                 v_flex()
@@ -2742,6 +2790,37 @@ fn run_background_supervisor() -> Result<(), String> {
     Ok(())
 }
 
+fn register_global_actions(cx: &mut gpui_kit::App, app: Entity<App>) {
+    let sidebar = app.downgrade();
+    cx.on_action(move |_: &ToggleSidebar, cx| {
+        sidebar.update(cx, |app, cx| app.toggle_sidebar(cx)).ok();
+    });
+
+    let inspector = app.downgrade();
+    cx.on_action(move |_: &ToggleInspector, cx| {
+        inspector
+            .update(cx, |app, cx| app.toggle_inspector(cx))
+            .ok();
+    });
+
+    let focus_search = app.downgrade();
+    cx.on_action(move |_: &FocusSearch, cx| {
+        let Some(window) = cx.active_window() else {
+            return;
+        };
+        let focus_search = focus_search.clone();
+        cx.defer(move |cx| {
+            window
+                .update(cx, |_, window, cx| {
+                    focus_search
+                        .update(cx, |app, cx| app.focus_search(window, cx))
+                        .ok();
+                })
+                .ok();
+        });
+    });
+}
+
 fn main() {
     let options = parse_args(std::env::args());
     if options.background {
@@ -2757,17 +2836,26 @@ fn main() {
             )])
             .expect("load Noto Sans JP");
         gpui_kit::init(cx);
+        cx.bind_keys([
+            KeyBinding::new("ctrl-b", ToggleSidebar, None),
+            KeyBinding::new("cmd-b", ToggleSidebar, None),
+            KeyBinding::new("ctrl-i", ToggleInspector, None),
+            KeyBinding::new("cmd-i", ToggleInspector, None),
+            KeyBinding::new("ctrl-k", FocusSearch, None),
+            KeyBinding::new("cmd-k", FocusSearch, None),
+        ]);
         let (width, height) = options.window_size;
         let window_options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(width), px(height)), cx)),
             window_min_size: Some(size(px(1080.), px(700.))),
             ..Default::default()
         };
-        gpui_kit::open_window(window_options, cx, |window, cx| {
+        let (_, app) = gpui_kit::open_window(window_options, cx, |window, cx| {
             window.set_window_title("VRC Photo Manager");
             cx.new(|cx| App::new(window, cx, &options))
         })
         .expect("open window");
+        register_global_actions(cx, app);
     });
 }
 
