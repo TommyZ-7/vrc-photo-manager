@@ -1,0 +1,1125 @@
+use std::path::Path;
+
+use rusqlite::types::Value;
+use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
+
+use crate::error::Result;
+use crate::model::{
+    CompressionJob, CompressionProfile, Derivative, LibraryRoot, LibraryStats, NewPhoto, Photo,
+    PhotoContext, PhotoFilter, PhotoPlayer, PhotoSort, PhotoStatus, QueueStatus, Session,
+    SessionPlayer, World,
+};
+
+const SCHEMA_V1: &str = r#"
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    applied_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS library_roots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    path TEXT NOT NULL UNIQUE,
+    kind TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS worlds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    world_id TEXT NOT NULL UNIQUE,
+    name TEXT,
+    name_source TEXT,
+    alias TEXT,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    log_file TEXT NOT NULL,
+    started_at INTEGER NOT NULL,
+    ended_at INTEGER,
+    world_id INTEGER NOT NULL REFERENCES worlds(id),
+    instance_id TEXT
+);
+
+CREATE TABLE IF NOT EXISTS session_players (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    joined_at INTEGER NOT NULL,
+    left_at INTEGER,
+    UNIQUE(session_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS photos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    root_id INTEGER NOT NULL REFERENCES library_roots(id) ON DELETE CASCADE,
+    rel_path TEXT NOT NULL,
+    abs_path TEXT NOT NULL UNIQUE,
+    file_name TEXT NOT NULL,
+    captured_at_utc INTEGER NOT NULL,
+    captured_at_local TEXT NOT NULL,
+    tz_offset_sec INTEGER NOT NULL,
+    width INTEGER NOT NULL,
+    height INTEGER NOT NULL,
+    file_size INTEGER NOT NULL,
+    mtime INTEGER NOT NULL,
+    blake3 TEXT,
+    status TEXT NOT NULL DEFAULT 'present',
+    is_favorite INTEGER NOT NULL DEFAULT 0,
+    note TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(root_id, rel_path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_photos_captured ON photos(captured_at_utc DESC);
+CREATE INDEX IF NOT EXISTS idx_photos_favorite ON photos(is_favorite) WHERE is_favorite = 1;
+CREATE INDEX IF NOT EXISTS idx_photos_blake3 ON photos(blake3);
+
+CREATE TABLE IF NOT EXISTS photo_context (
+    photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
+    session_id INTEGER REFERENCES sessions(id) ON DELETE SET NULL,
+    world_id INTEGER REFERENCES worlds(id) ON DELETE SET NULL,
+    world_name TEXT,
+    instance_id TEXT,
+    link_method TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 0,
+    linked_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_context_world ON photo_context(world_id);
+CREATE INDEX IF NOT EXISTS idx_context_instance ON photo_context(instance_id);
+
+CREATE TABLE IF NOT EXISTS photo_players (
+    photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL,
+    display_name TEXT NOT NULL,
+    PRIMARY KEY(photo_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_photo_players_user ON photo_players(user_id);
+CREATE INDEX IF NOT EXISTS idx_photo_players_name ON photo_players(display_name);
+
+CREATE TABLE IF NOT EXISTS tags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE IF NOT EXISTS photo_tags (
+    photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+    tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    PRIMARY KEY(photo_id, tag_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_photo_tags_tag ON photo_tags(tag_id);
+
+CREATE TABLE IF NOT EXISTS compression_profiles (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    enabled INTEGER NOT NULL,
+    auto_enabled INTEGER NOT NULL,
+    json TEXT NOT NULL,
+    sort_order INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS derivatives (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+    path TEXT NOT NULL UNIQUE,
+    format TEXT NOT NULL,
+    width INTEGER NOT NULL,
+    height INTEGER NOT NULL,
+    file_size INTEGER NOT NULL,
+    profile_id TEXT NOT NULL,
+    policy TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_derivatives_photo ON derivatives(photo_id);
+
+CREATE TABLE IF NOT EXISTS compression_jobs (
+    id TEXT PRIMARY KEY,
+    photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+    profile_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    progress REAL NOT NULL DEFAULT 0,
+    error TEXT,
+    output_path TEXT,
+    policy TEXT NOT NULL DEFAULT 'keep',
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON compression_jobs(status);
+
+CREATE TABLE IF NOT EXISTS log_imports (
+    log_file TEXT PRIMARY KEY,
+    size INTEGER NOT NULL,
+    mtime INTEGER NOT NULL,
+    last_offset INTEGER NOT NULL,
+    parser_version TEXT NOT NULL,
+    parsed_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+"#;
+
+const PHOTO_SELECT: &str = "p.id, p.root_id, p.rel_path, p.abs_path, p.file_name, \
+    p.captured_at_utc, p.captured_at_local, p.tz_offset_sec, p.width, p.height, \
+    p.file_size, p.mtime, p.blake3, p.status, p.is_favorite, p.note, \
+    c.world_name, c.instance_id, c.link_method, c.confidence";
+
+const PHOTO_FROM: &str = " FROM photos p LEFT JOIN photo_context c ON c.photo_id = p.id ";
+
+pub struct Db {
+    conn: Connection,
+}
+
+impl Db {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let conn = Connection::open(path)?;
+        Self::configure(&conn)?;
+        let db = Self { conn };
+        db.migrate()?;
+        Ok(db)
+    }
+
+    pub fn open_in_memory() -> Result<Self> {
+        let conn = Connection::open_in_memory()?;
+        Self::configure(&conn)?;
+        let db = Self { conn };
+        db.migrate()?;
+        Ok(db)
+    }
+
+    fn configure(conn: &Connection) -> Result<()> {
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // WAL is not available for in-memory databases; ignore that case.
+        let _ = conn.pragma_update(None, "journal_mode", "WAL");
+        let _ = conn.pragma_update(None, "synchronous", "NORMAL");
+        Ok(())
+    }
+
+    fn migrate(&self) -> Result<()> {
+        let version: i64 = self
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version < 1 {
+            self.conn.execute_batch(SCHEMA_V1)?;
+            self.conn.execute(
+                "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (1, ?1)",
+                params![now_string()],
+            )?;
+            self.conn.pragma_update(None, "user_version", 1)?;
+        }
+        Ok(())
+    }
+
+    pub fn connection(&self) -> &Connection {
+        &self.conn
+    }
+
+    // ---------- library roots ----------
+
+    pub fn add_root(&self, path: &str, kind: &str) -> Result<i64> {
+        let id = self.conn.query_row(
+            "INSERT INTO library_roots(path, kind, created_at) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(path) DO UPDATE SET kind = excluded.kind RETURNING id",
+            params![path, kind, now_string()],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    pub fn roots(&self) -> Result<Vec<LibraryRoot>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, path, kind FROM library_roots ORDER BY id")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(LibraryRoot {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                kind: row.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    // ---------- photos ----------
+
+    pub fn upsert_photo(&self, photo: &NewPhoto) -> Result<i64> {
+        let now = now_string();
+        let id = self.conn.query_row(
+            "INSERT INTO photos(root_id, rel_path, abs_path, file_name, captured_at_utc, \
+                captured_at_local, tz_offset_sec, width, height, file_size, mtime, blake3, \
+                status, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'present', ?13, ?13) \
+             ON CONFLICT(abs_path) DO UPDATE SET \
+                root_id = excluded.root_id, rel_path = excluded.rel_path, \
+                file_name = excluded.file_name, captured_at_utc = excluded.captured_at_utc, \
+                captured_at_local = excluded.captured_at_local, \
+                tz_offset_sec = excluded.tz_offset_sec, width = excluded.width, \
+                height = excluded.height, file_size = excluded.file_size, \
+                mtime = excluded.mtime, blake3 = COALESCE(excluded.blake3, photos.blake3), \
+                status = 'present', updated_at = excluded.updated_at \
+             RETURNING id",
+            params![
+                photo.root_id,
+                photo.rel_path,
+                photo.abs_path,
+                photo.file_name,
+                photo.captured_at_utc,
+                photo.captured_at_local,
+                photo.tz_offset_sec,
+                photo.width as i64,
+                photo.height as i64,
+                photo.file_size as i64,
+                photo.mtime,
+                photo.blake3,
+                now,
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    pub fn photo_by_id(&self, id: i64) -> Result<Option<Photo>> {
+        let sql = format!("SELECT {PHOTO_SELECT}{PHOTO_FROM} WHERE p.id = ?1");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let photo = stmt.query_row(params![id], row_to_photo).optional()?;
+        Ok(photo)
+    }
+
+    pub fn photo_by_path(&self, path: &str) -> Result<Option<Photo>> {
+        let sql = format!("SELECT {PHOTO_SELECT}{PHOTO_FROM} WHERE p.abs_path = ?1");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let photo = stmt.query_row(params![path], row_to_photo).optional()?;
+        Ok(photo)
+    }
+
+    pub fn list_photos(&self, limit: i64, offset: i64, sort: PhotoSort) -> Result<Vec<Photo>> {
+        let order = match sort {
+            PhotoSort::Newest => "p.captured_at_utc DESC, p.id DESC",
+            PhotoSort::Oldest => "p.captured_at_utc ASC, p.id ASC",
+            PhotoSort::Largest => "p.file_size DESC, p.id DESC",
+            PhotoSort::World => "c.world_name COLLATE NOCASE ASC, p.captured_at_utc DESC",
+        };
+        let sql = format!(
+            "SELECT {PHOTO_SELECT}{PHOTO_FROM} WHERE p.status = 'present' \
+             ORDER BY {order} LIMIT ?1 OFFSET ?2"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![limit.max(1), offset.max(0)], row_to_photo)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn search_photos(&self, filter: &PhotoFilter) -> Result<Vec<Photo>> {
+        let (where_sql, values) = build_photo_filter(filter);
+        let sort = filter.sort.unwrap_or(PhotoSort::Newest);
+        let order = match sort {
+            PhotoSort::Newest => "p.captured_at_utc DESC, p.id DESC",
+            PhotoSort::Oldest => "p.captured_at_utc ASC, p.id ASC",
+            PhotoSort::Largest => "p.file_size DESC, p.id DESC",
+            PhotoSort::World => "c.world_name COLLATE NOCASE ASC, p.captured_at_utc DESC",
+        };
+        let limit = if filter.limit > 0 { filter.limit } else { 500 };
+        let offset = filter.offset.max(0);
+        let sql = format!(
+            "SELECT {PHOTO_SELECT}{PHOTO_FROM} WHERE {where_sql} \
+             ORDER BY {order} LIMIT ? OFFSET ?"
+        );
+        let mut all_values = values;
+        all_values.push(Value::Integer(limit));
+        all_values.push(Value::Integer(offset));
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(all_values), row_to_photo)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn count_search(&self, filter: &PhotoFilter) -> Result<i64> {
+        let (where_sql, values) = build_photo_filter(filter);
+        let sql = format!("SELECT COUNT(*){PHOTO_FROM} WHERE {where_sql}");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let count = stmt.query_row(params_from_iter(values), |row| row.get(0))?;
+        Ok(count)
+    }
+
+    pub fn count_photos(&self) -> Result<i64> {
+        let count = self.conn.query_row(
+            "SELECT COUNT(*) FROM photos WHERE status = 'present'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    pub fn set_favorite(&self, photo_id: i64, favorite: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE photos SET is_favorite = ?1, updated_at = ?2 WHERE id = ?3",
+            params![favorite as i64, now_string(), photo_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_note(&self, photo_id: i64, note: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE photos SET note = ?1, updated_at = ?2 WHERE id = ?3",
+            params![note, now_string(), photo_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_missing(&self, photo_id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE photos SET status = 'missing', updated_at = ?1 WHERE id = ?2",
+            params![now_string(), photo_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn stats(&self) -> Result<LibraryStats> {
+        let (photo_count, total_bytes): (i64, i64) = self.conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(file_size), 0) FROM photos WHERE status = 'present'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let compressed_count: i64 = self.conn.query_row(
+            "SELECT COUNT(DISTINCT photo_id) FROM derivatives",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(LibraryStats {
+            photo_count,
+            total_bytes: total_bytes.max(0) as u64,
+            compressed_count,
+        })
+    }
+
+    // ---------- worlds / sessions ----------
+
+    pub fn upsert_world(
+        &self,
+        world_id: &str,
+        name: Option<&str>,
+        source: Option<&str>,
+    ) -> Result<i64> {
+        let now = now_string();
+        let id = self.conn.query_row(
+            "INSERT INTO worlds(world_id, name, name_source, first_seen, last_seen) \
+             VALUES (?1, ?2, ?3, ?4, ?4) \
+             ON CONFLICT(world_id) DO UPDATE SET \
+                name = COALESCE(excluded.name, worlds.name), \
+                name_source = COALESCE(excluded.name_source, worlds.name_source), \
+                last_seen = excluded.last_seen \
+             RETURNING id",
+            params![world_id, name, source, now],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    pub fn world_by_id(&self, id: i64) -> Result<Option<World>> {
+        let world = self
+            .conn
+            .query_row(
+                "SELECT id, world_id, name, name_source, alias FROM worlds WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok(World {
+                        id: row.get(0)?,
+                        world_id: row.get(1)?,
+                        name: row.get(2)?,
+                        name_source: row.get(3)?,
+                        alias: row.get(4)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(world)
+    }
+
+    pub fn create_session(
+        &self,
+        log_file: &str,
+        started_at: i64,
+        world_id: i64,
+        instance_id: Option<&str>,
+    ) -> Result<i64> {
+        let id = self.conn.query_row(
+            "INSERT INTO sessions(log_file, started_at, world_id, instance_id) \
+             VALUES (?1, ?2, ?3, ?4) RETURNING id",
+            params![log_file, started_at, world_id, instance_id],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    pub fn close_session(&self, session_id: i64, ended_at: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET ended_at = ?1 WHERE id = ?2 AND ended_at IS NULL",
+            params![ended_at, session_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn session_at(&self, timestamp: i64) -> Result<Option<Session>> {
+        let session = self
+            .conn
+            .query_row(
+                "SELECT id, log_file, started_at, ended_at, world_id, instance_id \
+                 FROM sessions WHERE started_at <= ?1 AND (ended_at IS NULL OR ?1 < ended_at) \
+                 ORDER BY started_at DESC LIMIT 1",
+                params![timestamp],
+                |row| {
+                    Ok(Session {
+                        id: row.get(0)?,
+                        log_file: row.get(1)?,
+                        started_at: row.get(2)?,
+                        ended_at: row.get(3)?,
+                        world_id: row.get(4)?,
+                        instance_id: row.get(5)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(session)
+    }
+
+    pub fn upsert_session_player(
+        &self,
+        session_id: i64,
+        user_id: &str,
+        display_name: &str,
+        joined_at: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO session_players(session_id, user_id, display_name, joined_at) \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(session_id, user_id) DO UPDATE SET \
+                display_name = excluded.display_name, left_at = NULL",
+            params![session_id, user_id, display_name, joined_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn close_session_player(&self, session_id: i64, user_id: &str, left_at: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE session_players SET left_at = ?1 \
+             WHERE session_id = ?2 AND user_id = ?3 AND left_at IS NULL",
+            params![left_at, session_id, user_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn players_at(&self, session_id: i64, timestamp: i64) -> Result<Vec<SessionPlayer>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, user_id, display_name, joined_at, left_at \
+             FROM session_players WHERE session_id = ?1 AND joined_at <= ?2 \
+             AND (left_at IS NULL OR ?2 < left_at) ORDER BY joined_at",
+        )?;
+        let rows = stmt.query_map(params![session_id, timestamp], |row| {
+            Ok(SessionPlayer {
+                id: row.get(0)?,
+                session_id: row.get(1)?,
+                user_id: row.get(2)?,
+                display_name: row.get(3)?,
+                joined_at: row.get(4)?,
+                left_at: row.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    // ---------- photo context ----------
+
+    pub fn set_photo_context(&self, context: &PhotoContext) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO photo_context(photo_id, session_id, world_id, world_name, instance_id, \
+                link_method, confidence, linked_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+             ON CONFLICT(photo_id) DO UPDATE SET \
+                session_id = excluded.session_id, world_id = excluded.world_id, \
+                world_name = excluded.world_name, instance_id = excluded.instance_id, \
+                link_method = excluded.link_method, confidence = excluded.confidence, \
+                linked_at = excluded.linked_at",
+            params![
+                context.photo_id,
+                context.session_id,
+                context.world_id,
+                context.world_name,
+                context.instance_id,
+                context.link_method,
+                context.confidence,
+                context.linked_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn photo_context(&self, photo_id: i64) -> Result<Option<PhotoContext>> {
+        let context = self
+            .conn
+            .query_row(
+                "SELECT photo_id, session_id, world_id, world_name, instance_id, \
+                    link_method, confidence, linked_at FROM photo_context WHERE photo_id = ?1",
+                params![photo_id],
+                |row| {
+                    Ok(PhotoContext {
+                        photo_id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        world_id: row.get(2)?,
+                        world_name: row.get(3)?,
+                        instance_id: row.get(4)?,
+                        link_method: row.get(5)?,
+                        confidence: row.get(6)?,
+                        linked_at: row.get(7)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(context)
+    }
+
+    pub fn set_photo_players(&self, photo_id: i64, players: &[PhotoPlayer]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM photo_players WHERE photo_id = ?1",
+            params![photo_id],
+        )?;
+        for player in players {
+            if player.user_id.trim().is_empty() {
+                continue;
+            }
+            tx.execute(
+                "INSERT OR REPLACE INTO photo_players(photo_id, user_id, display_name) \
+                 VALUES (?1, ?2, ?3)",
+                params![photo_id, player.user_id, player.display_name],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn photo_players(&self, photo_id: i64) -> Result<Vec<PhotoPlayer>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT user_id, display_name FROM photo_players WHERE photo_id = ?1 \
+             ORDER BY display_name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map(params![photo_id], |row| {
+            Ok(PhotoPlayer {
+                user_id: row.get(0)?,
+                display_name: row.get(1)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    // ---------- tags ----------
+
+    pub fn add_tag(&self, name: &str) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO tags(name) VALUES (?1) ON CONFLICT(name) DO NOTHING",
+            params![name],
+        )?;
+        let id = self.conn.query_row(
+            "SELECT id FROM tags WHERE name = ?1",
+            params![name],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    pub fn set_photo_tags(&self, photo_id: i64, tags: &[String]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "DELETE FROM photo_tags WHERE photo_id = ?1",
+            params![photo_id],
+        )?;
+        for name in tags {
+            let name = name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            tx.execute(
+                "INSERT INTO tags(name) VALUES (?1) ON CONFLICT(name) DO NOTHING",
+                params![name],
+            )?;
+            let tag_id: i64 = tx.query_row(
+                "SELECT id FROM tags WHERE name = ?1",
+                params![name],
+                |row| row.get(0),
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO photo_tags(photo_id, tag_id) VALUES (?1, ?2)",
+                params![photo_id, tag_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn photo_tags(&self, photo_id: i64) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.name FROM tags t JOIN photo_tags pt ON pt.tag_id = t.id \
+             WHERE pt.photo_id = ?1 ORDER BY t.name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map(params![photo_id], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    // ---------- compression profiles ----------
+
+    pub fn save_profile(&self, profile: &CompressionProfile) -> Result<()> {
+        let json = serde_json::to_string(profile)?;
+        self.conn.execute(
+            "INSERT INTO compression_profiles(id, name, enabled, auto_enabled, json, sort_order) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 0) \
+             ON CONFLICT(id) DO UPDATE SET name = excluded.name, enabled = excluded.enabled, \
+                auto_enabled = excluded.auto_enabled, json = excluded.json",
+            params![
+                profile.id,
+                profile.name,
+                profile.enabled as i64,
+                profile.auto_enabled as i64,
+                json,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_profiles(&self) -> Result<Vec<CompressionProfile>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT json FROM compression_profiles ORDER BY sort_order, name COLLATE NOCASE",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut profiles = Vec::new();
+        for row in rows {
+            let json = row?;
+            profiles.push(serde_json::from_str(&json)?);
+        }
+        Ok(profiles)
+    }
+
+    pub fn delete_profile(&self, id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM compression_profiles WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    // ---------- compression jobs ----------
+
+    pub fn enqueue_job(&self, photo_id: i64, profile_id: &str, policy: &str) -> Result<String> {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.conn.execute(
+            "INSERT INTO compression_jobs(id, photo_id, profile_id, status, progress, policy, created_at) \
+             VALUES (?1, ?2, ?3, 'pending', 0, ?4, ?5)",
+            params![id, photo_id, profile_id, policy, now_string()],
+        )?;
+        Ok(id)
+    }
+
+    pub fn next_pending_job(&self) -> Result<Option<CompressionJob>> {
+        let job = self
+            .conn
+            .query_row(
+                "SELECT id, photo_id, profile_id, status, progress, error, output_path, policy, \
+                    created_at, started_at, finished_at FROM compression_jobs \
+                 WHERE status = 'pending' ORDER BY created_at LIMIT 1",
+                [],
+                row_to_job,
+            )
+            .optional()?;
+        if let Some(job) = &job {
+            self.conn.execute(
+                "UPDATE compression_jobs SET status = 'processing', started_at = ?1 WHERE id = ?2",
+                params![now_string(), job.id],
+            )?;
+        }
+        let mut job = job;
+        if let Some(job) = job.as_mut() {
+            job.status = QueueStatus::Processing;
+            job.started_at = Some(now_string());
+        }
+        Ok(job)
+    }
+
+    pub fn update_job(
+        &self,
+        id: &str,
+        status: QueueStatus,
+        progress: f64,
+        error: Option<&str>,
+        output_path: Option<&str>,
+    ) -> Result<()> {
+        let finished_at = if matches!(
+            status,
+            QueueStatus::Completed | QueueStatus::Failed | QueueStatus::Cancelled
+        ) {
+            Some(now_string())
+        } else {
+            None
+        };
+        self.conn.execute(
+            "UPDATE compression_jobs SET status = ?1, progress = ?2, error = ?3, \
+                output_path = ?4, finished_at = COALESCE(?5, finished_at) WHERE id = ?6",
+            params![
+                status.as_str(),
+                progress,
+                error,
+                output_path,
+                finished_at,
+                id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_jobs(&self, limit: i64) -> Result<Vec<CompressionJob>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, photo_id, profile_id, status, progress, error, output_path, policy, \
+                created_at, started_at, finished_at FROM compression_jobs \
+             ORDER BY created_at DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit.max(1)], row_to_job)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn count_jobs(&self, status: QueueStatus) -> Result<i64> {
+        let count = self.conn.query_row(
+            "SELECT COUNT(*) FROM compression_jobs WHERE status = ?1",
+            params![status.as_str()],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    // ---------- derivatives ----------
+
+    pub fn add_derivative(
+        &self,
+        photo_id: i64,
+        path: &str,
+        format: &str,
+        width: u32,
+        height: u32,
+        file_size: u64,
+        profile_id: &str,
+        policy: &str,
+    ) -> Result<i64> {
+        let id = self.conn.query_row(
+            "INSERT INTO derivatives(photo_id, path, format, width, height, file_size, profile_id, policy, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+             ON CONFLICT(path) DO UPDATE SET file_size = excluded.file_size, \
+                width = excluded.width, height = excluded.height RETURNING id",
+            params![
+                photo_id,
+                path,
+                format,
+                width as i64,
+                height as i64,
+                file_size as i64,
+                profile_id,
+                policy,
+                now_string(),
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(id)
+    }
+
+    pub fn derivatives_for_photo(&self, photo_id: i64) -> Result<Vec<Derivative>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, photo_id, path, format, width, height, file_size, profile_id, policy, created_at \
+             FROM derivatives WHERE photo_id = ?1 ORDER BY created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![photo_id], |row| {
+            Ok(Derivative {
+                id: row.get(0)?,
+                photo_id: row.get(1)?,
+                path: row.get(2)?,
+                format: row.get(3)?,
+                width: row.get(4)?,
+                height: row.get(5)?,
+                file_size: row.get::<_, i64>(6)? as u64,
+                profile_id: row.get(7)?,
+                policy: row.get(8)?,
+                created_at: row.get(9)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    // ---------- log imports / settings ----------
+
+    pub fn log_offset(&self, log_file: &str) -> Result<Option<i64>> {
+        let offset = self
+            .conn
+            .query_row(
+                "SELECT last_offset FROM log_imports WHERE log_file = ?1",
+                params![log_file],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(offset)
+    }
+
+    pub fn set_log_offset(
+        &self,
+        log_file: &str,
+        size: i64,
+        mtime: i64,
+        last_offset: i64,
+        parser_version: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO log_imports(log_file, size, mtime, last_offset, parser_version, parsed_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+             ON CONFLICT(log_file) DO UPDATE SET size = excluded.size, mtime = excluded.mtime, \
+                last_offset = excluded.last_offset, parser_version = excluded.parser_version, \
+                parsed_at = excluded.parsed_at",
+            params![log_file, size, mtime, last_offset, parser_version, now_string()],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO app_settings(key, value) VALUES (?1, ?2) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        let value = self
+            .conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value)
+    }
+}
+
+fn build_photo_filter(filter: &PhotoFilter) -> (String, Vec<Value>) {
+    let mut clauses = vec!["p.status = 'present'".to_string()];
+    let mut values = Vec::new();
+
+    if !filter.world_ids.is_empty() {
+        let placeholders = vec!["?"; filter.world_ids.len()].join(",");
+        clauses.push(format!("c.world_id IN ({placeholders})"));
+        values.extend(filter.world_ids.iter().map(|id| Value::Integer(*id)));
+    }
+
+    if !filter.player_user_ids.is_empty() {
+        let placeholders = vec!["?"; filter.player_user_ids.len()].join(",");
+        clauses.push(format!(
+            "EXISTS (SELECT 1 FROM photo_players pp WHERE pp.photo_id = p.id \
+             AND pp.user_id IN ({placeholders}))"
+        ));
+        values.extend(
+            filter
+                .player_user_ids
+                .iter()
+                .map(|id| Value::Text(id.clone())),
+        );
+    }
+
+    if !filter.tags.is_empty() {
+        let placeholders = vec!["?"; filter.tags.len()].join(",");
+        clauses.push(format!(
+            "EXISTS (SELECT 1 FROM photo_tags pt JOIN tags t ON t.id = pt.tag_id \
+             WHERE pt.photo_id = p.id AND t.name IN ({placeholders}))"
+        ));
+        values.extend(filter.tags.iter().map(|tag| Value::Text(tag.clone())));
+    }
+
+    if let Some(from) = filter.from_utc {
+        clauses.push("p.captured_at_utc >= ?".to_string());
+        values.push(Value::Integer(from));
+    }
+    if let Some(to) = filter.to_utc {
+        clauses.push("p.captured_at_utc <= ?".to_string());
+        values.push(Value::Integer(to));
+    }
+    if filter.favorite == Some(true) {
+        clauses.push("p.is_favorite = 1".to_string());
+    }
+    if filter.unlinked == Some(true) {
+        clauses.push("c.photo_id IS NULL".to_string());
+    }
+
+    (clauses.join(" AND "), values)
+}
+
+fn row_to_photo(row: &Row<'_>) -> rusqlite::Result<Photo> {
+    Ok(Photo {
+        id: row.get(0)?,
+        root_id: row.get(1)?,
+        rel_path: row.get(2)?,
+        abs_path: row.get(3)?,
+        file_name: row.get(4)?,
+        captured_at_utc: row.get(5)?,
+        captured_at_local: row.get(6)?,
+        tz_offset_sec: row.get(7)?,
+        width: row.get(8)?,
+        height: row.get(9)?,
+        file_size: row.get::<_, i64>(10)? as u64,
+        mtime: row.get(11)?,
+        blake3: row.get(12)?,
+        status: PhotoStatus::from_str(&row.get::<_, String>(13)?),
+        is_favorite: row.get::<_, i64>(14)? != 0,
+        note: row.get(15)?,
+        world_name: row.get(16)?,
+        instance_id: row.get(17)?,
+        link_method: row.get(18)?,
+        confidence: row.get(19)?,
+    })
+}
+
+fn row_to_job(row: &Row<'_>) -> rusqlite::Result<CompressionJob> {
+    Ok(CompressionJob {
+        id: row.get(0)?,
+        photo_id: row.get(1)?,
+        profile_id: row.get(2)?,
+        status: QueueStatus::from_str(&row.get::<_, String>(3)?),
+        progress: row.get(4)?,
+        error: row.get(5)?,
+        output_path: row.get(6)?,
+        policy: row.get(7)?,
+        created_at: row.get(8)?,
+        started_at: row.get(9)?,
+        finished_at: row.get(10)?,
+    })
+}
+
+fn now_string() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{NewPhoto, PhotoFilter, PhotoPlayer};
+
+    fn sample_photo(root_id: i64, path: &str, ts: i64) -> NewPhoto {
+        NewPhoto {
+            root_id,
+            rel_path: path.trim_start_matches('/').to_string(),
+            abs_path: path.to_string(),
+            file_name: path.rsplit('/').next().unwrap_or(path).to_string(),
+            captured_at_utc: ts,
+            captured_at_local: "2026-10-21 21:14:03".to_string(),
+            tz_offset_sec: 9 * 3600,
+            width: 3840,
+            height: 2160,
+            file_size: 12_400_000,
+            mtime: ts,
+            blake3: None,
+        }
+    }
+
+    #[test]
+    fn migrates_and_upserts_photo() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let id = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        assert!(id > 0);
+        let photo = db.photo_by_id(id).unwrap().unwrap();
+        assert_eq!(photo.width, 3840);
+        assert_eq!(photo.status, PhotoStatus::Present);
+
+        let id2 = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        assert_eq!(id, id2);
+        assert_eq!(db.count_photos().unwrap(), 1);
+    }
+
+    #[test]
+    fn links_context_and_players() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo_id = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        let world = db
+            .upsert_world("wrld_test", Some("Test World"), Some("log"))
+            .unwrap();
+        let session = db
+            .create_session("output_log.txt", 90, world, Some("123~region(jp)"))
+            .unwrap();
+        db.upsert_session_player(session, "usr_a", "Alice", 95)
+            .unwrap();
+
+        let ctx = PhotoContext {
+            photo_id,
+            session_id: Some(session),
+            world_id: Some(world),
+            world_name: Some("Test World".to_string()),
+            instance_id: Some("123~region(jp)".to_string()),
+            link_method: "log".to_string(),
+            confidence: 1.0,
+            linked_at: now_string(),
+        };
+        db.set_photo_context(&ctx).unwrap();
+        db.set_photo_players(
+            photo_id,
+            &[PhotoPlayer {
+                user_id: "usr_a".to_string(),
+                display_name: "Alice".to_string(),
+            }],
+        )
+        .unwrap();
+
+        let stored = db.photo_context(photo_id).unwrap().unwrap();
+        assert_eq!(stored.world_name.as_deref(), Some("Test World"));
+        assert_eq!(db.photo_players(photo_id).unwrap()[0].display_name, "Alice");
+
+        let filter = PhotoFilter {
+            world_ids: vec![world],
+            ..Default::default()
+        };
+        assert_eq!(db.search_photos(&filter).unwrap().len(), 1);
+        assert_eq!(db.count_search(&filter).unwrap(), 1);
+    }
+
+    #[test]
+    fn queue_roundtrip() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        db.enqueue_job(photo, "profile", "keep").unwrap();
+        let job = db.next_pending_job().unwrap().unwrap();
+        assert_eq!(job.status, QueueStatus::Processing);
+        db.update_job(
+            &job.id,
+            QueueStatus::Completed,
+            1.0,
+            None,
+            Some("/photos/compressed/a.webp"),
+        )
+        .unwrap();
+        assert_eq!(db.count_jobs(QueueStatus::Completed).unwrap(), 1);
+    }
+}

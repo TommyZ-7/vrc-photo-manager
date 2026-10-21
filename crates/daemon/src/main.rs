@@ -2,7 +2,11 @@ use anyhow::Result;
 use clap::Parser;
 
 #[derive(Debug, Parser)]
-#[command(name = "vrc-photo-daemon", version, about = "VRC Photo Manager background daemon")]
+#[command(
+    name = "vrc-photo-daemon",
+    version,
+    about = "VRC Photo Manager background daemon"
+)]
 struct Args {
     /// Print the resolved data directory and exit.
     #[arg(long)]
@@ -19,7 +23,10 @@ fn main() -> Result<()> {
 
     let args = Args::parse();
     if args.print_data_dir {
-        println!("{}", vrc_photo_core::data_dir().unwrap_or_default().display());
+        println!(
+            "{}",
+            vrc_photo_core::data_dir().unwrap_or_default().display()
+        );
         return Ok(());
     }
 

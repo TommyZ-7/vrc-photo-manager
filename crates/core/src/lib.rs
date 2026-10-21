@@ -3,6 +3,13 @@
 //! The core crate is intentionally free of UI and process concerns so that the
 //! daemon and the gpui application can share it.
 
+pub mod db;
+pub mod error;
+pub mod model;
+
+pub use db::Db;
+pub use error::{CoreError, Result};
+
 pub const APP_NAME: &str = "VRC Photo Manager";
 pub const DB_FILE_NAME: &str = "library.db";
 
