@@ -541,13 +541,12 @@ impl Daemon {
                 .expect("cannot spawn thumbnail worker");
             self.thumbnail_tx = Some(tx.clone());
             self.thumbnail_handle = Some(handle);
-            if let Ok(db) = self.db.lock() {
-                if let Ok(photos) =
+            if let Ok(db) = self.db.lock()
+                && let Ok(photos) =
                     db.list_photos(5000, 0, vrc_photo_core::model::PhotoSort::Newest)
-                {
-                    for photo in photos {
-                        let _ = tx.send(photo.id);
-                    }
+            {
+                for photo in photos {
+                    let _ = tx.send(photo.id);
                 }
             }
         }
@@ -814,6 +813,46 @@ mod tests {
         daemon.run_once().unwrap();
         let photo = db.photo_by_id(photo.id).unwrap().unwrap();
         assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Missing);
+    }
+
+    #[test]
+    fn end_to_end_auto_compress() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let photo_path = photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        image::RgbaImage::from_pixel(16, 10, image::Rgba([10, 20, 30, 255]))
+            .save(&photo_path)
+            .unwrap();
+
+        let db_path = dir.path().join("library.db");
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        {
+            let db = Db::open(&db_path).unwrap();
+            db.save_profile(&CompressionProfile {
+                name: "test webp".to_string(),
+                format: vrc_photo_core::model::CompressionFormat::Webp,
+                auto_enabled: true,
+                quality: 80,
+                suffix: "_test".to_string(),
+                ..CompressionProfile::default()
+            })
+            .unwrap();
+        }
+        daemon.run_once().unwrap();
+        daemon.compress_pending().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        let photo = db
+            .photo_by_path(photo_path.to_str().unwrap())
+            .unwrap()
+            .expect("photo");
+        let derivatives = db.derivatives_for_photo(photo.id).unwrap();
+        assert_eq!(derivatives.len(), 1);
+        assert!(Path::new(&derivatives[0].path).is_file());
+        assert!(derivatives[0].file_size > 0);
     }
 
     #[test]

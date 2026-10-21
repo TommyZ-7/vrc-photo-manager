@@ -115,18 +115,18 @@ pub fn detect_vrchat_paths() -> DetectedPaths {
 
     #[cfg(not(target_os = "windows"))]
     {
-        if photo_roots.is_empty() {
-            if let Some(prefix) = proton_prefix() {
-                let user = prefix.join("drive_c").join("users").join("steamuser");
-                photo_roots.push(user.join("Pictures").join("VRChat"));
-                if log_dir.is_none() {
-                    log_dir = Some(
-                        user.join("AppData")
-                            .join("LocalLow")
-                            .join("VRChat")
-                            .join("VRChat"),
-                    );
-                }
+        if photo_roots.is_empty()
+            && let Some(prefix) = proton_prefix()
+        {
+            let user = prefix.join("drive_c").join("users").join("steamuser");
+            photo_roots.push(user.join("Pictures").join("VRChat"));
+            if log_dir.is_none() {
+                log_dir = Some(
+                    user.join("AppData")
+                        .join("LocalLow")
+                        .join("VRChat")
+                        .join("VRChat"),
+                );
             }
         }
     }
@@ -187,10 +187,12 @@ mod tests {
     #[test]
     fn settings_roundtrip() {
         let db = Db::open_in_memory().unwrap();
-        let mut settings = AppSettings::default();
-        settings.photo_roots = vec!["/tmp/photos".to_string()];
-        settings.log_dir = Some("/tmp/logs".to_string());
-        settings.language = "en".to_string();
+        let settings = AppSettings {
+            photo_roots: vec!["/tmp/photos".to_string()],
+            log_dir: Some("/tmp/logs".to_string()),
+            language: "en".to_string(),
+            ..Default::default()
+        };
         settings.save(&db).unwrap();
         let loaded = AppSettings::load(&db).unwrap();
         assert_eq!(loaded.photo_roots, settings.photo_roots);

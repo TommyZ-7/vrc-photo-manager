@@ -14,7 +14,7 @@ impl PhotoStatus {
         }
     }
 
-    pub fn from_str(value: &str) -> Self {
+    pub fn parse(value: &str) -> Self {
         match value {
             "missing" => Self::Missing,
             _ => Self::Present,
@@ -50,7 +50,7 @@ impl CompressionFormat {
         }
     }
 
-    pub fn from_str(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             "jpeg" => Some(Self::Jpeg),
             "webp" => Some(Self::Webp),
@@ -128,7 +128,7 @@ impl QueueStatus {
         }
     }
 
-    pub fn from_str(value: &str) -> Self {
+    pub fn parse(value: &str) -> Self {
         match value {
             "processing" => Self::Processing,
             "completed" => Self::Completed,

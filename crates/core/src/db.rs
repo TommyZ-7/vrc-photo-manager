@@ -369,6 +369,7 @@ impl Db {
 
     /// Text search used by the UI. Empty filters are ignored; categories are
     /// combined with AND.
+    #[allow(clippy::too_many_arguments)]
     pub fn search_photos_text(
         &self,
         world: Option<&str>,
@@ -835,24 +836,15 @@ impl Db {
         let job = self
             .conn
             .query_row(
-                "SELECT id, photo_id, profile_id, status, progress, error, output_path, policy, \
-                    created_at, started_at, finished_at FROM compression_jobs \
-                 WHERE status = 'pending' ORDER BY created_at LIMIT 1",
-                [],
+                "UPDATE compression_jobs SET status = 'processing', started_at = ?1 \
+                 WHERE id = (SELECT id FROM compression_jobs WHERE status = 'pending' \
+                    ORDER BY created_at LIMIT 1) \
+                 RETURNING id, photo_id, profile_id, status, progress, error, output_path, policy, \
+                    created_at, started_at, finished_at",
+                params![now_string()],
                 row_to_job,
             )
             .optional()?;
-        if let Some(job) = &job {
-            self.conn.execute(
-                "UPDATE compression_jobs SET status = 'processing', started_at = ?1 WHERE id = ?2",
-                params![now_string(), job.id],
-            )?;
-        }
-        let mut job = job;
-        if let Some(job) = job.as_mut() {
-            job.status = QueueStatus::Processing;
-            job.started_at = Some(now_string());
-        }
         Ok(job)
     }
 
@@ -908,6 +900,7 @@ impl Db {
 
     // ---------- derivatives ----------
 
+    #[allow(clippy::too_many_arguments)]
     pub fn add_derivative(
         &self,
         photo_id: i64,
@@ -1100,7 +1093,7 @@ fn row_to_photo(row: &Row<'_>) -> rusqlite::Result<Photo> {
         file_size: row.get::<_, i64>(10)? as u64,
         mtime: row.get(11)?,
         blake3: row.get(12)?,
-        status: PhotoStatus::from_str(&row.get::<_, String>(13)?),
+        status: PhotoStatus::parse(&row.get::<_, String>(13)?),
         is_favorite: row.get::<_, i64>(14)? != 0,
         note: row.get(15)?,
         world_name: row.get(16)?,
@@ -1116,7 +1109,7 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<CompressionJob> {
         id: row.get(0)?,
         photo_id: row.get(1)?,
         profile_id: row.get(2)?,
-        status: QueueStatus::from_str(&row.get::<_, String>(3)?),
+        status: QueueStatus::parse(&row.get::<_, String>(3)?),
         progress: row.get(4)?,
         error: row.get(5)?,
         output_path: row.get(6)?,

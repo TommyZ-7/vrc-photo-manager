@@ -118,12 +118,10 @@ fn build_icon() -> Result<Icon> {
             let border = x < 2 || y < 2 || x >= SIZE - 2 || y >= SIZE - 2;
             let photo_frame = (6..=25).contains(&x)
                 && (8..=23).contains(&y)
-                && (x < 9 || x > 22 || y < 11 || y > 20);
+                && (!(9..=22).contains(&x) || !(11..=20).contains(&y));
             let sun = (x as i32 - 21).pow(2) + (y as i32 - 14).pow(2) <= 6;
             let mountain = y > 16 && ((x as i32 - 15).abs() + (y as i32 - 20) < 7);
-            let color = if border {
-                [255, 255, 255, 255]
-            } else if photo_frame || sun || mountain {
+            let color = if border || photo_frame || sun || mountain {
                 [255, 255, 255, 255]
             } else {
                 [0, 120, 212, 255]

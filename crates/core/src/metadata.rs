@@ -41,20 +41,20 @@ pub fn read_xmp(path: &Path) -> Result<Option<XmpMetadata>> {
 
     let mut packet = None;
     for chunk in &info.utf8_text {
-        if is_xmp_keyword(&chunk.keyword) {
-            if let Ok(text) = chunk.get_text() {
-                packet = Some(text);
-                break;
-            }
+        if is_xmp_keyword(&chunk.keyword)
+            && let Ok(text) = chunk.get_text()
+        {
+            packet = Some(text);
+            break;
         }
     }
     if packet.is_none() {
         for chunk in &info.compressed_latin1_text {
-            if is_xmp_keyword(&chunk.keyword) {
-                if let Ok(text) = chunk.get_text() {
-                    packet = Some(text);
-                    break;
-                }
+            if is_xmp_keyword(&chunk.keyword)
+                && let Ok(text) = chunk.get_text()
+            {
+                packet = Some(text);
+                break;
             }
         }
     }
