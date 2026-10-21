@@ -1,0 +1,10 @@
+/target
+**/*.rs.bk
+*.db
+*.db-wal
+*.db-shm
+/thumbnails
+/data
+.env
+.DS_Store
+Thumbs.db
