@@ -16,6 +16,7 @@ use vrc_photo_core::log_parser::LogIngestor;
 use vrc_photo_core::model::{CompressionJob, CompressionProfile, QueueStatus};
 use vrc_photo_core::scanner::{ScanReport, scan_and_index};
 use vrc_photo_core::settings::{AppSettings, detect_vrchat_paths};
+use vrc_photo_core::thumbnail;
 
 mod tray;
 use tray::{Tray, TrayAction};
@@ -56,6 +57,8 @@ pub struct Daemon {
     last_log_poll: std::time::Instant,
     tray: Option<Tray>,
     tray_enabled: bool,
+    thumbnail_tx: Option<mpsc::Sender<i64>>,
+    thumbnail_handle: Option<JoinHandle<()>>,
 }
 
 impl Daemon {
@@ -102,6 +105,8 @@ impl Daemon {
             last_log_poll: std::time::Instant::now() - LOG_INTERVAL,
             tray: None,
             tray_enabled,
+            thumbnail_tx: None,
+            thumbnail_handle: None,
         })
     }
 
@@ -127,7 +132,19 @@ impl Daemon {
     }
 
     pub fn run_once(&mut self) -> Result<()> {
-        self.scan_photos()?;
+        let report = self.scan_photos()?;
+        for id in &report.new_ids {
+            let path = {
+                let db = self.db.lock().unwrap();
+                db.photo_by_id(*id)
+                    .ok()
+                    .flatten()
+                    .map(|photo| photo.abs_path)
+            };
+            if let Some(path) = path {
+                let _ = thumbnail::ensure_thumbnail(*id, Path::new(&path));
+            }
+        }
         self.ingest_logs()?;
         self.link_unlinked()?;
         self.refresh_status()?;
@@ -257,6 +274,11 @@ impl Daemon {
         drop(db);
         if report.indexed > 0 {
             self.link_unlinked()?;
+        }
+        if let Some(tx) = &self.thumbnail_tx {
+            for id in &report.new_ids {
+                let _ = tx.send(*id);
+            }
         }
         Ok(report)
     }
@@ -442,6 +464,26 @@ impl Daemon {
     }
 
     fn start_workers(&mut self) {
+        if self.thumbnail_tx.is_none() {
+            let (tx, rx) = mpsc::channel();
+            let db = self.db.clone();
+            let running = self.running.clone();
+            let handle = thread::Builder::new()
+                .name("thumbnails".to_string())
+                .spawn(move || thumbnail_loop(db, running, rx))
+                .expect("cannot spawn thumbnail worker");
+            self.thumbnail_tx = Some(tx.clone());
+            self.thumbnail_handle = Some(handle);
+            if let Ok(db) = self.db.lock() {
+                if let Ok(photos) =
+                    db.list_photos(5000, 0, vrc_photo_core::model::PhotoSort::Newest)
+                {
+                    for photo in photos {
+                        let _ = tx.send(photo.id);
+                    }
+                }
+            }
+        }
         if !self.workers.is_empty() {
             return;
         }
@@ -459,6 +501,10 @@ impl Daemon {
 
     fn stop_workers(&mut self) {
         self.running.store(false, Ordering::Relaxed);
+        self.thumbnail_tx = None;
+        if let Some(handle) = self.thumbnail_handle.take() {
+            let _ = handle.join();
+        }
         for handle in self.workers.drain(..) {
             let _ = handle.join();
         }
@@ -496,6 +542,27 @@ fn enqueue_auto_jobs(db: &Db, new_ids: &[i64]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn thumbnail_loop(db: Arc<Mutex<Db>>, running: Arc<AtomicBool>, rx: Receiver<i64>) {
+    while running.load(Ordering::Relaxed) {
+        match rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(id) => {
+                let path = {
+                    let db = db.lock().unwrap();
+                    db.photo_by_id(id)
+                        .ok()
+                        .flatten()
+                        .map(|photo| photo.abs_path)
+                };
+                if let Some(path) = path {
+                    let _ = thumbnail::ensure_thumbnail(id, Path::new(&path));
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
 }
 
 fn worker_loop(db: Arc<Mutex<Db>>, running: Arc<AtomicBool>) {

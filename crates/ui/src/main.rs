@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -19,6 +19,7 @@ use vrc_photo_core::model::{
     PhotoPlayer, QueueStatus,
 };
 use vrc_photo_core::settings::AppSettings;
+use vrc_photo_core::thumbnail;
 use vrc_photo_core::time;
 
 const BG: u32 = 0x0f1115;
@@ -69,6 +70,7 @@ pub struct App {
     selected_tags: Vec<String>,
     selected_derivatives: Vec<Derivative>,
     compressed_ids: HashSet<i64>,
+    thumbnails: HashMap<i64, Arc<RenderImage>>,
     preview: Option<Arc<RenderImage>>,
     profiles: Vec<CompressionProfile>,
     profile_index: usize,
@@ -103,6 +105,7 @@ impl App {
             selected_tags: Vec::new(),
             selected_derivatives: Vec::new(),
             compressed_ids: HashSet::new(),
+            thumbnails: HashMap::new(),
             preview: None,
             profiles: Vec::new(),
             profile_index: 0,
@@ -184,6 +187,7 @@ impl App {
             .unwrap_or_default()
             .into_iter()
             .collect();
+        self.load_thumbnails();
         self.jobs = self.db.list_jobs(20).unwrap_or_default();
         self.settings = AppSettings::load(&self.db).unwrap_or_default();
         self.refresh_monitor();
@@ -207,6 +211,18 @@ impl App {
                     .into_iter()
                     .map(|player| player.display_name)
                     .collect();
+            }
+        }
+    }
+
+    fn load_thumbnails(&mut self) {
+        self.thumbnails.clear();
+        for photo in self.photos.iter().take(300) {
+            let Some(path) = thumbnail::thumbnail_path(photo.id) else {
+                continue;
+            };
+            if let Some(image) = load_render(&path) {
+                self.thumbnails.insert(photo.id, image);
             }
         }
     }
@@ -514,6 +530,7 @@ impl App {
             .clone()
             .unwrap_or_else(|| "未紐付け".to_string());
         let compressed = self.compressed_ids.contains(&photo.id);
+        let thumbnail = self.thumbnails.get(&photo.id).cloned();
         v_flex()
             .id(SharedString::from(format!("photo-{id}")))
             .w(px(168.))
@@ -529,6 +546,13 @@ impl App {
                     .border_1()
                     .border_color(if selected { rgb(BLUE) } else { rgb(BORDER) })
                     .relative()
+                    .when_some(thumbnail, |this, image| {
+                        this.child(
+                            gpui_kit::img(image)
+                                .object_fit(ObjectFit::Cover)
+                                .size_full(),
+                        )
+                    })
                     .child(
                         div()
                             .absolute()
@@ -1792,6 +1816,18 @@ fn seed_demo(db: &Db) {
             .ok();
         }
     }
+}
+
+fn load_render(path: &Path) -> Option<Arc<RenderImage>> {
+    if !path.is_file() {
+        return None;
+    }
+    let mut buffer = image::open(path).ok()?.to_rgba8();
+    for pixel in buffer.pixels_mut() {
+        pixel.0.swap(0, 2);
+    }
+    let frame = image::Frame::new(buffer);
+    Some(Arc::new(RenderImage::new(SmallVec::from_elem(frame, 1))))
 }
 
 fn load_preview(path: &Path) -> Option<Arc<RenderImage>> {

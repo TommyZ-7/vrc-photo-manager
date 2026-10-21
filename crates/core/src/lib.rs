@@ -13,6 +13,7 @@ pub mod model;
 pub mod photo_filename;
 pub mod scanner;
 pub mod settings;
+pub mod thumbnail;
 pub mod time;
 
 pub use db::Db;
