@@ -2,6 +2,9 @@
 
 最終更新: 2026-10-21
 
+> 詳細な開発ドキュメントは [docs/README.md](README.md) を参照。
+> このファイルは短期引き継ぎ用の要約。
+
 ## リポジトリ
 
 - GitHub: https://github.com/TommyZ-7/vrc-photo-manager
@@ -30,6 +33,9 @@
 - コピー/移動の写真取り込み
 - OSゴミ箱への写真移動（2段階確認）
 - トレイ常駐、自動起動
+- パッケージ版UIからのデーモン自動起動
+- AppImageの安定した自動起動（`$APPIMAGE --background`）
+- デーモンの二重起動防止
 - デーモンハートビート表示
 - 外部削除された写真の `missing` 検出
 - notifyによる増分スキャン
