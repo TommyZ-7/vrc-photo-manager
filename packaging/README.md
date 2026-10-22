@@ -14,6 +14,17 @@ cargo packager --release
 The config lives in `Packager.toml`. The release workflow runs the same command
 on tag pushes and uploads every file in `dist/` to the GitHub Release.
 
+## License notices
+
+`Packager.toml` bundles these files through `resources`:
+
+- `LICENSE` (application, MIT)
+- `packaging/licenses/LICENSE-LUCIDE` (Lucide ISC; Feather-derived icons MIT)
+
+Linux packages place them in `/usr/lib/vrc-photo-manager/`. The Windows
+installer places them next to the executable. See `docs/licenses.md` for
+provenance and update steps.
+
 Runtime expectations:
 
 - Vulkan-capable GPU/driver

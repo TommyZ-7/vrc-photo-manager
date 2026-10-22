@@ -42,8 +42,13 @@ git push origin v0.1.0
 - `beforePackagingCommand = "cargo build --release -p vrc-photo-ui -p vrc-photo-daemon"`
 - `binariesDir = "target/release"` / `outDir = "dist"`
 - アイコン: `packaging/icons/icon.png`（512px）
+- `resources = ["LICENSE", "packaging/licenses/LICENSE-LUCIDE"]`
 - deb依存: `libxkbcommon0`, `libxkbcommon-x11-0`, `libwayland-client0`, `libvulkan1`, `libx11-6`, `libxcb1`, `libfontconfig1`, `libfreetype6`
 - pacman依存: `libxkbcommon`, `wayland`, `vulkan-icd-loader`, `libx11`, `libxcb`, `fontconfig`, `freetype2`
+
+`resources` のライセンス通知は、Linux（deb / AppImage / pacman）では
+`/usr/lib/vrc-photo-manager/`、Windows（NSIS）では実行ファイルと同じディレクトリに配置される。
+由来と更新手順は [licenses.md](licenses.md) を参照。
 
 ## 4. パッケージ起動時の挙動
 
@@ -78,6 +83,8 @@ ls -lh dist
 - `pull_request`（release-relevant pathsのみ）
 - `workflow_dispatch`
 - Ubuntuランナー: 依存を入れ、`cargo packager --release`
+- `Verify third-party notices`: deb / AppImage / pacman に `LICENSE` と
+  `LICENSE-LUCIDE` が含まれることを検査する
 - Windowsランナー: `cargo packager --release -f nsis`（NSISは自動取得）
 - 両ジョブの `dist/*` をworkflow artifactとして保存
 - タグ時のみ `publish` ジョブが両artifactをまとめて `gh release create/upload` で公開
@@ -105,6 +112,7 @@ Required check名を変更した場合は、GitHubのbranch protectionも更新�
 - [ ] 破壊的DB変更がない、またはマイグレーションがある
 - [ ] パッケージ生成物にUIとデーモンの両方が入っている
 - [ ] アイコンとdesktop entryが入っている
+- [ ] パッケージ生成物に `LICENSE` と `LICENSE-LUCIDE` が入っている
 - [ ] リリースノートの分類が正しい
 
 ## 9. ロールバック

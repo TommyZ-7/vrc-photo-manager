@@ -45,6 +45,7 @@ jobs:
             libxcb1-dev \
             libfontconfig1-dev \
             libfreetype6-dev \
+            squashfs-tools \
             file
 
       - name: Install Rust
@@ -61,6 +62,30 @@ jobs:
 
       - name: List artifacts
         run: ls -lh dist
+
+      - name: Verify third-party notices
+        run: |
+          set -euo pipefail
+          deb=$(ls dist/*.deb)
+          appimage=$(ls dist/*.AppImage)
+          pacman=$(ls dist/*.tar.gz)
+
+          chmod +x "$appimage"
+          if ! "$appimage" --appimage-extract >/dev/null; then
+            echo "failed to extract AppImage"
+            exit 1
+          fi
+
+          for notice in LICENSE LICENSE-LUCIDE; do
+            path="usr/lib/vrc-photo-manager/$notice"
+            dpkg-deb --contents "$deb" | grep "$path\$" >/dev/null \
+              || { echo "missing $notice in deb"; exit 1; }
+            test -f "squashfs-root/$path" \
+              || { echo "missing $notice in AppImage"; exit 1; }
+            tar -tzf "$pacman" | grep "$path\$" >/dev/null \
+              || { echo "missing $notice in pacman package"; exit 1; }
+          done
+          echo "third-party notices verified"
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4

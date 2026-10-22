@@ -14,6 +14,7 @@
 | [development.md](development.md) | 環境構築、実行、デバッグ、コード規約 | 開発者 |
 | [testing.md](testing.md) | 自動テスト、手動確認、未検証範囲 | QA・開発者 |
 | [release.md](release.md) | バージョン、CI、deb/AppImage/pacman配布 | リリース担当 |
+| [licenses.md](licenses.md) | 同梱アセットのライセンスとパッケージ内の配置 | 全員 |
 | [troubleshooting.md](troubleshooting.md) | よくある不具合と調査手順 | サポート・開発者 |
 | [security-privacy.md](security-privacy.md) | ローカルデータ、ログ、個人情報の扱い | 全員 |
 | [roadmap.md](roadmap.md) | 残作業、優先度、受け入れ条件 | 企画・開発者 |

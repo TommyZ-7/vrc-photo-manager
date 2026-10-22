@@ -7,6 +7,10 @@ longDescription = "Index VRChat screenshots, link them to the world and players 
 homepage = "https://github.com/TommyZ-7/vrc-photo-manager"
 authors = ["TommyZ7"]
 licenseFile = "LICENSE"
+resources = [
+  "LICENSE",
+  "packaging/licenses/LICENSE-LUCIDE",
+]
 category = "Photography"
 outDir = "dist"
 binariesDir = "target/release"
