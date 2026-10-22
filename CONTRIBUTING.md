@@ -74,5 +74,8 @@ deb / AppImage / pacmanに影響する変更は、PRでReleaseワークフロー
 
 ## ライセンス
 
-- アプリ本体: MIT
+- アプリ本体: MIT（`LICENSE`）
 - バンドルフォント: SIL OFL 1.1（`crates/ui/assets/LICENSE-NotoSansJP.txt`）
+- Lucide アイコン: ISC、Feather 由来分は MIT（`packaging/licenses/LICENSE-LUCIDE`）
+- 一覧とパッケージ内の配置: [docs/licenses.md](docs/licenses.md)
+- 第三者アセットを追加・更新した場合は `docs/licenses.md` と `Packager.toml` の `resources` を更新する。

@@ -141,4 +141,7 @@ cargo test --workspace
 
 ## ライセンス
 
-MIT。バンドルしている Noto Sans JP は SIL Open Font License 1.1（`crates/ui/assets/LICENSE-NotoSansJP.txt`）。
+MIT。同梱アセットの通知とパッケージ内の配置は [docs/licenses.md](docs/licenses.md) を参照。
+
+- Noto Sans JP: SIL Open Font License 1.1（`crates/ui/assets/LICENSE-NotoSansJP.txt`）
+- Lucide アイコン（`gpui-kit-assets` 経由）: ISC、Feather 由来分は MIT（`packaging/licenses/LICENSE-LUCIDE`）
