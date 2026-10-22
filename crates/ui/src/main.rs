@@ -50,6 +50,8 @@ const INSPECTOR_WIDTH: f32 = 330.0;
 const INSPECTOR_CARD_WIDTH: f32 = 314.0;
 const INSPECTOR_MARGIN: f32 = 16.0;
 const VIEWER_DETAILS_WIDTH: f32 = 380.0;
+const VIEWER_TOP_BAR: f32 = 56.0;
+const VIEWER_PAD: f32 = 24.0;
 const WORKSPACE_PAD_X: f32 = 44.0;
 const CARD_INTRO_SECS: f32 = 0.6;
 const CARD_STAGGER_SECS: f32 = 0.04;
@@ -74,6 +76,19 @@ gpui_kit::actions!(
 enum PhotoCardLayout {
     Grid { index: usize },
     Fixed,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ButtonTone {
+    Neutral,
+    Primary,
+    Danger,
+}
+
+#[derive(Clone, Copy)]
+struct ButtonState {
+    tone: ButtonTone,
+    enabled: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -579,6 +594,8 @@ impl App {
         if self.quick_look_open || self.selected_photo.is_none() {
             return;
         }
+        self.message = None;
+        self.delete_armed = None;
         self.quick_look_return_focus = window.focused(cx);
         self.quick_look_photo_ids = self.viewer_source_ids();
         self.quick_look_index = self
@@ -595,9 +612,13 @@ impl App {
         let close_focus = self.quick_look_close_focus.clone();
         window.focus(&close_focus, cx);
         // The close button mounts with the overlay on this frame, so make the
-        // focus stick once the focus tree contains it.
-        window.defer(cx, move |window, cx| {
-            window.focus(&close_focus, cx);
+        // focus stick once the focus tree contains it. Guard the retry so a
+        // close (or close+reopen) cannot steal focus back to a stale overlay.
+        let epoch = self.quick_look_epoch;
+        cx.defer_in(window, move |this, window, cx| {
+            if this.quick_look_open && this.quick_look_epoch == epoch {
+                window.focus(&close_focus, cx);
+            }
         });
         cx.notify();
     }
@@ -616,6 +637,31 @@ impl App {
         cx.notify();
     }
 
+    /// Closes a viewer whose backing photo vanished (for example, an external
+    /// delete picked up by the three-second refresh) and restores focus.
+    fn guard_viewer_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.quick_look_open || self.selected_photo.is_some() {
+            return;
+        }
+        self.quick_look_open = false;
+        self.delete_armed = None;
+        self.selected = None;
+        self.quick_look_photo_ids.clear();
+        self.quick_look_index = 0;
+        self.preview = None;
+        self.previous_preview = None;
+        self.previous_color = None;
+        let focus = self
+            .quick_look_return_focus
+            .take()
+            .unwrap_or_else(|| self.photo_grid_focus.clone());
+        cx.defer_in(window, move |this, window, cx| {
+            if !this.quick_look_open {
+                window.focus(&focus, cx);
+            }
+        });
+    }
+
     fn viewer_source_ids(&self) -> Vec<i64> {
         let source: Vec<i64> = if self.screen == Screen::Search {
             match self.search_results.as_ref() {
@@ -632,7 +678,7 @@ impl App {
         }
     }
 
-    fn step_viewer_photo(&mut self, delta: isize, _window: &mut Window, cx: &mut Context<Self>) {
+    fn step_viewer_photo(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         if !self.quick_look_open || self.quick_look_photo_ids.is_empty() {
             return;
         }
@@ -645,6 +691,14 @@ impl App {
             return;
         }
         self.quick_look_index = next;
+        let focused = window.focused(cx);
+        let prev_disabled = next == 0 && focused.as_ref() == Some(&self.quick_look_prev_focus);
+        let next_disabled = next + 1 == self.quick_look_photo_ids.len()
+            && focused.as_ref() == Some(&self.quick_look_next_focus);
+        if prev_disabled || next_disabled {
+            self.quick_look_focus_index = 0;
+            window.focus(&self.quick_look_close_focus, cx);
+        }
         // Keep the top-bar navigation focused; only the library selection and
         // the displayed photo change behind the overlay.
         self.select_photo(self.quick_look_photo_ids[next], cx);
@@ -654,19 +708,28 @@ impl App {
     fn toggle_quick_look_details(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.quick_look_details_open = !self.quick_look_details_open;
         self.quick_look_details_epoch = self.quick_look_details_epoch.wrapping_add(1);
-        // The toggle sits at index 3 in the visual focus order.
-        self.quick_look_focus_index = 3;
+        let index = self
+            .quick_look_focus_order(cx)
+            .iter()
+            .position(|handle| *handle == self.quick_look_details_focus)
+            .unwrap_or(0);
+        self.quick_look_focus_index = index;
         window.focus(&self.quick_look_details_focus, cx);
         cx.notify();
     }
 
     fn quick_look_focus_order(&self, cx: &gpui_kit::App) -> Vec<FocusHandle> {
-        let mut order = vec![
-            self.quick_look_close_focus.clone(),
-            self.quick_look_prev_focus.clone(),
-            self.quick_look_next_focus.clone(),
-            self.quick_look_details_focus.clone(),
-        ];
+        let index = self
+            .quick_look_index
+            .min(self.quick_look_photo_ids.len().saturating_sub(1));
+        let mut order = vec![self.quick_look_close_focus.clone()];
+        if index > 0 {
+            order.push(self.quick_look_prev_focus.clone());
+        }
+        if index + 1 < self.quick_look_photo_ids.len() {
+            order.push(self.quick_look_next_focus.clone());
+        }
+        order.push(self.quick_look_details_focus.clone());
         if self.quick_look_details_open {
             order.push(self.quick_look_favorite_focus.clone());
             order.push(self.tag_edit_input.read(cx).focus_handle(cx));
@@ -706,7 +769,6 @@ impl App {
         let path = photo.abs_path.clone();
         if self.delete_armed != Some(id) {
             self.delete_armed = Some(id);
-            self.message = Some("もう一度押すとOSゴミ箱へ移動します。".to_string());
             cx.notify();
             return;
         }
@@ -1254,85 +1316,39 @@ impl App {
         let message = self.message.clone();
         let inspector_collapsed = self.inspector_collapsed;
 
+        let actions = vec![
+            Button::new("inspector-toggle")
+                .label(if inspector_collapsed {
+                    "詳細"
+                } else {
+                    "詳細を隠す"
+                })
+                .small()
+                .ghost()
+                .tooltip("詳細パネル (Ctrl+I)")
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_inspector(cx)))
+                .into_any_element(),
+            Button::new("import-copy")
+                .label("コピー取込")
+                .small()
+                .ghost()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.import_dialog(ImportMode::Copy, cx);
+                }))
+                .into_any_element(),
+            Button::new("import-move")
+                .label("移動取込")
+                .small()
+                .primary()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.import_dialog(ImportMode::Move, cx);
+                }))
+                .into_any_element(),
+        ];
+
         v_flex()
             .flex_shrink_0()
-            .child(
-                h_flex()
-                    .h(px(72.))
-                    .flex_shrink_0()
-                    .px(px(26.))
-                    .gap(px(14.))
-                    .items_center()
-                    .border_b_1()
-                    .border_color(rgb(BORDER))
-                    .child(
-                        v_flex()
-                            .flex_shrink_0()
-                            .gap(px(2.))
-                            .child(
-                                div()
-                                    .text_size(px(24.))
-                                    .font_semibold()
-                                    .text_color(rgb(TEXT))
-                                    .child("ライブラリ"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(MUTED_2))
-                                    .child(subtitle),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .when_some(message, |this, message| {
-                                this.text_size(px(10.))
-                                    .text_color(rgb(AMBER))
-                                    .truncate()
-                                    .child(message)
-                            }),
-                    )
-                    .child(
-                        h_flex()
-                            .flex_shrink_0()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(
-                                Button::new("inspector-toggle")
-                                    .label(if inspector_collapsed {
-                                        "詳細"
-                                    } else {
-                                        "詳細を隠す"
-                                    })
-                                    .small()
-                                    .ghost()
-                                    .tooltip("詳細パネル (Ctrl+I)")
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.toggle_inspector(cx)),
-                                    ),
-                            )
-                            .child(
-                                Button::new("import-copy")
-                                    .label("コピー取込")
-                                    .small()
-                                    .ghost()
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.import_dialog(ImportMode::Copy, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("import-move")
-                                    .label("移動取込")
-                                    .small()
-                                    .primary()
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.import_dialog(ImportMode::Move, cx);
-                                    })),
-                            ),
-                    ),
-            )
+            .child(self.screen_header("ライブラリ", subtitle, message, actions))
             .child(
                 h_flex()
                     .px(px(26.))
@@ -1396,7 +1412,10 @@ impl App {
                     .tab_stop(true)
                     .child(
                         uniform_list(
-                            SharedString::from(format!("photo-grid-{columns}")),
+                            // Keep the list ID stable so uniform_list retains
+                            // its scroll offset when the column count changes;
+                            // row height is fixed.
+                            SharedString::from("photo-grid-list"),
                             rows,
                             cx.processor(
                                 move |this, range: std::ops::Range<usize>, _window, cx| {
@@ -1567,22 +1586,6 @@ impl App {
                         )),
                 ),
         );
-        let body: AnyElement = if intro {
-            body.with_animation(
-                SharedString::from(format!("card-intro-{grid_epoch}-{id}")),
-                Animation::new(Duration::from_secs_f32(
-                    CARD_INTRO_SECS + intro_index.min(CARD_STAGGER_MAX) as f32 * CARD_STAGGER_SECS,
-                ))
-                .with_max_fps(60.0),
-                move |el, t| {
-                    let value = stagger_value(t, intro_index);
-                    el.opacity(value).relative().top(px(14.0 * (1.0 - value)))
-                },
-            )
-            .into_any_element()
-        } else {
-            body.into_any_element()
-        };
 
         let card = v_flex()
             .id(SharedString::from(format!("photo-{id}")))
@@ -1618,15 +1621,7 @@ impl App {
                     this.open_quick_look(window, cx);
                 }
             }))
-            .child(body);
-
-        // The animation wrapper is the flex item, so the grid sizing lives on
-        // it; sizing the inner card alone would let rows overflow.
-        div()
-            .relative()
-            .when(grid_index.is_some(), |this| this.flex_1().min_w_0())
-            .when(grid_index.is_none(), |this| this.w(px(190.)))
-            .child(card)
+            .child(body)
             .with_animation(
                 SharedString::from(format!("card-hover-{id}-{hovered}")),
                 Animation::new(Duration::from_millis(180)).with_easing(ease_motion),
@@ -1634,8 +1629,37 @@ impl App {
                     let offset = if hovered { -4.0 * t } else { -4.0 * (1.0 - t) };
                     el.relative().top(px(offset))
                 },
-            )
-            .into_any_element()
+            );
+
+        // The intro wrapper is the flex item; keep the hover animation inside
+        // it so changing `hovered` does not remount the intro state. Keep the
+        // wrapper mounted for the card's lifetime: removing it when the intro
+        // ends would change the hover animation's ancestor path and remount it,
+        // causing a 4 px settle without a hover.
+        let cell = div()
+            .relative()
+            .when(grid_index.is_some(), |this| this.flex_1().min_w_0())
+            .when(grid_index.is_none(), |this| this.w(px(190.)))
+            .child(card);
+
+        cell.with_animation(
+            SharedString::from(format!("card-intro-{grid_epoch}-{id}")),
+            Animation::new(if intro {
+                Duration::from_secs_f32(intro_total)
+            } else {
+                Duration::ZERO
+            })
+            .with_max_fps(60.0),
+            move |el, t| {
+                if intro {
+                    let value = stagger_value(t, intro_index);
+                    el.opacity(value).relative().top(px(14.0 * (1.0 - value)))
+                } else {
+                    el
+                }
+            },
+        )
+        .into_any_element()
     }
 
     fn inspector_column(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -2015,10 +2039,11 @@ impl App {
         id: &'static str,
         label: impl Into<SharedString>,
         focus: FocusHandle,
-        primary: bool,
+        state: ButtonState,
         cx: &mut Context<Self>,
         on_activate: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + Clone + 'static,
     ) -> AnyElement {
+        let ButtonState { tone, enabled } = state;
         let label: SharedString = label.into();
         let activate: ViewerActivate = Rc::new(on_activate);
         let click_activate = activate.clone();
@@ -2026,6 +2051,84 @@ impl App {
         let click_focus = focus.clone();
         let key_focus = focus.clone();
 
+        let (border, background, fg) = if !enabled {
+            (rgba(0xffffff08), rgba(0x00000000), rgba(0x76819680))
+        } else {
+            match tone {
+                ButtonTone::Primary => (rgba(0x66b3ff40), rgba(0x66b3ff1a), rgb(0xdceeff)),
+                ButtonTone::Neutral => (rgba(0xffffff10), rgba(0xffffff08), rgb(MUTED_2)),
+                ButtonTone::Danger => (rgba(0xfb718566), rgba(0xfb718526), rgb(RED)),
+            }
+        };
+
+        let mut button = self.base_text_button(id, border, background, fg);
+
+        if enabled {
+            let (hover_bg, hover_fg, focus_border, focus_bg, focus_fg) = match tone {
+                ButtonTone::Primary => (
+                    rgba(0xffffff14),
+                    rgb(TEXT),
+                    rgb(BLUE),
+                    rgb(ACCENT_SOFT),
+                    rgb(TEXT),
+                ),
+                ButtonTone::Neutral => (
+                    rgba(0xffffff14),
+                    rgb(TEXT),
+                    rgb(BLUE),
+                    rgb(ACCENT_SOFT),
+                    rgb(TEXT),
+                ),
+                ButtonTone::Danger => (
+                    rgba(0xfb71853d),
+                    rgb(0xffd9df),
+                    rgb(RED),
+                    rgba(0xfb718533),
+                    rgb(0xffd9df),
+                ),
+            };
+            button = button
+                .cursor_pointer()
+                .track_focus(&focus)
+                .tab_stop(true)
+                .hover(move |this| this.bg(hover_bg).text_color(hover_fg))
+                .focus(move |this| {
+                    this.border_color(focus_border)
+                        .bg(focus_bg)
+                        .text_color(focus_fg)
+                })
+                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    // Enter/Space activation is handled on key down; GPUI also
+                    // synthesizes a keyboard click on key up, so ignore that path
+                    // to avoid firing the action twice.
+                    if matches!(event, ClickEvent::Keyboard(_)) {
+                        return;
+                    }
+                    window.focus(&click_focus, cx);
+                    click_activate(this, window, cx);
+                }))
+                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                    let key = event.keystroke.key.as_str();
+                    if !event.is_held && (key == "enter" || key == "space") {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        window.focus(&key_focus, cx);
+                        key_activate(this, window, cx);
+                    }
+                }));
+        }
+
+        button.child(label).into_any_element()
+    }
+
+    /// Shared chrome for the viewer's text-only controls.
+    fn base_text_button(
+        &self,
+        id: &'static str,
+        border: Rgba,
+        background: Rgba,
+        fg: Rgba,
+    ) -> Stateful<Div> {
         div()
             .id(id)
             .h(px(28.))
@@ -2034,50 +2137,12 @@ impl App {
             .items_center()
             .rounded(px(8.))
             .border_1()
-            .border_color(if primary {
-                rgba(0x66b3ff40)
-            } else {
-                rgba(0xffffff10)
-            })
-            .bg(if primary {
-                rgba(0x66b3ff1a)
-            } else {
-                rgba(0xffffff08)
-            })
+            .border_color(border)
+            .bg(background)
             .text_size(px(11.))
             .font_medium()
-            .text_color(rgb(if primary { 0xdceeff } else { MUTED_2 }))
+            .text_color(fg)
             .whitespace_nowrap()
-            .cursor_pointer()
-            .track_focus(&focus)
-            .tab_stop(true)
-            .hover(|this| this.bg(rgba(0xffffff14)).text_color(rgb(TEXT)))
-            .focus(|this| {
-                this.border_color(rgb(BLUE))
-                    .bg(rgb(ACCENT_SOFT))
-                    .text_color(rgb(TEXT))
-            })
-            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                // Enter/Space activation is handled on key down; GPUI also
-                // synthesizes a keyboard click on key up, so ignore that path
-                // to avoid firing the action twice.
-                if matches!(event, ClickEvent::Keyboard(_)) {
-                    return;
-                }
-                window.focus(&click_focus, cx);
-                click_activate(this, window, cx);
-            }))
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                let key = event.keystroke.key.as_str();
-                if !event.is_held && (key == "enter" || key == "space") {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                    window.focus(&key_focus, cx);
-                    key_activate(this, window, cx);
-                }
-            }))
-            .child(label)
-            .into_any_element()
     }
 
     /// Metadata and actions for one photo. Shared by the full-screen viewer.
@@ -2124,7 +2189,14 @@ impl App {
                 "☆ お気に入り"
             },
             self.quick_look_favorite_focus.clone(),
-            favorite,
+            ButtonState {
+                tone: if favorite {
+                    ButtonTone::Primary
+                } else {
+                    ButtonTone::Neutral
+                },
+                enabled: true,
+            },
             cx,
             move |this, _, cx| {
                 let _ = this.db.set_favorite(id, !favorite);
@@ -2136,7 +2208,10 @@ impl App {
             "viewer-add-tag",
             "追加",
             self.quick_look_add_tag_focus.clone(),
-            false,
+            ButtonState {
+                tone: ButtonTone::Neutral,
+                enabled: true,
+            },
             cx,
             move |this, _, cx| {
                 let tag = this.tag_edit_input.read(cx).value().trim().to_string();
@@ -2156,7 +2231,10 @@ impl App {
             "viewer-compress",
             "圧縮",
             self.quick_look_compress_focus.clone(),
-            true,
+            ButtonState {
+                tone: ButtonTone::Primary,
+                enabled: true,
+            },
             cx,
             |this, _, cx| this.enqueue_selected(cx),
         );
@@ -2168,7 +2246,14 @@ impl App {
                 "ゴミ箱へ移動"
             },
             self.quick_look_trash_focus.clone(),
-            false,
+            ButtonState {
+                tone: if armed {
+                    ButtonTone::Danger
+                } else {
+                    ButtonTone::Neutral
+                },
+                enabled: true,
+            },
             cx,
             move |this, window, cx| {
                 this.trash_selected(cx);
@@ -2305,7 +2390,7 @@ impl App {
             )
     }
 
-    fn quick_look(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn quick_look(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(photo) = self.selected_photo.clone() else {
             return div().into_any_element();
         };
@@ -2320,7 +2405,10 @@ impl App {
             "viewer-close",
             "閉じる Esc",
             self.quick_look_close_focus.clone(),
-            true,
+            ButtonState {
+                tone: ButtonTone::Primary,
+                enabled: true,
+            },
             cx,
             |this, window, cx| this.close_quick_look(window, cx),
         );
@@ -2328,7 +2416,14 @@ impl App {
             "viewer-prev",
             "前へ",
             self.quick_look_prev_focus.clone(),
-            prev_enabled,
+            ButtonState {
+                tone: if prev_enabled {
+                    ButtonTone::Primary
+                } else {
+                    ButtonTone::Neutral
+                },
+                enabled: prev_enabled,
+            },
             cx,
             |this, window, cx| this.step_viewer_photo(-1, window, cx),
         );
@@ -2336,7 +2431,14 @@ impl App {
             "viewer-next",
             "次へ",
             self.quick_look_next_focus.clone(),
-            next_enabled,
+            ButtonState {
+                tone: if next_enabled {
+                    ButtonTone::Primary
+                } else {
+                    ButtonTone::Neutral
+                },
+                enabled: next_enabled,
+            },
             cx,
             |this, window, cx| this.step_viewer_photo(1, window, cx),
         );
@@ -2348,13 +2450,20 @@ impl App {
                 "詳細"
             },
             self.quick_look_details_focus.clone(),
-            details_open,
+            ButtonState {
+                tone: if details_open {
+                    ButtonTone::Primary
+                } else {
+                    ButtonTone::Neutral
+                },
+                enabled: true,
+            },
             cx,
             |this, window, cx| this.toggle_quick_look_details(window, cx),
         );
 
         let top_bar = h_flex()
-            .h(px(56.))
+            .h(px(VIEWER_TOP_BAR))
             .flex_shrink_0()
             .px(px(20.))
             .gap(px(10.))
@@ -2382,14 +2491,19 @@ impl App {
         } else {
             16.0 / 9.0
         };
+        let viewport = window.viewport_size();
+        let (image_w, image_h) = viewer_image_box(
+            viewport.width.into(),
+            viewport.height.into(),
+            details_open,
+            aspect,
+        );
         let image = if let Some(preview) = self.preview.clone() {
             div()
                 .id("viewer-image")
                 .relative()
-                .h_full()
-                .aspect_ratio(aspect)
-                .max_w(relative(0.92))
-                .max_h(relative(0.92))
+                .w(px(image_w))
+                .h(px(image_h))
                 .overflow_hidden()
                 .rounded(px(10.))
                 .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
@@ -2402,10 +2516,8 @@ impl App {
             div()
                 .id("viewer-image")
                 .relative()
-                .h_full()
-                .aspect_ratio(aspect)
-                .max_w(relative(0.92))
-                .max_h(relative(0.92))
+                .w(px(image_w))
+                .h(px(image_h))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -2436,7 +2548,8 @@ impl App {
             .flex()
             .items_center()
             .justify_center()
-            .p(px(24.))
+            .overflow_hidden()
+            .p(px(VIEWER_PAD))
             .on_click(cx.listener(|this, _, window, cx| this.close_quick_look(window, cx)))
             .child(image);
 
@@ -2462,6 +2575,14 @@ impl App {
                         .text_size(px(10.))
                         .text_color(rgb(AMBER))
                         .child(message),
+                );
+            }
+            if self.delete_armed == Some(photo.id) {
+                body = body.child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(rgb(AMBER))
+                        .child("もう一度押すとOSゴミ箱へ移動します。"),
                 );
             }
             details_panel = details_panel.child(body.child(self.detail_body(&photo, cx)));
@@ -2510,163 +2631,144 @@ impl App {
     fn compression_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let profile = self.profiles.get(self.profile_index).cloned();
         let message = self.message.clone();
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scrollbar()
-            .px(px(26.))
-            .pt(px(22.))
-            .pb(px(26.))
-            .gap(px(24.))
-            .child(
+        let header = self.screen_header(
+            "圧縮設定",
+            "自動圧縮は元画像を保持します。置換は手動実行時のみです。".to_string(),
+            message,
+            vec![
                 h_flex()
-                    .items_center()
-                    .gap(px(14.))
-                    .child(
-                        v_flex()
-                            .flex_shrink_0()
-                            .gap(px(2.))
-                            .child(
-                                div()
-                                    .text_size(px(24.))
-                                    .font_semibold()
-                                    .text_color(rgb(TEXT))
-                                    .child("圧縮設定"),
-                            )
-                            .child(
-                                div().text_size(px(10.)).text_color(rgb(MUTED_2)).child(
-                                    "自動圧縮は元画像を保持します。置換は手動実行時のみです。",
-                                ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .when_some(message, |this, message| {
-                                this.text_size(px(10.))
-                                    .text_color(rgb(AMBER))
-                                    .truncate()
-                                    .child(message)
+                    .gap_1()
+                    .child(self.policy_button("元画像を保持", "keep", cx))
+                    .child(self.policy_button("置換（ゴミ箱）", "replace", cx))
+                    .into_any_element(),
+                Button::new("add-profile")
+                    .label("＋ プロファイル")
+                    .small()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let profile = CompressionProfile {
+                            name: format!("新規プロファイル {}", this.profiles.len() + 1),
+                            auto_enabled: false,
+                            ..CompressionProfile::default()
+                        };
+                        let _ = this.db.save_profile(&profile);
+                        this.profiles = this.db.list_profiles().unwrap_or_default();
+                        this.profile_index = this
+                            .profiles
+                            .iter()
+                            .position(|item| item.id == profile.id)
+                            .unwrap_or(0);
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+                Button::new("manual-compress")
+                    .label("手動圧縮")
+                    .small()
+                    .primary()
+                    .on_click(cx.listener(|this, _, _, cx| this.enqueue_selected(cx)))
+                    .into_any_element(),
+            ],
+        );
+
+        v_flex().flex_1().min_h_0().child(header).child(
+            v_flex()
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scrollbar()
+                .px(px(26.))
+                .pt(px(22.))
+                .pb(px(26.))
+                .gap(px(24.))
+                .child(
+                    h_flex()
+                        .gap(px(24.))
+                        .items_start()
+                        .child(v_flex().w(px(280.)).gap(px(8.)).children(
+                            self.profiles.iter().enumerate().map(|(index, profile)| {
+                                let active = index == self.profile_index;
+                                let auto = profile.auto_enabled;
+                                let title = profile.name.clone();
+                                let meta = format!(
+                                    "{} · Q{} · {}",
+                                    format_label(&profile.format),
+                                    profile.quality,
+                                    if profile.lossless {
+                                        "Lossless"
+                                    } else {
+                                        "Lossy"
+                                    }
+                                );
+                                glass_panel()
+                                    .id(SharedString::from(format!("profile-{index}")))
+                                    .flex()
+                                    .flex_col()
+                                    .p(px(14.))
+                                    .gap(px(6.))
+                                    .bg(rgb(if active { ACCENT_SOFT } else { PANEL }))
+                                    .border_color(rgb(if active { BLUE } else { BORDER }))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.profile_index = index;
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        h_flex()
+                                            .items_center()
+                                            .gap(px(8.))
+                                            .child(
+                                                div()
+                                                    .text_size(px(12.))
+                                                    .font_semibold()
+                                                    .text_color(rgb(if active {
+                                                        BLUE
+                                                    } else {
+                                                        MUTED
+                                                    }))
+                                                    .child(title),
+                                            )
+                                            .child(self.badge(
+                                                if auto { "自動" } else { "手動" },
+                                                if auto { GREEN } else { MUTED },
+                                                if auto { 0x112a22 } else { PANEL_2 },
+                                            )),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(10.))
+                                            .text_color(rgb(if active { MUTED } else { MUTED_2 }))
+                                            .child(meta),
+                                    )
                             }),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .child(self.policy_button("元画像を保持", "keep", cx))
-                            .child(self.policy_button("置換（ゴミ箱）", "replace", cx)),
-                    )
-                    .child(
-                        Button::new("add-profile")
-                            .label("＋ プロファイル")
-                            .small()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let profile = CompressionProfile {
-                                    name: format!("新規プロファイル {}", this.profiles.len() + 1),
-                                    auto_enabled: false,
-                                    ..CompressionProfile::default()
-                                };
-                                let _ = this.db.save_profile(&profile);
-                                this.profiles = this.db.list_profiles().unwrap_or_default();
-                                this.profile_index = this
-                                    .profiles
-                                    .iter()
-                                    .position(|item| item.id == profile.id)
-                                    .unwrap_or(0);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("manual-compress")
-                            .label("手動圧縮")
-                            .small()
-                            .primary()
-                            .on_click(cx.listener(|this, _, _, cx| this.enqueue_selected(cx))),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap(px(24.))
-                    .items_start()
-                    .child(v_flex().w(px(280.)).gap(px(8.)).children(
-                        self.profiles.iter().enumerate().map(|(index, profile)| {
-                            let active = index == self.profile_index;
-                            let auto = profile.auto_enabled;
-                            let title = profile.name.clone();
-                            let meta = format!(
-                                "{} · Q{} · {}",
-                                format_label(&profile.format),
-                                profile.quality,
-                                if profile.lossless {
-                                    "Lossless"
-                                } else {
-                                    "Lossy"
-                                }
-                            );
-                            glass_panel()
-                                .id(SharedString::from(format!("profile-{index}")))
-                                .flex()
-                                .flex_col()
-                                .p(px(14.))
-                                .gap(px(6.))
-                                .bg(rgb(if active { ACCENT_SOFT } else { PANEL }))
-                                .border_color(rgb(if active { BLUE } else { BORDER }))
-                                .cursor_pointer()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.profile_index = index;
-                                    cx.notify();
-                                }))
+                        ))
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap(px(24.))
+                                .when_some(profile, |this, profile| {
+                                    this.child(self.profile_editor(&profile, cx))
+                                })
                                 .child(
                                     h_flex()
-                                        .items_center()
-                                        .gap(px(8.))
+                                        .gap_3()
+                                        .child(self.stat_card(
+                                            "総圧縮数",
+                                            self.stats.compressed_count.to_string(),
+                                        ))
                                         .child(
-                                            div()
-                                                .text_size(px(12.))
-                                                .font_semibold()
-                                                .text_color(rgb(if active { BLUE } else { MUTED }))
-                                                .child(title),
+                                            self.stat_card(
+                                                "写真",
+                                                self.stats.photo_count.to_string(),
+                                            ),
                                         )
-                                        .child(self.badge(
-                                            if auto { "自動" } else { "手動" },
-                                            if auto { GREEN } else { MUTED },
-                                            if auto { 0x112a22 } else { PANEL_2 },
+                                        .child(self.stat_card(
+                                            "圧縮後合計",
+                                            format_bytes(self.db.derivative_bytes().unwrap_or(0)),
                                         )),
                                 )
-                                .child(
-                                    div()
-                                        .text_size(px(10.))
-                                        .text_color(rgb(if active { MUTED } else { MUTED_2 }))
-                                        .child(meta),
-                                )
-                        }),
-                    ))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap(px(24.))
-                            .when_some(profile, |this, profile| {
-                                this.child(self.profile_editor(&profile, cx))
-                            })
-                            .child(
-                                h_flex()
-                                    .gap_3()
-                                    .child(self.stat_card(
-                                        "総圧縮数",
-                                        self.stats.compressed_count.to_string(),
-                                    ))
-                                    .child(
-                                        self.stat_card("写真", self.stats.photo_count.to_string()),
-                                    )
-                                    .child(self.stat_card(
-                                        "圧縮後合計",
-                                        format_bytes(self.db.derivative_bytes().unwrap_or(0)),
-                                    )),
-                            )
-                            .child(self.queue_panel(cx)),
-                    ),
-            )
+                                .child(self.queue_panel(cx)),
+                        ),
+                ),
+        )
     }
 
     fn edit_profile(&mut self, edit: impl FnOnce(&mut CompressionProfile), cx: &mut Context<Self>) {
@@ -3237,25 +3339,13 @@ impl App {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let active = self.search_days == days;
-        div()
+        chip(label, active)
             .id(SharedString::from(format!("preset-{label}")))
-            .px(px(8.))
-            .py(px(3.))
-            .rounded_full()
-            .bg(if active {
-                rgb(ACCENT_SOFT)
-            } else {
-                rgb(PANEL_2)
-            })
-            .text_size(px(10.))
-            .font_medium()
-            .text_color(if active { rgb(BLUE) } else { rgb(MUTED) })
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.search_days = days;
                 this.run_search(cx);
             }))
-            .child(label.to_string())
     }
 
     fn filter_field(&self, label: &str, input: Input) -> impl IntoElement {
@@ -3732,6 +3822,7 @@ impl App {
 
 impl Render for App {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.guard_viewer_selection(window, cx);
         let width: f32 = window.viewport_size().width.into();
         self.grid_columns = grid_columns(grid_available_width(
             width,
@@ -3774,7 +3865,7 @@ impl Render for App {
             .child(self.nav_tooltip())
             .child(self.rail_toggle(cx));
         if self.quick_look_open {
-            root.child(self.quick_look(cx))
+            root.child(self.quick_look(window, cx))
         } else {
             root
         }
@@ -4239,6 +4330,24 @@ fn viewer_details_width(open: bool, t: f32) -> f32 {
     from + (to - from) * t
 }
 
+fn viewer_image_box(
+    viewport_w: f32,
+    viewport_h: f32,
+    details_open: bool,
+    aspect: f32,
+) -> (f32, f32) {
+    let details = if details_open {
+        VIEWER_DETAILS_WIDTH
+    } else {
+        0.0
+    };
+    let avail_w = (viewport_w - details - VIEWER_PAD * 2.0).max(1.0);
+    let avail_h = (viewport_h - VIEWER_TOP_BAR - VIEWER_PAD * 2.0).max(1.0);
+    let ratio = aspect.max(0.05);
+    let width = avail_w.min(avail_h * ratio);
+    (width, width / ratio)
+}
+
 fn grid_columns(available_width: f32) -> usize {
     (((available_width + GRID_GAP) / (MIN_CARD_WIDTH + GRID_GAP)).floor() as usize).max(1)
 }
@@ -4396,7 +4505,7 @@ mod tests {
         DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH, average_bgra,
         demo_thumb_path, ease_motion, format_count, grid_available_width, grid_columns, lerp_color,
         next_focus_index, parse_args, parse_window_size, sidebar_reveal_width, sidebar_width,
-        stagger_value, step_index, viewer_details_width,
+        stagger_value, step_index, viewer_details_width, viewer_image_box,
     };
 
     #[test]
@@ -4435,6 +4544,27 @@ mod tests {
         assert_eq!(viewer_details_width(false, 1.0), 0.0);
         assert_eq!(viewer_details_width(true, 0.0), 0.0);
         assert_eq!(viewer_details_width(true, 1.0), 380.0);
+    }
+
+    #[test]
+    fn viewer_image_box_fits_inside_padding_and_details() {
+        let close = |a: f32, b: f32| assert!((a - b).abs() < 0.01, "{a} != {b}");
+
+        let (w, h) = viewer_image_box(1280.0, 820.0, false, 16.0 / 9.0);
+        close(w, 1232.0);
+        close(h, 693.0);
+
+        let (w, h) = viewer_image_box(1280.0, 820.0, true, 16.0 / 9.0);
+        close(w, 852.0);
+        close(h, 479.25);
+
+        let (w, h) = viewer_image_box(1280.0, 820.0, false, 2.0 / 3.0);
+        close(w, 477.333);
+        close(h, 716.0);
+
+        let (w, h) = viewer_image_box(400.0, 400.0, false, 1.0);
+        close(w, 296.0);
+        close(h, 296.0);
     }
 
     #[test]
