@@ -1458,7 +1458,10 @@ impl App {
                     .tab_stop(true)
                     .child(
                         uniform_list(
-                            SharedString::from(format!("photo-grid-{columns}")),
+                            // Keep the list ID stable so uniform_list retains
+                            // its scroll offset when the column count changes;
+                            // row height is fixed.
+                            SharedString::from("photo-grid-list"),
                             rows,
                             cx.processor(
                                 move |this, range: std::ops::Range<usize>, _window, cx| {
@@ -1629,22 +1632,6 @@ impl App {
                         )),
                 ),
         );
-        let body: AnyElement = if intro {
-            body.with_animation(
-                SharedString::from(format!("card-intro-{grid_epoch}-{id}")),
-                Animation::new(Duration::from_secs_f32(
-                    CARD_INTRO_SECS + intro_index.min(CARD_STAGGER_MAX) as f32 * CARD_STAGGER_SECS,
-                ))
-                .with_max_fps(60.0),
-                move |el, t| {
-                    let value = stagger_value(t, intro_index);
-                    el.opacity(value).relative().top(px(14.0 * (1.0 - value)))
-                },
-            )
-            .into_any_element()
-        } else {
-            body.into_any_element()
-        };
 
         let card = v_flex()
             .id(SharedString::from(format!("photo-{id}")))
@@ -1680,15 +1667,7 @@ impl App {
                     this.open_quick_look(window, cx);
                 }
             }))
-            .child(body);
-
-        // The animation wrapper is the flex item, so the grid sizing lives on
-        // it; sizing the inner card alone would let rows overflow.
-        div()
-            .relative()
-            .when(grid_index.is_some(), |this| this.flex_1().min_w_0())
-            .when(grid_index.is_none(), |this| this.w(px(190.)))
-            .child(card)
+            .child(body)
             .with_animation(
                 SharedString::from(format!("card-hover-{id}-{hovered}")),
                 Animation::new(Duration::from_millis(180)).with_easing(ease_motion),
@@ -1696,8 +1675,29 @@ impl App {
                     let offset = if hovered { -4.0 * t } else { -4.0 * (1.0 - t) };
                     el.relative().top(px(offset))
                 },
+            );
+
+        // The intro wrapper is the flex item; keep the hover animation inside
+        // it so changing `hovered` does not remount the intro state.
+        let cell = div()
+            .relative()
+            .when(grid_index.is_some(), |this| this.flex_1().min_w_0())
+            .when(grid_index.is_none(), |this| this.w(px(190.)))
+            .child(card);
+
+        if intro {
+            cell.with_animation(
+                SharedString::from(format!("card-intro-{grid_epoch}-{id}")),
+                Animation::new(Duration::from_secs_f32(intro_total)).with_max_fps(60.0),
+                move |el, t| {
+                    let value = stagger_value(t, intro_index);
+                    el.opacity(value).relative().top(px(14.0 * (1.0 - value)))
+                },
             )
             .into_any_element()
+        } else {
+            cell.into_any_element()
+        }
     }
 
     fn inspector_column(&mut self, cx: &mut Context<Self>) -> AnyElement {
