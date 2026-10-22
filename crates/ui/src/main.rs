@@ -388,40 +388,7 @@ impl App {
     }
 
     fn ensure_profiles(&mut self) {
-        if !self.profiles.is_empty() {
-            return;
-        }
-        let defaults = [
-            CompressionProfile::default(),
-            CompressionProfile {
-                name: "AVIF 容量優先".to_string(),
-                format: CompressionFormat::Avif,
-                quality: 68,
-                encode_speed: 6,
-                suffix: "_avif".to_string(),
-                ..CompressionProfile::default()
-            },
-            CompressionProfile {
-                name: "JPEG XL ロスレス".to_string(),
-                format: CompressionFormat::JpegXl,
-                lossless: true,
-                auto_enabled: false,
-                suffix: "_jxl".to_string(),
-                ..CompressionProfile::default()
-            },
-            CompressionProfile {
-                name: "JPEG 互換用".to_string(),
-                format: CompressionFormat::Jpeg,
-                quality: 88,
-                auto_enabled: false,
-                suffix: "_jpg".to_string(),
-                ..CompressionProfile::default()
-            },
-        ];
-        for profile in &defaults {
-            let _ = self.db.save_profile(profile);
-        }
-        self.profiles = self.db.list_profiles().unwrap_or_default();
+        self.profiles = self.db.ensure_default_profiles().unwrap_or_default();
     }
 
     fn reload(&mut self, cx: &mut Context<Self>) {
