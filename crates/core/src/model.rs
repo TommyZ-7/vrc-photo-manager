@@ -107,6 +107,39 @@ impl Default for CompressionProfile {
     }
 }
 
+impl CompressionProfile {
+    /// Built-in presets seeded into an empty database.
+    pub fn defaults() -> Vec<Self> {
+        vec![
+            Self::default(),
+            Self {
+                name: "AVIF 容量優先".to_string(),
+                format: CompressionFormat::Avif,
+                quality: 68,
+                encode_speed: 6,
+                suffix: "_avif".to_string(),
+                ..Self::default()
+            },
+            Self {
+                name: "JPEG XL ロスレス".to_string(),
+                format: CompressionFormat::JpegXl,
+                lossless: true,
+                auto_enabled: false,
+                suffix: "_jxl".to_string(),
+                ..Self::default()
+            },
+            Self {
+                name: "JPEG 互換用".to_string(),
+                format: CompressionFormat::Jpeg,
+                quality: 88,
+                auto_enabled: false,
+                suffix: "_jpg".to_string(),
+                ..Self::default()
+            },
+        ]
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QueueStatus {

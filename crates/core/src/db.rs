@@ -812,6 +812,21 @@ impl Db {
         Ok(profiles)
     }
 
+    /// Seeds the built-in presets when no profile exists.
+    ///
+    /// Returns the profiles currently stored. A read error is returned before
+    /// any preset is written, so a corrupt table is never masked by defaults.
+    pub fn ensure_default_profiles(&self) -> Result<Vec<CompressionProfile>> {
+        let existing = self.list_profiles()?;
+        if !existing.is_empty() {
+            return Ok(existing);
+        }
+        for profile in CompressionProfile::defaults() {
+            self.save_profile(&profile)?;
+        }
+        self.list_profiles()
+    }
+
     pub fn delete_profile(&self, id: &str) -> Result<()> {
         self.conn.execute(
             "DELETE FROM compression_profiles WHERE id = ?1",
@@ -1233,5 +1248,71 @@ mod tests {
         )
         .unwrap();
         assert_eq!(db.count_jobs(QueueStatus::Completed).unwrap(), 1);
+    }
+
+    #[test]
+    fn ensure_default_profiles_is_idempotent() {
+        let db = Db::open_in_memory().unwrap();
+        let first = db.ensure_default_profiles().unwrap();
+        assert_eq!(first.len(), 4);
+
+        let mut names: Vec<&str> = first.iter().map(|profile| profile.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(
+            names,
+            [
+                "AVIF 容量優先",
+                "JPEG XL ロスレス",
+                "JPEG 互換用",
+                "WebP 高品質"
+            ]
+        );
+        let by_name = |name: &str| first.iter().find(|profile| profile.name == name).unwrap();
+        assert!(by_name("AVIF 容量優先").auto_enabled);
+        assert!(!by_name("JPEG XL ロスレス").auto_enabled);
+        assert!(!by_name("JPEG 互換用").auto_enabled);
+
+        let first_ids: Vec<String> = first.iter().map(|profile| profile.id.clone()).collect();
+        let second = db.ensure_default_profiles().unwrap();
+        assert_eq!(second.len(), 4);
+        let second_ids: Vec<String> = second.iter().map(|profile| profile.id.clone()).collect();
+        assert_eq!(first_ids, second_ids);
+        assert_eq!(db.list_profiles().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn ensure_default_profiles_keeps_existing_rows() {
+        let db = Db::open_in_memory().unwrap();
+        let custom = CompressionProfile {
+            name: "custom".to_string(),
+            ..CompressionProfile::default()
+        };
+        db.save_profile(&custom).unwrap();
+
+        let profiles = db.ensure_default_profiles().unwrap();
+        assert_eq!(profiles.len(), 1);
+        assert_eq!(profiles[0].id, custom.id);
+        assert_eq!(profiles[0].name, "custom");
+    }
+
+    #[test]
+    fn ensure_default_profiles_does_not_seed_on_read_error() {
+        let db = Db::open_in_memory().unwrap();
+        db.connection()
+            .execute(
+                "INSERT INTO compression_profiles(id, name, enabled, auto_enabled, json, sort_order) \
+                 VALUES ('broken', 'broken', 1, 0, '{', 0)",
+                [],
+            )
+            .unwrap();
+
+        assert!(db.ensure_default_profiles().is_err());
+        let count: i64 = db
+            .connection()
+            .query_row("SELECT COUNT(*) FROM compression_profiles", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
     }
 }
