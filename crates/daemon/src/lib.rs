@@ -319,6 +319,7 @@ impl Daemon {
             return Ok(report);
         }
         let db = self.db.lock().unwrap();
+        let initial_scan = db.count_photos()? == 0;
         for root in roots {
             if !root.is_dir() {
                 tracing::warn!(path = %root.display(), "photo root does not exist");
@@ -339,7 +340,10 @@ impl Daemon {
             report.skipped += root_report.skipped;
             report.new_ids.extend(root_report.new_ids);
         }
-        if self.settings.auto_compress && !report.new_ids.is_empty() {
+        if self.settings.auto_compress
+            && !report.new_ids.is_empty()
+            && (!initial_scan || self.settings.auto_compress_backlog)
+        {
             enqueue_auto_jobs(&db, &report.new_ids)?;
         }
         drop(db);
@@ -881,6 +885,25 @@ mod tests {
         assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Missing);
     }
 
+    fn add_auto_profile(db_path: &Path) {
+        let db = Db::open(db_path).unwrap();
+        db.save_profile(&CompressionProfile {
+            name: "test webp".to_string(),
+            format: vrc_photo_core::model::CompressionFormat::Webp,
+            auto_enabled: true,
+            quality: 80,
+            suffix: "_test".to_string(),
+            ..CompressionProfile::default()
+        })
+        .unwrap();
+    }
+
+    fn write_photo(path: &Path) {
+        image::RgbaImage::from_pixel(16, 10, image::Rgba([10, 20, 30, 255]))
+            .save(path)
+            .unwrap();
+    }
+
     #[test]
     fn end_to_end_auto_compress() {
         let dir = tempfile::tempdir().unwrap();
@@ -889,25 +912,13 @@ mod tests {
         std::fs::create_dir_all(&photo_dir).unwrap();
         std::fs::create_dir_all(&log_dir).unwrap();
         let photo_path = photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
-        image::RgbaImage::from_pixel(16, 10, image::Rgba([10, 20, 30, 255]))
-            .save(&photo_path)
-            .unwrap();
+        write_photo(&photo_path);
 
         let db_path = dir.path().join("library.db");
+        add_auto_profile(&db_path);
         let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
         daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
-        {
-            let db = Db::open(&db_path).unwrap();
-            db.save_profile(&CompressionProfile {
-                name: "test webp".to_string(),
-                format: vrc_photo_core::model::CompressionFormat::Webp,
-                auto_enabled: true,
-                quality: 80,
-                suffix: "_test".to_string(),
-                ..CompressionProfile::default()
-            })
-            .unwrap();
-        }
+        daemon.settings.auto_compress_backlog = true;
         daemon.run_once().unwrap();
         daemon.compress_pending().unwrap();
 
@@ -920,6 +931,51 @@ mod tests {
         assert_eq!(derivatives.len(), 1);
         assert!(Path::new(&derivatives[0].path).is_file());
         assert!(derivatives[0].file_size > 0);
+    }
+
+    #[test]
+    fn initial_scan_skips_backlog_when_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        write_photo(&photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png"));
+
+        let db_path = dir.path().join("library.db");
+        add_auto_profile(&db_path);
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir.clone()), Some(log_dir)).unwrap();
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+        daemon.run_once().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        assert_eq!(db.count_jobs(QueueStatus::Pending).unwrap(), 0);
+
+        let new_path = photo_dir.join("VRChat_2026-10-21_21-25-00.000_4x3.png");
+        write_photo(&new_path);
+        daemon.dirty_paths.push(new_path);
+        daemon.index_dirty_paths().unwrap();
+        assert_eq!(db.count_jobs(QueueStatus::Pending).unwrap(), 1);
+    }
+
+    #[test]
+    fn initial_scan_enqueues_backlog_when_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        write_photo(&photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png"));
+
+        let db_path = dir.path().join("library.db");
+        add_auto_profile(&db_path);
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+        daemon.settings.auto_compress_backlog = true;
+        daemon.run_once().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        assert_eq!(db.count_jobs(QueueStatus::Pending).unwrap(), 1);
     }
 
     #[test]
