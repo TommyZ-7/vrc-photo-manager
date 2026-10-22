@@ -595,6 +595,7 @@ impl App {
             return;
         }
         self.message = None;
+        self.delete_armed = None;
         self.quick_look_return_focus = window.focused(cx);
         self.quick_look_photo_ids = self.viewer_source_ids();
         self.quick_look_index = self
@@ -768,7 +769,6 @@ impl App {
         let path = photo.abs_path.clone();
         if self.delete_armed != Some(id) {
             self.delete_armed = Some(id);
-            self.message = Some("もう一度押すとOSゴミ箱へ移動します。".to_string());
             cx.notify();
             return;
         }
@@ -1632,26 +1632,34 @@ impl App {
             );
 
         // The intro wrapper is the flex item; keep the hover animation inside
-        // it so changing `hovered` does not remount the intro state.
+        // it so changing `hovered` does not remount the intro state. Keep the
+        // wrapper mounted for the card's lifetime: removing it when the intro
+        // ends would change the hover animation's ancestor path and remount it,
+        // causing a 4 px settle without a hover.
         let cell = div()
             .relative()
             .when(grid_index.is_some(), |this| this.flex_1().min_w_0())
             .when(grid_index.is_none(), |this| this.w(px(190.)))
             .child(card);
 
-        if intro {
-            cell.with_animation(
-                SharedString::from(format!("card-intro-{grid_epoch}-{id}")),
-                Animation::new(Duration::from_secs_f32(intro_total)).with_max_fps(60.0),
-                move |el, t| {
+        cell.with_animation(
+            SharedString::from(format!("card-intro-{grid_epoch}-{id}")),
+            Animation::new(if intro {
+                Duration::from_secs_f32(intro_total)
+            } else {
+                Duration::ZERO
+            })
+            .with_max_fps(60.0),
+            move |el, t| {
+                if intro {
                     let value = stagger_value(t, intro_index);
                     el.opacity(value).relative().top(px(14.0 * (1.0 - value)))
-                },
-            )
-            .into_any_element()
-        } else {
-            cell.into_any_element()
-        }
+                } else {
+                    el
+                }
+            },
+        )
+        .into_any_element()
     }
 
     fn inspector_column(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -2567,6 +2575,14 @@ impl App {
                         .text_size(px(10.))
                         .text_color(rgb(AMBER))
                         .child(message),
+                );
+            }
+            if self.delete_armed == Some(photo.id) {
+                body = body.child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(rgb(AMBER))
+                        .child("もう一度押すとOSゴミ箱へ移動します。"),
                 );
             }
             details_panel = details_panel.child(body.child(self.detail_body(&photo, cx)));
