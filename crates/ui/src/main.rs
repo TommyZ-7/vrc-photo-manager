@@ -50,6 +50,8 @@ const INSPECTOR_WIDTH: f32 = 330.0;
 const INSPECTOR_CARD_WIDTH: f32 = 314.0;
 const INSPECTOR_MARGIN: f32 = 16.0;
 const VIEWER_DETAILS_WIDTH: f32 = 380.0;
+const VIEWER_TOP_BAR: f32 = 56.0;
+const VIEWER_PAD: f32 = 24.0;
 const WORKSPACE_PAD_X: f32 = 44.0;
 const CARD_INTRO_SECS: f32 = 0.6;
 const CARD_STAGGER_SECS: f32 = 0.04;
@@ -74,6 +76,19 @@ gpui_kit::actions!(
 enum PhotoCardLayout {
     Grid { index: usize },
     Fixed,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ButtonTone {
+    Neutral,
+    Primary,
+    Danger,
+}
+
+#[derive(Clone, Copy)]
+struct ButtonState {
+    tone: ButtonTone,
+    enabled: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -579,6 +594,7 @@ impl App {
         if self.quick_look_open || self.selected_photo.is_none() {
             return;
         }
+        self.message = None;
         self.quick_look_return_focus = window.focused(cx);
         self.quick_look_photo_ids = self.viewer_source_ids();
         self.quick_look_index = self
@@ -595,9 +611,13 @@ impl App {
         let close_focus = self.quick_look_close_focus.clone();
         window.focus(&close_focus, cx);
         // The close button mounts with the overlay on this frame, so make the
-        // focus stick once the focus tree contains it.
-        window.defer(cx, move |window, cx| {
-            window.focus(&close_focus, cx);
+        // focus stick once the focus tree contains it. Guard the retry so a
+        // close (or close+reopen) cannot steal focus back to a stale overlay.
+        let epoch = self.quick_look_epoch;
+        cx.defer_in(window, move |this, window, cx| {
+            if this.quick_look_open && this.quick_look_epoch == epoch {
+                window.focus(&close_focus, cx);
+            }
         });
         cx.notify();
     }
@@ -616,6 +636,31 @@ impl App {
         cx.notify();
     }
 
+    /// Closes a viewer whose backing photo vanished (for example, an external
+    /// delete picked up by the three-second refresh) and restores focus.
+    fn guard_viewer_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.quick_look_open || self.selected_photo.is_some() {
+            return;
+        }
+        self.quick_look_open = false;
+        self.delete_armed = None;
+        self.selected = None;
+        self.quick_look_photo_ids.clear();
+        self.quick_look_index = 0;
+        self.preview = None;
+        self.previous_preview = None;
+        self.previous_color = None;
+        let focus = self
+            .quick_look_return_focus
+            .take()
+            .unwrap_or_else(|| self.photo_grid_focus.clone());
+        cx.defer_in(window, move |this, window, cx| {
+            if !this.quick_look_open {
+                window.focus(&focus, cx);
+            }
+        });
+    }
+
     fn viewer_source_ids(&self) -> Vec<i64> {
         let source: Vec<i64> = if self.screen == Screen::Search {
             match self.search_results.as_ref() {
@@ -632,7 +677,7 @@ impl App {
         }
     }
 
-    fn step_viewer_photo(&mut self, delta: isize, _window: &mut Window, cx: &mut Context<Self>) {
+    fn step_viewer_photo(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
         if !self.quick_look_open || self.quick_look_photo_ids.is_empty() {
             return;
         }
@@ -645,6 +690,14 @@ impl App {
             return;
         }
         self.quick_look_index = next;
+        let focused = window.focused(cx);
+        let prev_disabled = next == 0 && focused.as_ref() == Some(&self.quick_look_prev_focus);
+        let next_disabled = next + 1 == self.quick_look_photo_ids.len()
+            && focused.as_ref() == Some(&self.quick_look_next_focus);
+        if prev_disabled || next_disabled {
+            self.quick_look_focus_index = 0;
+            window.focus(&self.quick_look_close_focus, cx);
+        }
         // Keep the top-bar navigation focused; only the library selection and
         // the displayed photo change behind the overlay.
         self.select_photo(self.quick_look_photo_ids[next], cx);
@@ -654,19 +707,28 @@ impl App {
     fn toggle_quick_look_details(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.quick_look_details_open = !self.quick_look_details_open;
         self.quick_look_details_epoch = self.quick_look_details_epoch.wrapping_add(1);
-        // The toggle sits at index 3 in the visual focus order.
-        self.quick_look_focus_index = 3;
+        let index = self
+            .quick_look_focus_order(cx)
+            .iter()
+            .position(|handle| *handle == self.quick_look_details_focus)
+            .unwrap_or(0);
+        self.quick_look_focus_index = index;
         window.focus(&self.quick_look_details_focus, cx);
         cx.notify();
     }
 
     fn quick_look_focus_order(&self, cx: &gpui_kit::App) -> Vec<FocusHandle> {
-        let mut order = vec![
-            self.quick_look_close_focus.clone(),
-            self.quick_look_prev_focus.clone(),
-            self.quick_look_next_focus.clone(),
-            self.quick_look_details_focus.clone(),
-        ];
+        let index = self
+            .quick_look_index
+            .min(self.quick_look_photo_ids.len().saturating_sub(1));
+        let mut order = vec![self.quick_look_close_focus.clone()];
+        if index > 0 {
+            order.push(self.quick_look_prev_focus.clone());
+        }
+        if index + 1 < self.quick_look_photo_ids.len() {
+            order.push(self.quick_look_next_focus.clone());
+        }
+        order.push(self.quick_look_details_focus.clone());
         if self.quick_look_details_open {
             order.push(self.quick_look_favorite_focus.clone());
             order.push(self.tag_edit_input.read(cx).focus_handle(cx));
@@ -2015,10 +2077,11 @@ impl App {
         id: &'static str,
         label: impl Into<SharedString>,
         focus: FocusHandle,
-        primary: bool,
+        state: ButtonState,
         cx: &mut Context<Self>,
         on_activate: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + Clone + 'static,
     ) -> AnyElement {
+        let ButtonState { tone, enabled } = state;
         let label: SharedString = label.into();
         let activate: ViewerActivate = Rc::new(on_activate);
         let click_activate = activate.clone();
@@ -2026,6 +2089,84 @@ impl App {
         let click_focus = focus.clone();
         let key_focus = focus.clone();
 
+        let (border, background, fg) = if !enabled {
+            (rgba(0xffffff08), rgba(0x00000000), rgba(0x76819680))
+        } else {
+            match tone {
+                ButtonTone::Primary => (rgba(0x66b3ff40), rgba(0x66b3ff1a), rgb(0xdceeff)),
+                ButtonTone::Neutral => (rgba(0xffffff10), rgba(0xffffff08), rgb(MUTED_2)),
+                ButtonTone::Danger => (rgba(0xfb718566), rgba(0xfb718526), rgb(RED)),
+            }
+        };
+
+        let mut button = self.base_text_button(id, border, background, fg);
+
+        if enabled {
+            let (hover_bg, hover_fg, focus_border, focus_bg, focus_fg) = match tone {
+                ButtonTone::Primary => (
+                    rgba(0xffffff14),
+                    rgb(TEXT),
+                    rgb(BLUE),
+                    rgb(ACCENT_SOFT),
+                    rgb(TEXT),
+                ),
+                ButtonTone::Neutral => (
+                    rgba(0xffffff14),
+                    rgb(TEXT),
+                    rgb(BLUE),
+                    rgb(ACCENT_SOFT),
+                    rgb(TEXT),
+                ),
+                ButtonTone::Danger => (
+                    rgba(0xfb71853d),
+                    rgb(0xffd9df),
+                    rgb(RED),
+                    rgba(0xfb718533),
+                    rgb(0xffd9df),
+                ),
+            };
+            button = button
+                .cursor_pointer()
+                .track_focus(&focus)
+                .tab_stop(true)
+                .hover(move |this| this.bg(hover_bg).text_color(hover_fg))
+                .focus(move |this| {
+                    this.border_color(focus_border)
+                        .bg(focus_bg)
+                        .text_color(focus_fg)
+                })
+                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    // Enter/Space activation is handled on key down; GPUI also
+                    // synthesizes a keyboard click on key up, so ignore that path
+                    // to avoid firing the action twice.
+                    if matches!(event, ClickEvent::Keyboard(_)) {
+                        return;
+                    }
+                    window.focus(&click_focus, cx);
+                    click_activate(this, window, cx);
+                }))
+                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                    let key = event.keystroke.key.as_str();
+                    if !event.is_held && (key == "enter" || key == "space") {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        window.focus(&key_focus, cx);
+                        key_activate(this, window, cx);
+                    }
+                }));
+        }
+
+        button.child(label).into_any_element()
+    }
+
+    /// Shared chrome for the viewer's text-only controls.
+    fn base_text_button(
+        &self,
+        id: &'static str,
+        border: Rgba,
+        background: Rgba,
+        fg: Rgba,
+    ) -> Stateful<Div> {
         div()
             .id(id)
             .h(px(28.))
@@ -2034,50 +2175,12 @@ impl App {
             .items_center()
             .rounded(px(8.))
             .border_1()
-            .border_color(if primary {
-                rgba(0x66b3ff40)
-            } else {
-                rgba(0xffffff10)
-            })
-            .bg(if primary {
-                rgba(0x66b3ff1a)
-            } else {
-                rgba(0xffffff08)
-            })
+            .border_color(border)
+            .bg(background)
             .text_size(px(11.))
             .font_medium()
-            .text_color(rgb(if primary { 0xdceeff } else { MUTED_2 }))
+            .text_color(fg)
             .whitespace_nowrap()
-            .cursor_pointer()
-            .track_focus(&focus)
-            .tab_stop(true)
-            .hover(|this| this.bg(rgba(0xffffff14)).text_color(rgb(TEXT)))
-            .focus(|this| {
-                this.border_color(rgb(BLUE))
-                    .bg(rgb(ACCENT_SOFT))
-                    .text_color(rgb(TEXT))
-            })
-            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                // Enter/Space activation is handled on key down; GPUI also
-                // synthesizes a keyboard click on key up, so ignore that path
-                // to avoid firing the action twice.
-                if matches!(event, ClickEvent::Keyboard(_)) {
-                    return;
-                }
-                window.focus(&click_focus, cx);
-                click_activate(this, window, cx);
-            }))
-            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
-                let key = event.keystroke.key.as_str();
-                if !event.is_held && (key == "enter" || key == "space") {
-                    window.prevent_default();
-                    cx.stop_propagation();
-                    window.focus(&key_focus, cx);
-                    key_activate(this, window, cx);
-                }
-            }))
-            .child(label)
-            .into_any_element()
     }
 
     /// Metadata and actions for one photo. Shared by the full-screen viewer.
@@ -2124,7 +2227,14 @@ impl App {
                 "☆ お気に入り"
             },
             self.quick_look_favorite_focus.clone(),
-            favorite,
+            ButtonState {
+                tone: if favorite {
+                    ButtonTone::Primary
+                } else {
+                    ButtonTone::Neutral
+                },
+                enabled: true,
+            },
             cx,
             move |this, _, cx| {
                 let _ = this.db.set_favorite(id, !favorite);
@@ -2136,7 +2246,10 @@ impl App {
             "viewer-add-tag",
             "追加",
             self.quick_look_add_tag_focus.clone(),
-            false,
+            ButtonState {
+                tone: ButtonTone::Neutral,
+                enabled: true,
+            },
             cx,
             move |this, _, cx| {
                 let tag = this.tag_edit_input.read(cx).value().trim().to_string();
@@ -2156,7 +2269,10 @@ impl App {
             "viewer-compress",
             "圧縮",
             self.quick_look_compress_focus.clone(),
-            true,
+            ButtonState {
+                tone: ButtonTone::Primary,
+                enabled: true,
+            },
             cx,
             |this, _, cx| this.enqueue_selected(cx),
         );
@@ -2168,7 +2284,14 @@ impl App {
                 "ゴミ箱へ移動"
             },
             self.quick_look_trash_focus.clone(),
-            false,
+            ButtonState {
+                tone: if armed {
+                    ButtonTone::Danger
+                } else {
+                    ButtonTone::Neutral
+                },
+                enabled: true,
+            },
             cx,
             move |this, window, cx| {
                 this.trash_selected(cx);
@@ -2305,7 +2428,7 @@ impl App {
             )
     }
 
-    fn quick_look(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn quick_look(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(photo) = self.selected_photo.clone() else {
             return div().into_any_element();
         };
@@ -2320,7 +2443,10 @@ impl App {
             "viewer-close",
             "閉じる Esc",
             self.quick_look_close_focus.clone(),
-            true,
+            ButtonState {
+                tone: ButtonTone::Primary,
+                enabled: true,
+            },
             cx,
             |this, window, cx| this.close_quick_look(window, cx),
         );
@@ -2328,7 +2454,14 @@ impl App {
             "viewer-prev",
             "前へ",
             self.quick_look_prev_focus.clone(),
-            prev_enabled,
+            ButtonState {
+                tone: if prev_enabled {
+                    ButtonTone::Primary
+                } else {
+                    ButtonTone::Neutral
+                },
+                enabled: prev_enabled,
+            },
             cx,
             |this, window, cx| this.step_viewer_photo(-1, window, cx),
         );
@@ -2336,7 +2469,14 @@ impl App {
             "viewer-next",
             "次へ",
             self.quick_look_next_focus.clone(),
-            next_enabled,
+            ButtonState {
+                tone: if next_enabled {
+                    ButtonTone::Primary
+                } else {
+                    ButtonTone::Neutral
+                },
+                enabled: next_enabled,
+            },
             cx,
             |this, window, cx| this.step_viewer_photo(1, window, cx),
         );
@@ -2348,13 +2488,20 @@ impl App {
                 "詳細"
             },
             self.quick_look_details_focus.clone(),
-            details_open,
+            ButtonState {
+                tone: if details_open {
+                    ButtonTone::Primary
+                } else {
+                    ButtonTone::Neutral
+                },
+                enabled: true,
+            },
             cx,
             |this, window, cx| this.toggle_quick_look_details(window, cx),
         );
 
         let top_bar = h_flex()
-            .h(px(56.))
+            .h(px(VIEWER_TOP_BAR))
             .flex_shrink_0()
             .px(px(20.))
             .gap(px(10.))
@@ -2382,14 +2529,19 @@ impl App {
         } else {
             16.0 / 9.0
         };
+        let viewport = window.viewport_size();
+        let (image_w, image_h) = viewer_image_box(
+            viewport.width.into(),
+            viewport.height.into(),
+            details_open,
+            aspect,
+        );
         let image = if let Some(preview) = self.preview.clone() {
             div()
                 .id("viewer-image")
                 .relative()
-                .h_full()
-                .aspect_ratio(aspect)
-                .max_w(relative(0.92))
-                .max_h(relative(0.92))
+                .w(px(image_w))
+                .h(px(image_h))
                 .overflow_hidden()
                 .rounded(px(10.))
                 .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
@@ -2402,10 +2554,8 @@ impl App {
             div()
                 .id("viewer-image")
                 .relative()
-                .h_full()
-                .aspect_ratio(aspect)
-                .max_w(relative(0.92))
-                .max_h(relative(0.92))
+                .w(px(image_w))
+                .h(px(image_h))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -2436,7 +2586,8 @@ impl App {
             .flex()
             .items_center()
             .justify_center()
-            .p(px(24.))
+            .overflow_hidden()
+            .p(px(VIEWER_PAD))
             .on_click(cx.listener(|this, _, window, cx| this.close_quick_look(window, cx)))
             .child(image);
 
@@ -3732,6 +3883,7 @@ impl App {
 
 impl Render for App {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.guard_viewer_selection(window, cx);
         let width: f32 = window.viewport_size().width.into();
         self.grid_columns = grid_columns(grid_available_width(
             width,
@@ -3774,7 +3926,7 @@ impl Render for App {
             .child(self.nav_tooltip())
             .child(self.rail_toggle(cx));
         if self.quick_look_open {
-            root.child(self.quick_look(cx))
+            root.child(self.quick_look(window, cx))
         } else {
             root
         }
@@ -4239,6 +4391,24 @@ fn viewer_details_width(open: bool, t: f32) -> f32 {
     from + (to - from) * t
 }
 
+fn viewer_image_box(
+    viewport_w: f32,
+    viewport_h: f32,
+    details_open: bool,
+    aspect: f32,
+) -> (f32, f32) {
+    let details = if details_open {
+        VIEWER_DETAILS_WIDTH
+    } else {
+        0.0
+    };
+    let avail_w = (viewport_w - details - VIEWER_PAD * 2.0).max(1.0);
+    let avail_h = (viewport_h - VIEWER_TOP_BAR - VIEWER_PAD * 2.0).max(1.0);
+    let ratio = aspect.max(0.05);
+    let width = avail_w.min(avail_h * ratio);
+    (width, width / ratio)
+}
+
 fn grid_columns(available_width: f32) -> usize {
     (((available_width + GRID_GAP) / (MIN_CARD_WIDTH + GRID_GAP)).floor() as usize).max(1)
 }
@@ -4396,7 +4566,7 @@ mod tests {
         DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH, average_bgra,
         demo_thumb_path, ease_motion, format_count, grid_available_width, grid_columns, lerp_color,
         next_focus_index, parse_args, parse_window_size, sidebar_reveal_width, sidebar_width,
-        stagger_value, step_index, viewer_details_width,
+        stagger_value, step_index, viewer_details_width, viewer_image_box,
     };
 
     #[test]
@@ -4435,6 +4605,27 @@ mod tests {
         assert_eq!(viewer_details_width(false, 1.0), 0.0);
         assert_eq!(viewer_details_width(true, 0.0), 0.0);
         assert_eq!(viewer_details_width(true, 1.0), 380.0);
+    }
+
+    #[test]
+    fn viewer_image_box_fits_inside_padding_and_details() {
+        let close = |a: f32, b: f32| assert!((a - b).abs() < 0.01, "{a} != {b}");
+
+        let (w, h) = viewer_image_box(1280.0, 820.0, false, 16.0 / 9.0);
+        close(w, 1232.0);
+        close(h, 693.0);
+
+        let (w, h) = viewer_image_box(1280.0, 820.0, true, 16.0 / 9.0);
+        close(w, 852.0);
+        close(h, 479.25);
+
+        let (w, h) = viewer_image_box(1280.0, 820.0, false, 2.0 / 3.0);
+        close(w, 477.333);
+        close(h, 716.0);
+
+        let (w, h) = viewer_image_box(400.0, 400.0, false, 1.0);
+        close(w, 296.0);
+        close(h, 296.0);
     }
 
     #[test]
