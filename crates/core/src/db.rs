@@ -782,8 +782,12 @@ impl Db {
     // ---------- compression profiles ----------
 
     pub fn save_profile(&self, profile: &CompressionProfile) -> Result<()> {
+        Self::insert_profile(&self.conn, profile)
+    }
+
+    fn insert_profile(conn: &Connection, profile: &CompressionProfile) -> Result<()> {
         let json = serde_json::to_string(profile)?;
-        self.conn.execute(
+        conn.execute(
             "INSERT INTO compression_profiles(id, name, enabled, auto_enabled, json, sort_order) \
              VALUES (?1, ?2, ?3, ?4, ?5, 0) \
              ON CONFLICT(id) DO UPDATE SET name = excluded.name, enabled = excluded.enabled, \
@@ -814,16 +818,19 @@ impl Db {
 
     /// Seeds the built-in presets when no profile exists.
     ///
-    /// Returns the profiles currently stored. A read error is returned before
-    /// any preset is written, so a corrupt table is never masked by defaults.
+    /// Returns the profiles currently stored. A read or write error is returned
+    /// without leaving a partial seed: existing rows are never touched, and the
+    /// preset inserts commit together.
     pub fn ensure_default_profiles(&self) -> Result<Vec<CompressionProfile>> {
         let existing = self.list_profiles()?;
         if !existing.is_empty() {
             return Ok(existing);
         }
+        let transaction = self.conn.unchecked_transaction()?;
         for profile in CompressionProfile::defaults() {
-            self.save_profile(&profile)?;
+            Self::insert_profile(&transaction, &profile)?;
         }
+        transaction.commit()?;
         self.list_profiles()
     }
 
@@ -1293,6 +1300,21 @@ mod tests {
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].id, custom.id);
         assert_eq!(profiles[0].name, "custom");
+    }
+
+    #[test]
+    fn ensure_default_profiles_rolls_back_partial_seed() {
+        let db = Db::open_in_memory().unwrap();
+        db.connection()
+            .execute_batch(
+                "CREATE TRIGGER fail_second_profile BEFORE INSERT ON compression_profiles \
+                 WHEN (SELECT COUNT(*) FROM compression_profiles) = 1 \
+                 BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END;",
+            )
+            .unwrap();
+
+        assert!(db.ensure_default_profiles().is_err());
+        assert_eq!(db.list_profiles().unwrap().len(), 0);
     }
 
     #[test]
