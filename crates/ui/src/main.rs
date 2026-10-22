@@ -2919,7 +2919,7 @@ impl App {
                 div()
                     .p(px(12.))
                     .rounded(px(8.))
-                    .bg(rgba(0x102a24))
+                    .bg(rgb(0x102a24))
                     .border_1()
                     .border_color(rgba(0x5eead433))
                     .text_size(px(10.))
@@ -3019,6 +3019,7 @@ impl App {
                     .gap(px(14.))
                     .rounded(px(20.))
                     .bg(rgb(PANEL))
+                    .border_color(rgb(BORDER))
                     .child(
                         div()
                             .text_size(px(17.))
@@ -3087,7 +3088,7 @@ impl App {
                                 Button::new("search-clear")
                                     .label("クリア")
                                     .small()
-                                    .ghost()
+                                    .secondary()
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.search_results = None;
                                         cx.notify();
@@ -3108,7 +3109,7 @@ impl App {
                     .h_full()
                     .overflow_y_scrollbar()
                     .px(px(26.))
-                    .pt(px(22.))
+                    .pt(px(26.))
                     .pb(px(26.))
                     .gap(px(18.))
                     .child(
@@ -3405,7 +3406,7 @@ impl App {
                         div()
                             .p(px(14.))
                             .rounded(px(14.))
-                            .bg(rgba(0x2a2412))
+                            .bg(rgb(0x2a2412))
                             .border_1()
                             .border_color(rgba(0xfbbf2440))
                             .text_size(px(12.))
