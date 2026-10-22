@@ -1316,85 +1316,39 @@ impl App {
         let message = self.message.clone();
         let inspector_collapsed = self.inspector_collapsed;
 
+        let actions = vec![
+            Button::new("inspector-toggle")
+                .label(if inspector_collapsed {
+                    "詳細"
+                } else {
+                    "詳細を隠す"
+                })
+                .small()
+                .ghost()
+                .tooltip("詳細パネル (Ctrl+I)")
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_inspector(cx)))
+                .into_any_element(),
+            Button::new("import-copy")
+                .label("コピー取込")
+                .small()
+                .ghost()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.import_dialog(ImportMode::Copy, cx);
+                }))
+                .into_any_element(),
+            Button::new("import-move")
+                .label("移動取込")
+                .small()
+                .primary()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.import_dialog(ImportMode::Move, cx);
+                }))
+                .into_any_element(),
+        ];
+
         v_flex()
             .flex_shrink_0()
-            .child(
-                h_flex()
-                    .h(px(72.))
-                    .flex_shrink_0()
-                    .px(px(26.))
-                    .gap(px(14.))
-                    .items_center()
-                    .border_b_1()
-                    .border_color(rgb(BORDER))
-                    .child(
-                        v_flex()
-                            .flex_shrink_0()
-                            .gap(px(2.))
-                            .child(
-                                div()
-                                    .text_size(px(24.))
-                                    .font_semibold()
-                                    .text_color(rgb(TEXT))
-                                    .child("ライブラリ"),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(MUTED_2))
-                                    .child(subtitle),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .when_some(message, |this, message| {
-                                this.text_size(px(10.))
-                                    .text_color(rgb(AMBER))
-                                    .truncate()
-                                    .child(message)
-                            }),
-                    )
-                    .child(
-                        h_flex()
-                            .flex_shrink_0()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(
-                                Button::new("inspector-toggle")
-                                    .label(if inspector_collapsed {
-                                        "詳細"
-                                    } else {
-                                        "詳細を隠す"
-                                    })
-                                    .small()
-                                    .ghost()
-                                    .tooltip("詳細パネル (Ctrl+I)")
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.toggle_inspector(cx)),
-                                    ),
-                            )
-                            .child(
-                                Button::new("import-copy")
-                                    .label("コピー取込")
-                                    .small()
-                                    .ghost()
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.import_dialog(ImportMode::Copy, cx);
-                                    })),
-                            )
-                            .child(
-                                Button::new("import-move")
-                                    .label("移動取込")
-                                    .small()
-                                    .primary()
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.import_dialog(ImportMode::Move, cx);
-                                    })),
-                            ),
-                    ),
-            )
+            .child(self.screen_header("ライブラリ", subtitle, message, actions))
             .child(
                 h_flex()
                     .px(px(26.))
@@ -2661,163 +2615,144 @@ impl App {
     fn compression_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let profile = self.profiles.get(self.profile_index).cloned();
         let message = self.message.clone();
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scrollbar()
-            .px(px(26.))
-            .pt(px(22.))
-            .pb(px(26.))
-            .gap(px(24.))
-            .child(
+        let header = self.screen_header(
+            "圧縮設定",
+            "自動圧縮は元画像を保持します。置換は手動実行時のみです。".to_string(),
+            message,
+            vec![
                 h_flex()
-                    .items_center()
-                    .gap(px(14.))
-                    .child(
-                        v_flex()
-                            .flex_shrink_0()
-                            .gap(px(2.))
-                            .child(
-                                div()
-                                    .text_size(px(24.))
-                                    .font_semibold()
-                                    .text_color(rgb(TEXT))
-                                    .child("圧縮設定"),
-                            )
-                            .child(
-                                div().text_size(px(10.)).text_color(rgb(MUTED_2)).child(
-                                    "自動圧縮は元画像を保持します。置換は手動実行時のみです。",
-                                ),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .when_some(message, |this, message| {
-                                this.text_size(px(10.))
-                                    .text_color(rgb(AMBER))
-                                    .truncate()
-                                    .child(message)
+                    .gap_1()
+                    .child(self.policy_button("元画像を保持", "keep", cx))
+                    .child(self.policy_button("置換（ゴミ箱）", "replace", cx))
+                    .into_any_element(),
+                Button::new("add-profile")
+                    .label("＋ プロファイル")
+                    .small()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let profile = CompressionProfile {
+                            name: format!("新規プロファイル {}", this.profiles.len() + 1),
+                            auto_enabled: false,
+                            ..CompressionProfile::default()
+                        };
+                        let _ = this.db.save_profile(&profile);
+                        this.profiles = this.db.list_profiles().unwrap_or_default();
+                        this.profile_index = this
+                            .profiles
+                            .iter()
+                            .position(|item| item.id == profile.id)
+                            .unwrap_or(0);
+                        cx.notify();
+                    }))
+                    .into_any_element(),
+                Button::new("manual-compress")
+                    .label("手動圧縮")
+                    .small()
+                    .primary()
+                    .on_click(cx.listener(|this, _, _, cx| this.enqueue_selected(cx)))
+                    .into_any_element(),
+            ],
+        );
+
+        v_flex().flex_1().min_h_0().child(header).child(
+            v_flex()
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scrollbar()
+                .px(px(26.))
+                .pt(px(22.))
+                .pb(px(26.))
+                .gap(px(24.))
+                .child(
+                    h_flex()
+                        .gap(px(24.))
+                        .items_start()
+                        .child(v_flex().w(px(280.)).gap(px(8.)).children(
+                            self.profiles.iter().enumerate().map(|(index, profile)| {
+                                let active = index == self.profile_index;
+                                let auto = profile.auto_enabled;
+                                let title = profile.name.clone();
+                                let meta = format!(
+                                    "{} · Q{} · {}",
+                                    format_label(&profile.format),
+                                    profile.quality,
+                                    if profile.lossless {
+                                        "Lossless"
+                                    } else {
+                                        "Lossy"
+                                    }
+                                );
+                                glass_panel()
+                                    .id(SharedString::from(format!("profile-{index}")))
+                                    .flex()
+                                    .flex_col()
+                                    .p(px(14.))
+                                    .gap(px(6.))
+                                    .bg(rgb(if active { ACCENT_SOFT } else { PANEL }))
+                                    .border_color(rgb(if active { BLUE } else { BORDER }))
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.profile_index = index;
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        h_flex()
+                                            .items_center()
+                                            .gap(px(8.))
+                                            .child(
+                                                div()
+                                                    .text_size(px(12.))
+                                                    .font_semibold()
+                                                    .text_color(rgb(if active {
+                                                        BLUE
+                                                    } else {
+                                                        MUTED
+                                                    }))
+                                                    .child(title),
+                                            )
+                                            .child(self.badge(
+                                                if auto { "自動" } else { "手動" },
+                                                if auto { GREEN } else { MUTED },
+                                                if auto { 0x112a22 } else { PANEL_2 },
+                                            )),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(10.))
+                                            .text_color(rgb(if active { MUTED } else { MUTED_2 }))
+                                            .child(meta),
+                                    )
                             }),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_1()
-                            .child(self.policy_button("元画像を保持", "keep", cx))
-                            .child(self.policy_button("置換（ゴミ箱）", "replace", cx)),
-                    )
-                    .child(
-                        Button::new("add-profile")
-                            .label("＋ プロファイル")
-                            .small()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let profile = CompressionProfile {
-                                    name: format!("新規プロファイル {}", this.profiles.len() + 1),
-                                    auto_enabled: false,
-                                    ..CompressionProfile::default()
-                                };
-                                let _ = this.db.save_profile(&profile);
-                                this.profiles = this.db.list_profiles().unwrap_or_default();
-                                this.profile_index = this
-                                    .profiles
-                                    .iter()
-                                    .position(|item| item.id == profile.id)
-                                    .unwrap_or(0);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("manual-compress")
-                            .label("手動圧縮")
-                            .small()
-                            .primary()
-                            .on_click(cx.listener(|this, _, _, cx| this.enqueue_selected(cx))),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap(px(24.))
-                    .items_start()
-                    .child(v_flex().w(px(280.)).gap(px(8.)).children(
-                        self.profiles.iter().enumerate().map(|(index, profile)| {
-                            let active = index == self.profile_index;
-                            let auto = profile.auto_enabled;
-                            let title = profile.name.clone();
-                            let meta = format!(
-                                "{} · Q{} · {}",
-                                format_label(&profile.format),
-                                profile.quality,
-                                if profile.lossless {
-                                    "Lossless"
-                                } else {
-                                    "Lossy"
-                                }
-                            );
-                            glass_panel()
-                                .id(SharedString::from(format!("profile-{index}")))
-                                .flex()
-                                .flex_col()
-                                .p(px(14.))
-                                .gap(px(6.))
-                                .bg(rgb(if active { ACCENT_SOFT } else { PANEL }))
-                                .border_color(rgb(if active { BLUE } else { BORDER }))
-                                .cursor_pointer()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.profile_index = index;
-                                    cx.notify();
-                                }))
+                        ))
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap(px(24.))
+                                .when_some(profile, |this, profile| {
+                                    this.child(self.profile_editor(&profile, cx))
+                                })
                                 .child(
                                     h_flex()
-                                        .items_center()
-                                        .gap(px(8.))
+                                        .gap_3()
+                                        .child(self.stat_card(
+                                            "総圧縮数",
+                                            self.stats.compressed_count.to_string(),
+                                        ))
                                         .child(
-                                            div()
-                                                .text_size(px(12.))
-                                                .font_semibold()
-                                                .text_color(rgb(if active { BLUE } else { MUTED }))
-                                                .child(title),
+                                            self.stat_card(
+                                                "写真",
+                                                self.stats.photo_count.to_string(),
+                                            ),
                                         )
-                                        .child(self.badge(
-                                            if auto { "自動" } else { "手動" },
-                                            if auto { GREEN } else { MUTED },
-                                            if auto { 0x112a22 } else { PANEL_2 },
+                                        .child(self.stat_card(
+                                            "圧縮後合計",
+                                            format_bytes(self.db.derivative_bytes().unwrap_or(0)),
                                         )),
                                 )
-                                .child(
-                                    div()
-                                        .text_size(px(10.))
-                                        .text_color(rgb(if active { MUTED } else { MUTED_2 }))
-                                        .child(meta),
-                                )
-                        }),
-                    ))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap(px(24.))
-                            .when_some(profile, |this, profile| {
-                                this.child(self.profile_editor(&profile, cx))
-                            })
-                            .child(
-                                h_flex()
-                                    .gap_3()
-                                    .child(self.stat_card(
-                                        "総圧縮数",
-                                        self.stats.compressed_count.to_string(),
-                                    ))
-                                    .child(
-                                        self.stat_card("写真", self.stats.photo_count.to_string()),
-                                    )
-                                    .child(self.stat_card(
-                                        "圧縮後合計",
-                                        format_bytes(self.db.derivative_bytes().unwrap_or(0)),
-                                    )),
-                            )
-                            .child(self.queue_panel(cx)),
-                    ),
-            )
+                                .child(self.queue_panel(cx)),
+                        ),
+                ),
+        )
     }
 
     fn edit_profile(&mut self, edit: impl FnOnce(&mut CompressionProfile), cx: &mut Context<Self>) {
@@ -3388,25 +3323,13 @@ impl App {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let active = self.search_days == days;
-        div()
+        chip(label, active)
             .id(SharedString::from(format!("preset-{label}")))
-            .px(px(8.))
-            .py(px(3.))
-            .rounded_full()
-            .bg(if active {
-                rgb(ACCENT_SOFT)
-            } else {
-                rgb(PANEL_2)
-            })
-            .text_size(px(10.))
-            .font_medium()
-            .text_color(if active { rgb(BLUE) } else { rgb(MUTED) })
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.search_days = days;
                 this.run_search(cx);
             }))
-            .child(label.to_string())
     }
 
     fn filter_field(&self, label: &str, input: Input) -> impl IntoElement {
