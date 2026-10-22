@@ -1181,7 +1181,7 @@ Use `glass_panel()` for cards, 24 px gaps, 26 px horizontal padding.
 - `stat_card`: 10 px label, 17 px value, 16 px padding, `PANEL` surface.
 - `meta_row`: 86 px label column, 10 px label/value with `.truncate()`, `MUTED_2` label.
 - `section_label`: 10 px uppercase with letter spacing (use `.text_size(px(10.))`; GPUI has no letter-spacing API, so use spacing between characters only if the API supports it — otherwise plain uppercase).
-- Warning callout: `rgba(0x2a2412)` background, amber border/text.
+- Warning callout: `rgb(0x2a2412)` background, amber border/text.
 
 - [ ] **Step 3: Remove the global topbar**
 
