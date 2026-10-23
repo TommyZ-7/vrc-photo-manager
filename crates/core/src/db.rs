@@ -1927,6 +1927,17 @@ mod tests {
         let first = db.ensure_default_profiles().unwrap();
         assert_eq!(first.len(), 4);
 
+        let order: Vec<&str> = first.iter().map(|profile| profile.name.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "WebP 高品質",
+                "AVIF 容量優先",
+                "JPEG XL ロスレス",
+                "JPEG 互換用"
+            ]
+        );
+
         let mut names: Vec<&str> = first.iter().map(|profile| profile.name.as_str()).collect();
         names.sort_unstable();
         assert_eq!(
@@ -2005,7 +2016,7 @@ mod tests {
     #[test]
     fn save_profile_assigns_and_preserves_sort_order() {
         let db = Db::open_in_memory().unwrap();
-        for (id, name) in [("a", "A"), ("b", "B"), ("c", "C")] {
+        for (id, name) in [("c", "C"), ("a", "A"), ("b", "B")] {
             db.save_profile(&profile(id, name)).unwrap();
         }
 
@@ -2016,22 +2027,28 @@ mod tests {
                 .map(|profile| profile.id)
                 .collect::<Vec<_>>()
         };
-        assert_eq!(ids(), vec!["a", "b", "c"]);
+        assert_eq!(ids(), vec!["c", "a", "b"]);
 
         let mut edited = profile("a", "A renamed");
         edited.quality = 44;
         db.save_profile(&edited).unwrap();
 
-        assert_eq!(ids(), vec!["a", "b", "c"]);
+        assert_eq!(ids(), vec!["c", "a", "b"]);
         let stored = db.list_profiles().unwrap();
-        assert_eq!(stored[0].name, "A renamed");
-        assert_eq!(stored[0].quality, 44);
+        assert_eq!(stored[1].name, "A renamed");
+        assert_eq!(stored[1].quality, 44);
+
+        // Deleting the middle row leaves a gap. The next insert must use
+        // MAX(sort_order) + 1, not COUNT(*), so "A0" goes after "B".
+        db.delete_profile("a").unwrap();
+        db.save_profile(&profile("d", "A0")).unwrap();
+        assert_eq!(ids(), vec!["c", "b", "d"]);
     }
 
     #[test]
     fn reorder_profiles_persists_and_rolls_back_bad_lists() {
         let db = Db::open_in_memory().unwrap();
-        for (id, name) in [("a", "A"), ("b", "B"), ("c", "C")] {
+        for (id, name) in [("c", "C"), ("a", "A"), ("b", "B")] {
             db.save_profile(&profile(id, name)).unwrap();
         }
 
@@ -2043,6 +2060,12 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let order = |values: &[&str]| values.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+
+        // A legacy database where every row is zero sorts by name.
+        db.connection()
+            .execute("UPDATE compression_profiles SET sort_order = 0", [])
+            .unwrap();
+        assert_eq!(ids(), vec!["a", "b", "c"]);
 
         db.reorder_profiles(&order(&["c", "a", "b"])).unwrap();
         assert_eq!(ids(), vec!["c", "a", "b"]);
@@ -2064,6 +2087,41 @@ mod tests {
             Err(CoreError::NotFound(_))
         ));
         assert_eq!(ids(), vec!["c", "a", "b"]);
+    }
+
+    #[test]
+    fn reorder_profiles_survives_reopen_with_legacy_zero_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.db");
+
+        {
+            let db = Db::open(&path).unwrap();
+            for (id, name) in [("c", "C"), ("a", "A"), ("b", "B")] {
+                db.save_profile(&profile(id, name)).unwrap();
+            }
+            db.connection()
+                .execute("UPDATE compression_profiles SET sort_order = 0", [])
+                .unwrap();
+            let ids: Vec<String> = db
+                .list_profiles()
+                .unwrap()
+                .into_iter()
+                .map(|profile| profile.id)
+                .collect();
+            assert_eq!(ids, vec!["a", "b", "c"]);
+
+            db.reorder_profiles(&["c".to_string(), "a".to_string(), "b".to_string()])
+                .unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        let ids: Vec<String> = db
+            .list_profiles()
+            .unwrap()
+            .into_iter()
+            .map(|profile| profile.id)
+            .collect();
+        assert_eq!(ids, vec!["c", "a", "b"]);
     }
 
     #[test]
@@ -2089,6 +2147,7 @@ mod tests {
         let stored = db.list_profiles().unwrap();
         let ids: Vec<&str> = stored.iter().map(|profile| profile.id.as_str()).collect();
         assert_eq!(ids, vec!["a", "b", copy.id.as_str(), "c"]);
+        assert!(!stored[2].auto_enabled);
 
         let mut edited = copy.clone();
         edited.quality = 31;
@@ -2157,12 +2216,29 @@ mod tests {
             Some("/photos/compressed/a.webp"),
         )
         .unwrap();
+        db.add_derivative(
+            photo,
+            "/photos/compressed/a.webp",
+            "webp",
+            16,
+            10,
+            10,
+            "p",
+            "keep",
+        )
+        .unwrap();
+        let failed = db.enqueue_job(photo, "p", "keep").unwrap();
+        db.update_job(&failed, QueueStatus::Failed, 0.0, Some("boom"), None)
+            .unwrap();
         assert_eq!(db.active_job_count_for_profile("p").unwrap(), 0);
 
         db.delete_profile("p").unwrap();
         assert_eq!(db.list_profiles().unwrap().len(), 1);
         assert_eq!(db.list_profiles().unwrap()[0].id, "q");
-        assert_eq!(db.list_jobs(10).unwrap().len(), 1);
+        assert_eq!(db.list_jobs(10).unwrap().len(), 2);
+        let derivatives = db.derivatives_for_photo(photo).unwrap();
+        assert_eq!(derivatives.len(), 1);
+        assert_eq!(derivatives[0].profile_id, "p");
 
         assert!(matches!(db.delete_profile("q"), Err(CoreError::Invalid(_))));
         assert_eq!(db.list_profiles().unwrap().len(), 1);

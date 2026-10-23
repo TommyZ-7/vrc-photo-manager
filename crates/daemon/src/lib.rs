@@ -943,6 +943,13 @@ mod tests {
 
         // One photo: its auto profiles are enqueued in the saved order.
         enqueue_auto_jobs(&db, &[photo_id]).unwrap();
+        // Force the tie the rowid tie-break exists for.
+        db.connection()
+            .execute(
+                "UPDATE compression_jobs SET created_at = '2026-01-01T00:00:00+00:00'",
+                [],
+            )
+            .unwrap();
 
         let mut order = Vec::new();
         while let Some(job) = db.next_pending_job().unwrap() {
