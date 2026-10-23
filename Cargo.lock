@@ -7456,7 +7456,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vrc-photo-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "blake3",
  "chrono",
@@ -7481,7 +7481,7 @@ dependencies = [
 
 [[package]]
 name = "vrc-photo-daemon"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "auto-launch",
@@ -7501,7 +7501,7 @@ dependencies = [
 
 [[package]]
 name = "vrc-photo-ui"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
