@@ -976,11 +976,57 @@ impl Db {
         self.list_profiles()
     }
 
+    pub fn active_job_count_for_profile(&self, profile_id: &str) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM compression_jobs \
+             WHERE profile_id = ?1 AND status IN ('pending', 'processing')",
+            params![profile_id],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn delete_profile(&self, id: &str) -> Result<()> {
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        let exists: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM compression_profiles WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            return Err(CoreError::NotFound(format!("compression profile {id}")));
+        }
+
+        let active: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM compression_jobs \
+             WHERE profile_id = ?1 AND status IN ('pending', 'processing')",
+            params![id],
+            |row| row.get(0),
+        )?;
+        if active > 0 {
+            return Err(CoreError::Invalid(format!(
+                "compression profile {id} has {active} active jobs"
+            )));
+        }
+
+        let total: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM compression_profiles",
+            [],
+            |row| row.get(0),
+        )?;
+        if total <= 1 {
+            return Err(CoreError::Invalid(
+                "at least one compression profile is required".to_string(),
+            ));
+        }
+
+        let deleted = tx.execute(
             "DELETE FROM compression_profiles WHERE id = ?1",
             params![id],
         )?;
+        if deleted == 0 {
+            return Err(CoreError::NotFound(format!("compression profile {id}")));
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -996,13 +1042,29 @@ impl Db {
         Ok(id)
     }
 
+    pub fn enqueue_job_for_existing_profile(
+        &self,
+        photo_id: i64,
+        profile_id: &str,
+        policy: &str,
+    ) -> Result<bool> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let inserted = self.conn.execute(
+            "INSERT INTO compression_jobs(id, photo_id, profile_id, status, progress, policy, created_at) \
+             SELECT ?1, ?2, ?3, 'pending', 0, ?4, ?5 \
+             WHERE EXISTS (SELECT 1 FROM compression_profiles WHERE id = ?3)",
+            params![id, photo_id, profile_id, policy, now_string()],
+        )?;
+        Ok(inserted == 1)
+    }
+
     pub fn next_pending_job(&self) -> Result<Option<CompressionJob>> {
         let job = self
             .conn
             .query_row(
                 "UPDATE compression_jobs SET status = 'processing', started_at = ?1 \
                  WHERE id = (SELECT id FROM compression_jobs WHERE status = 'pending' \
-                    ORDER BY created_at LIMIT 1) \
+                    ORDER BY created_at, rowid LIMIT 1) \
                  RETURNING id, photo_id, profile_id, status, progress, error, output_path, policy, \
                     created_at, started_at, finished_at",
                 params![now_string()],
@@ -2066,5 +2128,75 @@ mod tests {
         let stored = db.list_profiles().unwrap();
         let ids: Vec<&str> = stored.iter().map(|profile| profile.id.as_str()).collect();
         assert_eq!(ids, vec!["a", "b", copy.id.as_str(), "c"]);
+    }
+
+    #[test]
+    fn delete_profile_blocks_active_jobs_and_keeps_history() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_profile(&profile("p", "P")).unwrap();
+        db.save_profile(&profile("q", "Q")).unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        let job = db.enqueue_job(photo, "p", "keep").unwrap();
+
+        assert_eq!(db.list_profiles().unwrap().len(), 2);
+        assert_eq!(db.active_job_count_for_profile("p").unwrap(), 1);
+        assert!(matches!(
+            db.delete_profile("p"),
+            Err(CoreError::Invalid(_))
+        ));
+        assert_eq!(db.list_profiles().unwrap().len(), 2);
+
+        db.update_job(&job, QueueStatus::Processing, 0.1, None, None)
+            .unwrap();
+        assert_eq!(db.active_job_count_for_profile("p").unwrap(), 1);
+        assert!(db.delete_profile("p").is_err());
+
+        db.update_job(
+            &job,
+            QueueStatus::Completed,
+            1.0,
+            None,
+            Some("/photos/compressed/a.webp"),
+        )
+        .unwrap();
+        assert_eq!(db.active_job_count_for_profile("p").unwrap(), 0);
+
+        db.delete_profile("p").unwrap();
+        assert_eq!(db.list_profiles().unwrap().len(), 1);
+        assert_eq!(db.list_profiles().unwrap()[0].id, "q");
+        assert_eq!(db.list_jobs(10).unwrap().len(), 1);
+
+        assert!(matches!(
+            db.delete_profile("q"),
+            Err(CoreError::Invalid(_))
+        ));
+        assert_eq!(db.list_profiles().unwrap().len(), 1);
+        assert!(matches!(
+            db.delete_profile("missing"),
+            Err(CoreError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn guarded_enqueue_skips_missing_profiles() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+
+        assert!(!db
+            .enqueue_job_for_existing_profile(photo, "missing", "keep")
+            .unwrap());
+        assert_eq!(db.count_jobs(QueueStatus::Pending).unwrap(), 0);
+
+        db.save_profile(&profile("p", "P")).unwrap();
+        assert!(db
+            .enqueue_job_for_existing_profile(photo, "p", "keep")
+            .unwrap());
+        assert_eq!(db.count_jobs(QueueStatus::Pending).unwrap(), 1);
     }
 }
