@@ -90,7 +90,26 @@ fn import_one(source: &Path, dest: &Path, mode: ImportMode, result: &mut ImportR
 }
 
 fn move_file(source: &Path, target: PathBuf, result: &mut ImportResult) {
-    if fs::rename(source, &target).is_ok() {
+    fn rename(from: &Path, to: &Path) -> std::io::Result<()> {
+        fs::rename(from, to)
+    }
+    fn remove(path: &Path) -> std::io::Result<()> {
+        fs::remove_file(path)
+    }
+    move_file_with(source, target, result, rename, remove);
+}
+
+/// Moves a file, reporting a partial move when the copy succeeds but the source
+/// removal fails. The filesystem operations are parameters so tests can inject
+/// failures deterministically.
+fn move_file_with(
+    source: &Path,
+    target: PathBuf,
+    result: &mut ImportResult,
+    rename: fn(&Path, &Path) -> std::io::Result<()>,
+    remove_source: fn(&Path) -> std::io::Result<()>,
+) {
+    if rename(source, &target).is_ok() {
         result.imported.push(target);
         return;
     }
@@ -104,7 +123,7 @@ fn move_file(source: &Path, target: PathBuf, result: &mut ImportResult) {
         ));
         return;
     }
-    match fs::remove_file(source) {
+    match remove_source(source) {
         Ok(()) => result.imported.push(target),
         Err(error) => {
             result.issues.push(ImportIssue {
@@ -251,6 +270,75 @@ mod tests {
         assert!(dest.join(good.file_name().unwrap()).is_file());
     }
 
+    #[test]
+    fn copy_failure_is_retryable_and_does_not_abort_the_batch() {
+        let dir = tempdir().unwrap();
+        let dest = dir.path().join("dest");
+        fs::create_dir_all(&dest).unwrap();
+        let bad = dir.path().join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        write_png(&bad);
+        // copy_atomic writes to "<name>.png.tmp" first; an existing directory
+        // there makes fs::copy fail deterministically, even when privileged.
+        let blocked_temp = dest.join("VRChat_2026-10-21_21-14-03.221_4x3.png.tmp");
+        fs::create_dir_all(&blocked_temp).unwrap();
+        let good = dir.path().join("VRChat_2026-10-22_10-00-00.000_4x3.png");
+        write_png(&good);
+
+        let result = import_files(&[bad.clone(), good.clone()], &dest, ImportMode::Copy).unwrap();
+
+        assert_eq!(result.imported, vec![dest.join(good.file_name().unwrap())]);
+        assert_eq!(result.skipped, 0);
+        assert_eq!(result.issues.len(), 1);
+        let issue = &result.issues[0];
+        assert_eq!(issue.kind, ImportIssueKind::Failed);
+        assert!(issue.retryable);
+        assert_eq!(issue.source, bad);
+        assert_eq!(
+            issue.target.as_deref(),
+            Some(dest.join(bad.file_name().unwrap()).as_path())
+        );
+        assert!(
+            issue.message.contains("コピーに失敗しました"),
+            "unexpected message: {}",
+            issue.message
+        );
+    }
+
+    #[test]
+    fn move_fallback_reports_partial_move_with_paths_and_error() {
+        let dir = tempdir().unwrap();
+        let dest = dir.path().join("dest");
+        fs::create_dir_all(&dest).unwrap();
+        let source = dir.path().join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        write_png(&source);
+        let target = dest.join(source.file_name().unwrap());
+
+        let mut result = ImportResult::default();
+        move_file_with(
+            &source,
+            target.clone(),
+            &mut result,
+            |_, _| Err(std::io::Error::other("injected rename failure")),
+            |_| Err(std::io::Error::other("injected removal failure")),
+        );
+
+        assert!(target.is_file(), "the fallback copy must exist");
+        assert!(source.is_file(), "the failed removal keeps the source");
+        assert_eq!(result.imported, vec![target.clone()]);
+        assert_eq!(result.skipped, 0);
+        assert_eq!(result.issues.len(), 1);
+        let issue = &result.issues[0];
+        assert_eq!(issue.kind, ImportIssueKind::PartialMove);
+        assert_eq!(issue.source, source);
+        assert_eq!(issue.target.as_deref(), Some(target.as_path()));
+        assert!(!issue.retryable);
+        assert!(
+            issue.message.contains("injected removal failure"),
+            "message must carry the removal error: {}",
+            issue.message
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn move_reports_partial_move_and_keeps_the_target() {
@@ -262,25 +350,37 @@ mod tests {
         fs::create_dir_all(&source_dir).unwrap();
         let source = source_dir.join("VRChat_2026-10-21_21-14-03.221_4x3.png");
         write_png(&source);
+        let sentinel = source_dir.join("delete-probe");
+        fs::write(&sentinel, "probe").unwrap();
 
         fs::set_permissions(&source_dir, fs::Permissions::from_mode(0o555)).unwrap();
-        let result = import_files(std::slice::from_ref(&source), &dest, ImportMode::Move).unwrap();
-        fs::set_permissions(&source_dir, fs::Permissions::from_mode(0o755)).unwrap();
-
-        if result.issues.is_empty() {
-            // A privileged environment can delete the source even from a
-            // read-only directory, so the failure cannot be simulated here.
+        let probe = fs::remove_file(&sentinel);
+        if probe.is_ok() {
+            // A privileged environment can delete from a read-only directory,
+            // so the partial-move failure cannot be simulated here. The
+            // injected test above still covers this branch deterministically.
+            fs::set_permissions(&source_dir, fs::Permissions::from_mode(0o755)).unwrap();
+            eprintln!(
+                "skipping partial-move assertions: this environment can delete from a read-only directory"
+            );
             return;
         }
+        let probe_error = probe.unwrap_err();
+        let result = import_files(std::slice::from_ref(&source), &dest, ImportMode::Move).unwrap();
+        fs::set_permissions(&source_dir, fs::Permissions::from_mode(0o755)).unwrap();
 
         assert!(source.is_file(), "source must remain after a failed delete");
         assert_eq!(result.imported.len(), 1);
         assert_eq!(result.issues.len(), 1);
-        assert_eq!(result.issues[0].kind, ImportIssueKind::PartialMove);
-        assert!(!result.issues[0].retryable);
-        assert_eq!(
-            result.issues[0].target.as_deref(),
-            Some(result.imported[0].as_path())
+        let issue = &result.issues[0];
+        assert_eq!(issue.kind, ImportIssueKind::PartialMove);
+        assert_eq!(issue.source, source);
+        assert!(!issue.retryable);
+        assert_eq!(issue.target.as_deref(), Some(result.imported[0].as_path()));
+        assert!(
+            issue.message.contains(&probe_error.to_string()),
+            "message must carry the removal error: {}",
+            issue.message
         );
     }
 }
