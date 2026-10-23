@@ -22,7 +22,7 @@ PRAGMA busy_timeout = 5000;
 ```
 
 - `user_version` でスキーマバージョンを管理する。
-- 現在のバージョンは **2**。
+- 現在のバージョンは **3**。
 - マイグレーションは `Db::migrate` で起動時に自動実行する。
 
 ## 3. テーブル
@@ -77,6 +77,7 @@ PRAGMA busy_timeout = 5000;
 
 ```sql
 idx_photos_captured(captured_at_utc DESC)
+idx_photos_captured_id(captured_at_utc DESC, id DESC) WHERE status = 'present'
 idx_photos_favorite(is_favorite) WHERE is_favorite = 1
 idx_photos_blake3(blake3)
 ```
@@ -266,11 +267,12 @@ estimated_link, thumbnail_cache_mb, compression_workers
 |---|---|
 | 1 | 初期スキーマ |
 | 2 | `photo_context.author` 追加 |
+| 3 | `idx_photos_captured_id` 追加（`status='present'` の `captured_at_utc DESC, id DESC`） |
 
 追加手順:
 
-1. `db.rs` に `SCHEMA_V3` を追加する。
-2. `migrate` に `if version < 3` を追加し、`schema_migrations` と `user_version` を更新する。
+1. `db.rs` に次の `SCHEMA_V*` を追加する。
+2. `migrate` に `if version < N` を追加し、`schema_migrations` と `user_version` を更新する。
 3. 既存DBからの起動テストと、新規DBの起動テストを追加する。
 4. 破壊的変更（列削除・型変更）は避け、必要なら新テーブル＋コピーで行う。
 
@@ -278,9 +280,9 @@ estimated_link, thumbnail_cache_mb, compression_workers
 
 - 一覧は `photos` + `photo_context` のLEFT JOIN。`captured_at_utc` 降順。
 - 検索は `photo_context` / `photo_players` / `photo_tags` のEXISTS句。
-- 現状UIは一覧・検索とも最大300件。10万枚を扱うにはキーセットページングと仮想リストの遅延取得が必要。
-- 10万枚を想定する場合の追加インデックス候補:
-  - `photos(status, captured_at_utc)`
+- UIは `photo_index` / `photo_index_text` で一致する写真の軽量索引（`id`, `captured_at_utc`, `captured_month`）を全件読み、表示範囲の写真だけを `photos_by_ids` で256枚ページ取得する。件数上限はない。
+- `idx_photos_captured_id` はV3で追加済み。100k合成DB（`photo_context` 5万行を含む）のrelease測定は索引61.5 ms、ページ0.72 ms。
+- 未検証の追加インデックス候補:
   - `photo_players(display_name COLLATE NOCASE)`
   - `photo_context(world_name)`
 

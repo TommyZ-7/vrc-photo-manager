@@ -1,7 +1,9 @@
 # ADR-0007: MVPの一覧読み込みを300枚に制限する
 
-- Status: Accepted（将来置換）
+- Status: Superseded by [ADR-0009](0009-photo-index-virtual-window.md)
 - Date: 2026-10-21
+
+> この判断は ADR-0009（順序付き索引＋仮想ウィンドウ）で置き換えられた。履歴として残す。
 
 ## Context
 
