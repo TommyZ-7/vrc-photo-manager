@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use rusqlite::types::Value;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params, params_from_iter};
 
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::model::{
     CompressionJob, CompressionProfile, Derivative, LibraryRoot, LibraryStats, NewPhoto, Photo,
     PhotoContext, PhotoFilter, PhotoIndexEntry, PhotoPlayer, PhotoSort, PhotoStatus,
@@ -825,14 +825,27 @@ impl Db {
     // ---------- compression profiles ----------
 
     pub fn save_profile(&self, profile: &CompressionProfile) -> Result<()> {
-        Self::insert_profile(&self.conn, profile)
+        let sort_order = Self::next_sort_order(&self.conn)?;
+        Self::write_profile(&self.conn, profile, sort_order)
     }
 
-    fn insert_profile(conn: &Connection, profile: &CompressionProfile) -> Result<()> {
+    fn next_sort_order(conn: &Connection) -> Result<i64> {
+        Ok(conn.query_row(
+            "SELECT COALESCE(MAX(sort_order) + 1, 0) FROM compression_profiles",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    fn write_profile(
+        conn: &Connection,
+        profile: &CompressionProfile,
+        sort_order: i64,
+    ) -> Result<()> {
         let json = serde_json::to_string(profile)?;
         conn.execute(
             "INSERT INTO compression_profiles(id, name, enabled, auto_enabled, json, sort_order) \
-             VALUES (?1, ?2, ?3, ?4, ?5, 0) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
              ON CONFLICT(id) DO UPDATE SET name = excluded.name, enabled = excluded.enabled, \
                 auto_enabled = excluded.auto_enabled, json = excluded.json",
             params![
@@ -841,6 +854,7 @@ impl Db {
                 profile.enabled as i64,
                 profile.auto_enabled as i64,
                 json,
+                sort_order,
             ],
         )?;
         Ok(())
@@ -859,6 +873,39 @@ impl Db {
         Ok(profiles)
     }
 
+    pub fn reorder_profiles(&self, ids: &[String]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        let stored: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM compression_profiles",
+            [],
+            |row| row.get(0),
+        )?;
+        if stored != ids.len() as i64 {
+            return Err(CoreError::Invalid(
+                "profile order must list every profile".to_string(),
+            ));
+        }
+        let mut seen = HashSet::new();
+        for id in ids {
+            if !seen.insert(id.as_str()) {
+                return Err(CoreError::Invalid(
+                    "profile order contains duplicate ids".to_string(),
+                ));
+            }
+        }
+        for (index, id) in ids.iter().enumerate() {
+            let changed = tx.execute(
+                "UPDATE compression_profiles SET sort_order = ?1 WHERE id = ?2",
+                params![index as i64, id],
+            )?;
+            if changed != 1 {
+                return Err(CoreError::NotFound(format!("compression profile {id}")));
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Seeds the built-in presets when no profile exists.
     ///
     /// Returns the profiles currently stored. A read or write error is returned
@@ -870,8 +917,8 @@ impl Db {
             return Ok(existing);
         }
         let transaction = self.conn.unchecked_transaction()?;
-        for profile in CompressionProfile::defaults() {
-            Self::insert_profile(&transaction, &profile)?;
+        for (index, profile) in CompressionProfile::defaults().into_iter().enumerate() {
+            Self::write_profile(&transaction, &profile, index as i64)?;
         }
         transaction.commit()?;
         self.list_profiles()
@@ -1288,6 +1335,14 @@ mod tests {
         let mut photo = sample_photo(root_id, path, utc);
         photo.captured_at_local = local.to_string();
         photo
+    }
+
+    fn profile(id: &str, name: &str) -> CompressionProfile {
+        CompressionProfile {
+            id: id.to_string(),
+            name: name.to_string(),
+            ..CompressionProfile::default()
+        }
     }
 
     #[test]
@@ -1832,5 +1887,70 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn save_profile_assigns_and_preserves_sort_order() {
+        let db = Db::open_in_memory().unwrap();
+        for (id, name) in [("a", "A"), ("b", "B"), ("c", "C")] {
+            db.save_profile(&profile(id, name)).unwrap();
+        }
+
+        let ids = || {
+            db.list_profiles()
+                .unwrap()
+                .into_iter()
+                .map(|profile| profile.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(), vec!["a", "b", "c"]);
+
+        let mut edited = profile("a", "A renamed");
+        edited.quality = 44;
+        db.save_profile(&edited).unwrap();
+
+        assert_eq!(ids(), vec!["a", "b", "c"]);
+        let stored = db.list_profiles().unwrap();
+        assert_eq!(stored[0].name, "A renamed");
+        assert_eq!(stored[0].quality, 44);
+    }
+
+    #[test]
+    fn reorder_profiles_persists_and_rolls_back_bad_lists() {
+        let db = Db::open_in_memory().unwrap();
+        for (id, name) in [("a", "A"), ("b", "B"), ("c", "C")] {
+            db.save_profile(&profile(id, name)).unwrap();
+        }
+
+        let ids = || {
+            db.list_profiles()
+                .unwrap()
+                .into_iter()
+                .map(|profile| profile.id)
+                .collect::<Vec<_>>()
+        };
+        let order =
+            |values: &[&str]| values.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+
+        db.reorder_profiles(&order(&["c", "a", "b"])).unwrap();
+        assert_eq!(ids(), vec!["c", "a", "b"]);
+
+        assert!(matches!(
+            db.reorder_profiles(&order(&["c", "a"])),
+            Err(CoreError::Invalid(_))
+        ));
+        assert_eq!(ids(), vec!["c", "a", "b"]);
+
+        assert!(matches!(
+            db.reorder_profiles(&order(&["a", "a", "b"])),
+            Err(CoreError::Invalid(_))
+        ));
+        assert_eq!(ids(), vec!["c", "a", "b"]);
+
+        assert!(matches!(
+            db.reorder_profiles(&order(&["c", "a", "missing"])),
+            Err(CoreError::NotFound(_))
+        ));
+        assert_eq!(ids(), vec!["c", "a", "b"]);
     }
 }
