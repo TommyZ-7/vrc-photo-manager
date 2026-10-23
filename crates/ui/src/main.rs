@@ -255,11 +255,11 @@ impl PhotoIndex {
     }
 }
 
-/// Bounded page cache for the virtual grid.
+/// Bounded access-order LRU cache for grid photo pages.
 ///
-/// Pages are evicted in insertion order. `get_page` deliberately does not
-/// reorder anything: scrolling must not turn a cheap read into a write, and
-/// the grid only touches the pages it is about to render.
+/// `get_page` moves the page to the back of the order; `insert_page` evicts
+/// from the front, so a page the user scrolled back to is not displaced by a
+/// backlog of page loads that finish later.
 #[derive(Default)]
 struct PhotoPageCache {
     pages: HashMap<usize, Arc<Vec<Arc<Photo>>>>,
@@ -281,22 +281,30 @@ impl PhotoPageCache {
     }
 
     fn get_page(&mut self, page: usize) -> Option<Arc<Vec<Arc<Photo>>>> {
-        self.pages.get(&page).cloned()
+        let page_photos = self.pages.get(&page).cloned()?;
+        self.touch(page);
+        Some(page_photos)
     }
 
     fn insert_page(&mut self, page: usize, photos: Vec<Photo>) {
         self.pending.remove(&page);
         self.failed.remove(&page);
         let page_photos = photos.into_iter().map(Arc::new).collect::<Vec<_>>();
-        if self.pages.insert(page, Arc::new(page_photos)).is_none() {
-            self.order.push_back(page);
-        }
+        self.pages.insert(page, Arc::new(page_photos));
+        self.touch(page);
         while self.pages.len() > MAX_PAGES {
             let Some(oldest) = self.order.pop_front() else {
                 break;
             };
             self.pages.remove(&oldest);
         }
+    }
+
+    fn touch(&mut self, page: usize) {
+        if let Some(index) = self.order.iter().position(|entry| *entry == page) {
+            self.order.remove(index);
+        }
+        self.order.push_back(page);
     }
 
     fn plan_pages(&mut self, start: usize, end: usize, limit: usize) -> Vec<usize> {
@@ -1613,12 +1621,12 @@ impl App {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let width: f32 = window.viewport_size().width.into();
-        let available = if search {
-            search_available_width(width, self.sidebar_collapsed, self.inspector_collapsed)
-        } else {
-            grid_available_width(width, self.sidebar_collapsed, self.inspector_collapsed)
-        };
-        let next_columns = grid_columns(available).max(1);
+        let next_columns = grid_columns_for(
+            search,
+            width,
+            self.sidebar_collapsed,
+            self.inspector_collapsed,
+        );
         let browser = self.browser_mut(search);
         browser.columns = next_columns;
         let columns = browser.columns;
@@ -4732,18 +4740,10 @@ fn grid_available_width(
 }
 
 /// Width left for the search grid after the filter panel (290 px + 26 px
-/// margin) and the right column's 26 px padding on both sides.
-fn search_available_width(
-    window_width: f32,
-    sidebar_collapsed: bool,
-    inspector_collapsed: bool,
-) -> f32 {
-    let inspector = if inspector_collapsed {
-        0.0
-    } else {
-        INSPECTOR_WIDTH
-    };
-    (window_width - sidebar_width(sidebar_collapsed) - inspector - 290.0 - 26.0 - 52.0).max(0.0)
+/// margin) and the right column's 26 px padding on both sides. The Search
+/// screen has no inspector column, so none is subtracted.
+fn search_available_width(window_width: f32, sidebar_collapsed: bool) -> f32 {
+    (window_width - sidebar_width(sidebar_collapsed) - 290.0 - 26.0 - 52.0).max(0.0)
 }
 
 fn viewer_details_width(open: bool, t: f32) -> f32 {
@@ -4775,6 +4775,23 @@ fn viewer_image_box(
 
 fn grid_columns(available_width: f32) -> usize {
     (((available_width + GRID_GAP) / (MIN_CARD_WIDTH + GRID_GAP)).floor() as usize).max(1)
+}
+
+/// Column count for a grid screen. Search uses its own available width because
+/// it has a filter panel and no inspector; the library keeps its inspector
+/// aware width.
+fn grid_columns_for(
+    search: bool,
+    window_width: f32,
+    sidebar_collapsed: bool,
+    inspector_collapsed: bool,
+) -> usize {
+    let available = if search {
+        search_available_width(window_width, sidebar_collapsed)
+    } else {
+        grid_available_width(window_width, sidebar_collapsed, inspector_collapsed)
+    };
+    grid_columns(available)
 }
 
 /// Stands in for a photo whose page has not loaded yet. Matches the card's
@@ -4944,9 +4961,9 @@ mod tests {
         DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH, MAX_PAGES, PAGE_SIZE,
         PhotoPageCache, THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, average_bgra,
         decode_thumbnail, demo_thumb_path, ease_motion, format_count, grid_available_width,
-        grid_columns, lerp_color, next_focus_index, parse_args, parse_window_size,
-        search_available_width, sidebar_reveal_width, sidebar_width, stagger_value, step_index,
-        viewer_details_width, viewer_image_box,
+        grid_columns, grid_columns_for, lerp_color, next_focus_index, parse_args,
+        parse_window_size, search_available_width, sidebar_reveal_width, sidebar_width,
+        stagger_value, step_index, viewer_details_width, viewer_image_box,
     };
     use gpui_kit::RenderImage;
     use smallvec::SmallVec;
@@ -5206,9 +5223,22 @@ mod tests {
         for page in 0..MAX_PAGES {
             cache.insert_page(page, vec![test_photo(page as i64)]);
         }
-        assert!(cache.get_page(0).is_some());
         cache.insert_page(MAX_PAGES, vec![test_photo(999)]);
         assert!(cache.get_page(0).is_none());
+        assert!(cache.get_page(MAX_PAGES).is_some());
+    }
+
+    #[test]
+    fn page_cache_keeps_recently_touched_pages() {
+        let mut cache = PhotoPageCache::new();
+        for page in 0..MAX_PAGES {
+            cache.insert_page(page, vec![test_photo(page as i64)]);
+        }
+        // Touch page 0 so it is no longer the least recently used entry.
+        assert!(cache.get_page(0).is_some());
+        cache.insert_page(MAX_PAGES, vec![test_photo(999)]);
+        assert!(cache.get_page(0).is_some());
+        assert!(cache.get_page(1).is_none());
         assert!(cache.get_page(MAX_PAGES).is_some());
     }
 
@@ -5227,9 +5257,19 @@ mod tests {
 
     #[test]
     fn search_available_width_drops_to_the_filter_panel_width() {
-        assert_eq!(grid_columns(search_available_width(1280.0, false, true)), 3);
-        assert_eq!(grid_columns(search_available_width(1440.0, false, true)), 4);
-        assert_eq!(grid_columns(search_available_width(1080.0, false, true)), 2);
-        assert!(grid_columns(search_available_width(1280.0, false, false)) >= 1);
+        assert_eq!(grid_columns(search_available_width(1280.0, false)), 3);
+        assert_eq!(grid_columns(search_available_width(1440.0, false)), 4);
+        assert_eq!(grid_columns(search_available_width(1080.0, false)), 2);
+        assert_eq!(grid_columns(search_available_width(1280.0, true)), 4);
+    }
+
+    #[test]
+    fn search_grid_columns_ignore_the_inspector_state() {
+        // The Search screen has no inspector column, so the default expanded
+        // inspector must not shrink its grid.
+        assert_eq!(grid_columns_for(true, 1280.0, false, false), 3);
+        assert_eq!(grid_columns_for(true, 1440.0, false, false), 4);
+        assert_eq!(grid_columns_for(true, 1080.0, false, false), 2);
+        assert_eq!(grid_columns_for(false, 1280.0, false, false), 3);
     }
 }
