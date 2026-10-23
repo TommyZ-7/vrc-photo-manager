@@ -7509,6 +7509,8 @@ dependencies = [
  "image",
  "rfd",
  "smallvec",
+ "tracing",
+ "tracing-subscriber",
  "trash",
  "vrc-photo-core",
 ]

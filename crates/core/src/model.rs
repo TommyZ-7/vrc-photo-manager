@@ -282,6 +282,9 @@ pub struct SessionPlayer {
     pub left_at: Option<i64>,
 }
 
+/// Maximum number of user retries per compression job.
+pub const MAX_JOB_RETRIES: i64 = 3;
+
 #[derive(Debug, Clone)]
 pub struct CompressionJob {
     pub id: String,
@@ -292,9 +295,80 @@ pub struct CompressionJob {
     pub error: Option<String>,
     pub output_path: Option<String>,
     pub policy: String,
+    /// Number of user retries already performed for this job.
+    pub retry_count: i64,
     pub created_at: String,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DaemonOperation {
+    Scan,
+    Log,
+    Link,
+}
+
+impl DaemonOperation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Scan => "scan",
+            Self::Log => "log",
+            Self::Link => "link",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "scan" => Some(Self::Scan),
+            "log" => Some(Self::Log),
+            "link" => Some(Self::Link),
+            _ => None,
+        }
+    }
+
+    pub fn retry_command(self) -> DaemonCommand {
+        match self {
+            Self::Scan => DaemonCommand::Rescan,
+            Self::Log => DaemonCommand::Relog,
+            Self::Link => DaemonCommand::Relink,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DaemonCommand {
+    Rescan,
+    Relog,
+    Relink,
+}
+
+impl DaemonCommand {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Rescan => "rescan",
+            Self::Relog => "relog",
+            Self::Relink => "relink",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "rescan" => Some(Self::Rescan),
+            "relog" => Some(Self::Relog),
+            "relink" => Some(Self::Relink),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DaemonError {
+    pub operation: DaemonOperation,
+    pub message: String,
+    pub detail: Option<String>,
+    pub occurred_at: String,
+    pub attempts: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

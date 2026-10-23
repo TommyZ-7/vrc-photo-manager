@@ -216,7 +216,13 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     ));
     fs::write(&temp, bytes)?;
     if let Err(error) = fs::rename(&temp, path) {
-        let _ = fs::remove_file(&temp);
+        if let Err(cleanup) = fs::remove_file(&temp) {
+            tracing::debug!(
+                %cleanup,
+                path = %temp.display(),
+                "cannot remove temporary compressed file after rename failure"
+            );
+        }
         return Err(CoreError::Io(error));
     }
     Ok(())

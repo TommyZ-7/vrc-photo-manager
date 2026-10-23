@@ -2,13 +2,17 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use rusqlite::types::Value;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params, params_from_iter};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Row, Transaction, TransactionBehavior, params,
+    params_from_iter,
+};
 
 use crate::error::{CoreError, Result};
 use crate::model::{
-    CompressionJob, CompressionProfile, Derivative, LibraryRoot, LibraryStats, NewPhoto, Photo,
-    PhotoContext, PhotoFilter, PhotoIndexEntry, PhotoPlayer, PhotoSort, PhotoStatus,
-    PhotoTextFilter, QueueStatus, Session, SessionPlayer, World,
+    CompressionJob, CompressionProfile, DaemonCommand, DaemonError, DaemonOperation, Derivative,
+    LibraryRoot, LibraryStats, MAX_JOB_RETRIES, NewPhoto, Photo, PhotoContext, PhotoFilter,
+    PhotoIndexEntry, PhotoPlayer, PhotoSort, PhotoStatus, PhotoTextFilter, QueueStatus, Session,
+    SessionPlayer, World,
 };
 
 const SCHEMA_V1: &str = r#"
@@ -181,6 +185,25 @@ CREATE INDEX IF NOT EXISTS idx_photos_captured_id
     WHERE status = 'present';
 "#;
 
+const SCHEMA_V4_RETRY_COUNT: &str =
+    "ALTER TABLE compression_jobs ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;";
+
+const SCHEMA_V4_DAEMON_TABLES: &str = r#"
+CREATE TABLE IF NOT EXISTS daemon_errors (
+    operation TEXT PRIMARY KEY,
+    message TEXT NOT NULL,
+    detail TEXT,
+    occurred_at TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS daemon_commands (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    command TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+"#;
+
 const PHOTO_SELECT: &str = "p.id, p.root_id, p.rel_path, p.abs_path, p.file_name, \
     p.captured_at_utc, p.captured_at_local, p.tz_offset_sec, p.width, p.height, \
     p.file_size, p.mtime, p.blake3, p.status, p.is_favorite, p.note, \
@@ -244,7 +267,9 @@ impl Db {
     fn configure(conn: &Connection) -> Result<()> {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        // WAL is not available for in-memory databases; ignore that case.
+        // Best-effort tuning hints; the results are intentionally ignored. WAL
+        // is unavailable for in-memory databases (they stay in `memory` journal
+        // mode), and read-only connections may reject these writes.
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
         let _ = conn.pragma_update(None, "synchronous", "NORMAL");
         Ok(())
@@ -278,6 +303,41 @@ impl Db {
             )?;
             self.conn.pragma_update(None, "user_version", 3)?;
         }
+        if version < 4 {
+            self.migrate_v4()?;
+        }
+        Ok(())
+    }
+
+    /// Applies schema version 4 in one immediate transaction. The write lock
+    /// serializes concurrent UI/daemon startups, and the existence checks make
+    /// the step safe to retry after an interrupted upgrade.
+    fn migrate_v4(&self) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        // Re-read under the write lock: another process may have completed V4
+        // between the caller's version check and this transaction.
+        let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version >= 4 {
+            tx.commit()?;
+            return Ok(());
+        }
+
+        let has_retry_count: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('compression_jobs') \
+             WHERE name = 'retry_count')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_retry_count {
+            tx.execute_batch(SCHEMA_V4_RETRY_COUNT)?;
+        }
+        tx.execute_batch(SCHEMA_V4_DAEMON_TABLES)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (4, ?1)",
+            params![now_string()],
+        )?;
+        tx.pragma_update(None, "user_version", 4)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1065,7 +1125,7 @@ impl Db {
                  WHERE id = (SELECT id FROM compression_jobs WHERE status = 'pending' \
                     ORDER BY created_at, rowid LIMIT 1) \
                  RETURNING id, photo_id, profile_id, status, progress, error, output_path, policy, \
-                    created_at, started_at, finished_at",
+                    retry_count, created_at, started_at, finished_at",
                 params![now_string()],
                 row_to_job,
             )
@@ -1107,11 +1167,50 @@ impl Db {
     pub fn list_jobs(&self, limit: i64) -> Result<Vec<CompressionJob>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, photo_id, profile_id, status, progress, error, output_path, policy, \
-                created_at, started_at, finished_at FROM compression_jobs \
+                retry_count, created_at, started_at, finished_at FROM compression_jobs \
              ORDER BY created_at DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit.max(1)], row_to_job)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn list_jobs_by_status(
+        &self,
+        status: QueueStatus,
+        limit: i64,
+    ) -> Result<Vec<CompressionJob>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, photo_id, profile_id, status, progress, error, output_path, policy, \
+                retry_count, created_at, started_at, finished_at FROM compression_jobs \
+             WHERE status = ?1 ORDER BY created_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![status.as_str(), limit.max(1)], row_to_job)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Returns a failed job to the queue once, incrementing its retry count.
+    /// Returns false when the job is missing, not failed, or already at the
+    /// retry cap.
+    pub fn retry_job(&self, id: &str) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE compression_jobs SET status = 'pending', progress = 0, error = NULL, \
+                started_at = NULL, finished_at = NULL, retry_count = retry_count + 1 \
+             WHERE id = ?1 AND status = 'failed' AND retry_count < ?2",
+            params![id, MAX_JOB_RETRIES],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Returns every eligible failed job to the queue and reports how many
+    /// rows changed. Jobs at the retry cap are left untouched.
+    pub fn retry_failed_jobs(&self) -> Result<usize> {
+        let changed = self.conn.execute(
+            "UPDATE compression_jobs SET status = 'pending', progress = 0, error = NULL, \
+                started_at = NULL, finished_at = NULL, retry_count = retry_count + 1 \
+             WHERE status = 'failed' AND retry_count < ?1",
+            params![MAX_JOB_RETRIES],
+        )?;
+        Ok(changed)
     }
 
     pub fn count_jobs(&self, status: QueueStatus) -> Result<i64> {
@@ -1121,6 +1220,100 @@ impl Db {
             |row| row.get(0),
         )?;
         Ok(count)
+    }
+
+    // ---------- daemon errors and commands ----------
+
+    /// Records a daemon failure for `operation`, replacing any previous
+    /// message/detail/time and incrementing the attempt count.
+    pub fn record_daemon_error(
+        &self,
+        operation: DaemonOperation,
+        message: &str,
+        detail: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO daemon_errors(operation, message, detail, occurred_at, attempts) \
+             VALUES (?1, ?2, ?3, ?4, 1) \
+             ON CONFLICT(operation) DO UPDATE SET message = excluded.message, \
+                detail = excluded.detail, occurred_at = excluded.occurred_at, \
+                attempts = daemon_errors.attempts + 1",
+            params![operation.as_str(), message, detail, now_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Removes the stored error for `operation`, if any.
+    pub fn clear_daemon_error(&self, operation: DaemonOperation) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM daemon_errors WHERE operation = ?1",
+            params![operation.as_str()],
+        )?;
+        Ok(())
+    }
+
+    /// Returns every stored daemon error, newest first. Rows whose operation
+    /// string is unknown to this build are skipped.
+    pub fn daemon_errors(&self) -> Result<Vec<DaemonError>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT operation, message, detail, occurred_at, attempts FROM daemon_errors \
+             ORDER BY occurred_at DESC, operation",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?;
+        let mut errors = Vec::new();
+        for row in rows {
+            let (operation, message, detail, occurred_at, attempts) = row?;
+            let Some(operation) = DaemonOperation::parse(&operation) else {
+                continue;
+            };
+            errors.push(DaemonError {
+                operation,
+                message,
+                detail,
+                occurred_at,
+                attempts,
+            });
+        }
+        Ok(errors)
+    }
+
+    /// Inserts `command` unless the same command is already queued. Returns
+    /// whether a row was inserted.
+    pub fn request_daemon_command(&self, command: DaemonCommand) -> Result<bool> {
+        let changed = self.conn.execute(
+            "INSERT INTO daemon_commands(command, created_at) \
+             SELECT ?1, ?2 WHERE NOT EXISTS \
+                (SELECT 1 FROM daemon_commands WHERE command = ?1)",
+            params![command.as_str(), now_string()],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Atomically removes and returns every queued command in request order.
+    /// Unknown command strings are discarded.
+    pub fn take_daemon_commands(&self) -> Result<Vec<DaemonCommand>> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let mut commands = Vec::new();
+        {
+            let mut stmt = tx.prepare("SELECT command FROM daemon_commands ORDER BY id")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            for row in rows {
+                if let Some(command) = DaemonCommand::parse(&row?) {
+                    commands.push(command);
+                }
+            }
+        }
+        tx.execute("DELETE FROM daemon_commands", [])?;
+        tx.commit()?;
+        Ok(commands)
     }
 
     // ---------- derivatives ----------
@@ -1412,9 +1605,10 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<CompressionJob> {
         error: row.get(5)?,
         output_path: row.get(6)?,
         policy: row.get(7)?,
-        created_at: row.get(8)?,
-        started_at: row.get(9)?,
-        finished_at: row.get(10)?,
+        retry_count: row.get(8)?,
+        created_at: row.get(9)?,
+        started_at: row.get(10)?,
+        finished_at: row.get(11)?,
     })
 }
 
@@ -1458,6 +1652,53 @@ mod tests {
         }
     }
 
+    /// Builds a version-3 database file directly from the V1-V3 DDL with one
+    /// failed compression job. When `retry_count` is set, the retry column is
+    /// added too, simulating an upgrade interrupted after the ALTER.
+    fn seed_version_3_database(path: &Path, retry_count: Option<i64>) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(SCHEMA_V1).unwrap();
+        conn.execute_batch(SCHEMA_V2).unwrap();
+        conn.execute_batch(SCHEMA_V3).unwrap();
+        for version in 1..=3 {
+            conn.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
+                params![version, now_string()],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO library_roots(path, kind, created_at) VALUES ('/photos', 'reference', ?1)",
+            params![now_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO photos(root_id, rel_path, abs_path, file_name, captured_at_utc, \
+                captured_at_local, tz_offset_sec, width, height, file_size, mtime, blake3, \
+                status, created_at, updated_at) \
+             VALUES (1, 'a.png', '/photos/a.png', 'a.png', 100, '2026-10-21 21:14:03', 32400, \
+                3840, 2160, 12400000, 100, NULL, 'present', ?1, ?1)",
+            params![now_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO compression_jobs(id, photo_id, profile_id, status, progress, error, \
+                output_path, policy, created_at, started_at, finished_at) \
+             VALUES ('job-1', 1, 'p', 'failed', 0, 'boom', NULL, 'keep', ?1, ?1, ?1)",
+            params![now_string()],
+        )
+        .unwrap();
+        if let Some(count) = retry_count {
+            conn.execute_batch(SCHEMA_V4_RETRY_COUNT).unwrap();
+            conn.execute(
+                "UPDATE compression_jobs SET retry_count = ?1 WHERE id = 'job-1'",
+                params![count],
+            )
+            .unwrap();
+        }
+        conn.pragma_update(None, "user_version", 3).unwrap();
+    }
+
     #[test]
     fn migration_adds_captured_id_index() {
         let db = Db::open_in_memory().unwrap();
@@ -1465,7 +1706,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
 
         let recorded: i64 = db
             .conn
@@ -1496,6 +1737,94 @@ mod tests {
             "{sql}"
         );
         assert!(normalized.contains("where status = 'present'"), "{sql}");
+    }
+
+    #[test]
+    fn migration_adds_retry_count_and_daemon_tables() {
+        let db = Db::open_in_memory().unwrap();
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 4);
+        let retry_column: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('compression_jobs') WHERE name = 'retry_count'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retry_column, 1);
+        let tables: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' \
+                 AND name IN ('daemon_errors', 'daemon_commands')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 2);
+    }
+
+    #[test]
+    fn migration_upgrades_version_3_database_with_existing_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.db");
+        seed_version_3_database(&path, None);
+
+        let db = Db::open(&path).unwrap();
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 4);
+
+        let jobs = db.list_jobs(10).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, "job-1");
+        assert_eq!(jobs[0].status, QueueStatus::Failed);
+        assert_eq!(jobs[0].retry_count, 0);
+
+        let tables: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' \
+                 AND name IN ('daemon_errors', 'daemon_commands')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 2);
+    }
+
+    #[test]
+    fn migration_v4_recovers_from_interrupted_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.db");
+        // The ALTER committed but user_version stayed at 3 and the daemon
+        // tables are missing, as if the process died mid-upgrade.
+        seed_version_3_database(&path, Some(2));
+
+        let db = Db::open(&path).unwrap();
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 4);
+        assert_eq!(db.list_jobs(10).unwrap()[0].retry_count, 2);
+
+        let tables: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' \
+                 AND name IN ('daemon_errors', 'daemon_commands')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 2);
     }
 
     #[test]
@@ -1919,6 +2248,162 @@ mod tests {
         )
         .unwrap();
         assert_eq!(db.count_jobs(QueueStatus::Completed).unwrap(), 1);
+    }
+
+    #[test]
+    fn retry_job_resets_failed_job_and_enforces_cap() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        let job = db.enqueue_job(photo, "p", "keep").unwrap();
+        db.next_pending_job().unwrap();
+        db.update_job(&job, QueueStatus::Failed, 0.0, Some("boom"), None)
+            .unwrap();
+
+        for expected in 1..=MAX_JOB_RETRIES {
+            assert!(db.retry_job(&job).unwrap());
+            let row = &db.list_jobs(1).unwrap()[0];
+            assert_eq!(row.status, QueueStatus::Pending);
+            assert_eq!(row.retry_count, expected);
+            assert!(row.error.is_none());
+            assert!(row.started_at.is_none());
+            assert!(row.finished_at.is_none());
+            db.next_pending_job().unwrap();
+            db.update_job(&job, QueueStatus::Failed, 0.0, Some("boom"), None)
+                .unwrap();
+        }
+
+        assert!(!db.retry_job(&job).unwrap());
+        assert_eq!(db.list_jobs(1).unwrap()[0].retry_count, MAX_JOB_RETRIES);
+    }
+
+    #[test]
+    fn retry_failed_jobs_returns_only_eligible_rows() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        let first = db.enqueue_job(photo, "p", "keep").unwrap();
+        let capped = db.enqueue_job(photo, "p", "keep").unwrap();
+        let completed = db.enqueue_job(photo, "p", "keep").unwrap();
+        for job in [&first, &capped, &completed] {
+            db.next_pending_job().unwrap();
+            db.update_job(job, QueueStatus::Failed, 0.0, Some("boom"), None)
+                .unwrap();
+        }
+        db.connection()
+            .execute(
+                "UPDATE compression_jobs SET retry_count = ?1 WHERE id = ?2",
+                params![MAX_JOB_RETRIES, capped],
+            )
+            .unwrap();
+        db.update_job(&completed, QueueStatus::Completed, 1.0, None, None)
+            .unwrap();
+
+        assert_eq!(db.retry_failed_jobs().unwrap(), 1);
+        assert_eq!(db.count_jobs(QueueStatus::Pending).unwrap(), 1);
+        assert_eq!(
+            db.list_jobs(10)
+                .unwrap()
+                .into_iter()
+                .find(|row| row.id == first)
+                .unwrap()
+                .retry_count,
+            1
+        );
+    }
+
+    #[test]
+    fn list_jobs_by_status_filters_and_limits() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        let failed = db.enqueue_job(photo, "p", "keep").unwrap();
+        db.enqueue_job(photo, "p", "keep").unwrap();
+        db.update_job(&failed, QueueStatus::Failed, 0.0, Some("boom"), None)
+            .unwrap();
+
+        let rows = db.list_jobs_by_status(QueueStatus::Failed, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, failed);
+        assert!(
+            db.list_jobs_by_status(QueueStatus::Pending, 10)
+                .unwrap()
+                .len()
+                == 1
+        );
+    }
+
+    #[test]
+    fn daemon_error_upsert_increments_attempts_and_clear_removes_it() {
+        let db = Db::open_in_memory().unwrap();
+        db.record_daemon_error(DaemonOperation::Scan, "cannot scan", Some("/missing"))
+            .unwrap();
+        db.record_daemon_error(DaemonOperation::Scan, "still missing", None)
+            .unwrap();
+
+        let errors = db.daemon_errors().unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].operation, DaemonOperation::Scan);
+        assert_eq!(errors[0].message, "still missing");
+        assert_eq!(errors[0].detail, None);
+        assert_eq!(errors[0].attempts, 2);
+
+        db.clear_daemon_error(DaemonOperation::Scan).unwrap();
+        assert!(db.daemon_errors().unwrap().is_empty());
+    }
+
+    #[test]
+    fn daemon_commands_deduplicate_and_drain_in_order() {
+        let db = Db::open_in_memory().unwrap();
+        assert!(db.request_daemon_command(DaemonCommand::Rescan).unwrap());
+        assert!(!db.request_daemon_command(DaemonCommand::Rescan).unwrap());
+        assert!(db.request_daemon_command(DaemonCommand::Relog).unwrap());
+
+        assert_eq!(
+            db.take_daemon_commands().unwrap(),
+            vec![DaemonCommand::Rescan, DaemonCommand::Relog]
+        );
+        assert!(db.take_daemon_commands().unwrap().is_empty());
+        assert!(db.request_daemon_command(DaemonCommand::Relink).unwrap());
+    }
+
+    #[test]
+    fn unknown_daemon_rows_are_ignored() {
+        let db = Db::open_in_memory().unwrap();
+        db.connection()
+            .execute(
+                "INSERT INTO daemon_errors(operation, message, detail, occurred_at, attempts) \
+                 VALUES ('future-op', 'boom', NULL, '2026-10-21T00:00:00+00:00', 1)",
+                [],
+            )
+            .unwrap();
+        db.record_daemon_error(DaemonOperation::Log, "log failed", Some("detail"))
+            .unwrap();
+
+        let errors = db.daemon_errors().unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].operation, DaemonOperation::Log);
+        assert_eq!(errors[0].detail.as_deref(), Some("detail"));
+        assert_eq!(errors[0].attempts, 1);
+
+        db.connection()
+            .execute(
+                "INSERT INTO daemon_commands(command, created_at) VALUES ('future-command', 'now')",
+                [],
+            )
+            .unwrap();
+        assert!(db.request_daemon_command(DaemonCommand::Rescan).unwrap());
+        assert_eq!(
+            db.take_daemon_commands().unwrap(),
+            vec![DaemonCommand::Rescan]
+        );
+        assert!(db.take_daemon_commands().unwrap().is_empty());
     }
 
     #[test]

@@ -17,15 +17,21 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use smallvec::SmallVec;
 use vrc_photo_core::db::Db;
-use vrc_photo_core::importer::{self, ImportMode};
+use vrc_photo_core::importer::{self, ImportIssue, ImportIssueKind, ImportMode};
+use vrc_photo_core::linker;
+use vrc_photo_core::logging::{DAEMON_LOG_FILE, UI_LOG_FILE, logs_dir};
 use vrc_photo_core::model::{
-    CompressionFormat, CompressionProfile, Derivative, LibraryStats, NewPhoto, Photo, PhotoContext,
+    CompressionFormat, CompressionJob, CompressionProfile, DaemonCommand, DaemonError,
+    DaemonOperation, Derivative, LibraryStats, MAX_JOB_RETRIES, NewPhoto, Photo, PhotoContext,
     PhotoIndexEntry, PhotoPlayer, PhotoSort, PhotoTextFilter, QueueStatus,
 };
+use vrc_photo_core::scanner;
+use vrc_photo_core::scanner::ScanFailure;
 use vrc_photo_core::settings::AppSettings;
 use vrc_photo_core::thumbnail;
 use vrc_photo_core::time;
-use vrc_photo_core::{linker, scanner};
+
+mod logging;
 
 const BG: u32 = 0x07090d;
 const PANEL: u32 = 0x121722;
@@ -97,7 +103,7 @@ struct ButtonState {
     enabled: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Screen {
     Photos,
     Compression,
@@ -654,7 +660,7 @@ fn apply_library_index(
             None
         }
         Err(error) => {
-            eprintln!("photo_index failed: {error}");
+            tracing::error!(%error, "photo_index failed");
             Some("写真一覧を読み込めませんでした".to_string())
         }
     }
@@ -1041,6 +1047,19 @@ impl Element for YearRail {
     }
 }
 
+/// Outcome of one import run, kept on the Photos screen until the user closes
+/// it so failed files can be retried without reopening the file picker.
+#[derive(Clone)]
+struct ImportReportView {
+    mode: ImportMode,
+    dest: PathBuf,
+    imported: usize,
+    skipped: usize,
+    issues: Vec<ImportIssue>,
+    scan_failures: Vec<ScanFailure>,
+    scan_error: Option<String>,
+}
+
 pub struct App {
     db: Db,
     screen: Screen,
@@ -1098,7 +1117,12 @@ pub struct App {
     profile_index: usize,
     stats: LibraryStats,
     settings: AppSettings,
-    jobs: Vec<vrc_photo_core::model::CompressionJob>,
+    jobs: Vec<CompressionJob>,
+    daemon_errors: Vec<DaemonError>,
+    failed_job_count: i64,
+    failed_jobs: Vec<CompressionJob>,
+    failed_job_names: HashMap<i64, String>,
+    import_report: Option<ImportReportView>,
     monitor_world: Option<String>,
     monitor_instance: Option<String>,
     monitor_players: Vec<String>,
@@ -1232,6 +1256,11 @@ impl App {
             stats: LibraryStats::default(),
             settings: AppSettings::default(),
             jobs: Vec::new(),
+            daemon_errors: Vec::new(),
+            failed_job_count: 0,
+            failed_jobs: Vec::new(),
+            failed_job_names: HashMap::new(),
+            import_report: None,
             monitor_world: None,
             monitor_instance: None,
             monitor_players: Vec::new(),
@@ -1310,9 +1339,7 @@ impl App {
         if let Ok(stats) = self.db.stats() {
             self.stats = stats;
         }
-        if let Ok(jobs) = self.db.list_jobs(20) {
-            self.jobs = jobs;
-        }
+        self.reload_job_state();
         self.refresh_monitor();
         if let Some(id) = self.selected {
             self.load_selected_meta(id);
@@ -1340,25 +1367,107 @@ impl App {
         cx.notify();
     }
 
+    fn reload_job_state(&mut self) {
+        self.jobs = self.db.list_jobs(20).unwrap_or_else(|error| {
+            tracing::warn!(%error, "cannot load recent compression jobs");
+            Vec::new()
+        });
+        self.failed_job_count = self.db.count_jobs(QueueStatus::Failed).unwrap_or(0);
+        self.failed_jobs = self
+            .db
+            .list_jobs_by_status(QueueStatus::Failed, 100)
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "cannot load failed compression jobs");
+                Vec::new()
+            });
+        self.failed_job_names.clear();
+        for job in &self.failed_jobs {
+            if self.failed_job_names.contains_key(&job.photo_id) {
+                continue;
+            }
+            if let Ok(Some(photo)) = self.db.photo_by_id(job.photo_id) {
+                self.failed_job_names.insert(job.photo_id, photo.file_name);
+            }
+        }
+        self.daemon_errors = self.db.daemon_errors().unwrap_or_default();
+    }
+
+    fn retry_job(&mut self, id: String, cx: &mut Context<Self>) {
+        match self.db.retry_job(&id) {
+            Ok(true) => {
+                self.message = Some("再試行をキューに戻しました".to_string());
+                self.reload_job_state();
+            }
+            Ok(false) => {
+                self.message = Some(format!("再試行の上限（{MAX_JOB_RETRIES}回）に達しました"));
+            }
+            Err(error) => {
+                tracing::warn!(%error, %id, "cannot retry compression job");
+                self.message = Some(format!("再試行できません: {error}"));
+            }
+        }
+        cx.notify();
+    }
+
+    fn retry_all_failed_jobs(&mut self, cx: &mut Context<Self>) {
+        match self.db.retry_failed_jobs() {
+            Ok(count) => {
+                self.message = Some(format!("{count} 件を再試行に戻しました（上限到達は除外）"));
+                self.reload_job_state();
+            }
+            Err(error) => {
+                tracing::warn!(%error, "cannot retry failed compression jobs");
+                self.message = Some(format!("再試行できません: {error}"));
+            }
+        }
+        cx.notify();
+    }
+
+    fn request_daemon_command(&mut self, command: DaemonCommand, cx: &mut Context<Self>) {
+        match self.db.request_daemon_command(command) {
+            Ok(true) => {
+                self.message = Some("再試行を要求しました。デーモンが処理します。".to_string())
+            }
+            Ok(false) => self.message = Some("すでに再試行を要求済みです。".to_string()),
+            Err(error) => self.message = Some(format!("再試行を要求できません: {error}")),
+        }
+        cx.notify();
+    }
+
     fn ensure_profiles(&mut self) {
-        self.profiles = self.db.ensure_default_profiles().unwrap_or_default();
+        self.profiles = self.db.ensure_default_profiles().unwrap_or_else(|error| {
+            tracing::warn!(%error, "cannot ensure default compression profiles");
+            Vec::new()
+        });
     }
 
     /// Refreshes side panels without touching the library snapshot or pages.
     fn reload_aux(&mut self, cx: &mut Context<Self>) {
-        self.profiles = self.db.list_profiles().unwrap_or_default();
+        self.profiles = self.db.list_profiles().unwrap_or_else(|error| {
+            tracing::warn!(%error, "cannot load compression profiles");
+            Vec::new()
+        });
         if self.profile_index >= self.profiles.len() {
             self.profile_index = 0;
         }
-        self.stats = self.db.stats().unwrap_or_default();
+        self.stats = self.db.stats().unwrap_or_else(|error| {
+            tracing::warn!(%error, "cannot load library stats");
+            LibraryStats::default()
+        });
         self.compressed_ids = self
             .db
             .compressed_photo_ids()
-            .unwrap_or_default()
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "cannot load compressed photo ids");
+                Vec::new()
+            })
             .into_iter()
             .collect();
-        self.jobs = self.db.list_jobs(20).unwrap_or_default();
-        self.settings = AppSettings::load(&self.db).unwrap_or_default();
+        self.reload_job_state();
+        self.settings = AppSettings::load(&self.db).unwrap_or_else(|error| {
+            tracing::warn!(%error, "cannot load app settings");
+            AppSettings::default()
+        });
         cx.set_reduce_motion(self.settings.ui_reduce_motion);
         self.refresh_monitor();
         if let Some(id) = self.selected {
@@ -1484,7 +1593,9 @@ impl App {
         self.sidebar_motion_epoch = self.sidebar_motion_epoch.wrapping_add(1);
         self.hovered_nav = None;
         self.settings.ui_sidebar_collapsed = self.sidebar_collapsed;
-        let _ = self.settings.save(&self.db);
+        if let Err(error) = self.settings.save(&self.db) {
+            tracing::warn!(%error, "cannot save sidebar state");
+        }
         cx.notify();
     }
 
@@ -1495,7 +1606,9 @@ impl App {
         self.inspector_collapsed = !self.inspector_collapsed;
         self.inspector_epoch = self.inspector_epoch.wrapping_add(1);
         self.settings.ui_inspector_collapsed = self.inspector_collapsed;
-        let _ = self.settings.save(&self.db);
+        if let Err(error) = self.settings.save(&self.db) {
+            tracing::warn!(%error, "cannot save inspector state");
+        }
         cx.notify();
     }
 
@@ -1531,10 +1644,25 @@ impl App {
     /// Favorite and tag edits use this so the preview does not flash.
     fn load_selected_meta(&mut self, id: i64) {
         self.selected = Some(id);
-        self.selected_photo = self.db.photo_by_id(id).ok().flatten();
-        self.selected_players = self.db.photo_players(id).unwrap_or_default();
-        self.selected_tags = self.db.photo_tags(id).unwrap_or_default();
-        self.selected_derivatives = self.db.derivatives_for_photo(id).unwrap_or_default();
+        self.selected_photo = match self.db.photo_by_id(id) {
+            Ok(photo) => photo,
+            Err(error) => {
+                tracing::warn!(%error, photo_id = id, "cannot load selected photo");
+                None
+            }
+        };
+        self.selected_players = self.db.photo_players(id).unwrap_or_else(|error| {
+            tracing::warn!(%error, photo_id = id, "cannot load selected photo players");
+            Vec::new()
+        });
+        self.selected_tags = self.db.photo_tags(id).unwrap_or_else(|error| {
+            tracing::warn!(%error, photo_id = id, "cannot load selected photo tags");
+            Vec::new()
+        });
+        self.selected_derivatives = self.db.derivatives_for_photo(id).unwrap_or_else(|error| {
+            tracing::warn!(%error, photo_id = id, "cannot load photo derivatives");
+            Vec::new()
+        });
         if self.note_edit_id.is_some_and(|edit_id| edit_id != id) {
             self.note_edit_id = None;
         }
@@ -1545,7 +1673,7 @@ impl App {
         self.preview = self
             .selected_photo
             .as_ref()
-            .and_then(|photo| load_preview(Path::new(&photo.abs_path)));
+            .and_then(|photo| load_preview(id, Path::new(&photo.abs_path)));
     }
 
     fn begin_note_edit(
@@ -1574,6 +1702,7 @@ impl App {
         let value = self.note_edit_input.read(cx).value();
         let note = normalize_note(&value);
         if let Err(error) = self.db.set_note(id, note) {
+            tracing::warn!(%error, photo_id = id, "cannot save photo note");
             self.message = Some(format!("メモを保存できません: {error}"));
             cx.notify();
             return;
@@ -1891,7 +2020,9 @@ impl App {
         }
         match trash::delete(&path) {
             Ok(_) => {
-                let _ = self.db.mark_missing(id);
+                if let Err(error) = self.db.mark_missing(id) {
+                    tracing::warn!(%error, photo_id = id, "cannot mark trashed photo missing");
+                }
                 self.library.remove_photo(id);
                 self.search_view.remove_photo(id);
                 self.thumbnails.unpin(id);
@@ -2117,6 +2248,7 @@ impl App {
 
     fn commit_tags(&mut self, photo_id: i64, tags: Vec<String>, cx: &mut Context<Self>) {
         if let Err(error) = self.db.set_photo_tags(photo_id, &tags) {
+            tracing::warn!(%error, photo_id, "cannot save photo tags");
             self.message = Some(format!("タグを保存できません: {error}"));
             cx.notify();
             return;
@@ -2134,6 +2266,7 @@ impl App {
         let tags = match self.db.photo_tags(photo_id) {
             Ok(tags) => tags,
             Err(error) => {
+                tracing::warn!(%error, photo_id, "cannot load photo tags");
                 self.message = Some(format!("タグを読み込めません: {error}"));
                 cx.notify();
                 return;
@@ -2149,6 +2282,7 @@ impl App {
         let tags = match self.db.photo_tags(photo_id) {
             Ok(tags) => tags,
             Err(error) => {
+                tracing::warn!(%error, photo_id, "cannot load photo tags");
                 self.message = Some(format!("タグを読み込めません: {error}"));
                 cx.notify();
                 return;
@@ -2586,21 +2720,95 @@ impl App {
             .into_any_element()
     }
 
+    /// One compact row per failure domain. Detail text stays on the target
+    /// screen so the bar never truncates the actual reason.
+    fn global_alerts(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let import_failed = self
+            .import_report
+            .as_ref()
+            .map(|report| import_issue_counts(&report.issues).0)
+            .unwrap_or(0);
+        alert_summaries(
+            self.failed_job_count,
+            self.daemon_errors.len(),
+            import_failed,
+        )
+        .into_iter()
+        .map(|(target, message)| {
+            let (id, action) = match target {
+                Screen::Photos => ("alert-photos", "写真を開く"),
+                Screen::Compression => ("alert-compression", "圧縮を開く"),
+                Screen::Search => ("alert-search", "検索を開く"),
+                Screen::Monitor => ("alert-monitor", "ログ監視を開く"),
+                Screen::Settings => ("alert-settings", "設定を開く"),
+            };
+            h_flex()
+                .flex_shrink_0()
+                .w_full()
+                .items_center()
+                .gap(px(10.))
+                .px(px(26.))
+                .py(px(8.))
+                .bg(rgb(PANEL))
+                .border_b_1()
+                .border_color(rgb(BORDER))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .w(px(6.))
+                        .h(px(6.))
+                        .rounded_full()
+                        .bg(rgb(RED)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(11.))
+                        .text_color(rgb(RED))
+                        .child(message),
+                )
+                .child(
+                    Button::new(id)
+                        .label(action)
+                        .small()
+                        .ghost()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.switch_screen(target, cx);
+                        })),
+                )
+                .into_any_element()
+        })
+        .collect()
+    }
+
     fn content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        match self.screen {
+        let screen = match self.screen {
             Screen::Photos => self.photos_screen(window, cx).into_any_element(),
             Screen::Compression => self.compression_screen(cx).into_any_element(),
             Screen::Search => self.search_screen(window, cx).into_any_element(),
             Screen::Monitor => self.monitor_screen(cx).into_any_element(),
             Screen::Settings => self.settings_screen(cx).into_any_element(),
-        }
+        };
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .children(self.global_alerts(cx))
+            .child(screen)
+            .into_any_element()
     }
 
     fn photos_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let import_panel = self
+            .import_report
+            .clone()
+            .map(|report| self.import_report_panel(&report, cx));
         v_flex()
             .flex_1()
             .min_h_0()
             .child(self.photos_header(cx))
+            .children(import_panel)
             .child(
                 h_flex()
                     .flex_1()
@@ -2962,7 +3170,7 @@ impl App {
         let photos = match self.db.photos_by_ids(&ids) {
             Ok(photos) => photos,
             Err(error) => {
-                eprintln!("photos_by_ids failed: {error}");
+                tracing::error!(%error, "photos_by_ids failed");
                 {
                     let browser = self.browser_mut(search);
                     for (page, _, _) in &requests {
@@ -2992,10 +3200,10 @@ impl App {
                     // in the page; keep placeholders until the next reload
                     // rebuilds the snapshot. The retry action makes the
                     // failure recoverable instead of permanent.
-                    eprintln!(
-                        "photos_by_ids returned a short page: {} of {}",
-                        page_photos.len(),
-                        end - start
+                    tracing::warn!(
+                        returned = page_photos.len(),
+                        expected = end - start,
+                        "photos_by_ids returned a short page"
                     );
                     short_page = true;
                     browser.fail_page(page, generation);
@@ -3776,8 +3984,13 @@ impl App {
             },
             cx,
             move |this, _, cx| {
-                let _ = this.db.set_favorite(id, !favorite);
-                this.load_selected_meta(id);
+                match this.db.set_favorite(id, !favorite) {
+                    Ok(()) => this.load_selected_meta(id),
+                    Err(error) => {
+                        tracing::warn!(%error, photo_id = id, "cannot update favorite");
+                        this.message = Some(format!("お気に入りを更新できません: {error}"));
+                    }
+                }
                 cx.notify();
             },
         );
@@ -4286,8 +4499,14 @@ impl App {
                             auto_enabled: false,
                             ..CompressionProfile::default()
                         };
-                        let _ = this.db.save_profile(&profile);
-                        this.profiles = this.db.list_profiles().unwrap_or_default();
+                        if let Err(error) = this.db.save_profile(&profile) {
+                            tracing::warn!(%error, "cannot add compression profile");
+                            this.message = Some(format!("プロファイルを追加できません: {error}"));
+                        }
+                        this.profiles = this.db.list_profiles().unwrap_or_else(|error| {
+                            tracing::warn!(%error, "cannot reload compression profiles");
+                            Vec::new()
+                        });
                         this.profile_index = this
                             .profiles
                             .iter()
@@ -4482,7 +4701,10 @@ impl App {
         if let Some(profile) = self.profiles.get_mut(self.profile_index) {
             edit(profile);
             let profile = profile.clone();
-            let _ = self.db.save_profile(&profile);
+            if let Err(error) = self.db.save_profile(&profile) {
+                tracing::warn!(%error, profile = %profile.id, "cannot save compression profile");
+                self.message = Some(format!("プロファイルを保存できません: {error}"));
+            }
         }
         cx.notify();
     }
@@ -4617,7 +4839,6 @@ impl App {
         profile: &CompressionProfile,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let index = self.profile_index;
         let profile_id = profile.id.clone();
         glass_panel()
             .flex()
@@ -4658,12 +4879,7 @@ impl App {
                         Switch::new("profile-auto")
                             .checked(profile.auto_enabled)
                             .on_click(cx.listener(move |this, checked, _, cx| {
-                                if let Some(profile) = this.profiles.get_mut(index) {
-                                    profile.auto_enabled = *checked;
-                                    let profile = profile.clone();
-                                    let _ = this.db.save_profile(&profile);
-                                }
-                                cx.notify();
+                                this.edit_profile(|profile| profile.auto_enabled = *checked, cx);
                             })),
                     ),
             )
@@ -4695,12 +4911,10 @@ impl App {
                             .text_color(if active { rgb(BLUE) } else { rgb(MUTED) })
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(profile) = this.profiles.get_mut(index) {
-                                    profile.format = selected_format.clone();
-                                    let profile = profile.clone();
-                                    let _ = this.db.save_profile(&profile);
-                                }
-                                cx.notify();
+                                this.edit_profile(
+                                    |profile| profile.format = selected_format.clone(),
+                                    cx,
+                                );
                             }))
                             .child(label)
                     }),
@@ -4722,12 +4936,12 @@ impl App {
                             .label("−")
                             .small()
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(profile) = this.profiles.get_mut(index) {
-                                    profile.quality = profile.quality.saturating_sub(1).max(1);
-                                    let profile = profile.clone();
-                                    let _ = this.db.save_profile(&profile);
-                                }
-                                cx.notify();
+                                this.edit_profile(
+                                    |profile| {
+                                        profile.quality = profile.quality.saturating_sub(1).max(1);
+                                    },
+                                    cx,
+                                );
                             })),
                     )
                     .child(
@@ -4743,12 +4957,13 @@ impl App {
                             .label("＋")
                             .small()
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(profile) = this.profiles.get_mut(index) {
-                                    profile.quality = profile.quality.saturating_add(1).min(100);
-                                    let profile = profile.clone();
-                                    let _ = this.db.save_profile(&profile);
-                                }
-                                cx.notify();
+                                this.edit_profile(
+                                    |profile| {
+                                        profile.quality =
+                                            profile.quality.saturating_add(1).min(100);
+                                    },
+                                    cx,
+                                );
                             })),
                     )
                     .child(div().text_size(px(10.)).text_color(rgb(MUTED_2)).child(
@@ -4879,7 +5094,8 @@ impl App {
             )
     }
 
-    fn queue_panel(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn queue_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let retryable_jobs = self.failed_jobs.iter().any(job_retry_available);
         glass_panel()
             .flex()
             .flex_col()
@@ -4899,40 +5115,152 @@ impl App {
                             .text_color(rgb(TEXT))
                             .child("圧縮キュー"),
                     )
-                    .child(self.badge(&format!("{} 件", self.jobs.len()), BLUE, 0x14283d)),
+                    .child(self.badge(&format!("{} 件", self.jobs.len()), BLUE, 0x14283d))
+                    .when(self.failed_job_count > 0, |this| {
+                        this.child(self.badge(
+                            &format!("失敗 {}", self.failed_job_count),
+                            RED,
+                            0x2a1414,
+                        ))
+                    })
+                    .child(div().flex_1())
+                    .when(retryable_jobs, |this| {
+                        this.child(
+                            Button::new("retry-all-failed-jobs")
+                                .label("失敗をすべて再試行")
+                                .small()
+                                .ghost()
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.retry_all_failed_jobs(cx)),
+                                ),
+                        )
+                    }),
             )
-            .children(self.jobs.iter().take(8).map(|job| {
-                let status = match job.status {
-                    QueueStatus::Pending => ("待機", AMBER, 0x2a2412),
-                    QueueStatus::Processing => ("処理中", BLUE, 0x14283d),
-                    QueueStatus::Completed => ("完了", GREEN, 0x112a22),
-                    QueueStatus::Failed => ("失敗", RED, 0x2a1414),
-                    QueueStatus::Cancelled => ("取消", MUTED, PANEL_2),
-                };
-                h_flex()
+            .when(self.failed_job_count > 100, |this| {
+                this.child(
+                    div()
+                        .px(px(16.))
+                        .py(px(8.))
+                        .text_size(px(10.))
+                        .text_color(rgb(MUTED_2))
+                        .child("失敗は最新の100件のみ表示しています（再試行は上限内のすべてが対象です）"),
+                )
+            })
+            .children(self.failed_jobs.iter().map(|job| {
+                let name = self
+                    .failed_job_names
+                    .get(&job.photo_id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("photo #{}", job.photo_id));
+                let profile_name = self
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == job.profile_id)
+                    .map(|profile| profile.name.clone());
+                let error = job.error.clone().unwrap_or_default();
+                let retryable = job_retry_available(job);
+                let id = job.id.clone();
+                v_flex()
                     .px(px(16.))
                     .py(px(10.))
-                    .gap(px(8.))
-                    .items_center()
+                    .gap(px(6.))
                     .border_b_1()
                     .border_color(rgb(BORDER))
-                    .child(self.badge(status.0, status.1, status.2))
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(px(12.))
-                            .text_color(rgb(TEXT))
-                            .truncate()
-                            .child(format!("photo #{}", job.photo_id)),
+                        h_flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(self.badge("失敗", RED, 0x2a1414))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(TEXT))
+                                    .truncate()
+                                    .child(name),
+                            )
+                            .when_some(profile_name, |this, name| {
+                                this.child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .text_color(rgb(MUTED_2))
+                                        .child(name),
+                                )
+                            }),
                     )
+                    .when(!error.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .w_full()
+                                .text_size(px(10.))
+                                .text_color(rgb(RED))
+                                .child(error),
+                        )
+                    })
                     .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(MUTED_2))
-                            .child(format!("{:.0}%", job.progress * 100.0)),
+                        h_flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(MUTED_2))
+                                    .child(job_retry_label(job)),
+                            )
+                            .when(retryable, |this| {
+                                this.child(
+                                    Button::new(SharedString::from(format!(
+                                        "retry-job-{}",
+                                        job.id
+                                    )))
+                                    .label("再試行")
+                                    .small()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.retry_job(id.clone(), cx)
+                                    })),
+                                )
+                            }),
                     )
             }))
+            .children(
+                self.jobs
+                    .iter()
+                    .filter(|job| job.status != QueueStatus::Failed)
+                    .take(6)
+                    .map(|job| {
+                        let status = match job.status {
+                            QueueStatus::Pending => ("待機", AMBER, 0x2a2412),
+                            QueueStatus::Processing => ("処理中", BLUE, 0x14283d),
+                            QueueStatus::Completed => ("完了", GREEN, 0x112a22),
+                            QueueStatus::Failed => ("失敗", RED, 0x2a1414),
+                            QueueStatus::Cancelled => ("取消", MUTED, PANEL_2),
+                        };
+                        h_flex()
+                            .px(px(16.))
+                            .py(px(10.))
+                            .gap(px(8.))
+                            .items_center()
+                            .border_b_1()
+                            .border_color(rgb(BORDER))
+                            .child(self.badge(status.0, status.1, status.2))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(TEXT))
+                                    .truncate()
+                                    .child(format!("photo #{}", job.photo_id)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(MUTED_2))
+                                    .child(format!("{:.0}%", job.progress * 100.0)),
+                            )
+                    }),
+            )
             .when(self.jobs.is_empty(), |this| {
                 this.child(
                     div()
@@ -5106,46 +5434,352 @@ impl App {
             return;
         };
         let dest = self.settings.import_dir();
+        self.run_import(files, mode, dest, cx);
+    }
+
+    /// Copies or moves the picked files, then indexes the destination.
+    fn run_import(
+        &mut self,
+        files: Vec<PathBuf>,
+        mode: ImportMode,
+        dest: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
         let result = match importer::import_files(&files, &dest, mode) {
             Ok(result) => result,
             Err(error) => {
+                tracing::warn!(%error, "cannot import photos");
                 self.message = Some(format!("取り込みに失敗: {error}"));
                 cx.notify();
                 return;
             }
         };
-        let dest_string = dest.to_string_lossy().to_string();
-        if !self
-            .settings
-            .photo_roots
-            .iter()
-            .any(|root| root == &dest_string)
-        {
-            self.settings.photo_roots.push(dest_string.clone());
-            let _ = self.settings.save(&self.db);
+        let mut report = ImportReportView {
+            mode,
+            dest,
+            imported: result.imported.len(),
+            skipped: result.skipped,
+            issues: result.issues,
+            scan_failures: Vec::new(),
+            scan_error: None,
+        };
+        self.index_import_destination(&mut report, cx);
+        self.message = Some(import_summary(&report));
+        self.import_report = Some(report);
+        cx.notify();
+    }
+
+    /// Registers, scans, and links the import destination, then rebuilds the
+    /// library. Indexing failures stay on the report instead of aborting the
+    /// UI, so the imported files and per-file issues remain visible.
+    fn index_import_destination(&mut self, report: &mut ImportReportView, cx: &mut Context<Self>) {
+        let dest_string = report.dest.to_string_lossy().to_string();
+        if let Err(error) = add_photo_root_and_save(&mut self.settings, &dest_string, |settings| {
+            settings.save(&self.db)
+        }) {
+            tracing::warn!(%error, "cannot save photo roots after import");
+            append_scan_error(report, format!("取り込み先の設定を保存できません: {error}"));
         }
         let root_id = match self.db.add_root(&dest_string, "managed") {
             Ok(id) => id,
             Err(error) => {
-                self.message = Some(format!("取り込み先を登録できません: {error}"));
+                tracing::warn!(%error, "cannot register import destination");
+                append_scan_error(report, format!("取り込み先を登録できません: {error}"));
+                return;
+            }
+        };
+        match scanner::scan_and_index(&self.db, root_id, &report.dest) {
+            Ok(scan) => {
+                report.scan_failures.extend(scan.failures);
+                for id in &scan.new_ids {
+                    let Ok(Some(photo)) = self.db.photo_by_id(*id) else {
+                        continue;
+                    };
+                    if let Err(error) = thumbnail::ensure_thumbnail(*id, Path::new(&photo.abs_path))
+                    {
+                        tracing::warn!(%error, %id, "cannot generate thumbnail after import");
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "cannot scan import destination");
+                append_scan_error(report, format!("取り込み先をスキャンできません: {error}"));
+            }
+        }
+        if let Err(error) = linker::relink_unlinked(&self.db, 1000) {
+            tracing::warn!(%error, "cannot link imported photos");
+            append_scan_error(report, format!("写真の紐付けに失敗しました: {error}"));
+        }
+        if !self.reload_library(true, cx)
+            && let Some(error) = self.library_error.clone()
+        {
+            append_scan_error(report, error);
+        }
+    }
+
+    /// Re-imports only the retryable failed sources of the current report with
+    /// the same destination and mode.
+    fn retry_import(&mut self, cx: &mut Context<Self>) {
+        let Some(previous) = self.import_report.clone() else {
+            return;
+        };
+        let sources = retryable_sources(&previous.issues);
+        if sources.is_empty() {
+            return;
+        }
+        let result = match importer::import_files(&sources, &previous.dest, previous.mode) {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::warn!(%error, "cannot retry import");
+                self.message = Some(format!("再取り込みに失敗: {error}"));
                 cx.notify();
                 return;
             }
         };
-        let report = scanner::scan_and_index(&self.db, root_id, &dest).unwrap_or_default();
-        let _ = linker::relink_unlinked(&self.db, 1000);
-        for id in &report.new_ids {
-            if let Ok(Some(photo)) = self.db.photo_by_id(*id) {
-                let _ = thumbnail::ensure_thumbnail(*id, Path::new(&photo.abs_path));
-            }
-        }
-        self.reload_library(true, cx);
-        self.message = Some(format!(
-            "{} 枚を取り込みました（{} 枚スキップ）",
-            result.imported.len(),
-            result.skipped
-        ));
+        let mut report = ImportReportView {
+            mode: previous.mode,
+            dest: previous.dest.clone(),
+            imported: previous.imported + result.imported.len(),
+            skipped: previous.skipped + result.skipped,
+            issues: previous
+                .issues
+                .iter()
+                .filter(|issue| issue.kind != ImportIssueKind::Failed || !issue.retryable)
+                .cloned()
+                .collect(),
+            scan_failures: Vec::new(),
+            scan_error: None,
+        };
+        report.issues.extend(result.issues);
+        self.index_import_destination(&mut report, cx);
+        self.message = Some(import_summary(&report));
+        self.import_report = Some(report);
         cx.notify();
+    }
+
+    fn import_report_panel(&self, report: &ImportReportView, cx: &mut Context<Self>) -> AnyElement {
+        let (failed, partial) = import_issue_counts(&report.issues);
+        let retryable = retryable_sources(&report.issues);
+        let mode = import_mode_label(report.mode);
+        let dest = report.dest.to_string_lossy().to_string();
+        let scan_failed = report.scan_failures.len();
+        let failed_issues: Vec<&ImportIssue> = report
+            .issues
+            .iter()
+            .filter(|issue| issue.kind == ImportIssueKind::Failed)
+            .collect();
+        let partial_issues: Vec<&ImportIssue> = report
+            .issues
+            .iter()
+            .filter(|issue| issue.kind == ImportIssueKind::PartialMove)
+            .collect();
+
+        let mut panel = v_flex()
+            .flex_shrink_0()
+            .mx(px(26.))
+            .mb(px(12.))
+            .rounded(px(14.))
+            .bg(rgb(PANEL))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .child(
+                h_flex()
+                    .px(px(16.))
+                    .py(px(10.))
+                    .gap(px(10.))
+                    .items_center()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_semibold()
+                            .text_color(rgb(TEXT))
+                            .child("取り込み結果"),
+                    )
+                    .child(self.badge(mode, BLUE, 0x14283d))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED_2))
+                            .child(dest),
+                    )
+                    .when(!retryable.is_empty(), |this| {
+                        this.child(
+                            Button::new("import-retry-failed")
+                                .label("失敗分を再試行")
+                                .small()
+                                .primary()
+                                .on_click(cx.listener(|this, _, _, cx| this.retry_import(cx))),
+                        )
+                    })
+                    .child(
+                        Button::new("import-report-close")
+                            .label("閉じる")
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.import_report = None;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .px(px(16.))
+                    .py(px(8.))
+                    .gap(px(8.))
+                    .items_center()
+                    .child(self.badge(&format!("取込 {}", report.imported), GREEN, 0x102a24))
+                    .child(self.badge(&format!("スキップ {}", report.skipped), MUTED, PANEL_2))
+                    .when(failed > 0, |this| {
+                        this.child(self.badge(&format!("失敗 {failed}"), RED, 0x2a1414))
+                    })
+                    .when(partial > 0, |this| {
+                        this.child(self.badge(&format!("部分移動 {partial}"), AMBER, 0x2b2210))
+                    })
+                    .when(scan_failed > 0, |this| {
+                        this.child(self.badge(
+                            &format!("スキャン失敗 {scan_failed}"),
+                            RED,
+                            0x2a1414,
+                        ))
+                    }),
+            );
+
+        if !failed_issues.is_empty() {
+            panel = panel.child(
+                v_flex()
+                    .px(px(16.))
+                    .py(px(8.))
+                    .gap(px(6.))
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .child(self.section_label("失敗したファイル"))
+                    .child(
+                        v_flex()
+                            .gap(px(6.))
+                            .max_h(px(150.))
+                            .overflow_y_scrollbar()
+                            .children(failed_issues.iter().map(|issue| {
+                                let source = issue.source.to_string_lossy().to_string();
+                                v_flex()
+                                    .gap(px(2.))
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_size(px(10.))
+                                            .text_color(rgb(RED))
+                                            .child(source),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(10.))
+                                            .text_color(rgb(MUTED))
+                                            .child(issue.message.clone()),
+                                    )
+                            })),
+                    ),
+            );
+        }
+
+        if !partial_issues.is_empty() {
+            panel = panel.child(
+                v_flex()
+                    .px(px(16.))
+                    .py(px(8.))
+                    .gap(px(6.))
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .child(self.section_label("移動元を削除できなかったファイル"))
+                    .children(partial_issues.iter().map(|issue| {
+                        let source = issue.source.to_string_lossy().to_string();
+                        let target = issue
+                            .target
+                            .as_ref()
+                            .map(|target| target.to_string_lossy().to_string());
+                        v_flex()
+                            .gap(px(2.))
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_size(px(10.))
+                                            .text_color(rgb(AMBER))
+                                            .child(source),
+                                    )
+                                    .when_some(target, |this, target| {
+                                        this.child(
+                                            div()
+                                                .truncate()
+                                                .text_size(px(9.))
+                                                .text_color(rgb(MUTED_2))
+                                                .child(format!("→ {target}")),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(MUTED))
+                                    .child(issue.message.clone()),
+                            )
+                    })),
+            );
+        }
+
+        if !report.scan_failures.is_empty() {
+            panel = panel.child(
+                v_flex()
+                    .px(px(16.))
+                    .py(px(8.))
+                    .gap(px(6.))
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .child(self.section_label("スキャンできなかったファイル"))
+                    .children(report.scan_failures.iter().map(|failure| {
+                        v_flex()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(RED))
+                                    .child(failure.path.to_string_lossy().to_string()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(MUTED))
+                                    .child(failure.message.clone()),
+                            )
+                    })),
+            );
+        }
+
+        if let Some(error) = report.scan_error.clone() {
+            panel = panel.child(
+                div()
+                    .mx(px(16.))
+                    .my(px(8.))
+                    .p(px(8.))
+                    .rounded(px(8.))
+                    .bg(rgb(0x2a1414))
+                    .border_1()
+                    .border_color(rgba(0xfb718533))
+                    .text_size(px(10.))
+                    .text_color(rgb(RED))
+                    .child(error),
+            );
+        }
+
+        panel.into_any_element()
     }
 
     fn policy_button(&self, label: &str, policy: &str, cx: &mut Context<Self>) -> impl IntoElement {
@@ -5255,6 +5889,9 @@ impl App {
                                 format!("{} 枚", self.stats.photo_count),
                             )),
                     )
+                    .when(!self.daemon_errors.is_empty(), |this| {
+                        this.child(self.daemon_error_card(cx))
+                    })
                     .child(
                         h_flex()
                             .gap(px(24.))
@@ -5332,6 +5969,7 @@ impl App {
                                     ),
                             ),
                     )
+                    .child(self.log_card(cx))
                     .child(
                         div()
                             .p(px(14.))
@@ -5346,9 +5984,210 @@ impl App {
             )
     }
 
+    fn daemon_error_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut card = glass_panel()
+            .flex()
+            .flex_col()
+            .p(px(16.))
+            .gap(px(10.))
+            .bg(rgb(PANEL))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .text_size(px(17.))
+                            .font_semibold()
+                            .text_color(rgb(TEXT))
+                            .child("処理エラー"),
+                    )
+                    .child(self.badge(&format!("{} 件", self.daemon_errors.len()), RED, 0x2a1414)),
+            );
+        for error in &self.daemon_errors {
+            let command = error.operation.retry_command();
+            card = card.child(
+                v_flex()
+                    .gap(px(8.))
+                    .p(px(12.))
+                    .rounded(px(10.))
+                    .bg(rgb(PANEL_2))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(self.badge(
+                                daemon_operation_label(error.operation),
+                                RED,
+                                0x2a1414,
+                            ))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(RED))
+                                    .child(error.message.clone()),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!(
+                                    "retry-daemon-{}",
+                                    error.operation.as_str()
+                                )))
+                                .label("再試行")
+                                .small()
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| this.request_daemon_command(command, cx),
+                                )),
+                            ),
+                    )
+                    .when_some(error.detail.clone(), |this, detail| {
+                        this.child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .p(px(8.))
+                                .rounded(px(8.))
+                                .bg(rgb(BG))
+                                .font_family("monospace")
+                                .whitespace_normal()
+                                .text_size(px(10.))
+                                .text_color(rgb(MUTED))
+                                .child(detail),
+                        )
+                    })
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(12.))
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(MUTED_2))
+                                    .child(format!("検出回数 {}", error.attempts)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(MUTED_2))
+                                    .child(format_timestamp(&error.occurred_at)),
+                            ),
+                    ),
+            );
+        }
+        card.when(!self.daemon_active, |this| {
+            this.child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(rgb(MUTED_2))
+                    .child("デーモン停止中です。起動後に実行されます。"),
+            )
+        })
+    }
+
+    fn log_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let dir = logs_dir();
+        let mut card = glass_panel()
+            .flex()
+            .flex_col()
+            .p(px(24.))
+            .gap(px(16.))
+            .bg(rgb(PANEL))
+            .child(
+                div()
+                    .text_size(px(17.))
+                    .font_semibold()
+                    .text_color(rgb(TEXT))
+                    .child("ログ"),
+            )
+            .child(
+                v_flex()
+                    .gap(px(6.))
+                    .child(self.section_label("保存先"))
+                    .child(match &dir {
+                        Some(dir) => div()
+                            .min_w_0()
+                            .font_family("monospace")
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED))
+                            .child(dir.display().to_string()),
+                        None => div()
+                            .text_size(px(10.))
+                            .text_color(rgb(RED))
+                            .child("ログフォルダを特定できません"),
+                    }),
+            )
+            .child(
+                v_flex()
+                    .gap(px(4.))
+                    .child(self.section_label("ファイル"))
+                    .child(
+                        div()
+                            .font_family("monospace")
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED_2))
+                            .child(format!("UI: {UI_LOG_FILE}")),
+                    )
+                    .child(
+                        div()
+                            .font_family("monospace")
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED_2))
+                            .child(format!("デーモン: {DAEMON_LOG_FILE}")),
+                    ),
+            );
+        if dir.is_some() {
+            card = card.child(
+                h_flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(
+                        Button::new("open-logs-folder")
+                            .label("ログフォルダを開く")
+                            .small()
+                            .on_click(cx.listener(|this, _, _, cx| this.open_logs_folder(cx))),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED_2))
+                            .child("OSのファイラーで開きます"),
+                    ),
+            );
+        } else {
+            card = card.child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(rgb(MUTED_2))
+                    .child("ファイルへのログ出力は利用できません。"),
+            );
+        }
+        card
+    }
+
+    fn open_logs_folder(&mut self, cx: &mut Context<Self>) {
+        let Some(dir) = logs_dir() else {
+            self.message = Some("ログフォルダを特定できません".to_string());
+            cx.notify();
+            return;
+        };
+        let result = std::fs::create_dir_all(&dir)
+            .map_err(|error| error.to_string())
+            .and_then(|()| open_path(&dir));
+        self.message = Some(match result {
+            Ok(()) => format!("ログフォルダを開きました: {}", dir.display()),
+            Err(error) => format!("ログフォルダを開けません: {error}"),
+        });
+        cx.notify();
+    }
+
     fn set_reduce_motion(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.settings.ui_reduce_motion = enabled;
-        let _ = self.settings.save(&self.db);
+        if let Err(error) = self.settings.save(&self.db) {
+            tracing::warn!(%error, "cannot save reduce-motion setting");
+        }
         cx.set_reduce_motion(enabled);
         cx.notify();
     }
@@ -5424,8 +6263,7 @@ impl App {
                                                     .read(cx)
                                                     .value()
                                                     .to_string();
-                                                let previous_roots =
-                                                    this.settings.photo_roots.clone();
+                                                let previous = this.settings.clone();
                                                 this.settings.photo_roots =
                                                     if root.trim().is_empty() {
                                                         Vec::new()
@@ -5444,15 +6282,43 @@ impl App {
                                                         Some(imported.trim().to_string())
                                                     };
                                                 let root_changed =
-                                                    this.settings.photo_roots != previous_roots;
-                                                let _ = this.settings.save(&this.db);
+                                                    this.settings.photo_roots != previous.photo_roots;
+                                                let paths_changed = root_changed
+                                                    || this.settings.log_dir != previous.log_dir
+                                                    || this.settings.managed_dir
+                                                        != previous.managed_dir;
+                                                if let Err(error) = this.settings.save(&this.db) {
+                                                    this.settings = previous;
+                                                    this.message = Some(format!(
+                                                        "設定を保存できません: {error}"
+                                                    ));
+                                                    tracing::warn!(
+                                                        %error,
+                                                        "cannot save path settings"
+                                                    );
+                                                    cx.notify();
+                                                    return;
+                                                }
                                                 if root_changed {
                                                     this.reload_library(false, cx);
                                                 }
-                                                this.message = Some(
-                                                    "保存しました。デーモン再起動で監視に反映されます。"
-                                                        .to_string(),
-                                                );
+                                                if paths_changed {
+                                                    let requested = this
+                                                        .db
+                                                        .request_daemon_command(DaemonCommand::Rescan);
+                                                    this.message = Some(match requested {
+                                                        Ok(_) => "保存しました。デーモンに再スキャンを要求しました（停止中なら起動後に実行）".to_string(),
+                                                        Err(error) => {
+                                                            tracing::warn!(
+                                                                %error,
+                                                                "cannot request daemon rescan"
+                                                            );
+                                                            "保存しました。デーモン再起動後に反映されます。".to_string()
+                                                        }
+                                                    });
+                                                } else {
+                                                    this.message = Some("保存しました。".to_string());
+                                                }
                                                 cx.notify();
                                             })),
                                     )
@@ -5460,7 +6326,7 @@ impl App {
                                         div()
                                             .text_size(px(10.))
                                             .text_color(rgb(MUTED_2))
-                                            .child("デーモン実行中は再起動後に反映"),
+                                            .child("保存時に再スキャンを要求します（停止中なら起動後に実行）"),
                                     ),
                             ),
                     )
@@ -5532,6 +6398,7 @@ impl App {
                                     ),
                             ),
                     )
+                    .child(self.log_card(cx))
                     .child(
                         h_flex()
                             .gap(px(8.))
@@ -5566,6 +6433,7 @@ impl App {
         cx: &mut Context<Self>,
         apply: fn(&mut AppSettings, bool),
     ) -> impl IntoElement {
+        let label = label.to_string();
         h_flex()
             .items_center()
             .gap(px(12.))
@@ -5592,7 +6460,9 @@ impl App {
                     .checked(checked)
                     .on_click(cx.listener(move |this, value, _, cx| {
                         apply(&mut this.settings, *value);
-                        let _ = this.settings.save(&this.db);
+                        if let Err(error) = this.settings.save(&this.db) {
+                            tracing::warn!(%error, setting = %label, "cannot save setting");
+                        }
                         cx.notify();
                     })),
             )
@@ -5956,13 +6826,50 @@ fn decode_thumbnail(id: i64, cache_path: &Path, source: &Path) -> Option<(u32, i
     let cached = cache_path.is_file()
         && std::fs::metadata(cache_path)
             .map(|meta| meta.len() > 0)
-            .unwrap_or(false);
+            .unwrap_or_else(|error| {
+                tracing::debug!(
+                    %error,
+                    path = %cache_path.display(),
+                    "cannot read thumbnail cache metadata"
+                );
+                false
+            });
     let path = if cached {
         cache_path.to_path_buf()
     } else {
-        thumbnail::ensure_thumbnail(id, source).ok().flatten()?
+        match thumbnail::ensure_thumbnail(id, source) {
+            Ok(Some(path)) => path,
+            Ok(None) => {
+                tracing::debug!(
+                    photo_id = id,
+                    path = %source.display(),
+                    "thumbnail source is missing or cannot be decoded"
+                );
+                return None;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    photo_id = id,
+                    path = %source.display(),
+                    "cannot generate thumbnail"
+                );
+                return None;
+            }
+        }
     };
-    let mut buffer = image::open(path).ok()?.to_rgba8();
+    let mut buffer = match image::open(&path) {
+        Ok(image) => image.to_rgba8(),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                photo_id = id,
+                path = %path.display(),
+                "cannot decode thumbnail"
+            );
+            return None;
+        }
+    };
     for pixel in buffer.pixels_mut() {
         pixel.0.swap(0, 2);
     }
@@ -5976,11 +6883,27 @@ fn make_render_image(rgba: image::RgbaImage) -> Arc<RenderImage> {
     Arc::new(RenderImage::new(SmallVec::from_elem(frame, 1)))
 }
 
-fn load_preview(path: &Path) -> Option<Arc<RenderImage>> {
+fn load_preview(id: i64, path: &Path) -> Option<Arc<RenderImage>> {
     if !path.is_file() {
+        tracing::debug!(
+            photo_id = id,
+            path = %path.display(),
+            "preview source is missing"
+        );
         return None;
     }
-    let image = image::open(path).ok()?.thumbnail(1200, 1200).to_rgba8();
+    let image = match image::open(path) {
+        Ok(image) => image.thumbnail(1200, 1200).to_rgba8(),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                photo_id = id,
+                path = %path.display(),
+                "cannot decode photo preview"
+            );
+            return None;
+        }
+    };
     let mut buffer = image;
     for pixel in buffer.pixels_mut() {
         pixel.0.swap(0, 2);
@@ -6079,6 +7002,151 @@ fn format_count(value: i64) -> String {
     } else {
         format!("{}.{}k", tenths / 10, tenths % 10)
     }
+}
+
+/// Whether a failed job can return to the queue without exceeding the cap.
+fn job_retry_available(job: &CompressionJob) -> bool {
+    job.status == QueueStatus::Failed && job.retry_count < MAX_JOB_RETRIES
+}
+
+/// Retry usage for a failed job, or the cap explanation once exhausted.
+fn job_retry_label(job: &CompressionJob) -> String {
+    if job_retry_available(job) {
+        format!("再試行 {}/{MAX_JOB_RETRIES}", job.retry_count)
+    } else {
+        format!("再試行の上限（{MAX_JOB_RETRIES}回）に達しました")
+    }
+}
+
+/// Import failures and partial moves. Partial moves reached the destination,
+/// so they are warnings and never count as failures.
+fn import_issue_counts(issues: &[ImportIssue]) -> (usize, usize) {
+    let failed = issues
+        .iter()
+        .filter(|issue| issue.kind == ImportIssueKind::Failed)
+        .count();
+    let partial = issues
+        .iter()
+        .filter(|issue| issue.kind == ImportIssueKind::PartialMove)
+        .count();
+    (failed, partial)
+}
+
+/// Sources a retry may try again: only `Failed` issues marked retryable.
+fn retryable_sources(issues: &[ImportIssue]) -> Vec<PathBuf> {
+    issues
+        .iter()
+        .filter(|issue| issue.kind == ImportIssueKind::Failed && issue.retryable)
+        .map(|issue| issue.source.clone())
+        .collect()
+}
+
+fn import_mode_label(mode: ImportMode) -> &'static str {
+    match mode {
+        ImportMode::Copy => "コピー",
+        ImportMode::Move => "移動",
+    }
+}
+
+/// Keeps every hard error that occurred while indexing the destination.
+fn append_scan_error(report: &mut ImportReportView, message: String) {
+    match &mut report.scan_error {
+        Some(existing) => {
+            existing.push('\n');
+            existing.push_str(&message);
+        }
+        None => report.scan_error = Some(message),
+    }
+}
+
+/// Adds `dest` to the settings roots and persists the change. A failed save
+/// restores the previous in-memory roots so a later retry attempts the save
+/// again instead of treating an unsaved path as persisted.
+fn add_photo_root_and_save<E, F>(
+    settings: &mut AppSettings,
+    dest: &str,
+    save: F,
+) -> std::result::Result<bool, E>
+where
+    E: std::fmt::Display,
+    F: FnOnce(&AppSettings) -> std::result::Result<(), E>,
+{
+    if settings.photo_roots.iter().any(|root| root == dest) {
+        return Ok(false);
+    }
+    let previous = settings.photo_roots.clone();
+    settings.photo_roots.push(dest.to_string());
+    match save(settings) {
+        Ok(()) => Ok(true),
+        Err(error) => {
+            settings.photo_roots = previous;
+            Err(error)
+        }
+    }
+}
+
+fn import_summary(report: &ImportReportView) -> String {
+    let (failed, _) = import_issue_counts(&report.issues);
+    let mut details = Vec::new();
+    if report.skipped > 0 {
+        details.push(format!("{} 枚スキップ", report.skipped));
+    }
+    if failed > 0 {
+        details.push(format!("失敗 {failed} 件"));
+    }
+    let mut summary = format!("{} 枚を取り込みました", report.imported);
+    if !details.is_empty() {
+        summary.push_str(&format!("（{}）", details.join("、")));
+    }
+    summary
+}
+
+/// Compact, ordered summaries of every failure that deserves a global alert.
+/// The target screen owns the detail, so the bar only carries the count.
+fn alert_summaries(
+    failed_jobs: i64,
+    daemon_errors: usize,
+    import_failed: usize,
+) -> Vec<(Screen, String)> {
+    let mut rows = Vec::new();
+    if failed_jobs > 0 {
+        rows.push((
+            Screen::Compression,
+            format!("圧縮に {failed_jobs} 件の失敗があります"),
+        ));
+    }
+    if daemon_errors > 0 {
+        rows.push((
+            Screen::Monitor,
+            format!("デーモンで {daemon_errors} 件の処理エラーがあります"),
+        ));
+    }
+    if import_failed > 0 {
+        rows.push((
+            Screen::Photos,
+            format!("取り込みで {import_failed} 件失敗しました"),
+        ));
+    }
+    rows
+}
+
+fn daemon_operation_label(operation: DaemonOperation) -> &'static str {
+    match operation {
+        DaemonOperation::Scan => "写真スキャン",
+        DaemonOperation::Log => "ログ解析",
+        DaemonOperation::Link => "写真の紐付け",
+    }
+}
+
+fn format_timestamp(raw: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .map(|timestamp| {
+            timestamp
+                .with_timezone(&chrono::Local)
+                .format("%m/%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|_| raw.to_string())
 }
 
 fn average_bgra(bytes: &[u8]) -> u32 {
@@ -6324,6 +7392,62 @@ fn format_label(format: &CompressionFormat) -> String {
     .to_string()
 }
 
+#[cfg(target_os = "windows")]
+fn open_path(path: &Path) -> Result<(), String> {
+    // explorer.exe reports a non-zero exit code even when it opens the folder,
+    // so success is defined by the process starting.
+    Command::new("explorer")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("explorer を起動できません: {error}"))
+}
+
+#[cfg(target_os = "macos")]
+fn open_path(path: &Path) -> Result<(), String> {
+    let status = Command::new("open")
+        .arg(path)
+        .status()
+        .map_err(|error| format!("open を起動できません: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("open が終了コード {status} で失敗しました"))
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_path(path: &Path) -> Result<(), String> {
+    match open_status("xdg-open", &[], path) {
+        Ok(()) => Ok(()),
+        Err(first) => {
+            open_status("gio", &["open"], path).map_err(|second| format!("{first} / {second}"))
+        }
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_status(program: &str, args: &[&str], path: &Path) -> Result<(), String> {
+    let status = Command::new(program)
+        .args(args)
+        .arg(path)
+        .status()
+        .map_err(|error| format!("{program} を起動できません: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{program} が終了コード {status} で失敗しました"))
+    }
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn open_path(path: &Path) -> Result<(), String> {
+    Err(format!(
+        "この環境ではフォルダを開けません: {}",
+        path.display()
+    ))
+}
+
 fn daemon_binary_path() -> Option<PathBuf> {
     let name = if cfg!(target_os = "windows") {
         "vrc-photo-daemon.exe"
@@ -6391,13 +7515,16 @@ fn register_global_actions(cx: &mut gpui_kit::App, app: Entity<App>) {
 }
 
 fn main() {
+    if logging::init("vrc-photo-manager", "info,vrc_photo_manager=debug").is_none() {
+        tracing::warn!("file logging is unavailable; using stderr only");
+    }
     if timing_enabled() {
-        let _ = process_start();
+        process_start();
     }
     let options = parse_args(std::env::args());
     if options.background {
         if let Err(error) = run_background_supervisor() {
-            eprintln!("{error}");
+            tracing::error!(%error, "background supervisor failed");
         }
         return;
     }
@@ -6448,23 +7575,32 @@ mod tests {
     // `gpui_kit::*`, shadowing the built-in `#[test]` and recursing forever.
     use super::{
         CountDebounce, DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH,
-        MAX_PAGES, PAGE_SIZE, PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex, PhotoPageCache,
-        THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, YearBucket, anchor_photo_id,
-        apply_library_index, average_bgra, build_year_buckets, decode_thumbnail, demo_thumb_path,
-        ease_motion, first_visible_photo, format_captured_month, format_count,
-        grid_available_width, grid_columns, grid_columns_for, has_tag_filter, lerp_color,
-        list_scroll_top, moved_profile_order, next_focus_index, normalize_note, parse_args,
-        parse_window_size, rail_label_hidden_by_pill, rail_row_at, rail_scroll_offset, rail_y,
-        search_anchor_after_result, search_available_width, sidebar_reveal_width, sidebar_width,
-        stagger_value, step_index, sync_search_mirror, viewer_details_width, viewer_image_box,
-        visible_year_buckets, with_tag, without_tag,
+        MAX_PAGES, PAGE_SIZE, PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex, PhotoPageCache, Screen,
+        THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, YearBucket, add_photo_root_and_save,
+        alert_summaries, anchor_photo_id, apply_library_index, average_bgra, build_year_buckets,
+        daemon_operation_label, decode_thumbnail, demo_thumb_path, ease_motion,
+        first_visible_photo, format_captured_month, format_count, format_timestamp,
+        grid_available_width, grid_columns, grid_columns_for, has_tag_filter, import_issue_counts,
+        job_retry_available, job_retry_label, lerp_color, list_scroll_top, moved_profile_order,
+        next_focus_index, normalize_note, parse_args, parse_window_size, rail_label_hidden_by_pill,
+        rail_row_at, rail_scroll_offset, rail_y, retryable_sources, search_anchor_after_result,
+        search_available_width, sidebar_reveal_width, sidebar_width, stagger_value, step_index,
+        sync_search_mirror, viewer_details_width, viewer_image_box, visible_year_buckets, with_tag,
+        without_tag,
     };
     use gpui_kit::{RenderImage, ScrollStrategy, UniformListScrollHandle, point, px};
     use smallvec::SmallVec;
+    use std::cell::Cell;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use vrc_photo_core::error::CoreError;
-    use vrc_photo_core::model::{Photo, PhotoIndexEntry, PhotoStatus, PhotoTextFilter};
+    use vrc_photo_core::importer::{ImportIssue, ImportIssueKind};
+    use vrc_photo_core::model::{
+        CompressionJob, DaemonOperation, Photo, PhotoIndexEntry, PhotoStatus, PhotoTextFilter,
+        QueueStatus,
+    };
+    use vrc_photo_core::settings::AppSettings;
 
     #[test]
     fn sidebar_widths_match_the_rail() {
@@ -6532,6 +7668,95 @@ mod tests {
         assert_eq!(format_count(1_234), "1,234");
         assert_eq!(format_count(12_842), "12.8k");
         assert_eq!(format_count(100_000), "100k");
+    }
+
+    #[test]
+    fn alert_summaries_follow_priority_order() {
+        let rows = alert_summaries(2, 1, 3);
+        assert_eq!(rows[0].0, Screen::Compression);
+        assert!(rows[0].1.contains("2"));
+        assert_eq!(rows[1].0, Screen::Monitor);
+        assert_eq!(rows[2].0, Screen::Photos);
+        assert!(alert_summaries(0, 0, 0).is_empty());
+    }
+
+    #[test]
+    fn daemon_operation_labels_cover_every_operation() {
+        assert_eq!(
+            daemon_operation_label(DaemonOperation::Scan),
+            "写真スキャン"
+        );
+        assert_eq!(daemon_operation_label(DaemonOperation::Log), "ログ解析");
+        assert_eq!(
+            daemon_operation_label(DaemonOperation::Link),
+            "写真の紐付け"
+        );
+    }
+
+    #[test]
+    fn timestamp_formats_rfc3339_and_falls_back_to_raw() {
+        let raw = "2026-10-23T03:04:05+00:00";
+        let expected = chrono::DateTime::parse_from_rfc3339(raw)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%m/%d %H:%M")
+            .to_string();
+        assert_eq!(format_timestamp(raw), expected);
+        assert_eq!(format_timestamp("not a timestamp"), "not a timestamp");
+    }
+
+    #[test]
+    fn import_issue_counts_separate_failures_and_partial_moves() {
+        let issues = vec![
+            ImportIssue {
+                source: PathBuf::from("/a.png"),
+                target: None,
+                message: "copy failed".to_string(),
+                kind: ImportIssueKind::Failed,
+                retryable: true,
+            },
+            ImportIssue {
+                source: PathBuf::from("/b.png"),
+                target: Some(PathBuf::from("/dest/b.png")),
+                message: "source remains".to_string(),
+                kind: ImportIssueKind::PartialMove,
+                retryable: false,
+            },
+        ];
+        assert_eq!(import_issue_counts(&issues), (1, 1));
+        assert_eq!(retryable_sources(&issues), vec![PathBuf::from("/a.png")]);
+    }
+
+    #[test]
+    fn failed_import_root_save_is_retried_until_it_succeeds() {
+        let mut settings = AppSettings::default();
+        let attempts = Cell::new(0);
+        let dest = "/photos/imported";
+
+        let result = add_photo_root_and_save(&mut settings, dest, |settings| {
+            attempts.set(attempts.get() + 1);
+            assert_eq!(settings.photo_roots, vec![dest.to_string()]);
+            Err::<(), _>("database is locked".to_string())
+        });
+        assert!(result.is_err());
+        assert!(
+            settings.photo_roots.is_empty(),
+            "a failed save must restore the in-memory roots"
+        );
+
+        let result = add_photo_root_and_save(&mut settings, dest, |settings| {
+            attempts.set(attempts.get() + 1);
+            assert_eq!(settings.photo_roots, vec![dest.to_string()]);
+            Ok::<(), String>(())
+        });
+        assert_eq!(result, Ok(true));
+        assert_eq!(attempts.get(), 2, "the retry must save again");
+        assert_eq!(settings.photo_roots, vec![dest.to_string()]);
+
+        let result: Result<bool, String> = add_photo_root_and_save(&mut settings, dest, |_| {
+            panic!("an already saved root must not be saved again")
+        });
+        assert_eq!(result, Ok(false));
     }
 
     #[test]
@@ -7201,5 +8426,31 @@ mod tests {
         // rather than the real non-negative contract.
         assert_eq!(rail_scroll_offset(600, 3, 0.0), 0.0);
         assert_eq!(rail_scroll_offset(600, 3, -5.0), 0.0);
+    }
+
+    fn test_job(status: QueueStatus, retry_count: i64) -> CompressionJob {
+        CompressionJob {
+            id: "job".to_string(),
+            photo_id: 1,
+            profile_id: "p".to_string(),
+            status,
+            progress: 0.0,
+            error: Some("boom".to_string()),
+            output_path: None,
+            policy: "keep".to_string(),
+            created_at: "now".to_string(),
+            started_at: None,
+            finished_at: None,
+            retry_count,
+        }
+    }
+
+    #[test]
+    fn job_retry_availability_stops_at_the_cap() {
+        assert!(job_retry_available(&test_job(QueueStatus::Failed, 0)));
+        assert!(job_retry_available(&test_job(QueueStatus::Failed, 2)));
+        assert!(!job_retry_available(&test_job(QueueStatus::Failed, 3)));
+        assert!(!job_retry_available(&test_job(QueueStatus::Completed, 0)));
+        assert!(job_retry_label(&test_job(QueueStatus::Failed, 3)).contains("上限"));
     }
 }
