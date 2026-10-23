@@ -4394,7 +4394,9 @@ impl App {
                                                             })
                                                             .on_click(cx.listener(
                                                                 move |this, _, _, cx| {
-                                                                    this.move_profile(index, -1, cx);
+                                                                    this.move_profile(
+                                                                        index, -1, cx,
+                                                                    );
                                                                     cx.stop_propagation();
                                                                 },
                                                             ))
@@ -4413,13 +4415,13 @@ impl App {
                                                     .justify_center()
                                                     .rounded(px(6.))
                                                     .text_size(px(11.))
-                                                    .text_color(
-                                                        rgb(if index + 1 == profile_count {
+                                                    .text_color(rgb(
+                                                        if index + 1 == profile_count {
                                                             MUTED_2
                                                         } else {
                                                             MUTED
-                                                        }),
-                                                    )
+                                                        },
+                                                    ))
                                                     .when(index + 1 < profile_count, |this| {
                                                         this.cursor_pointer()
                                                             .hover(|this| {
@@ -4518,22 +4520,14 @@ impl App {
                     .iter()
                     .position(|profile| profile.id == copy.id)
                     .unwrap_or(0);
-                self.message = Some(format!(
-                    "「{}」を複製しました（自動適用はOFF）",
-                    copy.name
-                ));
+                self.message = Some(format!("「{}」を複製しました（自動適用はOFF）", copy.name));
             }
             Err(error) => self.message = Some(format!("複製に失敗: {error}")),
         }
         cx.notify();
     }
 
-    fn request_delete_profile(
-        &mut self,
-        id: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn request_delete_profile(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(profile) = self
             .profiles
             .iter()
@@ -4604,9 +4598,9 @@ impl App {
             }
             Err(error) => {
                 let message = match self.db.active_job_count_for_profile(id) {
-                    Ok(count) if count > 0 => format!(
-                        "「{name}」は未完了のジョブが{count}件あるため削除できません"
-                    ),
+                    Ok(count) if count > 0 => {
+                        format!("「{name}」は未完了のジョブが{count}件あるため削除できません")
+                    }
                     _ if self.profiles.len() <= 1 => {
                         "最後のプロファイルは削除できません".to_string()
                     }
@@ -4649,9 +4643,7 @@ impl App {
                             .label("複製")
                             .small()
                             .ghost()
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.duplicate_profile(cx)),
-                            ),
+                            .on_click(cx.listener(|this, _, _, cx| this.duplicate_profile(cx))),
                     )
                     .child(
                         Button::new("delete-profile")
@@ -6462,8 +6454,7 @@ mod tests {
         ease_motion, first_visible_photo, format_captured_month, format_count,
         grid_available_width, grid_columns, grid_columns_for, has_tag_filter, lerp_color,
         list_scroll_top, moved_profile_order, next_focus_index, normalize_note, parse_args,
-        parse_window_size,
-        rail_label_hidden_by_pill, rail_row_at, rail_scroll_offset, rail_y,
+        parse_window_size, rail_label_hidden_by_pill, rail_row_at, rail_scroll_offset, rail_y,
         search_anchor_after_result, search_available_width, sidebar_reveal_width, sidebar_width,
         stagger_value, step_index, sync_search_mirror, viewer_details_width, viewer_image_box,
         visible_year_buckets, with_tag, without_tag,

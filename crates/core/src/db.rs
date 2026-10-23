@@ -875,11 +875,9 @@ impl Db {
 
     pub fn reorder_profiles(&self, ids: &[String]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        let stored: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM compression_profiles",
-            [],
-            |row| row.get(0),
-        )?;
+        let stored: i64 = tx.query_row("SELECT COUNT(*) FROM compression_profiles", [], |row| {
+            row.get(0)
+        })?;
         if stored != ids.len() as i64 {
             return Err(CoreError::Invalid(
                 "profile order must list every profile".to_string(),
@@ -919,7 +917,10 @@ impl Db {
             let mut ordered = Vec::new();
             for row in rows {
                 let (stored_id, json) = row?;
-                ordered.push((stored_id, serde_json::from_str::<CompressionProfile>(&json)?));
+                ordered.push((
+                    stored_id,
+                    serde_json::from_str::<CompressionProfile>(&json)?,
+                ));
             }
             ordered
         };
@@ -1008,11 +1009,9 @@ impl Db {
             )));
         }
 
-        let total: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM compression_profiles",
-            [],
-            |row| row.get(0),
-        )?;
+        let total: i64 = tx.query_row("SELECT COUNT(*) FROM compression_profiles", [], |row| {
+            row.get(0)
+        })?;
         if total <= 1 {
             return Err(CoreError::Invalid(
                 "at least one compression profile is required".to_string(),
@@ -2043,8 +2042,7 @@ mod tests {
                 .map(|profile| profile.id)
                 .collect::<Vec<_>>()
         };
-        let order =
-            |values: &[&str]| values.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        let order = |values: &[&str]| values.iter().map(|id| id.to_string()).collect::<Vec<_>>();
 
         db.reorder_profiles(&order(&["c", "a", "b"])).unwrap();
         assert_eq!(ids(), vec!["c", "a", "b"]);
@@ -2143,10 +2141,7 @@ mod tests {
 
         assert_eq!(db.list_profiles().unwrap().len(), 2);
         assert_eq!(db.active_job_count_for_profile("p").unwrap(), 1);
-        assert!(matches!(
-            db.delete_profile("p"),
-            Err(CoreError::Invalid(_))
-        ));
+        assert!(matches!(db.delete_profile("p"), Err(CoreError::Invalid(_))));
         assert_eq!(db.list_profiles().unwrap().len(), 2);
 
         db.update_job(&job, QueueStatus::Processing, 0.1, None, None)
@@ -2169,10 +2164,7 @@ mod tests {
         assert_eq!(db.list_profiles().unwrap()[0].id, "q");
         assert_eq!(db.list_jobs(10).unwrap().len(), 1);
 
-        assert!(matches!(
-            db.delete_profile("q"),
-            Err(CoreError::Invalid(_))
-        ));
+        assert!(matches!(db.delete_profile("q"), Err(CoreError::Invalid(_))));
         assert_eq!(db.list_profiles().unwrap().len(), 1);
         assert!(matches!(
             db.delete_profile("missing"),
@@ -2188,15 +2180,17 @@ mod tests {
             .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
             .unwrap();
 
-        assert!(!db
-            .enqueue_job_for_existing_profile(photo, "missing", "keep")
-            .unwrap());
+        assert!(
+            !db.enqueue_job_for_existing_profile(photo, "missing", "keep")
+                .unwrap()
+        );
         assert_eq!(db.count_jobs(QueueStatus::Pending).unwrap(), 0);
 
         db.save_profile(&profile("p", "P")).unwrap();
-        assert!(db
-            .enqueue_job_for_existing_profile(photo, "p", "keep")
-            .unwrap());
+        assert!(
+            db.enqueue_job_for_existing_profile(photo, "p", "keep")
+                .unwrap()
+        );
         assert_eq!(db.count_jobs(QueueStatus::Pending).unwrap(), 1);
     }
 }
