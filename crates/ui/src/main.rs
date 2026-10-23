@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::Utc;
@@ -134,6 +134,25 @@ impl Default for LaunchOptions {
             window_size: (1280.0, 820.0),
         }
     }
+}
+
+/// Timing probes stay silent unless `VRC_PHOTO_TIMING` is set.
+fn timing_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("VRC_PHOTO_TIMING").is_some())
+}
+
+fn log_timing(label: &str, start: Instant) {
+    if timing_enabled() {
+        eprintln!("[timing] {label}: {:?}", start.elapsed());
+    }
+}
+
+/// Process start, captured once so the first-frame probe can report launch
+/// latency. Only initialized when timing is enabled.
+fn process_start() -> Instant {
+    static START: OnceLock<Instant> = OnceLock::new();
+    *START.get_or_init(Instant::now)
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> LaunchOptions {
@@ -1020,9 +1039,11 @@ impl App {
         let quick_look_compress_focus = cx.focus_handle();
         let quick_look_trash_focus = cx.focus_handle();
         let quick_look_add_tag_focus = cx.focus_handle();
+        let index_start = Instant::now();
         let index = Arc::new(PhotoIndex::new(
             db.photo_index(PhotoSort::Newest).unwrap_or_default(),
         ));
+        log_timing("photo_index (startup)", index_start);
         let mut app = Self {
             db,
             screen: Screen::Photos,
@@ -1120,6 +1141,12 @@ impl App {
             app.message = Some(format!("デーモンを起動できません: {error}"));
         }
         app.start_auto_refresh(cx);
+        if timing_enabled() {
+            let started = process_start();
+            cx.on_next_frame(window, move |_, _, _| {
+                log_timing("first frame (from process start)", started)
+            });
+        }
         app
     }
 
@@ -1201,7 +1228,9 @@ impl App {
         });
         let anchor = anchor.flatten();
 
+        let index_start = Instant::now();
         let entries = self.db.photo_index(PhotoSort::Newest).unwrap_or_default();
+        log_timing("photo_index (reload)", index_start);
         let index = Arc::new(PhotoIndex::new(entries));
         self.library.replace_index(index.clone());
 
@@ -1358,7 +1387,12 @@ impl App {
         cx.spawn(async move |this, cx| {
             let decoded = cx
                 .background_executor()
-                .spawn(async move { decode_thumbnail(id, &cache_path, &source) })
+                .spawn(async move {
+                    let decode_start = Instant::now();
+                    let decoded = decode_thumbnail(id, &cache_path, &source);
+                    log_timing("thumbnail decode", decode_start);
+                    decoded
+                })
                 .await;
             this.update(cx, |this, cx| {
                 match decoded {
@@ -1663,7 +1697,11 @@ impl App {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    Db::open_read_only(path).and_then(|db| db.photo_index_text(&background_filter))
+                    let search_start = Instant::now();
+                    let result = Db::open_read_only(path)
+                        .and_then(|db| db.photo_index_text(&background_filter));
+                    log_timing("search photo_index_text", search_start);
+                    result
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -2477,7 +2515,9 @@ impl App {
         if requests.is_empty() {
             return;
         }
+        let page_start = Instant::now();
         let photos = self.db.photos_by_ids(&ids).unwrap_or_default();
+        log_timing("photos_by_ids", page_start);
         let mut by_id: HashMap<i64, Photo> =
             photos.into_iter().map(|photo| (photo.id, photo)).collect();
         let browser = self.browser_mut(search);
@@ -5516,6 +5556,9 @@ fn register_global_actions(cx: &mut gpui_kit::App, app: Entity<App>) {
 }
 
 fn main() {
+    if timing_enabled() {
+        let _ = process_start();
+    }
     let options = parse_args(std::env::args());
     if options.background {
         if let Err(error) = run_background_supervisor() {

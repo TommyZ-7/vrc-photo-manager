@@ -1475,6 +1475,87 @@ mod tests {
         );
     }
 
+    /// Seeds 100k synthetic rows in one transaction and measures the shipped
+    /// index and page queries. Ignored by default because it is a timing
+    /// benchmark, not a correctness gate:
+    ///
+    /// `cargo test -p vrc-photo-core photo_index_scales_to_100k -- --ignored --nocapture`
+    #[test]
+    #[ignore = "100k timing benchmark"]
+    fn photo_index_scales_to_100k() {
+        use std::time::{Duration, Instant};
+
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let base = 1_600_000_000i64;
+        let seed_start = Instant::now();
+        {
+            let tx = db.connection().unchecked_transaction().unwrap();
+            {
+                let mut stmt = tx
+                    .prepare(
+                        "INSERT INTO photos(root_id, rel_path, abs_path, file_name, \
+                         captured_at_utc, captured_at_local, tz_offset_sec, width, height, \
+                         file_size, mtime, status, created_at, updated_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, 3840, 2160, 12400000, ?5, \
+                         'present', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                    )
+                    .unwrap();
+                for index in 0..100_000i64 {
+                    let captured_at = base + index;
+                    let local = chrono::DateTime::<chrono::Utc>::from_timestamp(captured_at, 0)
+                        .unwrap()
+                        .format("%Y-%m-%d %H:%M:%S")
+                        .to_string();
+                    let rel_path = format!("2026/{index:06}.png");
+                    let abs_path = format!("/photos/{rel_path}");
+                    stmt.execute(params![
+                        root,
+                        rel_path,
+                        abs_path,
+                        format!("{index:06}.png"),
+                        captured_at,
+                        local
+                    ])
+                    .unwrap();
+                }
+            }
+            tx.commit().unwrap();
+        }
+        eprintln!("seed 100k: {:?}", seed_start.elapsed());
+
+        let start = Instant::now();
+        let entries = db.photo_index(PhotoSort::Newest).unwrap();
+        let index_elapsed = start.elapsed();
+        assert_eq!(entries.len(), 100_000);
+        eprintln!("photo_index 100k: {index_elapsed:?}");
+        assert!(
+            index_elapsed < Duration::from_secs(2),
+            "photo_index took {index_elapsed:?}"
+        );
+
+        let ids: Vec<i64> = entries[50_000..50_256]
+            .iter()
+            .map(|entry| entry.id)
+            .collect();
+        let start = Instant::now();
+        let photos = db.photos_by_ids(&ids).unwrap();
+        let page_elapsed = start.elapsed();
+        eprintln!("photos_by_ids 256: {page_elapsed:?}");
+        assert_eq!(photos.len(), 256);
+        assert!(
+            page_elapsed < Duration::from_millis(200),
+            "photos_by_ids took {page_elapsed:?}"
+        );
+
+        // The search screen builds the same full snapshot with a text filter;
+        // an empty filter is the worst case (all 100k rows match).
+        let start = Instant::now();
+        let matches = db.photo_index_text(&PhotoTextFilter::default()).unwrap();
+        eprintln!("photo_index_text 100k: {:?}", start.elapsed());
+        assert_eq!(matches.len(), 100_000);
+    }
+
     #[test]
     fn database_path_is_exposed_for_read_only_workers() {
         let dir = tempfile::tempdir().unwrap();
