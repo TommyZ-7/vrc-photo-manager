@@ -1106,6 +1106,9 @@ pub struct App {
     search_active: bool,
     searching: bool,
     search_request: u64,
+    applied_search: Option<PhotoTextFilter>,
+    pending_search_anchor: Option<i64>,
+    search_refresh_pending: bool,
     search_favorite: bool,
     search_days: Option<i64>,
     compress_policy: String,
@@ -1236,6 +1239,9 @@ impl App {
             search_active: false,
             searching: false,
             search_request: 0,
+            applied_search: None,
+            pending_search_anchor: None,
+            search_refresh_pending: false,
             search_favorite: false,
             search_days: Some(7),
             compress_policy: "keep".to_string(),
@@ -1949,6 +1955,12 @@ impl App {
             from_utc,
             to_utc: None,
         };
+        self.applied_search = Some(filter.clone());
+        self.pending_search_anchor = None;
+        self.start_search(filter, cx);
+    }
+
+    fn start_search(&mut self, filter: PhotoTextFilter, cx: &mut Context<Self>) {
         self.search_request = self.search_request.wrapping_add(1);
         let generation = self.search_request;
 
@@ -2008,15 +2020,33 @@ impl App {
             Ok(entries) => {
                 self.search_view
                     .replace_index(Arc::new(PhotoIndex::new(entries)));
-                self.search_view
-                    .scroll
-                    .scroll_to_item_strict(0, ScrollStrategy::Top);
+                let columns = self.search_view.columns.max(1);
+                let row = self
+                    .pending_search_anchor
+                    .take()
+                    .and_then(|id| self.search_view.index.row_of_id(id));
+                match row {
+                    Some(row) => self
+                        .search_view
+                        .scroll
+                        .scroll_to_item_strict(row / columns, ScrollStrategy::Top),
+                    None => self
+                        .search_view
+                        .scroll
+                        .scroll_to_item_strict(0, ScrollStrategy::Top),
+                }
                 self.search_active = true;
                 self.searching = false;
                 // A previous failure must not linger above a fresh result.
                 self.message = None;
+                if self.search_refresh_pending {
+                    self.search_refresh_pending = false;
+                    self.refresh_search_after_tag_edit(cx);
+                }
             }
             Err(error) => {
+                self.pending_search_anchor = None;
+                self.search_refresh_pending = false;
                 self.searching = false;
                 self.message = Some(format!("検索に失敗しました: {error}"));
             }
@@ -2027,6 +2057,9 @@ impl App {
     fn clear_search(&mut self, cx: &mut Context<Self>) {
         self.search_active = false;
         self.searching = false;
+        self.applied_search = None;
+        self.pending_search_anchor = None;
+        self.search_refresh_pending = false;
         self.message = None;
         // Invalidate an in-flight request so it cannot revive the cleared view.
         self.search_request = self.search_request.wrapping_add(1);
@@ -2036,6 +2069,46 @@ impl App {
             .scroll
             .scroll_to_item_strict(0, ScrollStrategy::Top);
         cx.notify();
+    }
+
+    fn refresh_search_after_tag_edit(&mut self, cx: &mut Context<Self>) {
+        if !self.search_active {
+            return;
+        }
+        let Some(filter) = self.applied_search.clone() else {
+            return;
+        };
+        if !has_tag_filter(&filter) {
+            return;
+        }
+        if self.searching {
+            // The in-flight query may have started before the tag write.
+            // Apply its result first, then refresh from the new state.
+            self.search_refresh_pending = true;
+            return;
+        }
+        self.pending_search_anchor = anchor_photo_id(
+            &self.search_view.index,
+            list_scroll_top(&self.search_view.scroll),
+            self.search_view.columns,
+        );
+        self.start_search(filter, cx);
+    }
+
+    fn commit_tags(&mut self, photo_id: i64, tags: Vec<String>, cx: &mut Context<Self>) {
+        if let Err(error) = self.db.set_photo_tags(photo_id, &tags) {
+            self.message = Some(format!("タグを保存できません: {error}"));
+            cx.notify();
+            return;
+        }
+        self.load_selected_meta(photo_id);
+        self.refresh_search_after_tag_edit(cx);
+        cx.notify();
+    }
+
+    fn remove_tag(&mut self, photo_id: i64, tag: &str, cx: &mut Context<Self>) {
+        let tags = without_tag(&self.selected_tags, tag);
+        self.commit_tags(photo_id, tags, cx);
     }
 
     fn sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -3561,6 +3634,43 @@ impl App {
             .whitespace_nowrap()
     }
 
+    /// A tag pill with a remove control for the full-screen viewer.
+    fn tag_chip(&self, photo_id: i64, tag: String, cx: &mut Context<Self>) -> AnyElement {
+        let remove = tag.clone();
+        h_flex()
+            .id(SharedString::from(format!("viewer-tag-{tag}")))
+            .items_center()
+            .gap(px(3.))
+            .pl(px(7.))
+            .pr(px(3.))
+            .py(px(2.))
+            .rounded_full()
+            .bg(rgba(0xffffff0f))
+            .border_1()
+            .border_color(rgba(0xffffff12))
+            .text_size(px(10.))
+            .text_color(rgb(MUTED))
+            .child(format!("#{tag}"))
+            .child(
+                div()
+                    .id(SharedString::from(format!("viewer-tag-remove-{tag}")))
+                    .cursor_pointer()
+                    .size(px(14.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .text_color(rgb(MUTED_2))
+                    .hover(|this| this.bg(rgba(0xfb71852e)).text_color(rgb(RED)))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.remove_tag(photo_id, &remove, cx);
+                    }))
+                    .child("×"),
+            )
+            .into_any_element()
+    }
+
     /// Metadata and actions for one photo. Shared by the full-screen viewer.
     fn detail_body(&mut self, photo: &Photo, cx: &mut Context<Self>) -> impl IntoElement {
         let id = photo.id;
@@ -3637,12 +3747,11 @@ impl App {
                     return;
                 }
                 let mut tags = this.selected_tags.clone();
-                if !tags.contains(&tag) {
-                    tags.push(tag);
+                if tags.contains(&tag) {
+                    return;
                 }
-                let _ = this.db.set_photo_tags(id, &tags);
-                this.load_selected_meta(id);
-                cx.notify();
+                tags.push(tag);
+                this.commit_tags(id, tags, cx);
             },
         );
         let compress_button = self.focusable_text_button(
@@ -3782,7 +3891,11 @@ impl App {
                         .flex_wrap()
                         .gap(px(4.))
                         .when(tags.is_empty(), |this| this.child(pill("—".to_string())))
-                        .children(tags.iter().map(|tag| pill(format!("#{tag}")))),
+                        .children(
+                            tags.iter()
+                                .map(|tag| self.tag_chip(id, tag.clone(), cx))
+                                .collect::<Vec<_>>(),
+                        ),
                 ),
             )
             .child(
@@ -5650,6 +5763,23 @@ fn normalize_note(value: &str) -> Option<&str> {
     (!trimmed.is_empty()).then_some(trimmed)
 }
 
+/// Returns the tags left after removing `tag`, preserving the existing order.
+fn without_tag(tags: &[String], tag: &str) -> Vec<String> {
+    tags.iter()
+        .filter(|existing| existing.as_str() != tag)
+        .cloned()
+        .collect()
+}
+
+/// Whether an executed search would be affected by a tag edit.
+fn has_tag_filter(filter: &PhotoTextFilter) -> bool {
+    filter
+        .tag
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|tag| !tag.is_empty())
+}
+
 fn format_bytes(bytes: u64) -> String {
     if bytes == 0 {
         return "0 B".to_string();
@@ -6036,18 +6166,18 @@ mod tests {
         THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, YearBucket, anchor_photo_id,
         apply_library_index, average_bgra, build_year_buckets, decode_thumbnail, demo_thumb_path,
         ease_motion, first_visible_photo, format_captured_month, format_count,
-        grid_available_width, grid_columns, grid_columns_for, lerp_color, list_scroll_top,
-        next_focus_index, normalize_note, parse_args, parse_window_size, rail_label_hidden_by_pill,
-        rail_row_at, rail_scroll_offset, rail_y, search_available_width, sidebar_reveal_width,
-        sidebar_width, stagger_value, step_index, sync_search_mirror, viewer_details_width,
-        viewer_image_box, visible_year_buckets,
+        grid_available_width, grid_columns, grid_columns_for, has_tag_filter, lerp_color,
+        list_scroll_top, next_focus_index, normalize_note, parse_args, parse_window_size,
+        rail_label_hidden_by_pill, rail_row_at, rail_scroll_offset, rail_y, search_available_width,
+        sidebar_reveal_width, sidebar_width, stagger_value, step_index, sync_search_mirror,
+        viewer_details_width, viewer_image_box, visible_year_buckets, without_tag,
     };
     use gpui_kit::{RenderImage, ScrollStrategy, UniformListScrollHandle, point, px};
     use smallvec::SmallVec;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use vrc_photo_core::error::CoreError;
-    use vrc_photo_core::model::{Photo, PhotoIndexEntry, PhotoStatus};
+    use vrc_photo_core::model::{Photo, PhotoIndexEntry, PhotoStatus, PhotoTextFilter};
 
     #[test]
     fn sidebar_widths_match_the_rail() {
@@ -6704,6 +6834,26 @@ mod tests {
         assert_eq!(normalize_note("  \n\t "), None);
         assert_eq!(normalize_note(" hello \n"), Some("hello"));
         assert_eq!(normalize_note("line1\nline2"), Some("line1\nline2"));
+    }
+
+    #[test]
+    fn tag_removal_filters_only_the_named_tag() {
+        let tags = vec!["alpha".to_string(), "beta".to_string()];
+        assert_eq!(without_tag(&tags, "alpha"), vec!["beta".to_string()]);
+        assert_eq!(without_tag(&tags, "missing"), tags);
+    }
+
+    #[test]
+    fn search_refresh_requires_a_non_empty_tag_filter() {
+        assert!(!has_tag_filter(&PhotoTextFilter::default()));
+        assert!(!has_tag_filter(&PhotoTextFilter {
+            tag: Some("  ".to_string()),
+            ..Default::default()
+        }));
+        assert!(has_tag_filter(&PhotoTextFilter {
+            tag: Some("vrc".to_string()),
+            ..Default::default()
+        }));
     }
 
     #[test]
