@@ -17,16 +17,18 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use smallvec::SmallVec;
 use vrc_photo_core::db::Db;
-use vrc_photo_core::importer::{self, ImportMode};
+use vrc_photo_core::importer::{self, ImportIssue, ImportIssueKind, ImportMode};
+use vrc_photo_core::linker;
 use vrc_photo_core::model::{
     CompressionFormat, CompressionJob, CompressionProfile, DaemonError, Derivative, LibraryStats,
     MAX_JOB_RETRIES, NewPhoto, Photo, PhotoContext, PhotoIndexEntry, PhotoPlayer, PhotoSort,
     PhotoTextFilter, QueueStatus,
 };
+use vrc_photo_core::scanner;
+use vrc_photo_core::scanner::ScanFailure;
 use vrc_photo_core::settings::AppSettings;
 use vrc_photo_core::thumbnail;
 use vrc_photo_core::time;
-use vrc_photo_core::{linker, scanner};
 
 mod logging;
 
@@ -1044,6 +1046,19 @@ impl Element for YearRail {
     }
 }
 
+/// Outcome of one import run, kept on the Photos screen until the user closes
+/// it so failed files can be retried without reopening the file picker.
+#[derive(Clone)]
+struct ImportReportView {
+    mode: ImportMode,
+    dest: PathBuf,
+    imported: usize,
+    skipped: usize,
+    issues: Vec<ImportIssue>,
+    scan_failures: Vec<ScanFailure>,
+    scan_error: Option<String>,
+}
+
 pub struct App {
     db: Db,
     screen: Screen,
@@ -1106,6 +1121,7 @@ pub struct App {
     failed_job_count: i64,
     failed_jobs: Vec<CompressionJob>,
     failed_job_names: HashMap<i64, String>,
+    import_report: Option<ImportReportView>,
     monitor_world: Option<String>,
     monitor_instance: Option<String>,
     monitor_players: Vec<String>,
@@ -1243,6 +1259,7 @@ impl App {
             failed_job_count: 0,
             failed_jobs: Vec::new(),
             failed_job_names: HashMap::new(),
+            import_report: None,
             monitor_world: None,
             monitor_instance: None,
             monitor_players: Vec::new(),
@@ -2654,55 +2671,64 @@ impl App {
     /// One compact row per failure domain. Detail text stays on the target
     /// screen so the bar never truncates the actual reason.
     fn global_alerts(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        alert_summaries(self.failed_job_count, self.daemon_errors.len(), 0)
-            .into_iter()
-            .map(|(target, message)| {
-                let (id, action) = match target {
-                    Screen::Photos => ("alert-photos", "写真を開く"),
-                    Screen::Compression => ("alert-compression", "圧縮を開く"),
-                    Screen::Search => ("alert-search", "検索を開く"),
-                    Screen::Monitor => ("alert-monitor", "ログ監視を開く"),
-                    Screen::Settings => ("alert-settings", "設定を開く"),
-                };
-                h_flex()
-                    .flex_shrink_0()
-                    .w_full()
-                    .items_center()
-                    .gap(px(10.))
-                    .px(px(26.))
-                    .py(px(8.))
-                    .bg(rgb(PANEL))
-                    .border_b_1()
-                    .border_color(rgb(BORDER))
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .w(px(6.))
-                            .h(px(6.))
-                            .rounded_full()
-                            .bg(rgb(RED)),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(11.))
-                            .text_color(rgb(RED))
-                            .child(message),
-                    )
-                    .child(
-                        Button::new(id)
-                            .label(action)
-                            .small()
-                            .ghost()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.switch_screen(target, cx);
-                            })),
-                    )
-                    .into_any_element()
-            })
-            .collect()
+        let import_failed = self
+            .import_report
+            .as_ref()
+            .map(|report| import_issue_counts(&report.issues).0)
+            .unwrap_or(0);
+        alert_summaries(
+            self.failed_job_count,
+            self.daemon_errors.len(),
+            import_failed,
+        )
+        .into_iter()
+        .map(|(target, message)| {
+            let (id, action) = match target {
+                Screen::Photos => ("alert-photos", "写真を開く"),
+                Screen::Compression => ("alert-compression", "圧縮を開く"),
+                Screen::Search => ("alert-search", "検索を開く"),
+                Screen::Monitor => ("alert-monitor", "ログ監視を開く"),
+                Screen::Settings => ("alert-settings", "設定を開く"),
+            };
+            h_flex()
+                .flex_shrink_0()
+                .w_full()
+                .items_center()
+                .gap(px(10.))
+                .px(px(26.))
+                .py(px(8.))
+                .bg(rgb(PANEL))
+                .border_b_1()
+                .border_color(rgb(BORDER))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .w(px(6.))
+                        .h(px(6.))
+                        .rounded_full()
+                        .bg(rgb(RED)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(11.))
+                        .text_color(rgb(RED))
+                        .child(message),
+                )
+                .child(
+                    Button::new(id)
+                        .label(action)
+                        .small()
+                        .ghost()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.switch_screen(target, cx);
+                        })),
+                )
+                .into_any_element()
+        })
+        .collect()
     }
 
     fn content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -2722,10 +2748,15 @@ impl App {
     }
 
     fn photos_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let import_panel = self
+            .import_report
+            .clone()
+            .map(|report| self.import_report_panel(&report, cx));
         v_flex()
             .flex_1()
             .min_h_0()
             .child(self.photos_header(cx))
+            .children(import_panel)
             .child(
                 h_flex()
                     .flex_1()
@@ -5344,15 +5375,46 @@ impl App {
             return;
         };
         let dest = self.settings.import_dir();
+        self.run_import(files, mode, dest, cx);
+    }
+
+    /// Copies or moves the picked files, then indexes the destination.
+    fn run_import(
+        &mut self,
+        files: Vec<PathBuf>,
+        mode: ImportMode,
+        dest: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
         let result = match importer::import_files(&files, &dest, mode) {
             Ok(result) => result,
             Err(error) => {
+                tracing::warn!(%error, "cannot import photos");
                 self.message = Some(format!("取り込みに失敗: {error}"));
                 cx.notify();
                 return;
             }
         };
-        let dest_string = dest.to_string_lossy().to_string();
+        let mut report = ImportReportView {
+            mode,
+            dest,
+            imported: result.imported.len(),
+            skipped: result.skipped,
+            issues: result.issues,
+            scan_failures: Vec::new(),
+            scan_error: None,
+        };
+        self.index_import_destination(&mut report, cx);
+        self.message = Some(import_summary(&report));
+        self.import_report = Some(report);
+        cx.notify();
+    }
+
+    /// Registers, scans, and links the import destination, then rebuilds the
+    /// library. Indexing failures stay on the report instead of aborting the
+    /// UI, so the imported files and per-file issues remain visible.
+    fn index_import_destination(&mut self, report: &mut ImportReportView, cx: &mut Context<Self>) {
+        let dest_string = report.dest.to_string_lossy().to_string();
         if !self
             .settings
             .photo_roots
@@ -5360,30 +5422,311 @@ impl App {
             .any(|root| root == &dest_string)
         {
             self.settings.photo_roots.push(dest_string.clone());
-            let _ = self.settings.save(&self.db);
+            if let Err(error) = self.settings.save(&self.db) {
+                tracing::warn!(%error, "cannot save photo roots after import");
+                append_scan_error(report, format!("取り込み先の設定を保存できません: {error}"));
+            }
         }
         let root_id = match self.db.add_root(&dest_string, "managed") {
             Ok(id) => id,
             Err(error) => {
-                self.message = Some(format!("取り込み先を登録できません: {error}"));
+                tracing::warn!(%error, "cannot register import destination");
+                append_scan_error(report, format!("取り込み先を登録できません: {error}"));
+                return;
+            }
+        };
+        match scanner::scan_and_index(&self.db, root_id, &report.dest) {
+            Ok(scan) => {
+                report.scan_failures.extend(scan.failures);
+                for id in &scan.new_ids {
+                    let Ok(Some(photo)) = self.db.photo_by_id(*id) else {
+                        continue;
+                    };
+                    if let Err(error) = thumbnail::ensure_thumbnail(*id, Path::new(&photo.abs_path))
+                    {
+                        tracing::warn!(%error, %id, "cannot generate thumbnail after import");
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "cannot scan import destination");
+                append_scan_error(report, format!("取り込み先をスキャンできません: {error}"));
+            }
+        }
+        if let Err(error) = linker::relink_unlinked(&self.db, 1000) {
+            tracing::warn!(%error, "cannot link imported photos");
+            append_scan_error(report, format!("写真の紐付けに失敗しました: {error}"));
+        }
+        if !self.reload_library(true, cx)
+            && let Some(error) = self.library_error.clone()
+        {
+            append_scan_error(report, error);
+        }
+    }
+
+    /// Re-imports only the retryable failed sources of the current report with
+    /// the same destination and mode.
+    fn retry_import(&mut self, cx: &mut Context<Self>) {
+        let Some(previous) = self.import_report.clone() else {
+            return;
+        };
+        let sources = retryable_sources(&previous.issues);
+        if sources.is_empty() {
+            return;
+        }
+        let result = match importer::import_files(&sources, &previous.dest, previous.mode) {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::warn!(%error, "cannot retry import");
+                self.message = Some(format!("再取り込みに失敗: {error}"));
                 cx.notify();
                 return;
             }
         };
-        let report = scanner::scan_and_index(&self.db, root_id, &dest).unwrap_or_default();
-        let _ = linker::relink_unlinked(&self.db, 1000);
-        for id in &report.new_ids {
-            if let Ok(Some(photo)) = self.db.photo_by_id(*id) {
-                let _ = thumbnail::ensure_thumbnail(*id, Path::new(&photo.abs_path));
-            }
-        }
-        self.reload_library(true, cx);
-        self.message = Some(format!(
-            "{} 枚を取り込みました（{} 枚スキップ）",
-            result.imported.len(),
-            result.skipped
-        ));
+        let mut report = ImportReportView {
+            mode: previous.mode,
+            dest: previous.dest.clone(),
+            imported: previous.imported + result.imported.len(),
+            skipped: previous.skipped + result.skipped,
+            issues: previous
+                .issues
+                .iter()
+                .filter(|issue| issue.kind != ImportIssueKind::Failed || !issue.retryable)
+                .cloned()
+                .collect(),
+            scan_failures: Vec::new(),
+            scan_error: None,
+        };
+        report.issues.extend(result.issues);
+        self.index_import_destination(&mut report, cx);
+        self.message = Some(import_summary(&report));
+        self.import_report = Some(report);
         cx.notify();
+    }
+
+    fn import_report_panel(&self, report: &ImportReportView, cx: &mut Context<Self>) -> AnyElement {
+        let (failed, partial) = import_issue_counts(&report.issues);
+        let retryable = retryable_sources(&report.issues);
+        let mode = import_mode_label(report.mode);
+        let dest = report.dest.to_string_lossy().to_string();
+        let scan_failed = report.scan_failures.len();
+        let failed_issues: Vec<&ImportIssue> = report
+            .issues
+            .iter()
+            .filter(|issue| issue.kind == ImportIssueKind::Failed)
+            .collect();
+        let partial_issues: Vec<&ImportIssue> = report
+            .issues
+            .iter()
+            .filter(|issue| issue.kind == ImportIssueKind::PartialMove)
+            .collect();
+
+        let mut panel = v_flex()
+            .flex_shrink_0()
+            .mx(px(26.))
+            .mb(px(12.))
+            .rounded(px(14.))
+            .bg(rgb(PANEL))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .child(
+                h_flex()
+                    .px(px(16.))
+                    .py(px(10.))
+                    .gap(px(10.))
+                    .items_center()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_semibold()
+                            .text_color(rgb(TEXT))
+                            .child("取り込み結果"),
+                    )
+                    .child(self.badge(mode, BLUE, 0x14283d))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED_2))
+                            .child(dest),
+                    )
+                    .when(!retryable.is_empty(), |this| {
+                        this.child(
+                            Button::new("import-retry-failed")
+                                .label("失敗分を再試行")
+                                .small()
+                                .primary()
+                                .on_click(cx.listener(|this, _, _, cx| this.retry_import(cx))),
+                        )
+                    })
+                    .child(
+                        Button::new("import-report-close")
+                            .label("閉じる")
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.import_report = None;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .px(px(16.))
+                    .py(px(8.))
+                    .gap(px(8.))
+                    .items_center()
+                    .child(self.badge(&format!("取込 {}", report.imported), GREEN, 0x102a24))
+                    .child(self.badge(&format!("スキップ {}", report.skipped), MUTED, PANEL_2))
+                    .when(failed > 0, |this| {
+                        this.child(self.badge(&format!("失敗 {failed}"), RED, 0x2a1414))
+                    })
+                    .when(partial > 0, |this| {
+                        this.child(self.badge(&format!("部分移動 {partial}"), AMBER, 0x2b2210))
+                    })
+                    .when(scan_failed > 0, |this| {
+                        this.child(self.badge(
+                            &format!("スキャン失敗 {scan_failed}"),
+                            RED,
+                            0x2a1414,
+                        ))
+                    }),
+            );
+
+        if !failed_issues.is_empty() {
+            panel = panel.child(
+                v_flex()
+                    .px(px(16.))
+                    .py(px(8.))
+                    .gap(px(6.))
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .child(self.section_label("失敗したファイル"))
+                    .child(
+                        v_flex()
+                            .gap(px(6.))
+                            .max_h(px(150.))
+                            .overflow_y_scrollbar()
+                            .children(failed_issues.iter().map(|issue| {
+                                let source = issue.source.to_string_lossy().to_string();
+                                v_flex()
+                                    .gap(px(2.))
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_size(px(10.))
+                                            .text_color(rgb(RED))
+                                            .child(source),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(10.))
+                                            .text_color(rgb(MUTED))
+                                            .child(issue.message.clone()),
+                                    )
+                            })),
+                    ),
+            );
+        }
+
+        if !partial_issues.is_empty() {
+            panel = panel.child(
+                v_flex()
+                    .px(px(16.))
+                    .py(px(8.))
+                    .gap(px(6.))
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .child(self.section_label("移動元を削除できなかったファイル"))
+                    .children(partial_issues.iter().map(|issue| {
+                        let source = issue.source.to_string_lossy().to_string();
+                        let target = issue
+                            .target
+                            .as_ref()
+                            .map(|target| target.to_string_lossy().to_string());
+                        v_flex()
+                            .gap(px(2.))
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_size(px(10.))
+                                            .text_color(rgb(AMBER))
+                                            .child(source),
+                                    )
+                                    .when_some(target, |this, target| {
+                                        this.child(
+                                            div()
+                                                .truncate()
+                                                .text_size(px(9.))
+                                                .text_color(rgb(MUTED_2))
+                                                .child(format!("→ {target}")),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(MUTED))
+                                    .child(issue.message.clone()),
+                            )
+                    })),
+            );
+        }
+
+        if !report.scan_failures.is_empty() {
+            panel = panel.child(
+                v_flex()
+                    .px(px(16.))
+                    .py(px(8.))
+                    .gap(px(6.))
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .child(self.section_label("スキャンできなかったファイル"))
+                    .children(report.scan_failures.iter().map(|failure| {
+                        v_flex()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(RED))
+                                    .child(failure.path.to_string_lossy().to_string()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(MUTED))
+                                    .child(failure.message.clone()),
+                            )
+                    })),
+            );
+        }
+
+        if let Some(error) = report.scan_error.clone() {
+            panel = panel.child(
+                div()
+                    .mx(px(16.))
+                    .my(px(8.))
+                    .p(px(8.))
+                    .rounded(px(8.))
+                    .bg(rgb(0x2a1414))
+                    .border_1()
+                    .border_color(rgba(0xfb718533))
+                    .text_size(px(10.))
+                    .text_color(rgb(RED))
+                    .child(error),
+            );
+        }
+
+        panel.into_any_element()
     }
 
     fn policy_button(&self, label: &str, policy: &str, cx: &mut Context<Self>) -> impl IntoElement {
@@ -6333,6 +6676,63 @@ fn job_retry_label(job: &CompressionJob) -> String {
     }
 }
 
+/// Import failures and partial moves. Partial moves reached the destination,
+/// so they are warnings and never count as failures.
+fn import_issue_counts(issues: &[ImportIssue]) -> (usize, usize) {
+    let failed = issues
+        .iter()
+        .filter(|issue| issue.kind == ImportIssueKind::Failed)
+        .count();
+    let partial = issues
+        .iter()
+        .filter(|issue| issue.kind == ImportIssueKind::PartialMove)
+        .count();
+    (failed, partial)
+}
+
+/// Sources a retry may try again: only `Failed` issues marked retryable.
+fn retryable_sources(issues: &[ImportIssue]) -> Vec<PathBuf> {
+    issues
+        .iter()
+        .filter(|issue| issue.kind == ImportIssueKind::Failed && issue.retryable)
+        .map(|issue| issue.source.clone())
+        .collect()
+}
+
+fn import_mode_label(mode: ImportMode) -> &'static str {
+    match mode {
+        ImportMode::Copy => "コピー",
+        ImportMode::Move => "移動",
+    }
+}
+
+/// Keeps every hard error that occurred while indexing the destination.
+fn append_scan_error(report: &mut ImportReportView, message: String) {
+    match &mut report.scan_error {
+        Some(existing) => {
+            existing.push('\n');
+            existing.push_str(&message);
+        }
+        None => report.scan_error = Some(message),
+    }
+}
+
+fn import_summary(report: &ImportReportView) -> String {
+    let (failed, _) = import_issue_counts(&report.issues);
+    let mut details = Vec::new();
+    if report.skipped > 0 {
+        details.push(format!("{} 枚スキップ", report.skipped));
+    }
+    if failed > 0 {
+        details.push(format!("失敗 {failed} 件"));
+    }
+    let mut summary = format!("{} 枚を取り込みました", report.imported);
+    if !details.is_empty() {
+        summary.push_str(&format!("（{}）", details.join("、")));
+    }
+    summary
+}
+
 /// Compact, ordered summaries of every failure that deserves a global alert.
 /// The target screen owns the detail, so the bar only carries the count.
 fn alert_summaries(
@@ -6736,18 +7136,21 @@ mod tests {
         THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, YearBucket, alert_summaries,
         anchor_photo_id, apply_library_index, average_bgra, build_year_buckets, decode_thumbnail,
         demo_thumb_path, ease_motion, first_visible_photo, format_captured_month, format_count,
-        grid_available_width, grid_columns, grid_columns_for, has_tag_filter, job_retry_available,
-        job_retry_label, lerp_color, list_scroll_top, moved_profile_order, next_focus_index,
-        normalize_note, parse_args, parse_window_size, rail_label_hidden_by_pill, rail_row_at,
-        rail_scroll_offset, rail_y, search_anchor_after_result, search_available_width,
-        sidebar_reveal_width, sidebar_width, stagger_value, step_index, sync_search_mirror,
-        viewer_details_width, viewer_image_box, visible_year_buckets, with_tag, without_tag,
+        grid_available_width, grid_columns, grid_columns_for, has_tag_filter, import_issue_counts,
+        job_retry_available, job_retry_label, lerp_color, list_scroll_top, moved_profile_order,
+        next_focus_index, normalize_note, parse_args, parse_window_size, rail_label_hidden_by_pill,
+        rail_row_at, rail_scroll_offset, rail_y, retryable_sources, search_anchor_after_result,
+        search_available_width, sidebar_reveal_width, sidebar_width, stagger_value, step_index,
+        sync_search_mirror, viewer_details_width, viewer_image_box, visible_year_buckets, with_tag,
+        without_tag,
     };
     use gpui_kit::{RenderImage, ScrollStrategy, UniformListScrollHandle, point, px};
     use smallvec::SmallVec;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use vrc_photo_core::error::CoreError;
+    use vrc_photo_core::importer::{ImportIssue, ImportIssueKind};
     use vrc_photo_core::model::{
         CompressionJob, Photo, PhotoIndexEntry, PhotoStatus, PhotoTextFilter, QueueStatus,
     };
@@ -6828,6 +7231,28 @@ mod tests {
         assert_eq!(rows[1].0, Screen::Monitor);
         assert_eq!(rows[2].0, Screen::Photos);
         assert!(alert_summaries(0, 0, 0).is_empty());
+    }
+
+    #[test]
+    fn import_issue_counts_separate_failures_and_partial_moves() {
+        let issues = vec![
+            ImportIssue {
+                source: PathBuf::from("/a.png"),
+                target: None,
+                message: "copy failed".to_string(),
+                kind: ImportIssueKind::Failed,
+                retryable: true,
+            },
+            ImportIssue {
+                source: PathBuf::from("/b.png"),
+                target: Some(PathBuf::from("/dest/b.png")),
+                message: "source remains".to_string(),
+                kind: ImportIssueKind::PartialMove,
+                retryable: false,
+            },
+        ];
+        assert_eq!(import_issue_counts(&issues), (1, 1));
+        assert_eq!(retryable_sources(&issues), vec![PathBuf::from("/a.png")]);
     }
 
     #[test]
