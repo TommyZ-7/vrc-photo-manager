@@ -9,6 +9,7 @@ pub mod error;
 pub mod importer;
 pub mod linker;
 pub mod log_parser;
+pub mod logging;
 pub mod metadata;
 pub mod model;
 pub mod photo_filename;
