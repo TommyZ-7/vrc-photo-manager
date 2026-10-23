@@ -363,12 +363,14 @@ impl Db {
         Ok(photo)
     }
 
-    /// Returns a lightweight, ordered snapshot of every present photo.
+    /// Returns a lightweight, ordered snapshot of every present photo. The
+    /// `photo_context` join is 1:1 and keeps every `PhotoSort` executable,
+    /// including world order.
     pub fn photo_index(&self, sort: PhotoSort) -> Result<Vec<PhotoIndexEntry>> {
         let order = photo_order(sort);
         let sql = format!(
-            "SELECT p.id, p.captured_at_utc, {PHOTO_MONTH} \
-             FROM photos p WHERE p.status = 'present' ORDER BY {order}"
+            "SELECT p.id, p.captured_at_utc, {PHOTO_MONTH}{PHOTO_FROM} \
+             WHERE p.status = 'present' ORDER BY {order}"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([], row_to_photo_index)?;
@@ -1340,6 +1342,48 @@ mod tests {
         );
         assert_eq!(entries[0].captured_month, 202505);
         assert_eq!(entries[1].captured_month, 202504);
+    }
+
+    #[test]
+    fn photo_index_supports_world_sort() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let alpha = db
+            .upsert_photo(&photo_at(
+                root,
+                "/photos/alpha.png",
+                1_700_000_000,
+                "2025-04-30 09:00:00",
+            ))
+            .unwrap();
+        let beta = db
+            .upsert_photo(&photo_at(
+                root,
+                "/photos/beta.png",
+                1_700_000_100,
+                "2025-04-30 10:00:00",
+            ))
+            .unwrap();
+        for (photo_id, world_name) in [(alpha, "Alpha"), (beta, "Beta")] {
+            db.set_photo_context(&PhotoContext {
+                photo_id,
+                session_id: None,
+                world_id: None,
+                world_name: Some(world_name.to_string()),
+                instance_id: None,
+                link_method: "manual".to_string(),
+                confidence: 1.0,
+                author: None,
+                linked_at: now_string(),
+            })
+            .unwrap();
+        }
+
+        let entries = db.photo_index(PhotoSort::World).unwrap();
+        assert_eq!(
+            entries.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+            vec![alpha, beta]
+        );
     }
 
     #[test]
