@@ -668,7 +668,7 @@ fn enqueue_auto_jobs(db: &Db, new_ids: &[i64]) -> Result<()> {
     }
     for photo_id in new_ids {
         for profile in &auto_profiles {
-            db.enqueue_job(*photo_id, &profile.id, "keep")?;
+            db.enqueue_job_for_existing_profile(*photo_id, &profile.id, "keep")?;
         }
     }
     Ok(())
@@ -902,6 +902,60 @@ mod tests {
         image::RgbaImage::from_pixel(16, 10, image::Rgba([10, 20, 30, 255]))
             .save(path)
             .unwrap();
+    }
+
+    #[test]
+    fn auto_jobs_follow_profile_sort_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("library.db")).unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo_id = db
+            .upsert_photo(&vrc_photo_core::model::NewPhoto {
+                root_id: root,
+                rel_path: "a.png".to_string(),
+                abs_path: "/photos/a.png".to_string(),
+                file_name: "a.png".to_string(),
+                captured_at_utc: 1_700_000_000,
+                captured_at_local: "2026-10-21 21:14:03".to_string(),
+                tz_offset_sec: 9 * 3600,
+                width: 16,
+                height: 10,
+                file_size: 10,
+                mtime: 1_700_000_000,
+                blake3: None,
+            })
+            .unwrap();
+
+        let make = |id: &str, name: &str| CompressionProfile {
+            id: id.to_string(),
+            name: name.to_string(),
+            auto_enabled: true,
+            ..CompressionProfile::default()
+        };
+        let a = make("a", "A");
+        let b = make("b", "B");
+        let c = make("c", "C");
+        for profile in [&a, &b, &c] {
+            db.save_profile(profile).unwrap();
+        }
+        db.reorder_profiles(&[c.id.clone(), a.id.clone(), b.id.clone()])
+            .unwrap();
+
+        // One photo: its auto profiles are enqueued in the saved order.
+        enqueue_auto_jobs(&db, &[photo_id]).unwrap();
+        // Force the tie the rowid tie-break exists for.
+        db.connection()
+            .execute(
+                "UPDATE compression_jobs SET created_at = '2026-01-01T00:00:00+00:00'",
+                [],
+            )
+            .unwrap();
+
+        let mut order = Vec::new();
+        while let Some(job) = db.next_pending_job().unwrap() {
+            order.push(job.profile_id);
+        }
+        assert_eq!(order, vec![c.id, a.id, b.id]);
     }
 
     #[test]

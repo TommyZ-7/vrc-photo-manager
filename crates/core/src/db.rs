@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use rusqlite::types::Value;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params, params_from_iter};
 
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::model::{
     CompressionJob, CompressionProfile, Derivative, LibraryRoot, LibraryStats, NewPhoto, Photo,
     PhotoContext, PhotoFilter, PhotoIndexEntry, PhotoPlayer, PhotoSort, PhotoStatus,
@@ -825,14 +825,27 @@ impl Db {
     // ---------- compression profiles ----------
 
     pub fn save_profile(&self, profile: &CompressionProfile) -> Result<()> {
-        Self::insert_profile(&self.conn, profile)
+        let sort_order = Self::next_sort_order(&self.conn)?;
+        Self::write_profile(&self.conn, profile, sort_order)
     }
 
-    fn insert_profile(conn: &Connection, profile: &CompressionProfile) -> Result<()> {
+    fn next_sort_order(conn: &Connection) -> Result<i64> {
+        Ok(conn.query_row(
+            "SELECT COALESCE(MAX(sort_order) + 1, 0) FROM compression_profiles",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
+    fn write_profile(
+        conn: &Connection,
+        profile: &CompressionProfile,
+        sort_order: i64,
+    ) -> Result<()> {
         let json = serde_json::to_string(profile)?;
         conn.execute(
             "INSERT INTO compression_profiles(id, name, enabled, auto_enabled, json, sort_order) \
-             VALUES (?1, ?2, ?3, ?4, ?5, 0) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
              ON CONFLICT(id) DO UPDATE SET name = excluded.name, enabled = excluded.enabled, \
                 auto_enabled = excluded.auto_enabled, json = excluded.json",
             params![
@@ -841,6 +854,7 @@ impl Db {
                 profile.enabled as i64,
                 profile.auto_enabled as i64,
                 json,
+                sort_order,
             ],
         )?;
         Ok(())
@@ -859,6 +873,92 @@ impl Db {
         Ok(profiles)
     }
 
+    pub fn reorder_profiles(&self, ids: &[String]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        let stored: i64 = tx.query_row("SELECT COUNT(*) FROM compression_profiles", [], |row| {
+            row.get(0)
+        })?;
+        if stored != ids.len() as i64 {
+            return Err(CoreError::Invalid(
+                "profile order must list every profile".to_string(),
+            ));
+        }
+        let mut seen = HashSet::new();
+        for id in ids {
+            if !seen.insert(id.as_str()) {
+                return Err(CoreError::Invalid(
+                    "profile order contains duplicate ids".to_string(),
+                ));
+            }
+        }
+        for (index, id) in ids.iter().enumerate() {
+            let changed = tx.execute(
+                "UPDATE compression_profiles SET sort_order = ?1 WHERE id = ?2",
+                params![index as i64, id],
+            )?;
+            if changed != 1 {
+                return Err(CoreError::NotFound(format!("compression profile {id}")));
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn duplicate_profile(&self, id: &str) -> Result<CompressionProfile> {
+        let tx = self.conn.unchecked_transaction()?;
+        let ordered = {
+            let mut stmt = tx.prepare(
+                "SELECT id, json FROM compression_profiles \
+                 ORDER BY sort_order, name COLLATE NOCASE",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            let mut ordered = Vec::new();
+            for row in rows {
+                let (stored_id, json) = row?;
+                ordered.push((
+                    stored_id,
+                    serde_json::from_str::<CompressionProfile>(&json)?,
+                ));
+            }
+            ordered
+        };
+
+        let source_index = ordered
+            .iter()
+            .position(|(stored_id, _)| stored_id == id)
+            .ok_or_else(|| CoreError::NotFound(format!("compression profile {id}")))?;
+
+        let mut name = format!("{} のコピー", ordered[source_index].1.name);
+        let mut suffix = 2;
+        while ordered.iter().any(|(_, profile)| profile.name == name) {
+            name = format!("{} のコピー {suffix}", ordered[source_index].1.name);
+            suffix += 1;
+        }
+
+        for (index, (stored_id, _)) in ordered.iter().enumerate() {
+            tx.execute(
+                "UPDATE compression_profiles SET sort_order = ?1 WHERE id = ?2",
+                params![index as i64, stored_id],
+            )?;
+        }
+        tx.execute(
+            "UPDATE compression_profiles SET sort_order = sort_order + 1 WHERE sort_order > ?1",
+            params![source_index as i64],
+        )?;
+
+        let copy = CompressionProfile {
+            id: uuid::Uuid::new_v4().to_string(),
+            name,
+            auto_enabled: false,
+            ..ordered[source_index].1.clone()
+        };
+        Self::write_profile(&tx, &copy, source_index as i64 + 1)?;
+        tx.commit()?;
+        Ok(copy)
+    }
+
     /// Seeds the built-in presets when no profile exists.
     ///
     /// Returns the profiles currently stored. A read or write error is returned
@@ -870,18 +970,62 @@ impl Db {
             return Ok(existing);
         }
         let transaction = self.conn.unchecked_transaction()?;
-        for profile in CompressionProfile::defaults() {
-            Self::insert_profile(&transaction, &profile)?;
+        for (index, profile) in CompressionProfile::defaults().into_iter().enumerate() {
+            Self::write_profile(&transaction, &profile, index as i64)?;
         }
         transaction.commit()?;
         self.list_profiles()
     }
 
+    pub fn active_job_count_for_profile(&self, profile_id: &str) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM compression_jobs \
+             WHERE profile_id = ?1 AND status IN ('pending', 'processing')",
+            params![profile_id],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn delete_profile(&self, id: &str) -> Result<()> {
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        let exists: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM compression_profiles WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )?;
+        if exists == 0 {
+            return Err(CoreError::NotFound(format!("compression profile {id}")));
+        }
+
+        let active: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM compression_jobs \
+             WHERE profile_id = ?1 AND status IN ('pending', 'processing')",
+            params![id],
+            |row| row.get(0),
+        )?;
+        if active > 0 {
+            return Err(CoreError::Invalid(format!(
+                "compression profile {id} has {active} active jobs"
+            )));
+        }
+
+        let total: i64 = tx.query_row("SELECT COUNT(*) FROM compression_profiles", [], |row| {
+            row.get(0)
+        })?;
+        if total <= 1 {
+            return Err(CoreError::Invalid(
+                "at least one compression profile is required".to_string(),
+            ));
+        }
+
+        let deleted = tx.execute(
             "DELETE FROM compression_profiles WHERE id = ?1",
             params![id],
         )?;
+        if deleted == 0 {
+            return Err(CoreError::NotFound(format!("compression profile {id}")));
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -897,13 +1041,29 @@ impl Db {
         Ok(id)
     }
 
+    pub fn enqueue_job_for_existing_profile(
+        &self,
+        photo_id: i64,
+        profile_id: &str,
+        policy: &str,
+    ) -> Result<bool> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let inserted = self.conn.execute(
+            "INSERT INTO compression_jobs(id, photo_id, profile_id, status, progress, policy, created_at) \
+             SELECT ?1, ?2, ?3, 'pending', 0, ?4, ?5 \
+             WHERE EXISTS (SELECT 1 FROM compression_profiles WHERE id = ?3)",
+            params![id, photo_id, profile_id, policy, now_string()],
+        )?;
+        Ok(inserted == 1)
+    }
+
     pub fn next_pending_job(&self) -> Result<Option<CompressionJob>> {
         let job = self
             .conn
             .query_row(
                 "UPDATE compression_jobs SET status = 'processing', started_at = ?1 \
                  WHERE id = (SELECT id FROM compression_jobs WHERE status = 'pending' \
-                    ORDER BY created_at LIMIT 1) \
+                    ORDER BY created_at, rowid LIMIT 1) \
                  RETURNING id, photo_id, profile_id, status, progress, error, output_path, policy, \
                     created_at, started_at, finished_at",
                 params![now_string()],
@@ -1288,6 +1448,14 @@ mod tests {
         let mut photo = sample_photo(root_id, path, utc);
         photo.captured_at_local = local.to_string();
         photo
+    }
+
+    fn profile(id: &str, name: &str) -> CompressionProfile {
+        CompressionProfile {
+            id: id.to_string(),
+            name: name.to_string(),
+            ..CompressionProfile::default()
+        }
     }
 
     #[test]
@@ -1759,6 +1927,17 @@ mod tests {
         let first = db.ensure_default_profiles().unwrap();
         assert_eq!(first.len(), 4);
 
+        let order: Vec<&str> = first.iter().map(|profile| profile.name.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "WebP 高品質",
+                "AVIF 容量優先",
+                "JPEG XL ロスレス",
+                "JPEG 互換用"
+            ]
+        );
+
         let mut names: Vec<&str> = first.iter().map(|profile| profile.name.as_str()).collect();
         names.sort_unstable();
         assert_eq!(
@@ -1832,5 +2011,262 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn save_profile_assigns_and_preserves_sort_order() {
+        let db = Db::open_in_memory().unwrap();
+        for (id, name) in [("c", "C"), ("a", "A"), ("b", "B")] {
+            db.save_profile(&profile(id, name)).unwrap();
+        }
+
+        let ids = || {
+            db.list_profiles()
+                .unwrap()
+                .into_iter()
+                .map(|profile| profile.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(), vec!["c", "a", "b"]);
+
+        let mut edited = profile("a", "A renamed");
+        edited.quality = 44;
+        db.save_profile(&edited).unwrap();
+
+        assert_eq!(ids(), vec!["c", "a", "b"]);
+        let stored = db.list_profiles().unwrap();
+        assert_eq!(stored[1].name, "A renamed");
+        assert_eq!(stored[1].quality, 44);
+
+        // Deleting the middle row leaves a gap. The next insert must use
+        // MAX(sort_order) + 1, not COUNT(*), so "A0" goes after "B".
+        db.delete_profile("a").unwrap();
+        db.save_profile(&profile("d", "A0")).unwrap();
+        assert_eq!(ids(), vec!["c", "b", "d"]);
+    }
+
+    #[test]
+    fn reorder_profiles_persists_and_rolls_back_bad_lists() {
+        let db = Db::open_in_memory().unwrap();
+        for (id, name) in [("c", "C"), ("a", "A"), ("b", "B")] {
+            db.save_profile(&profile(id, name)).unwrap();
+        }
+
+        let ids = || {
+            db.list_profiles()
+                .unwrap()
+                .into_iter()
+                .map(|profile| profile.id)
+                .collect::<Vec<_>>()
+        };
+        let order = |values: &[&str]| values.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+
+        // A legacy database where every row is zero sorts by name.
+        db.connection()
+            .execute("UPDATE compression_profiles SET sort_order = 0", [])
+            .unwrap();
+        assert_eq!(ids(), vec!["a", "b", "c"]);
+
+        db.reorder_profiles(&order(&["c", "a", "b"])).unwrap();
+        assert_eq!(ids(), vec!["c", "a", "b"]);
+
+        assert!(matches!(
+            db.reorder_profiles(&order(&["c", "a"])),
+            Err(CoreError::Invalid(_))
+        ));
+        assert_eq!(ids(), vec!["c", "a", "b"]);
+
+        assert!(matches!(
+            db.reorder_profiles(&order(&["a", "a", "b"])),
+            Err(CoreError::Invalid(_))
+        ));
+        assert_eq!(ids(), vec!["c", "a", "b"]);
+
+        assert!(matches!(
+            db.reorder_profiles(&order(&["c", "a", "missing"])),
+            Err(CoreError::NotFound(_))
+        ));
+        assert_eq!(ids(), vec!["c", "a", "b"]);
+    }
+
+    #[test]
+    fn reorder_profiles_survives_reopen_with_legacy_zero_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.db");
+
+        {
+            let db = Db::open(&path).unwrap();
+            for (id, name) in [("c", "C"), ("a", "A"), ("b", "B")] {
+                db.save_profile(&profile(id, name)).unwrap();
+            }
+            db.connection()
+                .execute("UPDATE compression_profiles SET sort_order = 0", [])
+                .unwrap();
+            let ids: Vec<String> = db
+                .list_profiles()
+                .unwrap()
+                .into_iter()
+                .map(|profile| profile.id)
+                .collect();
+            assert_eq!(ids, vec!["a", "b", "c"]);
+
+            db.reorder_profiles(&["c".to_string(), "a".to_string(), "b".to_string()])
+                .unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        let ids: Vec<String> = db
+            .list_profiles()
+            .unwrap()
+            .into_iter()
+            .map(|profile| profile.id)
+            .collect();
+        assert_eq!(ids, vec!["c", "a", "b"]);
+    }
+
+    #[test]
+    fn duplicate_profile_inserts_named_copy_after_source() {
+        let db = Db::open_in_memory().unwrap();
+        for (id, name) in [("a", "A"), ("b", "B"), ("c", "C")] {
+            db.save_profile(&profile(id, name)).unwrap();
+        }
+        let source = db
+            .list_profiles()
+            .unwrap()
+            .into_iter()
+            .find(|profile| profile.id == "b")
+            .unwrap();
+
+        let copy = db.duplicate_profile("b").unwrap();
+        assert_ne!(copy.id, source.id);
+        assert_eq!(copy.name, "B のコピー");
+        assert!(!copy.auto_enabled);
+        assert_eq!(copy.format, source.format);
+        assert_eq!(copy.quality, source.quality);
+
+        let stored = db.list_profiles().unwrap();
+        let ids: Vec<&str> = stored.iter().map(|profile| profile.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b", copy.id.as_str(), "c"]);
+        assert!(!stored[2].auto_enabled);
+
+        let mut edited = copy.clone();
+        edited.quality = 31;
+        db.save_profile(&edited).unwrap();
+        let stored = db.list_profiles().unwrap();
+        assert_eq!(stored[1].quality, source.quality);
+        assert_eq!(stored[2].quality, 31);
+
+        let second = db.duplicate_profile("b").unwrap();
+        assert_eq!(second.name, "B のコピー 2");
+        let stored = db.list_profiles().unwrap();
+        let ids: Vec<&str> = stored.iter().map(|profile| profile.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["a", "b", second.id.as_str(), copy.id.as_str(), "c"]
+        );
+
+        assert!(matches!(
+            db.duplicate_profile("missing"),
+            Err(CoreError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn duplicate_profile_normalizes_legacy_zero_order() {
+        let db = Db::open_in_memory().unwrap();
+        for (id, name) in [("a", "A"), ("b", "B"), ("c", "C")] {
+            db.save_profile(&profile(id, name)).unwrap();
+        }
+        db.connection()
+            .execute("UPDATE compression_profiles SET sort_order = 0", [])
+            .unwrap();
+
+        let copy = db.duplicate_profile("b").unwrap();
+        let stored = db.list_profiles().unwrap();
+        let ids: Vec<&str> = stored.iter().map(|profile| profile.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b", copy.id.as_str(), "c"]);
+    }
+
+    #[test]
+    fn delete_profile_blocks_active_jobs_and_keeps_history() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_profile(&profile("p", "P")).unwrap();
+        db.save_profile(&profile("q", "Q")).unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        let job = db.enqueue_job(photo, "p", "keep").unwrap();
+
+        assert_eq!(db.list_profiles().unwrap().len(), 2);
+        assert_eq!(db.active_job_count_for_profile("p").unwrap(), 1);
+        assert!(matches!(db.delete_profile("p"), Err(CoreError::Invalid(_))));
+        assert_eq!(db.list_profiles().unwrap().len(), 2);
+
+        db.update_job(&job, QueueStatus::Processing, 0.1, None, None)
+            .unwrap();
+        assert_eq!(db.active_job_count_for_profile("p").unwrap(), 1);
+        assert!(db.delete_profile("p").is_err());
+
+        db.update_job(
+            &job,
+            QueueStatus::Completed,
+            1.0,
+            None,
+            Some("/photos/compressed/a.webp"),
+        )
+        .unwrap();
+        db.add_derivative(
+            photo,
+            "/photos/compressed/a.webp",
+            "webp",
+            16,
+            10,
+            10,
+            "p",
+            "keep",
+        )
+        .unwrap();
+        let failed = db.enqueue_job(photo, "p", "keep").unwrap();
+        db.update_job(&failed, QueueStatus::Failed, 0.0, Some("boom"), None)
+            .unwrap();
+        assert_eq!(db.active_job_count_for_profile("p").unwrap(), 0);
+
+        db.delete_profile("p").unwrap();
+        assert_eq!(db.list_profiles().unwrap().len(), 1);
+        assert_eq!(db.list_profiles().unwrap()[0].id, "q");
+        assert_eq!(db.list_jobs(10).unwrap().len(), 2);
+        let derivatives = db.derivatives_for_photo(photo).unwrap();
+        assert_eq!(derivatives.len(), 1);
+        assert_eq!(derivatives[0].profile_id, "p");
+
+        assert!(matches!(db.delete_profile("q"), Err(CoreError::Invalid(_))));
+        assert_eq!(db.list_profiles().unwrap().len(), 1);
+        assert!(matches!(
+            db.delete_profile("missing"),
+            Err(CoreError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn guarded_enqueue_skips_missing_profiles() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+
+        assert!(
+            !db.enqueue_job_for_existing_profile(photo, "missing", "keep")
+                .unwrap()
+        );
+        assert_eq!(db.count_jobs(QueueStatus::Pending).unwrap(), 0);
+
+        db.save_profile(&profile("p", "P")).unwrap();
+        assert!(
+            db.enqueue_job_for_existing_profile(photo, "p", "keep")
+                .unwrap()
+        );
+        assert_eq!(db.count_jobs(QueueStatus::Pending).unwrap(), 1);
     }
 }
