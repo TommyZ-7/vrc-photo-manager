@@ -1293,16 +1293,41 @@ mod tests {
     #[test]
     fn migration_adds_captured_id_index() {
         let db = Db::open_in_memory().unwrap();
-        let count: i64 = db
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+
+        let recorded: i64 = db
             .conn
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master \
+                "SELECT version FROM schema_migrations WHERE version = 3",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(recorded, 3);
+
+        let sql: String = db
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master \
                  WHERE type = 'index' AND name = 'idx_photos_captured_id'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(count, 1);
+        let normalized = sql
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        assert!(
+            normalized.contains("on photos(captured_at_utc desc, id desc)"),
+            "{sql}"
+        );
+        assert!(normalized.contains("where status = 'present'"), "{sql}");
     }
 
     #[test]
@@ -1468,6 +1493,16 @@ mod tests {
         assert_eq!(photos.len(), 501);
         assert_eq!(photos.first().map(|photo| photo.id), Some(ids[0]));
         assert_eq!(photos.last().map(|photo| photo.id), Some(ids[500]));
+
+        // The reversed request crosses the 500-id chunk boundary; every row
+        // must come back in exactly the requested order.
+        let reversed: Vec<i64> = ids.iter().rev().copied().collect();
+        let photos = db.photos_by_ids(&reversed).unwrap();
+        assert_eq!(
+            photos.iter().map(|photo| photo.id).collect::<Vec<_>>(),
+            reversed
+        );
+
         let missing = db.photos_by_ids(&[ids[500], ids[0], -1]).unwrap();
         assert_eq!(
             missing.iter().map(|photo| photo.id).collect::<Vec<_>>(),
@@ -1520,9 +1555,24 @@ mod tests {
                     .unwrap();
                 }
             }
+            // The shipped query LEFT JOINs `photo_context`; seed every other
+            // row so the benchmark measures the production join instead of an
+            // all-NULL shortcut.
+            tx.execute(
+                "INSERT INTO photo_context(photo_id, world_name, link_method, confidence, linked_at) \
+                 SELECT id, 'Bench World ' || (id % 100), 'log', 1.0, \
+                 '2026-01-01T00:00:00+00:00' FROM photos WHERE id % 2 = 0",
+                [],
+            )
+            .unwrap();
             tx.commit().unwrap();
         }
         eprintln!("seed 100k: {:?}", seed_start.elapsed());
+        let context_count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM photo_context", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(context_count, 50_000);
 
         let start = Instant::now();
         let entries = db.photo_index(PhotoSort::Newest).unwrap();
