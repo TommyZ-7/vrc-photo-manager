@@ -989,7 +989,7 @@ Expected: FAIL because the helpers do not exist.
 
 - [ ] **Step 3: Implement `PhotoBrowser::remove_photo` and anchor helpers**
 
-- `remove_photo` clones `index.entries`, removes the entry by ID, rebuilds `Arc::new(PhotoIndex::new(entries))` (which recomputes `years`), increments `generation`, clears the page cache, and does not notify. If the current scroll row is now past the new row count, clamp it with `scroll_to_item_strict(rows - 1, Nearest)`. 
+- `remove_photo` clones `index.entries`, removes the entry by ID, rebuilds `Arc::new(PhotoIndex::new(entries))` (which recomputes `years`), increments `generation`, clears the page cache, and does not notify. If the current scroll row is now past the new row count, clamp it with `scroll_to_item_strict(rows - 1, Nearest)`.
 - `row_of_id` performs a linear scan over `index.entries` and returns the position.
 - `anchor_photo_id` returns `None` for an empty index; otherwise computes `first_photo = (offset_y.max(0) / PHOTO_ROW_HEIGHT).floor() as usize * columns`, clamps to `total - 1`, and returns `entries[first_photo].id`.
 
