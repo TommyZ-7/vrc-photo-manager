@@ -167,7 +167,9 @@ VRChatの1滞在。
 | enabled | INTEGER | 手動/自動の有効状態 |
 | auto_enabled | INTEGER | 新規写真へ自動適用 |
 | json | TEXT | `CompressionProfile` のJSON |
-| sort_order | INTEGER | 現状は0固定 |
+| sort_order | INTEGER | 並び順（0始まり） |
+
+`sort_order` は挿入時に末尾へ割り当て、編集では変わらない。並び替え・複製時に全行を `0..n-1` へ正規化する。削除後の欠番は許容する。
 
 ### `derivatives`
 
