@@ -8,7 +8,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::Utc;
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::switch::Switch;
@@ -4528,12 +4528,103 @@ impl App {
         cx.notify();
     }
 
+    fn request_delete_profile(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile) = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        if self.profiles.len() <= 1 {
+            self.message = Some("最後のプロファイルは削除できません".to_string());
+            cx.notify();
+            return;
+        }
+        match self.db.active_job_count_for_profile(id) {
+            Ok(0) => {
+                let entity = cx.entity();
+                let id = id.to_string();
+                let name = profile.name.clone();
+                window.open_alert_dialog(cx, move |alert, _, _| {
+                    let entity = entity.clone();
+                    let id = id.clone();
+                    alert
+                        .title("プロファイルを削除")
+                        .description(format!(
+                            "「{name}」を削除します。この操作は元に戻せません。"
+                        ))
+                        .confirm()
+                        .ok_text("削除")
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text("キャンセル")
+                        .on_ok(move |_, _, cx| {
+                            entity.update(cx, |this, cx| this.delete_profile(&id, cx));
+                            true
+                        })
+                });
+            }
+            Ok(count) => {
+                self.message = Some(format!(
+                    "「{}」は未完了のジョブが{}件あるため削除できません",
+                    profile.name, count
+                ));
+                cx.notify();
+            }
+            Err(error) => {
+                self.message = Some(format!("削除前の確認に失敗: {error}"));
+                cx.notify();
+            }
+        }
+    }
+
+    fn delete_profile(&mut self, id: &str, cx: &mut Context<Self>) {
+        let removed_index = self
+            .profiles
+            .iter()
+            .position(|profile| profile.id == id)
+            .unwrap_or(self.profile_index);
+        let name = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .map(|profile| profile.name.clone())
+            .unwrap_or_else(|| id.to_string());
+        match self.db.delete_profile(id) {
+            Ok(()) => {
+                self.profiles = self.db.list_profiles().unwrap_or_default();
+                self.profile_index = removed_index.min(self.profiles.len().saturating_sub(1));
+                self.message = Some("プロファイルを削除しました".to_string());
+            }
+            Err(error) => {
+                let message = match self.db.active_job_count_for_profile(id) {
+                    Ok(count) if count > 0 => format!(
+                        "「{name}」は未完了のジョブが{count}件あるため削除できません"
+                    ),
+                    _ if self.profiles.len() <= 1 => {
+                        "最後のプロファイルは削除できません".to_string()
+                    }
+                    _ => format!("プロファイルを削除できません: {error}"),
+                };
+                self.message = Some(message);
+            }
+        }
+        cx.notify();
+    }
+
     fn profile_editor(
         &self,
         profile: &CompressionProfile,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let index = self.profile_index;
+        let profile_id = profile.id.clone();
         glass_panel()
             .flex()
             .flex_col()
@@ -4561,6 +4652,15 @@ impl App {
                             .on_click(
                                 cx.listener(|this, _, _, cx| this.duplicate_profile(cx)),
                             ),
+                    )
+                    .child(
+                        Button::new("delete-profile")
+                            .label("削除")
+                            .small()
+                            .danger()
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.request_delete_profile(&profile_id, window, cx);
+                            })),
                     )
                     .child(
                         Switch::new("profile-auto")
