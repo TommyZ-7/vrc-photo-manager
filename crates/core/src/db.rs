@@ -9,9 +9,10 @@ use rusqlite::{
 
 use crate::error::{CoreError, Result};
 use crate::model::{
-    CompressionJob, CompressionProfile, Derivative, LibraryRoot, LibraryStats, MAX_JOB_RETRIES,
-    NewPhoto, Photo, PhotoContext, PhotoFilter, PhotoIndexEntry, PhotoPlayer, PhotoSort,
-    PhotoStatus, PhotoTextFilter, QueueStatus, Session, SessionPlayer, World,
+    CompressionJob, CompressionProfile, DaemonCommand, DaemonError, DaemonOperation, Derivative,
+    LibraryRoot, LibraryStats, MAX_JOB_RETRIES, NewPhoto, Photo, PhotoContext, PhotoFilter,
+    PhotoIndexEntry, PhotoPlayer, PhotoSort, PhotoStatus, PhotoTextFilter, QueueStatus, Session,
+    SessionPlayer, World,
 };
 
 const SCHEMA_V1: &str = r#"
@@ -1219,6 +1220,100 @@ impl Db {
         Ok(count)
     }
 
+    // ---------- daemon errors and commands ----------
+
+    /// Records a daemon failure for `operation`, replacing any previous
+    /// message/detail/time and incrementing the attempt count.
+    pub fn record_daemon_error(
+        &self,
+        operation: DaemonOperation,
+        message: &str,
+        detail: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO daemon_errors(operation, message, detail, occurred_at, attempts) \
+             VALUES (?1, ?2, ?3, ?4, 1) \
+             ON CONFLICT(operation) DO UPDATE SET message = excluded.message, \
+                detail = excluded.detail, occurred_at = excluded.occurred_at, \
+                attempts = daemon_errors.attempts + 1",
+            params![operation.as_str(), message, detail, now_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Removes the stored error for `operation`, if any.
+    pub fn clear_daemon_error(&self, operation: DaemonOperation) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM daemon_errors WHERE operation = ?1",
+            params![operation.as_str()],
+        )?;
+        Ok(())
+    }
+
+    /// Returns every stored daemon error, newest first. Rows whose operation
+    /// string is unknown to this build are skipped.
+    pub fn daemon_errors(&self) -> Result<Vec<DaemonError>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT operation, message, detail, occurred_at, attempts FROM daemon_errors \
+             ORDER BY occurred_at DESC, operation",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?;
+        let mut errors = Vec::new();
+        for row in rows {
+            let (operation, message, detail, occurred_at, attempts) = row?;
+            let Some(operation) = DaemonOperation::parse(&operation) else {
+                continue;
+            };
+            errors.push(DaemonError {
+                operation,
+                message,
+                detail,
+                occurred_at,
+                attempts,
+            });
+        }
+        Ok(errors)
+    }
+
+    /// Inserts `command` unless the same command is already queued. Returns
+    /// whether a row was inserted.
+    pub fn request_daemon_command(&self, command: DaemonCommand) -> Result<bool> {
+        let changed = self.conn.execute(
+            "INSERT INTO daemon_commands(command, created_at) \
+             SELECT ?1, ?2 WHERE NOT EXISTS \
+                (SELECT 1 FROM daemon_commands WHERE command = ?1)",
+            params![command.as_str(), now_string()],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Atomically removes and returns every queued command in request order.
+    /// Unknown command strings are discarded.
+    pub fn take_daemon_commands(&self) -> Result<Vec<DaemonCommand>> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let mut commands = Vec::new();
+        {
+            let mut stmt = tx.prepare("SELECT command FROM daemon_commands ORDER BY id")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            for row in rows {
+                if let Some(command) = DaemonCommand::parse(&row?) {
+                    commands.push(command);
+                }
+            }
+        }
+        tx.execute("DELETE FROM daemon_commands", [])?;
+        tx.commit()?;
+        Ok(commands)
+    }
+
     // ---------- derivatives ----------
 
     #[allow(clippy::too_many_arguments)]
@@ -2240,6 +2335,73 @@ mod tests {
                 .len()
                 == 1
         );
+    }
+
+    #[test]
+    fn daemon_error_upsert_increments_attempts_and_clear_removes_it() {
+        let db = Db::open_in_memory().unwrap();
+        db.record_daemon_error(DaemonOperation::Scan, "cannot scan", Some("/missing"))
+            .unwrap();
+        db.record_daemon_error(DaemonOperation::Scan, "still missing", None)
+            .unwrap();
+
+        let errors = db.daemon_errors().unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].operation, DaemonOperation::Scan);
+        assert_eq!(errors[0].message, "still missing");
+        assert_eq!(errors[0].detail, None);
+        assert_eq!(errors[0].attempts, 2);
+
+        db.clear_daemon_error(DaemonOperation::Scan).unwrap();
+        assert!(db.daemon_errors().unwrap().is_empty());
+    }
+
+    #[test]
+    fn daemon_commands_deduplicate_and_drain_in_order() {
+        let db = Db::open_in_memory().unwrap();
+        assert!(db.request_daemon_command(DaemonCommand::Rescan).unwrap());
+        assert!(!db.request_daemon_command(DaemonCommand::Rescan).unwrap());
+        assert!(db.request_daemon_command(DaemonCommand::Relog).unwrap());
+
+        assert_eq!(
+            db.take_daemon_commands().unwrap(),
+            vec![DaemonCommand::Rescan, DaemonCommand::Relog]
+        );
+        assert!(db.take_daemon_commands().unwrap().is_empty());
+        assert!(db.request_daemon_command(DaemonCommand::Relink).unwrap());
+    }
+
+    #[test]
+    fn unknown_daemon_rows_are_ignored() {
+        let db = Db::open_in_memory().unwrap();
+        db.connection()
+            .execute(
+                "INSERT INTO daemon_errors(operation, message, detail, occurred_at, attempts) \
+                 VALUES ('future-op', 'boom', NULL, '2026-10-21T00:00:00+00:00', 1)",
+                [],
+            )
+            .unwrap();
+        db.record_daemon_error(DaemonOperation::Log, "log failed", Some("detail"))
+            .unwrap();
+
+        let errors = db.daemon_errors().unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].operation, DaemonOperation::Log);
+        assert_eq!(errors[0].detail.as_deref(), Some("detail"));
+        assert_eq!(errors[0].attempts, 1);
+
+        db.connection()
+            .execute(
+                "INSERT INTO daemon_commands(command, created_at) VALUES ('future-command', 'now')",
+                [],
+            )
+            .unwrap();
+        assert!(db.request_daemon_command(DaemonCommand::Rescan).unwrap());
+        assert_eq!(
+            db.take_daemon_commands().unwrap(),
+            vec![DaemonCommand::Rescan]
+        );
+        assert!(db.take_daemon_commands().unwrap().is_empty());
     }
 
     #[test]
