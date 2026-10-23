@@ -4265,6 +4265,7 @@ impl App {
 
     fn compression_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let profile = self.profiles.get(self.profile_index).cloned();
+        let profile_count = self.profiles.len();
         let message = self.message.clone();
         let header = self.screen_header(
             "圧縮設定",
@@ -4348,9 +4349,12 @@ impl App {
                                     .child(
                                         h_flex()
                                             .items_center()
-                                            .gap(px(8.))
+                                            .gap(px(6.))
                                             .child(
                                                 div()
+                                                    .flex_1()
+                                                    .min_w_0()
+                                                    .truncate()
                                                     .text_size(px(12.))
                                                     .font_semibold()
                                                     .text_color(rgb(if active {
@@ -4364,7 +4368,73 @@ impl App {
                                                 if auto { "自動" } else { "手動" },
                                                 if auto { GREEN } else { MUTED },
                                                 if auto { 0x112a22 } else { PANEL_2 },
-                                            )),
+                                            ))
+                                            .child(
+                                                div()
+                                                    .id(SharedString::from(format!(
+                                                        "profile-up-{index}"
+                                                    )))
+                                                    .w(px(20.))
+                                                    .h(px(20.))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .rounded(px(6.))
+                                                    .text_size(px(11.))
+                                                    .text_color(rgb(if index == 0 {
+                                                        MUTED_2
+                                                    } else {
+                                                        MUTED
+                                                    }))
+                                                    .when(index > 0, |this| {
+                                                        this.cursor_pointer()
+                                                            .hover(|this| {
+                                                                this.bg(rgb(PANEL_2))
+                                                                    .text_color(rgb(TEXT))
+                                                            })
+                                                            .on_click(cx.listener(
+                                                                move |this, _, _, cx| {
+                                                                    this.move_profile(index, -1, cx);
+                                                                    cx.stop_propagation();
+                                                                },
+                                                            ))
+                                                    })
+                                                    .child("↑"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id(SharedString::from(format!(
+                                                        "profile-down-{index}"
+                                                    )))
+                                                    .w(px(20.))
+                                                    .h(px(20.))
+                                                    .flex()
+                                                    .items_center()
+                                                    .justify_center()
+                                                    .rounded(px(6.))
+                                                    .text_size(px(11.))
+                                                    .text_color(
+                                                        rgb(if index + 1 == profile_count {
+                                                            MUTED_2
+                                                        } else {
+                                                            MUTED
+                                                        }),
+                                                    )
+                                                    .when(index + 1 < profile_count, |this| {
+                                                        this.cursor_pointer()
+                                                            .hover(|this| {
+                                                                this.bg(rgb(PANEL_2))
+                                                                    .text_color(rgb(TEXT))
+                                                            })
+                                                            .on_click(cx.listener(
+                                                                move |this, _, _, cx| {
+                                                                    this.move_profile(index, 1, cx);
+                                                                    cx.stop_propagation();
+                                                                },
+                                                            ))
+                                                    })
+                                                    .child("↓"),
+                                            ),
                                     )
                                     .child(
                                         div()
@@ -4411,6 +4481,26 @@ impl App {
             edit(profile);
             let profile = profile.clone();
             let _ = self.db.save_profile(&profile);
+        }
+        cx.notify();
+    }
+
+    fn move_profile(&mut self, index: usize, delta: isize, cx: &mut Context<Self>) {
+        let ids: Vec<String> = self.profiles.iter().map(|p| p.id.clone()).collect();
+        let Some(order) = moved_profile_order(&ids, index, delta) else {
+            return;
+        };
+        let target = step_index(index, ids.len(), delta);
+        match self.db.reorder_profiles(&order) {
+            Ok(()) => {
+                self.profiles.swap(index, target);
+                if self.profile_index == index {
+                    self.profile_index = target;
+                } else if self.profile_index == target {
+                    self.profile_index = index;
+                }
+            }
+            Err(error) => self.message = Some(format!("並び替えを保存できません: {error}")),
         }
         cx.notify();
     }
@@ -5958,6 +6048,19 @@ fn step_index(current: usize, len: usize, delta: isize) -> usize {
     (base.saturating_add(delta)).clamp(0, len as isize - 1) as usize
 }
 
+fn moved_profile_order(ids: &[String], index: usize, delta: isize) -> Option<Vec<String>> {
+    if index >= ids.len() {
+        return None;
+    }
+    let target = step_index(index, ids.len(), delta);
+    if target == index {
+        return None;
+    }
+    let mut order = ids.to_vec();
+    order.swap(index, target);
+    Some(order)
+}
+
 fn parse_window_size(value: &str) -> Option<(f32, f32)> {
     let (width, height) = value.split_once(['x', 'X'])?;
     let width: f32 = width.trim().parse().ok()?;
@@ -6226,7 +6329,8 @@ mod tests {
         apply_library_index, average_bgra, build_year_buckets, decode_thumbnail, demo_thumb_path,
         ease_motion, first_visible_photo, format_captured_month, format_count,
         grid_available_width, grid_columns, grid_columns_for, has_tag_filter, lerp_color,
-        list_scroll_top, next_focus_index, normalize_note, parse_args, parse_window_size,
+        list_scroll_top, moved_profile_order, next_focus_index, normalize_note, parse_args,
+        parse_window_size,
         rail_label_hidden_by_pill, rail_row_at, rail_scroll_offset, rail_y,
         search_anchor_after_result, search_available_width, sidebar_reveal_width, sidebar_width,
         stagger_value, step_index, sync_search_mirror, viewer_details_width, viewer_image_box,
@@ -6359,6 +6463,23 @@ mod tests {
         assert_eq!(step_index(2, 5, 1), 3);
         assert_eq!(step_index(4, 5, 1), 4);
         assert_eq!(step_index(0, 0, 1), 0);
+    }
+
+    #[test]
+    fn profile_move_order_swaps_neighbors_and_stops_at_edges() {
+        let ids: Vec<String> = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+
+        assert_eq!(
+            moved_profile_order(&ids, 1, -1),
+            Some(vec!["b".to_string(), "a".to_string(), "c".to_string()])
+        );
+        assert_eq!(
+            moved_profile_order(&ids, 1, 1),
+            Some(vec!["a".to_string(), "c".to_string(), "b".to_string()])
+        );
+        assert_eq!(moved_profile_order(&ids, 0, -1), None);
+        assert_eq!(moved_profile_order(&ids, 2, 1), None);
+        assert_eq!(moved_profile_order(&[], 0, 1), None);
     }
 
     #[test]
