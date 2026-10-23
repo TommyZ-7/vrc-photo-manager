@@ -377,6 +377,27 @@ impl PhotoIndex {
             years,
         }
     }
+
+    /// Position of `id` in the ordered snapshot, if it is still present.
+    fn row_of_id(&self, id: i64) -> Option<usize> {
+        self.entries.iter().position(|entry| entry.id == id)
+    }
+}
+
+/// Photo at the top-left of the first visible row.
+///
+/// `offset_y` is the non-negative scroll distance from the top of the list;
+/// callers convert the scroll handle's negative offset before calling.
+fn anchor_photo_id(index: &PhotoIndex, offset_y: f32, columns: usize) -> Option<i64> {
+    let total = index.total;
+    if total == 0 {
+        return None;
+    }
+    let columns = columns.max(1);
+    let first_photo = ((offset_y.max(0.0) / PHOTO_ROW_HEIGHT).floor() as usize)
+        .saturating_mul(columns)
+        .min(total - 1);
+    index.entries.get(first_photo).map(|entry| entry.id)
 }
 
 /// Bounded access-order LRU cache for grid photo pages.
@@ -494,6 +515,32 @@ impl PhotoBrowser {
         self.pages.clear();
         self.labels = None;
         self.rail_drag.set(false);
+    }
+
+    /// Drops a photo from this snapshot without notifying the caller.
+    ///
+    /// The page cache and scroll position refer to the old row layout, so the
+    /// cache is cleared and a scroll that now points past the last row is
+    /// clamped to it.
+    fn remove_photo(&mut self, id: i64) {
+        let Some(position) = self.index.row_of_id(id) else {
+            return;
+        };
+        let mut entries = self.index.entries.clone();
+        entries.remove(position);
+        self.replace_index(Arc::new(PhotoIndex::new(entries)));
+
+        let columns = self.columns.max(1);
+        let rows = self.index.total.div_ceil(columns);
+        if rows == 0 {
+            self.scroll.scroll_to_item_strict(0, ScrollStrategy::Top);
+            return;
+        }
+        let current_row = (list_scroll_top(&self.scroll) / PHOTO_ROW_HEIGHT).floor() as usize;
+        if current_row >= rows {
+            self.scroll
+                .scroll_to_item_strict(rows - 1, ScrollStrategy::Nearest);
+        }
     }
 
     fn photo_at(&mut self, photo_index: usize) -> Option<Arc<Photo>> {
@@ -867,6 +914,10 @@ pub struct App {
     daemon_age_secs: Option<i64>,
     library: PhotoBrowser,
     search_view: PhotoBrowser,
+    /// The library index changed while another screen was mounted; the next
+    /// visit to Photos rebuilds it.
+    library_dirty: bool,
+    last_library_refresh: Instant,
     selected: Option<i64>,
     selection_epoch: u64,
     selection_changed_at: Option<Instant>,
@@ -983,6 +1034,8 @@ impl App {
             daemon_age_secs: None,
             library: PhotoBrowser::new(index.clone()),
             search_view: PhotoBrowser::new(index),
+            library_dirty: false,
+            last_library_refresh: Instant::now(),
             selected: None,
             selection_epoch: 0,
             selection_changed_at: None,
@@ -1043,7 +1096,7 @@ impl App {
             demo_assets,
         };
         app.ensure_profiles();
-        app.reload(cx);
+        app.reload_all(true, cx);
         if app.library.index.total == 0 {
             message.get_or_insert_with(|| {
                 "写真がありません。VRChatの写真フォルダを設定するか、--demo で起動してください。"
@@ -1091,7 +1144,18 @@ impl App {
             self.load_selected_meta(id);
         }
         if count != self.library.index.total as i64 {
-            self.reload(cx);
+            if self.screen == Screen::Photos {
+                // A burst of files arriving from the daemon must not rebuild
+                // the 100k-entry index every three seconds.
+                if self.last_library_refresh.elapsed() >= Duration::from_secs(2) {
+                    self.reload_library(true, cx);
+                    self.last_library_refresh = Instant::now();
+                }
+            } else {
+                // Rebuild when the user next visits Photos, not while they are
+                // reading another screen.
+                self.mark_library_dirty();
+            }
         }
         cx.notify();
     }
@@ -1100,18 +1164,8 @@ impl App {
         self.profiles = self.db.ensure_default_profiles().unwrap_or_default();
     }
 
-    fn reload(&mut self, cx: &mut Context<Self>) {
-        self.grid_epoch = self.grid_epoch.wrapping_add(1);
-        self.intro_seen.clear();
-        self.hovered_photo = None;
-        let entries = self.db.photo_index(PhotoSort::Newest).unwrap_or_default();
-        let index = Arc::new(PhotoIndex::new(entries));
-        self.library.replace_index(index.clone());
-        // An active result set stays mounted until the user clears it or runs
-        // a new search; Task 6 refines this into the reload contract.
-        if !self.search_active {
-            self.search_view.replace_index(index);
-        }
+    /// Refreshes side panels without touching the library snapshot or pages.
+    fn reload_aux(&mut self, cx: &mut Context<Self>) {
         self.profiles = self.db.list_profiles().unwrap_or_default();
         if self.profile_index >= self.profiles.len() {
             self.profile_index = 0;
@@ -1130,6 +1184,67 @@ impl App {
         if let Some(id) = self.selected {
             self.load_selected(id);
         }
+    }
+
+    /// Rebuilds the ordered library snapshot and its page cache.
+    ///
+    /// With `preserve_anchor`, the photo at the top-left of the first visible
+    /// row stays at the top after the rebuild. A root change or an explicit
+    /// reset passes `false` to return the grid to the first row.
+    fn reload_library(&mut self, preserve_anchor: bool, cx: &mut Context<Self>) {
+        let anchor = preserve_anchor.then(|| {
+            anchor_photo_id(
+                &self.library.index,
+                list_scroll_top(&self.library.scroll),
+                self.library.columns,
+            )
+        });
+        let anchor = anchor.flatten();
+
+        let entries = self.db.photo_index(PhotoSort::Newest).unwrap_or_default();
+        let index = Arc::new(PhotoIndex::new(entries));
+        self.library.replace_index(index.clone());
+
+        let columns = self.library.columns.max(1);
+        if let Some(row) = anchor.and_then(|id| self.library.index.row_of_id(id)) {
+            self.library
+                .scroll
+                .scroll_to_item_strict(row / columns, ScrollStrategy::Top);
+        } else {
+            self.library
+                .scroll
+                .scroll_to_item_strict(0, ScrollStrategy::Top);
+        }
+
+        // An active result set stays mounted until the user clears it or runs
+        // a new search; the inactive mirror only needs the fresh snapshot.
+        if !self.search_active {
+            self.search_view.replace_index(index);
+        }
+        self.reload_aux(cx);
+    }
+
+    /// Full rebuild used at startup: resets the grid animation state too.
+    fn reload_all(&mut self, reset_scroll: bool, cx: &mut Context<Self>) {
+        self.grid_epoch = self.grid_epoch.wrapping_add(1);
+        self.intro_seen.clear();
+        self.hovered_photo = None;
+        self.reload_library(!reset_scroll, cx);
+    }
+
+    fn mark_library_dirty(&mut self) {
+        self.library_dirty = true;
+    }
+
+    /// Changes screens without rebuilding the library unless Photos was marked
+    /// dirty while another screen was mounted.
+    fn switch_screen(&mut self, screen: Screen, cx: &mut Context<Self>) {
+        self.screen = screen;
+        if screen == Screen::Photos && self.library_dirty {
+            self.reload_library(true, cx);
+            self.library_dirty = false;
+        }
+        cx.notify();
     }
 
     fn refresh_monitor(&mut self) {
@@ -1186,7 +1301,7 @@ impl App {
         if self.quick_look_open {
             return;
         }
-        self.screen = Screen::Search;
+        self.switch_screen(Screen::Search, cx);
         let focus_handle = self.world_input.read(cx).focus_handle(cx);
         window.focus(&focus_handle, cx);
         // The search screen may not be mounted yet when the action fires, so
@@ -1466,6 +1581,8 @@ impl App {
         match trash::delete(&path) {
             Ok(_) => {
                 let _ = self.db.mark_missing(id);
+                self.library.remove_photo(id);
+                self.search_view.remove_photo(id);
                 self.selected = None;
                 self.selected_photo = None;
                 self.selected_players.clear();
@@ -1474,7 +1591,7 @@ impl App {
                 self.preview = None;
                 self.delete_armed = None;
                 self.message = Some("写真をゴミ箱へ移動しました".to_string());
-                self.reload(cx);
+                self.reload_aux(cx);
             }
             Err(error) => {
                 self.delete_armed = None;
@@ -1507,7 +1624,7 @@ impl App {
                 } else {
                     "圧縮ジョブをキューに追加しました（元画像を保持）".to_string()
                 });
-                self.reload(cx);
+                self.reload_aux(cx);
             }
             Err(error) => self.message = Some(format!("キュー追加に失敗: {error}")),
         }
@@ -1886,8 +2003,7 @@ impl App {
                 }
             }))
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.screen = screen;
-                cx.notify();
+                this.switch_screen(screen, cx);
             }))
             .when(active, |this| {
                 this.child(
@@ -4197,7 +4313,7 @@ impl App {
                 let _ = thumbnail::ensure_thumbnail(*id, Path::new(&photo.abs_path));
             }
         }
-        self.reload(cx);
+        self.reload_library(true, cx);
         self.message = Some(format!(
             "{} 枚を取り込みました（{} 枚スキップ）",
             result.imported.len(),
@@ -4272,7 +4388,7 @@ impl App {
                         .small()
                         .ghost()
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.reload(cx);
+                            this.reload_aux(cx);
                             cx.notify();
                         }))
                         .into_any_element(),
@@ -4482,6 +4598,8 @@ impl App {
                                                     .read(cx)
                                                     .value()
                                                     .to_string();
+                                                let previous_roots =
+                                                    this.settings.photo_roots.clone();
                                                 this.settings.photo_roots =
                                                     if root.trim().is_empty() {
                                                         Vec::new()
@@ -4499,7 +4617,12 @@ impl App {
                                                     } else {
                                                         Some(imported.trim().to_string())
                                                     };
+                                                let root_changed =
+                                                    this.settings.photo_roots != previous_roots;
                                                 let _ = this.settings.save(&this.db);
+                                                if root_changed {
+                                                    this.reload_library(false, cx);
+                                                }
                                                 this.message = Some(
                                                     "保存しました。デーモン再起動で監視に反映されます。"
                                                         .to_string(),
@@ -4592,7 +4715,7 @@ impl App {
                                     .small()
                                     .ghost()
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.reload(cx);
+                                        this.reload_aux(cx);
                                         cx.notify();
                                     })),
                             )
@@ -5447,14 +5570,15 @@ mod tests {
     // `gpui_kit::*`, shadowing the built-in `#[test]` and recursing forever.
     use super::{
         DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH, MAX_PAGES, PAGE_SIZE,
-        PhotoPageCache, THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, YearBucket,
-        average_bgra, build_year_buckets, decode_thumbnail, demo_thumb_path, ease_motion,
-        format_captured_month, format_count, grid_available_width, grid_columns, grid_columns_for,
-        lerp_color, list_scroll_top, next_focus_index, parse_args, parse_window_size, rail_row_at,
+        PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex, PhotoPageCache, THUMB_CACHE_ENTRIES,
+        THUMB_IN_FLIGHT, ThumbnailCache, YearBucket, anchor_photo_id, average_bgra,
+        build_year_buckets, decode_thumbnail, demo_thumb_path, ease_motion, format_captured_month,
+        format_count, grid_available_width, grid_columns, grid_columns_for, lerp_color,
+        list_scroll_top, next_focus_index, parse_args, parse_window_size, rail_row_at,
         rail_scroll_offset, rail_y, search_available_width, sidebar_reveal_width, sidebar_width,
         stagger_value, step_index, viewer_details_width, viewer_image_box, visible_year_buckets,
     };
-    use gpui_kit::{RenderImage, UniformListScrollHandle, point, px};
+    use gpui_kit::{RenderImage, ScrollStrategy, UniformListScrollHandle, point, px};
     use smallvec::SmallVec;
     use std::sync::Arc;
     use vrc_photo_core::model::{Photo, PhotoIndexEntry, PhotoStatus};
@@ -5742,6 +5866,71 @@ mod tests {
         assert!(cache.get_page(0).is_some());
         let third = cache.plan_pages(0, PAGE_SIZE, 2);
         assert!(third.is_empty());
+    }
+
+    #[test]
+    fn anchor_photo_id_uses_the_first_visible_row() {
+        let entries = vec![
+            index_entry(1, 202601),
+            index_entry(2, 202512),
+            index_entry(3, 202411),
+        ];
+        let index = PhotoIndex::new(entries);
+        assert_eq!(anchor_photo_id(&index, 0.0, 3), Some(1));
+        assert_eq!(anchor_photo_id(&index, PHOTO_ROW_HEIGHT + 1.0, 1), Some(2));
+        assert_eq!(
+            anchor_photo_id(&index, PHOTO_ROW_HEIGHT * 2.0 + 1.0, 1),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn anchor_photo_id_handles_empty_and_overscrolled_indexes() {
+        assert_eq!(anchor_photo_id(&PhotoIndex::new(Vec::new()), 0.0, 3), None);
+        let index = PhotoIndex::new(vec![index_entry(1, 202601), index_entry(2, 202512)]);
+        assert_eq!(anchor_photo_id(&index, PHOTO_ROW_HEIGHT * 50.0, 4), Some(2));
+    }
+
+    #[test]
+    fn removing_a_photo_clears_pages_and_rebuilds_year_counts() {
+        let entries = vec![
+            index_entry(1, 202601),
+            index_entry(2, 202601),
+            index_entry(3, 202412),
+        ];
+        let mut browser = PhotoBrowser::new(Arc::new(PhotoIndex::new(entries)));
+        let generation = browser.generation;
+        browser.insert_page(0, vec![test_photo(1)], generation);
+        browser.remove_photo(2);
+        assert_eq!(browser.index.total, 2);
+        assert_eq!(browser.index.years[0].count, 1);
+        assert_eq!(browser.index.years[1].count, 1);
+        assert!(browser.pages.get_page(0).is_none());
+        assert_eq!(browser.index.row_of_id(1), Some(0));
+        assert_eq!(browser.index.row_of_id(2), None);
+        // Removing an id that is already gone is a no-op.
+        browser.remove_photo(2);
+        assert_eq!(browser.index.total, 2);
+    }
+
+    #[test]
+    fn removing_a_photo_clamps_a_scroll_past_the_last_row() {
+        let entries = (1..=10).map(|id| index_entry(id, 202601)).collect();
+        let mut browser = PhotoBrowser::new(Arc::new(PhotoIndex::new(entries)));
+        browser.columns = 2;
+        browser
+            .scroll
+            .0
+            .borrow_mut()
+            .base_handle
+            .set_offset(point(px(0.), px(-PHOTO_ROW_HEIGHT * 10.0)));
+        browser.remove_photo(1);
+
+        let state = browser.scroll.0.borrow();
+        let deferred = state.deferred_scroll_to_item.expect("scroll clamp");
+        // 9 photos over 2 columns is 5 rows; the last row index is 4.
+        assert_eq!(deferred.item_index, 4);
+        assert_eq!(deferred.strategy, ScrollStrategy::Nearest);
     }
 
     #[test]
