@@ -27,6 +27,8 @@ use vrc_photo_core::thumbnail;
 use vrc_photo_core::time;
 use vrc_photo_core::{linker, scanner};
 
+mod logging;
+
 const BG: u32 = 0x07090d;
 const PANEL: u32 = 0x121722;
 const PANEL_2: u32 = 0x1a2130;
@@ -654,7 +656,7 @@ fn apply_library_index(
             None
         }
         Err(error) => {
-            eprintln!("photo_index failed: {error}");
+            tracing::error!(%error, "photo_index failed");
             Some("写真一覧を読み込めませんでした".to_string())
         }
     }
@@ -2962,7 +2964,7 @@ impl App {
         let photos = match self.db.photos_by_ids(&ids) {
             Ok(photos) => photos,
             Err(error) => {
-                eprintln!("photos_by_ids failed: {error}");
+                tracing::error!(%error, "photos_by_ids failed");
                 {
                     let browser = self.browser_mut(search);
                     for (page, _, _) in &requests {
@@ -2992,10 +2994,10 @@ impl App {
                     // in the page; keep placeholders until the next reload
                     // rebuilds the snapshot. The retry action makes the
                     // failure recoverable instead of permanent.
-                    eprintln!(
-                        "photos_by_ids returned a short page: {} of {}",
-                        page_photos.len(),
-                        end - start
+                    tracing::warn!(
+                        returned = page_photos.len(),
+                        expected = end - start,
+                        "photos_by_ids returned a short page"
                     );
                     short_page = true;
                     browser.fail_page(page, generation);
@@ -6391,6 +6393,9 @@ fn register_global_actions(cx: &mut gpui_kit::App, app: Entity<App>) {
 }
 
 fn main() {
+    if logging::init("vrc-photo-manager", "info,vrc_photo_ui=debug").is_none() {
+        tracing::warn!("file logging is unavailable; using stderr only");
+    }
     if timing_enabled() {
         let _ = process_start();
     }

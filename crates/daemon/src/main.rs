@@ -4,6 +4,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use vrc_photo_daemon::Daemon;
 
+mod logging;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "vrc-photo-daemon",
@@ -35,12 +37,9 @@ struct Args {
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,vrc_photo_daemon=debug".into()),
-        )
-        .init();
+    if logging::init("vrc-photo-daemon", "info,vrc_photo_daemon=debug").is_none() {
+        tracing::warn!("file logging is unavailable; using stderr only");
+    }
 
     let args = Args::parse();
     if args.print_data_dir {
