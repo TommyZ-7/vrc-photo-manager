@@ -11,7 +11,10 @@
 pub fn init(process: &str, default_filter: &str) -> Option<std::path::PathBuf> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| default_filter.into());
-    let builder = tracing_subscriber::fmt().with_env_filter(filter);
+    // Log files are plain text; never write terminal escape sequences to them.
+    let builder = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_ansi(false);
     match vrc_photo_core::logging::prepare_log_file(process)
         .ok()
         .flatten()
