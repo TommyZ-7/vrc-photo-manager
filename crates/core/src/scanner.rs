@@ -40,6 +40,22 @@ impl ScannedPhoto {
     }
 }
 
+/// A source photo or directory entry that could not be scanned or indexed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanFailure {
+    pub path: PathBuf,
+    pub message: String,
+}
+
+impl ScanFailure {
+    fn new(path: &Path, message: impl Into<String>) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            message: message.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ScanReport {
     pub found: usize,
@@ -47,13 +63,23 @@ pub struct ScanReport {
     pub skipped: usize,
     pub new_ids: Vec<i64>,
     pub seen_paths: Vec<String>,
+    pub failures: Vec<ScanFailure>,
 }
 
 /// Recursively scans a VRChat photo root.
 ///
 /// Only source PNG/JPEG files are returned. The `compressed` subdirectory is
 /// skipped so that generated derivatives are not indexed as new photos.
+/// Failures are dropped; use [`scan_root_report`] to inspect them.
 pub fn scan_root(root: &Path) -> Result<Vec<ScannedPhoto>> {
+    scan_root_report(root).map(|(photos, _failures)| photos)
+}
+
+/// Recursively scans a VRChat photo root, reporting unreadable entries.
+///
+/// A failure while reading one directory or photo does not abort the walk;
+/// readable photos are still returned.
+pub fn scan_root_report(root: &Path) -> Result<(Vec<ScannedPhoto>, Vec<ScanFailure>)> {
     if !root.is_dir() {
         return Err(CoreError::Invalid(format!(
             "photo root is not a directory: {}",
@@ -61,19 +87,42 @@ pub fn scan_root(root: &Path) -> Result<Vec<ScannedPhoto>> {
         )));
     }
     let mut photos = Vec::new();
-    walk(root, root, &mut photos)?;
+    let mut failures = Vec::new();
+    walk(root, root, &mut photos, &mut failures);
     photos.sort_by_key(|photo| photo.captured_at_utc);
-    Ok(photos)
+    Ok((photos, failures))
 }
 
 /// Scans one file. Used for incremental notify events so a new photo does not
-/// trigger a full library walk.
+/// trigger a full library walk. Failures are dropped; use
+/// [`scan_one_detailed`] to inspect them.
 pub fn scan_one(root: &Path, path: &Path) -> Option<ScannedPhoto> {
+    scan_one_detailed(root, path).and_then(|result| result.ok())
+}
+
+/// Scans one file, distinguishing "not a source photo" from "could not scan".
+///
+/// `None` means the path is not a candidate source photo, `Some(Err(_))` means
+/// a candidate could not be read or has no readable image dimensions, and
+/// `Some(Ok(_))` is a valid photo.
+pub fn scan_one_detailed(
+    root: &Path,
+    path: &Path,
+) -> Option<std::result::Result<ScannedPhoto, ScanFailure>> {
     if !path.is_file() || !is_source_photo(path) {
         return None;
     }
-    let file_name = path.file_name()?.to_str()?.to_string();
-    let metadata = std::fs::metadata(path).ok()?;
+    Some(read_photo(root, path))
+}
+
+fn read_photo(root: &Path, path: &Path) -> std::result::Result<ScannedPhoto, ScanFailure> {
+    let failure = |message: String| ScanFailure::new(path, message);
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| failure(format!("invalid file name: {}", path.display())))?
+        .to_string();
+    let metadata = std::fs::metadata(path).map_err(|error| failure(error.to_string()))?;
     let mtime = metadata
         .modified()
         .ok()
@@ -84,12 +133,12 @@ pub fn scan_one(root: &Path, path: &Path) -> Option<ScannedPhoto> {
     let mut parsed = parse_photo_filename(&file_name).unwrap_or_else(|| {
         from_modified_time(metadata.modified().unwrap_or(std::time::SystemTime::now()))
     });
-    if let Some((width, height)) = image_dimensions(path) {
-        parsed.width = width;
-        parsed.height = height;
-    }
-    if parsed.width == 0 || parsed.height == 0 {
-        return None;
+    match image_dimensions(path) {
+        Some((width, height)) if width > 0 && height > 0 => {
+            parsed.width = width;
+            parsed.height = height;
+        }
+        _ => return Err(failure("cannot read image dimensions".to_string())),
     }
 
     let rel_path = path
@@ -98,7 +147,7 @@ pub fn scan_one(root: &Path, path: &Path) -> Option<ScannedPhoto> {
         .to_string_lossy()
         .replace('\\', "/");
 
-    Some(ScannedPhoto {
+    Ok(ScannedPhoto {
         path: path.to_path_buf(),
         rel_path,
         file_name,
@@ -112,21 +161,31 @@ pub fn scan_one(root: &Path, path: &Path) -> Option<ScannedPhoto> {
     })
 }
 
-fn walk(root: &Path, dir: &Path, photos: &mut Vec<ScannedPhoto>) -> Result<()> {
+fn walk(root: &Path, dir: &Path, photos: &mut Vec<ScannedPhoto>, failures: &mut Vec<ScanFailure>) {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) => {
             tracing::warn!(path = %dir.display(), %error, "cannot read directory");
-            return Ok(());
+            failures.push(ScanFailure::new(dir, error.to_string()));
+            return;
         }
     };
 
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(path = %dir.display(), %error, "cannot read directory entry");
+                failures.push(ScanFailure::new(dir, error.to_string()));
+                continue;
+            }
+        };
         let path = entry.path();
         let file_type = match entry.file_type() {
             Ok(file_type) => file_type,
             Err(error) => {
                 tracing::warn!(path = %path.display(), %error, "cannot read file type");
+                failures.push(ScanFailure::new(&path, error.to_string()));
                 continue;
             }
         };
@@ -137,28 +196,32 @@ fn walk(root: &Path, dir: &Path, photos: &mut Vec<ScannedPhoto>) -> Result<()> {
             if entry.file_name() == "compressed" {
                 continue;
             }
-            walk(root, &path, photos)?;
+            walk(root, &path, photos, failures);
             continue;
         }
-        if let Some(photo) = scan_one(root, &path) {
-            photos.push(photo);
+        match scan_one_detailed(root, &path) {
+            Some(Ok(photo)) => photos.push(photo),
+            Some(Err(failure)) => failures.push(failure),
+            None => {}
         }
     }
-    Ok(())
 }
 
 /// Scans and upserts all source photos under `root` into the library.
+///
+/// Per-photo failures are reported in [`ScanReport::failures`] and do not
+/// abort the batch.
 pub fn scan_and_index(db: &Db, root_id: i64, root: &Path) -> Result<ScanReport> {
-    let photos = scan_root(root)?;
+    let (photos, failures) = scan_root_report(root)?;
     let mut report = ScanReport {
         found: photos.len(),
+        failures,
         ..Default::default()
     };
     for photo in photos {
-        report
-            .seen_paths
-            .push(photo.path.to_string_lossy().to_string());
         let path = photo.path.to_string_lossy().to_string();
+        report.seen_paths.push(path.clone());
+        let photo_path = photo.path.clone();
         let new_photo = photo.into_new_photo(root_id);
         let existed = db.photo_by_path(&path)?.is_some();
         match db.upsert_photo(&new_photo) {
@@ -171,6 +234,9 @@ pub fn scan_and_index(db: &Db, root_id: i64, root: &Path) -> Result<ScanReport> 
             Err(error) => {
                 tracing::warn!(path = %new_photo.abs_path, %error, "cannot index photo");
                 report.skipped += 1;
+                report
+                    .failures
+                    .push(ScanFailure::new(&photo_path, error.to_string()));
             }
         }
     }
@@ -222,5 +288,40 @@ mod tests {
         assert_eq!(photo.width, 4);
         assert_eq!(photo.height, 3);
         assert_eq!(photo.rel_path, "VRChat_2026-10-21_21-14-03.221_4x3.png");
+    }
+
+    #[test]
+    fn corrupt_source_is_reported_but_other_photos_are_indexed() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write_png(&root.join("VRChat_2026-10-21_21-14-03.221_4x3.png"));
+        std::fs::write(root.join("broken.png"), b"not an image").unwrap();
+
+        let db = Db::open_in_memory().unwrap();
+        let root_id = db.add_root(root.to_str().unwrap(), "reference").unwrap();
+        let report = scan_and_index(&db, root_id, root).unwrap();
+
+        assert_eq!(report.indexed, 1);
+        assert_eq!(report.failures.len(), 1);
+        assert!(report.failures[0].path.ends_with("broken.png"));
+        assert_eq!(db.count_photos().unwrap(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_directory_is_reported() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let (photos, failures) = scan_root_report(dir.path()).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(photos.is_empty());
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].path, locked);
     }
 }
