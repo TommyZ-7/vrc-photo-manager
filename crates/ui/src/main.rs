@@ -6332,7 +6332,7 @@ impl App {
                                         div()
                                             .text_size(px(10.))
                                             .text_color(rgb(MUTED_2))
-                                            .child("デーモン実行中は再起動後に反映"),
+                                            .child("保存時に再スキャンを要求します（停止中なら起動後に実行）"),
                                     ),
                             ),
                     )
