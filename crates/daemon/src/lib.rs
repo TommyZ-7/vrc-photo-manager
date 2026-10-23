@@ -988,11 +988,15 @@ impl Daemon {
     fn stop_workers(&mut self) {
         self.running.store(false, Ordering::Relaxed);
         self.thumbnail_tx = None;
-        if let Some(handle) = self.thumbnail_handle.take() {
-            let _ = handle.join();
+        if let Some(handle) = self.thumbnail_handle.take()
+            && handle.join().is_err()
+        {
+            tracing::error!("thumbnail worker panicked");
         }
-        for handle in self.workers.drain(..) {
-            let _ = handle.join();
+        for (index, handle) in self.workers.drain(..).enumerate() {
+            if handle.join().is_err() {
+                tracing::error!(worker = index, "compression worker panicked");
+            }
         }
     }
 
