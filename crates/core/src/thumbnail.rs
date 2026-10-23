@@ -58,7 +58,14 @@ pub fn ensure_thumbnail_in(
     let temp = output.with_extension("webp.tmp");
     fs::write(&temp, &*encoded)?;
     if let Err(error) = fs::rename(&temp, &output) {
-        let _ = fs::remove_file(&temp);
+        if let Err(cleanup) = fs::remove_file(&temp) {
+            tracing::debug!(
+                %cleanup,
+                photo_id,
+                path = %temp.display(),
+                "cannot remove temporary thumbnail after rename failure"
+            );
+        }
         return Err(CoreError::Io(error));
     }
     Ok(Some(output))

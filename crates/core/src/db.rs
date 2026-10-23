@@ -267,7 +267,9 @@ impl Db {
     fn configure(conn: &Connection) -> Result<()> {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        // WAL is not available for in-memory databases; ignore that case.
+        // These are performance tuning hints, not correctness requirements.
+        // In-memory databases (used by tests) reject WAL and the synchronous
+        // mode change, so keep the failures non-fatal for both backends.
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
         let _ = conn.pragma_update(None, "synchronous", "NORMAL");
         Ok(())

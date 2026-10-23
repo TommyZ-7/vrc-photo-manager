@@ -340,7 +340,20 @@ impl Daemon {
                     .map(|photo| photo.abs_path)
             };
             if let Some(path) = path {
-                let _ = thumbnail::ensure_thumbnail_in(*id, Path::new(&path), &self.thumbnail_dir);
+                match thumbnail::ensure_thumbnail_in(*id, Path::new(&path), &self.thumbnail_dir) {
+                    Ok(Some(_)) => {}
+                    Ok(None) => tracing::debug!(
+                        photo_id = *id,
+                        path = %path,
+                        "thumbnail source is missing"
+                    ),
+                    Err(error) => tracing::warn!(
+                        %error,
+                        photo_id = *id,
+                        path = %path,
+                        "cannot generate thumbnail"
+                    ),
+                }
             }
         }
         self.ingest_logs()?;
@@ -499,7 +512,13 @@ impl Daemon {
         }
         if let Some(tx) = &self.thumbnail_tx {
             for id in &new_ids {
-                let _ = tx.send(*id);
+                if let Err(error) = tx.send(*id) {
+                    tracing::debug!(
+                        %error,
+                        photo_id = *id,
+                        "thumbnail worker is unavailable; dropping request"
+                    );
+                }
             }
         }
         if !new_ids.is_empty() {
@@ -540,8 +559,10 @@ impl Daemon {
                     let seen: std::collections::HashSet<&str> =
                         root_report.seen_paths.iter().map(String::as_str).collect();
                     for (id, path) in existing {
-                        if !seen.contains(path.as_str()) {
-                            let _ = db.mark_missing(id);
+                        if !seen.contains(path.as_str())
+                            && let Err(error) = db.mark_missing(id)
+                        {
+                            tracing::warn!(%error, photo_id = id, "cannot mark missing photo");
                         }
                     }
                 }
@@ -564,7 +585,13 @@ impl Daemon {
         }
         if let Some(tx) = &self.thumbnail_tx {
             for id in &report.new_ids {
-                let _ = tx.send(*id);
+                if let Err(error) = tx.send(*id) {
+                    tracing::debug!(
+                        %error,
+                        photo_id = *id,
+                        "thumbnail worker is unavailable; dropping request"
+                    );
+                }
             }
         }
         Ok(report)
@@ -780,11 +807,16 @@ impl Daemon {
     }
 
     fn write_heartbeat(&mut self) {
-        if let Ok(db) = self.db.lock() {
-            let _ = db.set_setting(
-                "daemon_heartbeat",
-                &chrono::Utc::now().timestamp().to_string(),
-            );
+        match self.db.lock() {
+            Ok(db) => {
+                if let Err(error) = db.set_setting(
+                    "daemon_heartbeat",
+                    &chrono::Utc::now().timestamp().to_string(),
+                ) {
+                    tracing::warn!(%error, "cannot write daemon heartbeat");
+                }
+            }
+            Err(error) => tracing::warn!(%error, "cannot lock database for heartbeat"),
         }
         self.last_heartbeat = std::time::Instant::now();
     }
@@ -866,7 +898,9 @@ impl Daemon {
             }
             let tx = tx.clone();
             let mut watcher = notify::recommended_watcher(move |event| {
-                let _ = tx.send(event);
+                if let Err(error) = tx.send(event) {
+                    tracing::debug!(%error, "photo watcher receiver closed; dropping event");
+                }
             })
             .context("cannot create photo watcher")?;
             watcher
@@ -926,7 +960,13 @@ impl Daemon {
                     db.list_photos(5000, 0, vrc_photo_core::model::PhotoSort::Newest)
             {
                 for photo in photos {
-                    let _ = tx.send(photo.id);
+                    if let Err(error) = tx.send(photo.id) {
+                        tracing::debug!(
+                            %error,
+                            photo_id = photo.id,
+                            "thumbnail worker is unavailable; dropping request"
+                        );
+                    }
                 }
             }
         }
@@ -960,7 +1000,9 @@ impl Daemon {
         self.running.store(false, Ordering::Relaxed);
         if let Some(mut tail) = self.log_tail.take() {
             let db = self.db.lock().unwrap();
-            let _ = tail.ingestor.finish(&db, chrono::Utc::now().timestamp());
+            if let Err(error) = tail.ingestor.finish(&db, chrono::Utc::now().timestamp()) {
+                tracing::warn!(%error, "cannot finish log ingestion on shutdown");
+            }
         }
         self.tray = None;
         self.stop_workers();
@@ -1014,7 +1056,20 @@ fn thumbnail_loop(
                         .map(|photo| photo.abs_path)
                 };
                 if let Some(path) = path {
-                    let _ = thumbnail::ensure_thumbnail_in(id, Path::new(&path), &cache_dir);
+                    match thumbnail::ensure_thumbnail_in(id, Path::new(&path), &cache_dir) {
+                        Ok(Some(_)) => {}
+                        Ok(None) => tracing::debug!(
+                            photo_id = id,
+                            path = %path,
+                            "thumbnail source is missing"
+                        ),
+                        Err(error) => tracing::warn!(
+                            %error,
+                            photo_id = id,
+                            path = %path,
+                            "cannot generate thumbnail"
+                        ),
+                    }
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
@@ -1035,14 +1090,27 @@ fn worker_loop(db: Arc<Mutex<Db>>, running: Arc<AtomicBool>) {
         };
         if let Err(error) = process_job(&db, &job) {
             tracing::error!(job = %job.id, %error, "compression failed");
-            if let Ok(db) = db.lock() {
-                let _ = db.update_job(
-                    &job.id,
-                    QueueStatus::Failed,
-                    0.0,
-                    Some(&error.to_string()),
-                    None,
-                );
+            match db.lock() {
+                Ok(db) => {
+                    if let Err(update_error) = db.update_job(
+                        &job.id,
+                        QueueStatus::Failed,
+                        0.0,
+                        Some(&error.to_string()),
+                        None,
+                    ) {
+                        tracing::error!(
+                            job = %job.id,
+                            %update_error,
+                            "cannot record failed compression job"
+                        );
+                    }
+                }
+                Err(lock_error) => tracing::error!(
+                    job = %job.id,
+                    %lock_error,
+                    "cannot lock database to record failed compression job"
+                ),
             }
         }
     }

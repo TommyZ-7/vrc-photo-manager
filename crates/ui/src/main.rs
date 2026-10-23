@@ -1435,24 +1435,39 @@ impl App {
     }
 
     fn ensure_profiles(&mut self) {
-        self.profiles = self.db.ensure_default_profiles().unwrap_or_default();
+        self.profiles = self.db.ensure_default_profiles().unwrap_or_else(|error| {
+            tracing::warn!(%error, "cannot ensure default compression profiles");
+            Vec::new()
+        });
     }
 
     /// Refreshes side panels without touching the library snapshot or pages.
     fn reload_aux(&mut self, cx: &mut Context<Self>) {
-        self.profiles = self.db.list_profiles().unwrap_or_default();
+        self.profiles = self.db.list_profiles().unwrap_or_else(|error| {
+            tracing::warn!(%error, "cannot load compression profiles");
+            Vec::new()
+        });
         if self.profile_index >= self.profiles.len() {
             self.profile_index = 0;
         }
-        self.stats = self.db.stats().unwrap_or_default();
+        self.stats = self.db.stats().unwrap_or_else(|error| {
+            tracing::warn!(%error, "cannot load library stats");
+            LibraryStats::default()
+        });
         self.compressed_ids = self
             .db
             .compressed_photo_ids()
-            .unwrap_or_default()
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "cannot load compressed photo ids");
+                Vec::new()
+            })
             .into_iter()
             .collect();
         self.reload_job_state();
-        self.settings = AppSettings::load(&self.db).unwrap_or_default();
+        self.settings = AppSettings::load(&self.db).unwrap_or_else(|error| {
+            tracing::warn!(%error, "cannot load app settings");
+            AppSettings::default()
+        });
         cx.set_reduce_motion(self.settings.ui_reduce_motion);
         self.refresh_monitor();
         if let Some(id) = self.selected {
@@ -1578,7 +1593,9 @@ impl App {
         self.sidebar_motion_epoch = self.sidebar_motion_epoch.wrapping_add(1);
         self.hovered_nav = None;
         self.settings.ui_sidebar_collapsed = self.sidebar_collapsed;
-        let _ = self.settings.save(&self.db);
+        if let Err(error) = self.settings.save(&self.db) {
+            tracing::warn!(%error, "cannot save sidebar state");
+        }
         cx.notify();
     }
 
@@ -1589,7 +1606,9 @@ impl App {
         self.inspector_collapsed = !self.inspector_collapsed;
         self.inspector_epoch = self.inspector_epoch.wrapping_add(1);
         self.settings.ui_inspector_collapsed = self.inspector_collapsed;
-        let _ = self.settings.save(&self.db);
+        if let Err(error) = self.settings.save(&self.db) {
+            tracing::warn!(%error, "cannot save inspector state");
+        }
         cx.notify();
     }
 
@@ -1625,10 +1644,25 @@ impl App {
     /// Favorite and tag edits use this so the preview does not flash.
     fn load_selected_meta(&mut self, id: i64) {
         self.selected = Some(id);
-        self.selected_photo = self.db.photo_by_id(id).ok().flatten();
-        self.selected_players = self.db.photo_players(id).unwrap_or_default();
-        self.selected_tags = self.db.photo_tags(id).unwrap_or_default();
-        self.selected_derivatives = self.db.derivatives_for_photo(id).unwrap_or_default();
+        self.selected_photo = match self.db.photo_by_id(id) {
+            Ok(photo) => photo,
+            Err(error) => {
+                tracing::warn!(%error, photo_id = id, "cannot load selected photo");
+                None
+            }
+        };
+        self.selected_players = self.db.photo_players(id).unwrap_or_else(|error| {
+            tracing::warn!(%error, photo_id = id, "cannot load selected photo players");
+            Vec::new()
+        });
+        self.selected_tags = self.db.photo_tags(id).unwrap_or_else(|error| {
+            tracing::warn!(%error, photo_id = id, "cannot load selected photo tags");
+            Vec::new()
+        });
+        self.selected_derivatives = self.db.derivatives_for_photo(id).unwrap_or_else(|error| {
+            tracing::warn!(%error, photo_id = id, "cannot load photo derivatives");
+            Vec::new()
+        });
         if self.note_edit_id.is_some_and(|edit_id| edit_id != id) {
             self.note_edit_id = None;
         }
@@ -1639,7 +1673,7 @@ impl App {
         self.preview = self
             .selected_photo
             .as_ref()
-            .and_then(|photo| load_preview(Path::new(&photo.abs_path)));
+            .and_then(|photo| load_preview(id, Path::new(&photo.abs_path)));
     }
 
     fn begin_note_edit(
@@ -1668,6 +1702,7 @@ impl App {
         let value = self.note_edit_input.read(cx).value();
         let note = normalize_note(&value);
         if let Err(error) = self.db.set_note(id, note) {
+            tracing::warn!(%error, photo_id = id, "cannot save photo note");
             self.message = Some(format!("メモを保存できません: {error}"));
             cx.notify();
             return;
@@ -1985,7 +2020,9 @@ impl App {
         }
         match trash::delete(&path) {
             Ok(_) => {
-                let _ = self.db.mark_missing(id);
+                if let Err(error) = self.db.mark_missing(id) {
+                    tracing::warn!(%error, photo_id = id, "cannot mark trashed photo missing");
+                }
                 self.library.remove_photo(id);
                 self.search_view.remove_photo(id);
                 self.thumbnails.unpin(id);
@@ -2211,6 +2248,7 @@ impl App {
 
     fn commit_tags(&mut self, photo_id: i64, tags: Vec<String>, cx: &mut Context<Self>) {
         if let Err(error) = self.db.set_photo_tags(photo_id, &tags) {
+            tracing::warn!(%error, photo_id, "cannot save photo tags");
             self.message = Some(format!("タグを保存できません: {error}"));
             cx.notify();
             return;
@@ -2228,6 +2266,7 @@ impl App {
         let tags = match self.db.photo_tags(photo_id) {
             Ok(tags) => tags,
             Err(error) => {
+                tracing::warn!(%error, photo_id, "cannot load photo tags");
                 self.message = Some(format!("タグを読み込めません: {error}"));
                 cx.notify();
                 return;
@@ -2243,6 +2282,7 @@ impl App {
         let tags = match self.db.photo_tags(photo_id) {
             Ok(tags) => tags,
             Err(error) => {
+                tracing::warn!(%error, photo_id, "cannot load photo tags");
                 self.message = Some(format!("タグを読み込めません: {error}"));
                 cx.notify();
                 return;
@@ -3944,8 +3984,13 @@ impl App {
             },
             cx,
             move |this, _, cx| {
-                let _ = this.db.set_favorite(id, !favorite);
-                this.load_selected_meta(id);
+                match this.db.set_favorite(id, !favorite) {
+                    Ok(()) => this.load_selected_meta(id),
+                    Err(error) => {
+                        tracing::warn!(%error, photo_id = id, "cannot update favorite");
+                        this.message = Some(format!("お気に入りを更新できません: {error}"));
+                    }
+                }
                 cx.notify();
             },
         );
@@ -4454,8 +4499,14 @@ impl App {
                             auto_enabled: false,
                             ..CompressionProfile::default()
                         };
-                        let _ = this.db.save_profile(&profile);
-                        this.profiles = this.db.list_profiles().unwrap_or_default();
+                        if let Err(error) = this.db.save_profile(&profile) {
+                            tracing::warn!(%error, "cannot add compression profile");
+                            this.message = Some(format!("プロファイルを追加できません: {error}"));
+                        }
+                        this.profiles = this.db.list_profiles().unwrap_or_else(|error| {
+                            tracing::warn!(%error, "cannot reload compression profiles");
+                            Vec::new()
+                        });
                         this.profile_index = this
                             .profiles
                             .iter()
@@ -4650,7 +4701,10 @@ impl App {
         if let Some(profile) = self.profiles.get_mut(self.profile_index) {
             edit(profile);
             let profile = profile.clone();
-            let _ = self.db.save_profile(&profile);
+            if let Err(error) = self.db.save_profile(&profile) {
+                tracing::warn!(%error, profile = %profile.id, "cannot save compression profile");
+                self.message = Some(format!("プロファイルを保存できません: {error}"));
+            }
         }
         cx.notify();
     }
@@ -4785,7 +4839,6 @@ impl App {
         profile: &CompressionProfile,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let index = self.profile_index;
         let profile_id = profile.id.clone();
         glass_panel()
             .flex()
@@ -4826,12 +4879,7 @@ impl App {
                         Switch::new("profile-auto")
                             .checked(profile.auto_enabled)
                             .on_click(cx.listener(move |this, checked, _, cx| {
-                                if let Some(profile) = this.profiles.get_mut(index) {
-                                    profile.auto_enabled = *checked;
-                                    let profile = profile.clone();
-                                    let _ = this.db.save_profile(&profile);
-                                }
-                                cx.notify();
+                                this.edit_profile(|profile| profile.auto_enabled = *checked, cx);
                             })),
                     ),
             )
@@ -4863,12 +4911,10 @@ impl App {
                             .text_color(if active { rgb(BLUE) } else { rgb(MUTED) })
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(profile) = this.profiles.get_mut(index) {
-                                    profile.format = selected_format.clone();
-                                    let profile = profile.clone();
-                                    let _ = this.db.save_profile(&profile);
-                                }
-                                cx.notify();
+                                this.edit_profile(
+                                    |profile| profile.format = selected_format.clone(),
+                                    cx,
+                                );
                             }))
                             .child(label)
                     }),
@@ -4890,12 +4936,12 @@ impl App {
                             .label("−")
                             .small()
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(profile) = this.profiles.get_mut(index) {
-                                    profile.quality = profile.quality.saturating_sub(1).max(1);
-                                    let profile = profile.clone();
-                                    let _ = this.db.save_profile(&profile);
-                                }
-                                cx.notify();
+                                this.edit_profile(
+                                    |profile| {
+                                        profile.quality = profile.quality.saturating_sub(1).max(1);
+                                    },
+                                    cx,
+                                );
                             })),
                     )
                     .child(
@@ -4911,12 +4957,13 @@ impl App {
                             .label("＋")
                             .small()
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(profile) = this.profiles.get_mut(index) {
-                                    profile.quality = profile.quality.saturating_add(1).min(100);
-                                    let profile = profile.clone();
-                                    let _ = this.db.save_profile(&profile);
-                                }
-                                cx.notify();
+                                this.edit_profile(
+                                    |profile| {
+                                        profile.quality =
+                                            profile.quality.saturating_add(1).min(100);
+                                    },
+                                    cx,
+                                );
                             })),
                     )
                     .child(div().text_size(px(10.)).text_color(rgb(MUTED_2)).child(
@@ -6144,7 +6191,9 @@ impl App {
 
     fn set_reduce_motion(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.settings.ui_reduce_motion = enabled;
-        let _ = self.settings.save(&self.db);
+        if let Err(error) = self.settings.save(&self.db) {
+            tracing::warn!(%error, "cannot save reduce-motion setting");
+        }
         cx.set_reduce_motion(enabled);
         cx.notify();
     }
@@ -6390,6 +6439,7 @@ impl App {
         cx: &mut Context<Self>,
         apply: fn(&mut AppSettings, bool),
     ) -> impl IntoElement {
+        let label = label.to_string();
         h_flex()
             .items_center()
             .gap(px(12.))
@@ -6416,7 +6466,9 @@ impl App {
                     .checked(checked)
                     .on_click(cx.listener(move |this, value, _, cx| {
                         apply(&mut this.settings, *value);
-                        let _ = this.settings.save(&this.db);
+                        if let Err(error) = this.settings.save(&this.db) {
+                            tracing::warn!(%error, setting = %label, "cannot save setting");
+                        }
                         cx.notify();
                     })),
             )
@@ -6780,13 +6832,50 @@ fn decode_thumbnail(id: i64, cache_path: &Path, source: &Path) -> Option<(u32, i
     let cached = cache_path.is_file()
         && std::fs::metadata(cache_path)
             .map(|meta| meta.len() > 0)
-            .unwrap_or(false);
+            .unwrap_or_else(|error| {
+                tracing::debug!(
+                    %error,
+                    path = %cache_path.display(),
+                    "cannot read thumbnail cache metadata"
+                );
+                false
+            });
     let path = if cached {
         cache_path.to_path_buf()
     } else {
-        thumbnail::ensure_thumbnail(id, source).ok().flatten()?
+        match thumbnail::ensure_thumbnail(id, source) {
+            Ok(Some(path)) => path,
+            Ok(None) => {
+                tracing::debug!(
+                    photo_id = id,
+                    path = %source.display(),
+                    "thumbnail source is missing or cannot be decoded"
+                );
+                return None;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    photo_id = id,
+                    path = %source.display(),
+                    "cannot generate thumbnail"
+                );
+                return None;
+            }
+        }
     };
-    let mut buffer = image::open(path).ok()?.to_rgba8();
+    let mut buffer = match image::open(&path) {
+        Ok(image) => image.to_rgba8(),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                photo_id = id,
+                path = %path.display(),
+                "cannot decode thumbnail"
+            );
+            return None;
+        }
+    };
     for pixel in buffer.pixels_mut() {
         pixel.0.swap(0, 2);
     }
@@ -6800,11 +6889,27 @@ fn make_render_image(rgba: image::RgbaImage) -> Arc<RenderImage> {
     Arc::new(RenderImage::new(SmallVec::from_elem(frame, 1)))
 }
 
-fn load_preview(path: &Path) -> Option<Arc<RenderImage>> {
+fn load_preview(id: i64, path: &Path) -> Option<Arc<RenderImage>> {
     if !path.is_file() {
+        tracing::debug!(
+            photo_id = id,
+            path = %path.display(),
+            "preview source is missing"
+        );
         return None;
     }
-    let image = image::open(path).ok()?.thumbnail(1200, 1200).to_rgba8();
+    let image = match image::open(path) {
+        Ok(image) => image.thumbnail(1200, 1200).to_rgba8(),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                photo_id = id,
+                path = %path.display(),
+                "cannot decode photo preview"
+            );
+            return None;
+        }
+    };
     let mut buffer = image;
     for pixel in buffer.pixels_mut() {
         pixel.0.swap(0, 2);
@@ -7394,7 +7499,7 @@ fn main() {
         tracing::warn!("file logging is unavailable; using stderr only");
     }
     if timing_enabled() {
-        let _ = process_start();
+        process_start();
     }
     let options = parse_args(std::env::args());
     if options.background {

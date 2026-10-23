@@ -187,14 +187,26 @@ fn copy_atomic(source: &Path, target: &Path) -> Result<()> {
     let source_len = fs::metadata(source)?.len();
     let copied_len = fs::metadata(&temp)?.len();
     if source_len != copied_len {
-        let _ = fs::remove_file(&temp);
+        if let Err(error) = fs::remove_file(&temp) {
+            tracing::debug!(
+                %error,
+                path = %temp.display(),
+                "cannot remove temporary copy after size mismatch"
+            );
+        }
         return Err(CoreError::Invalid(format!(
             "copy size mismatch: {} != {}",
             source_len, copied_len
         )));
     }
     if let Err(error) = fs::rename(&temp, target) {
-        let _ = fs::remove_file(&temp);
+        if let Err(cleanup) = fs::remove_file(&temp) {
+            tracing::debug!(
+                %cleanup,
+                path = %temp.display(),
+                "cannot remove temporary copy after rename failure"
+            );
+        }
         return Err(CoreError::Io(error));
     }
     Ok(())
