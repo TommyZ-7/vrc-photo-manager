@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -13,9 +14,9 @@ use vrc_photo_core::compressor;
 use vrc_photo_core::db::Db;
 use vrc_photo_core::linker;
 use vrc_photo_core::log_parser::LogIngestor;
-use vrc_photo_core::model::{CompressionJob, CompressionProfile, QueueStatus};
+use vrc_photo_core::model::{CompressionJob, CompressionProfile, DaemonOperation, QueueStatus};
 use vrc_photo_core::photo_filename::is_source_photo;
-use vrc_photo_core::scanner::{ScanReport, scan_and_index, scan_one};
+use vrc_photo_core::scanner::{ScanFailure, ScanReport, scan_and_index, scan_one};
 use vrc_photo_core::settings::{AppSettings, detect_vrchat_paths};
 use vrc_photo_core::thumbnail;
 
@@ -42,6 +43,43 @@ struct LogTail {
     path: PathBuf,
     ingestor: LogIngestor,
     offset: i64,
+    failed_offset: Option<i64>,
+    failed_attempts: u8,
+}
+
+impl LogTail {
+    /// Remembers a failed line at `offset`. The caller retries the line until it
+    /// has failed three times, then this returns `true` so the poison line can
+    /// be skipped.
+    fn note_line_failure(&mut self, offset: i64) -> bool {
+        if self.failed_offset != Some(offset) {
+            self.failed_offset = Some(offset);
+            self.failed_attempts = 1;
+            return false;
+        }
+        self.failed_attempts = self.failed_attempts.saturating_add(1);
+        if self.failed_attempts >= 3 {
+            self.failed_offset = None;
+            self.failed_attempts = 0;
+            return true;
+        }
+        false
+    }
+}
+
+#[derive(Debug, Default)]
+struct LogPass {
+    processed: usize,
+    skipped: usize,
+    failure: Option<String>,
+}
+
+impl LogPass {
+    /// A pass can only clear a previous error when it processed real log data
+    /// without skipping or failing on any line.
+    fn is_clean(&self) -> bool {
+        self.processed > 0 && self.skipped == 0 && self.failure.is_none()
+    }
 }
 
 pub struct Daemon {
@@ -62,6 +100,7 @@ pub struct Daemon {
     last_autostart_check: std::time::Instant,
     last_heartbeat: std::time::Instant,
     thumbnail_dir: PathBuf,
+    last_errors: HashMap<DaemonOperation, String>,
 }
 
 impl Daemon {
@@ -95,6 +134,17 @@ impl Daemon {
         let tray_enabled = settings.tray;
         let thumbnail_dir = vrc_photo_core::thumbnail::thumbnails_dir()
             .unwrap_or_else(|| PathBuf::from("thumbnails"));
+        let last_errors = db
+            .daemon_errors()
+            .context("cannot load daemon errors")?
+            .into_iter()
+            .map(|error| {
+                (
+                    error.operation,
+                    error_signature(&error.message, error.detail.as_deref()),
+                )
+            })
+            .collect();
 
         Ok(Self {
             db: Arc::new(Mutex::new(db)),
@@ -114,6 +164,7 @@ impl Daemon {
             last_autostart_check: std::time::Instant::now(),
             last_heartbeat: std::time::Instant::now() - Duration::from_secs(10),
             thumbnail_dir,
+            last_errors,
         })
     }
 
@@ -140,6 +191,39 @@ impl Daemon {
 
     pub fn settings(&self) -> &AppSettings {
         &self.settings
+    }
+
+    /// Persists a daemon failure unless the same message/detail was already
+    /// reported, so `attempts` counts distinct reports rather than poll ticks.
+    fn report_daemon_error(
+        &mut self,
+        operation: DaemonOperation,
+        message: &str,
+        detail: Option<&str>,
+    ) -> Result<()> {
+        let signature = error_signature(message, detail);
+        if self.last_errors.get(&operation) == Some(&signature) {
+            return Ok(());
+        }
+        {
+            let db = self.db.lock().unwrap();
+            db.record_daemon_error(operation, message, detail)?;
+        }
+        self.last_errors.insert(operation, signature);
+        Ok(())
+    }
+
+    /// Removes a previously reported failure once the operation recovers.
+    fn clear_daemon_error(&mut self, operation: DaemonOperation) -> Result<()> {
+        if !self.last_errors.contains_key(&operation) {
+            return Ok(());
+        }
+        {
+            let db = self.db.lock().unwrap();
+            db.clear_daemon_error(operation)?;
+        }
+        self.last_errors.remove(&operation);
+        Ok(())
     }
 
     pub fn run_once(&mut self) -> Result<()> {
@@ -221,6 +305,13 @@ impl Daemon {
                 && let Err(error) = self.index_dirty_paths()
             {
                 tracing::error!(%error, "incremental photo scan failed");
+                if let Err(report_error) = self.report_daemon_error(
+                    DaemonOperation::Scan,
+                    "写真フォルダの差分スキャンに失敗しました",
+                    Some(&error.to_string()),
+                ) {
+                    tracing::error!(%report_error, "cannot record scan error");
+                }
             }
             if self.last_log_poll.elapsed() >= LOG_INTERVAL {
                 if let Err(error) = self.ingest_logs() {
@@ -315,38 +406,54 @@ impl Daemon {
     fn scan_photos(&mut self) -> Result<ScanReport> {
         let mut report = ScanReport::default();
         let roots = self.settings.photo_roots();
-        if roots.is_empty() {
-            return Ok(report);
-        }
-        let db = self.db.lock().unwrap();
-        let initial_scan = db.count_photos()? == 0;
-        for root in roots {
-            if !root.is_dir() {
-                tracing::warn!(path = %root.display(), "photo root does not exist");
-                continue;
-            }
-            let root_id = db.add_root(&root.to_string_lossy(), "reference")?;
-            let existing = db.photos_for_root(root_id)?;
-            let root_report = scan_and_index(&db, root_id, &root)?;
-            let seen: std::collections::HashSet<&str> =
-                root_report.seen_paths.iter().map(String::as_str).collect();
-            for (id, path) in existing {
-                if !seen.contains(path.as_str()) {
-                    let _ = db.mark_missing(id);
+        if !roots.is_empty() {
+            let db = self.db.lock().unwrap();
+            let initial_scan = db.count_photos()? == 0;
+            for root in roots {
+                if !root.is_dir() {
+                    tracing::warn!(path = %root.display(), "photo root does not exist");
+                    report.failures.push(ScanFailure {
+                        path: root,
+                        message: "写真フォルダが見つかりません".to_string(),
+                    });
+                    continue;
                 }
+                let root_id = db.add_root(&root.to_string_lossy(), "reference")?;
+                let existing = db.photos_for_root(root_id)?;
+                let root_report = match scan_and_index(&db, root_id, &root) {
+                    Ok(root_report) => root_report,
+                    Err(error) => {
+                        tracing::error!(path = %root.display(), %error, "photo scan failed");
+                        report.failures.push(ScanFailure {
+                            path: root,
+                            message: error.to_string(),
+                        });
+                        continue;
+                    }
+                };
+                if root_report.failures.is_empty() {
+                    let seen: std::collections::HashSet<&str> =
+                        root_report.seen_paths.iter().map(String::as_str).collect();
+                    for (id, path) in existing {
+                        if !seen.contains(path.as_str()) {
+                            let _ = db.mark_missing(id);
+                        }
+                    }
+                }
+                report.found += root_report.found;
+                report.indexed += root_report.indexed;
+                report.skipped += root_report.skipped;
+                report.new_ids.extend(root_report.new_ids);
+                report.failures.extend(root_report.failures);
             }
-            report.found += root_report.found;
-            report.indexed += root_report.indexed;
-            report.skipped += root_report.skipped;
-            report.new_ids.extend(root_report.new_ids);
+            if self.settings.auto_compress
+                && !report.new_ids.is_empty()
+                && (!initial_scan || self.settings.auto_compress_backlog)
+            {
+                enqueue_auto_jobs(&db, &report.new_ids)?;
+            }
         }
-        if self.settings.auto_compress
-            && !report.new_ids.is_empty()
-            && (!initial_scan || self.settings.auto_compress_backlog)
-        {
-            enqueue_auto_jobs(&db, &report.new_ids)?;
-        }
-        drop(db);
+        self.report_scan_outcome(&report)?;
         if report.indexed > 0 {
             self.link_unlinked()?;
         }
@@ -358,15 +465,74 @@ impl Daemon {
         Ok(report)
     }
 
+    /// Records one `Scan` error summarizing the current failures, or clears a
+    /// stale error when the full scan had none.
+    fn report_scan_outcome(&mut self, report: &ScanReport) -> Result<()> {
+        if report.failures.is_empty() {
+            return self.clear_daemon_error(DaemonOperation::Scan);
+        }
+        let detail = report
+            .failures
+            .iter()
+            .take(5)
+            .map(|failure| format!("{}: {}", failure.path.display(), failure.message))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let message = format!(
+            "写真フォルダのスキャンで{}件の失敗がありました",
+            report.failures.len()
+        );
+        self.report_daemon_error(DaemonOperation::Scan, &message, Some(&detail))
+    }
+
     fn ingest_logs(&mut self) -> Result<()> {
         let Some(log_dir) = self.settings.log_dir() else {
+            self.clear_daemon_error(DaemonOperation::Log)?;
             return Ok(());
         };
-        let Some(path) = latest_log_file(&log_dir) else {
+        if !log_dir.is_dir() {
+            self.report_daemon_error(
+                DaemonOperation::Log,
+                &format!("ログフォルダが見つかりません: {}", log_dir.display()),
+                None,
+            )?;
             return Ok(());
+        }
+        let path = match latest_log_file(&log_dir) {
+            Ok(Some(path)) => path,
+            Ok(None) => return Ok(()),
+            Err(error) => {
+                self.report_daemon_error(
+                    DaemonOperation::Log,
+                    "ログフォルダを読み取れません",
+                    Some(&error.to_string()),
+                )?;
+                return Ok(());
+            }
         };
+        let pass = self.ingest_log_pass(&path)?;
+        if let Some(failure) = &pass.failure {
+            self.report_daemon_error(
+                DaemonOperation::Log,
+                "ログの取り込みに失敗しました",
+                Some(failure),
+            )?;
+        } else if pass.is_clean() {
+            self.clear_daemon_error(DaemonOperation::Log)?;
+        }
+        Ok(())
+    }
+
+    fn ingest_log_pass(&mut self, path: &Path) -> Result<LogPass> {
+        let mut pass = LogPass::default();
         let path_string = path.to_string_lossy().to_string();
-        let metadata = std::fs::metadata(&path)?;
+        let metadata = match std::fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                pass.failure = Some(format!("{}: {error}", path.display()));
+                return Ok(pass);
+            }
+        };
         let size = metadata.len() as i64;
         let mtime = metadata
             .modified()
@@ -398,9 +564,11 @@ impl Daemon {
                 db.log_offset(&path_string)?.unwrap_or(0)
             };
             self.log_tail = Some(LogTail {
-                path: path.clone(),
+                path: path.to_path_buf(),
                 ingestor: LogIngestor::new(&path_string),
                 offset,
+                failed_offset: None,
+                failed_attempts: 0,
             });
         }
 
@@ -408,33 +576,76 @@ impl Daemon {
         if size < tail.offset {
             tail.offset = 0;
             tail.ingestor = LogIngestor::new(&path_string);
+            tail.failed_offset = None;
+            tail.failed_attempts = 0;
         }
-        let (lines, new_offset) = read_new_lines(&path, tail.offset)?;
+        let (lines, new_offset) = match read_new_lines(path, tail.offset) {
+            Ok(result) => result,
+            Err(error) => {
+                pass.failure = Some(format!("{}: {error}", path.display()));
+                return Ok(pass);
+            }
+        };
         if lines.is_empty() {
-            return Ok(());
+            return Ok(pass);
         }
 
         let db = self.db.lock().unwrap();
-        for line in &lines {
-            if let Err(error) = tail.ingestor.ingest_line(&db, line) {
-                tracing::debug!(%error, "cannot parse log line");
+        let mut line_start = tail.offset;
+        for (line, line_end) in lines {
+            match tail.ingestor.ingest_line(&db, &line) {
+                Ok(_) => {
+                    db.set_log_offset(&path_string, size, mtime, line_end, PARSER_VERSION)?;
+                    tail.offset = line_end;
+                    line_start = line_end;
+                    pass.processed += 1;
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "cannot parse log line");
+                    pass.failure
+                        .get_or_insert_with(|| format!("{}: {error}", path.display()));
+                    if !tail.note_line_failure(line_start) {
+                        break;
+                    }
+                    pass.skipped += 1;
+                    db.set_log_offset(&path_string, size, mtime, line_end, PARSER_VERSION)?;
+                    tail.offset = line_end;
+                    line_start = line_end;
+                }
             }
         }
-        db.set_log_offset(&path_string, size, mtime, new_offset, PARSER_VERSION)?;
+        if pass.failure.is_none() && tail.offset != new_offset {
+            db.set_log_offset(&path_string, size, mtime, new_offset, PARSER_VERSION)?;
+            tail.offset = new_offset;
+        }
         drop(db);
-        tail.offset = new_offset;
-        self.link_unlinked()?;
         self.refresh_status()?;
-        Ok(())
+        self.link_unlinked()?;
+        Ok(pass)
     }
 
-    fn link_unlinked(&self) -> Result<()> {
-        let db = self.db.lock().unwrap();
-        let linked = linker::relink_unlinked(&db, 2000)?;
-        if linked > 0 {
-            tracing::info!(linked, "linked photos to log context");
+    fn link_unlinked(&mut self) -> Result<()> {
+        let result = {
+            let db = self.db.lock().unwrap();
+            linker::relink_unlinked(&db, 2000)
+        };
+        match result {
+            Ok(linked) => {
+                if linked > 0 {
+                    tracing::info!(linked, "linked photos to log context");
+                }
+                self.clear_daemon_error(DaemonOperation::Link)
+            }
+            Err(error) => {
+                tracing::error!(%error, "cannot link photos to log context");
+                self.report_daemon_error(
+                    DaemonOperation::Link,
+                    "写真とログの紐付けに失敗しました",
+                    Some(&error.to_string()),
+                )?;
+                Err(error.into())
+            }
         }
-        Ok(())
     }
 
     fn refresh_status(&self) -> Result<()> {
@@ -657,6 +868,13 @@ impl Drop for Daemon {
     }
 }
 
+fn error_signature(message: &str, detail: Option<&str>) -> String {
+    match detail {
+        Some(detail) => format!("{message}\n{detail}"),
+        None => message.to_string(),
+    }
+}
+
 fn enqueue_auto_jobs(db: &Db, new_ids: &[i64]) -> Result<()> {
     let profiles = db.list_profiles()?;
     let auto_profiles: Vec<&CompressionProfile> = profiles
@@ -780,9 +998,15 @@ fn process_job(db: &Arc<Mutex<Db>>, job: &CompressionJob) -> Result<()> {
     Ok(())
 }
 
-fn latest_log_file(dir: &Path) -> Option<PathBuf> {
-    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
-        .ok()?
+fn latest_log_file(dir: &Path) -> Result<Option<PathBuf>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("cannot read log folder {}", dir.display()));
+        }
+    };
+    let mut files: Vec<PathBuf> = entries
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| {
@@ -796,27 +1020,31 @@ fn latest_log_file(dir: &Path) -> Option<PathBuf> {
         })
         .collect();
     files.sort();
-    files.pop()
+    Ok(files.pop())
 }
 
 /// Reads complete lines from `offset`, leaving a trailing partial line for the
-/// next poll.
-fn read_new_lines(path: &Path, offset: i64) -> Result<(Vec<String>, i64)> {
+/// next poll. Each line is returned with its end byte offset.
+fn read_new_lines(path: &Path, offset: i64) -> Result<(Vec<(String, i64)>, i64)> {
     let mut file = File::open(path)?;
     file.seek(SeekFrom::Start(offset.max(0) as u64))?;
     let mut buffer = Vec::new();
     file.read_to_end(&mut buffer)?;
-    let Some(last_newline) = buffer.iter().rposition(|byte| *byte == b'\n') else {
-        return Ok((Vec::new(), offset));
-    };
-    let consumed = last_newline + 1;
-    let text = String::from_utf8_lossy(&buffer[..consumed]);
-    let lines = text
-        .lines()
-        .map(|line| line.trim_end_matches('\r').to_string())
-        .filter(|line| !line.is_empty())
-        .collect();
-    Ok((lines, offset + consumed as i64))
+    let mut lines = Vec::new();
+    let mut line_start = 0;
+    for (index, byte) in buffer.iter().enumerate() {
+        if *byte != b'\n' {
+            continue;
+        }
+        let line_end = index + 1;
+        let text = String::from_utf8_lossy(&buffer[line_start..index]);
+        let line = text.trim_end_matches('\r');
+        if !line.is_empty() {
+            lines.push((line.to_string(), offset + line_end as i64));
+        }
+        line_start = line_end;
+    }
+    Ok((lines, offset + line_start as i64))
 }
 
 #[cfg(test)]
@@ -825,21 +1053,145 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn reads_only_complete_lines() {
+    fn reads_only_complete_lines_with_offsets() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("output_log_test.txt");
         let mut file = File::create(&path).unwrap();
         write!(file, "line1\nline2\npart").unwrap();
         drop(file);
-        let (lines, offset) = read_new_lines(&path, 0).unwrap();
-        assert_eq!(lines, vec!["line1", "line2"]);
-        assert_eq!(offset, 12);
 
-        let mut file = File::open(&path).unwrap();
-        file.seek(SeekFrom::Start(offset as u64)).unwrap();
-        let mut rest = String::new();
-        file.read_to_string(&mut rest).unwrap();
-        assert_eq!(rest, "part");
+        let (lines, offset) = read_new_lines(&path, 0).unwrap();
+        assert_eq!(
+            lines,
+            vec![("line1".to_string(), 6), ("line2".to_string(), 12)]
+        );
+        assert_eq!(offset, 12);
+    }
+
+    #[test]
+    fn poison_line_is_skipped_only_after_three_attempts() {
+        let mut tail = LogTail {
+            path: PathBuf::new(),
+            ingestor: LogIngestor::new("log"),
+            offset: 0,
+            failed_offset: None,
+            failed_attempts: 0,
+        };
+        assert!(!tail.note_line_failure(0));
+        assert!(!tail.note_line_failure(0));
+        assert!(tail.note_line_failure(0));
+        assert_eq!(tail.failed_attempts, 0);
+        assert!(!tail.note_line_failure(10));
+    }
+
+    #[test]
+    fn stale_daemon_errors_clear_after_a_successful_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let db_path = dir.path().join("library.db");
+
+        {
+            let db = Db::open(&db_path).unwrap();
+            db.record_daemon_error(DaemonOperation::Scan, "old scan", None)
+                .unwrap();
+            db.record_daemon_error(DaemonOperation::Log, "old log", None)
+                .unwrap();
+            db.record_daemon_error(DaemonOperation::Link, "old link", None)
+                .unwrap();
+        }
+        std::fs::write(
+            log_dir.join("output_log_2026-10-21_21-00-00.txt"),
+            "2026.10.21 21:23:12 Debug      -  [Behaviour] Unloading scenes\n",
+        )
+        .unwrap();
+
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        daemon.run_once().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        assert!(db.daemon_errors().unwrap().is_empty());
+    }
+
+    #[test]
+    fn missing_photo_root_records_a_scan_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let db_path = dir.path().join("library.db");
+
+        let mut daemon = Daemon::open(&db_path, Some(missing), Some(log_dir)).unwrap();
+        daemon.run_once().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        let errors = db.daemon_errors().unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].operation, DaemonOperation::Scan);
+        assert!(errors[0].message.contains("写真フォルダ"));
+    }
+
+    #[test]
+    fn missing_log_folder_records_a_log_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        let log_dir = dir.path().join("missing-logs");
+        let db_path = dir.path().join("library.db");
+
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        daemon.run_once().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        let errors = db.daemon_errors().unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].operation, DaemonOperation::Log);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_failure_does_not_mark_unseen_photos_missing() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let photo_path = photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&photo_path);
+        let db_path = dir.path().join("library.db");
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir.clone()), Some(log_dir)).unwrap();
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+        daemon.run_once().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        let photo = db
+            .photo_by_path(photo_path.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        drop(db);
+
+        let locked = photo_dir.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&locked).is_ok() {
+            // Privileged environments bypass directory permissions, so the
+            // unreadable-subtree failure cannot be simulated here.
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::remove_dir(&locked).unwrap();
+            eprintln!("skipping permission lock: current user can read mode 000");
+            return;
+        }
+        std::fs::remove_file(&photo_path).unwrap();
+        daemon.run_once().unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        let photo = db.photo_by_id(photo.id).unwrap().unwrap();
+        assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Present);
     }
 
     #[test]
@@ -1073,7 +1425,7 @@ mod tests {
         std::fs::write(dir.path().join("output_log_2026-10-20_10-00-00.txt"), "").unwrap();
         std::fs::write(dir.path().join("output_log_2026-10-21_10-00-00.txt"), "").unwrap();
         std::fs::write(dir.path().join("other.txt"), "").unwrap();
-        let latest = latest_log_file(dir.path()).unwrap();
+        let latest = latest_log_file(dir.path()).unwrap().unwrap();
         assert_eq!(
             latest.file_name().unwrap(),
             "output_log_2026-10-21_10-00-00.txt"
