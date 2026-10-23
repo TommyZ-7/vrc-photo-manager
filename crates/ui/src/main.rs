@@ -19,10 +19,11 @@ use smallvec::SmallVec;
 use vrc_photo_core::db::Db;
 use vrc_photo_core::importer::{self, ImportIssue, ImportIssueKind, ImportMode};
 use vrc_photo_core::linker;
+use vrc_photo_core::logging::{DAEMON_LOG_FILE, UI_LOG_FILE, logs_dir};
 use vrc_photo_core::model::{
-    CompressionFormat, CompressionJob, CompressionProfile, DaemonError, Derivative, LibraryStats,
-    MAX_JOB_RETRIES, NewPhoto, Photo, PhotoContext, PhotoIndexEntry, PhotoPlayer, PhotoSort,
-    PhotoTextFilter, QueueStatus,
+    CompressionFormat, CompressionJob, CompressionProfile, DaemonCommand, DaemonError,
+    DaemonOperation, Derivative, LibraryStats, MAX_JOB_RETRIES, NewPhoto, Photo, PhotoContext,
+    PhotoIndexEntry, PhotoPlayer, PhotoSort, PhotoTextFilter, QueueStatus,
 };
 use vrc_photo_core::scanner;
 use vrc_photo_core::scanner::ScanFailure;
@@ -1418,6 +1419,17 @@ impl App {
                 tracing::warn!(%error, "cannot retry failed compression jobs");
                 self.message = Some(format!("再試行できません: {error}"));
             }
+        }
+        cx.notify();
+    }
+
+    fn request_daemon_command(&mut self, command: DaemonCommand, cx: &mut Context<Self>) {
+        match self.db.request_daemon_command(command) {
+            Ok(true) => {
+                self.message = Some("再試行を要求しました。デーモンが処理します。".to_string())
+            }
+            Ok(false) => self.message = Some("すでに再試行を要求済みです。".to_string()),
+            Err(error) => self.message = Some(format!("再試行を要求できません: {error}")),
         }
         cx.notify();
     }
@@ -5836,6 +5848,9 @@ impl App {
                                 format!("{} 枚", self.stats.photo_count),
                             )),
                     )
+                    .when(!self.daemon_errors.is_empty(), |this| {
+                        this.child(self.daemon_error_card(cx))
+                    })
                     .child(
                         h_flex()
                             .gap(px(24.))
@@ -5913,6 +5928,7 @@ impl App {
                                     ),
                             ),
                     )
+                    .child(self.log_card(cx))
                     .child(
                         div()
                             .p(px(14.))
@@ -5925,6 +5941,205 @@ impl App {
                             .child("VRChat本体は出力ログを24時間で削除します。アプリ側には解析済みイベントだけを保存します。"),
                     ),
             )
+    }
+
+    fn daemon_error_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut card = glass_panel()
+            .flex()
+            .flex_col()
+            .p(px(16.))
+            .gap(px(10.))
+            .bg(rgb(PANEL))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .text_size(px(17.))
+                            .font_semibold()
+                            .text_color(rgb(TEXT))
+                            .child("処理エラー"),
+                    )
+                    .child(self.badge(&format!("{} 件", self.daemon_errors.len()), RED, 0x2a1414)),
+            );
+        for error in &self.daemon_errors {
+            let command = error.operation.retry_command();
+            card = card.child(
+                v_flex()
+                    .gap(px(8.))
+                    .p(px(12.))
+                    .rounded(px(10.))
+                    .bg(rgb(PANEL_2))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(self.badge(
+                                daemon_operation_label(error.operation),
+                                RED,
+                                0x2a1414,
+                            ))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(RED))
+                                    .child(error.message.clone()),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!(
+                                    "retry-daemon-{}",
+                                    error.operation.as_str()
+                                )))
+                                .label("再試行")
+                                .small()
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| this.request_daemon_command(command, cx),
+                                )),
+                            ),
+                    )
+                    .when_some(error.detail.clone(), |this, detail| {
+                        this.child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .p(px(8.))
+                                .rounded(px(8.))
+                                .bg(rgb(BG))
+                                .font_family("monospace")
+                                .whitespace_normal()
+                                .text_size(px(10.))
+                                .text_color(rgb(MUTED))
+                                .child(detail),
+                        )
+                    })
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(12.))
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(MUTED_2))
+                                    .child(format!("検出回数 {}", error.attempts)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(MUTED_2))
+                                    .child(format_timestamp(&error.occurred_at)),
+                            ),
+                    ),
+            );
+        }
+        card.when(!self.daemon_active, |this| {
+            this.child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(rgb(MUTED_2))
+                    .child("デーモン停止中です。起動後に実行されます。"),
+            )
+        })
+    }
+
+    fn log_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let dir = logs_dir();
+        let mut card = glass_panel()
+            .flex()
+            .flex_col()
+            .p(px(24.))
+            .gap(px(16.))
+            .bg(rgb(PANEL))
+            .child(
+                div()
+                    .text_size(px(17.))
+                    .font_semibold()
+                    .text_color(rgb(TEXT))
+                    .child("ログ"),
+            )
+            .child(
+                v_flex()
+                    .gap(px(6.))
+                    .child(self.section_label("保存先"))
+                    .child(match &dir {
+                        Some(dir) => div()
+                            .min_w_0()
+                            .font_family("monospace")
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED))
+                            .child(dir.display().to_string()),
+                        None => div()
+                            .text_size(px(10.))
+                            .text_color(rgb(RED))
+                            .child("ログフォルダを特定できません"),
+                    }),
+            )
+            .child(
+                v_flex()
+                    .gap(px(4.))
+                    .child(self.section_label("ファイル"))
+                    .child(
+                        div()
+                            .font_family("monospace")
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED_2))
+                            .child(format!("UI: {UI_LOG_FILE}")),
+                    )
+                    .child(
+                        div()
+                            .font_family("monospace")
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED_2))
+                            .child(format!("デーモン: {DAEMON_LOG_FILE}")),
+                    ),
+            );
+        if dir.is_some() {
+            card = card.child(
+                h_flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(
+                        Button::new("open-logs-folder")
+                            .label("ログフォルダを開く")
+                            .small()
+                            .on_click(cx.listener(|this, _, _, cx| this.open_logs_folder(cx))),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED_2))
+                            .child("OSのファイラーで開きます"),
+                    ),
+            );
+        } else {
+            card = card.child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(rgb(MUTED_2))
+                    .child("ファイルへのログ出力は利用できません。"),
+            );
+        }
+        card
+    }
+
+    fn open_logs_folder(&mut self, cx: &mut Context<Self>) {
+        let Some(dir) = logs_dir() else {
+            self.message = Some("ログフォルダを特定できません".to_string());
+            cx.notify();
+            return;
+        };
+        let result = std::fs::create_dir_all(&dir)
+            .map_err(|error| error.to_string())
+            .and_then(|()| open_path(&dir));
+        self.message = Some(match result {
+            Ok(()) => format!("ログフォルダを開きました: {}", dir.display()),
+            Err(error) => format!("ログフォルダを開けません: {error}"),
+        });
+        cx.notify();
     }
 
     fn set_reduce_motion(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -6005,8 +6220,7 @@ impl App {
                                                     .read(cx)
                                                     .value()
                                                     .to_string();
-                                                let previous_roots =
-                                                    this.settings.photo_roots.clone();
+                                                let previous = this.settings.clone();
                                                 this.settings.photo_roots =
                                                     if root.trim().is_empty() {
                                                         Vec::new()
@@ -6025,15 +6239,43 @@ impl App {
                                                         Some(imported.trim().to_string())
                                                     };
                                                 let root_changed =
-                                                    this.settings.photo_roots != previous_roots;
-                                                let _ = this.settings.save(&this.db);
+                                                    this.settings.photo_roots != previous.photo_roots;
+                                                let paths_changed = root_changed
+                                                    || this.settings.log_dir != previous.log_dir
+                                                    || this.settings.managed_dir
+                                                        != previous.managed_dir;
+                                                if let Err(error) = this.settings.save(&this.db) {
+                                                    this.settings = previous;
+                                                    this.message = Some(format!(
+                                                        "設定を保存できません: {error}"
+                                                    ));
+                                                    tracing::warn!(
+                                                        %error,
+                                                        "cannot save path settings"
+                                                    );
+                                                    cx.notify();
+                                                    return;
+                                                }
                                                 if root_changed {
                                                     this.reload_library(false, cx);
                                                 }
-                                                this.message = Some(
-                                                    "保存しました。デーモン再起動で監視に反映されます。"
-                                                        .to_string(),
-                                                );
+                                                if paths_changed {
+                                                    let requested = this
+                                                        .db
+                                                        .request_daemon_command(DaemonCommand::Rescan);
+                                                    this.message = Some(match requested {
+                                                        Ok(_) => "保存しました。デーモンに再スキャンを要求しました（停止中なら起動後に実行）".to_string(),
+                                                        Err(error) => {
+                                                            tracing::warn!(
+                                                                %error,
+                                                                "cannot request daemon rescan"
+                                                            );
+                                                            "保存しました。デーモン再起動後に反映されます。".to_string()
+                                                        }
+                                                    });
+                                                } else {
+                                                    this.message = Some("保存しました。".to_string());
+                                                }
                                                 cx.notify();
                                             })),
                                     )
@@ -6113,6 +6355,7 @@ impl App {
                                     ),
                             ),
                     )
+                    .child(self.log_card(cx))
                     .child(
                         h_flex()
                             .gap(px(8.))
@@ -6762,6 +7005,25 @@ fn alert_summaries(
     rows
 }
 
+fn daemon_operation_label(operation: DaemonOperation) -> &'static str {
+    match operation {
+        DaemonOperation::Scan => "写真スキャン",
+        DaemonOperation::Log => "ログ解析",
+        DaemonOperation::Link => "写真の紐付け",
+    }
+}
+
+fn format_timestamp(raw: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .map(|timestamp| {
+            timestamp
+                .with_timezone(&chrono::Local)
+                .format("%m/%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|_| raw.to_string())
+}
+
 fn average_bgra(bytes: &[u8]) -> u32 {
     let mut blue = 0u64;
     let mut green = 0u64;
@@ -7005,6 +7267,62 @@ fn format_label(format: &CompressionFormat) -> String {
     .to_string()
 }
 
+#[cfg(target_os = "windows")]
+fn open_path(path: &Path) -> Result<(), String> {
+    // explorer.exe reports a non-zero exit code even when it opens the folder,
+    // so success is defined by the process starting.
+    Command::new("explorer")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("explorer を起動できません: {error}"))
+}
+
+#[cfg(target_os = "macos")]
+fn open_path(path: &Path) -> Result<(), String> {
+    let status = Command::new("open")
+        .arg(path)
+        .status()
+        .map_err(|error| format!("open を起動できません: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("open が終了コード {status} で失敗しました"))
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_path(path: &Path) -> Result<(), String> {
+    match open_status("xdg-open", &[], path) {
+        Ok(()) => Ok(()),
+        Err(first) => {
+            open_status("gio", &["open"], path).map_err(|second| format!("{first} / {second}"))
+        }
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_status(program: &str, args: &[&str], path: &Path) -> Result<(), String> {
+    let status = Command::new(program)
+        .args(args)
+        .arg(path)
+        .status()
+        .map_err(|error| format!("{program} を起動できません: {error}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("{program} が終了コード {status} で失敗しました"))
+    }
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+fn open_path(path: &Path) -> Result<(), String> {
+    Err(format!(
+        "この環境ではフォルダを開けません: {}",
+        path.display()
+    ))
+}
+
 fn daemon_binary_path() -> Option<PathBuf> {
     let name = if cfg!(target_os = "windows") {
         "vrc-photo-daemon.exe"
@@ -7134,8 +7452,9 @@ mod tests {
         CountDebounce, DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH,
         MAX_PAGES, PAGE_SIZE, PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex, PhotoPageCache, Screen,
         THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, YearBucket, alert_summaries,
-        anchor_photo_id, apply_library_index, average_bgra, build_year_buckets, decode_thumbnail,
-        demo_thumb_path, ease_motion, first_visible_photo, format_captured_month, format_count,
+        anchor_photo_id, apply_library_index, average_bgra, build_year_buckets,
+        daemon_operation_label, decode_thumbnail, demo_thumb_path, ease_motion,
+        first_visible_photo, format_captured_month, format_count, format_timestamp,
         grid_available_width, grid_columns, grid_columns_for, has_tag_filter, import_issue_counts,
         job_retry_available, job_retry_label, lerp_color, list_scroll_top, moved_profile_order,
         next_focus_index, normalize_note, parse_args, parse_window_size, rail_label_hidden_by_pill,
@@ -7152,7 +7471,8 @@ mod tests {
     use vrc_photo_core::error::CoreError;
     use vrc_photo_core::importer::{ImportIssue, ImportIssueKind};
     use vrc_photo_core::model::{
-        CompressionJob, Photo, PhotoIndexEntry, PhotoStatus, PhotoTextFilter, QueueStatus,
+        CompressionJob, DaemonOperation, Photo, PhotoIndexEntry, PhotoStatus, PhotoTextFilter,
+        QueueStatus,
     };
 
     #[test]
@@ -7231,6 +7551,31 @@ mod tests {
         assert_eq!(rows[1].0, Screen::Monitor);
         assert_eq!(rows[2].0, Screen::Photos);
         assert!(alert_summaries(0, 0, 0).is_empty());
+    }
+
+    #[test]
+    fn daemon_operation_labels_cover_every_operation() {
+        assert_eq!(
+            daemon_operation_label(DaemonOperation::Scan),
+            "写真スキャン"
+        );
+        assert_eq!(daemon_operation_label(DaemonOperation::Log), "ログ解析");
+        assert_eq!(
+            daemon_operation_label(DaemonOperation::Link),
+            "写真の紐付け"
+        );
+    }
+
+    #[test]
+    fn timestamp_formats_rfc3339_and_falls_back_to_raw() {
+        let raw = "2026-10-23T03:04:05+00:00";
+        let expected = chrono::DateTime::parse_from_rfc3339(raw)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%m/%d %H:%M")
+            .to_string();
+        assert_eq!(format_timestamp(raw), expected);
+        assert_eq!(format_timestamp("not a timestamp"), "not a timestamp");
     }
 
     #[test]
