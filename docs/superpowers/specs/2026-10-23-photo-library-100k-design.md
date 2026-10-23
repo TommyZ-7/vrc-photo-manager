@@ -232,8 +232,7 @@ actually available to that browser:
   argument and no inspector width is subtracted.
 
 Add `search_available_width(...)` next to `grid_available_width` and unit tests
-at 1280×820 and 1440×900 for each sidebar state (and confirm the inspector
-state does not change the search column count). Both helpers feed the existing
+at 1280×820 and 1440×900 for each sidebar state. Both helpers feed the existing
 `grid_columns` / `MIN_CARD_WIDTH` rule. At 1280 px with the sidebar expanded
 and the filter panel shown, the search viewport gets 3 columns; at 1440 px it
 gets 4; at 1080 px it gets 2.
@@ -599,7 +598,7 @@ Do not use `photos_by_ids` with all 100k IDs; pages are always <= 256.
 | `photo_index` 100k | 61.6 ms (release test); 51–55 ms on UI reload |
 | `photos_by_ids` 256 | 0.58 ms (release test); 0.41–0.57 ms in the UI |
 | `photo_index_text` 100k | 60.9 ms; 0.78 ms for a 529-result background search |
-| First frame, warm | 229–243 ms |
+| First frame, warm | 229–249 ms (4 runs; max 248.65 ms) |
 | First frame, cold | 1.4995 s |
 | Startup DB work | ~108 ms warm / ~140 ms cold (the index is built twice) |
 | Seed 100k rows | 0.455 s |
@@ -692,7 +691,7 @@ photos), and the thumbnail cache at 192 decoded entries (~50 MB estimated).
 | Page fetch blocks the UI | Page size 256 by primary key is a few milliseconds; at most two pages per deferred callback. Log a warning above 16 ms and move the loader to a read-only background connection if the measurement demands it. |
 | Memory growth from 100k `Photo` values | Only 24 pages are cached; index entries are 24 bytes each. `Arc<Photo>` avoids row clones. |
 | GPUI internal scroll-handle fields change on upgrade | `gpui-kit` is pinned; isolate rail offset math in one helper so an upgrade touches one place. |
-| Thumbnail cache churn while scrubbing | 192 entries, 8 requests per frame, 4 in flight, failed-ID suppression. |
+| Thumbnail cache churn while scrubbing | 192 entries, requests only for rendered cards, 4 in flight, failed-ID suppression. |
 
 ## 12. Decisions left to the builder
 
