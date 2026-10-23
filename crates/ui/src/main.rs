@@ -19,8 +19,9 @@ use smallvec::SmallVec;
 use vrc_photo_core::db::Db;
 use vrc_photo_core::importer::{self, ImportMode};
 use vrc_photo_core::model::{
-    CompressionFormat, CompressionProfile, DaemonError, Derivative, LibraryStats, NewPhoto, Photo,
-    PhotoContext, PhotoIndexEntry, PhotoPlayer, PhotoSort, PhotoTextFilter, QueueStatus,
+    CompressionFormat, CompressionJob, CompressionProfile, DaemonError, Derivative, LibraryStats,
+    MAX_JOB_RETRIES, NewPhoto, Photo, PhotoContext, PhotoIndexEntry, PhotoPlayer, PhotoSort,
+    PhotoTextFilter, QueueStatus,
 };
 use vrc_photo_core::settings::AppSettings;
 use vrc_photo_core::thumbnail;
@@ -1100,9 +1101,11 @@ pub struct App {
     profile_index: usize,
     stats: LibraryStats,
     settings: AppSettings,
-    jobs: Vec<vrc_photo_core::model::CompressionJob>,
+    jobs: Vec<CompressionJob>,
     daemon_errors: Vec<DaemonError>,
     failed_job_count: i64,
+    failed_jobs: Vec<CompressionJob>,
+    failed_job_names: HashMap<i64, String>,
     monitor_world: Option<String>,
     monitor_instance: Option<String>,
     monitor_players: Vec<String>,
@@ -1238,6 +1241,8 @@ impl App {
             jobs: Vec::new(),
             daemon_errors: Vec::new(),
             failed_job_count: 0,
+            failed_jobs: Vec::new(),
+            failed_job_names: HashMap::new(),
             monitor_world: None,
             monitor_instance: None,
             monitor_players: Vec::new(),
@@ -1350,7 +1355,54 @@ impl App {
             Vec::new()
         });
         self.failed_job_count = self.db.count_jobs(QueueStatus::Failed).unwrap_or(0);
+        self.failed_jobs = self
+            .db
+            .list_jobs_by_status(QueueStatus::Failed, 100)
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "cannot load failed compression jobs");
+                Vec::new()
+            });
+        self.failed_job_names.clear();
+        for job in &self.failed_jobs {
+            if self.failed_job_names.contains_key(&job.photo_id) {
+                continue;
+            }
+            if let Ok(Some(photo)) = self.db.photo_by_id(job.photo_id) {
+                self.failed_job_names.insert(job.photo_id, photo.file_name);
+            }
+        }
         self.daemon_errors = self.db.daemon_errors().unwrap_or_default();
+    }
+
+    fn retry_job(&mut self, id: String, cx: &mut Context<Self>) {
+        match self.db.retry_job(&id) {
+            Ok(true) => {
+                self.message = Some("再試行をキューに戻しました".to_string());
+                self.reload_job_state();
+            }
+            Ok(false) => {
+                self.message = Some(format!("再試行の上限（{MAX_JOB_RETRIES}回）に達しました"));
+            }
+            Err(error) => {
+                tracing::warn!(%error, %id, "cannot retry compression job");
+                self.message = Some(format!("再試行できません: {error}"));
+            }
+        }
+        cx.notify();
+    }
+
+    fn retry_all_failed_jobs(&mut self, cx: &mut Context<Self>) {
+        match self.db.retry_failed_jobs() {
+            Ok(count) => {
+                self.message = Some(format!("{count} 件を再試行に戻しました（上限到達は除外）"));
+                self.reload_job_state();
+            }
+            Err(error) => {
+                tracing::warn!(%error, "cannot retry failed compression jobs");
+                self.message = Some(format!("再試行できません: {error}"));
+            }
+        }
+        cx.notify();
     }
 
     fn ensure_profiles(&mut self) {
@@ -4952,7 +5004,8 @@ impl App {
             )
     }
 
-    fn queue_panel(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn queue_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let retryable_jobs = self.failed_jobs.iter().any(job_retry_available);
         glass_panel()
             .flex()
             .flex_col()
@@ -4972,40 +5025,152 @@ impl App {
                             .text_color(rgb(TEXT))
                             .child("圧縮キュー"),
                     )
-                    .child(self.badge(&format!("{} 件", self.jobs.len()), BLUE, 0x14283d)),
+                    .child(self.badge(&format!("{} 件", self.jobs.len()), BLUE, 0x14283d))
+                    .when(self.failed_job_count > 0, |this| {
+                        this.child(self.badge(
+                            &format!("失敗 {}", self.failed_job_count),
+                            RED,
+                            0x2a1414,
+                        ))
+                    })
+                    .child(div().flex_1())
+                    .when(retryable_jobs, |this| {
+                        this.child(
+                            Button::new("retry-all-failed-jobs")
+                                .label("失敗をすべて再試行")
+                                .small()
+                                .ghost()
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.retry_all_failed_jobs(cx)),
+                                ),
+                        )
+                    }),
             )
-            .children(self.jobs.iter().take(8).map(|job| {
-                let status = match job.status {
-                    QueueStatus::Pending => ("待機", AMBER, 0x2a2412),
-                    QueueStatus::Processing => ("処理中", BLUE, 0x14283d),
-                    QueueStatus::Completed => ("完了", GREEN, 0x112a22),
-                    QueueStatus::Failed => ("失敗", RED, 0x2a1414),
-                    QueueStatus::Cancelled => ("取消", MUTED, PANEL_2),
-                };
-                h_flex()
+            .when(self.failed_job_count > 100, |this| {
+                this.child(
+                    div()
+                        .px(px(16.))
+                        .py(px(8.))
+                        .text_size(px(10.))
+                        .text_color(rgb(MUTED_2))
+                        .child("失敗は最新の100件のみ表示しています（再試行は上限内のすべてが対象です）"),
+                )
+            })
+            .children(self.failed_jobs.iter().map(|job| {
+                let name = self
+                    .failed_job_names
+                    .get(&job.photo_id)
+                    .cloned()
+                    .unwrap_or_else(|| format!("photo #{}", job.photo_id));
+                let profile_name = self
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == job.profile_id)
+                    .map(|profile| profile.name.clone());
+                let error = job.error.clone().unwrap_or_default();
+                let retryable = job_retry_available(job);
+                let id = job.id.clone();
+                v_flex()
                     .px(px(16.))
                     .py(px(10.))
-                    .gap(px(8.))
-                    .items_center()
+                    .gap(px(6.))
                     .border_b_1()
                     .border_color(rgb(BORDER))
-                    .child(self.badge(status.0, status.1, status.2))
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(px(12.))
-                            .text_color(rgb(TEXT))
-                            .truncate()
-                            .child(format!("photo #{}", job.photo_id)),
+                        h_flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(self.badge("失敗", RED, 0x2a1414))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(TEXT))
+                                    .truncate()
+                                    .child(name),
+                            )
+                            .when_some(profile_name, |this, name| {
+                                this.child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .text_color(rgb(MUTED_2))
+                                        .child(name),
+                                )
+                            }),
                     )
+                    .when(!error.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .w_full()
+                                .text_size(px(10.))
+                                .text_color(rgb(RED))
+                                .child(error),
+                        )
+                    })
                     .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(MUTED_2))
-                            .child(format!("{:.0}%", job.progress * 100.0)),
+                        h_flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(MUTED_2))
+                                    .child(job_retry_label(job)),
+                            )
+                            .when(retryable, |this| {
+                                this.child(
+                                    Button::new(SharedString::from(format!(
+                                        "retry-job-{}",
+                                        job.id
+                                    )))
+                                    .label("再試行")
+                                    .small()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.retry_job(id.clone(), cx)
+                                    })),
+                                )
+                            }),
                     )
             }))
+            .children(
+                self.jobs
+                    .iter()
+                    .filter(|job| job.status != QueueStatus::Failed)
+                    .take(6)
+                    .map(|job| {
+                        let status = match job.status {
+                            QueueStatus::Pending => ("待機", AMBER, 0x2a2412),
+                            QueueStatus::Processing => ("処理中", BLUE, 0x14283d),
+                            QueueStatus::Completed => ("完了", GREEN, 0x112a22),
+                            QueueStatus::Failed => ("失敗", RED, 0x2a1414),
+                            QueueStatus::Cancelled => ("取消", MUTED, PANEL_2),
+                        };
+                        h_flex()
+                            .px(px(16.))
+                            .py(px(10.))
+                            .gap(px(8.))
+                            .items_center()
+                            .border_b_1()
+                            .border_color(rgb(BORDER))
+                            .child(self.badge(status.0, status.1, status.2))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(TEXT))
+                                    .truncate()
+                                    .child(format!("photo #{}", job.photo_id)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(MUTED_2))
+                                    .child(format!("{:.0}%", job.progress * 100.0)),
+                            )
+                    }),
+            )
             .when(self.jobs.is_empty(), |this| {
                 this.child(
                     div()
@@ -6154,6 +6319,20 @@ fn format_count(value: i64) -> String {
     }
 }
 
+/// Whether a failed job can return to the queue without exceeding the cap.
+fn job_retry_available(job: &CompressionJob) -> bool {
+    job.status == QueueStatus::Failed && job.retry_count < MAX_JOB_RETRIES
+}
+
+/// Retry usage for a failed job, or the cap explanation once exhausted.
+fn job_retry_label(job: &CompressionJob) -> String {
+    if job_retry_available(job) {
+        format!("再試行 {}/{MAX_JOB_RETRIES}", job.retry_count)
+    } else {
+        format!("再試行の上限（{MAX_JOB_RETRIES}回）に達しました")
+    }
+}
+
 /// Compact, ordered summaries of every failure that deserves a global alert.
 /// The target screen owns the detail, so the bar only carries the count.
 fn alert_summaries(
@@ -6557,19 +6736,21 @@ mod tests {
         THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, YearBucket, alert_summaries,
         anchor_photo_id, apply_library_index, average_bgra, build_year_buckets, decode_thumbnail,
         demo_thumb_path, ease_motion, first_visible_photo, format_captured_month, format_count,
-        grid_available_width, grid_columns, grid_columns_for, has_tag_filter, lerp_color,
-        list_scroll_top, moved_profile_order, next_focus_index, normalize_note, parse_args,
-        parse_window_size, rail_label_hidden_by_pill, rail_row_at, rail_scroll_offset, rail_y,
-        search_anchor_after_result, search_available_width, sidebar_reveal_width, sidebar_width,
-        stagger_value, step_index, sync_search_mirror, viewer_details_width, viewer_image_box,
-        visible_year_buckets, with_tag, without_tag,
+        grid_available_width, grid_columns, grid_columns_for, has_tag_filter, job_retry_available,
+        job_retry_label, lerp_color, list_scroll_top, moved_profile_order, next_focus_index,
+        normalize_note, parse_args, parse_window_size, rail_label_hidden_by_pill, rail_row_at,
+        rail_scroll_offset, rail_y, search_anchor_after_result, search_available_width,
+        sidebar_reveal_width, sidebar_width, stagger_value, step_index, sync_search_mirror,
+        viewer_details_width, viewer_image_box, visible_year_buckets, with_tag, without_tag,
     };
     use gpui_kit::{RenderImage, ScrollStrategy, UniformListScrollHandle, point, px};
     use smallvec::SmallVec;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use vrc_photo_core::error::CoreError;
-    use vrc_photo_core::model::{Photo, PhotoIndexEntry, PhotoStatus, PhotoTextFilter};
+    use vrc_photo_core::model::{
+        CompressionJob, Photo, PhotoIndexEntry, PhotoStatus, PhotoTextFilter, QueueStatus,
+    };
 
     #[test]
     fn sidebar_widths_match_the_rail() {
@@ -7316,5 +7497,31 @@ mod tests {
         // rather than the real non-negative contract.
         assert_eq!(rail_scroll_offset(600, 3, 0.0), 0.0);
         assert_eq!(rail_scroll_offset(600, 3, -5.0), 0.0);
+    }
+
+    fn test_job(status: QueueStatus, retry_count: i64) -> CompressionJob {
+        CompressionJob {
+            id: "job".to_string(),
+            photo_id: 1,
+            profile_id: "p".to_string(),
+            status,
+            progress: 0.0,
+            error: Some("boom".to_string()),
+            output_path: None,
+            policy: "keep".to_string(),
+            created_at: "now".to_string(),
+            started_at: None,
+            finished_at: None,
+            retry_count,
+        }
+    }
+
+    #[test]
+    fn job_retry_availability_stops_at_the_cap() {
+        assert!(job_retry_available(&test_job(QueueStatus::Failed, 0)));
+        assert!(job_retry_available(&test_job(QueueStatus::Failed, 2)));
+        assert!(!job_retry_available(&test_job(QueueStatus::Failed, 3)));
+        assert!(!job_retry_available(&test_job(QueueStatus::Completed, 0)));
+        assert!(job_retry_label(&test_job(QueueStatus::Failed, 3)).contains("上限"));
     }
 }
