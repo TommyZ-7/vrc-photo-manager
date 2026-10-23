@@ -1473,6 +1473,55 @@ mod tests {
     }
 
     #[test]
+    fn set_note_round_trips_and_clears_with_none() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let id = db
+            .upsert_photo(&photo_at(
+                root,
+                "/photos/note.png",
+                1_700_000_000,
+                "2025-04-30 09:00:00",
+            ))
+            .unwrap();
+
+        assert_eq!(db.photo_by_id(id).unwrap().unwrap().note, None);
+        db.set_note(id, Some("first note")).unwrap();
+        assert_eq!(
+            db.photo_by_id(id).unwrap().unwrap().note.as_deref(),
+            Some("first note")
+        );
+        db.set_note(id, None).unwrap();
+        assert_eq!(db.photo_by_id(id).unwrap().unwrap().note, None);
+    }
+
+    #[test]
+    fn removing_a_tag_drops_the_photo_from_tag_search() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let id = db
+            .upsert_photo(&photo_at(
+                root,
+                "/photos/tagged.png",
+                1_700_000_000,
+                "2025-04-30 09:00:00",
+            ))
+            .unwrap();
+        db.set_photo_tags(id, &["keep".to_string(), "remove".to_string()])
+            .unwrap();
+
+        let filter = PhotoTextFilter {
+            tag: Some("remove".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(db.photo_index_text(&filter).unwrap().len(), 1);
+
+        db.set_photo_tags(id, &["keep".to_string()]).unwrap();
+        assert!(db.photo_index_text(&filter).unwrap().is_empty());
+        assert_eq!(db.photo_tags(id).unwrap(), vec!["keep".to_string()]);
+    }
+
+    #[test]
     fn photos_by_ids_preserves_order_and_skips_missing_ids() {
         let db = Db::open_in_memory().unwrap();
         let root = db.add_root("/photos", "reference").unwrap();
