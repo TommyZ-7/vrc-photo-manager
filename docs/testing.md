@@ -45,7 +45,7 @@ cargo test --workspace
 2. 圧縮ジョブの複数ワーカー同時取得
 3. XMPの実ファイル（VRChatが出力したPNG）での検証
 4. DST/タイムゾーン境界
-5. 10万件の検索クエリ性能
+5. 10万件の検索クエリ性能（`photo_index_text` のignoredベンチマークで一部実施済み）
 6. UIのヘッドレス操作テスト（gpui-kit test-support）
 7. AppImage/deb/pacmanのインストール後起動（実機/CIコンテナ）
 
@@ -108,7 +108,7 @@ cargo test --workspace
 - Windows実機（トレイ、IME、自動起動、GPU）
 - AppImageの実起動・自動起動
 - deb/pacmanのインストール後起動
-- 10万枚の負荷
+- 10万枚の実ライブラリ負荷（合成DBのwarm測定のみ。実ポインタの年レール操作、cold起動の1 s目標は未検証）
 - 実VRChatログの最新バージョン差異
 - rfdのファイルダイアログ（xdg-portal環境）
 

@@ -479,7 +479,7 @@ impl PhotoIndex {
     fn new(entries: Vec<PhotoIndexEntry>) -> Self;
 }
 
-fn search_available_width(window_width: f32, sidebar_collapsed: bool, inspector_collapsed: bool) -> f32;
+fn search_available_width(window_width: f32, sidebar_collapsed: bool) -> f32;
 
 struct PhotoPageCache { /* pages, order, pending, failed */ }
 impl PhotoPageCache {
@@ -549,9 +549,24 @@ fn page_cache_evicts_the_oldest_page() {
     for page in 0..MAX_PAGES {
         cache.insert_page(page, vec![test_photo(page as i64)]);
     }
-    assert!(cache.get_page(0).is_some());
+    // Do not call get_page(0) here: it would refresh page 0 in the
+    // access-order LRU and the next insert would evict page 1 instead.
     cache.insert_page(MAX_PAGES, vec![test_photo(999)]);
     assert!(cache.get_page(0).is_none());
+    assert!(cache.get_page(MAX_PAGES).is_some());
+}
+
+#[test]
+fn page_cache_keeps_recently_touched_pages() {
+    let mut cache = PhotoPageCache::new();
+    for page in 0..MAX_PAGES {
+        cache.insert_page(page, vec![test_photo(page as i64)]);
+    }
+    // Touch page 0 so it is no longer the least recently used entry.
+    assert!(cache.get_page(0).is_some());
+    cache.insert_page(MAX_PAGES, vec![test_photo(999)]);
+    assert!(cache.get_page(0).is_some());
+    assert!(cache.get_page(1).is_none());
     assert!(cache.get_page(MAX_PAGES).is_some());
 }
 
@@ -570,10 +585,10 @@ fn page_cache_plans_only_missing_pages_and_marks_them_pending() {
 
 #[test]
 fn search_available_width_drops_to_the_filter_panel_width() {
-    assert_eq!(grid_columns(search_available_width(1280.0, false, true)), 3);
-    assert_eq!(grid_columns(search_available_width(1440.0, false, true)), 4);
-    assert_eq!(grid_columns(search_available_width(1080.0, false, true)), 2);
-    assert!(grid_columns(search_available_width(1280.0, false, false)) >= 1);
+    assert_eq!(grid_columns(search_available_width(1280.0, false)), 3);
+    assert_eq!(grid_columns(search_available_width(1440.0, false)), 4);
+    assert_eq!(grid_columns(search_available_width(1080.0, false)), 2);
+    assert_eq!(grid_columns(search_available_width(1280.0, true)), 4);
 }
 ```
 
@@ -584,11 +599,11 @@ Expected: FAIL because the types do not exist.
 
 - [ ] **Step 3: Implement the page cache and width helper**
 
-- `PhotoPageCache` uses `HashMap<usize, Arc<Vec<Arc<Photo>>>>`, `VecDeque<usize>` for LRU, and `HashSet` for `pending`/`failed`. `get_page` updates LRU order; `insert_page` clears `pending`/`failed` for the page and evicts from the front while over `MAX_PAGES`; `plan_pages` clamps the end to `photo_end`, computes the page range, skips cached/pending/failed pages, marks up to `limit` pages pending, and returns them.
+- `PhotoPageCache` uses `HashMap<usize, Arc<Vec<Arc<Photo>>>>`, `VecDeque<usize>` for an access-order LRU, and `HashSet` for `pending`/`failed`. `get_page` moves the page to the back of the order; `insert_page` clears `pending`/`failed` for the page and evicts from the front while over `MAX_PAGES`; `plan_pages` clamps the end to `photo_end`, computes the page range, skips cached/pending/failed pages, marks up to `limit` pages pending, and returns them. The eviction test must not call `get_page(0)` before the overflowing insert when it expects page 0 to be evicted.
 - `PhotoBrowser::replace_index` increments `generation` and clears the page cache.
 - `PhotoBrowser::photo_at` converts the page number and calls `get_page`.
 - `PhotoBrowser::insert_page` and `fail_page` ignore a stale `generation`, then delegate and notify are the caller's job.
-- `search_available_width` is `(window_width - sidebar_width - inspector_width - 290.0 - 26.0 - 52.0).max(0.0)`.
+- `search_available_width(window_width, sidebar_collapsed)` is `(window_width - sidebar_width - 290.0 - 26.0 - 52.0).max(0.0)`. Search has no inspector column, so the inspector width is not subtracted.
 
 - [ ] **Step 4: Run the pure tests to verify they pass**
 
@@ -858,7 +873,7 @@ Expected: FAIL because the helpers do not exist.
 - `build_year_buckets` scans entries in order, records the first row of each `captured_month / 100`, counts every entry, then emits buckets in first-occurrence order with cumulative `display_row`.
 - `rail_y(row, total, height) = RAIL_TOP_PAD + (row / total) * (height - 2 * RAIL_TOP_PAD)`, clamped to the track.
 - `rail_row_at(y, total, height)` is the inverse, rounded and clamped to `0..total - 1`.
-- `visible_year_buckets` keeps the current/newest year and every Nth bucket so adjacent label y positions are at least 16 px apart; dots are painted for all buckets independently.
+- `visible_year_buckets` keeps the first/newest bucket, then each subsequent bucket whose label y is at least 16 px below the last kept label. Dots are painted for all buckets independently.
 - `format_captured_month` splits `YYYYMM` into `YYYY年M月`; return `"不明"` for 0.
 
 - [ ] **Step 4: Implement `YearRailLabels` and `YearRail`**
@@ -876,7 +891,7 @@ Expected: FAIL because the helpers do not exist.
 - Determine `first_visible_photo` from `list_scroll_top(&scroll) / PHOTO_ROW_HEIGHT * columns`, clamped to `total - 1`; look up `entries[first_visible].captured_month`, draw the month pill at `rail_y(first_visible)`, and paint its cached `ShapedLine`.
 - Labels are painted with `ShapedLine::paint(origin, px(12.), TextAlign::Right, Some(px(56.)), window, cx)`.
 - Register `MouseDownEvent`, `MouseMoveEvent`, and `MouseUpEvent` with `window.on_mouse_event` during paint. On mouse down inside `bounds`, call `cx.stop_propagation()`, set `drag_active`, and jump. On move while `drag_active`, jump to the pointer row. On mouse up, clear the flag.
-- `jump_to(y)`: if y is within 8 px of a year label's y, use that bucket's `start_row`; otherwise use `rail_row_at`. Convert to a grid row with `photo_row / columns`; set the base scroll offset directly to `-(grid_row * PHOTO_ROW_HEIGHT)` clamped to `base_handle.max_offset()`; call `window.refresh()`.
+- `jump_to(y)`: if y is within 8 px of a year label's y, use that bucket's `start_row`; otherwise use `rail_row_at`. Convert to a grid row with `photo_row / columns`; set the base scroll offset directly to `-(grid_row * PHOTO_ROW_HEIGHT)` clamped to `-max_offset..0`, since `base_handle.max_offset()` is a non-negative scrollable extent; call `window.refresh()`.
 
 - [ ] **Step 5: Integrate the rail into `photo_grid`**
 
@@ -1100,20 +1115,21 @@ git commit -m "test: measure 100k photo index and page queries"
 ### Task 8: Documentation and final QA
 
 **Files:**
-- Create (separate docs branch): `docs/adr/0008-photo-index-virtual-window.md`
-- Modify (separate docs branch): `docs/adr/0007-photo-load-cap.md`, `docs/roadmap.md`, `docs/features.md`, `docs/ui.md`, `docs/HANDOFF.md`
+- Create (separate docs branch): `docs/adr/0009-photo-index-virtual-window.md`
+- Modify (separate docs branch): `docs/adr/0007-photo-load-cap.md`, `docs/adr/README.md`, `docs/roadmap.md`, `docs/features.md`, `docs/ui.md`, `docs/HANDOFF.md`, `docs/architecture.md`, `docs/data-model.md`, `docs/testing.md`
 - No code changes in this task.
+- ADR-0008 is already used by the privacy ADR. Do not reuse the number.
 
 **Interfaces:**
 - Consumes: the measured numbers from Task 7.
 
-- [ ] **Step 1: Write ADR-0008**
+- [ ] **Step 1: Write ADR-0009**
 
-Record: the 300 cap problem, the ordered-index + 256-photo page cache decision, why keyset append was rejected for the rail UX, memory/performance numbers, and the add-only `idx_photos_captured_id` migration.
+Record: the 300 cap problem, the ordered-index + 256-photo page cache decision, why keyset append was rejected for the rail UX, memory/performance numbers, the cold-start caveat, and the add-only `idx_photos_captured_id` migration.
 
 - [ ] **Step 2: Mark ADR-0007 superseded**
 
-Change its status to `Superseded by ADR-0008`; do not delete the history.
+Change its status to `Superseded by ADR-0009`; do not delete the history.
 
 - [ ] **Step 3: Update user-facing docs**
 
@@ -1140,7 +1156,7 @@ Save temporary screenshots under `/tmp/opencode`, never in the repository.
 - [ ] **Step 5: Open the docs-only PR**
 
 ```bash
-git add docs/adr/0008-photo-index-virtual-window.md docs/adr/0007-photo-load-cap.md docs/roadmap.md docs/features.md docs/ui.md docs/HANDOFF.md
+git add docs/adr/0009-photo-index-virtual-window.md docs/adr/0007-photo-load-cap.md docs/adr/README.md docs/roadmap.md docs/features.md docs/ui.md docs/HANDOFF.md docs/architecture.md docs/data-model.md docs/testing.md
 git commit -m "docs: document the 100k photo index and year rail"
 ```
 

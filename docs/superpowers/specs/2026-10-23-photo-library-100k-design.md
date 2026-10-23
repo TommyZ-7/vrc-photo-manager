@@ -191,7 +191,6 @@ struct PhotoIndex {
     entries: Vec<PhotoIndexEntry>, // ordered by the active sort
     years: Vec<YearBucket>,        // descending for Newest
     total: usize,
-    date_ordered: bool,
 }
 
 struct YearBucket {
@@ -226,14 +225,18 @@ Use a dedicated `search_view: PhotoBrowser`:
 actually available to that browser:
 
 - library: `grid_available_width(window_width, sidebar_collapsed, inspector_collapsed)`;
-- search: the same workspace width minus the 290 px filter panel, its 26 px
-  left margin, and the right column's 52 px horizontal padding.
+- search: `search_available_width(window_width, sidebar_collapsed)`, computed as
+  the window width minus the sidebar, the 290 px filter panel, its 26 px left
+  margin, and the right column's 52 px horizontal padding. The Search screen
+  has no inspector column, so the inspector state is deliberately not an
+  argument and no inspector width is subtracted.
 
 Add `search_available_width(...)` next to `grid_available_width` and unit tests
-at 1280×820 and 1440×900 for each sidebar/inspector combination. Both helpers
-feed the existing `grid_columns` / `MIN_CARD_WIDTH` rule. At 1280 px with the
-sidebar expanded and inspector collapsed, the library gets 3 columns; the
-search viewport must still produce at least 2 columns at 170 px or wider.
+at 1280×820 and 1440×900 for each sidebar state (and confirm the inspector
+state does not change the search column count). Both helpers feed the existing
+`grid_columns` / `MIN_CARD_WIDTH` rule. At 1280 px with the sidebar expanded
+and the filter panel shown, the search viewport gets 3 columns; at 1440 px it
+gets 4; at 1080 px it gets 2.
 
 `columns` is updated at the start of each screen's render, before the row count
 is computed. A column change only changes `rows`; the index and page cache stay
@@ -248,7 +251,7 @@ const MAX_PAGES: usize = 24;
 
 struct PhotoPageCache {
     pages: HashMap<usize, Arc<Vec<Arc<Photo>>>>,
-    order: VecDeque<usize>,       // LRU, front = least recently used
+    order: VecDeque<usize>,       // access-order LRU, front = least recently used
     pending: HashSet<usize>,
     failed: HashSet<usize>,
 }
@@ -256,6 +259,11 @@ struct PhotoPageCache {
 
 - A page holds 256 photos; cache holds at most 24 pages (6,144 photos, a few
   MB). `photo_at(photo_index)` returns `Option<Arc<Photo>>`.
+- The cache is an access-order LRU: `get_page` moves the page to the back of
+  `order`, and `insert_page` evicts from the front. A test must not call
+  `get_page(0)` before inserting the overflowing page and then expect page 0
+  to be evicted; that call has already refreshed page 0. The eviction test
+  inserts `MAX_PAGES` pages, inserts one more, and only then checks page 0.
 - On a miss, the render path only records the page in `pending` and schedules
   a deferred load. It never queries SQLite during layout.
 - The deferred load fetches `photos_by_ids` for that page, stores the result,
@@ -327,14 +335,15 @@ that no year appears twice.
   track. This makes spacing proportional to photo count, matching the
   reference image (a year with many photos gets more space).
 - A 3 px dot is drawn at each year's `display_row`. Year labels are
-  right-aligned ending 14 px left of the track. Clicking a label jumps to its
+  right-aligned ending 8 px left of the track. Clicking a label jumps to its
   `start_row`.
 - The current-month pill (`YYYY年M月`) is drawn at the current top row. It is
-  64×20 px, uses `PANEL_2` with a blue border/text, and overlays the track.
-- If year labels would be closer than 16 px, keep the current year plus every
-  Nth label so no two labels overlap. Dots remain for every year.
-- With more than 24 years, label every second/third year; do not render 100
-  labels.
+  80×18 px with 9 px corners, uses `PANEL_2` at 94% opacity with `TEXT`-colored
+  text, and overlays the track.
+- If year labels would be closer than 16 px, walk the buckets from the newest
+  and keep the first label, then the next label that is at least 16 px below
+  the last kept one. Dots remain for every year, so a 100-year library still
+  does not paint 100 labels.
 
 **Painting and caching.** Implement a small `YearRailPainter` custom element (same
 pattern as `gpui_base::Scrollbar`):
@@ -375,15 +384,18 @@ app-level drag state is needed:
   `start_row`; otherwise map y proportionally to a photo row.
 - For dragging, handle move events globally so the drag continues when the
   pointer leaves the rail. Compute the target pixel offset directly
-  (`-(grid_row as f32 * PHOTO_ROW_HEIGHT)`, clamped to `base_handle.max_offset()`)
-  and call `base_handle.set_offset(...)` then `window.refresh()`. This redraws
-  the retained element tree without rebuilding the app view or re-shaping the
+  (`-(grid_row as f32 * PHOTO_ROW_HEIGHT)`, clamped to `-max_offset..0`, because
+  GPUI's `ScrollHandle::max_offset()` is the non-negative scrollable extent and
+  the actual offset is zero or negative) and call
+  `base_handle.set_offset(...)` then `window.refresh()`. This redraws the
+  retained element tree without rebuilding the app view or re-shaping the
   labels.
 - On mouse up, clear the drag flag.
 - Wheel events over the rail are allowed to bubble to the grid; do not consume
   them.
 
-The rail is hidden when `total == 0` or when the active sort is not date-based.
+The rail is hidden when `total == 0`. The UI currently has no non-date sort, so
+there is no additional sort-based visibility rule.
 
 ### 7.5 Search
 
@@ -430,10 +442,10 @@ struct ThumbnailCache {
 }
 ```
 
-- Request thumbnails only for the visible row range plus one row above and
-  below. Skip IDs that are cached, pending, or failed.
-- Issue at most 8 new requests per frame and keep at most 4 background decodes
-  in flight. A request:
+- Request thumbnails only for the rendered/visible cards. Skip IDs that are
+  cached, pending, or failed.
+- Keep at most 4 background decodes in flight; when no slot is free, the card
+  waits for a later frame. A request:
   1. resolves the cache path (`thumbnails/{id}.webp`, or the demo asset path);
   2. if missing, calls `thumbnail::ensure_thumbnail(id, abs_path)` in the
      background (this is already atomic and shared with the daemon);
@@ -566,7 +578,9 @@ Budgets (development machine, 100k photos, release build):
 
 Instrumentation:
 
-- `tracing::debug!` timing for index build, page load, and thumbnail decode.
+- `VRC_PHOTO_TIMING` env-gated timing probes for index build, page load,
+  thumbnail decode, background search, and first frame. The probes are silent
+  when the variable is unset and add no logging dependency.
 - A `#[test] #[ignore]` in `crates/core/src/db.rs` seeds 100k photos in a
   transaction, runs `photo_index` and `photos_by_ids`, and prints elapsed times.
   It is run manually and not part of the normal CI time budget.
@@ -577,6 +591,30 @@ Instrumentation:
   search.
 
 Do not use `photos_by_ids` with all 100k IDs; pages are always <= 256.
+
+### 8.1 Measured results (2026-10-23, release, 100k synthetic DB)
+
+| Probe | Result |
+|---|---|
+| `photo_index` 100k | 61.6 ms (release test); 51–55 ms on UI reload |
+| `photos_by_ids` 256 | 0.58 ms (release test); 0.41–0.57 ms in the UI |
+| `photo_index_text` 100k | 60.9 ms; 0.78 ms for a 529-result background search |
+| First frame, warm | 229–243 ms |
+| First frame, cold | 1.4995 s |
+| Startup DB work | ~108 ms warm / ~140 ms cold (the index is built twice) |
+| Seed 100k rows | 0.455 s |
+
+The warm numbers meet the table budgets. **The cold first frame does not meet
+the 1000 ms budget.** The DB portion is only about 140 ms, so the overage is
+most likely window/GPU initialization and shader work; an empty-DB cold
+baseline is still needed before that is treated as confirmed. The startup path
+also queries the same index twice (`App::new` and the immediate `reload_all`),
+costing about 108 ms warm and 140 ms cold. Both are follow-ups, not claims that
+all budgets passed.
+
+Memory figures in the table are design bounds, not measurements: the index is
+about 2.4 MB at 100k entries, the page cache is capped at 24 pages (6,144
+photos), and the thumbnail cache at 192 decoded entries (~50 MB estimated).
 
 ## 9. Testing
 
@@ -601,10 +639,12 @@ Do not use `photos_by_ids` with all 100k IDs; pages are always <= 256.
   positions, jump target on a photo from that year).
 - `rail_y` and `rail_row_at` round-trip within one pixel and clamp at the ends.
 - `photo_row_to_grid_row` handles partial rows and column changes.
-- `search_available_width` plus `grid_columns` yields at least 2 columns at
-  1280×820 and 1440×900 for every sidebar/inspector combination.
-- LRU eviction keeps the newest page, never evicts a pending page, and never
-  evicts a pinned thumbnail.
+- `search_available_width(window_width, sidebar_collapsed)` plus `grid_columns`
+  yields 3 columns at 1280×820 and 4 at 1440×900 with the sidebar expanded;
+  the inspector state does not change the result.
+- LRU eviction keeps recently touched pages, never evicts a pending page, and
+  never evicts a pinned thumbnail. The eviction test does not touch page 0
+  before the overflowing insert when it expects page 0 to be evicted.
 - Anchor remapping preserves the top photo when new photos are inserted.
 - `remove_photo` removes an ID from an index, recomputes year buckets, and
   invalidates only the affected page.
@@ -630,10 +670,11 @@ Do not use `photos_by_ids` with all 100k IDs; pages are always <= 256.
 
 ## 10. Documentation
 
-- Add `docs/adr/0008-photo-index-virtual-window.md` describing the chosen
+- Add `docs/adr/0009-photo-index-virtual-window.md` describing the chosen
   index-snapshot + page-cache approach and why keyset append was rejected for
-  the rail UX.
-- Mark ADR-0007 as `Superseded by ADR-0008`.
+  the rail UX. (ADR-0008 is already the privacy ADR, so this decision takes the
+  next free number.)
+- Mark ADR-0007 as `Superseded by ADR-0009`.
 - Update `docs/roadmap.md`: remove "一覧・検索は最大300件" from the current
   state and remove the 300-limit open question; keep the performance item until
   the acceptance measurement is recorded.
