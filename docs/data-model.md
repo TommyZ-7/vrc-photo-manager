@@ -281,7 +281,7 @@ estimated_link, thumbnail_cache_mb, compression_workers
 - 一覧は `photos` + `photo_context` のLEFT JOIN。`captured_at_utc` 降順。
 - 検索は `photo_context` / `photo_players` / `photo_tags` のEXISTS句。
 - UIは `photo_index` / `photo_index_text` で一致する写真の軽量索引（`id`, `captured_at_utc`, `captured_month`）を全件読み、表示範囲の写真だけを `photos_by_ids` で256枚ページ取得する。件数上限はない。
-- `idx_photos_captured_id` はV3で追加済み。100k合成DBのrelease測定は索引61.6 ms、ページ0.58 ms。
+- `idx_photos_captured_id` はV3で追加済み。100k合成DB（`photo_context` 5万行を含む）のrelease測定は索引61.5 ms、ページ0.72 ms。
 - 未検証の追加インデックス候補:
   - `photo_players(display_name COLLATE NOCASE)`
   - `photo_context(world_name)`

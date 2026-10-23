@@ -500,7 +500,7 @@ Caller contract:
 | compression enqueue | `reload_aux()` |
 | Settings "設定を再読込" | `reload_aux()` |
 | Monitor "再読込" | `reload_aux()` |
-| 3-second live refresh, count changed on Photos | debounce 2 s, then `reload_library(preserve)` |
+| 3-second live refresh, count changed on Photos | quiet-period count debounce, then `reload_library(preserve)` |
 | 3-second live refresh, count changed elsewhere | `mark_library_dirty()` |
 
 `reload_library` steps:
@@ -520,7 +520,10 @@ Caller contract:
 
 `refresh_live` reads stats/jobs as today and updates selected metadata; it only
 compares `count_photos()` with `library.index.total` to decide whether to
-schedule a rebuild. It must not clear `quick_look_photo_ids` for an unrelated
+schedule a rebuild, and only uses the count when the query returns `Ok`. A
+`CountDebounce` requires the observed count to stay unchanged for a quiet
+period: a burst restarts the period, and a single change is rebuilt on the next
+3-second tick. It must not clear `quick_look_photo_ids` for an unrelated
 library change.
 
 The demo index rebuild is a no-op when the in-memory DB did not change.
@@ -593,23 +596,29 @@ Do not use `photos_by_ids` with all 100k IDs; pages are always <= 256.
 
 ### 8.1 Measured results (2026-10-23, release, 100k synthetic DB)
 
+Final measurements after the review fix wave:
+
 | Probe | Result |
 |---|---|
-| `photo_index` 100k | 61.6 ms (release test); 51–55 ms on UI reload |
-| `photos_by_ids` 256 | 0.58 ms (release test); 0.41–0.57 ms in the UI |
-| `photo_index_text` 100k | 60.9 ms; 0.78 ms for a 529-result background search |
-| First frame, warm | 229–249 ms (4 runs; max 248.65 ms) |
-| First frame, cold | 1.4995 s |
-| Startup DB work | ~108 ms warm / ~140 ms cold (the index is built twice) |
-| Seed 100k rows | 0.455 s |
+| `photo_index` 100k (production LEFT JOIN, 50k `photo_context` rows) | 61.5 ms (release test); 49.5–50.8 ms on UI startup |
+| `photos_by_ids` 256 | 0.72 ms (release test); 0.54–0.79 ms in the UI |
+| `photo_index_text` 100k | 60.7 ms; 0.78 ms for a 529-result background search |
+| First frame, warm, 100k | 179–187 ms (3 runs) |
+| First frame, cold-ish, 100k | 226–235 ms (3 runs) |
+| First frame, cold-ish, empty DB | 158–163 ms (3 runs) |
+| Startup DB work | one `photo_index` query, 49.5–50.8 ms warm |
+| Seed 100k rows + 50k context rows | 0.554 s |
 
-The warm numbers meet the table budgets. **The cold first frame does not meet
-the 1000 ms budget.** The DB portion is only about 140 ms, so the overage is
-most likely window/GPU initialization and shader work; an empty-DB cold
-baseline is still needed before that is treated as confirmed. The startup path
-also queries the same index twice (`App::new` and the immediate `reload_all`),
-costing about 108 ms warm and 140 ms cold. Both are follow-ups, not claims that
-all budgets passed.
+The warm and cold-ish numbers meet the table budgets. The cold-ish runs used
+fresh `XDG_CACHE_HOME`, `XDG_DATA_HOME`, and Mesa shader caches plus a freshly
+copied release binary and a `--reflink=never` copy of the 32 MB DB, but the OS
+page cache still held the shared libraries because `drop_caches` needs root.
+**True OS-cold remains unmeasured.** The empty-DB cold-ish baseline is
+158–163 ms, so the 100k index adds roughly 65–75 ms. The earlier 1.4995 s cold
+first frame did not reproduce in 3/3 cold-ish runs (all below 240 ms) and is
+treated as a one-time environment/driver-init outlier. The duplicate startup
+index query is gone: `App::new` starts both browsers with an empty index and
+calls `reload_all` once.
 
 Memory figures in the table are design bounds, not measurements: the index is
 about 2.4 MB at 100k entries, the page cache is capped at 24 pages (6,144
@@ -686,7 +695,7 @@ photos), and the thumbnail cache at 192 decoded entries (~50 MB estimated).
 | Risk | Mitigation |
 |---|---|
 | Custom rail paint is hard to get right in GPUI | Follow the `gpui_base::Scrollbar` element pattern; keep the painter read-only and put pointer handling in a simple overlay div. If text shaping in paint becomes a problem, fall back to pre-shaped labels drawn with `ShapedLine::paint` (already planned) rather than child divs per label. |
-| Index rebuild thrashes during a large import | Debounce 2 s, keep the old index until the new one is ready, preserve the top-photo anchor. |
+| Index rebuild thrashes during a large import | Quiet-period count debounce: rebuild only after the observed count stays unchanged for a quiet period; keep the old index until the new one is ready, preserve the top-photo anchor. |
 | Search `EXISTS` filters are slow at 100k | Existing player/tag indexes cover the subqueries; measure with the ignored test; if a filter exceeds 300 ms, keep the background search path and show progress. |
 | Page fetch blocks the UI | Page size 256 by primary key is a few milliseconds; at most two pages per deferred callback. Log a warning above 16 ms and move the loader to a read-only background connection if the measurement demands it. |
 | Memory growth from 100k `Photo` values | Only 24 pages are cached; index entries are 24 bytes each. `Arc<Photo>` avoids row clones. |

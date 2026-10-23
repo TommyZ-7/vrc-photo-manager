@@ -1019,12 +1019,12 @@ Expected: FAIL because the helpers do not exist.
 - `focus_search`: call `switch_screen(Screen::Search, cx)` before focusing.
 - `switch_screen`: if leaving Photos, keep the index; if entering Photos and `library_dirty`, call `reload_library(true)` and clear the flag.
 
-- [ ] **Step 6: Debounce live refresh**
+- [ ] **Step 6: Debounce live refresh with a quiet period**
 
-- Add `library_dirty: bool` and `last_library_refresh: Instant` (initialize to `Instant::now()`).
-- `refresh_live` updates stats/jobs/selected metadata and compares `count_photos()` with `library.index.total`.
-- If the count differs and the screen is Photos and `last_library_refresh.elapsed() >= 2 s`, call `reload_library(true)` and update the timestamp.
-- If the count differs on another screen, call `mark_library_dirty()`.
+- Add `library_dirty: bool` and a `CountDebounce` that tracks the observed photo count.
+- `refresh_live` updates stats/jobs/selected metadata and compares `count_photos()` with `library.index.total` only when the count query returns `Ok`.
+- Feed each observed count into the debounce. It reports ready only after the count stays unchanged for a quiet period; a burst restarts the period, and a single change is rebuilt on the next 3-second tick.
+- When the debounce is ready and the screen is Photos, call `reload_library(true)`; otherwise call `mark_library_dirty()`.
 - Do not call `reload_all` from `refresh_live`.
 
 - [ ] **Step 7: Run the tests, clippy, and manual checks**
@@ -1110,6 +1110,14 @@ git add crates/core/src/db.rs crates/ui/src/main.rs
 git commit -m "test: measure 100k photo index and page queries"
 ```
 
+**Measured outcome (2026-10-23, release, final fix wave):** warm 100k first
+frame 179–187 ms; cold-ish 226–235 ms (3/3 runs; OS page cache not dropped,
+so true OS-cold remains unmeasured);
+empty-DB cold-ish 158–163 ms; `photo_index` 61.5 ms with 50k `photo_context`
+rows; 256-id page 0.72 ms. The duplicate startup index query was later removed
+in the same branch: startup now runs one index query (49.5–50.8 ms). The old
+1.4995 s cold outlier did not reproduce.
+
 ---
 
 ### Task 8: Documentation and final QA
@@ -1125,7 +1133,7 @@ git commit -m "test: measure 100k photo index and page queries"
 
 - [ ] **Step 1: Write ADR-0009**
 
-Record: the 300 cap problem, the ordered-index + 256-photo page cache decision, why keyset append was rejected for the rail UX, memory/performance numbers, the cold-start caveat, and the add-only `idx_photos_captured_id` migration.
+Record: the 300 cap problem, the ordered-index + 256-photo page cache decision, why keyset append was rejected for the rail UX, memory/performance numbers, the measured warm/cold-ish first-frame numbers with the true-OS-cold caveat, and the add-only `idx_photos_captured_id` migration.
 
 - [ ] **Step 2: Mark ADR-0007 superseded**
 
@@ -1150,6 +1158,7 @@ At 1280×820 and 1440×900:
 - import while scrolled;
 - trash a search result;
 - select a photo, scroll it out of view, and confirm the inspector background stays.
+- Force the X11 backend (`env -u WAYLAND_DISPLAY DISPLAY=:0`) for real-pointer rail QA; the Wayland session drops XTest events.
 
 Save temporary screenshots under `/tmp/opencode`, never in the repository.
 
