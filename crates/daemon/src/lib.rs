@@ -14,7 +14,9 @@ use vrc_photo_core::compressor;
 use vrc_photo_core::db::Db;
 use vrc_photo_core::linker;
 use vrc_photo_core::log_parser::LogIngestor;
-use vrc_photo_core::model::{CompressionJob, CompressionProfile, DaemonOperation, QueueStatus};
+use vrc_photo_core::model::{
+    CompressionJob, CompressionProfile, DaemonCommand, DaemonOperation, QueueStatus,
+};
 use vrc_photo_core::photo_filename::is_source_photo;
 use vrc_photo_core::scanner::{ScanFailure, ScanReport, scan_and_index, scan_one};
 use vrc_photo_core::settings::{AppSettings, detect_vrchat_paths};
@@ -226,7 +228,107 @@ impl Daemon {
         Ok(())
     }
 
+    /// Consumes queued UI requests once: reloads settings, rebuilds the photo
+    /// watchers for the new roots, runs each command in request order, then
+    /// refreshes the status view. Commands are consumed even when they fail so
+    /// a broken request cannot loop forever; the failure is recorded under its
+    /// operation instead.
+    fn poll_commands(&mut self) -> Result<()> {
+        let commands = {
+            let db = self.db.lock().unwrap();
+            db.take_daemon_commands()?
+        };
+        if commands.is_empty() {
+            return Ok(());
+        }
+        self.reload_settings()?;
+        self.restart_watchers();
+        for command in commands {
+            if let Err(error) = self.run_command(command) {
+                tracing::error!(command = command.as_str(), %error, "daemon command failed");
+                let (operation, message) = match command {
+                    DaemonCommand::Rescan => (
+                        DaemonOperation::Scan,
+                        "写真フォルダの再スキャンに失敗しました",
+                    ),
+                    DaemonCommand::Relog => {
+                        (DaemonOperation::Log, "ログの再取り込みに失敗しました")
+                    }
+                    DaemonCommand::Relink => {
+                        (DaemonOperation::Link, "写真とログの紐付けに失敗しました")
+                    }
+                };
+                if let Err(report_error) =
+                    self.report_daemon_error(operation, message, Some(&error.to_string()))
+                {
+                    tracing::error!(%report_error, "cannot record daemon command error");
+                }
+            }
+        }
+        self.refresh_status()
+    }
+
+    /// Replaces the in-memory settings with the current database values so a
+    /// corrected path or switch takes effect without restarting the daemon.
+    fn reload_settings(&mut self) -> Result<()> {
+        let settings = {
+            let db = self.db.lock().unwrap();
+            AppSettings::load(&db)?
+        };
+        if settings.autostart != self.settings.autostart {
+            self.apply_autostart(settings.autostart);
+        }
+        self.settings = settings;
+        Ok(())
+    }
+
+    /// Stops the current watchers and sets up new ones for the reloaded roots.
+    /// A failure leaves them stopped so the next command or daemon start can
+    /// retry the setup.
+    fn rebuild_watchers(&mut self) -> Result<()> {
+        self.watchers.clear();
+        self.watcher_rx = None;
+        let result = self.setup_watchers();
+        if result.is_err() {
+            self.watchers.clear();
+        }
+        result
+    }
+
+    /// Rebuilds the watchers, recording a `Scan` failure instead of aborting
+    /// the daemon when the operating system refuses a watch.
+    fn restart_watchers(&mut self) {
+        if let Err(error) = self.rebuild_watchers() {
+            tracing::error!(%error, "cannot start photo watchers");
+            if let Err(report_error) = self.report_daemon_error(
+                DaemonOperation::Scan,
+                "写真フォルダの監視を開始できませんでした",
+                Some(&error.to_string()),
+            ) {
+                tracing::error!(%report_error, "cannot record watcher error");
+            }
+        }
+    }
+
+    /// Runs one queued command. `poll_commands` records a failure under the
+    /// command's operation.
+    fn run_command(&mut self, command: DaemonCommand) -> Result<()> {
+        match command {
+            DaemonCommand::Rescan => {
+                self.scan_photos()?;
+                self.link_unlinked()?;
+            }
+            DaemonCommand::Relog => {
+                self.ingest_logs()?;
+                self.link_unlinked()?;
+            }
+            DaemonCommand::Relink => self.link_unlinked()?,
+        }
+        Ok(())
+    }
+
     pub fn run_once(&mut self) -> Result<()> {
+        self.poll_commands()?;
         self.write_heartbeat();
         let report = self.scan_photos()?;
         for id in &report.new_ids {
@@ -279,7 +381,7 @@ impl Daemon {
         self.ingest_logs()?;
         self.link_unlinked()?;
         self.write_heartbeat();
-        self.setup_watchers()?;
+        self.restart_watchers();
         self.apply_autostart(self.settings.autostart);
         self.ensure_tray();
         self.start_workers();
@@ -291,6 +393,9 @@ impl Daemon {
         );
 
         while self.running.load(Ordering::Relaxed) {
+            if let Err(error) = self.poll_commands() {
+                tracing::error!(%error, "cannot handle daemon commands");
+            }
             if self
                 .status
                 .lock()
@@ -1148,6 +1253,167 @@ mod tests {
         let errors = db.daemon_errors().unwrap();
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].operation, DaemonOperation::Log);
+    }
+
+    #[test]
+    fn rescan_command_clears_missing_root_error_and_indexes_the_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let db_path = dir.path().join("library.db");
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir.clone()), Some(log_dir)).unwrap();
+        daemon.run_once().unwrap();
+
+        {
+            let db = Db::open(&db_path).unwrap();
+            assert_eq!(
+                db.daemon_errors().unwrap()[0].operation,
+                DaemonOperation::Scan
+            );
+        }
+
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        write_photo(&photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png"));
+        {
+            let db = Db::open(&db_path).unwrap();
+            assert!(db.request_daemon_command(DaemonCommand::Rescan).unwrap());
+        }
+        daemon.run_once().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        assert!(db.daemon_errors().unwrap().is_empty());
+        assert_eq!(db.count_photos().unwrap(), 1);
+    }
+
+    #[test]
+    fn relog_command_clears_a_log_error_and_reads_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        let log_dir = dir.path().join("logs");
+        let db_path = dir.path().join("library.db");
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir.clone())).unwrap();
+        daemon.run_once().unwrap();
+
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let log_path = log_dir.join("output_log_2026-10-21_21-00-00.txt");
+        std::fs::write(
+            &log_path,
+            concat!(
+                "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)\n",
+                "2026.10.21 21:23:13 Debug      -  [Behaviour] Joining or Creating Room: Test World\n",
+            ),
+        )
+        .unwrap();
+        {
+            let db = Db::open(&db_path).unwrap();
+            assert!(db.request_daemon_command(DaemonCommand::Relog).unwrap());
+        }
+        daemon.run_once().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        assert!(db.daemon_errors().unwrap().is_empty());
+        assert!(db.log_offset(log_path.to_str().unwrap()).unwrap().is_some());
+    }
+
+    #[test]
+    fn command_reloads_settings_and_rebuilds_watchers() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_root = dir.path().join("old");
+        let new_root = dir.path().join("new");
+        std::fs::create_dir_all(&old_root).unwrap();
+        std::fs::create_dir_all(&new_root).unwrap();
+        write_photo(&new_root.join("VRChat_2026-10-21_21-24-00.000_4x3.png"));
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let db_path = dir.path().join("library.db");
+
+        let mut daemon = Daemon::open(&db_path, Some(old_root), Some(log_dir)).unwrap();
+        {
+            let db = Db::open(&db_path).unwrap();
+            let mut settings = AppSettings::load(&db).unwrap();
+            settings.photo_roots = vec![new_root.to_string_lossy().to_string()];
+            settings.save(&db).unwrap();
+            assert!(db.request_daemon_command(DaemonCommand::Rescan).unwrap());
+        }
+        daemon.run_once().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        assert_eq!(db.count_photos().unwrap(), 1);
+        assert_eq!(daemon.watchers.len(), 1);
+        assert!(db.daemon_errors().unwrap().is_empty());
+    }
+
+    #[test]
+    fn run_once_consumes_queued_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let db_path = dir.path().join("library.db");
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        {
+            let db = Db::open(&db_path).unwrap();
+            assert!(db.request_daemon_command(DaemonCommand::Rescan).unwrap());
+        }
+
+        daemon.run_once().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        assert!(db.take_daemon_commands().unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_job_can_be_retried_and_completed() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let photo_path = photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&photo_path);
+        let db_path = dir.path().join("library.db");
+        {
+            let db = Db::open(&db_path).unwrap();
+            db.save_profile(&CompressionProfile {
+                id: "p".to_string(),
+                name: "retry".to_string(),
+                format: vrc_photo_core::model::CompressionFormat::Webp,
+                suffix: "_retry".to_string(),
+                ..CompressionProfile::default()
+            })
+            .unwrap();
+        }
+
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+        daemon.run_once().unwrap();
+
+        let job = {
+            let db = Db::open(&db_path).unwrap();
+            let photo = db
+                .photo_by_path(photo_path.to_str().unwrap())
+                .unwrap()
+                .unwrap();
+            let job = db.enqueue_job(photo.id, "p", "keep").unwrap();
+            db.update_job(&job, QueueStatus::Failed, 0.0, Some("boom"), None)
+                .unwrap();
+            assert!(db.retry_job(&job).unwrap());
+            job
+        };
+        daemon.compress_pending().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        let job = db
+            .list_jobs(10)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id == job)
+            .unwrap();
+        assert_eq!(job.status, QueueStatus::Completed);
+        assert!(db.derivatives_for_photo(job.photo_id).unwrap().len() == 1);
     }
 
     #[cfg(unix)]
