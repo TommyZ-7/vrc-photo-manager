@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
@@ -56,6 +56,8 @@ const WORKSPACE_PAD_X: f32 = 44.0;
 const CARD_INTRO_SECS: f32 = 0.6;
 const CARD_STAGGER_SECS: f32 = 0.04;
 const CARD_STAGGER_MAX: usize = 8;
+const THUMB_CACHE_ENTRIES: usize = 192;
+const THUMB_IN_FLIGHT: usize = 4;
 
 gpui_kit::actions!(
     ui,
@@ -152,6 +154,91 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> LaunchOptions {
     options
 }
 
+/// Bounded LRU cache for grid thumbnails.
+///
+/// Decoding runs on the background executor; the UI thread only turns the
+/// decoded RGBA buffer into a `RenderImage`. `pending` and `failed` keep a
+/// photo from being requested more than once while it is on screen.
+#[derive(Default)]
+struct ThumbnailCache {
+    images: HashMap<i64, Arc<RenderImage>>,
+    colors: HashMap<i64, u32>,
+    lru: VecDeque<i64>,
+    pending: HashSet<i64>,
+    failed: HashSet<i64>,
+    pinned: Option<i64>,
+    in_flight: usize,
+}
+
+impl ThumbnailCache {
+    fn get(&mut self, id: i64) -> Option<Arc<RenderImage>> {
+        let image = self.images.get(&id)?.clone();
+        self.touch(id);
+        Some(image)
+    }
+
+    fn color(&self, id: i64) -> Option<u32> {
+        self.colors.get(&id).copied()
+    }
+
+    fn begin(&mut self, id: i64) -> bool {
+        if self.images.contains_key(&id)
+            || self.pending.contains(&id)
+            || self.failed.contains(&id)
+            || self.in_flight >= THUMB_IN_FLIGHT
+        {
+            return false;
+        }
+        self.pending.insert(id);
+        self.in_flight += 1;
+        true
+    }
+
+    fn insert(&mut self, id: i64, image: Arc<RenderImage>, color: u32) {
+        if self.pending.remove(&id) {
+            self.in_flight = self.in_flight.saturating_sub(1);
+        }
+        self.images.insert(id, image);
+        self.colors.insert(id, color);
+        self.touch(id);
+        self.evict();
+    }
+
+    fn fail(&mut self, id: i64) {
+        if self.pending.remove(&id) {
+            self.in_flight = self.in_flight.saturating_sub(1);
+        }
+        self.failed.insert(id);
+    }
+
+    fn pin(&mut self, id: i64) {
+        self.pinned = Some(id);
+    }
+
+    fn touch(&mut self, id: i64) {
+        if let Some(index) = self.lru.iter().position(|entry| *entry == id) {
+            self.lru.remove(index);
+        }
+        self.lru.push_back(id);
+    }
+
+    fn evict(&mut self) {
+        while self.images.len() > THUMB_CACHE_ENTRIES {
+            let Some(id) = self.lru.pop_front() else {
+                break;
+            };
+            // Rotate the pinned entry instead of dropping it. All cached
+            // images own an LRU slot, so this always terminates.
+            if Some(id) == self.pinned {
+                self.lru.push_back(id);
+                continue;
+            }
+            self.images.remove(&id);
+            self.colors.remove(&id);
+        }
+    }
+}
+
 pub struct App {
     db: Db,
     screen: Screen,
@@ -170,8 +257,7 @@ pub struct App {
     selected_tags: Vec<String>,
     selected_derivatives: Vec<Derivative>,
     compressed_ids: HashSet<i64>,
-    thumbnails: HashMap<i64, Arc<RenderImage>>,
-    thumbnail_colors: HashMap<i64, u32>,
+    thumbnails: ThumbnailCache,
     grid_columns: usize,
     grid_epoch: u64,
     hovered_photo: Option<i64>,
@@ -282,8 +368,7 @@ impl App {
             selected_tags: Vec::new(),
             selected_derivatives: Vec::new(),
             compressed_ids: HashSet::new(),
-            thumbnails: HashMap::new(),
-            thumbnail_colors: HashMap::new(),
+            thumbnails: ThumbnailCache::default(),
             grid_columns: 0,
             grid_epoch: 0,
             hovered_photo: None,
@@ -410,7 +495,6 @@ impl App {
             .unwrap_or_default()
             .into_iter()
             .collect();
-        self.load_thumbnails();
         self.jobs = self.db.list_jobs(20).unwrap_or_default();
         self.settings = AppSettings::load(&self.db).unwrap_or_default();
         cx.set_reduce_motion(self.settings.ui_reduce_motion);
@@ -485,32 +569,9 @@ impl App {
         cx.notify();
     }
 
-    fn load_thumbnails(&mut self) {
-        self.thumbnails.clear();
-        self.thumbnail_colors.clear();
-        for photo in self.photos.iter().take(300) {
-            let path = match &self.demo_assets {
-                Some(assets) => demo_thumb_path(assets, photo.id),
-                None => match thumbnail::thumbnail_path(photo.id) {
-                    Some(path) => path,
-                    None => continue,
-                },
-            };
-            if let Some(image) = load_render(&path) {
-                let color = image
-                    .as_bytes(0)
-                    .map(average_bgra)
-                    .unwrap_or_else(|| scene_color(photo.world_name.as_deref().unwrap_or("")));
-                self.thumbnail_colors.insert(photo.id, color);
-                self.thumbnails.insert(photo.id, image);
-            }
-        }
-    }
-
     fn color_for(&self, photo: &Photo) -> u32 {
-        self.thumbnail_colors
-            .get(&photo.id)
-            .copied()
+        self.thumbnails
+            .color(photo.id)
             .unwrap_or_else(|| scene_color(photo.world_name.as_deref().unwrap_or("")))
     }
 
@@ -539,6 +600,37 @@ impl App {
             .and_then(|photo| load_preview(Path::new(&photo.abs_path)));
     }
 
+    /// Starts a background decode for a grid thumbnail when the cache has a
+    /// free slot. Cached, pending, and previously failed photos are skipped.
+    fn request_thumbnail(&mut self, photo: &Photo, cx: &mut Context<Self>) {
+        if !self.thumbnails.begin(photo.id) {
+            return;
+        }
+        let id = photo.id;
+        let source = PathBuf::from(&photo.abs_path);
+        let cache_path = match &self.demo_assets {
+            Some(assets) => demo_thumb_path(assets, id),
+            None => thumbnail::thumbnail_path(id).unwrap_or_default(),
+        };
+        cx.spawn(async move |this, cx| {
+            let decoded = cx
+                .background_executor()
+                .spawn(async move { decode_thumbnail(id, &cache_path, &source) })
+                .await;
+            this.update(cx, |this, cx| {
+                match decoded {
+                    Some((color, rgba)) => {
+                        this.thumbnails.insert(id, make_render_image(rgba), color);
+                    }
+                    None => this.thumbnails.fail(id),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     fn select_photo(&mut self, id: i64, cx: &mut Context<Self>) {
         if self.delete_armed != Some(id) {
             self.delete_armed = None;
@@ -553,7 +645,13 @@ impl App {
             self.selection_epoch = self.selection_epoch.wrapping_add(1);
             self.selection_changed_at = Some(Instant::now());
         }
+        self.thumbnails.pin(id);
         self.load_selected(id);
+        if self.thumbnails.get(id).is_none()
+            && let Some(photo) = self.selected_photo.clone()
+        {
+            self.request_thumbnail(&photo, cx);
+        }
         cx.notify();
     }
 
@@ -1440,7 +1538,10 @@ impl App {
             .world_name
             .clone()
             .unwrap_or_else(|| "未紐付け".to_string());
-        let thumbnail = self.thumbnails.get(&id).cloned();
+        let thumbnail = self.thumbnails.get(id);
+        if thumbnail.is_none() {
+            self.request_thumbnail(photo, cx);
+        }
         let color = self.color_for(photo);
         let hovered = self.hovered_photo == Some(id);
         let grid_index = match layout {
@@ -1704,7 +1805,7 @@ impl App {
         let selection_epoch = self.selection_epoch;
         let previous_preview = self.previous_preview.clone();
         let current_preview = self.preview.clone();
-        let thumbnail = self.thumbnails.get(&id).cloned();
+        let thumbnail = self.thumbnails.get(id);
         let compressed = self.compressed_ids.contains(&id);
         let world = photo
             .world_name
@@ -4078,16 +4179,30 @@ fn seed_demo(db: &Db, photo_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn load_render(path: &Path) -> Option<Arc<RenderImage>> {
-    if !path.is_file() {
-        return None;
-    }
+/// Decodes a thumbnail on a background thread. Returns the average color in
+/// RGB and the RGBA buffer with channels already swapped to BGRA.
+fn decode_thumbnail(id: i64, cache_path: &Path, source: &Path) -> Option<(u32, image::RgbaImage)> {
+    let cached = cache_path.is_file()
+        && std::fs::metadata(cache_path)
+            .map(|meta| meta.len() > 0)
+            .unwrap_or(false);
+    let path = if cached {
+        cache_path.to_path_buf()
+    } else {
+        thumbnail::ensure_thumbnail(id, source).ok().flatten()?
+    };
     let mut buffer = image::open(path).ok()?.to_rgba8();
     for pixel in buffer.pixels_mut() {
         pixel.0.swap(0, 2);
     }
-    let frame = image::Frame::new(buffer);
-    Some(Arc::new(RenderImage::new(SmallVec::from_elem(frame, 1))))
+    let color = average_bgra(buffer.as_raw());
+    Some((color, buffer))
+}
+
+/// Builds a GPUI image from a decoded buffer. Must run on the UI thread.
+fn make_render_image(rgba: image::RgbaImage) -> Arc<RenderImage> {
+    let frame = image::Frame::new(rgba);
+    Arc::new(RenderImage::new(SmallVec::from_elem(frame, 1)))
 }
 
 fn load_preview(path: &Path) -> Option<Arc<RenderImage>> {
@@ -4469,11 +4584,15 @@ mod tests {
     // `use super::*` would also import GPUI's `test` attribute macro through
     // `gpui_kit::*`, shadowing the built-in `#[test]` and recursing forever.
     use super::{
-        DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH, average_bgra,
-        demo_thumb_path, ease_motion, format_count, grid_available_width, grid_columns, lerp_color,
+        DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH, THUMB_CACHE_ENTRIES,
+        THUMB_IN_FLIGHT, ThumbnailCache, average_bgra, decode_thumbnail, demo_thumb_path,
+        ease_motion, format_count, grid_available_width, grid_columns, lerp_color,
         next_focus_index, parse_args, parse_window_size, sidebar_reveal_width, sidebar_width,
         stagger_value, step_index, viewer_details_width, viewer_image_box,
     };
+    use gpui_kit::RenderImage;
+    use smallvec::SmallVec;
+    use std::sync::Arc;
 
     #[test]
     fn sidebar_widths_match_the_rail() {
@@ -4640,5 +4759,59 @@ mod tests {
         let path = demo_thumb_path(&assets, 42);
         assert!(path.ends_with("42.png"));
         assert_eq!(path.parent(), Some(assets.thumb_dir.as_path()));
+    }
+
+    fn test_render_image() -> Arc<RenderImage> {
+        let frame = image::Frame::new(image::RgbaImage::new(1, 1));
+        Arc::new(RenderImage::new(SmallVec::from_elem(frame, 1)))
+    }
+
+    #[test]
+    fn thumbnail_cache_limits_in_flight_requests() {
+        let mut cache = ThumbnailCache::default();
+        for id in 0..THUMB_IN_FLIGHT as i64 {
+            assert!(cache.begin(id));
+        }
+        assert!(!cache.begin(999));
+    }
+
+    #[test]
+    fn thumbnail_cache_evicts_least_recently_used_but_keeps_pinned() {
+        let mut cache = ThumbnailCache::default();
+        cache.pin(1);
+        for id in 1..=THUMB_CACHE_ENTRIES as i64 {
+            assert!(cache.begin(id));
+            cache.insert(id, test_render_image(), 0x112233);
+        }
+        assert!(cache.get(1).is_some());
+
+        assert!(cache.begin(999));
+        cache.insert(999, test_render_image(), 0x445566);
+        assert!(cache.get(1).is_some());
+        assert!(cache.get(2).is_none());
+    }
+
+    #[test]
+    fn thumbnail_cache_does_not_retry_failed_or_pending_ids() {
+        let mut cache = ThumbnailCache::default();
+        assert!(cache.begin(1));
+        assert!(!cache.begin(1));
+        cache.fail(1);
+        assert!(!cache.begin(1));
+    }
+
+    #[test]
+    fn decode_thumbnail_uses_the_cached_file_and_swaps_channels() {
+        let dir = std::env::temp_dir().join(format!("vrc-photo-ui-decode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cache_path = dir.join("thumb.png");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([10, 20, 30, 255]))
+            .save(&cache_path)
+            .unwrap();
+        let (color, rgba) =
+            decode_thumbnail(7, &cache_path, &dir.join("missing-source.png")).unwrap();
+        assert_eq!(color, 0x0a141e);
+        assert_eq!(&rgba.as_raw()[..4], &[30, 20, 10, 255]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
