@@ -1,13 +1,14 @@
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use rusqlite::types::Value;
-use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params, params_from_iter};
 
 use crate::error::Result;
 use crate::model::{
     CompressionJob, CompressionProfile, Derivative, LibraryRoot, LibraryStats, NewPhoto, Photo,
-    PhotoContext, PhotoFilter, PhotoPlayer, PhotoSort, PhotoStatus, QueueStatus, Session,
-    SessionPlayer, World,
+    PhotoContext, PhotoFilter, PhotoIndexEntry, PhotoPlayer, PhotoSort, PhotoStatus,
+    PhotoTextFilter, QueueStatus, Session, SessionPlayer, World,
 };
 
 const SCHEMA_V1: &str = r#"
@@ -174,6 +175,12 @@ const SCHEMA_V2: &str = r#"
 ALTER TABLE photo_context ADD COLUMN author TEXT;
 "#;
 
+const SCHEMA_V3: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_photos_captured_id
+    ON photos(captured_at_utc DESC, id DESC)
+    WHERE status = 'present';
+"#;
+
 const PHOTO_SELECT: &str = "p.id, p.root_id, p.rel_path, p.abs_path, p.file_name, \
     p.captured_at_utc, p.captured_at_local, p.tz_offset_sec, p.width, p.height, \
     p.file_size, p.mtime, p.blake3, p.status, p.is_favorite, p.note, \
@@ -181,8 +188,16 @@ const PHOTO_SELECT: &str = "p.id, p.root_id, p.rel_path, p.abs_path, p.file_name
 
 const PHOTO_FROM: &str = " FROM photos p LEFT JOIN photo_context c ON c.photo_id = p.id ";
 
+/// Local capture month as YYYYMM, falling back to the UTC capture time and
+/// finally to 0 when neither can be parsed.
+const PHOTO_MONTH: &str = "COALESCE(\
+    CAST(strftime('%Y%m', p.captured_at_local) AS INTEGER), \
+    CAST(strftime('%Y%m', p.captured_at_utc, 'unixepoch') AS INTEGER), \
+    0)";
+
 pub struct Db {
     conn: Connection,
+    path: Option<PathBuf>,
 }
 
 impl Db {
@@ -193,7 +208,10 @@ impl Db {
         }
         let conn = Connection::open(path)?;
         Self::configure(&conn)?;
-        let db = Self { conn };
+        let db = Self {
+            conn,
+            path: Some(path.to_path_buf()),
+        };
         db.migrate()?;
         Ok(db)
     }
@@ -201,9 +219,26 @@ impl Db {
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         Self::configure(&conn)?;
-        let db = Self { conn };
+        let db = Self { conn, path: None };
         db.migrate()?;
         Ok(db)
+    }
+
+    /// Opens an existing database file without running migrations, for readers
+    /// such as background index workers. Callers should fall back to a
+    /// synchronous query when this fails.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        Self::configure(&conn)?;
+        Ok(Self {
+            conn,
+            path: Some(path.to_path_buf()),
+        })
+    }
+
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
     }
 
     fn configure(conn: &Connection) -> Result<()> {
@@ -234,6 +269,14 @@ impl Db {
                 params![now_string()],
             )?;
             self.conn.pragma_update(None, "user_version", 2)?;
+        }
+        if version < 3 {
+            self.conn.execute_batch(SCHEMA_V3)?;
+            self.conn.execute(
+                "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (3, ?1)",
+                params![now_string()],
+            )?;
+            self.conn.pragma_update(None, "user_version", 3)?;
         }
         Ok(())
     }
@@ -320,13 +363,61 @@ impl Db {
         Ok(photo)
     }
 
+    /// Returns a lightweight, ordered snapshot of every present photo. The
+    /// `photo_context` join is 1:1 and keeps every `PhotoSort` executable,
+    /// including world order.
+    pub fn photo_index(&self, sort: PhotoSort) -> Result<Vec<PhotoIndexEntry>> {
+        let order = photo_order(sort);
+        let sql = format!(
+            "SELECT p.id, p.captured_at_utc, {PHOTO_MONTH}{PHOTO_FROM} \
+             WHERE p.status = 'present' ORDER BY {order}"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map([], row_to_photo_index)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Returns an ordered index snapshot matching the text filters.
+    pub fn photo_index_text(&self, filter: &PhotoTextFilter) -> Result<Vec<PhotoIndexEntry>> {
+        let (where_sql, values) = build_text_filter(
+            filter.world.as_deref(),
+            filter.player.as_deref(),
+            filter.tag.as_deref(),
+            filter.favorite,
+            filter.from_utc,
+            filter.to_utc,
+        );
+        let sql = format!(
+            "SELECT p.id, p.captured_at_utc, {PHOTO_MONTH}{PHOTO_FROM} WHERE {where_sql} \
+             ORDER BY p.captured_at_utc DESC, p.id DESC"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(values), row_to_photo_index)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Fetches photos by primary key, preserving the order of `ids` and
+    /// skipping ids that no longer exist.
+    pub fn photos_by_ids(&self, ids: &[i64]) -> Result<Vec<Photo>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut by_id = HashMap::with_capacity(ids.len());
+        for chunk in ids.chunks(500) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!("SELECT {PHOTO_SELECT}{PHOTO_FROM} WHERE p.id IN ({placeholders})");
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(params_from_iter(chunk.iter().copied()), row_to_photo)?;
+            for photo in rows {
+                let photo = photo?;
+                by_id.insert(photo.id, photo);
+            }
+        }
+        Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
+    }
+
     pub fn list_photos(&self, limit: i64, offset: i64, sort: PhotoSort) -> Result<Vec<Photo>> {
-        let order = match sort {
-            PhotoSort::Newest => "p.captured_at_utc DESC, p.id DESC",
-            PhotoSort::Oldest => "p.captured_at_utc ASC, p.id ASC",
-            PhotoSort::Largest => "p.file_size DESC, p.id DESC",
-            PhotoSort::World => "c.world_name COLLATE NOCASE ASC, p.captured_at_utc DESC",
-        };
+        let order = photo_order(sort);
         let sql = format!(
             "SELECT {PHOTO_SELECT}{PHOTO_FROM} WHERE p.status = 'present' \
              ORDER BY {order} LIMIT ?1 OFFSET ?2"
@@ -339,12 +430,7 @@ impl Db {
     pub fn search_photos(&self, filter: &PhotoFilter) -> Result<Vec<Photo>> {
         let (where_sql, values) = build_photo_filter(filter);
         let sort = filter.sort.unwrap_or(PhotoSort::Newest);
-        let order = match sort {
-            PhotoSort::Newest => "p.captured_at_utc DESC, p.id DESC",
-            PhotoSort::Oldest => "p.captured_at_utc ASC, p.id ASC",
-            PhotoSort::Largest => "p.file_size DESC, p.id DESC",
-            PhotoSort::World => "c.world_name COLLATE NOCASE ASC, p.captured_at_utc DESC",
-        };
+        let order = photo_order(sort);
         let limit = if filter.limit > 0 { filter.limit } else { 500 };
         let offset = filter.offset.max(0);
         let sql = format!(
@@ -380,55 +466,12 @@ impl Db {
         to_utc: Option<i64>,
         limit: i64,
     ) -> Result<Vec<Photo>> {
-        let mut clauses = vec!["p.status = 'present'".to_string()];
-        let mut values: Vec<Value> = Vec::new();
-
-        if let Some(query) = world.map(str::trim).filter(|query| !query.is_empty()) {
-            let like = format!("%{query}%");
-            clauses.push(
-                "(c.world_name LIKE ? OR c.instance_id LIKE ? OR EXISTS (\
-                    SELECT 1 FROM worlds w WHERE w.id = c.world_id AND w.world_id LIKE ?))"
-                    .to_string(),
-            );
-            values.push(Value::Text(like.clone()));
-            values.push(Value::Text(like.clone()));
-            values.push(Value::Text(like));
-        }
-        if let Some(query) = player.map(str::trim).filter(|query| !query.is_empty()) {
-            let like = format!("%{query}%");
-            clauses.push(
-                "EXISTS (SELECT 1 FROM photo_players pp WHERE pp.photo_id = p.id \
-                 AND (pp.display_name LIKE ? OR pp.user_id LIKE ?))"
-                    .to_string(),
-            );
-            values.push(Value::Text(like.clone()));
-            values.push(Value::Text(like));
-        }
-        if let Some(query) = tag.map(str::trim).filter(|query| !query.is_empty()) {
-            let like = format!("%{query}%");
-            clauses.push(
-                "EXISTS (SELECT 1 FROM photo_tags pt JOIN tags t ON t.id = pt.tag_id \
-                 WHERE pt.photo_id = p.id AND t.name LIKE ?)"
-                    .to_string(),
-            );
-            values.push(Value::Text(like));
-        }
-        if favorite {
-            clauses.push("p.is_favorite = 1".to_string());
-        }
-        if let Some(from) = from_utc {
-            clauses.push("p.captured_at_utc >= ?".to_string());
-            values.push(Value::Integer(from));
-        }
-        if let Some(to) = to_utc {
-            clauses.push("p.captured_at_utc <= ?".to_string());
-            values.push(Value::Integer(to));
-        }
+        let (where_sql, mut values) =
+            build_text_filter(world, player, tag, favorite, from_utc, to_utc);
 
         let sql = format!(
-            "SELECT {PHOTO_SELECT}{PHOTO_FROM} WHERE {} \
-             ORDER BY p.captured_at_utc DESC, p.id DESC LIMIT ?",
-            clauses.join(" AND ")
+            "SELECT {PHOTO_SELECT}{PHOTO_FROM} WHERE {where_sql} \
+             ORDER BY p.captured_at_utc DESC, p.id DESC LIMIT ?"
         );
         values.push(Value::Integer(limit.max(1)));
         let mut stmt = self.conn.prepare(&sql)?;
@@ -1049,6 +1092,15 @@ impl Db {
     }
 }
 
+fn photo_order(sort: PhotoSort) -> &'static str {
+    match sort {
+        PhotoSort::Newest => "p.captured_at_utc DESC, p.id DESC",
+        PhotoSort::Oldest => "p.captured_at_utc ASC, p.id ASC",
+        PhotoSort::Largest => "p.file_size DESC, p.id DESC",
+        PhotoSort::World => "c.world_name COLLATE NOCASE ASC, p.captured_at_utc DESC",
+    }
+}
+
 fn build_photo_filter(filter: &PhotoFilter) -> (String, Vec<Value>) {
     let mut clauses = vec!["p.status = 'present'".to_string()];
     let mut values = Vec::new();
@@ -1100,6 +1152,62 @@ fn build_photo_filter(filter: &PhotoFilter) -> (String, Vec<Value>) {
     (clauses.join(" AND "), values)
 }
 
+fn build_text_filter(
+    world: Option<&str>,
+    player: Option<&str>,
+    tag: Option<&str>,
+    favorite: bool,
+    from_utc: Option<i64>,
+    to_utc: Option<i64>,
+) -> (String, Vec<Value>) {
+    let mut clauses = vec!["p.status = 'present'".to_string()];
+    let mut values: Vec<Value> = Vec::new();
+
+    if let Some(query) = world.map(str::trim).filter(|query| !query.is_empty()) {
+        let like = format!("%{query}%");
+        clauses.push(
+            "(c.world_name LIKE ? OR c.instance_id LIKE ? OR EXISTS (\
+                SELECT 1 FROM worlds w WHERE w.id = c.world_id AND w.world_id LIKE ?))"
+                .to_string(),
+        );
+        values.push(Value::Text(like.clone()));
+        values.push(Value::Text(like.clone()));
+        values.push(Value::Text(like));
+    }
+    if let Some(query) = player.map(str::trim).filter(|query| !query.is_empty()) {
+        let like = format!("%{query}%");
+        clauses.push(
+            "EXISTS (SELECT 1 FROM photo_players pp WHERE pp.photo_id = p.id \
+             AND (pp.display_name LIKE ? OR pp.user_id LIKE ?))"
+                .to_string(),
+        );
+        values.push(Value::Text(like.clone()));
+        values.push(Value::Text(like));
+    }
+    if let Some(query) = tag.map(str::trim).filter(|query| !query.is_empty()) {
+        let like = format!("%{query}%");
+        clauses.push(
+            "EXISTS (SELECT 1 FROM photo_tags pt JOIN tags t ON t.id = pt.tag_id \
+             WHERE pt.photo_id = p.id AND t.name LIKE ?)"
+                .to_string(),
+        );
+        values.push(Value::Text(like));
+    }
+    if favorite {
+        clauses.push("p.is_favorite = 1".to_string());
+    }
+    if let Some(from) = from_utc {
+        clauses.push("p.captured_at_utc >= ?".to_string());
+        values.push(Value::Integer(from));
+    }
+    if let Some(to) = to_utc {
+        clauses.push("p.captured_at_utc <= ?".to_string());
+        values.push(Value::Integer(to));
+    }
+
+    (clauses.join(" AND "), values)
+}
+
 fn row_to_photo(row: &Row<'_>) -> rusqlite::Result<Photo> {
     Ok(Photo {
         id: row.get(0)?,
@@ -1123,6 +1231,14 @@ fn row_to_photo(row: &Row<'_>) -> rusqlite::Result<Photo> {
         link_method: row.get(18)?,
         confidence: row.get(19)?,
         author: row.get(20)?,
+    })
+}
+
+fn row_to_photo_index(row: &Row<'_>) -> rusqlite::Result<PhotoIndexEntry> {
+    Ok(PhotoIndexEntry {
+        id: row.get(0)?,
+        captured_at_utc: row.get(1)?,
+        captured_month: row.get(2)?,
     })
 }
 
@@ -1166,6 +1282,337 @@ mod tests {
             mtime: ts,
             blake3: None,
         }
+    }
+
+    fn photo_at(root_id: i64, path: &str, utc: i64, local: &str) -> NewPhoto {
+        let mut photo = sample_photo(root_id, path, utc);
+        photo.captured_at_local = local.to_string();
+        photo
+    }
+
+    #[test]
+    fn migration_adds_captured_id_index() {
+        let db = Db::open_in_memory().unwrap();
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+
+        let recorded: i64 = db
+            .conn
+            .query_row(
+                "SELECT version FROM schema_migrations WHERE version = 3",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(recorded, 3);
+
+        let sql: String = db
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_photos_captured_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let normalized = sql
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        assert!(
+            normalized.contains("on photos(captured_at_utc desc, id desc)"),
+            "{sql}"
+        );
+        assert!(normalized.contains("where status = 'present'"), "{sql}");
+    }
+
+    #[test]
+    fn photo_index_orders_newest_first_and_uses_local_month() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let older = db
+            .upsert_photo(&photo_at(
+                root,
+                "/photos/older.png",
+                1_700_000_000,
+                "2025-04-30 09:00:00",
+            ))
+            .unwrap();
+        let newer = db
+            .upsert_photo(&photo_at(
+                root,
+                "/photos/newer.png",
+                1_700_100_000,
+                "2025-05-01 08:00:00",
+            ))
+            .unwrap();
+        let missing = db
+            .upsert_photo(&photo_at(
+                root,
+                "/photos/missing.png",
+                1_700_200_000,
+                "2025-06-01 08:00:00",
+            ))
+            .unwrap();
+        db.mark_missing(missing).unwrap();
+
+        let entries = db.photo_index(PhotoSort::Newest).unwrap();
+        assert_eq!(
+            entries.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+            vec![newer, older]
+        );
+        assert_eq!(entries[0].captured_month, 202505);
+        assert_eq!(entries[1].captured_month, 202504);
+    }
+
+    #[test]
+    fn photo_index_supports_world_sort() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let alpha = db
+            .upsert_photo(&photo_at(
+                root,
+                "/photos/alpha.png",
+                1_700_000_000,
+                "2025-04-30 09:00:00",
+            ))
+            .unwrap();
+        let beta = db
+            .upsert_photo(&photo_at(
+                root,
+                "/photos/beta.png",
+                1_700_000_100,
+                "2025-04-30 10:00:00",
+            ))
+            .unwrap();
+        for (photo_id, world_name) in [(alpha, "Alpha"), (beta, "Beta")] {
+            db.set_photo_context(&PhotoContext {
+                photo_id,
+                session_id: None,
+                world_id: None,
+                world_name: Some(world_name.to_string()),
+                instance_id: None,
+                link_method: "manual".to_string(),
+                confidence: 1.0,
+                author: None,
+                linked_at: now_string(),
+            })
+            .unwrap();
+        }
+
+        let entries = db.photo_index(PhotoSort::World).unwrap();
+        assert_eq!(
+            entries.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+            vec![alpha, beta]
+        );
+    }
+
+    #[test]
+    fn photo_index_falls_back_to_utc_month_for_bad_local_time() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        // 2025-05-01 00:00:00 UTC
+        db.upsert_photo(&photo_at(root, "/photos/bad-local.png", 1_746_057_600, ""))
+            .unwrap();
+        let entries = db.photo_index(PhotoSort::Newest).unwrap();
+        assert_eq!(entries[0].captured_month, 202505);
+    }
+
+    #[test]
+    fn photo_index_text_returns_more_than_300_matches() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        for index in 0..305 {
+            db.upsert_photo(&photo_at(
+                root,
+                &format!("/photos/{index}.png"),
+                1_700_000_000 + index,
+                "2025-04-30 09:00:00",
+            ))
+            .unwrap();
+        }
+        let entries = db.photo_index_text(&PhotoTextFilter::default()).unwrap();
+        assert_eq!(entries.len(), 305);
+    }
+
+    #[test]
+    fn photo_index_text_applies_favorite_filter() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let favorite = db
+            .upsert_photo(&photo_at(
+                root,
+                "/photos/favorite.png",
+                1_700_000_100,
+                "2025-04-30 09:00:00",
+            ))
+            .unwrap();
+        db.upsert_photo(&photo_at(
+            root,
+            "/photos/plain.png",
+            1_700_000_000,
+            "2025-04-30 08:00:00",
+        ))
+        .unwrap();
+        db.set_favorite(favorite, true).unwrap();
+
+        let entries = db
+            .photo_index_text(&PhotoTextFilter {
+                favorite: true,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            entries.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+            vec![favorite]
+        );
+    }
+
+    #[test]
+    fn photos_by_ids_preserves_order_and_skips_missing_ids() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let mut ids = Vec::new();
+        for index in 0..501 {
+            ids.push(
+                db.upsert_photo(&photo_at(
+                    root,
+                    &format!("/photos/{index}.png"),
+                    1_700_000_000 + index,
+                    "2025-04-30 09:00:00",
+                ))
+                .unwrap(),
+            );
+        }
+
+        let photos = db.photos_by_ids(&ids).unwrap();
+        assert_eq!(photos.len(), 501);
+        assert_eq!(photos.first().map(|photo| photo.id), Some(ids[0]));
+        assert_eq!(photos.last().map(|photo| photo.id), Some(ids[500]));
+
+        // The reversed request crosses the 500-id chunk boundary; every row
+        // must come back in exactly the requested order.
+        let reversed: Vec<i64> = ids.iter().rev().copied().collect();
+        let photos = db.photos_by_ids(&reversed).unwrap();
+        assert_eq!(
+            photos.iter().map(|photo| photo.id).collect::<Vec<_>>(),
+            reversed
+        );
+
+        let missing = db.photos_by_ids(&[ids[500], ids[0], -1]).unwrap();
+        assert_eq!(
+            missing.iter().map(|photo| photo.id).collect::<Vec<_>>(),
+            vec![ids[500], ids[0]]
+        );
+    }
+
+    /// Seeds 100k synthetic rows in one transaction and measures the shipped
+    /// index and page queries. Ignored by default because it is a timing
+    /// benchmark, not a correctness gate:
+    ///
+    /// `cargo test -p vrc-photo-core photo_index_scales_to_100k -- --ignored --nocapture`
+    #[test]
+    #[ignore = "100k timing benchmark"]
+    fn photo_index_scales_to_100k() {
+        use std::time::{Duration, Instant};
+
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let base = 1_600_000_000i64;
+        let seed_start = Instant::now();
+        {
+            let tx = db.connection().unchecked_transaction().unwrap();
+            {
+                let mut stmt = tx
+                    .prepare(
+                        "INSERT INTO photos(root_id, rel_path, abs_path, file_name, \
+                         captured_at_utc, captured_at_local, tz_offset_sec, width, height, \
+                         file_size, mtime, status, created_at, updated_at) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, 3840, 2160, 12400000, ?5, \
+                         'present', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                    )
+                    .unwrap();
+                for index in 0..100_000i64 {
+                    let captured_at = base + index;
+                    let local = chrono::DateTime::<chrono::Utc>::from_timestamp(captured_at, 0)
+                        .unwrap()
+                        .format("%Y-%m-%d %H:%M:%S")
+                        .to_string();
+                    let rel_path = format!("2026/{index:06}.png");
+                    let abs_path = format!("/photos/{rel_path}");
+                    stmt.execute(params![
+                        root,
+                        rel_path,
+                        abs_path,
+                        format!("{index:06}.png"),
+                        captured_at,
+                        local
+                    ])
+                    .unwrap();
+                }
+            }
+            // The shipped query LEFT JOINs `photo_context`; seed every other
+            // row so the benchmark measures the production join instead of an
+            // all-NULL shortcut.
+            tx.execute(
+                "INSERT INTO photo_context(photo_id, world_name, link_method, confidence, linked_at) \
+                 SELECT id, 'Bench World ' || (id % 100), 'log', 1.0, \
+                 '2026-01-01T00:00:00+00:00' FROM photos WHERE id % 2 = 0",
+                [],
+            )
+            .unwrap();
+            tx.commit().unwrap();
+        }
+        eprintln!("seed 100k: {:?}", seed_start.elapsed());
+        let context_count: i64 = db
+            .conn
+            .query_row("SELECT COUNT(*) FROM photo_context", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(context_count, 50_000);
+
+        let start = Instant::now();
+        let entries = db.photo_index(PhotoSort::Newest).unwrap();
+        let index_elapsed = start.elapsed();
+        assert_eq!(entries.len(), 100_000);
+        eprintln!("photo_index 100k: {index_elapsed:?}");
+        assert!(
+            index_elapsed < Duration::from_secs(2),
+            "photo_index took {index_elapsed:?}"
+        );
+
+        let ids: Vec<i64> = entries[50_000..50_256]
+            .iter()
+            .map(|entry| entry.id)
+            .collect();
+        let start = Instant::now();
+        let photos = db.photos_by_ids(&ids).unwrap();
+        let page_elapsed = start.elapsed();
+        eprintln!("photos_by_ids 256: {page_elapsed:?}");
+        assert_eq!(photos.len(), 256);
+        assert!(
+            page_elapsed < Duration::from_millis(200),
+            "photos_by_ids took {page_elapsed:?}"
+        );
+
+        // The search screen builds the same full snapshot with a text filter;
+        // an empty filter is the worst case (all 100k rows match).
+        let start = Instant::now();
+        let matches = db.photo_index_text(&PhotoTextFilter::default()).unwrap();
+        eprintln!("photo_index_text 100k: {:?}", start.elapsed());
+        assert_eq!(matches.len(), 100_000);
+    }
+
+    #[test]
+    fn database_path_is_exposed_for_read_only_workers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.db");
+        let db = Db::open(&path).unwrap();
+        assert_eq!(db.path(), Some(path.as_path()));
+        assert_eq!(Db::open_in_memory().unwrap().path(), None);
     }
 
     #[test]

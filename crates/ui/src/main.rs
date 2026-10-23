@@ -1,9 +1,10 @@
 use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::cell::Cell;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::Utc;
@@ -19,7 +20,7 @@ use vrc_photo_core::db::Db;
 use vrc_photo_core::importer::{self, ImportMode};
 use vrc_photo_core::model::{
     CompressionFormat, CompressionProfile, Derivative, LibraryStats, NewPhoto, Photo, PhotoContext,
-    PhotoPlayer, QueueStatus,
+    PhotoIndexEntry, PhotoPlayer, PhotoSort, PhotoTextFilter, QueueStatus,
 };
 use vrc_photo_core::settings::AppSettings;
 use vrc_photo_core::thumbnail;
@@ -56,6 +57,17 @@ const WORKSPACE_PAD_X: f32 = 44.0;
 const CARD_INTRO_SECS: f32 = 0.6;
 const CARD_STAGGER_SECS: f32 = 0.04;
 const CARD_STAGGER_MAX: usize = 8;
+const THUMB_CACHE_ENTRIES: usize = 192;
+const THUMB_IN_FLIGHT: usize = 4;
+const PAGE_SIZE: usize = 256;
+const MAX_PAGES: usize = 24;
+const PHOTO_ROW_HEIGHT: f32 = 196.0;
+const RAIL_WIDTH: f32 = 88.0;
+const RAIL_TOP_PAD: f32 = 24.0;
+const RAIL_TRACK_INSET: f32 = 12.0;
+const RAIL_LABEL_GAP: f32 = 16.0;
+const RAIL_YEAR_HIT_SLOP: f32 = 8.0;
+const RAIL_PILL_HEIGHT: f32 = 18.0;
 
 gpui_kit::actions!(
     ui,
@@ -71,12 +83,6 @@ gpui_kit::actions!(
         QuickLookPrevFocus,
     ]
 );
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PhotoCardLayout {
-    Grid { index: usize },
-    Fixed,
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ButtonTone {
@@ -131,6 +137,25 @@ impl Default for LaunchOptions {
     }
 }
 
+/// Timing probes stay silent unless `VRC_PHOTO_TIMING` is set.
+fn timing_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("VRC_PHOTO_TIMING").is_some())
+}
+
+fn log_timing(label: &str, start: Instant) {
+    if timing_enabled() {
+        eprintln!("[timing] {label}: {:?}", start.elapsed());
+    }
+}
+
+/// Process start, captured once so the first-frame probe can report launch
+/// latency. Only initialized when timing is enabled.
+fn process_start() -> Instant {
+    static START: OnceLock<Instant> = OnceLock::new();
+    *START.get_or_init(Instant::now)
+}
+
 fn parse_args(args: impl IntoIterator<Item = String>) -> LaunchOptions {
     let mut options = LaunchOptions::default();
     let mut args = args.into_iter();
@@ -152,6 +177,861 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> LaunchOptions {
     options
 }
 
+/// Bounded LRU cache for grid thumbnails.
+///
+/// Decoding runs on the background executor; the UI thread only turns the
+/// decoded RGBA buffer into a `RenderImage`. `pending` and `failed` keep a
+/// photo from being requested more than once while it is on screen.
+#[derive(Default)]
+struct ThumbnailCache {
+    images: HashMap<i64, Arc<RenderImage>>,
+    colors: HashMap<i64, u32>,
+    lru: VecDeque<i64>,
+    pending: HashSet<i64>,
+    failed: HashSet<i64>,
+    pinned: Option<i64>,
+    in_flight: usize,
+}
+
+impl ThumbnailCache {
+    fn get(&mut self, id: i64) -> Option<Arc<RenderImage>> {
+        let image = self.images.get(&id)?.clone();
+        self.touch(id);
+        Some(image)
+    }
+
+    fn color(&self, id: i64) -> Option<u32> {
+        self.colors.get(&id).copied()
+    }
+
+    fn begin(&mut self, id: i64) -> bool {
+        if self.images.contains_key(&id)
+            || self.pending.contains(&id)
+            || self.failed.contains(&id)
+            || self.in_flight >= THUMB_IN_FLIGHT
+        {
+            return false;
+        }
+        self.pending.insert(id);
+        self.in_flight += 1;
+        true
+    }
+
+    fn insert(&mut self, id: i64, image: Arc<RenderImage>, color: u32) {
+        if self.pending.remove(&id) {
+            self.in_flight = self.in_flight.saturating_sub(1);
+        }
+        self.images.insert(id, image);
+        self.colors.insert(id, color);
+        self.touch(id);
+        self.evict();
+    }
+
+    fn fail(&mut self, id: i64) {
+        if self.pending.remove(&id) {
+            self.in_flight = self.in_flight.saturating_sub(1);
+        }
+        self.failed.insert(id);
+    }
+
+    fn pin(&mut self, id: i64) {
+        self.pinned = Some(id);
+    }
+
+    /// Drops the pin when the selected photo is deleted or deselected.
+    fn unpin(&mut self, id: i64) {
+        if self.pinned == Some(id) {
+            self.pinned = None;
+        }
+    }
+
+    fn touch(&mut self, id: i64) {
+        if let Some(index) = self.lru.iter().position(|entry| *entry == id) {
+            self.lru.remove(index);
+        }
+        self.lru.push_back(id);
+    }
+
+    fn evict(&mut self) {
+        while self.images.len() > THUMB_CACHE_ENTRIES {
+            let Some(id) = self.lru.pop_front() else {
+                break;
+            };
+            // Rotate the pinned entry instead of dropping it. All cached
+            // images own an LRU slot, so this always terminates.
+            if Some(id) == self.pinned {
+                self.lru.push_back(id);
+                continue;
+            }
+            self.images.remove(&id);
+            self.colors.remove(&id);
+        }
+    }
+}
+
+/// Contiguous run of photos that share a local capture year.
+///
+/// `display_row` is the bucket's cumulative position in the rail, which stays
+/// proportional to the number of photos per year even when the underlying
+/// entries interleave years. `start_row` keeps the first entry index so a
+/// label click lands on a real photo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct YearBucket {
+    year: i32,
+    start_row: usize,
+    display_row: usize,
+    count: usize,
+}
+
+fn build_year_buckets(entries: &[PhotoIndexEntry]) -> Vec<YearBucket> {
+    let mut buckets: Vec<YearBucket> = Vec::new();
+    let mut positions: HashMap<i32, usize> = HashMap::new();
+    for (row, entry) in entries.iter().enumerate() {
+        let year = entry.captured_month / 100;
+        // Unknown capture times stay in the index, but a `0` bucket would
+        // paint a bogus "0" label and dot at the top of the rail.
+        if year <= 0 {
+            continue;
+        }
+        match positions.get(&year) {
+            Some(&index) => buckets[index].count += 1,
+            None => {
+                positions.insert(year, buckets.len());
+                buckets.push(YearBucket {
+                    year,
+                    start_row: row,
+                    display_row: 0,
+                    count: 1,
+                });
+            }
+        }
+    }
+    let mut display_row = 0;
+    for bucket in &mut buckets {
+        bucket.display_row = display_row;
+        display_row += bucket.count;
+    }
+    buckets
+}
+
+/// Y offset of a photo row on the rail track, including the top pad.
+fn rail_y(display_row: usize, total: usize, height: f32) -> f32 {
+    let usable = (height - 2.0 * RAIL_TOP_PAD).max(0.0);
+    if total == 0 {
+        return RAIL_TOP_PAD;
+    }
+    let fraction = (display_row as f32 / total as f32).clamp(0.0, 1.0);
+    (RAIL_TOP_PAD + fraction * usable).clamp(RAIL_TOP_PAD, RAIL_TOP_PAD + usable)
+}
+
+/// Inverse of [`rail_y`]: the row nearest to a y offset inside the rail.
+fn rail_row_at(y: f32, total: usize, height: f32) -> usize {
+    if total <= 1 {
+        return 0;
+    }
+    let usable = (height - 2.0 * RAIL_TOP_PAD).max(0.0);
+    let fraction = if usable <= f32::EPSILON {
+        0.0
+    } else {
+        ((y - RAIL_TOP_PAD) / usable).clamp(0.0, 1.0)
+    };
+    ((fraction * (total - 1) as f32).round() as usize).min(total - 1)
+}
+
+/// Formats a local `YYYYMM` capture month for the rail pill.
+fn format_captured_month(month: i32) -> String {
+    if month <= 0 {
+        return "不明".to_string();
+    }
+    format!("{}年{}月", month / 100, month % 100)
+}
+
+/// Visits the year labels that fit without overlapping, in bucket order.
+///
+/// Every bucket still gets a dot; only labels keep a 16 px gap so a long
+/// library does not paint a solid block of years.
+fn for_each_visible_year(
+    buckets: &[YearBucket],
+    height: f32,
+    mut visit: impl FnMut(usize, &YearBucket, f32),
+) {
+    let total = buckets
+        .last()
+        .map(|bucket| bucket.display_row + bucket.count)
+        .unwrap_or(0);
+    let mut last_label_y: Option<f32> = None;
+    for (index, bucket) in buckets.iter().enumerate() {
+        let y = rail_y(bucket.display_row, total, height);
+        if last_label_y.is_none_or(|last| y - last >= RAIL_LABEL_GAP) {
+            last_label_y = Some(y);
+            visit(index, bucket, y);
+        }
+    }
+}
+
+fn visible_year_buckets(buckets: &[YearBucket], height: f32) -> Vec<usize> {
+    let mut visible = Vec::new();
+    for_each_visible_year(buckets, height, |index, _, _| visible.push(index));
+    visible
+}
+
+/// The floating month pill already contains the year, so a year label it
+/// covers would only show through as a duplicate at rest.
+fn rail_label_hidden_by_pill(label_y: f32, pill_y: f32) -> bool {
+    (label_y - pill_y).abs() < RAIL_PILL_HEIGHT / 2.0 + 6.0
+}
+
+/// Scroll distance from the top of a uniform list, in pixels.
+fn list_scroll_top(handle: &UniformListScrollHandle) -> f32 {
+    let offset = handle.0.borrow().base_handle.offset().y;
+    (-f32::from(offset)).max(0.0)
+}
+
+/// Scroll offset that puts `photo_row` at the top of the grid, clamped to the
+/// list's scrollable range.
+///
+/// `max_offset` is the non-negative extent reported by
+/// `ScrollHandle::max_offset()`; the actual offset is zero or negative.
+fn rail_scroll_offset(photo_row: usize, columns: usize, max_offset: f32) -> f32 {
+    let grid_row = photo_row / columns.max(1);
+    (-(grid_row as f32 * PHOTO_ROW_HEIGHT)).clamp(-max_offset.max(0.0), 0.0)
+}
+
+/// Ordered snapshot of the library: only IDs and capture timestamps, so the
+/// full 100k-entry list stays cheap while photo rows load in pages.
+struct PhotoIndex {
+    entries: Vec<PhotoIndexEntry>,
+    total: usize,
+    years: Vec<YearBucket>,
+}
+
+impl PhotoIndex {
+    fn new(entries: Vec<PhotoIndexEntry>) -> Self {
+        let total = entries.len();
+        let years = build_year_buckets(&entries);
+        Self {
+            entries,
+            total,
+            years,
+        }
+    }
+
+    /// Position of `id` in the ordered snapshot, if it is still present.
+    fn row_of_id(&self, id: i64) -> Option<usize> {
+        self.entries.iter().position(|entry| entry.id == id)
+    }
+}
+
+/// First photo in the top visible row.
+///
+/// `scroll_top` is the non-negative scroll distance from the top of the list.
+/// The row is floored before multiplying by the column count: halfway into
+/// row 2 the top row is still row 2, not the first card of row 3.
+fn first_visible_photo(scroll_top: f32, columns: usize, total: usize) -> usize {
+    if total == 0 {
+        return 0;
+    }
+    let columns = columns.max(1);
+    let row = (scroll_top.max(0.0) / PHOTO_ROW_HEIGHT).floor() as usize;
+    row.saturating_mul(columns).min(total - 1)
+}
+
+/// Photo at the top-left of the first visible row.
+///
+/// `offset_y` is the non-negative scroll distance from the top of the list;
+/// callers convert the scroll handle's negative offset before calling.
+fn anchor_photo_id(index: &PhotoIndex, offset_y: f32, columns: usize) -> Option<i64> {
+    let total = index.total;
+    if total == 0 {
+        return None;
+    }
+    let first_photo = first_visible_photo(offset_y, columns, total);
+    index.entries.get(first_photo).map(|entry| entry.id)
+}
+
+/// Bounded access-order LRU cache for grid photo pages.
+///
+/// `get_page` moves the page to the back of the order; `insert_page` evicts
+/// from the front, so a page the user scrolled back to is not displaced by a
+/// backlog of page loads that finish later.
+#[derive(Default)]
+struct PhotoPageCache {
+    pages: HashMap<usize, Arc<Vec<Arc<Photo>>>>,
+    order: VecDeque<usize>,
+    pending: HashSet<usize>,
+    failed: HashSet<usize>,
+}
+
+impl PhotoPageCache {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn clear(&mut self) {
+        self.pages.clear();
+        self.order.clear();
+        self.pending.clear();
+        self.failed.clear();
+    }
+
+    fn get_page(&mut self, page: usize) -> Option<Arc<Vec<Arc<Photo>>>> {
+        let page_photos = self.pages.get(&page).cloned()?;
+        self.touch(page);
+        Some(page_photos)
+    }
+
+    fn insert_page(&mut self, page: usize, photos: Vec<Photo>) {
+        self.pending.remove(&page);
+        self.failed.remove(&page);
+        let page_photos = photos.into_iter().map(Arc::new).collect::<Vec<_>>();
+        self.pages.insert(page, Arc::new(page_photos));
+        self.touch(page);
+        while self.pages.len() > MAX_PAGES {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.pages.remove(&oldest);
+        }
+    }
+
+    fn touch(&mut self, page: usize) {
+        if let Some(index) = self.order.iter().position(|entry| *entry == page) {
+            self.order.remove(index);
+        }
+        self.order.push_back(page);
+    }
+
+    fn plan_pages(&mut self, start: usize, end: usize, limit: usize) -> Vec<usize> {
+        if end <= start || limit == 0 {
+            return Vec::new();
+        }
+        let first = start / PAGE_SIZE;
+        let last = (end - 1) / PAGE_SIZE;
+        let mut planned = Vec::new();
+        for page in first..=last {
+            if planned.len() >= limit {
+                break;
+            }
+            if self.pages.contains_key(&page)
+                || self.pending.contains(&page)
+                || self.failed.contains(&page)
+            {
+                continue;
+            }
+            self.pending.insert(page);
+            planned.push(page);
+        }
+        planned
+    }
+
+    fn fail_page(&mut self, page: usize) {
+        self.pending.remove(&page);
+        self.failed.insert(page);
+    }
+}
+
+/// Snapshot plus page cache for one grid (library or search).
+struct PhotoBrowser {
+    index: Arc<PhotoIndex>,
+    pages: PhotoPageCache,
+    scroll: UniformListScrollHandle,
+    columns: usize,
+    generation: u64,
+    labels_generation: u64,
+    labels: Option<Arc<YearRailLabels>>,
+    /// Shared with the mounted rail so a re-render cannot drop an in-flight
+    /// drag or let it outlive the browser.
+    rail_drag: Rc<Cell<bool>>,
+}
+
+impl PhotoBrowser {
+    fn new(index: Arc<PhotoIndex>) -> Self {
+        Self {
+            index,
+            pages: PhotoPageCache::new(),
+            scroll: UniformListScrollHandle::new(),
+            columns: 1,
+            generation: 0,
+            labels_generation: 0,
+            labels: None,
+            rail_drag: Rc::new(Cell::new(false)),
+        }
+    }
+
+    fn replace_index(&mut self, index: Arc<PhotoIndex>) {
+        self.index = index;
+        self.generation = self.generation.wrapping_add(1);
+        self.pages.clear();
+        self.labels = None;
+        self.rail_drag.set(false);
+    }
+
+    /// Drops a photo from this snapshot without notifying the caller.
+    ///
+    /// The page cache and scroll position refer to the old row layout, so the
+    /// cache is cleared and a scroll that now points past the last row is
+    /// clamped to it.
+    fn remove_photo(&mut self, id: i64) {
+        let Some(position) = self.index.row_of_id(id) else {
+            return;
+        };
+        let mut entries = self.index.entries.clone();
+        entries.remove(position);
+        self.replace_index(Arc::new(PhotoIndex::new(entries)));
+
+        let columns = self.columns.max(1);
+        let rows = self.index.total.div_ceil(columns);
+        if rows == 0 {
+            self.scroll.scroll_to_item_strict(0, ScrollStrategy::Top);
+            return;
+        }
+        let current_row = (list_scroll_top(&self.scroll) / PHOTO_ROW_HEIGHT).floor() as usize;
+        if current_row >= rows {
+            self.scroll
+                .scroll_to_item_strict(rows - 1, ScrollStrategy::Nearest);
+        }
+    }
+
+    fn photo_at(&mut self, photo_index: usize) -> Option<Arc<Photo>> {
+        let page = photo_index / PAGE_SIZE;
+        let offset = photo_index % PAGE_SIZE;
+        self.pages.get_page(page)?.get(offset).cloned()
+    }
+
+    fn plan_pages(&mut self, start: usize, end: usize, limit: usize) -> Vec<usize> {
+        let end = end.min(self.index.total);
+        self.pages.plan_pages(start, end, limit)
+    }
+
+    fn insert_page(&mut self, page: usize, photos: Vec<Photo>, generation: u64) {
+        if generation != self.generation {
+            return;
+        }
+        self.pages.insert_page(page, photos);
+    }
+
+    fn fail_page(&mut self, page: usize, generation: u64) {
+        if generation != self.generation {
+            return;
+        }
+        self.pages.fail_page(page);
+    }
+}
+
+/// Keeps the no-query search mirror on the current library snapshot.
+///
+/// Returns `true` when the mirror was replaced (and its page cache cleared).
+fn sync_search_mirror(search: &mut PhotoBrowser, library: &PhotoBrowser) -> bool {
+    if Arc::ptr_eq(&search.index, &library.index) {
+        return false;
+    }
+    search.replace_index(library.index.clone());
+    search.scroll.scroll_to_item_strict(0, ScrollStrategy::Top);
+    true
+}
+
+/// Replaces the library snapshot with a fresh index result.
+///
+/// On failure the previously mounted snapshot, page cache, and scroll offset
+/// stay untouched so a transient locked/corrupt/I-O error cannot blank the
+/// visible library. Returns the user-facing error in that case.
+fn apply_library_index(
+    browser: &mut PhotoBrowser,
+    result: vrc_photo_core::error::Result<Vec<PhotoIndexEntry>>,
+) -> Option<String> {
+    match result {
+        Ok(entries) => {
+            browser.replace_index(Arc::new(PhotoIndex::new(entries)));
+            None
+        }
+        Err(error) => {
+            eprintln!("photo_index failed: {error}");
+            Some("写真一覧を読み込めませんでした".to_string())
+        }
+    }
+}
+
+/// Quiet-period tracker for the live photo count.
+///
+/// The three-second refresh tick observes a changing count while the daemon
+/// imports a burst of files. Rebuilding the 100k index on every tick would
+/// waste work, so a rebuild waits until the count has stayed at the same
+/// value for one full quiet period. Any further change restarts the period.
+#[derive(Default)]
+struct CountDebounce {
+    pending: Option<i64>,
+    since: Option<Instant>,
+}
+
+impl CountDebounce {
+    fn observe(&mut self, count: i64, now: Instant, quiet: Duration) -> bool {
+        match self.pending {
+            Some(pending) if pending == count => {
+                if self
+                    .since
+                    .is_some_and(|since| now.duration_since(since) >= quiet)
+                {
+                    self.reset();
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => {
+                self.pending = Some(count);
+                self.since = Some(now);
+                false
+            }
+        }
+    }
+
+    fn reset(&mut self) {
+        self.pending = None;
+        self.since = None;
+    }
+}
+
+fn rail_text_run(len: usize, color: u32) -> TextRun {
+    TextRun {
+        len,
+        font: font("Noto Sans JP"),
+        color: rgb(color).into(),
+        ..TextRun::default()
+    }
+}
+
+/// Shaped year/month text for the rail.
+///
+/// Building shapes text, so it is cached per index generation on
+/// [`PhotoBrowser`]; paint only reuses these lines.
+struct YearRailLabels {
+    years: Vec<ShapedLine>,
+    current_years: Vec<ShapedLine>,
+    months: HashMap<i32, ShapedLine>,
+}
+
+impl YearRailLabels {
+    fn build(index: &PhotoIndex, window: &mut Window) -> Self {
+        let text_system = window.text_system();
+        let mut years = Vec::with_capacity(index.years.len());
+        let mut current_years = Vec::with_capacity(index.years.len());
+        for bucket in &index.years {
+            let text = SharedString::from(bucket.year.to_string());
+            years.push(text_system.shape_line(
+                text.clone(),
+                px(10.),
+                &[rail_text_run(text.len(), MUTED_2)],
+                None,
+            ));
+            current_years.push(text_system.shape_line(
+                text.clone(),
+                px(10.),
+                &[rail_text_run(text.len(), TEXT)],
+                None,
+            ));
+        }
+
+        let mut months: HashMap<i32, ShapedLine> = HashMap::new();
+        for entry in &index.entries {
+            if months.contains_key(&entry.captured_month) {
+                continue;
+            }
+            let text = SharedString::from(format_captured_month(entry.captured_month));
+            months.insert(
+                entry.captured_month,
+                text_system.shape_line(
+                    text.clone(),
+                    px(10.),
+                    &[rail_text_run(text.len(), TEXT)],
+                    None,
+                ),
+            );
+        }
+
+        Self {
+            years,
+            current_years,
+            months,
+        }
+    }
+}
+
+/// Google Photos-style year rail painted over the right edge of a grid.
+///
+/// The list offset is read from the tracked [`UniformListScrollHandle`], and
+/// clicks/drags write the same handle, so the rail never touches the database.
+#[derive(Clone)]
+struct YearRail {
+    id: &'static str,
+    labels: Arc<YearRailLabels>,
+    index: Arc<PhotoIndex>,
+    scroll: UniformListScrollHandle,
+    columns: usize,
+    drag_active: Rc<Cell<bool>>,
+}
+
+impl YearRail {
+    fn new(
+        id: &'static str,
+        labels: Arc<YearRailLabels>,
+        index: Arc<PhotoIndex>,
+        scroll: UniformListScrollHandle,
+        columns: usize,
+        drag_active: Rc<Cell<bool>>,
+    ) -> Self {
+        Self {
+            id,
+            labels,
+            index,
+            scroll,
+            columns,
+            drag_active,
+        }
+    }
+
+    /// Scrolls the grid to the row under `y`, snapping to a year label when
+    /// the pointer is within its 8 px hit area.
+    fn jump_to(&self, y: Pixels, bounds_top: Pixels, height: f32, window: &mut Window) {
+        let total = self.index.total;
+        if total == 0 {
+            return;
+        }
+        let local_y: f32 = (y - bounds_top).into();
+        let mut nearest: Option<(f32, usize)> = None;
+        for slot in visible_year_buckets(&self.index.years, height) {
+            let bucket = self.index.years[slot];
+            let label_y = rail_y(bucket.display_row, total, height);
+            let distance = (local_y - label_y).abs();
+            if distance <= RAIL_YEAR_HIT_SLOP && nearest.is_none_or(|(best, _)| distance < best) {
+                nearest = Some((distance, bucket.start_row));
+            }
+        }
+
+        let photo_row = nearest
+            .map(|(_, row)| row)
+            .unwrap_or_else(|| rail_row_at(local_y, total, height))
+            .min(total - 1);
+        let max_offset = f32::from(self.scroll.0.borrow().base_handle.max_offset().y);
+        let offset = rail_scroll_offset(photo_row, self.columns, max_offset);
+        self.scroll
+            .0
+            .borrow_mut()
+            .base_handle
+            .set_offset(point(px(0.), px(offset)));
+        window.refresh();
+    }
+}
+
+impl IntoElement for YearRail {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for YearRail {
+    type RequestLayoutState = ();
+    type PrepaintState = Hitbox;
+
+    fn id(&self) -> Option<ElementId> {
+        Some(ElementId::Name(SharedString::from(self.id)))
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut gpui_kit::App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        style.size.height = relative(1.).into();
+        (window.request_layout(style, None, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        _: &mut gpui_kit::App,
+    ) -> Self::PrepaintState {
+        // Keep cards under the rail from hovering or receiving clicks while
+        // still letting the wheel scroll the grid through the rail.
+        window.insert_hitbox(bounds, HitboxBehavior::BlockMouseExceptScroll)
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        hitbox: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut gpui_kit::App,
+    ) {
+        let total = self.index.total;
+        if total == 0 {
+            return;
+        }
+        let height: f32 = bounds.size.height.into();
+        let track_x = bounds.right() - px(RAIL_TRACK_INSET);
+        let usable = (height - 2.0 * RAIL_TOP_PAD).max(0.0);
+        let hitbox = hitbox.clone();
+
+        window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
+
+        if usable > 0.0 {
+            window.paint_quad(
+                fill(
+                    Bounds::new(
+                        point(track_x - px(1.), bounds.top() + px(RAIL_TOP_PAD)),
+                        size(px(2.), px(usable)),
+                    ),
+                    rgba(0xffffff14),
+                )
+                .corner_radii(px(1.)),
+            );
+        }
+
+        let scroll_top = list_scroll_top(&self.scroll);
+        let columns = self.columns.max(1);
+        let first_visible = first_visible_photo(scroll_top, columns, total);
+        let month = self
+            .index
+            .entries
+            .get(first_visible)
+            .map(|entry| entry.captured_month)
+            .unwrap_or(0);
+        let current_year = month / 100;
+        let pill_y = rail_y(first_visible, total, height);
+
+        for bucket in &self.index.years {
+            let y = bounds.top() + px(rail_y(bucket.display_row, total, height));
+            let color = if bucket.year == current_year {
+                rgb(TEXT)
+            } else {
+                rgba(0xffffff30)
+            };
+            window.paint_quad(
+                fill(
+                    Bounds::new(point(track_x - px(1.5), y - px(1.5)), size(px(3.), px(3.))),
+                    color,
+                )
+                .corner_radii(px(1.5)),
+            );
+        }
+
+        let labels = self.labels.clone();
+        let buckets = self.index.years.as_slice();
+        for_each_visible_year(buckets, height, |slot, bucket, y| {
+            // The pill sits on top of the topmost label at rest and repeats
+            // the year, so skip the label instead of letting it peek out.
+            if rail_label_hidden_by_pill(y, pill_y) {
+                return;
+            }
+            let line = if bucket.year == current_year {
+                labels.current_years.get(slot)
+            } else {
+                labels.years.get(slot)
+            };
+            if let Some(line) = line {
+                line.paint(
+                    point(
+                        bounds.right() - px(RAIL_TRACK_INSET + 8.0 + 56.0),
+                        bounds.top() + px(y) - px(6.),
+                    ),
+                    px(12.),
+                    TextAlign::Right,
+                    Some(px(56.)),
+                    window,
+                    cx,
+                )
+                .ok();
+            }
+        });
+
+        let pill_center = bounds.top() + px(pill_y);
+        let pill_bounds = Bounds::new(
+            point(
+                bounds.right() - px(RAIL_WIDTH) + px(4.),
+                pill_center - px(RAIL_PILL_HEIGHT / 2.0),
+            ),
+            size(px(RAIL_WIDTH - 8.), px(RAIL_PILL_HEIGHT)),
+        );
+        window.paint_quad(fill(pill_bounds, rgba((PANEL_2 << 8) | 0xf0)).corner_radii(px(9.)));
+        if let Some(line) = labels.months.get(&month) {
+            line.paint(
+                point(bounds.right() - px(RAIL_WIDTH - 10.), pill_center - px(6.)),
+                px(12.),
+                TextAlign::Right,
+                Some(px(RAIL_WIDTH - 20.)),
+                window,
+                cx,
+            )
+            .ok();
+        }
+
+        let rail = self.clone();
+        window.on_mouse_event({
+            let rail = rail.clone();
+            let hitbox = hitbox.clone();
+            move |event: &MouseDownEvent, phase, window, cx| {
+                if !phase.bubble()
+                    || event.button != MouseButton::Left
+                    || !hitbox.is_hovered(window)
+                    || !bounds.contains(&event.position)
+                {
+                    return;
+                }
+                // The rail is painted above the cards; keep the press from
+                // reaching the photo underneath it.
+                cx.stop_propagation();
+                rail.drag_active.set(true);
+                rail.jump_to(event.position.y, bounds.top(), height, window);
+            }
+        });
+
+        window.on_mouse_event({
+            let rail = rail.clone();
+            move |event: &MouseMoveEvent, phase, window, cx| {
+                if !rail.drag_active.get() {
+                    return;
+                }
+                if !event.dragging() {
+                    // Mouse-up can be swallowed by an overlay; stop dragging
+                    // as soon as the left button is no longer held.
+                    rail.drag_active.set(false);
+                    return;
+                }
+                if !phase.bubble() {
+                    return;
+                }
+                cx.stop_propagation();
+                rail.jump_to(event.position.y, bounds.top(), height, window);
+            }
+        });
+
+        window.on_mouse_event({
+            let rail = rail;
+            move |_: &MouseUpEvent, phase, _, _| {
+                if phase.bubble() {
+                    rail.drag_active.set(false);
+                }
+            }
+        });
+    }
+}
+
 pub struct App {
     db: Db,
     screen: Screen,
@@ -161,7 +1041,15 @@ pub struct App {
     inspector_epoch: u64,
     hovered_nav: Option<Screen>,
     daemon_age_secs: Option<i64>,
-    photos: Vec<Photo>,
+    library: PhotoBrowser,
+    search_view: PhotoBrowser,
+    /// The library index changed while another screen was mounted; the next
+    /// visit to Photos rebuilds it.
+    library_dirty: bool,
+    /// A failed index/page query kept the previous snapshot mounted; retry from
+    /// the Photos header.
+    library_error: Option<String>,
+    count_debounce: CountDebounce,
     selected: Option<i64>,
     selection_epoch: u64,
     selection_changed_at: Option<Instant>,
@@ -170,9 +1058,7 @@ pub struct App {
     selected_tags: Vec<String>,
     selected_derivatives: Vec<Derivative>,
     compressed_ids: HashSet<i64>,
-    thumbnails: HashMap<i64, Arc<RenderImage>>,
-    thumbnail_colors: HashMap<i64, u32>,
-    grid_columns: usize,
+    thumbnails: ThumbnailCache,
     grid_epoch: u64,
     hovered_photo: Option<i64>,
     intro_seen: HashMap<i64, Instant>,
@@ -212,7 +1098,9 @@ pub struct App {
     photo_root_input: Entity<InputState>,
     log_dir_input: Entity<InputState>,
     import_dir_input: Entity<InputState>,
-    search_results: Option<Vec<Photo>>,
+    search_active: bool,
+    searching: bool,
+    search_request: u64,
     search_favorite: bool,
     search_days: Option<i64>,
     compress_policy: String,
@@ -264,6 +1152,7 @@ impl App {
         let quick_look_compress_focus = cx.focus_handle();
         let quick_look_trash_focus = cx.focus_handle();
         let quick_look_add_tag_focus = cx.focus_handle();
+        let empty_index = Arc::new(PhotoIndex::new(Vec::new()));
         let mut app = Self {
             db,
             screen: Screen::Photos,
@@ -273,7 +1162,11 @@ impl App {
             inspector_epoch: 0,
             hovered_nav: None,
             daemon_age_secs: None,
-            photos: Vec::new(),
+            library: PhotoBrowser::new(empty_index.clone()),
+            search_view: PhotoBrowser::new(empty_index),
+            library_dirty: false,
+            library_error: None,
+            count_debounce: CountDebounce::default(),
             selected: None,
             selection_epoch: 0,
             selection_changed_at: None,
@@ -282,9 +1175,7 @@ impl App {
             selected_tags: Vec::new(),
             selected_derivatives: Vec::new(),
             compressed_ids: HashSet::new(),
-            thumbnails: HashMap::new(),
-            thumbnail_colors: HashMap::new(),
-            grid_columns: 0,
+            thumbnails: ThumbnailCache::default(),
             grid_epoch: 0,
             hovered_photo: None,
             intro_seen: HashMap::new(),
@@ -324,7 +1215,9 @@ impl App {
             photo_root_input,
             log_dir_input,
             import_dir_input,
-            search_results: None,
+            search_active: false,
+            searching: false,
+            search_request: 0,
             search_favorite: false,
             search_days: Some(7),
             compress_policy: "keep".to_string(),
@@ -334,15 +1227,15 @@ impl App {
             demo_assets,
         };
         app.ensure_profiles();
-        app.reload(cx);
-        if app.photos.is_empty() {
+        app.reload_all(true, cx);
+        if app.library_error.is_none() && app.library.index.total == 0 {
             message.get_or_insert_with(|| {
                 "写真がありません。VRChatの写真フォルダを設定するか、--demo で起動してください。"
                     .to_string()
             });
         }
         app.message = message;
-        if let Some(id) = app.photos.first().map(|photo| photo.id) {
+        if let Some(id) = app.library.index.entries.first().map(|entry| entry.id) {
             app.select_photo(id, cx);
             // The grid is not mounted until the first frame, so focus it once
             // the initial render has attached it to the focus tree.
@@ -358,6 +1251,12 @@ impl App {
             app.message = Some(format!("デーモンを起動できません: {error}"));
         }
         app.start_auto_refresh(cx);
+        if timing_enabled() {
+            let started = process_start();
+            cx.on_next_frame(window, move |_, _, _| {
+                log_timing("first frame (from process start)", started)
+            });
+        }
         app
     }
 
@@ -374,15 +1273,36 @@ impl App {
     }
 
     fn refresh_live(&mut self, cx: &mut Context<Self>) {
-        let count = self.db.count_photos().unwrap_or(0);
-        self.stats = self.db.stats().unwrap_or_default();
-        self.jobs = self.db.list_jobs(20).unwrap_or_default();
+        let count = self.db.count_photos();
+        if let Ok(stats) = self.db.stats() {
+            self.stats = stats;
+        }
+        if let Ok(jobs) = self.db.list_jobs(20) {
+            self.jobs = jobs;
+        }
         self.refresh_monitor();
         if let Some(id) = self.selected {
             self.load_selected_meta(id);
         }
-        if count != self.photos.len() as i64 {
-            self.reload(cx);
+        // Only compare counts when the query succeeds; treating a transient
+        // error as zero used to blank the whole library.
+        if let Ok(count) = count {
+            if count != self.library.index.total as i64 {
+                // A burst of files arriving from the daemon must not rebuild
+                // the 100k-entry index on every three-second tick. Wait until
+                // the observed count has been stable for a quiet period.
+                self.mark_library_dirty();
+                if self.screen == Screen::Photos
+                    && self
+                        .count_debounce
+                        .observe(count, Instant::now(), Duration::from_secs(2))
+                    && self.reload_library(true, cx)
+                {
+                    self.count_debounce.reset();
+                }
+            } else {
+                self.count_debounce.reset();
+            }
         }
         cx.notify();
     }
@@ -391,14 +1311,8 @@ impl App {
         self.profiles = self.db.ensure_default_profiles().unwrap_or_default();
     }
 
-    fn reload(&mut self, cx: &mut Context<Self>) {
-        self.grid_epoch = self.grid_epoch.wrapping_add(1);
-        self.intro_seen.clear();
-        self.hovered_photo = None;
-        self.photos = self
-            .db
-            .list_photos(300, 0, vrc_photo_core::model::PhotoSort::Newest)
-            .unwrap_or_default();
+    /// Refreshes side panels without touching the library snapshot or pages.
+    fn reload_aux(&mut self, cx: &mut Context<Self>) {
         self.profiles = self.db.list_profiles().unwrap_or_default();
         if self.profile_index >= self.profiles.len() {
             self.profile_index = 0;
@@ -410,7 +1324,6 @@ impl App {
             .unwrap_or_default()
             .into_iter()
             .collect();
-        self.load_thumbnails();
         self.jobs = self.db.list_jobs(20).unwrap_or_default();
         self.settings = AppSettings::load(&self.db).unwrap_or_default();
         cx.set_reduce_motion(self.settings.ui_reduce_motion);
@@ -418,6 +1331,89 @@ impl App {
         if let Some(id) = self.selected {
             self.load_selected(id);
         }
+    }
+
+    /// Rebuilds the ordered library snapshot and its page cache.
+    ///
+    /// With `preserve_anchor`, the photo at the top-left of the first visible
+    /// row stays at the top after the rebuild. A root change or an explicit
+    /// reset passes `false` to return the grid to the first row.
+    ///
+    /// On a query error the previous snapshot, pages, and scroll offset stay
+    /// mounted and `library_error` exposes the retry action. Returns `true`
+    /// when the snapshot was replaced.
+    fn reload_library(&mut self, preserve_anchor: bool, cx: &mut Context<Self>) -> bool {
+        let anchor = preserve_anchor.then(|| {
+            anchor_photo_id(
+                &self.library.index,
+                list_scroll_top(&self.library.scroll),
+                self.library.columns,
+            )
+        });
+        let anchor = anchor.flatten();
+
+        let index_start = Instant::now();
+        let result = self.db.photo_index(PhotoSort::Newest);
+        log_timing("photo_index", index_start);
+        let error = apply_library_index(&mut self.library, result);
+        if let Some(error) = error {
+            self.library_error = Some(error);
+            // Leave the mounted view and side panels untouched; the next
+            // successful reload repopulates them.
+            return false;
+        }
+
+        self.library_error = None;
+        self.library_dirty = false;
+        let columns = self.library.columns.max(1);
+        if let Some(row) = anchor.and_then(|id| self.library.index.row_of_id(id)) {
+            self.library
+                .scroll
+                .scroll_to_item_strict(row / columns, ScrollStrategy::Top);
+        } else {
+            self.library
+                .scroll
+                .scroll_to_item_strict(0, ScrollStrategy::Top);
+        }
+
+        // An active result set stays mounted until the user clears it or runs
+        // a new search; the inactive mirror only needs the fresh snapshot.
+        if !self.search_active {
+            self.search_view.replace_index(self.library.index.clone());
+        }
+        self.reload_aux(cx);
+        true
+    }
+
+    /// Full rebuild used at startup: resets the grid animation state too.
+    fn reload_all(&mut self, reset_scroll: bool, cx: &mut Context<Self>) {
+        self.grid_epoch = self.grid_epoch.wrapping_add(1);
+        self.intro_seen.clear();
+        self.hovered_photo = None;
+        self.reload_library(!reset_scroll, cx);
+    }
+
+    fn mark_library_dirty(&mut self) {
+        self.library_dirty = true;
+    }
+
+    /// Changes screens without rebuilding the library unless Photos was marked
+    /// dirty while another screen was mounted.
+    fn switch_screen(&mut self, screen: Screen, cx: &mut Context<Self>) {
+        self.screen = screen;
+        if screen == Screen::Photos && self.library_dirty {
+            self.reload_library(true, cx);
+        } else if screen == Screen::Search && !self.search_active {
+            // The no-query mirror only needs a refresh when the library
+            // snapshot changed while another screen was mounted. A dirty
+            // library is rebuilt first so the mirror also sees new photos.
+            if self.library_dirty {
+                self.reload_library(true, cx);
+            } else {
+                sync_search_mirror(&mut self.search_view, &self.library);
+            }
+        }
+        cx.notify();
     }
 
     fn refresh_monitor(&mut self) {
@@ -474,7 +1470,7 @@ impl App {
         if self.quick_look_open {
             return;
         }
-        self.screen = Screen::Search;
+        self.switch_screen(Screen::Search, cx);
         let focus_handle = self.world_input.read(cx).focus_handle(cx);
         window.focus(&focus_handle, cx);
         // The search screen may not be mounted yet when the action fires, so
@@ -485,32 +1481,9 @@ impl App {
         cx.notify();
     }
 
-    fn load_thumbnails(&mut self) {
-        self.thumbnails.clear();
-        self.thumbnail_colors.clear();
-        for photo in self.photos.iter().take(300) {
-            let path = match &self.demo_assets {
-                Some(assets) => demo_thumb_path(assets, photo.id),
-                None => match thumbnail::thumbnail_path(photo.id) {
-                    Some(path) => path,
-                    None => continue,
-                },
-            };
-            if let Some(image) = load_render(&path) {
-                let color = image
-                    .as_bytes(0)
-                    .map(average_bgra)
-                    .unwrap_or_else(|| scene_color(photo.world_name.as_deref().unwrap_or("")));
-                self.thumbnail_colors.insert(photo.id, color);
-                self.thumbnails.insert(photo.id, image);
-            }
-        }
-    }
-
     fn color_for(&self, photo: &Photo) -> u32 {
-        self.thumbnail_colors
-            .get(&photo.id)
-            .copied()
+        self.thumbnails
+            .color(photo.id)
             .unwrap_or_else(|| scene_color(photo.world_name.as_deref().unwrap_or("")))
     }
 
@@ -539,6 +1512,65 @@ impl App {
             .and_then(|photo| load_preview(Path::new(&photo.abs_path)));
     }
 
+    /// Starts a background decode for a grid thumbnail when the cache has a
+    /// free slot. Cached, pending, and previously failed photos are skipped.
+    fn request_thumbnail(&mut self, photo: &Photo, cx: &mut Context<Self>) {
+        if !self.thumbnails.begin(photo.id) {
+            return;
+        }
+        let id = photo.id;
+        let source = PathBuf::from(&photo.abs_path);
+        let cache_path = match &self.demo_assets {
+            Some(assets) => demo_thumb_path(assets, id),
+            None => thumbnail::thumbnail_path(id).unwrap_or_default(),
+        };
+        cx.spawn(async move |this, cx| {
+            let decoded = cx
+                .background_executor()
+                .spawn(async move {
+                    let decode_start = Instant::now();
+                    let decoded = decode_thumbnail(id, &cache_path, &source);
+                    log_timing("thumbnail decode", decode_start);
+                    decoded
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                match decoded {
+                    Some((color, rgba)) => {
+                        this.thumbnails.insert(id, make_render_image(rgba), color);
+                    }
+                    None => this.thumbnails.fail(id),
+                }
+                // The selected photo may have been refused earlier because
+                // every in-flight slot was busy; a freed slot is its retry.
+                this.retry_pinned_thumbnail(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Re-requests the pinned (selected) thumbnail if it is still missing.
+    /// `begin` ignores cached, pending, failed, and over-cap requests, so this
+    /// is safe to call after every decode completion.
+    fn retry_pinned_thumbnail(&mut self, cx: &mut Context<Self>) {
+        let Some(pinned) = self.thumbnails.pinned else {
+            return;
+        };
+        if self.thumbnails.get(pinned).is_some() {
+            return;
+        }
+        let Some(photo) = self
+            .selected_photo
+            .clone()
+            .filter(|photo| photo.id == pinned)
+        else {
+            return;
+        };
+        self.request_thumbnail(&photo, cx);
+    }
+
     fn select_photo(&mut self, id: i64, cx: &mut Context<Self>) {
         if self.delete_armed != Some(id) {
             self.delete_armed = None;
@@ -553,7 +1585,13 @@ impl App {
             self.selection_epoch = self.selection_epoch.wrapping_add(1);
             self.selection_changed_at = Some(Instant::now());
         }
+        self.thumbnails.pin(id);
         self.load_selected(id);
+        if self.thumbnails.get(id).is_none()
+            && let Some(photo) = self.selected_photo.clone()
+        {
+            self.request_thumbnail(&photo, cx);
+        }
         cx.notify();
     }
 
@@ -612,7 +1650,9 @@ impl App {
         }
         self.quick_look_open = false;
         self.delete_armed = None;
-        self.selected = None;
+        if let Some(id) = self.selected.take() {
+            self.thumbnails.unpin(id);
+        }
         self.quick_look_photo_ids.clear();
         self.quick_look_index = 0;
         self.preview = None;
@@ -630,14 +1670,12 @@ impl App {
     }
 
     fn viewer_source_ids(&self) -> Vec<i64> {
-        let source: Vec<i64> = if self.screen == Screen::Search {
-            match self.search_results.as_ref() {
-                Some(photos) => photos.iter().map(|photo| photo.id).collect(),
-                None => self.photos.iter().map(|photo| photo.id).collect(),
-            }
+        let browser = if self.screen == Screen::Search && self.search_active {
+            &self.search_view
         } else {
-            self.photos.iter().map(|photo| photo.id).collect()
+            &self.library
         };
+        let source: Vec<i64> = browser.index.entries.iter().map(|entry| entry.id).collect();
         match self.selected {
             Some(id) if source.contains(&id) => source,
             Some(id) => vec![id],
@@ -742,6 +1780,9 @@ impl App {
         match trash::delete(&path) {
             Ok(_) => {
                 let _ = self.db.mark_missing(id);
+                self.library.remove_photo(id);
+                self.search_view.remove_photo(id);
+                self.thumbnails.unpin(id);
                 self.selected = None;
                 self.selected_photo = None;
                 self.selected_players.clear();
@@ -750,7 +1791,7 @@ impl App {
                 self.preview = None;
                 self.delete_armed = None;
                 self.message = Some("写真をゴミ箱へ移動しました".to_string());
-                self.reload(cx);
+                self.reload_aux(cx);
             }
             Err(error) => {
                 self.delete_armed = None;
@@ -783,7 +1824,7 @@ impl App {
                 } else {
                     "圧縮ジョブをキューに追加しました（元画像を保持）".to_string()
                 });
-                self.reload(cx);
+                self.reload_aux(cx);
             }
             Err(error) => self.message = Some(format!("キュー追加に失敗: {error}")),
         }
@@ -791,25 +1832,112 @@ impl App {
     }
 
     fn run_search(&mut self, cx: &mut Context<Self>) {
+        // One 100k text query at a time; the Search button is disabled while a
+        // request is in flight, but the favorite switch and presets also call
+        // this method.
+        if self.searching {
+            return;
+        }
         let world = self.world_input.read(cx).value().to_string();
         let player = self.player_input.read(cx).value().to_string();
         let tag = self.tag_input.read(cx).value().to_string();
         let from_utc = self
             .search_days
             .map(|days| Utc::now().timestamp() - days * 86_400);
-        self.search_results = Some(
-            self.db
-                .search_photos_text(
-                    Some(world.as_str()),
-                    Some(player.as_str()),
-                    Some(tag.as_str()),
-                    self.search_favorite,
-                    from_utc,
-                    None,
-                    300,
-                )
-                .unwrap_or_default(),
-        );
+        let filter = PhotoTextFilter {
+            world: Some(world),
+            player: Some(player),
+            tag: Some(tag),
+            favorite: self.search_favorite,
+            from_utc,
+            to_utc: None,
+        };
+        self.search_request = self.search_request.wrapping_add(1);
+        let generation = self.search_request;
+
+        let Some(path) = self.db.path().map(Path::to_path_buf) else {
+            // In-memory demo/fallback databases have no second handle to open.
+            let result = self.db.photo_index_text(&filter);
+            self.apply_search_result(generation, result, cx);
+            return;
+        };
+
+        self.searching = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let background_filter = filter.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let search_start = Instant::now();
+                    let result = Db::open_read_only(path)
+                        .and_then(|db| db.photo_index_text(&background_filter));
+                    log_timing("search photo_index_text", search_start);
+                    result
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if generation != this.search_request {
+                    return;
+                }
+                match result {
+                    Ok(entries) => this.apply_search_result(generation, Ok(entries), cx),
+                    // A read-only handle can fail on a locked or WAL-only
+                    // database. Query the live connection on the UI thread
+                    // rather than leaving the spinner up.
+                    Err(_) => {
+                        let fallback = this.db.photo_index_text(&filter);
+                        this.apply_search_result(generation, fallback, cx);
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Applies a completed search to the virtual grid. A stale generation (the
+    /// user searched again or cleared the view) is discarded.
+    fn apply_search_result(
+        &mut self,
+        generation: u64,
+        result: vrc_photo_core::error::Result<Vec<PhotoIndexEntry>>,
+        cx: &mut Context<Self>,
+    ) {
+        if generation != self.search_request {
+            return;
+        }
+        match result {
+            Ok(entries) => {
+                self.search_view
+                    .replace_index(Arc::new(PhotoIndex::new(entries)));
+                self.search_view
+                    .scroll
+                    .scroll_to_item_strict(0, ScrollStrategy::Top);
+                self.search_active = true;
+                self.searching = false;
+                // A previous failure must not linger above a fresh result.
+                self.message = None;
+            }
+            Err(error) => {
+                self.searching = false;
+                self.message = Some(format!("検索に失敗しました: {error}"));
+            }
+        }
+        cx.notify();
+    }
+
+    fn clear_search(&mut self, cx: &mut Context<Self>) {
+        self.search_active = false;
+        self.searching = false;
+        self.message = None;
+        // Invalidate an in-flight request so it cannot revive the cleared view.
+        self.search_request = self.search_request.wrapping_add(1);
+        let index = self.library.index.clone();
+        self.search_view.replace_index(index);
+        self.search_view
+            .scroll
+            .scroll_to_item_strict(0, ScrollStrategy::Top);
         cx.notify();
     }
 
@@ -1088,8 +2216,7 @@ impl App {
                 }
             }))
             .on_click(cx.listener(move |this, _, _, cx| {
-                this.screen = screen;
-                cx.notify();
+                this.switch_screen(screen, cx);
             }))
             .when(active, |this| {
                 this.child(
@@ -1240,17 +2367,17 @@ impl App {
             .into_any_element()
     }
 
-    fn content(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         match self.screen {
-            Screen::Photos => self.photos_screen(cx).into_any_element(),
+            Screen::Photos => self.photos_screen(window, cx).into_any_element(),
             Screen::Compression => self.compression_screen(cx).into_any_element(),
-            Screen::Search => self.search_screen(cx).into_any_element(),
+            Screen::Search => self.search_screen(window, cx).into_any_element(),
             Screen::Monitor => self.monitor_screen(cx).into_any_element(),
             Screen::Settings => self.settings_screen(cx).into_any_element(),
         }
     }
 
-    fn photos_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn photos_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .flex_1()
             .min_h_0()
@@ -1259,7 +2386,7 @@ impl App {
                 h_flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.photo_list(cx))
+                    .child(self.photo_grid(false, window, cx))
                     .child(self.inspector_column(cx)),
             )
     }
@@ -1282,8 +2409,18 @@ impl App {
         );
         let message = self.message.clone();
         let inspector_collapsed = self.inspector_collapsed;
+        let library_error = self.library_error.clone();
 
         let actions = vec![
+            Button::new("library-reload")
+                .label("再読込")
+                .small()
+                .ghost()
+                .tooltip("写真一覧を再読み込み")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.reload_library(true, cx);
+                }))
+                .into_any_element(),
             Button::new("inspector-toggle")
                 .label(if inspector_collapsed {
                     "詳細"
@@ -1313,7 +2450,7 @@ impl App {
                 .into_any_element(),
         ];
 
-        v_flex()
+        let mut header = v_flex()
             .flex_shrink_0()
             .child(self.screen_header("ライブラリ", subtitle, message, actions))
             .child(
@@ -1334,24 +2471,110 @@ impl App {
                             .text_color(rgb(MUTED_2))
                             .child("並び: 新しい順"),
                     ),
-            )
-            .into_any_element()
+            );
+        if let Some(error) = library_error {
+            header = header.child(
+                h_flex()
+                    .px(px(26.))
+                    .pb(px(12.))
+                    .gap(px(10.))
+                    .items_center()
+                    .child(div().text_size(px(11.)).text_color(rgb(RED)).child(error))
+                    .child(
+                        Button::new("library-reload-banner")
+                            .label("再読込")
+                            .small()
+                            .primary()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.reload_library(true, cx);
+                            })),
+                    ),
+            );
+        }
+        header.into_any_element()
     }
 
-    fn photo_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let photos = self.photos.clone();
-        let columns = self.grid_columns.max(1);
-        let rows = photos.len().div_ceil(columns);
-        let mut container = v_flex()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .items_stretch()
-            .pl(px(26.))
-            .pr(px(18.))
-            .pb(px(18.));
-        if photos.is_empty() {
-            container = container.child(
+    fn browser_mut(&mut self, search: bool) -> &mut PhotoBrowser {
+        if search {
+            &mut self.search_view
+        } else {
+            &mut self.library
+        }
+    }
+
+    /// Virtualized grid shared by the library and the search screen.
+    ///
+    /// The range callback only plans missing pages and renders the page cache;
+    /// database work is deferred through [`Self::load_pages`], so neither
+    /// render nor prepaint ever touches SQLite.
+    fn photo_grid(
+        &mut self,
+        search: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let width: f32 = window.viewport_size().width.into();
+        let next_columns = grid_columns_for(
+            search,
+            width,
+            self.sidebar_collapsed,
+            self.inspector_collapsed,
+        );
+        let browser = self.browser_mut(search);
+        browser.columns = next_columns;
+        let labels = if browser.labels.is_none() || browser.labels_generation != browser.generation
+        {
+            // Shaping is expensive, so do it once per index snapshot instead
+            // of on every render or paint frame.
+            let labels = Arc::new(YearRailLabels::build(&browser.index, window));
+            browser.labels = Some(labels.clone());
+            browser.labels_generation = browser.generation;
+            labels
+        } else {
+            browser.labels.clone().expect("year rail labels")
+        };
+        let columns = browser.columns;
+        let index = browser.index.clone();
+        let scroll = browser.scroll.clone();
+        let generation = browser.generation;
+        let rail_drag = browser.rail_drag.clone();
+        let rows = index.total.div_ceil(columns);
+
+        if rows == 0 {
+            let empty = if search {
+                if self.search_active {
+                    glass_panel()
+                        .p(px(20.))
+                        .text_size(px(12.))
+                        .text_color(rgb(MUTED))
+                        .child("条件に一致する写真がありません")
+                        .into_any_element()
+                } else {
+                    // Before a search runs the browser mirrors the library, so
+                    // an empty library is not an empty result set.
+                    div().into_any_element()
+                }
+            } else if let Some(error) = self.library_error.clone() {
+                div()
+                    .mt(px(18.))
+                    .max_w(px(560.))
+                    .p(px(20.))
+                    .rounded(px(18.))
+                    .bg(rgb(PANEL))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .text_size(px(12.))
+                    .text_color(rgb(RED))
+                    .child(error)
+                    .child(
+                        div()
+                            .pt(px(4.))
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED_2))
+                            .child("右上の「再読込」で再試行できます。"),
+                    )
+                    .into_any_element()
+            } else {
                 div()
                     .mt(px(18.))
                     .max_w(px(560.))
@@ -1364,73 +2587,212 @@ impl App {
                     .text_color(rgb(MUTED))
                     .child(
                         "写真がありません。VRChatの写真フォルダを設定するか、--demo でサンプルを表示できます。",
-                    ),
-            );
-        } else {
-            container = container.child(
-                v_flex()
-                    .id("photo-grid")
-                    .flex_1()
-                    .w_full()
-                    .min_w_0()
-                    .min_h_0()
-                    .track_focus(&self.photo_grid_focus)
-                    .key_context("photo_grid")
-                    .tab_stop(true)
-                    .child(
-                        uniform_list(
-                            // Keep the list ID stable so uniform_list retains
-                            // its scroll offset when the column count changes;
-                            // row height is fixed.
-                            SharedString::from("photo-grid-list"),
-                            rows,
-                            cx.processor(
-                                move |this, range: std::ops::Range<usize>, _window, cx| {
-                                    let mut rendered = Vec::with_capacity(range.len());
-                                    for row in range {
-                                        let mut line = h_flex()
-                                            .h(px(196.))
-                                            .w_full()
-                                            .min_w_0()
-                                            .items_start()
-                                            .gap(px(16.));
-                                        for column in 0..columns {
-                                            let index = row * columns + column;
-                                            match photos.get(index) {
-                                                Some(photo) => {
-                                                    line = line.child(this.photo_card(
-                                                        photo,
-                                                        PhotoCardLayout::Grid { index },
-                                                        cx,
-                                                    ));
-                                                }
-                                                None => {
-                                                    line = line.child(div().flex_1());
-                                                }
-                                            }
-                                        }
-                                        rendered.push(line);
-                                    }
-                                    rendered
-                                },
-                            ),
-                        )
-                        // Room for the first row's -4 px hover lift.
-                        .pt(px(4.))
-                        .flex_1()
+                    )
+                    .into_any_element()
+            };
+            let mut container = v_flex()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .h_full()
+                .items_stretch();
+            if !search {
+                container = container.pl(px(26.)).pr(px(18.)).pb(px(18.));
+            }
+            return container.child(empty).into_any_element();
+        }
+
+        let list_index = index.clone();
+        let list = uniform_list(
+            // Keep the list ID stable so uniform_list retains its scroll
+            // offset when the column count changes; row height is fixed.
+            SharedString::from(if search {
+                "search-grid-list"
+            } else {
+                "photo-grid-list"
+            }),
+            rows,
+            cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
+                let photo_start = range.start * columns;
+                let photo_end = (range.end * columns).min(list_index.total);
+                let missing = this
+                    .browser_mut(search)
+                    .plan_pages(photo_start, photo_end, 2);
+                if !missing.is_empty() {
+                    cx.defer_in(window, move |this, _window, cx| {
+                        this.load_pages(search, generation, missing, cx);
+                    });
+                }
+                let mut rendered = Vec::with_capacity(range.len());
+                for row in range {
+                    let mut line = h_flex()
+                        .h(px(PHOTO_ROW_HEIGHT))
                         .w_full()
                         .min_w_0()
-                        .min_h_0(),
-                    ),
+                        .items_start()
+                        .gap(px(16.));
+                    for column in 0..columns {
+                        let photo_index = row * columns + column;
+                        if photo_index >= list_index.total {
+                            line = line.child(div().flex_1());
+                            continue;
+                        }
+                        match this.browser_mut(search).photo_at(photo_index) {
+                            Some(photo) => {
+                                line = line.child(this.photo_card(photo.as_ref(), photo_index, cx));
+                            }
+                            None => {
+                                line = line.child(grid_placeholder());
+                            }
+                        }
+                    }
+                    rendered.push(line);
+                }
+                rendered
+            }),
+        )
+        .track_scroll(&scroll)
+        // Room for the first row's -4 px hover lift.
+        .pt(px(4.))
+        .flex_1()
+        .w_full()
+        .min_w_0()
+        .min_h_0();
+
+        // The wrapper stays mounted (and relative) so the year rail can
+        // overlay the list without remounting it.
+        let mut wrapper = v_flex()
+            .id(if search { "search-grid" } else { "photo-grid" })
+            .relative()
+            .flex_1()
+            .w_full()
+            .min_w_0()
+            .min_h_0();
+        if !search {
+            wrapper = wrapper
+                .track_focus(&self.photo_grid_focus)
+                .key_context("photo_grid")
+                .tab_stop(true);
+        }
+        let mut grid = wrapper.child(list);
+        if index.total > 0 {
+            // Added after the list so the rail owns input inside its 88 px
+            // column instead of the cards underneath.
+            grid = grid.child(
+                div()
+                    .absolute()
+                    .right_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(px(RAIL_WIDTH))
+                    .child(YearRail::new(
+                        if search {
+                            "search-year-rail"
+                        } else {
+                            "year-rail"
+                        },
+                        labels,
+                        index,
+                        scroll,
+                        columns,
+                        rail_drag,
+                    )),
             );
         }
-        container
+        let mut container = v_flex()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .h_full()
+            .items_stretch();
+        if !search {
+            container = container.pl(px(26.)).pr(px(18.)).pb(px(18.));
+        }
+        container.child(grid).into_any_element()
+    }
+
+    /// Loads at most two pages for the grid, then inserts them unless the
+    /// index was replaced while the query was running.
+    fn load_pages(
+        &mut self,
+        search: bool,
+        generation: u64,
+        pages: Vec<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let browser = self.browser_mut(search);
+        if browser.generation != generation {
+            return;
+        }
+        let index = browser.index.clone();
+        let mut ids = Vec::new();
+        let mut requests = Vec::new();
+        for page in pages.into_iter().take(2) {
+            let start = page * PAGE_SIZE;
+            let end = (start + PAGE_SIZE).min(index.total);
+            if start >= end {
+                continue;
+            }
+            ids.extend(index.entries[start..end].iter().map(|entry| entry.id));
+            requests.push((page, start, end));
+        }
+        if requests.is_empty() {
+            return;
+        }
+        let page_start = Instant::now();
+        let photos = match self.db.photos_by_ids(&ids) {
+            Ok(photos) => photos,
+            Err(error) => {
+                eprintln!("photos_by_ids failed: {error}");
+                {
+                    let browser = self.browser_mut(search);
+                    for (page, _, _) in &requests {
+                        browser.fail_page(*page, generation);
+                    }
+                }
+                self.library_error = Some("一部の写真を読み込めませんでした".to_string());
+                cx.notify();
+                return;
+            }
+        };
+        log_timing("photos_by_ids", page_start);
+        let mut by_id: HashMap<i64, Photo> =
+            photos.into_iter().map(|photo| (photo.id, photo)).collect();
+        let mut short_page = false;
+        {
+            let browser = self.browser_mut(search);
+            for (page, start, end) in requests {
+                let page_photos: Vec<Photo> = index.entries[start..end]
+                    .iter()
+                    .filter_map(|entry| by_id.remove(&entry.id))
+                    .collect();
+                if page_photos.len() == end - start {
+                    browser.insert_page(page, page_photos, generation);
+                } else {
+                    // A row deleted mid-flight would shift every later offset
+                    // in the page; keep placeholders until the next reload
+                    // rebuilds the snapshot. The retry action makes the
+                    // failure recoverable instead of permanent.
+                    eprintln!(
+                        "photos_by_ids returned a short page: {} of {}",
+                        page_photos.len(),
+                        end - start
+                    );
+                    short_page = true;
+                    browser.fail_page(page, generation);
+                }
+            }
+        }
+        if short_page {
+            self.library_error = Some("一部の写真を読み込めませんでした".to_string());
+        }
+        cx.notify();
     }
 
     fn photo_card(
         &mut self,
         photo: &Photo,
-        layout: PhotoCardLayout,
+        grid_index: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = photo.id;
@@ -1440,22 +2802,16 @@ impl App {
             .world_name
             .clone()
             .unwrap_or_else(|| "未紐付け".to_string());
-        let thumbnail = self.thumbnails.get(&id).cloned();
+        let thumbnail = self.thumbnails.get(id);
+        if thumbnail.is_none() {
+            self.request_thumbnail(photo, cx);
+        }
         let color = self.color_for(photo);
         let hovered = self.hovered_photo == Some(id);
-        let grid_index = match layout {
-            PhotoCardLayout::Grid { index } => Some(index),
-            PhotoCardLayout::Fixed => None,
-        };
-        let intro_index = grid_index.unwrap_or(0);
         let intro_total =
-            CARD_INTRO_SECS + intro_index.min(CARD_STAGGER_MAX) as f32 * CARD_STAGGER_SECS;
-        let intro_started = match grid_index {
-            Some(index) if index < 24 => {
-                Some(*self.intro_seen.entry(id).or_insert_with(Instant::now))
-            }
-            _ => None,
-        };
+            CARD_INTRO_SECS + grid_index.min(CARD_STAGGER_MAX) as f32 * CARD_STAGGER_SECS;
+        let intro_started =
+            (grid_index < 24).then(|| *self.intro_seen.entry(id).or_insert_with(Instant::now));
         let intro = intro_started.is_some_and(|started| {
             Instant::now().duration_since(started).as_secs_f32() < intro_total
         });
@@ -1603,11 +2959,7 @@ impl App {
         // wrapper mounted for the card's lifetime: removing it when the intro
         // ends would change the hover animation's ancestor path and remount it,
         // causing a 4 px settle without a hover.
-        let cell = div()
-            .relative()
-            .when(grid_index.is_some(), |this| this.flex_1().min_w_0())
-            .when(grid_index.is_none(), |this| this.w(px(190.)))
-            .child(card);
+        let cell = div().relative().flex_1().min_w_0().child(card);
 
         cell.with_animation(
             SharedString::from(format!("card-intro-{grid_epoch}-{id}")),
@@ -1619,7 +2971,7 @@ impl App {
             .with_max_fps(60.0),
             move |el, t| {
                 if intro {
-                    let value = stagger_value(t, intro_index);
+                    let value = stagger_value(t, grid_index);
                     el.opacity(value).relative().top(px(14.0 * (1.0 - value)))
                 } else {
                     el
@@ -1704,7 +3056,7 @@ impl App {
         let selection_epoch = self.selection_epoch;
         let previous_preview = self.previous_preview.clone();
         let current_preview = self.preview.clone();
-        let thumbnail = self.thumbnails.get(&id).cloned();
+        let thumbnail = self.thumbnails.get(id);
         let compressed = self.compressed_ids.contains(&id);
         let world = photo
             .world_name
@@ -3062,127 +4414,33 @@ impl App {
             })
     }
 
-    fn search_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let results = self
-            .search_results
-            .clone()
-            .unwrap_or_else(|| self.photos.clone());
-        let message = self.message.clone();
-        let cards: Vec<AnyElement> = results
-            .iter()
-            .map(|photo| self.photo_card(photo, PhotoCardLayout::Fixed, cx))
-            .collect();
+    fn search_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let filters = self.search_filter_panel(cx);
+        let message = self.message.clone().or_else(|| self.library_error.clone());
+        let total = self.search_view.index.total;
+        let count = if self.searching {
+            "検索中…".to_string()
+        } else {
+            format!("{total} 枚")
+        };
         h_flex()
             .flex_1()
             .min_h_0()
             .items_stretch()
-            .child(
-                glass_panel()
-                    .flex()
-                    .flex_col()
-                    .w(px(290.))
-                    .flex_shrink_0()
-                    .my(px(22.))
-                    .ml(px(26.))
-                    .p(px(16.))
-                    .gap(px(14.))
-                    .rounded(px(20.))
-                    .bg(rgb(PANEL))
-                    .border_color(rgb(BORDER))
-                    .child(
-                        div()
-                            .text_size(px(17.))
-                            .font_semibold()
-                            .text_color(rgb(TEXT))
-                            .child("絞り込み"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(MUTED_2))
-                            .child("カテゴリ間はAND、カテゴリ内はOR"),
-                    )
-                    .child(self.filter_field("ワールド", Input::new(&self.world_input)))
-                    .child(self.filter_field("プレイヤー", Input::new(&self.player_input)))
-                    .child(self.filter_field("タグ", Input::new(&self.tag_input)))
-                    .child(
-                        v_flex()
-                            .gap(px(6.))
-                            .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(MUTED_2))
-                                    .child("日時"),
-                            )
-                            .child(
-                                h_flex()
-                                    .gap(px(4.))
-                                    .child(self.preset_button("今日", Some(1), cx))
-                                    .child(self.preset_button("7日", Some(7), cx))
-                                    .child(self.preset_button("30日", Some(30), cx))
-                                    .child(self.preset_button("すべて", None, cx)),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(rgb(MUTED))
-                                    .child("お気に入りのみ"),
-                            )
-                            .child(div().flex_1())
-                            .child(
-                                Switch::new("search-favorite")
-                                    .checked(self.search_favorite)
-                                    .on_click(cx.listener(|this, value, _, cx| {
-                                        this.search_favorite = *value;
-                                        this.run_search(cx);
-                                    })),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap(px(8.))
-                            .child(
-                                Button::new("search-run")
-                                    .label("検索")
-                                    .small()
-                                    .primary()
-                                    .on_click(cx.listener(|this, _, _, cx| this.run_search(cx))),
-                            )
-                            .child(
-                                Button::new("search-clear")
-                                    .label("クリア")
-                                    .small()
-                                    .secondary()
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.search_results = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(MUTED_2))
-                            .child("結果は最大300枚です"),
-                    ),
-            )
+            .child(filters)
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
+                    .min_h_0()
                     .h_full()
-                    .overflow_y_scrollbar()
                     .px(px(26.))
                     .pt(px(26.))
                     .pb(px(26.))
                     .gap(px(18.))
                     .child(
                         v_flex()
+                            .flex_shrink_0()
                             .gap(px(4.))
                             .child(
                                 h_flex()
@@ -3193,7 +4451,7 @@ impl App {
                                             .text_size(px(24.))
                                             .font_semibold()
                                             .text_color(rgb(TEXT))
-                                            .child(format!("{} 枚", results.len())),
+                                            .child(count),
                                     )
                                     .child(
                                         div()
@@ -3212,17 +4470,102 @@ impl App {
                                 )
                             }),
                     )
-                    .child(h_flex().flex_wrap().gap(px(16.)).children(cards))
-                    .when(results.is_empty(), |this| {
-                        this.child(
-                            glass_panel()
-                                .p(px(20.))
-                                .text_size(px(12.))
-                                .text_color(rgb(MUTED))
-                                .child("条件に一致する写真がありません"),
-                        )
-                    }),
+                    .child(self.photo_grid(true, window, cx)),
             )
+            .into_any_element()
+    }
+
+    fn search_filter_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        glass_panel()
+            .flex()
+            .flex_col()
+            .w(px(290.))
+            .flex_shrink_0()
+            .my(px(22.))
+            .ml(px(26.))
+            .p(px(16.))
+            .gap(px(14.))
+            .rounded(px(20.))
+            .bg(rgb(PANEL))
+            .border_color(rgb(BORDER))
+            .child(
+                div()
+                    .text_size(px(17.))
+                    .font_semibold()
+                    .text_color(rgb(TEXT))
+                    .child("絞り込み"),
+            )
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(rgb(MUTED_2))
+                    .child("カテゴリ間はAND、カテゴリ内はOR"),
+            )
+            .child(self.filter_field("ワールド", Input::new(&self.world_input)))
+            .child(self.filter_field("プレイヤー", Input::new(&self.player_input)))
+            .child(self.filter_field("タグ", Input::new(&self.tag_input)))
+            .child(
+                v_flex()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED_2))
+                            .child("日時"),
+                    )
+                    .child(
+                        h_flex()
+                            .gap(px(4.))
+                            .child(self.preset_button("今日", Some(1), cx))
+                            .child(self.preset_button("7日", Some(7), cx))
+                            .child(self.preset_button("30日", Some(30), cx))
+                            .child(self.preset_button("すべて", None, cx)),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgb(MUTED))
+                            .child("お気に入りのみ"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Switch::new("search-favorite")
+                            .checked(self.search_favorite)
+                            .on_click(cx.listener(|this, value, _, cx| {
+                                this.search_favorite = *value;
+                                this.run_search(cx);
+                            })),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap(px(8.))
+                    .child(
+                        Button::new("search-run")
+                            .label(if self.searching {
+                                "検索中…"
+                            } else {
+                                "検索"
+                            })
+                            .small()
+                            .primary()
+                            .disabled(self.searching)
+                            .on_click(cx.listener(|this, _, _, cx| this.run_search(cx))),
+                    )
+                    .child(
+                        Button::new("search-clear")
+                            .label("クリア")
+                            .small()
+                            .secondary()
+                            .on_click(cx.listener(|this, _, _, cx| this.clear_search(cx))),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn import_dialog(&mut self, mode: ImportMode, cx: &mut Context<Self>) {
@@ -3266,7 +4609,7 @@ impl App {
                 let _ = thumbnail::ensure_thumbnail(*id, Path::new(&photo.abs_path));
             }
         }
-        self.reload(cx);
+        self.reload_library(true, cx);
         self.message = Some(format!(
             "{} 枚を取り込みました（{} 枚スキップ）",
             result.imported.len(),
@@ -3341,7 +4684,7 @@ impl App {
                         .small()
                         .ghost()
                         .on_click(cx.listener(|this, _, _, cx| {
-                            this.reload(cx);
+                            this.reload_aux(cx);
                             cx.notify();
                         }))
                         .into_any_element(),
@@ -3551,6 +4894,8 @@ impl App {
                                                     .read(cx)
                                                     .value()
                                                     .to_string();
+                                                let previous_roots =
+                                                    this.settings.photo_roots.clone();
                                                 this.settings.photo_roots =
                                                     if root.trim().is_empty() {
                                                         Vec::new()
@@ -3568,7 +4913,12 @@ impl App {
                                                     } else {
                                                         Some(imported.trim().to_string())
                                                     };
+                                                let root_changed =
+                                                    this.settings.photo_roots != previous_roots;
                                                 let _ = this.settings.save(&this.db);
+                                                if root_changed {
+                                                    this.reload_library(false, cx);
+                                                }
                                                 this.message = Some(
                                                     "保存しました。デーモン再起動で監視に反映されます。"
                                                         .to_string(),
@@ -3661,7 +5011,7 @@ impl App {
                                     .small()
                                     .ghost()
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.reload(cx);
+                                        this.reload_aux(cx);
                                         cx.notify();
                                     })),
                             )
@@ -3790,12 +5140,6 @@ impl App {
 impl Render for App {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.guard_viewer_selection(window, cx);
-        let width: f32 = window.viewport_size().width.into();
-        self.grid_columns = grid_columns(grid_available_width(
-            width,
-            self.sidebar_collapsed,
-            self.inspector_collapsed,
-        ));
         let workspace = v_flex().flex_1().min_w_0().h_full();
         let root = h_flex()
             .relative()
@@ -3828,7 +5172,7 @@ impl Render for App {
                 this.cycle_quick_look_focus(true, window, cx)
             }))
             .child(self.sidebar(cx))
-            .child(workspace.child(self.content(cx)))
+            .child(workspace.child(self.content(window, cx)))
             .child(self.nav_tooltip())
             .child(self.rail_toggle(cx));
         if self.quick_look_open {
@@ -4078,16 +5422,30 @@ fn seed_demo(db: &Db, photo_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn load_render(path: &Path) -> Option<Arc<RenderImage>> {
-    if !path.is_file() {
-        return None;
-    }
+/// Decodes a thumbnail on a background thread. Returns the average color in
+/// RGB and the RGBA buffer with channels already swapped to BGRA.
+fn decode_thumbnail(id: i64, cache_path: &Path, source: &Path) -> Option<(u32, image::RgbaImage)> {
+    let cached = cache_path.is_file()
+        && std::fs::metadata(cache_path)
+            .map(|meta| meta.len() > 0)
+            .unwrap_or(false);
+    let path = if cached {
+        cache_path.to_path_buf()
+    } else {
+        thumbnail::ensure_thumbnail(id, source).ok().flatten()?
+    };
     let mut buffer = image::open(path).ok()?.to_rgba8();
     for pixel in buffer.pixels_mut() {
         pixel.0.swap(0, 2);
     }
-    let frame = image::Frame::new(buffer);
-    Some(Arc::new(RenderImage::new(SmallVec::from_elem(frame, 1))))
+    let color = average_bgra(buffer.as_raw());
+    Some((color, buffer))
+}
+
+/// Builds a GPUI image from a decoded buffer. Must run on the UI thread.
+fn make_render_image(rgba: image::RgbaImage) -> Arc<RenderImage> {
+    let frame = image::Frame::new(rgba);
+    Arc::new(RenderImage::new(SmallVec::from_elem(frame, 1)))
 }
 
 fn load_preview(path: &Path) -> Option<Arc<RenderImage>> {
@@ -4288,6 +5646,13 @@ fn grid_available_width(
     (window_width - sidebar_width(sidebar_collapsed) - inspector - WORKSPACE_PAD_X).max(0.0)
 }
 
+/// Width left for the search grid after the filter panel (290 px + 26 px
+/// margin) and the right column's 26 px padding on both sides. The Search
+/// screen has no inspector column, so none is subtracted.
+fn search_available_width(window_width: f32, sidebar_collapsed: bool) -> f32 {
+    (window_width - sidebar_width(sidebar_collapsed) - 290.0 - 26.0 - 52.0).max(0.0)
+}
+
 fn viewer_details_width(open: bool, t: f32) -> f32 {
     let (from, to) = if open {
         (0.0, VIEWER_DETAILS_WIDTH)
@@ -4317,6 +5682,37 @@ fn viewer_image_box(
 
 fn grid_columns(available_width: f32) -> usize {
     (((available_width + GRID_GAP) / (MIN_CARD_WIDTH + GRID_GAP)).floor() as usize).max(1)
+}
+
+/// Column count for a grid screen. Search uses its own available width because
+/// it has a filter panel and no inspector; the library keeps its inspector
+/// aware width.
+fn grid_columns_for(
+    search: bool,
+    window_width: f32,
+    sidebar_collapsed: bool,
+    inspector_collapsed: bool,
+) -> usize {
+    let available = if search {
+        search_available_width(window_width, sidebar_collapsed)
+    } else {
+        grid_available_width(window_width, sidebar_collapsed, inspector_collapsed)
+    };
+    grid_columns(available)
+}
+
+/// Stands in for a photo whose page has not loaded yet. Matches the card's
+/// 128 px image area so the fixed 196 px row height never changes.
+fn grid_placeholder() -> AnyElement {
+    div()
+        .flex_1()
+        .min_w_0()
+        .h(px(128.))
+        .rounded(px(14.))
+        .bg(rgb(PANEL_2))
+        .border_2()
+        .border_color(rgb(BORDER))
+        .into_any_element()
 }
 
 fn short_date(value: &str) -> String {
@@ -4416,6 +5812,9 @@ fn register_global_actions(cx: &mut gpui_kit::App, app: Entity<App>) {
 }
 
 fn main() {
+    if timing_enabled() {
+        let _ = process_start();
+    }
     let options = parse_args(std::env::args());
     if options.background {
         if let Err(error) = run_background_supervisor() {
@@ -4469,11 +5868,23 @@ mod tests {
     // `use super::*` would also import GPUI's `test` attribute macro through
     // `gpui_kit::*`, shadowing the built-in `#[test]` and recursing forever.
     use super::{
-        DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH, average_bgra,
-        demo_thumb_path, ease_motion, format_count, grid_available_width, grid_columns, lerp_color,
-        next_focus_index, parse_args, parse_window_size, sidebar_reveal_width, sidebar_width,
-        stagger_value, step_index, viewer_details_width, viewer_image_box,
+        CountDebounce, DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH,
+        MAX_PAGES, PAGE_SIZE, PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex, PhotoPageCache,
+        THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, YearBucket, anchor_photo_id,
+        apply_library_index, average_bgra, build_year_buckets, decode_thumbnail, demo_thumb_path,
+        ease_motion, first_visible_photo, format_captured_month, format_count,
+        grid_available_width, grid_columns, grid_columns_for, lerp_color, list_scroll_top,
+        next_focus_index, parse_args, parse_window_size, rail_label_hidden_by_pill, rail_row_at,
+        rail_scroll_offset, rail_y, search_available_width, sidebar_reveal_width, sidebar_width,
+        stagger_value, step_index, sync_search_mirror, viewer_details_width, viewer_image_box,
+        visible_year_buckets,
     };
+    use gpui_kit::{RenderImage, ScrollStrategy, UniformListScrollHandle, point, px};
+    use smallvec::SmallVec;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use vrc_photo_core::error::CoreError;
+    use vrc_photo_core::model::{Photo, PhotoIndexEntry, PhotoStatus};
 
     #[test]
     fn sidebar_widths_match_the_rail() {
@@ -4640,5 +6051,504 @@ mod tests {
         let path = demo_thumb_path(&assets, 42);
         assert!(path.ends_with("42.png"));
         assert_eq!(path.parent(), Some(assets.thumb_dir.as_path()));
+    }
+
+    fn test_render_image() -> Arc<RenderImage> {
+        let frame = image::Frame::new(image::RgbaImage::new(1, 1));
+        Arc::new(RenderImage::new(SmallVec::from_elem(frame, 1)))
+    }
+
+    #[test]
+    fn thumbnail_cache_limits_in_flight_requests() {
+        let mut cache = ThumbnailCache::default();
+        for id in 0..THUMB_IN_FLIGHT as i64 {
+            assert!(cache.begin(id));
+        }
+        assert!(!cache.begin(999));
+    }
+
+    #[test]
+    fn thumbnail_cache_evicts_least_recently_used_but_keeps_pinned() {
+        let mut cache = ThumbnailCache::default();
+        cache.pin(1);
+        for id in 1..=THUMB_CACHE_ENTRIES as i64 {
+            assert!(cache.begin(id));
+            cache.insert(id, test_render_image(), 0x112233);
+        }
+        // Do not touch id 1: it is the least recently used entry, so only the
+        // pin can keep it alive when the next insert overflows the cache.
+        assert!(cache.begin(999));
+        cache.insert(999, test_render_image(), 0x445566);
+        assert!(cache.get(1).is_some());
+        assert!(cache.get(2).is_none());
+    }
+
+    #[test]
+    fn thumbnail_cache_unpins_a_deleted_selection() {
+        let mut cache = ThumbnailCache::default();
+        cache.pin(7);
+        cache.unpin(7);
+        assert_eq!(cache.pinned, None);
+
+        cache.pin(8);
+        cache.unpin(7);
+        assert_eq!(cache.pinned, Some(8));
+    }
+
+    #[test]
+    fn thumbnail_cache_frees_a_slot_for_a_pinned_retry() {
+        let mut cache = ThumbnailCache::default();
+        for id in 0..THUMB_IN_FLIGHT as i64 {
+            assert!(cache.begin(id));
+        }
+        cache.pin(99);
+        // The selected thumbnail is refused while every slot is busy.
+        assert!(!cache.begin(99));
+        // A completed decode frees a slot; the pinned retry can now start.
+        cache.insert(0, test_render_image(), 0);
+        assert!(cache.begin(99));
+    }
+
+    #[test]
+    fn thumbnail_cache_does_not_retry_failed_or_pending_ids() {
+        let mut cache = ThumbnailCache::default();
+        assert!(cache.begin(1));
+        assert!(!cache.begin(1));
+        cache.fail(1);
+        assert!(!cache.begin(1));
+    }
+
+    #[test]
+    fn decode_thumbnail_uses_the_cached_file_and_swaps_channels() {
+        let dir = std::env::temp_dir().join(format!("vrc-photo-ui-decode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cache_path = dir.join("thumb.png");
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([10, 20, 30, 255]))
+            .save(&cache_path)
+            .unwrap();
+        let (color, rgba) =
+            decode_thumbnail(7, &cache_path, &dir.join("missing-source.png")).unwrap();
+        assert_eq!(color, 0x0a141e);
+        assert_eq!(&rgba.as_raw()[..4], &[30, 20, 10, 255]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn test_photo(id: i64) -> Photo {
+        Photo {
+            id,
+            root_id: 1,
+            rel_path: format!("p/{id}.png"),
+            abs_path: format!("/p/{id}.png"),
+            file_name: format!("{id}.png"),
+            captured_at_utc: id,
+            captured_at_local: "2026-10-21 21:14:03".to_string(),
+            tz_offset_sec: 0,
+            width: 1,
+            height: 1,
+            file_size: 1,
+            mtime: id,
+            blake3: None,
+            status: PhotoStatus::Present,
+            is_favorite: false,
+            note: None,
+            world_name: None,
+            instance_id: None,
+            link_method: None,
+            confidence: None,
+            author: None,
+        }
+    }
+
+    #[test]
+    fn page_cache_evicts_the_oldest_page() {
+        let mut cache = PhotoPageCache::new();
+        for page in 0..MAX_PAGES {
+            cache.insert_page(page, vec![test_photo(page as i64)]);
+        }
+        cache.insert_page(MAX_PAGES, vec![test_photo(999)]);
+        assert!(cache.get_page(0).is_none());
+        assert!(cache.get_page(MAX_PAGES).is_some());
+    }
+
+    #[test]
+    fn page_cache_keeps_recently_touched_pages() {
+        let mut cache = PhotoPageCache::new();
+        for page in 0..MAX_PAGES {
+            cache.insert_page(page, vec![test_photo(page as i64)]);
+        }
+        // Touch page 0 so it is no longer the least recently used entry.
+        assert!(cache.get_page(0).is_some());
+        cache.insert_page(MAX_PAGES, vec![test_photo(999)]);
+        assert!(cache.get_page(0).is_some());
+        assert!(cache.get_page(1).is_none());
+        assert!(cache.get_page(MAX_PAGES).is_some());
+    }
+
+    #[test]
+    fn page_cache_plans_only_missing_pages_and_marks_them_pending() {
+        let mut cache = PhotoPageCache::new();
+        let first = cache.plan_pages(0, PAGE_SIZE * 3, 2);
+        assert_eq!(first, vec![0, 1]);
+        let second = cache.plan_pages(0, PAGE_SIZE * 3, 2);
+        assert_eq!(second, vec![2]);
+        cache.insert_page(0, vec![test_photo(0)]);
+        assert!(cache.get_page(0).is_some());
+        let third = cache.plan_pages(0, PAGE_SIZE, 2);
+        assert!(third.is_empty());
+    }
+
+    #[test]
+    fn count_debounce_waits_for_a_quiet_period() {
+        let mut debounce = CountDebounce::default();
+        let quiet = Duration::from_secs(2);
+        let start = Instant::now();
+        assert!(!debounce.observe(100, start, quiet));
+        // The three-second tick re-observes the same count after the quiet
+        // period and releases the rebuild.
+        assert!(debounce.observe(100, start + Duration::from_secs(3), quiet));
+        // A successful reload starts a fresh period.
+        assert!(!debounce.observe(101, start + Duration::from_secs(6), quiet));
+    }
+
+    #[test]
+    fn count_debounce_restarts_while_imports_keep_arriving() {
+        let mut debounce = CountDebounce::default();
+        let quiet = Duration::from_secs(2);
+        let start = Instant::now();
+        assert!(!debounce.observe(100, start, quiet));
+        assert!(!debounce.observe(101, start + Duration::from_secs(3), quiet));
+        assert!(!debounce.observe(102, start + Duration::from_secs(6), quiet));
+        // Only after the count stays at 102 for a full tick does it reload.
+        assert!(debounce.observe(102, start + Duration::from_secs(9), quiet));
+    }
+
+    #[test]
+    fn stale_generation_cannot_insert_or_fail_pages() {
+        let mut browser =
+            PhotoBrowser::new(Arc::new(PhotoIndex::new(vec![index_entry(1, 202601)])));
+        let stale = browser.generation;
+        browser.replace_index(Arc::new(PhotoIndex::new(vec![index_entry(2, 202601)])));
+
+        browser.insert_page(0, vec![test_photo(1)], stale);
+        assert!(browser.pages.get_page(0).is_none());
+        browser.fail_page(0, stale);
+        assert!(!browser.pages.failed.contains(&0));
+
+        let current = browser.generation;
+        browser.fail_page(0, current);
+        assert!(browser.pages.failed.contains(&0));
+        browser.insert_page(0, vec![test_photo(2)], current);
+        assert!(browser.pages.get_page(0).is_some());
+        assert!(!browser.pages.failed.contains(&0));
+    }
+
+    #[test]
+    fn failed_library_index_keeps_the_mounted_snapshot_and_pages() {
+        let mut browser = PhotoBrowser::new(Arc::new(PhotoIndex::new(vec![
+            index_entry(1, 202601),
+            index_entry(2, 202512),
+        ])));
+        let generation = browser.generation;
+        browser.insert_page(0, vec![test_photo(1)], generation);
+        let mounted = browser.index.clone();
+
+        let error = apply_library_index(
+            &mut browser,
+            Err(CoreError::Invalid("database is locked".to_string())),
+        );
+
+        assert_eq!(error.as_deref(), Some("写真一覧を読み込めませんでした"));
+        assert!(Arc::ptr_eq(&browser.index, &mounted));
+        assert_eq!(browser.index.total, 2);
+        assert!(browser.pages.get_page(0).is_some());
+    }
+
+    #[test]
+    fn fresh_library_index_replaces_the_snapshot() {
+        let mut browser =
+            PhotoBrowser::new(Arc::new(PhotoIndex::new(vec![index_entry(1, 202601)])));
+        let generation = browser.generation;
+        browser.insert_page(0, vec![test_photo(1)], generation);
+
+        let error = apply_library_index(
+            &mut browser,
+            Ok(vec![index_entry(2, 202512), index_entry(3, 202511)]),
+        );
+
+        assert!(error.is_none());
+        assert_eq!(browser.index.total, 2);
+        assert_eq!(browser.index.row_of_id(2), Some(0));
+        assert!(browser.pages.get_page(0).is_none());
+    }
+
+    #[test]
+    fn search_mirror_refreshes_only_when_the_library_snapshot_changed() {
+        let library = PhotoBrowser::new(Arc::new(PhotoIndex::new(vec![index_entry(1, 202601)])));
+        let mut search = PhotoBrowser::new(library.index.clone());
+        let generation = search.generation;
+        search.insert_page(0, vec![test_photo(1)], generation);
+
+        assert!(!sync_search_mirror(&mut search, &library));
+        assert!(search.pages.get_page(0).is_some());
+
+        let updated = PhotoBrowser::new(Arc::new(PhotoIndex::new(vec![
+            index_entry(2, 202601),
+            index_entry(1, 202601),
+        ])));
+        assert!(sync_search_mirror(&mut search, &updated));
+        assert!(Arc::ptr_eq(&search.index, &updated.index));
+        assert_eq!(search.index.total, 2);
+        assert!(search.pages.get_page(0).is_none());
+    }
+
+    #[test]
+    fn anchor_photo_id_uses_the_first_visible_row() {
+        let entries = vec![
+            index_entry(1, 202601),
+            index_entry(2, 202512),
+            index_entry(3, 202411),
+        ];
+        let index = PhotoIndex::new(entries);
+        assert_eq!(anchor_photo_id(&index, 0.0, 3), Some(1));
+        assert_eq!(anchor_photo_id(&index, PHOTO_ROW_HEIGHT + 1.0, 1), Some(2));
+        assert_eq!(
+            anchor_photo_id(&index, PHOTO_ROW_HEIGHT * 2.0 + 1.0, 1),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn anchor_photo_id_handles_empty_and_overscrolled_indexes() {
+        assert_eq!(anchor_photo_id(&PhotoIndex::new(Vec::new()), 0.0, 3), None);
+        let index = PhotoIndex::new(vec![index_entry(1, 202601), index_entry(2, 202512)]);
+        assert_eq!(anchor_photo_id(&index, PHOTO_ROW_HEIGHT * 50.0, 4), Some(2));
+    }
+
+    #[test]
+    fn first_visible_photo_floors_the_row_before_applying_columns() {
+        // Halfway into row 2 with 3 columns: the top row starts at entry 6.
+        // Truncating after multiplying (`2.5 * 3 = 7.5`) would pick entry 7.
+        assert_eq!(first_visible_photo(PHOTO_ROW_HEIGHT * 2.5, 3, 100), 6);
+        assert_eq!(first_visible_photo(0.0, 3, 100), 0);
+        assert_eq!(first_visible_photo(-20.0, 3, 100), 0);
+        assert_eq!(first_visible_photo(PHOTO_ROW_HEIGHT * 50.0, 3, 10), 9);
+        assert_eq!(first_visible_photo(0.0, 3, 0), 0);
+    }
+
+    #[test]
+    fn anchor_row_remaps_after_an_insertion_before_it() {
+        let original = PhotoIndex::new(vec![index_entry(10, 202601), index_entry(11, 202512)]);
+        assert_eq!(original.row_of_id(11), Some(1));
+        let updated = PhotoIndex::new(vec![
+            index_entry(12, 202601),
+            index_entry(10, 202601),
+            index_entry(11, 202512),
+        ]);
+        assert_eq!(updated.row_of_id(11), Some(2));
+        assert_eq!(
+            anchor_photo_id(&updated, PHOTO_ROW_HEIGHT * 2.0 + 1.0, 1),
+            Some(11)
+        );
+    }
+
+    #[test]
+    fn grid_row_height_matches_the_card_height() {
+        assert_eq!(PHOTO_ROW_HEIGHT, 196.0);
+    }
+
+    #[test]
+    fn removing_a_photo_clears_pages_and_rebuilds_year_counts() {
+        let entries = vec![
+            index_entry(1, 202601),
+            index_entry(2, 202601),
+            index_entry(3, 202412),
+        ];
+        let mut browser = PhotoBrowser::new(Arc::new(PhotoIndex::new(entries)));
+        let generation = browser.generation;
+        browser.insert_page(0, vec![test_photo(1)], generation);
+        browser.remove_photo(2);
+        assert_eq!(browser.index.total, 2);
+        assert_eq!(browser.index.years[0].count, 1);
+        assert_eq!(browser.index.years[1].count, 1);
+        assert!(browser.pages.get_page(0).is_none());
+        assert_eq!(browser.index.row_of_id(1), Some(0));
+        assert_eq!(browser.index.row_of_id(2), None);
+        // Removing an id that is already gone is a no-op.
+        browser.remove_photo(2);
+        assert_eq!(browser.index.total, 2);
+    }
+
+    #[test]
+    fn removing_a_photo_clamps_a_scroll_past_the_last_row() {
+        let entries = (1..=10).map(|id| index_entry(id, 202601)).collect();
+        let mut browser = PhotoBrowser::new(Arc::new(PhotoIndex::new(entries)));
+        browser.columns = 2;
+        browser
+            .scroll
+            .0
+            .borrow_mut()
+            .base_handle
+            .set_offset(point(px(0.), px(-PHOTO_ROW_HEIGHT * 10.0)));
+        browser.remove_photo(1);
+
+        let state = browser.scroll.0.borrow();
+        let deferred = state.deferred_scroll_to_item.expect("scroll clamp");
+        // 9 photos over 2 columns is 5 rows; the last row index is 4.
+        assert_eq!(deferred.item_index, 4);
+        assert_eq!(deferred.strategy, ScrollStrategy::Nearest);
+    }
+
+    #[test]
+    fn search_available_width_drops_to_the_filter_panel_width() {
+        assert_eq!(grid_columns(search_available_width(1280.0, false)), 3);
+        assert_eq!(grid_columns(search_available_width(1440.0, false)), 4);
+        assert_eq!(grid_columns(search_available_width(1080.0, false)), 2);
+        assert_eq!(grid_columns(search_available_width(1280.0, true)), 4);
+    }
+
+    #[test]
+    fn search_grid_columns_ignore_the_inspector_state() {
+        // The Search screen has no inspector column, so the default expanded
+        // inspector must not shrink its grid.
+        assert_eq!(grid_columns_for(true, 1280.0, false, false), 3);
+        assert_eq!(grid_columns_for(true, 1440.0, false, false), 4);
+        assert_eq!(grid_columns_for(true, 1080.0, false, false), 2);
+        assert_eq!(grid_columns_for(false, 1280.0, false, false), 3);
+    }
+
+    fn index_entry(id: i64, month: i32) -> PhotoIndexEntry {
+        PhotoIndexEntry {
+            id,
+            captured_at_utc: id,
+            captured_month: month,
+        }
+    }
+
+    #[test]
+    fn year_buckets_merge_interleaved_local_years() {
+        let entries = vec![
+            index_entry(1, 202601),
+            index_entry(2, 202512),
+            index_entry(3, 202601),
+            index_entry(4, 202511),
+        ];
+        let years = build_year_buckets(&entries);
+        assert_eq!(
+            years
+                .iter()
+                .map(|bucket| (
+                    bucket.year,
+                    bucket.start_row,
+                    bucket.display_row,
+                    bucket.count
+                ))
+                .collect::<Vec<_>>(),
+            vec![(2026, 0, 0, 2), (2025, 1, 2, 2)]
+        );
+    }
+
+    #[test]
+    fn year_buckets_skip_unknown_capture_months() {
+        let entries = vec![
+            index_entry(1, 0),
+            index_entry(2, 202601),
+            index_entry(3, 0),
+            index_entry(4, 202512),
+        ];
+        let index = PhotoIndex::new(entries);
+        // Unknown capture times stay in the ordered index for the grid...
+        assert_eq!(index.total, 4);
+        // ...but they must not paint a "0" year label or dot.
+        assert_eq!(
+            index
+                .years
+                .iter()
+                .map(|bucket| (bucket.year, bucket.start_row, bucket.count))
+                .collect::<Vec<_>>(),
+            vec![(2026, 1, 1), (2025, 3, 1)]
+        );
+    }
+
+    #[test]
+    fn rail_position_round_trips_within_one_pixel() {
+        let height = 600.0;
+        for row in [0, 1, 99, 50_000, 99_999] {
+            let y = rail_y(row, 100_000, height);
+            let back = rail_row_at(y, 100_000, height);
+            let y2 = rail_y(back, 100_000, height);
+            assert!((y - y2).abs() <= 1.0, "{y} != {y2}");
+        }
+        assert_eq!(rail_row_at(-100.0, 100, height), 0);
+        assert_eq!(rail_row_at(1000.0, 100, height), 99);
+    }
+
+    #[test]
+    fn rail_month_format_is_japanese() {
+        assert_eq!(format_captured_month(202504), "2025年4月");
+        assert_eq!(format_captured_month(202612), "2026年12月");
+        assert_eq!(format_captured_month(0), "不明");
+        assert_eq!(format_captured_month(-202601), "不明");
+    }
+
+    #[test]
+    fn month_pill_hides_the_label_it_covers() {
+        // The pill is 18 px tall; labels inside its vertical span would be
+        // hidden behind it, so they are skipped instead.
+        assert!(rail_label_hidden_by_pill(24.0, 24.0));
+        assert!(rail_label_hidden_by_pill(32.0, 24.0));
+        assert!(!rail_label_hidden_by_pill(48.0, 24.0));
+    }
+
+    #[test]
+    fn rail_hides_labels_that_would_overlap() {
+        let buckets: Vec<YearBucket> = (0..30)
+            .map(|index| YearBucket {
+                year: 2026 - index,
+                start_row: index as usize * 100,
+                display_row: index as usize * 100,
+                count: 100,
+            })
+            .collect();
+        let visible = visible_year_buckets(&buckets, 120.0);
+        assert!(visible.len() < buckets.len());
+        assert!(visible.windows(2).all(|window| {
+            let a = rail_y(buckets[window[0]].display_row, 3000, 120.0);
+            let b = rail_y(buckets[window[1]].display_row, 3000, 120.0);
+            b - a >= 16.0
+        }));
+    }
+
+    #[test]
+    fn list_scroll_top_reads_the_uniform_list_offset() {
+        let handle = UniformListScrollHandle::new();
+        handle
+            .0
+            .borrow_mut()
+            .base_handle
+            .set_offset(point(px(0.), px(-392.)));
+        assert_eq!(list_scroll_top(&handle), 392.0);
+        handle
+            .0
+            .borrow_mut()
+            .base_handle
+            .set_offset(point(px(0.), px(12.)));
+        assert_eq!(list_scroll_top(&handle), 0.0);
+    }
+
+    #[test]
+    fn rail_jump_offset_uses_grid_rows_and_clamps_to_the_list() {
+        // `ScrollHandle::max_offset()` is a non-negative scrollable extent.
+        assert_eq!(rail_scroll_offset(0, 3, 10_000.0), 0.0);
+        assert_eq!(rail_scroll_offset(2, 3, 10_000.0), 0.0);
+        assert_eq!(rail_scroll_offset(3, 3, 10_000.0), -196.0);
+        assert_eq!(rail_scroll_offset(5, 3, 10_000.0), -196.0);
+        // The target (-2156) is clamped to the 1000 px extent.
+        assert_eq!(rail_scroll_offset(11, 1, 1_000.0), -1_000.0);
+        assert_eq!(rail_scroll_offset(600, 3, 10_000.0), -10_000.0);
+        assert_eq!(rail_scroll_offset(600, 0, 10_000.0), -10_000.0);
+        // No scrollable extent means no movement, even for a negative extent
+        // rather than the real non-negative contract.
+        assert_eq!(rail_scroll_offset(600, 3, 0.0), 0.0);
+        assert_eq!(rail_scroll_offset(600, 3, -5.0), 0.0);
     }
 }
