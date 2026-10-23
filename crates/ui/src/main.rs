@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -60,6 +61,12 @@ const THUMB_CACHE_ENTRIES: usize = 192;
 const THUMB_IN_FLIGHT: usize = 4;
 const PAGE_SIZE: usize = 256;
 const MAX_PAGES: usize = 24;
+const PHOTO_ROW_HEIGHT: f32 = 196.0;
+const RAIL_WIDTH: f32 = 88.0;
+const RAIL_TOP_PAD: f32 = 24.0;
+const RAIL_TRACK_INSET: f32 = 12.0;
+const RAIL_LABEL_GAP: f32 = 16.0;
+const RAIL_YEAR_HIT_SLOP: f32 = 8.0;
 
 gpui_kit::actions!(
     ui,
@@ -235,17 +242,137 @@ impl ThumbnailCache {
     }
 }
 
+/// Contiguous run of photos that share a local capture year.
+///
+/// `display_row` is the bucket's cumulative position in the rail, which stays
+/// proportional to the number of photos per year even when the underlying
+/// entries interleave years. `start_row` keeps the first entry index so a
+/// label click lands on a real photo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct YearBucket {
+    year: i32,
+    start_row: usize,
+    display_row: usize,
+    count: usize,
+}
+
+fn build_year_buckets(entries: &[PhotoIndexEntry]) -> Vec<YearBucket> {
+    let mut buckets: Vec<YearBucket> = Vec::new();
+    let mut positions: HashMap<i32, usize> = HashMap::new();
+    for (row, entry) in entries.iter().enumerate() {
+        let year = entry.captured_month / 100;
+        match positions.get(&year) {
+            Some(&index) => buckets[index].count += 1,
+            None => {
+                positions.insert(year, buckets.len());
+                buckets.push(YearBucket {
+                    year,
+                    start_row: row,
+                    display_row: 0,
+                    count: 1,
+                });
+            }
+        }
+    }
+    let mut display_row = 0;
+    for bucket in &mut buckets {
+        bucket.display_row = display_row;
+        display_row += bucket.count;
+    }
+    buckets
+}
+
+/// Y offset of a photo row on the rail track, including the top pad.
+fn rail_y(display_row: usize, total: usize, height: f32) -> f32 {
+    let usable = (height - 2.0 * RAIL_TOP_PAD).max(0.0);
+    if total == 0 {
+        return RAIL_TOP_PAD;
+    }
+    let fraction = (display_row as f32 / total as f32).clamp(0.0, 1.0);
+    (RAIL_TOP_PAD + fraction * usable).clamp(RAIL_TOP_PAD, RAIL_TOP_PAD + usable)
+}
+
+/// Inverse of [`rail_y`]: the row nearest to a y offset inside the rail.
+fn rail_row_at(y: f32, total: usize, height: f32) -> usize {
+    if total <= 1 {
+        return 0;
+    }
+    let usable = (height - 2.0 * RAIL_TOP_PAD).max(0.0);
+    let fraction = if usable <= f32::EPSILON {
+        0.0
+    } else {
+        ((y - RAIL_TOP_PAD) / usable).clamp(0.0, 1.0)
+    };
+    ((fraction * (total - 1) as f32).round() as usize).min(total - 1)
+}
+
+/// Formats a local `YYYYMM` capture month for the rail pill.
+fn format_captured_month(month: i32) -> String {
+    if month <= 0 {
+        return "不明".to_string();
+    }
+    format!("{}年{}月", month / 100, month % 100)
+}
+
+/// Visits the year labels that fit without overlapping, in bucket order.
+///
+/// Every bucket still gets a dot; only labels keep a 16 px gap so a long
+/// library does not paint a solid block of years.
+fn for_each_visible_year(
+    buckets: &[YearBucket],
+    height: f32,
+    mut visit: impl FnMut(usize, &YearBucket, f32),
+) {
+    let total = buckets
+        .last()
+        .map(|bucket| bucket.display_row + bucket.count)
+        .unwrap_or(0);
+    let mut last_label_y: Option<f32> = None;
+    for (index, bucket) in buckets.iter().enumerate() {
+        let y = rail_y(bucket.display_row, total, height);
+        if last_label_y.is_none_or(|last| y - last >= RAIL_LABEL_GAP) {
+            last_label_y = Some(y);
+            visit(index, bucket, y);
+        }
+    }
+}
+
+fn visible_year_buckets(buckets: &[YearBucket], height: f32) -> Vec<usize> {
+    let mut visible = Vec::new();
+    for_each_visible_year(buckets, height, |index, _, _| visible.push(index));
+    visible
+}
+
+/// Scroll distance from the top of a uniform list, in pixels.
+fn list_scroll_top(handle: &UniformListScrollHandle) -> f32 {
+    let offset = handle.0.borrow().base_handle.offset().y;
+    (-f32::from(offset)).max(0.0)
+}
+
+/// Scroll offset that puts `photo_row` at the top of the grid, clamped to the
+/// list's scrollable range.
+fn rail_scroll_offset(photo_row: usize, columns: usize, max_offset: f32) -> f32 {
+    let grid_row = photo_row / columns.max(1);
+    (-(grid_row as f32 * PHOTO_ROW_HEIGHT)).clamp(max_offset.min(0.0), 0.0)
+}
+
 /// Ordered snapshot of the library: only IDs and capture timestamps, so the
 /// full 100k-entry list stays cheap while photo rows load in pages.
 struct PhotoIndex {
     entries: Vec<PhotoIndexEntry>,
     total: usize,
+    years: Vec<YearBucket>,
 }
 
 impl PhotoIndex {
     fn new(entries: Vec<PhotoIndexEntry>) -> Self {
         let total = entries.len();
-        Self { entries, total }
+        let years = build_year_buckets(&entries);
+        Self {
+            entries,
+            total,
+            years,
+        }
     }
 }
 
@@ -337,6 +464,11 @@ struct PhotoBrowser {
     scroll: UniformListScrollHandle,
     columns: usize,
     generation: u64,
+    labels_generation: u64,
+    labels: Option<Arc<YearRailLabels>>,
+    /// Shared with the mounted rail so a re-render cannot drop an in-flight
+    /// drag or let it outlive the browser.
+    rail_drag: Rc<Cell<bool>>,
 }
 
 impl PhotoBrowser {
@@ -347,6 +479,9 @@ impl PhotoBrowser {
             scroll: UniformListScrollHandle::new(),
             columns: 1,
             generation: 0,
+            labels_generation: 0,
+            labels: None,
+            rail_drag: Rc::new(Cell::new(false)),
         }
     }
 
@@ -354,6 +489,8 @@ impl PhotoBrowser {
         self.index = index;
         self.generation = self.generation.wrapping_add(1);
         self.pages.clear();
+        self.labels = None;
+        self.rail_drag.set(false);
     }
 
     fn photo_at(&mut self, photo_index: usize) -> Option<Arc<Photo>> {
@@ -379,6 +516,340 @@ impl PhotoBrowser {
             return;
         }
         self.pages.fail_page(page);
+    }
+}
+
+fn rail_text_run(len: usize, color: u32) -> TextRun {
+    TextRun {
+        len,
+        font: font("Noto Sans JP"),
+        color: rgb(color).into(),
+        ..TextRun::default()
+    }
+}
+
+/// Shaped year/month text for the rail.
+///
+/// Building shapes text, so it is cached per index generation on
+/// [`PhotoBrowser`]; paint only reuses these lines.
+struct YearRailLabels {
+    years: Vec<ShapedLine>,
+    current_years: Vec<ShapedLine>,
+    months: HashMap<i32, ShapedLine>,
+}
+
+impl YearRailLabels {
+    fn build(index: &PhotoIndex, window: &mut Window) -> Self {
+        let text_system = window.text_system();
+        let mut years = Vec::with_capacity(index.years.len());
+        let mut current_years = Vec::with_capacity(index.years.len());
+        for bucket in &index.years {
+            let text = SharedString::from(bucket.year.to_string());
+            years.push(text_system.shape_line(
+                text.clone(),
+                px(10.),
+                &[rail_text_run(text.len(), MUTED_2)],
+                None,
+            ));
+            current_years.push(text_system.shape_line(
+                text.clone(),
+                px(10.),
+                &[rail_text_run(text.len(), TEXT)],
+                None,
+            ));
+        }
+
+        let mut months: HashMap<i32, ShapedLine> = HashMap::new();
+        for entry in &index.entries {
+            if months.contains_key(&entry.captured_month) {
+                continue;
+            }
+            let text = SharedString::from(format_captured_month(entry.captured_month));
+            months.insert(
+                entry.captured_month,
+                text_system.shape_line(
+                    text.clone(),
+                    px(10.),
+                    &[rail_text_run(text.len(), TEXT)],
+                    None,
+                ),
+            );
+        }
+
+        Self {
+            years,
+            current_years,
+            months,
+        }
+    }
+}
+
+/// Google Photos-style year rail painted over the right edge of a grid.
+///
+/// The list offset is read from the tracked [`UniformListScrollHandle`], and
+/// clicks/drags write the same handle, so the rail never touches the database.
+#[derive(Clone)]
+struct YearRail {
+    id: &'static str,
+    labels: Arc<YearRailLabels>,
+    index: Arc<PhotoIndex>,
+    scroll: UniformListScrollHandle,
+    columns: usize,
+    drag_active: Rc<Cell<bool>>,
+}
+
+impl YearRail {
+    fn new(
+        id: &'static str,
+        labels: Arc<YearRailLabels>,
+        index: Arc<PhotoIndex>,
+        scroll: UniformListScrollHandle,
+        columns: usize,
+        drag_active: Rc<Cell<bool>>,
+    ) -> Self {
+        Self {
+            id,
+            labels,
+            index,
+            scroll,
+            columns,
+            drag_active,
+        }
+    }
+
+    /// Scrolls the grid to the row under `y`, snapping to a year label when
+    /// the pointer is within its 8 px hit area.
+    fn jump_to(&self, y: Pixels, bounds_top: Pixels, height: f32, window: &mut Window) {
+        let total = self.index.total;
+        if total == 0 {
+            return;
+        }
+        let local_y: f32 = (y - bounds_top).into();
+        let mut nearest: Option<(f32, usize)> = None;
+        for slot in visible_year_buckets(&self.index.years, height) {
+            let bucket = self.index.years[slot];
+            let label_y = rail_y(bucket.display_row, total, height);
+            let distance = (local_y - label_y).abs();
+            if distance <= RAIL_YEAR_HIT_SLOP && nearest.is_none_or(|(best, _)| distance < best) {
+                nearest = Some((distance, bucket.start_row));
+            }
+        }
+
+        let photo_row = nearest
+            .map(|(_, row)| row)
+            .unwrap_or_else(|| rail_row_at(local_y, total, height))
+            .min(total - 1);
+        let max_offset = f32::from(self.scroll.0.borrow().base_handle.max_offset().y);
+        let offset = rail_scroll_offset(photo_row, self.columns, max_offset);
+        self.scroll
+            .0
+            .borrow_mut()
+            .base_handle
+            .set_offset(point(px(0.), px(offset)));
+        window.refresh();
+    }
+}
+
+impl IntoElement for YearRail {
+    type Element = Self;
+
+    fn into_element(self) -> Self::Element {
+        self
+    }
+}
+
+impl Element for YearRail {
+    type RequestLayoutState = ();
+    type PrepaintState = Hitbox;
+
+    fn id(&self) -> Option<ElementId> {
+        Some(ElementId::Name(SharedString::from(self.id)))
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut gpui_kit::App,
+    ) -> (LayoutId, Self::RequestLayoutState) {
+        let mut style = Style::default();
+        style.size.width = relative(1.).into();
+        style.size.height = relative(1.).into();
+        (window.request_layout(style, None, cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        window: &mut Window,
+        _: &mut gpui_kit::App,
+    ) -> Self::PrepaintState {
+        window.insert_hitbox(bounds, HitboxBehavior::Normal)
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut Self::RequestLayoutState,
+        hitbox: &mut Self::PrepaintState,
+        window: &mut Window,
+        cx: &mut gpui_kit::App,
+    ) {
+        let total = self.index.total;
+        if total == 0 {
+            return;
+        }
+        let height: f32 = bounds.size.height.into();
+        let track_x = bounds.right() - px(RAIL_TRACK_INSET);
+        let usable = (height - 2.0 * RAIL_TOP_PAD).max(0.0);
+        let hitbox = hitbox.clone();
+
+        window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
+
+        if usable > 0.0 {
+            window.paint_quad(
+                fill(
+                    Bounds::new(
+                        point(track_x - px(1.), bounds.top() + px(RAIL_TOP_PAD)),
+                        size(px(2.), px(usable)),
+                    ),
+                    rgba(0xffffff14),
+                )
+                .corner_radii(px(1.)),
+            );
+        }
+
+        let scroll_top = list_scroll_top(&self.scroll);
+        let columns = self.columns.max(1);
+        let first_visible =
+            (((scroll_top / PHOTO_ROW_HEIGHT) * columns as f32) as usize).min(total - 1);
+        let month = self
+            .index
+            .entries
+            .get(first_visible)
+            .map(|entry| entry.captured_month)
+            .unwrap_or(0);
+        let current_year = month / 100;
+
+        for bucket in &self.index.years {
+            let y = bounds.top() + px(rail_y(bucket.display_row, total, height));
+            let color = if bucket.year == current_year {
+                rgb(TEXT)
+            } else {
+                rgba(0xffffff30)
+            };
+            window.paint_quad(
+                fill(
+                    Bounds::new(point(track_x - px(1.5), y - px(1.5)), size(px(3.), px(3.))),
+                    color,
+                )
+                .corner_radii(px(1.5)),
+            );
+        }
+
+        let labels = self.labels.clone();
+        let buckets = self.index.years.as_slice();
+        for_each_visible_year(buckets, height, |slot, bucket, y| {
+            let line = if bucket.year == current_year {
+                labels.current_years.get(slot)
+            } else {
+                labels.years.get(slot)
+            };
+            if let Some(line) = line {
+                line.paint(
+                    point(
+                        bounds.right() - px(RAIL_TRACK_INSET + 8.0 + 56.0),
+                        bounds.top() + px(y) - px(6.),
+                    ),
+                    px(12.),
+                    TextAlign::Right,
+                    Some(px(56.)),
+                    window,
+                    cx,
+                )
+                .ok();
+            }
+        });
+
+        let pill_center = bounds.top() + px(rail_y(first_visible, total, height));
+        let pill_bounds = Bounds::new(
+            point(
+                bounds.right() - px(RAIL_WIDTH) + px(4.),
+                pill_center - px(9.),
+            ),
+            size(px(RAIL_WIDTH - 8.), px(18.)),
+        );
+        window.paint_quad(fill(pill_bounds, rgba((PANEL_2 << 8) | 0xf0)).corner_radii(px(9.)));
+        if let Some(line) = labels.months.get(&month) {
+            line.paint(
+                point(bounds.right() - px(RAIL_WIDTH - 10.), pill_center - px(6.)),
+                px(12.),
+                TextAlign::Right,
+                Some(px(RAIL_WIDTH - 20.)),
+                window,
+                cx,
+            )
+            .ok();
+        }
+
+        let rail = self.clone();
+        window.on_mouse_event({
+            let rail = rail.clone();
+            let hitbox = hitbox.clone();
+            move |event: &MouseDownEvent, phase, window, cx| {
+                if !phase.bubble()
+                    || event.button != MouseButton::Left
+                    || !hitbox.is_hovered(window)
+                    || !bounds.contains(&event.position)
+                {
+                    return;
+                }
+                // The rail is painted above the cards; keep the press from
+                // reaching the photo underneath it.
+                cx.stop_propagation();
+                rail.drag_active.set(true);
+                rail.jump_to(event.position.y, bounds.top(), height, window);
+            }
+        });
+
+        window.on_mouse_event({
+            let rail = rail.clone();
+            move |event: &MouseMoveEvent, phase, window, cx| {
+                if !rail.drag_active.get() {
+                    return;
+                }
+                if !event.dragging() {
+                    // Mouse-up can be swallowed by an overlay; stop dragging
+                    // as soon as the left button is no longer held.
+                    rail.drag_active.set(false);
+                    return;
+                }
+                if !phase.bubble() {
+                    return;
+                }
+                cx.stop_propagation();
+                rail.jump_to(event.position.y, bounds.top(), height, window);
+            }
+        });
+
+        window.on_mouse_event({
+            let rail = rail;
+            move |_: &MouseUpEvent, phase, _, _| {
+                if phase.bubble() {
+                    rail.drag_active.set(false);
+                }
+            }
+        });
     }
 }
 
@@ -1690,10 +2161,22 @@ impl App {
         );
         let browser = self.browser_mut(search);
         browser.columns = next_columns;
+        let labels = if browser.labels.is_none() || browser.labels_generation != browser.generation
+        {
+            // Shaping is expensive, so do it once per index snapshot instead
+            // of on every render or paint frame.
+            let labels = Arc::new(YearRailLabels::build(&browser.index, window));
+            browser.labels = Some(labels.clone());
+            browser.labels_generation = browser.generation;
+            labels
+        } else {
+            browser.labels.clone().expect("year rail labels")
+        };
         let columns = browser.columns;
         let index = browser.index.clone();
         let scroll = browser.scroll.clone();
         let generation = browser.generation;
+        let rail_drag = browser.rail_drag.clone();
         let rows = index.total.div_ceil(columns);
 
         if rows == 0 {
@@ -1738,6 +2221,7 @@ impl App {
             return container.child(empty).into_any_element();
         }
 
+        let list_index = index.clone();
         let list = uniform_list(
             // Keep the list ID stable so uniform_list retains its scroll
             // offset when the column count changes; row height is fixed.
@@ -1749,7 +2233,7 @@ impl App {
             rows,
             cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                 let photo_start = range.start * columns;
-                let photo_end = (range.end * columns).min(index.total);
+                let photo_end = (range.end * columns).min(list_index.total);
                 let missing = this
                     .browser_mut(search)
                     .plan_pages(photo_start, photo_end, 2);
@@ -1761,14 +2245,14 @@ impl App {
                 let mut rendered = Vec::with_capacity(range.len());
                 for row in range {
                     let mut line = h_flex()
-                        .h(px(196.))
+                        .h(px(PHOTO_ROW_HEIGHT))
                         .w_full()
                         .min_w_0()
                         .items_start()
                         .gap(px(16.));
                     for column in 0..columns {
                         let photo_index = row * columns + column;
-                        if photo_index >= index.total {
+                        if photo_index >= list_index.total {
                             line = line.child(div().flex_1());
                             continue;
                         }
@@ -1794,8 +2278,8 @@ impl App {
         .min_w_0()
         .min_h_0();
 
-        // The wrapper stays mounted (and relative) so Task 5 can overlay the
-        // year rail without remounting the list.
+        // The wrapper stays mounted (and relative) so the year rail can
+        // overlay the list without remounting it.
         let mut wrapper = v_flex()
             .id(if search { "search-grid" } else { "photo-grid" })
             .relative()
@@ -1809,6 +2293,31 @@ impl App {
                 .key_context("photo_grid")
                 .tab_stop(true);
         }
+        let mut grid = wrapper.child(list);
+        if index.total > 0 {
+            // Added after the list so the rail owns input inside its 88 px
+            // column instead of the cards underneath.
+            grid = grid.child(
+                div()
+                    .absolute()
+                    .right_0()
+                    .top_0()
+                    .bottom_0()
+                    .w(px(RAIL_WIDTH))
+                    .child(YearRail::new(
+                        if search {
+                            "search-year-rail"
+                        } else {
+                            "year-rail"
+                        },
+                        labels,
+                        index,
+                        scroll,
+                        columns,
+                        rail_drag,
+                    )),
+            );
+        }
         let mut container = v_flex()
             .flex_1()
             .min_w_0()
@@ -1818,7 +2327,7 @@ impl App {
         if !search {
             container = container.pl(px(26.)).pr(px(18.)).pb(px(18.));
         }
-        container.child(wrapper.child(list)).into_any_element()
+        container.child(grid).into_any_element()
     }
 
     /// Loads at most two pages for the grid, then inserts them unless the
@@ -4935,16 +5444,17 @@ mod tests {
     // `gpui_kit::*`, shadowing the built-in `#[test]` and recursing forever.
     use super::{
         DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH, MAX_PAGES, PAGE_SIZE,
-        PhotoPageCache, THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, average_bgra,
-        decode_thumbnail, demo_thumb_path, ease_motion, format_count, grid_available_width,
-        grid_columns, grid_columns_for, lerp_color, next_focus_index, parse_args,
-        parse_window_size, search_available_width, sidebar_reveal_width, sidebar_width,
-        stagger_value, step_index, viewer_details_width, viewer_image_box,
+        PhotoPageCache, THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, YearBucket,
+        average_bgra, build_year_buckets, decode_thumbnail, demo_thumb_path, ease_motion,
+        format_captured_month, format_count, grid_available_width, grid_columns, grid_columns_for,
+        lerp_color, list_scroll_top, next_focus_index, parse_args, parse_window_size, rail_row_at,
+        rail_scroll_offset, rail_y, search_available_width, sidebar_reveal_width, sidebar_width,
+        stagger_value, step_index, viewer_details_width, viewer_image_box, visible_year_buckets,
     };
-    use gpui_kit::RenderImage;
+    use gpui_kit::{RenderImage, UniformListScrollHandle, point, px};
     use smallvec::SmallVec;
     use std::sync::Arc;
-    use vrc_photo_core::model::{Photo, PhotoStatus};
+    use vrc_photo_core::model::{Photo, PhotoIndexEntry, PhotoStatus};
 
     #[test]
     fn sidebar_widths_match_the_rail() {
@@ -5247,5 +5757,102 @@ mod tests {
         assert_eq!(grid_columns_for(true, 1440.0, false, false), 4);
         assert_eq!(grid_columns_for(true, 1080.0, false, false), 2);
         assert_eq!(grid_columns_for(false, 1280.0, false, false), 3);
+    }
+
+    fn index_entry(id: i64, month: i32) -> PhotoIndexEntry {
+        PhotoIndexEntry {
+            id,
+            captured_at_utc: id,
+            captured_month: month,
+        }
+    }
+
+    #[test]
+    fn year_buckets_merge_interleaved_local_years() {
+        let entries = vec![
+            index_entry(1, 202601),
+            index_entry(2, 202512),
+            index_entry(3, 202601),
+            index_entry(4, 202511),
+        ];
+        let years = build_year_buckets(&entries);
+        assert_eq!(
+            years
+                .iter()
+                .map(|bucket| (
+                    bucket.year,
+                    bucket.start_row,
+                    bucket.display_row,
+                    bucket.count
+                ))
+                .collect::<Vec<_>>(),
+            vec![(2026, 0, 0, 2), (2025, 1, 2, 2)]
+        );
+    }
+
+    #[test]
+    fn rail_position_round_trips_within_one_pixel() {
+        let height = 600.0;
+        for row in [0, 1, 99, 50_000, 99_999] {
+            let y = rail_y(row, 100_000, height);
+            let back = rail_row_at(y, 100_000, height);
+            let y2 = rail_y(back, 100_000, height);
+            assert!((y - y2).abs() <= 1.0, "{y} != {y2}");
+        }
+        assert_eq!(rail_row_at(-100.0, 100, height), 0);
+        assert_eq!(rail_row_at(1000.0, 100, height), 99);
+    }
+
+    #[test]
+    fn rail_month_format_is_japanese() {
+        assert_eq!(format_captured_month(202504), "2025年4月");
+        assert_eq!(format_captured_month(202612), "2026年12月");
+    }
+
+    #[test]
+    fn rail_hides_labels_that_would_overlap() {
+        let buckets: Vec<YearBucket> = (0..30)
+            .map(|index| YearBucket {
+                year: 2026 - index,
+                start_row: index as usize * 100,
+                display_row: index as usize * 100,
+                count: 100,
+            })
+            .collect();
+        let visible = visible_year_buckets(&buckets, 120.0);
+        assert!(visible.len() < buckets.len());
+        assert!(visible.windows(2).all(|window| {
+            let a = rail_y(buckets[window[0]].display_row, 3000, 120.0);
+            let b = rail_y(buckets[window[1]].display_row, 3000, 120.0);
+            b - a >= 16.0
+        }));
+    }
+
+    #[test]
+    fn list_scroll_top_reads_the_uniform_list_offset() {
+        let handle = UniformListScrollHandle::new();
+        handle
+            .0
+            .borrow_mut()
+            .base_handle
+            .set_offset(point(px(0.), px(-392.)));
+        assert_eq!(list_scroll_top(&handle), 392.0);
+        handle
+            .0
+            .borrow_mut()
+            .base_handle
+            .set_offset(point(px(0.), px(12.)));
+        assert_eq!(list_scroll_top(&handle), 0.0);
+    }
+
+    #[test]
+    fn rail_jump_offset_uses_grid_rows_and_clamps_to_the_list() {
+        assert_eq!(rail_scroll_offset(0, 3, -10_000.0), 0.0);
+        assert_eq!(rail_scroll_offset(2, 3, -10_000.0), 0.0);
+        assert_eq!(rail_scroll_offset(3, 3, -10_000.0), -196.0);
+        assert_eq!(rail_scroll_offset(5, 3, -10_000.0), -196.0);
+        assert_eq!(rail_scroll_offset(600, 3, -10_000.0), -10_000.0);
+        assert_eq!(rail_scroll_offset(600, 0, -10_000.0), -10_000.0);
+        assert_eq!(rail_scroll_offset(600, 3, 0.0), 0.0);
     }
 }
