@@ -449,6 +449,15 @@ fn anchor_photo_id(index: &PhotoIndex, offset_y: f32, columns: usize) -> Option<
     index.entries.get(first_photo).map(|entry| entry.id)
 }
 
+/// The photo the next search result should be anchored to. Keep the requested
+/// anchor when it survived the query; otherwise fall back to the first photo
+/// (the top of the grid) or `None` for an empty result.
+fn search_anchor_after_result(requested: Option<i64>, index: &PhotoIndex) -> Option<i64> {
+    requested
+        .filter(|id| index.row_of_id(*id).is_some())
+        .or_else(|| index.entries.first().map(|entry| entry.id))
+}
+
 /// Bounded access-order LRU cache for grid photo pages.
 ///
 /// `get_page` moves the page to the back of the order; `insert_page` evicts
@@ -1957,6 +1966,7 @@ impl App {
         };
         self.applied_search = Some(filter.clone());
         self.pending_search_anchor = None;
+        self.search_refresh_pending = false;
         self.start_search(filter, cx);
     }
 
@@ -2020,11 +2030,10 @@ impl App {
             Ok(entries) => {
                 self.search_view
                     .replace_index(Arc::new(PhotoIndex::new(entries)));
+                let requested_anchor = self.pending_search_anchor.take();
+                let anchor = search_anchor_after_result(requested_anchor, &self.search_view.index);
                 let columns = self.search_view.columns.max(1);
-                let row = self
-                    .pending_search_anchor
-                    .take()
-                    .and_then(|id| self.search_view.index.row_of_id(id));
+                let row = anchor.and_then(|id| self.search_view.index.row_of_id(id));
                 match row {
                     Some(row) => self
                         .search_view
@@ -2041,7 +2050,7 @@ impl App {
                 self.message = None;
                 if self.search_refresh_pending {
                     self.search_refresh_pending = false;
-                    self.refresh_search_after_tag_edit(cx);
+                    self.start_search_refresh(anchor, cx);
                 }
             }
             Err(error) => {
@@ -2087,11 +2096,22 @@ impl App {
             self.search_refresh_pending = true;
             return;
         }
-        self.pending_search_anchor = anchor_photo_id(
+        let anchor = anchor_photo_id(
             &self.search_view.index,
             list_scroll_top(&self.search_view.scroll),
             self.search_view.columns,
         );
+        self.start_search_refresh(anchor, cx);
+    }
+
+    fn start_search_refresh(&mut self, anchor: Option<i64>, cx: &mut Context<Self>) {
+        let Some(filter) = self.applied_search.clone() else {
+            return;
+        };
+        if !has_tag_filter(&filter) {
+            return;
+        }
+        self.pending_search_anchor = anchor;
         self.start_search(filter, cx);
     }
 
@@ -2102,12 +2122,41 @@ impl App {
             return;
         }
         self.load_selected_meta(photo_id);
+        // A successful write is authoritative even if the metadata read failed.
+        if self.selected_tags.is_empty() && !tags.is_empty() {
+            self.selected_tags = tags;
+        }
         self.refresh_search_after_tag_edit(cx);
         cx.notify();
     }
 
+    fn add_tag(&mut self, photo_id: i64, tag: String, cx: &mut Context<Self>) {
+        let tags = match self.db.photo_tags(photo_id) {
+            Ok(tags) => tags,
+            Err(error) => {
+                self.message = Some(format!("タグを読み込めません: {error}"));
+                cx.notify();
+                return;
+            }
+        };
+        let Some(tags) = with_tag(&tags, &tag) else {
+            return;
+        };
+        self.commit_tags(photo_id, tags, cx);
+    }
+
     fn remove_tag(&mut self, photo_id: i64, tag: &str, cx: &mut Context<Self>) {
-        let tags = without_tag(&self.selected_tags, tag);
+        let tags = match self.db.photo_tags(photo_id) {
+            Ok(tags) => tags,
+            Err(error) => {
+                self.message = Some(format!("タグを読み込めません: {error}"));
+                cx.notify();
+                return;
+            }
+        };
+        let Some(tags) = without_tag(&tags, tag) else {
+            return;
+        };
         self.commit_tags(photo_id, tags, cx);
     }
 
@@ -3746,12 +3795,7 @@ impl App {
                 if tag.is_empty() {
                     return;
                 }
-                let mut tags = this.selected_tags.clone();
-                if tags.contains(&tag) {
-                    return;
-                }
-                tags.push(tag);
-                this.commit_tags(id, tags, cx);
+                this.add_tag(id, tag, cx);
             },
         );
         let compress_button = self.focusable_text_button(
@@ -5763,12 +5807,27 @@ fn normalize_note(value: &str) -> Option<&str> {
     (!trimmed.is_empty()).then_some(trimmed)
 }
 
-/// Returns the tags left after removing `tag`, preserving the existing order.
-fn without_tag(tags: &[String], tag: &str) -> Vec<String> {
-    tags.iter()
-        .filter(|existing| existing.as_str() != tag)
-        .cloned()
-        .collect()
+/// Returns the tags left after removing `tag`, or `None` when it is absent.
+fn without_tag(tags: &[String], tag: &str) -> Option<Vec<String>> {
+    if !tags.iter().any(|existing| existing == tag) {
+        return None;
+    }
+    Some(
+        tags.iter()
+            .filter(|existing| existing.as_str() != tag)
+            .cloned()
+            .collect(),
+    )
+}
+
+/// Returns the tags with `tag` appended, or `None` when it is already present.
+fn with_tag(tags: &[String], tag: &str) -> Option<Vec<String>> {
+    if tags.iter().any(|existing| existing == tag) {
+        return None;
+    }
+    let mut tags = tags.to_vec();
+    tags.push(tag.to_string());
+    Some(tags)
 }
 
 /// Whether an executed search would be affected by a tag edit.
@@ -6168,9 +6227,10 @@ mod tests {
         ease_motion, first_visible_photo, format_captured_month, format_count,
         grid_available_width, grid_columns, grid_columns_for, has_tag_filter, lerp_color,
         list_scroll_top, next_focus_index, normalize_note, parse_args, parse_window_size,
-        rail_label_hidden_by_pill, rail_row_at, rail_scroll_offset, rail_y, search_available_width,
-        sidebar_reveal_width, sidebar_width, stagger_value, step_index, sync_search_mirror,
-        viewer_details_width, viewer_image_box, visible_year_buckets, without_tag,
+        rail_label_hidden_by_pill, rail_row_at, rail_scroll_offset, rail_y,
+        search_anchor_after_result, search_available_width, sidebar_reveal_width, sidebar_width,
+        stagger_value, step_index, sync_search_mirror, viewer_details_width, viewer_image_box,
+        visible_year_buckets, with_tag, without_tag,
     };
     use gpui_kit::{RenderImage, ScrollStrategy, UniformListScrollHandle, point, px};
     use smallvec::SmallVec;
@@ -6839,8 +6899,34 @@ mod tests {
     #[test]
     fn tag_removal_filters_only_the_named_tag() {
         let tags = vec!["alpha".to_string(), "beta".to_string()];
-        assert_eq!(without_tag(&tags, "alpha"), vec!["beta".to_string()]);
-        assert_eq!(without_tag(&tags, "missing"), tags);
+        assert_eq!(without_tag(&tags, "alpha"), Some(vec!["beta".to_string()]));
+        assert_eq!(without_tag(&tags, "missing"), None);
+    }
+
+    #[test]
+    fn tag_addition_rejects_duplicates() {
+        let tags = vec!["alpha".to_string(), "beta".to_string()];
+        assert_eq!(
+            with_tag(&tags, "gamma"),
+            Some(vec![
+                "alpha".to_string(),
+                "beta".to_string(),
+                "gamma".to_string()
+            ])
+        );
+        assert_eq!(with_tag(&tags, "alpha"), None);
+    }
+
+    #[test]
+    fn search_anchor_after_result_keeps_existing_or_falls_back_to_first() {
+        let index = PhotoIndex::new(vec![index_entry(1, 202601), index_entry(2, 202512)]);
+        assert_eq!(search_anchor_after_result(Some(2), &index), Some(2));
+        assert_eq!(search_anchor_after_result(Some(9), &index), Some(1));
+        assert_eq!(search_anchor_after_result(None, &index), Some(1));
+        assert_eq!(
+            search_anchor_after_result(Some(1), &PhotoIndex::new(Vec::new())),
+            None
+        );
     }
 
     #[test]
