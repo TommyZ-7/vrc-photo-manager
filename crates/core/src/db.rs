@@ -906,6 +906,58 @@ impl Db {
         Ok(())
     }
 
+    pub fn duplicate_profile(&self, id: &str) -> Result<CompressionProfile> {
+        let tx = self.conn.unchecked_transaction()?;
+        let ordered = {
+            let mut stmt = tx.prepare(
+                "SELECT id, json FROM compression_profiles \
+                 ORDER BY sort_order, name COLLATE NOCASE",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            let mut ordered = Vec::new();
+            for row in rows {
+                let (stored_id, json) = row?;
+                ordered.push((stored_id, serde_json::from_str::<CompressionProfile>(&json)?));
+            }
+            ordered
+        };
+
+        let source_index = ordered
+            .iter()
+            .position(|(stored_id, _)| stored_id == id)
+            .ok_or_else(|| CoreError::NotFound(format!("compression profile {id}")))?;
+
+        let mut name = format!("{} のコピー", ordered[source_index].1.name);
+        let mut suffix = 2;
+        while ordered.iter().any(|(_, profile)| profile.name == name) {
+            name = format!("{} のコピー {suffix}", ordered[source_index].1.name);
+            suffix += 1;
+        }
+
+        for (index, (stored_id, _)) in ordered.iter().enumerate() {
+            tx.execute(
+                "UPDATE compression_profiles SET sort_order = ?1 WHERE id = ?2",
+                params![index as i64, stored_id],
+            )?;
+        }
+        tx.execute(
+            "UPDATE compression_profiles SET sort_order = sort_order + 1 WHERE sort_order > ?1",
+            params![source_index as i64],
+        )?;
+
+        let copy = CompressionProfile {
+            id: uuid::Uuid::new_v4().to_string(),
+            name,
+            auto_enabled: false,
+            ..ordered[source_index].1.clone()
+        };
+        Self::write_profile(&tx, &copy, source_index as i64 + 1)?;
+        tx.commit()?;
+        Ok(copy)
+    }
+
     /// Seeds the built-in presets when no profile exists.
     ///
     /// Returns the profiles currently stored. A read or write error is returned
@@ -1952,5 +2004,67 @@ mod tests {
             Err(CoreError::NotFound(_))
         ));
         assert_eq!(ids(), vec!["c", "a", "b"]);
+    }
+
+    #[test]
+    fn duplicate_profile_inserts_named_copy_after_source() {
+        let db = Db::open_in_memory().unwrap();
+        for (id, name) in [("a", "A"), ("b", "B"), ("c", "C")] {
+            db.save_profile(&profile(id, name)).unwrap();
+        }
+        let source = db
+            .list_profiles()
+            .unwrap()
+            .into_iter()
+            .find(|profile| profile.id == "b")
+            .unwrap();
+
+        let copy = db.duplicate_profile("b").unwrap();
+        assert_ne!(copy.id, source.id);
+        assert_eq!(copy.name, "B のコピー");
+        assert!(!copy.auto_enabled);
+        assert_eq!(copy.format, source.format);
+        assert_eq!(copy.quality, source.quality);
+
+        let stored = db.list_profiles().unwrap();
+        let ids: Vec<&str> = stored.iter().map(|profile| profile.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b", copy.id.as_str(), "c"]);
+
+        let mut edited = copy.clone();
+        edited.quality = 31;
+        db.save_profile(&edited).unwrap();
+        let stored = db.list_profiles().unwrap();
+        assert_eq!(stored[1].quality, source.quality);
+        assert_eq!(stored[2].quality, 31);
+
+        let second = db.duplicate_profile("b").unwrap();
+        assert_eq!(second.name, "B のコピー 2");
+        let stored = db.list_profiles().unwrap();
+        let ids: Vec<&str> = stored.iter().map(|profile| profile.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["a", "b", second.id.as_str(), copy.id.as_str(), "c"]
+        );
+
+        assert!(matches!(
+            db.duplicate_profile("missing"),
+            Err(CoreError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn duplicate_profile_normalizes_legacy_zero_order() {
+        let db = Db::open_in_memory().unwrap();
+        for (id, name) in [("a", "A"), ("b", "B"), ("c", "C")] {
+            db.save_profile(&profile(id, name)).unwrap();
+        }
+        db.connection()
+            .execute("UPDATE compression_profiles SET sort_order = 0", [])
+            .unwrap();
+
+        let copy = db.duplicate_profile("b").unwrap();
+        let stored = db.list_profiles().unwrap();
+        let ids: Vec<&str> = stored.iter().map(|profile| profile.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b", copy.id.as_str(), "c"]);
     }
 }
