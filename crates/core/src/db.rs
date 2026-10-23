@@ -6,9 +6,9 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params, params_fro
 
 use crate::error::{CoreError, Result};
 use crate::model::{
-    CompressionJob, CompressionProfile, Derivative, LibraryRoot, LibraryStats, NewPhoto, Photo,
-    PhotoContext, PhotoFilter, PhotoIndexEntry, PhotoPlayer, PhotoSort, PhotoStatus,
-    PhotoTextFilter, QueueStatus, Session, SessionPlayer, World,
+    CompressionJob, CompressionProfile, Derivative, LibraryRoot, LibraryStats, MAX_JOB_RETRIES,
+    NewPhoto, Photo, PhotoContext, PhotoFilter, PhotoIndexEntry, PhotoPlayer, PhotoSort,
+    PhotoStatus, PhotoTextFilter, QueueStatus, Session, SessionPlayer, World,
 };
 
 const SCHEMA_V1: &str = r#"
@@ -181,6 +181,24 @@ CREATE INDEX IF NOT EXISTS idx_photos_captured_id
     WHERE status = 'present';
 "#;
 
+const SCHEMA_V4: &str = r#"
+ALTER TABLE compression_jobs ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS daemon_errors (
+    operation TEXT PRIMARY KEY,
+    message TEXT NOT NULL,
+    detail TEXT,
+    occurred_at TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS daemon_commands (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    command TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+"#;
+
 const PHOTO_SELECT: &str = "p.id, p.root_id, p.rel_path, p.abs_path, p.file_name, \
     p.captured_at_utc, p.captured_at_local, p.tz_offset_sec, p.width, p.height, \
     p.file_size, p.mtime, p.blake3, p.status, p.is_favorite, p.note, \
@@ -277,6 +295,14 @@ impl Db {
                 params![now_string()],
             )?;
             self.conn.pragma_update(None, "user_version", 3)?;
+        }
+        if version < 4 {
+            self.conn.execute_batch(SCHEMA_V4)?;
+            self.conn.execute(
+                "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (4, ?1)",
+                params![now_string()],
+            )?;
+            self.conn.pragma_update(None, "user_version", 4)?;
         }
         Ok(())
     }
@@ -1065,7 +1091,7 @@ impl Db {
                  WHERE id = (SELECT id FROM compression_jobs WHERE status = 'pending' \
                     ORDER BY created_at, rowid LIMIT 1) \
                  RETURNING id, photo_id, profile_id, status, progress, error, output_path, policy, \
-                    created_at, started_at, finished_at",
+                    retry_count, created_at, started_at, finished_at",
                 params![now_string()],
                 row_to_job,
             )
@@ -1107,11 +1133,50 @@ impl Db {
     pub fn list_jobs(&self, limit: i64) -> Result<Vec<CompressionJob>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, photo_id, profile_id, status, progress, error, output_path, policy, \
-                created_at, started_at, finished_at FROM compression_jobs \
+                retry_count, created_at, started_at, finished_at FROM compression_jobs \
              ORDER BY created_at DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit.max(1)], row_to_job)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn list_jobs_by_status(
+        &self,
+        status: QueueStatus,
+        limit: i64,
+    ) -> Result<Vec<CompressionJob>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, photo_id, profile_id, status, progress, error, output_path, policy, \
+                retry_count, created_at, started_at, finished_at FROM compression_jobs \
+             WHERE status = ?1 ORDER BY created_at DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![status.as_str(), limit.max(1)], row_to_job)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Returns a failed job to the queue once, incrementing its retry count.
+    /// Returns false when the job is missing, not failed, or already at the
+    /// retry cap.
+    pub fn retry_job(&self, id: &str) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE compression_jobs SET status = 'pending', progress = 0, error = NULL, \
+                started_at = NULL, finished_at = NULL, retry_count = retry_count + 1 \
+             WHERE id = ?1 AND status = 'failed' AND retry_count < ?2",
+            params![id, MAX_JOB_RETRIES],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Returns every eligible failed job to the queue and reports how many
+    /// rows changed. Jobs at the retry cap are left untouched.
+    pub fn retry_failed_jobs(&self) -> Result<usize> {
+        let changed = self.conn.execute(
+            "UPDATE compression_jobs SET status = 'pending', progress = 0, error = NULL, \
+                started_at = NULL, finished_at = NULL, retry_count = retry_count + 1 \
+             WHERE status = 'failed' AND retry_count < ?1",
+            params![MAX_JOB_RETRIES],
+        )?;
+        Ok(changed)
     }
 
     pub fn count_jobs(&self, status: QueueStatus) -> Result<i64> {
@@ -1412,9 +1477,10 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<CompressionJob> {
         error: row.get(5)?,
         output_path: row.get(6)?,
         policy: row.get(7)?,
-        created_at: row.get(8)?,
-        started_at: row.get(9)?,
-        finished_at: row.get(10)?,
+        retry_count: row.get(8)?,
+        created_at: row.get(9)?,
+        started_at: row.get(10)?,
+        finished_at: row.get(11)?,
     })
 }
 
@@ -1465,7 +1531,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
 
         let recorded: i64 = db
             .conn
@@ -1496,6 +1562,35 @@ mod tests {
             "{sql}"
         );
         assert!(normalized.contains("where status = 'present'"), "{sql}");
+    }
+
+    #[test]
+    fn migration_adds_retry_count_and_daemon_tables() {
+        let db = Db::open_in_memory().unwrap();
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 4);
+        let retry_column: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('compression_jobs') WHERE name = 'retry_count'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(retry_column, 1);
+        let tables: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' \
+                 AND name IN ('daemon_errors', 'daemon_commands')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 2);
     }
 
     #[test]
@@ -1919,6 +2014,95 @@ mod tests {
         )
         .unwrap();
         assert_eq!(db.count_jobs(QueueStatus::Completed).unwrap(), 1);
+    }
+
+    #[test]
+    fn retry_job_resets_failed_job_and_enforces_cap() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        let job = db.enqueue_job(photo, "p", "keep").unwrap();
+        db.next_pending_job().unwrap();
+        db.update_job(&job, QueueStatus::Failed, 0.0, Some("boom"), None)
+            .unwrap();
+
+        for expected in 1..=MAX_JOB_RETRIES {
+            assert!(db.retry_job(&job).unwrap());
+            let row = &db.list_jobs(1).unwrap()[0];
+            assert_eq!(row.status, QueueStatus::Pending);
+            assert_eq!(row.retry_count, expected);
+            assert!(row.error.is_none());
+            assert!(row.started_at.is_none());
+            assert!(row.finished_at.is_none());
+            db.next_pending_job().unwrap();
+            db.update_job(&job, QueueStatus::Failed, 0.0, Some("boom"), None)
+                .unwrap();
+        }
+
+        assert!(!db.retry_job(&job).unwrap());
+        assert_eq!(db.list_jobs(1).unwrap()[0].retry_count, MAX_JOB_RETRIES);
+    }
+
+    #[test]
+    fn retry_failed_jobs_returns_only_eligible_rows() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        let first = db.enqueue_job(photo, "p", "keep").unwrap();
+        let capped = db.enqueue_job(photo, "p", "keep").unwrap();
+        let completed = db.enqueue_job(photo, "p", "keep").unwrap();
+        for job in [&first, &capped, &completed] {
+            db.next_pending_job().unwrap();
+            db.update_job(job, QueueStatus::Failed, 0.0, Some("boom"), None)
+                .unwrap();
+        }
+        db.connection()
+            .execute(
+                "UPDATE compression_jobs SET retry_count = ?1 WHERE id = ?2",
+                params![MAX_JOB_RETRIES, capped],
+            )
+            .unwrap();
+        db.update_job(&completed, QueueStatus::Completed, 1.0, None, None)
+            .unwrap();
+
+        assert_eq!(db.retry_failed_jobs().unwrap(), 1);
+        assert_eq!(db.count_jobs(QueueStatus::Pending).unwrap(), 1);
+        assert_eq!(
+            db.list_jobs(10)
+                .unwrap()
+                .into_iter()
+                .find(|row| row.id == first)
+                .unwrap()
+                .retry_count,
+            1
+        );
+    }
+
+    #[test]
+    fn list_jobs_by_status_filters_and_limits() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        let failed = db.enqueue_job(photo, "p", "keep").unwrap();
+        db.enqueue_job(photo, "p", "keep").unwrap();
+        db.update_job(&failed, QueueStatus::Failed, 0.0, Some("boom"), None)
+            .unwrap();
+
+        let rows = db.list_jobs_by_status(QueueStatus::Failed, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, failed);
+        assert!(
+            db.list_jobs_by_status(QueueStatus::Pending, 10)
+                .unwrap()
+                .len()
+                == 1
+        );
     }
 
     #[test]

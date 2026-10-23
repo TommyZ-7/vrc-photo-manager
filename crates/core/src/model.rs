@@ -282,6 +282,9 @@ pub struct SessionPlayer {
     pub left_at: Option<i64>,
 }
 
+/// Maximum number of user retries per compression job.
+pub const MAX_JOB_RETRIES: i64 = 3;
+
 #[derive(Debug, Clone)]
 pub struct CompressionJob {
     pub id: String,
@@ -292,6 +295,8 @@ pub struct CompressionJob {
     pub error: Option<String>,
     pub output_path: Option<String>,
     pub policy: String,
+    /// Number of user retries already performed for this job.
+    pub retry_count: i64,
     pub created_at: String,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
