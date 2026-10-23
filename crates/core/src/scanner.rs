@@ -102,14 +102,31 @@ pub fn scan_one(root: &Path, path: &Path) -> Option<ScannedPhoto> {
 
 /// Scans one file, distinguishing "not a source photo" from "could not scan".
 ///
-/// `None` means the path is not a candidate source photo, `Some(Err(_))` means
-/// a candidate could not be read or has no readable image dimensions, and
+/// `None` means the path is not a candidate source photo or no longer exists,
+/// `Some(Err(_))` means a candidate could not be stat'ed or read, and
 /// `Some(Ok(_))` is a valid photo.
 pub fn scan_one_detailed(
     root: &Path,
     path: &Path,
 ) -> Option<std::result::Result<ScannedPhoto, ScanFailure>> {
-    if !path.is_file() || !is_source_photo(path) {
+    if !is_source_photo(path) {
+        return None;
+    }
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        // A candidate that vanished between read_dir and stat is genuinely
+        // gone; anything else (for example a directory without the execute
+        // bit) must stay visible as a failure so a scan cannot mark its
+        // siblings missing.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            return Some(Err(ScanFailure::new(
+                path,
+                format!("cannot read file metadata: {error}"),
+            )));
+        }
+    };
+    if !metadata.is_file() {
         return None;
     }
     Some(read_photo(root, path))
@@ -122,7 +139,8 @@ fn read_photo(root: &Path, path: &Path) -> std::result::Result<ScannedPhoto, Sca
         .and_then(|name| name.to_str())
         .ok_or_else(|| failure(format!("invalid file name: {}", path.display())))?
         .to_string();
-    let metadata = std::fs::metadata(path).map_err(|error| failure(error.to_string()))?;
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| failure(format!("cannot read file metadata: {error}")))?;
     let mtime = metadata
         .modified()
         .ok()
@@ -323,5 +341,44 @@ mod tests {
         assert!(photos.is_empty());
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].path, locked);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stat_failure_in_listable_directory_is_reported() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        let photo = locked.join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        write_png(&photo);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o444)).unwrap();
+
+        // A mode-0444 directory can be listed but its children cannot be
+        // stat'ed without the execute bit. Root and some filesystems ignore
+        // that, so only run the assertion when the lock is effective.
+        let child_type = std::fs::read_dir(&locked)
+            .ok()
+            .and_then(|mut entries| entries.next())
+            .and_then(|entry| entry.ok())
+            .and_then(|entry| entry.file_type().ok());
+        if std::fs::metadata(&photo).is_ok() || !child_type.is_some_and(|kind| kind.is_file()) {
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            eprintln!("skipping stat lock: cannot simulate a listable but unstatable directory");
+            return;
+        }
+
+        let (photos, failures) = scan_root_report(dir.path()).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(photos.is_empty(), "unreadable photo must not be returned");
+        assert_eq!(failures.len(), 1, "failures: {failures:?}");
+        assert_eq!(failures[0].path, photo);
+        assert!(
+            failures[0].message.contains("metadata"),
+            "message should describe the stat failure: {}",
+            failures[0].message
+        );
     }
 }

@@ -26,6 +26,8 @@ mod tray;
 use tray::{Tray, TrayAction};
 
 const PARSER_VERSION: &str = "1";
+/// Number of skipped-line sentences kept in one log error detail.
+const MAX_SKIPPED_DETAILS: usize = 5;
 const SCAN_INTERVAL: Duration = Duration::from_millis(500);
 const LOG_INTERVAL: Duration = Duration::from_millis(750);
 
@@ -74,9 +76,44 @@ struct LogPass {
     processed: usize,
     skipped: usize,
     failure: Option<String>,
+    /// One sentence per skipped poison line, capped at [`MAX_SKIPPED_DETAILS`].
+    skipped_details: Vec<String>,
 }
 
 impl LogPass {
+    /// Records one poison line that was skipped, including its path and byte
+    /// range so the reported error changes even when the parse error repeats.
+    fn record_skip(&mut self, path: &Path, start: i64, end: i64) {
+        self.skipped += 1;
+        if self.skipped_details.len() < MAX_SKIPPED_DETAILS {
+            self.skipped_details.push(format!(
+                "{}: オフセット {}〜{} の行は3回失敗したためスキップしました",
+                path.display(),
+                start,
+                end
+            ));
+        }
+    }
+
+    /// The original error plus the skipped-line sentences. Skips beyond the
+    /// cap are summarized so one pass cannot grow the detail without bound.
+    fn failure_detail(&self) -> Option<String> {
+        let mut parts = Vec::new();
+        if let Some(failure) = &self.failure {
+            parts.push(failure.clone());
+        }
+        parts.extend(self.skipped_details.iter().cloned());
+        let omitted = self.skipped.saturating_sub(self.skipped_details.len());
+        if omitted > 0 {
+            parts.push(format!("ほか {omitted} 行を同じ理由でスキップしました"));
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join("\n"))
+        }
+    }
+
     /// A pass can only clear a previous error when it processed real log data
     /// without skipping or failing on any line.
     fn is_clean(&self) -> bool {
@@ -643,11 +680,11 @@ impl Daemon {
             }
         };
         let pass = self.ingest_log_pass(&path)?;
-        if let Some(failure) = &pass.failure {
+        if let Some(failure) = pass.failure_detail() {
             self.report_daemon_error(
                 DaemonOperation::Log,
                 "ログの取り込みに失敗しました",
-                Some(failure),
+                Some(&failure),
             )?;
         } else if pass.is_clean() {
             self.clear_daemon_error(DaemonOperation::Log)?;
@@ -739,7 +776,7 @@ impl Daemon {
                     if !tail.note_line_failure(line_start) {
                         break;
                     }
-                    pass.skipped += 1;
+                    pass.record_skip(path, line_start, line_end);
                     db.set_log_offset(&path_string, size, mtime, line_end, PARSER_VERSION)?;
                     tail.offset = line_end;
                     line_start = line_end;
@@ -1262,6 +1299,53 @@ mod tests {
     }
 
     #[test]
+    fn skipped_line_detail_records_path_offset_and_attempts() {
+        let original = "/logs/output_log_x.txt: parse error";
+        let mut pass = LogPass {
+            failure: Some(original.to_string()),
+            ..LogPass::default()
+        };
+        pass.record_skip(Path::new("/logs/output_log_x.txt"), 120, 180);
+
+        let detail = pass.failure_detail().expect("failure detail");
+        assert!(detail.contains("/logs/output_log_x.txt"), "{detail}");
+        assert!(detail.contains("120"), "{detail}");
+        assert!(detail.contains("180"), "{detail}");
+        assert!(detail.contains("3回失敗したためスキップ"), "{detail}");
+        assert!(
+            detail.contains("parse error"),
+            "the original error is kept: {detail}"
+        );
+        assert_eq!(pass.skipped, 1);
+        assert!(!pass.is_clean());
+        assert_ne!(
+            error_signature("ログの取り込みに失敗しました", Some(original)),
+            error_signature("ログの取り込みに失敗しました", Some(&detail)),
+            "the skipped line must change the reported signature"
+        );
+    }
+
+    #[test]
+    fn skipped_line_details_are_capped_and_summarized() {
+        let mut pass = LogPass {
+            failure: Some("parse error".to_string()),
+            ..LogPass::default()
+        };
+        for index in 0..MAX_SKIPPED_DETAILS + 2 {
+            let start = index as i64 * 10;
+            pass.record_skip(Path::new("/logs/a.txt"), start, start + 5);
+        }
+
+        let detail = pass.failure_detail().expect("failure detail");
+        assert_eq!(
+            detail.matches("3回失敗したためスキップ").count(),
+            MAX_SKIPPED_DETAILS
+        );
+        assert!(detail.contains("ほか 2 行"), "{detail}");
+        assert_eq!(pass.skipped, MAX_SKIPPED_DETAILS + 2);
+    }
+
+    #[test]
     fn stale_daemon_errors_clear_after_a_successful_run() {
         let dir = tempfile::tempdir().unwrap();
         let photo_dir = dir.path().join("photos");
@@ -1665,6 +1749,66 @@ mod tests {
         let db = Db::open(&db_path).unwrap();
         let photo = db.photo_by_id(photo.id).unwrap().unwrap();
         assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Present);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unstatable_photo_keeps_the_existing_row_present() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let locked = photo_dir.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let photo_path = locked.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&photo_path);
+        let db_path = dir.path().join("library.db");
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+        daemon.run_once().unwrap();
+
+        let photo = {
+            let db = Db::open(&db_path).unwrap();
+            db.photo_by_path(photo_path.to_str().unwrap())
+                .unwrap()
+                .expect("photo indexed")
+        };
+
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let child_type = std::fs::read_dir(&locked)
+            .ok()
+            .and_then(|mut entries| entries.next())
+            .and_then(Result::ok)
+            .and_then(|entry| entry.file_type().ok());
+        if std::fs::metadata(&photo_path).is_ok() || !child_type.is_some_and(|kind| kind.is_file())
+        {
+            // Root and some filesystems ignore the missing execute bit, so the
+            // stat failure cannot be simulated here.
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            eprintln!("skipping stat lock: cannot simulate a listable but unstatable directory");
+            return;
+        }
+
+        daemon.run_once().unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        let photo = db.photo_by_id(photo.id).unwrap().unwrap();
+        assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Present);
+        let errors = db.daemon_errors().unwrap();
+        assert_eq!(errors.len(), 1, "errors: {errors:?}");
+        assert_eq!(errors[0].operation, DaemonOperation::Scan);
+        assert!(
+            errors[0]
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("VRChat_2026-10-21_21-24-00.000_4x3.png"),
+            "detail should name the unreadable photo: {:?}",
+            errors[0].detail
+        );
     }
 
     #[test]

@@ -5474,17 +5474,11 @@ impl App {
     /// UI, so the imported files and per-file issues remain visible.
     fn index_import_destination(&mut self, report: &mut ImportReportView, cx: &mut Context<Self>) {
         let dest_string = report.dest.to_string_lossy().to_string();
-        if !self
-            .settings
-            .photo_roots
-            .iter()
-            .any(|root| root == &dest_string)
-        {
-            self.settings.photo_roots.push(dest_string.clone());
-            if let Err(error) = self.settings.save(&self.db) {
-                tracing::warn!(%error, "cannot save photo roots after import");
-                append_scan_error(report, format!("取り込み先の設定を保存できません: {error}"));
-            }
+        if let Err(error) = add_photo_root_and_save(&mut self.settings, &dest_string, |settings| {
+            settings.save(&self.db)
+        }) {
+            tracing::warn!(%error, "cannot save photo roots after import");
+            append_scan_error(report, format!("取り込み先の設定を保存できません: {error}"));
         }
         let root_id = match self.db.add_root(&dest_string, "managed") {
             Ok(id) => id,
@@ -7065,6 +7059,32 @@ fn append_scan_error(report: &mut ImportReportView, message: String) {
     }
 }
 
+/// Adds `dest` to the settings roots and persists the change. A failed save
+/// restores the previous in-memory roots so a later retry attempts the save
+/// again instead of treating an unsaved path as persisted.
+fn add_photo_root_and_save<E, F>(
+    settings: &mut AppSettings,
+    dest: &str,
+    save: F,
+) -> std::result::Result<bool, E>
+where
+    E: std::fmt::Display,
+    F: FnOnce(&AppSettings) -> std::result::Result<(), E>,
+{
+    if settings.photo_roots.iter().any(|root| root == dest) {
+        return Ok(false);
+    }
+    let previous = settings.photo_roots.clone();
+    settings.photo_roots.push(dest.to_string());
+    match save(settings) {
+        Ok(()) => Ok(true),
+        Err(error) => {
+            settings.photo_roots = previous;
+            Err(error)
+        }
+    }
+}
+
 fn import_summary(report: &ImportReportView) -> String {
     let (failed, _) = import_issue_counts(&report.issues);
     let mut details = Vec::new();
@@ -7556,8 +7576,8 @@ mod tests {
     use super::{
         CountDebounce, DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH,
         MAX_PAGES, PAGE_SIZE, PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex, PhotoPageCache, Screen,
-        THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, YearBucket, alert_summaries,
-        anchor_photo_id, apply_library_index, average_bgra, build_year_buckets,
+        THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, YearBucket, add_photo_root_and_save,
+        alert_summaries, anchor_photo_id, apply_library_index, average_bgra, build_year_buckets,
         daemon_operation_label, decode_thumbnail, demo_thumb_path, ease_motion,
         first_visible_photo, format_captured_month, format_count, format_timestamp,
         grid_available_width, grid_columns, grid_columns_for, has_tag_filter, import_issue_counts,
@@ -7570,6 +7590,7 @@ mod tests {
     };
     use gpui_kit::{RenderImage, ScrollStrategy, UniformListScrollHandle, point, px};
     use smallvec::SmallVec;
+    use std::cell::Cell;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -7579,6 +7600,7 @@ mod tests {
         CompressionJob, DaemonOperation, Photo, PhotoIndexEntry, PhotoStatus, PhotoTextFilter,
         QueueStatus,
     };
+    use vrc_photo_core::settings::AppSettings;
 
     #[test]
     fn sidebar_widths_match_the_rail() {
@@ -7703,6 +7725,38 @@ mod tests {
         ];
         assert_eq!(import_issue_counts(&issues), (1, 1));
         assert_eq!(retryable_sources(&issues), vec![PathBuf::from("/a.png")]);
+    }
+
+    #[test]
+    fn failed_import_root_save_is_retried_until_it_succeeds() {
+        let mut settings = AppSettings::default();
+        let attempts = Cell::new(0);
+        let dest = "/photos/imported";
+
+        let result = add_photo_root_and_save(&mut settings, dest, |settings| {
+            attempts.set(attempts.get() + 1);
+            assert_eq!(settings.photo_roots, vec![dest.to_string()]);
+            Err::<(), _>("database is locked".to_string())
+        });
+        assert!(result.is_err());
+        assert!(
+            settings.photo_roots.is_empty(),
+            "a failed save must restore the in-memory roots"
+        );
+
+        let result = add_photo_root_and_save(&mut settings, dest, |settings| {
+            attempts.set(attempts.get() + 1);
+            assert_eq!(settings.photo_roots, vec![dest.to_string()]);
+            Ok::<(), String>(())
+        });
+        assert_eq!(result, Ok(true));
+        assert_eq!(attempts.get(), 2, "the retry must save again");
+        assert_eq!(settings.photo_roots, vec![dest.to_string()]);
+
+        let result: Result<bool, String> = add_photo_root_and_save(&mut settings, dest, |_| {
+            panic!("an already saved root must not be saved again")
+        });
+        assert_eq!(result, Ok(false));
     }
 
     #[test]
