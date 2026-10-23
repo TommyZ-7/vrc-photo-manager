@@ -1346,6 +1346,141 @@ mod tests {
     }
 
     #[test]
+    fn poll_commands_rescan_dispatches_scan_without_run_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let db_path = dir.path().join("library.db");
+        {
+            let db = Db::open(&db_path).unwrap();
+            db.record_daemon_error(DaemonOperation::Scan, "old scan", None)
+                .unwrap();
+            assert!(db.request_daemon_command(DaemonCommand::Rescan).unwrap());
+        }
+
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir.clone()), Some(log_dir)).unwrap();
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        write_photo(&photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png"));
+        daemon.poll_commands().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        assert_eq!(db.count_photos().unwrap(), 1);
+        assert!(db.daemon_errors().unwrap().is_empty());
+    }
+
+    #[test]
+    fn poll_commands_relog_dispatches_log_ingestion_without_run_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        let log_dir = dir.path().join("logs");
+        let db_path = dir.path().join("library.db");
+        {
+            let db = Db::open(&db_path).unwrap();
+            db.record_daemon_error(DaemonOperation::Log, "old log", None)
+                .unwrap();
+            assert!(db.request_daemon_command(DaemonCommand::Relog).unwrap());
+        }
+
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir.clone())).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let log_path = log_dir.join("output_log_2026-10-21_21-00-00.txt");
+        std::fs::write(
+            &log_path,
+            concat!(
+                "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)\n",
+                "2026.10.21 21:23:13 Debug      -  [Behaviour] Joining or Creating Room: Test World\n",
+                "2026.10.21 21:23:20 Debug      -  [Behaviour] OnPlayerJoined Mio (usr_a)\n",
+            ),
+        )
+        .unwrap();
+        daemon.poll_commands().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        assert!(db.daemon_errors().unwrap().is_empty());
+        assert!(db.log_offset(log_path.to_str().unwrap()).unwrap().is_some());
+        let joined_at = vrc_photo_core::log_parser::parse_line(
+            "2026.10.21 21:23:20 Debug      -  [Behaviour] OnPlayerJoined Mio (usr_a)",
+        )
+        .unwrap()
+        .timestamp_utc();
+        let session = db.session_at(joined_at).unwrap().expect("log ingested");
+        let world = db.world_by_id(session.world_id).unwrap().unwrap();
+        assert_eq!(world.name.as_deref(), Some("Test World"));
+        assert_eq!(db.players_at(session.id, joined_at).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn poll_commands_relink_dispatches_linking_without_run_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let db_path = dir.path().join("library.db");
+        let photo_path = photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&photo_path);
+
+        let photo_id = {
+            let db = Db::open(&db_path).unwrap();
+            let mut ingestor = LogIngestor::new("output_log_2026-10-21_21-00-00.txt");
+            for line in [
+                "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)",
+                "2026.10.21 21:23:13 Debug      -  [Behaviour] Joining or Creating Room: Test World",
+                "2026.10.21 21:23:20 Debug      -  [Behaviour] OnPlayerJoined Mio (usr_a)",
+            ] {
+                ingestor.ingest_line(&db, line).unwrap();
+            }
+            let captured_at = vrc_photo_core::log_parser::parse_line(
+                "2026.10.21 21:24:00 Debug      -  [Behaviour] Unloading scenes",
+            )
+            .unwrap()
+            .timestamp_utc();
+            let root = db
+                .add_root(photo_dir.to_str().unwrap(), "reference")
+                .unwrap();
+            let file_name = photo_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            let photo_id = db
+                .upsert_photo(&vrc_photo_core::model::NewPhoto {
+                    root_id: root,
+                    rel_path: file_name.clone(),
+                    abs_path: photo_path.to_string_lossy().to_string(),
+                    file_name,
+                    captured_at_utc: captured_at,
+                    captured_at_local: "2026-10-21 21:24:00.000".to_string(),
+                    tz_offset_sec: 9 * 3600,
+                    width: 16,
+                    height: 10,
+                    file_size: 1,
+                    mtime: captured_at,
+                    blake3: None,
+                })
+                .unwrap();
+            assert!(db.photo_context(photo_id).unwrap().is_none());
+            assert!(db.request_daemon_command(DaemonCommand::Relink).unwrap());
+            photo_id
+        };
+
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        daemon.poll_commands().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        let context = db
+            .photo_context(photo_id)
+            .unwrap()
+            .expect("relink linked the photo");
+        assert_eq!(context.world_name.as_deref(), Some("Test World"));
+        let players = db.photo_players(photo_id).unwrap();
+        assert_eq!(players.len(), 1);
+        assert_eq!(players[0].display_name, "Mio");
+    }
+
+    #[test]
     fn run_once_consumes_queued_commands() {
         let dir = tempfile::tempdir().unwrap();
         let photo_dir = dir.path().join("photos");
