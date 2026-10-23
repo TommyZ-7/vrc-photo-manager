@@ -19,7 +19,7 @@ use vrc_photo_core::db::Db;
 use vrc_photo_core::importer::{self, ImportMode};
 use vrc_photo_core::model::{
     CompressionFormat, CompressionProfile, Derivative, LibraryStats, NewPhoto, Photo, PhotoContext,
-    PhotoPlayer, QueueStatus,
+    PhotoIndexEntry, PhotoPlayer, PhotoSort, QueueStatus,
 };
 use vrc_photo_core::settings::AppSettings;
 use vrc_photo_core::thumbnail;
@@ -58,6 +58,8 @@ const CARD_STAGGER_SECS: f32 = 0.04;
 const CARD_STAGGER_MAX: usize = 8;
 const THUMB_CACHE_ENTRIES: usize = 192;
 const THUMB_IN_FLIGHT: usize = 4;
+const PAGE_SIZE: usize = 256;
+const MAX_PAGES: usize = 24;
 
 gpui_kit::actions!(
     ui,
@@ -239,6 +241,145 @@ impl ThumbnailCache {
     }
 }
 
+/// Ordered snapshot of the library: only IDs and capture timestamps, so the
+/// full 100k-entry list stays cheap while photo rows load in pages.
+struct PhotoIndex {
+    entries: Vec<PhotoIndexEntry>,
+    total: usize,
+}
+
+impl PhotoIndex {
+    fn new(entries: Vec<PhotoIndexEntry>) -> Self {
+        let total = entries.len();
+        Self { entries, total }
+    }
+}
+
+/// Bounded page cache for the virtual grid.
+///
+/// Pages are evicted in insertion order. `get_page` deliberately does not
+/// reorder anything: scrolling must not turn a cheap read into a write, and
+/// the grid only touches the pages it is about to render.
+#[derive(Default)]
+struct PhotoPageCache {
+    pages: HashMap<usize, Arc<Vec<Arc<Photo>>>>,
+    order: VecDeque<usize>,
+    pending: HashSet<usize>,
+    failed: HashSet<usize>,
+}
+
+impl PhotoPageCache {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn clear(&mut self) {
+        self.pages.clear();
+        self.order.clear();
+        self.pending.clear();
+        self.failed.clear();
+    }
+
+    fn get_page(&mut self, page: usize) -> Option<Arc<Vec<Arc<Photo>>>> {
+        self.pages.get(&page).cloned()
+    }
+
+    fn insert_page(&mut self, page: usize, photos: Vec<Photo>) {
+        self.pending.remove(&page);
+        self.failed.remove(&page);
+        let page_photos = photos.into_iter().map(Arc::new).collect::<Vec<_>>();
+        if self.pages.insert(page, Arc::new(page_photos)).is_none() {
+            self.order.push_back(page);
+        }
+        while self.pages.len() > MAX_PAGES {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.pages.remove(&oldest);
+        }
+    }
+
+    fn plan_pages(&mut self, start: usize, end: usize, limit: usize) -> Vec<usize> {
+        if end <= start || limit == 0 {
+            return Vec::new();
+        }
+        let first = start / PAGE_SIZE;
+        let last = (end - 1) / PAGE_SIZE;
+        let mut planned = Vec::new();
+        for page in first..=last {
+            if planned.len() >= limit {
+                break;
+            }
+            if self.pages.contains_key(&page)
+                || self.pending.contains(&page)
+                || self.failed.contains(&page)
+            {
+                continue;
+            }
+            self.pending.insert(page);
+            planned.push(page);
+        }
+        planned
+    }
+
+    fn fail_page(&mut self, page: usize) {
+        self.pending.remove(&page);
+        self.failed.insert(page);
+    }
+}
+
+/// Snapshot plus page cache for one grid (library or search).
+struct PhotoBrowser {
+    index: Arc<PhotoIndex>,
+    pages: PhotoPageCache,
+    scroll: UniformListScrollHandle,
+    columns: usize,
+    generation: u64,
+}
+
+impl PhotoBrowser {
+    fn new(index: Arc<PhotoIndex>) -> Self {
+        Self {
+            index,
+            pages: PhotoPageCache::new(),
+            scroll: UniformListScrollHandle::new(),
+            columns: 1,
+            generation: 0,
+        }
+    }
+
+    fn replace_index(&mut self, index: Arc<PhotoIndex>) {
+        self.index = index;
+        self.generation = self.generation.wrapping_add(1);
+        self.pages.clear();
+    }
+
+    fn photo_at(&mut self, photo_index: usize) -> Option<Arc<Photo>> {
+        let page = photo_index / PAGE_SIZE;
+        let offset = photo_index % PAGE_SIZE;
+        self.pages.get_page(page)?.get(offset).cloned()
+    }
+
+    fn plan_pages(&mut self, start: usize, end: usize, limit: usize) -> Vec<usize> {
+        let end = end.min(self.index.total);
+        self.pages.plan_pages(start, end, limit)
+    }
+
+    fn insert_page(&mut self, page: usize, photos: Vec<Photo>, generation: u64) {
+        if generation != self.generation {
+            return;
+        }
+        self.pages.insert_page(page, photos);
+    }
+
+    fn fail_page(&mut self, page: usize, generation: u64) {
+        if generation != self.generation {
+            return;
+        }
+        self.pages.fail_page(page);
+    }
+}
+
 pub struct App {
     db: Db,
     screen: Screen,
@@ -248,7 +389,8 @@ pub struct App {
     inspector_epoch: u64,
     hovered_nav: Option<Screen>,
     daemon_age_secs: Option<i64>,
-    photos: Vec<Photo>,
+    library: PhotoBrowser,
+    search_view: PhotoBrowser,
     selected: Option<i64>,
     selection_epoch: u64,
     selection_changed_at: Option<Instant>,
@@ -258,7 +400,6 @@ pub struct App {
     selected_derivatives: Vec<Derivative>,
     compressed_ids: HashSet<i64>,
     thumbnails: ThumbnailCache,
-    grid_columns: usize,
     grid_epoch: u64,
     hovered_photo: Option<i64>,
     intro_seen: HashMap<i64, Instant>,
@@ -350,6 +491,9 @@ impl App {
         let quick_look_compress_focus = cx.focus_handle();
         let quick_look_trash_focus = cx.focus_handle();
         let quick_look_add_tag_focus = cx.focus_handle();
+        let index = Arc::new(PhotoIndex::new(
+            db.photo_index(PhotoSort::Newest).unwrap_or_default(),
+        ));
         let mut app = Self {
             db,
             screen: Screen::Photos,
@@ -359,7 +503,8 @@ impl App {
             inspector_epoch: 0,
             hovered_nav: None,
             daemon_age_secs: None,
-            photos: Vec::new(),
+            library: PhotoBrowser::new(index.clone()),
+            search_view: PhotoBrowser::new(index),
             selected: None,
             selection_epoch: 0,
             selection_changed_at: None,
@@ -369,7 +514,6 @@ impl App {
             selected_derivatives: Vec::new(),
             compressed_ids: HashSet::new(),
             thumbnails: ThumbnailCache::default(),
-            grid_columns: 0,
             grid_epoch: 0,
             hovered_photo: None,
             intro_seen: HashMap::new(),
@@ -420,14 +564,14 @@ impl App {
         };
         app.ensure_profiles();
         app.reload(cx);
-        if app.photos.is_empty() {
+        if app.library.index.total == 0 {
             message.get_or_insert_with(|| {
                 "写真がありません。VRChatの写真フォルダを設定するか、--demo で起動してください。"
                     .to_string()
             });
         }
         app.message = message;
-        if let Some(id) = app.photos.first().map(|photo| photo.id) {
+        if let Some(id) = app.library.index.entries.first().map(|entry| entry.id) {
             app.select_photo(id, cx);
             // The grid is not mounted until the first frame, so focus it once
             // the initial render has attached it to the focus tree.
@@ -466,7 +610,7 @@ impl App {
         if let Some(id) = self.selected {
             self.load_selected_meta(id);
         }
-        if count != self.photos.len() as i64 {
+        if count != self.library.index.total as i64 {
             self.reload(cx);
         }
         cx.notify();
@@ -480,10 +624,12 @@ impl App {
         self.grid_epoch = self.grid_epoch.wrapping_add(1);
         self.intro_seen.clear();
         self.hovered_photo = None;
-        self.photos = self
-            .db
-            .list_photos(300, 0, vrc_photo_core::model::PhotoSort::Newest)
-            .unwrap_or_default();
+        let entries = self.db.photo_index(PhotoSort::Newest).unwrap_or_default();
+        let index = Arc::new(PhotoIndex::new(entries));
+        self.library.replace_index(index.clone());
+        if self.search_results.is_none() {
+            self.search_view.replace_index(index);
+        }
         self.profiles = self.db.list_profiles().unwrap_or_default();
         if self.profile_index >= self.profiles.len() {
             self.profile_index = 0;
@@ -731,10 +877,21 @@ impl App {
         let source: Vec<i64> = if self.screen == Screen::Search {
             match self.search_results.as_ref() {
                 Some(photos) => photos.iter().map(|photo| photo.id).collect(),
-                None => self.photos.iter().map(|photo| photo.id).collect(),
+                None => self
+                    .library
+                    .index
+                    .entries
+                    .iter()
+                    .map(|entry| entry.id)
+                    .collect(),
             }
         } else {
-            self.photos.iter().map(|photo| photo.id).collect()
+            self.library
+                .index
+                .entries
+                .iter()
+                .map(|entry| entry.id)
+                .collect()
         };
         match self.selected {
             Some(id) if source.contains(&id) => source,
@@ -1338,17 +1495,17 @@ impl App {
             .into_any_element()
     }
 
-    fn content(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         match self.screen {
-            Screen::Photos => self.photos_screen(cx).into_any_element(),
+            Screen::Photos => self.photos_screen(window, cx).into_any_element(),
             Screen::Compression => self.compression_screen(cx).into_any_element(),
-            Screen::Search => self.search_screen(cx).into_any_element(),
+            Screen::Search => self.search_screen(window, cx).into_any_element(),
             Screen::Monitor => self.monitor_screen(cx).into_any_element(),
             Screen::Settings => self.settings_screen(cx).into_any_element(),
         }
     }
 
-    fn photos_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn photos_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .flex_1()
             .min_h_0()
@@ -1357,7 +1514,7 @@ impl App {
                 h_flex()
                     .flex_1()
                     .min_h_0()
-                    .child(self.photo_list(cx))
+                    .child(self.photo_grid(false, window, cx))
                     .child(self.inspector_column(cx)),
             )
     }
@@ -1436,20 +1593,49 @@ impl App {
             .into_any_element()
     }
 
-    fn photo_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let photos = self.photos.clone();
-        let columns = self.grid_columns.max(1);
-        let rows = photos.len().div_ceil(columns);
-        let mut container = v_flex()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .items_stretch()
-            .pl(px(26.))
-            .pr(px(18.))
-            .pb(px(18.));
-        if photos.is_empty() {
-            container = container.child(
+    fn browser_mut(&mut self, search: bool) -> &mut PhotoBrowser {
+        if search {
+            &mut self.search_view
+        } else {
+            &mut self.library
+        }
+    }
+
+    /// Virtualized grid shared by the library and the search screen.
+    ///
+    /// The range callback only plans missing pages and renders the page cache;
+    /// database work is deferred through [`Self::load_pages`], so neither
+    /// render nor prepaint ever touches SQLite.
+    fn photo_grid(
+        &mut self,
+        search: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let width: f32 = window.viewport_size().width.into();
+        let available = if search {
+            search_available_width(width, self.sidebar_collapsed, self.inspector_collapsed)
+        } else {
+            grid_available_width(width, self.sidebar_collapsed, self.inspector_collapsed)
+        };
+        let next_columns = grid_columns(available).max(1);
+        let browser = self.browser_mut(search);
+        browser.columns = next_columns;
+        let columns = browser.columns;
+        let index = browser.index.clone();
+        let scroll = browser.scroll.clone();
+        let generation = browser.generation;
+        let rows = index.total.div_ceil(columns);
+
+        if rows == 0 {
+            let empty = if search {
+                glass_panel()
+                    .p(px(20.))
+                    .text_size(px(12.))
+                    .text_color(rgb(MUTED))
+                    .child("条件に一致する写真がありません")
+                    .into_any_element()
+            } else {
                 div()
                     .mt(px(18.))
                     .max_w(px(560.))
@@ -1462,67 +1648,155 @@ impl App {
                     .text_color(rgb(MUTED))
                     .child(
                         "写真がありません。VRChatの写真フォルダを設定するか、--demo でサンプルを表示できます。",
-                    ),
-            );
-        } else {
-            container = container.child(
-                v_flex()
-                    .id("photo-grid")
-                    .flex_1()
-                    .w_full()
-                    .min_w_0()
-                    .min_h_0()
-                    .track_focus(&self.photo_grid_focus)
-                    .key_context("photo_grid")
-                    .tab_stop(true)
-                    .child(
-                        uniform_list(
-                            // Keep the list ID stable so uniform_list retains
-                            // its scroll offset when the column count changes;
-                            // row height is fixed.
-                            SharedString::from("photo-grid-list"),
-                            rows,
-                            cx.processor(
-                                move |this, range: std::ops::Range<usize>, _window, cx| {
-                                    let mut rendered = Vec::with_capacity(range.len());
-                                    for row in range {
-                                        let mut line = h_flex()
-                                            .h(px(196.))
-                                            .w_full()
-                                            .min_w_0()
-                                            .items_start()
-                                            .gap(px(16.));
-                                        for column in 0..columns {
-                                            let index = row * columns + column;
-                                            match photos.get(index) {
-                                                Some(photo) => {
-                                                    line = line.child(this.photo_card(
-                                                        photo,
-                                                        PhotoCardLayout::Grid { index },
-                                                        cx,
-                                                    ));
-                                                }
-                                                None => {
-                                                    line = line.child(div().flex_1());
-                                                }
-                                            }
-                                        }
-                                        rendered.push(line);
-                                    }
-                                    rendered
-                                },
-                            ),
-                        )
-                        // Room for the first row's -4 px hover lift.
-                        .pt(px(4.))
-                        .flex_1()
+                    )
+                    .into_any_element()
+            };
+            let mut container = v_flex()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .h_full()
+                .items_stretch();
+            if !search {
+                container = container.pl(px(26.)).pr(px(18.)).pb(px(18.));
+            }
+            return container.child(empty).into_any_element();
+        }
+
+        let list = uniform_list(
+            // Keep the list ID stable so uniform_list retains its scroll
+            // offset when the column count changes; row height is fixed.
+            SharedString::from(if search {
+                "search-grid-list"
+            } else {
+                "photo-grid-list"
+            }),
+            rows,
+            cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
+                let photo_start = range.start * columns;
+                let photo_end = (range.end * columns).min(index.total);
+                let missing = this
+                    .browser_mut(search)
+                    .plan_pages(photo_start, photo_end, 2);
+                if !missing.is_empty() {
+                    cx.defer_in(window, move |this, _window, cx| {
+                        this.load_pages(search, generation, missing, cx);
+                    });
+                }
+                let mut rendered = Vec::with_capacity(range.len());
+                for row in range {
+                    let mut line = h_flex()
+                        .h(px(196.))
                         .w_full()
                         .min_w_0()
-                        .min_h_0(),
-                    ),
-            );
+                        .items_start()
+                        .gap(px(16.));
+                    for column in 0..columns {
+                        let photo_index = row * columns + column;
+                        if photo_index >= index.total {
+                            line = line.child(div().flex_1());
+                            continue;
+                        }
+                        match this.browser_mut(search).photo_at(photo_index) {
+                            Some(photo) => {
+                                line = line.child(this.photo_card(
+                                    photo.as_ref(),
+                                    PhotoCardLayout::Grid { index: photo_index },
+                                    cx,
+                                ));
+                            }
+                            None => {
+                                line = line.child(grid_placeholder());
+                            }
+                        }
+                    }
+                    rendered.push(line);
+                }
+                rendered
+            }),
+        )
+        .track_scroll(&scroll)
+        // Room for the first row's -4 px hover lift.
+        .pt(px(4.))
+        .flex_1()
+        .w_full()
+        .min_w_0()
+        .min_h_0();
+
+        // The wrapper stays mounted (and relative) so Task 5 can overlay the
+        // year rail without remounting the list.
+        let mut wrapper = v_flex()
+            .id(if search { "search-grid" } else { "photo-grid" })
+            .relative()
+            .flex_1()
+            .w_full()
+            .min_w_0()
+            .min_h_0();
+        if !search {
+            wrapper = wrapper
+                .track_focus(&self.photo_grid_focus)
+                .key_context("photo_grid")
+                .tab_stop(true);
         }
-        container
+        let mut container = v_flex()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .h_full()
+            .items_stretch();
+        if !search {
+            container = container.pl(px(26.)).pr(px(18.)).pb(px(18.));
+        }
+        container.child(wrapper.child(list)).into_any_element()
+    }
+
+    /// Loads at most two pages for the grid, then inserts them unless the
+    /// index was replaced while the query was running.
+    fn load_pages(
+        &mut self,
+        search: bool,
+        generation: u64,
+        pages: Vec<usize>,
+        cx: &mut Context<Self>,
+    ) {
+        let browser = self.browser_mut(search);
+        if browser.generation != generation {
+            return;
+        }
+        let index = browser.index.clone();
+        let mut ids = Vec::new();
+        let mut requests = Vec::new();
+        for page in pages.into_iter().take(2) {
+            let start = page * PAGE_SIZE;
+            let end = (start + PAGE_SIZE).min(index.total);
+            if start >= end {
+                continue;
+            }
+            ids.extend(index.entries[start..end].iter().map(|entry| entry.id));
+            requests.push((page, start, end));
+        }
+        if requests.is_empty() {
+            return;
+        }
+        let photos = self.db.photos_by_ids(&ids).unwrap_or_default();
+        let mut by_id: HashMap<i64, Photo> =
+            photos.into_iter().map(|photo| (photo.id, photo)).collect();
+        let browser = self.browser_mut(search);
+        for (page, start, end) in requests {
+            let page_photos: Vec<Photo> = index.entries[start..end]
+                .iter()
+                .filter_map(|entry| by_id.remove(&entry.id))
+                .collect();
+            if page_photos.len() == end - start {
+                browser.insert_page(page, page_photos, generation);
+            } else {
+                // A row deleted mid-flight would shift every later offset in
+                // the page; keep placeholders until the next reload rebuilds
+                // the snapshot.
+                browser.fail_page(page, generation);
+            }
+        }
+        cx.notify();
     }
 
     fn photo_card(
@@ -3163,11 +3437,63 @@ impl App {
             })
     }
 
-    fn search_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let results = self
-            .search_results
-            .clone()
-            .unwrap_or_else(|| self.photos.clone());
+    fn search_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.search_results.is_none() {
+            let filters = self.search_filter_panel(cx);
+            let message = self.message.clone();
+            let total = self.search_view.index.total;
+            return h_flex()
+                .flex_1()
+                .min_h_0()
+                .items_stretch()
+                .child(filters)
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .h_full()
+                        .px(px(26.))
+                        .pt(px(26.))
+                        .pb(px(26.))
+                        .gap(px(18.))
+                        .child(
+                            v_flex()
+                                .flex_shrink_0()
+                                .gap(px(4.))
+                                .child(
+                                    h_flex()
+                                        .items_center()
+                                        .gap(px(8.))
+                                        .child(
+                                            div()
+                                                .text_size(px(24.))
+                                                .font_semibold()
+                                                .text_color(rgb(TEXT))
+                                                .child(format!("{total} 枚")),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(10.))
+                                                .text_color(rgb(MUTED_2))
+                                                .child("検索結果"),
+                                        ),
+                                )
+                                .when_some(message, |this, message| {
+                                    this.child(
+                                        div()
+                                            .text_size(px(10.))
+                                            .text_color(rgb(AMBER))
+                                            .truncate()
+                                            .child(message),
+                                    )
+                                }),
+                        )
+                        .child(self.photo_grid(true, window, cx)),
+                )
+                .into_any_element();
+        }
+        let results = self.search_results.clone().unwrap_or_default();
         let message = self.message.clone();
         let cards: Vec<AnyElement> = results
             .iter()
@@ -3177,101 +3503,7 @@ impl App {
             .flex_1()
             .min_h_0()
             .items_stretch()
-            .child(
-                glass_panel()
-                    .flex()
-                    .flex_col()
-                    .w(px(290.))
-                    .flex_shrink_0()
-                    .my(px(22.))
-                    .ml(px(26.))
-                    .p(px(16.))
-                    .gap(px(14.))
-                    .rounded(px(20.))
-                    .bg(rgb(PANEL))
-                    .border_color(rgb(BORDER))
-                    .child(
-                        div()
-                            .text_size(px(17.))
-                            .font_semibold()
-                            .text_color(rgb(TEXT))
-                            .child("絞り込み"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(MUTED_2))
-                            .child("カテゴリ間はAND、カテゴリ内はOR"),
-                    )
-                    .child(self.filter_field("ワールド", Input::new(&self.world_input)))
-                    .child(self.filter_field("プレイヤー", Input::new(&self.player_input)))
-                    .child(self.filter_field("タグ", Input::new(&self.tag_input)))
-                    .child(
-                        v_flex()
-                            .gap(px(6.))
-                            .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(MUTED_2))
-                                    .child("日時"),
-                            )
-                            .child(
-                                h_flex()
-                                    .gap(px(4.))
-                                    .child(self.preset_button("今日", Some(1), cx))
-                                    .child(self.preset_button("7日", Some(7), cx))
-                                    .child(self.preset_button("30日", Some(30), cx))
-                                    .child(self.preset_button("すべて", None, cx)),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(rgb(MUTED))
-                                    .child("お気に入りのみ"),
-                            )
-                            .child(div().flex_1())
-                            .child(
-                                Switch::new("search-favorite")
-                                    .checked(self.search_favorite)
-                                    .on_click(cx.listener(|this, value, _, cx| {
-                                        this.search_favorite = *value;
-                                        this.run_search(cx);
-                                    })),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .gap(px(8.))
-                            .child(
-                                Button::new("search-run")
-                                    .label("検索")
-                                    .small()
-                                    .primary()
-                                    .on_click(cx.listener(|this, _, _, cx| this.run_search(cx))),
-                            )
-                            .child(
-                                Button::new("search-clear")
-                                    .label("クリア")
-                                    .small()
-                                    .secondary()
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.search_results = None;
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(MUTED_2))
-                            .child("結果は最大300枚です"),
-                    ),
-            )
+            .child(self.search_filter_panel(cx))
             .child(
                 v_flex()
                     .flex_1()
@@ -3324,6 +3556,108 @@ impl App {
                         )
                     }),
             )
+            .into_any_element()
+    }
+
+    fn search_filter_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        glass_panel()
+            .flex()
+            .flex_col()
+            .w(px(290.))
+            .flex_shrink_0()
+            .my(px(22.))
+            .ml(px(26.))
+            .p(px(16.))
+            .gap(px(14.))
+            .rounded(px(20.))
+            .bg(rgb(PANEL))
+            .border_color(rgb(BORDER))
+            .child(
+                div()
+                    .text_size(px(17.))
+                    .font_semibold()
+                    .text_color(rgb(TEXT))
+                    .child("絞り込み"),
+            )
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(rgb(MUTED_2))
+                    .child("カテゴリ間はAND、カテゴリ内はOR"),
+            )
+            .child(self.filter_field("ワールド", Input::new(&self.world_input)))
+            .child(self.filter_field("プレイヤー", Input::new(&self.player_input)))
+            .child(self.filter_field("タグ", Input::new(&self.tag_input)))
+            .child(
+                v_flex()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED_2))
+                            .child("日時"),
+                    )
+                    .child(
+                        h_flex()
+                            .gap(px(4.))
+                            .child(self.preset_button("今日", Some(1), cx))
+                            .child(self.preset_button("7日", Some(7), cx))
+                            .child(self.preset_button("30日", Some(30), cx))
+                            .child(self.preset_button("すべて", None, cx)),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgb(MUTED))
+                            .child("お気に入りのみ"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Switch::new("search-favorite")
+                            .checked(self.search_favorite)
+                            .on_click(cx.listener(|this, value, _, cx| {
+                                this.search_favorite = *value;
+                                this.run_search(cx);
+                            })),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .gap(px(8.))
+                    .child(
+                        Button::new("search-run")
+                            .label("検索")
+                            .small()
+                            .primary()
+                            .on_click(cx.listener(|this, _, _, cx| this.run_search(cx))),
+                    )
+                    .child(
+                        Button::new("search-clear")
+                            .label("クリア")
+                            .small()
+                            .secondary()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.search_results = None;
+                                // The grid falls back to the library snapshot;
+                                // drop any search pages and stale generation.
+                                let index = this.library.index.clone();
+                                this.search_view.replace_index(index);
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(rgb(MUTED_2))
+                    .child("結果は最大300枚です"),
+            )
+            .into_any_element()
     }
 
     fn import_dialog(&mut self, mode: ImportMode, cx: &mut Context<Self>) {
@@ -3891,12 +4225,6 @@ impl App {
 impl Render for App {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.guard_viewer_selection(window, cx);
-        let width: f32 = window.viewport_size().width.into();
-        self.grid_columns = grid_columns(grid_available_width(
-            width,
-            self.sidebar_collapsed,
-            self.inspector_collapsed,
-        ));
         let workspace = v_flex().flex_1().min_w_0().h_full();
         let root = h_flex()
             .relative()
@@ -3929,7 +4257,7 @@ impl Render for App {
                 this.cycle_quick_look_focus(true, window, cx)
             }))
             .child(self.sidebar(cx))
-            .child(workspace.child(self.content(cx)))
+            .child(workspace.child(self.content(window, cx)))
             .child(self.nav_tooltip())
             .child(self.rail_toggle(cx));
         if self.quick_look_open {
@@ -4403,6 +4731,21 @@ fn grid_available_width(
     (window_width - sidebar_width(sidebar_collapsed) - inspector - WORKSPACE_PAD_X).max(0.0)
 }
 
+/// Width left for the search grid after the filter panel (290 px + 26 px
+/// margin) and the right column's 26 px padding on both sides.
+fn search_available_width(
+    window_width: f32,
+    sidebar_collapsed: bool,
+    inspector_collapsed: bool,
+) -> f32 {
+    let inspector = if inspector_collapsed {
+        0.0
+    } else {
+        INSPECTOR_WIDTH
+    };
+    (window_width - sidebar_width(sidebar_collapsed) - inspector - 290.0 - 26.0 - 52.0).max(0.0)
+}
+
 fn viewer_details_width(open: bool, t: f32) -> f32 {
     let (from, to) = if open {
         (0.0, VIEWER_DETAILS_WIDTH)
@@ -4432,6 +4775,20 @@ fn viewer_image_box(
 
 fn grid_columns(available_width: f32) -> usize {
     (((available_width + GRID_GAP) / (MIN_CARD_WIDTH + GRID_GAP)).floor() as usize).max(1)
+}
+
+/// Stands in for a photo whose page has not loaded yet. Matches the card's
+/// 128 px image area so the fixed 196 px row height never changes.
+fn grid_placeholder() -> AnyElement {
+    div()
+        .flex_1()
+        .min_w_0()
+        .h(px(128.))
+        .rounded(px(14.))
+        .bg(rgb(PANEL_2))
+        .border_2()
+        .border_color(rgb(BORDER))
+        .into_any_element()
 }
 
 fn short_date(value: &str) -> String {
@@ -4584,15 +4941,17 @@ mod tests {
     // `use super::*` would also import GPUI's `test` attribute macro through
     // `gpui_kit::*`, shadowing the built-in `#[test]` and recursing forever.
     use super::{
-        DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH, THUMB_CACHE_ENTRIES,
-        THUMB_IN_FLIGHT, ThumbnailCache, average_bgra, decode_thumbnail, demo_thumb_path,
-        ease_motion, format_count, grid_available_width, grid_columns, lerp_color,
-        next_focus_index, parse_args, parse_window_size, sidebar_reveal_width, sidebar_width,
-        stagger_value, step_index, viewer_details_width, viewer_image_box,
+        DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH, MAX_PAGES, PAGE_SIZE,
+        PhotoPageCache, THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, average_bgra,
+        decode_thumbnail, demo_thumb_path, ease_motion, format_count, grid_available_width,
+        grid_columns, lerp_color, next_focus_index, parse_args, parse_window_size,
+        search_available_width, sidebar_reveal_width, sidebar_width, stagger_value, step_index,
+        viewer_details_width, viewer_image_box,
     };
     use gpui_kit::RenderImage;
     use smallvec::SmallVec;
     use std::sync::Arc;
+    use vrc_photo_core::model::{Photo, PhotoStatus};
 
     #[test]
     fn sidebar_widths_match_the_rail() {
@@ -4813,5 +5172,64 @@ mod tests {
         assert_eq!(color, 0x0a141e);
         assert_eq!(&rgba.as_raw()[..4], &[30, 20, 10, 255]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn test_photo(id: i64) -> Photo {
+        Photo {
+            id,
+            root_id: 1,
+            rel_path: format!("p/{id}.png"),
+            abs_path: format!("/p/{id}.png"),
+            file_name: format!("{id}.png"),
+            captured_at_utc: id,
+            captured_at_local: "2026-10-21 21:14:03".to_string(),
+            tz_offset_sec: 0,
+            width: 1,
+            height: 1,
+            file_size: 1,
+            mtime: id,
+            blake3: None,
+            status: PhotoStatus::Present,
+            is_favorite: false,
+            note: None,
+            world_name: None,
+            instance_id: None,
+            link_method: None,
+            confidence: None,
+            author: None,
+        }
+    }
+
+    #[test]
+    fn page_cache_evicts_the_oldest_page() {
+        let mut cache = PhotoPageCache::new();
+        for page in 0..MAX_PAGES {
+            cache.insert_page(page, vec![test_photo(page as i64)]);
+        }
+        assert!(cache.get_page(0).is_some());
+        cache.insert_page(MAX_PAGES, vec![test_photo(999)]);
+        assert!(cache.get_page(0).is_none());
+        assert!(cache.get_page(MAX_PAGES).is_some());
+    }
+
+    #[test]
+    fn page_cache_plans_only_missing_pages_and_marks_them_pending() {
+        let mut cache = PhotoPageCache::new();
+        let first = cache.plan_pages(0, PAGE_SIZE * 3, 2);
+        assert_eq!(first, vec![0, 1]);
+        let second = cache.plan_pages(0, PAGE_SIZE * 3, 2);
+        assert_eq!(second, vec![2]);
+        cache.insert_page(0, vec![test_photo(0)]);
+        assert!(cache.get_page(0).is_some());
+        let third = cache.plan_pages(0, PAGE_SIZE, 2);
+        assert!(third.is_empty());
+    }
+
+    #[test]
+    fn search_available_width_drops_to_the_filter_panel_width() {
+        assert_eq!(grid_columns(search_available_width(1280.0, false, true)), 3);
+        assert_eq!(grid_columns(search_available_width(1440.0, false, true)), 4);
+        assert_eq!(grid_columns(search_available_width(1080.0, false, true)), 2);
+        assert!(grid_columns(search_available_width(1280.0, false, false)) >= 1);
     }
 }
