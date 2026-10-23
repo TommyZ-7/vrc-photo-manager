@@ -2,7 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use rusqlite::types::Value;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params, params_from_iter};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Row, Transaction, TransactionBehavior, params,
+    params_from_iter,
+};
 
 use crate::error::{CoreError, Result};
 use crate::model::{
@@ -181,9 +184,10 @@ CREATE INDEX IF NOT EXISTS idx_photos_captured_id
     WHERE status = 'present';
 "#;
 
-const SCHEMA_V4: &str = r#"
-ALTER TABLE compression_jobs ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;
+const SCHEMA_V4_RETRY_COUNT: &str =
+    "ALTER TABLE compression_jobs ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0;";
 
+const SCHEMA_V4_DAEMON_TABLES: &str = r#"
 CREATE TABLE IF NOT EXISTS daemon_errors (
     operation TEXT PRIMARY KEY,
     message TEXT NOT NULL,
@@ -297,13 +301,40 @@ impl Db {
             self.conn.pragma_update(None, "user_version", 3)?;
         }
         if version < 4 {
-            self.conn.execute_batch(SCHEMA_V4)?;
-            self.conn.execute(
-                "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (4, ?1)",
-                params![now_string()],
-            )?;
-            self.conn.pragma_update(None, "user_version", 4)?;
+            self.migrate_v4()?;
         }
+        Ok(())
+    }
+
+    /// Applies schema version 4 in one immediate transaction. The write lock
+    /// serializes concurrent UI/daemon startups, and the existence checks make
+    /// the step safe to retry after an interrupted upgrade.
+    fn migrate_v4(&self) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        // Re-read under the write lock: another process may have completed V4
+        // between the caller's version check and this transaction.
+        let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version >= 4 {
+            tx.commit()?;
+            return Ok(());
+        }
+
+        let has_retry_count: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('compression_jobs') \
+             WHERE name = 'retry_count')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_retry_count {
+            tx.execute_batch(SCHEMA_V4_RETRY_COUNT)?;
+        }
+        tx.execute_batch(SCHEMA_V4_DAEMON_TABLES)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (4, ?1)",
+            params![now_string()],
+        )?;
+        tx.pragma_update(None, "user_version", 4)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1524,6 +1555,53 @@ mod tests {
         }
     }
 
+    /// Builds a version-3 database file directly from the V1-V3 DDL with one
+    /// failed compression job. When `retry_count` is set, the retry column is
+    /// added too, simulating an upgrade interrupted after the ALTER.
+    fn seed_version_3_database(path: &Path, retry_count: Option<i64>) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(SCHEMA_V1).unwrap();
+        conn.execute_batch(SCHEMA_V2).unwrap();
+        conn.execute_batch(SCHEMA_V3).unwrap();
+        for version in 1..=3 {
+            conn.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
+                params![version, now_string()],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO library_roots(path, kind, created_at) VALUES ('/photos', 'reference', ?1)",
+            params![now_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO photos(root_id, rel_path, abs_path, file_name, captured_at_utc, \
+                captured_at_local, tz_offset_sec, width, height, file_size, mtime, blake3, \
+                status, created_at, updated_at) \
+             VALUES (1, 'a.png', '/photos/a.png', 'a.png', 100, '2026-10-21 21:14:03', 32400, \
+                3840, 2160, 12400000, 100, NULL, 'present', ?1, ?1)",
+            params![now_string()],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO compression_jobs(id, photo_id, profile_id, status, progress, error, \
+                output_path, policy, created_at, started_at, finished_at) \
+             VALUES ('job-1', 1, 'p', 'failed', 0, 'boom', NULL, 'keep', ?1, ?1, ?1)",
+            params![now_string()],
+        )
+        .unwrap();
+        if let Some(count) = retry_count {
+            conn.execute_batch(SCHEMA_V4_RETRY_COUNT).unwrap();
+            conn.execute(
+                "UPDATE compression_jobs SET retry_count = ?1 WHERE id = 'job-1'",
+                params![count],
+            )
+            .unwrap();
+        }
+        conn.pragma_update(None, "user_version", 3).unwrap();
+    }
+
     #[test]
     fn migration_adds_captured_id_index() {
         let db = Db::open_in_memory().unwrap();
@@ -1581,6 +1659,65 @@ mod tests {
             )
             .unwrap();
         assert_eq!(retry_column, 1);
+        let tables: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' \
+                 AND name IN ('daemon_errors', 'daemon_commands')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 2);
+    }
+
+    #[test]
+    fn migration_upgrades_version_3_database_with_existing_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.db");
+        seed_version_3_database(&path, None);
+
+        let db = Db::open(&path).unwrap();
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 4);
+
+        let jobs = db.list_jobs(10).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, "job-1");
+        assert_eq!(jobs[0].status, QueueStatus::Failed);
+        assert_eq!(jobs[0].retry_count, 0);
+
+        let tables: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' \
+                 AND name IN ('daemon_errors', 'daemon_commands')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 2);
+    }
+
+    #[test]
+    fn migration_v4_recovers_from_interrupted_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.db");
+        // The ALTER committed but user_version stayed at 3 and the daemon
+        // tables are missing, as if the process died mid-upgrade.
+        seed_version_3_database(&path, Some(2));
+
+        let db = Db::open(&path).unwrap();
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 4);
+        assert_eq!(db.list_jobs(10).unwrap()[0].retry_count, 2);
+
         let tables: i64 = db
             .conn
             .query_row(
