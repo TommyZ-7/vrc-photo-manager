@@ -305,6 +305,24 @@ pub enum PhotoSort {
     World,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhotoIndexEntry {
+    pub id: i64,
+    pub captured_at_utc: i64,
+    /// Local capture month encoded as YYYYMM, e.g. 202504.
+    pub captured_month: i32,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PhotoTextFilter {
+    pub world: Option<String>,
+    pub player: Option<String>,
+    pub tag: Option<String>,
+    pub favorite: bool,
+    pub from_utc: Option<i64>,
+    pub to_utc: Option<i64>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PhotoFilter {
     pub world_ids: Vec<i64>,
