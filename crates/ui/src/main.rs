@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use chrono::Utc;
 use gpui_kit::component::button::{Button, ButtonVariants};
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
@@ -1079,6 +1079,9 @@ pub struct App {
     quick_look_compress_focus: FocusHandle,
     quick_look_trash_focus: FocusHandle,
     quick_look_add_tag_focus: FocusHandle,
+    quick_look_note_edit_focus: FocusHandle,
+    quick_look_note_save_focus: FocusHandle,
+    quick_look_note_cancel_focus: FocusHandle,
     preview: Option<Arc<RenderImage>>,
     previous_preview: Option<Arc<RenderImage>>,
     previous_color: Option<u32>,
@@ -1095,6 +1098,8 @@ pub struct App {
     player_input: Entity<InputState>,
     tag_input: Entity<InputState>,
     tag_edit_input: Entity<InputState>,
+    note_edit_input: Entity<TextareaState>,
+    note_edit_id: Option<i64>,
     photo_root_input: Entity<InputState>,
     log_dir_input: Entity<InputState>,
     import_dir_input: Entity<InputState>,
@@ -1122,6 +1127,11 @@ impl App {
             cx.new(|cx| InputState::new(window, cx).placeholder("プレイヤー名 / ID"));
         let tag_input = cx.new(|cx| InputState::new(window, cx).placeholder("タグ"));
         let tag_edit_input = cx.new(|cx| InputState::new(window, cx).placeholder("タグを追加"));
+        let note_edit_input = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder("メモを入力")
+                .auto_grow(2, 6)
+        });
         let photo_root_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder("例: C:/Users/you/Pictures/VRChat")
@@ -1152,6 +1162,9 @@ impl App {
         let quick_look_compress_focus = cx.focus_handle();
         let quick_look_trash_focus = cx.focus_handle();
         let quick_look_add_tag_focus = cx.focus_handle();
+        let quick_look_note_edit_focus = cx.focus_handle();
+        let quick_look_note_save_focus = cx.focus_handle();
+        let quick_look_note_cancel_focus = cx.focus_handle();
         let empty_index = Arc::new(PhotoIndex::new(Vec::new()));
         let mut app = Self {
             db,
@@ -1196,6 +1209,9 @@ impl App {
             quick_look_compress_focus,
             quick_look_trash_focus,
             quick_look_add_tag_focus,
+            quick_look_note_edit_focus,
+            quick_look_note_save_focus,
+            quick_look_note_cancel_focus,
             preview: None,
             previous_preview: None,
             previous_color: None,
@@ -1212,6 +1228,8 @@ impl App {
             player_input,
             tag_input,
             tag_edit_input,
+            note_edit_input,
+            note_edit_id: None,
             photo_root_input,
             log_dir_input,
             import_dir_input,
@@ -1502,6 +1520,9 @@ impl App {
         self.selected_players = self.db.photo_players(id).unwrap_or_default();
         self.selected_tags = self.db.photo_tags(id).unwrap_or_default();
         self.selected_derivatives = self.db.derivatives_for_photo(id).unwrap_or_default();
+        if self.note_edit_id.is_some_and(|edit_id| edit_id != id) {
+            self.note_edit_id = None;
+        }
     }
 
     fn load_selected(&mut self, id: i64) {
@@ -1510,6 +1531,69 @@ impl App {
             .selected_photo
             .as_ref()
             .and_then(|photo| load_preview(Path::new(&photo.abs_path)));
+    }
+
+    fn begin_note_edit(
+        &mut self,
+        id: i64,
+        note: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.note_edit_id = Some(id);
+        let text = note.unwrap_or_default();
+        self.note_edit_input
+            .update(cx, |input, cx| input.set_value(text, window, cx));
+        let focus = self.note_edit_input.read(cx).focus_handle(cx);
+        // The textarea mounts on the next frame, after the editor state flips.
+        cx.defer_in(window, move |this, window, cx| {
+            if this.quick_look_open && this.quick_look_details_open && this.note_edit_id == Some(id)
+            {
+                window.focus(&focus, cx);
+            }
+        });
+        cx.notify();
+    }
+
+    fn save_note(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let value = self.note_edit_input.read(cx).value();
+        let note = normalize_note(&value);
+        if let Err(error) = self.db.set_note(id, note) {
+            self.message = Some(format!("メモを保存できません: {error}"));
+            cx.notify();
+            return;
+        }
+        self.note_edit_id = None;
+        self.load_selected_meta(id);
+        let focus = self.quick_look_note_edit_focus.clone();
+        // The edit action mounts after the textarea disappears.
+        cx.defer_in(window, move |this, window, cx| {
+            if this.quick_look_open && this.quick_look_details_open && this.note_edit_id.is_none() {
+                window.focus(&focus, cx);
+            }
+        });
+        cx.notify();
+    }
+
+    fn cancel_note_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.note_edit_id.take().is_none() {
+            return;
+        }
+        let focus = self.quick_look_note_edit_focus.clone();
+        cx.defer_in(window, move |this, window, cx| {
+            if this.quick_look_open && this.quick_look_details_open && this.note_edit_id.is_none() {
+                window.focus(&focus, cx);
+            }
+        });
+        cx.notify();
+    }
+
+    fn handle_viewer_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.note_edit_id.is_some() {
+            self.cancel_note_edit(window, cx);
+        } else {
+            self.close_quick_look(window, cx);
+        }
     }
 
     /// Starts a background decode for a grid thumbnail when the cache has a
@@ -1601,6 +1685,7 @@ impl App {
         }
         self.message = None;
         self.delete_armed = None;
+        self.note_edit_id = None;
         self.quick_look_return_focus = window.focused(cx);
         self.quick_look_photo_ids = self.viewer_source_ids();
         self.quick_look_index = self
@@ -1634,6 +1719,7 @@ impl App {
         }
         self.quick_look_open = false;
         self.delete_armed = None;
+        self.note_edit_id = None;
         let focus = self
             .quick_look_return_focus
             .take()
@@ -1650,6 +1736,7 @@ impl App {
         }
         self.quick_look_open = false;
         self.delete_armed = None;
+        self.note_edit_id = None;
         if let Some(id) = self.selected.take() {
             self.thumbnails.unpin(id);
         }
@@ -1712,6 +1799,9 @@ impl App {
 
     fn toggle_quick_look_details(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.quick_look_details_open = !self.quick_look_details_open;
+        if !self.quick_look_details_open {
+            self.note_edit_id = None;
+        }
         self.quick_look_details_epoch = self.quick_look_details_epoch.wrapping_add(1);
         let index = self
             .quick_look_focus_order(cx)
@@ -1739,6 +1829,13 @@ impl App {
             order.push(self.quick_look_favorite_focus.clone());
             order.push(self.tag_edit_input.read(cx).focus_handle(cx));
             order.push(self.quick_look_add_tag_focus.clone());
+            if self.note_edit_id.is_some() {
+                order.push(self.note_edit_input.read(cx).focus_handle(cx));
+                order.push(self.quick_look_note_save_focus.clone());
+                order.push(self.quick_look_note_cancel_focus.clone());
+            } else {
+                order.push(self.quick_look_note_edit_focus.clone());
+            }
             order.push(self.quick_look_compress_focus.clone());
             order.push(self.quick_look_trash_focus.clone());
         }
@@ -3479,6 +3576,8 @@ impl App {
         let tags = self.selected_tags.clone();
         let derivatives = self.selected_derivatives.clone();
         let favorite = photo.is_favorite;
+        let note = photo.note.clone();
+        let note_for_edit = note.clone();
         let armed = self.delete_armed == Some(id);
         let section = |label: &'static str| {
             div()
@@ -3580,6 +3679,39 @@ impl App {
                     this.close_quick_look(window, cx);
                 }
             },
+        );
+        let note_edit_button = self.focusable_text_button(
+            "viewer-note-edit",
+            "編集",
+            self.quick_look_note_edit_focus.clone(),
+            ButtonState {
+                tone: ButtonTone::Neutral,
+                enabled: true,
+            },
+            cx,
+            move |this, window, cx| this.begin_note_edit(id, note_for_edit.clone(), window, cx),
+        );
+        let note_save_button = self.focusable_text_button(
+            "viewer-note-save",
+            "保存",
+            self.quick_look_note_save_focus.clone(),
+            ButtonState {
+                tone: ButtonTone::Primary,
+                enabled: true,
+            },
+            cx,
+            move |this, window, cx| this.save_note(id, window, cx),
+        );
+        let note_cancel_button = self.focusable_text_button(
+            "viewer-note-cancel",
+            "キャンセル",
+            self.quick_look_note_cancel_focus.clone(),
+            ButtonState {
+                tone: ButtonTone::Neutral,
+                enabled: true,
+            },
+            cx,
+            |this, window, cx| this.cancel_note_edit(window, cx),
         );
 
         v_flex()
@@ -3683,22 +3815,49 @@ impl App {
                     })),
             )
             .child(
-                v_flex().gap(px(6.)).child(section("メモ")).child(
-                    div()
-                        .p(px(8.))
-                        .rounded(px(8.))
-                        .bg(rgb(PANEL))
-                        .border_1()
-                        .border_color(rgb(BORDER))
-                        .text_size(px(10.))
-                        .text_color(rgb(MUTED))
-                        .child(
-                            photo
-                                .note
-                                .clone()
-                                .unwrap_or_else(|| "メモはまだありません".to_string()),
-                        ),
-                ),
+                v_flex()
+                    .gap(px(6.))
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .justify_between()
+                            .child(section("メモ"))
+                            .when(self.note_edit_id != Some(id), |this| {
+                                this.child(note_edit_button)
+                            }),
+                    )
+                    .when(self.note_edit_id == Some(id), |this| {
+                        this.child(Textarea::new(&self.note_edit_input).w_full())
+                            .child(
+                                h_flex()
+                                    .gap(px(8.))
+                                    .items_center()
+                                    .child(note_save_button)
+                                    .child(note_cancel_button)
+                                    .child(
+                                        div()
+                                            .text_size(px(10.))
+                                            .text_color(rgb(MUTED_2))
+                                            .child("Esc でキャンセル"),
+                                    ),
+                            )
+                    })
+                    .when(self.note_edit_id != Some(id), |this| {
+                        this.child(
+                            div()
+                                .p(px(8.))
+                                .rounded(px(8.))
+                                .bg(rgb(PANEL))
+                                .border_1()
+                                .border_color(rgb(BORDER))
+                                .text_size(px(10.))
+                                .text_color(rgb(MUTED))
+                                .child(
+                                    note.clone()
+                                        .unwrap_or_else(|| "メモはまだありません".to_string()),
+                                ),
+                        )
+                    }),
             )
             .child(
                 h_flex()
@@ -5154,11 +5313,9 @@ impl Render for App {
             .on_action(
                 cx.listener(|this, _: &OpenQuickLook, window, cx| this.open_quick_look(window, cx)),
             )
-            .on_action(
-                cx.listener(|this, _: &CloseQuickLook, window, cx| {
-                    this.close_quick_look(window, cx)
-                }),
-            )
+            .on_action(cx.listener(|this, _: &CloseQuickLook, window, cx| {
+                this.handle_viewer_escape(window, cx)
+            }))
             .on_action(cx.listener(|this, _: &ViewerPreviousPhoto, window, cx| {
                 this.step_viewer_photo(-1, window, cx)
             }))
@@ -5485,6 +5642,12 @@ fn chip(label: &str, active: bool) -> Div {
         .bg(rgb(if active { ACCENT_SOFT } else { PANEL_2 }))
         .text_color(rgb(if active { BLUE } else { MUTED }))
         .child(label.to_string())
+}
+
+/// Trims the outer whitespace of a note and treats an empty result as "no note".
+fn normalize_note(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -5874,10 +6037,10 @@ mod tests {
         apply_library_index, average_bgra, build_year_buckets, decode_thumbnail, demo_thumb_path,
         ease_motion, first_visible_photo, format_captured_month, format_count,
         grid_available_width, grid_columns, grid_columns_for, lerp_color, list_scroll_top,
-        next_focus_index, parse_args, parse_window_size, rail_label_hidden_by_pill, rail_row_at,
-        rail_scroll_offset, rail_y, search_available_width, sidebar_reveal_width, sidebar_width,
-        stagger_value, step_index, sync_search_mirror, viewer_details_width, viewer_image_box,
-        visible_year_buckets,
+        next_focus_index, normalize_note, parse_args, parse_window_size, rail_label_hidden_by_pill,
+        rail_row_at, rail_scroll_offset, rail_y, search_available_width, sidebar_reveal_width,
+        sidebar_width, stagger_value, step_index, sync_search_mirror, viewer_details_width,
+        viewer_image_box, visible_year_buckets,
     };
     use gpui_kit::{RenderImage, ScrollStrategy, UniformListScrollHandle, point, px};
     use smallvec::SmallVec;
@@ -6533,6 +6696,14 @@ mod tests {
             .base_handle
             .set_offset(point(px(0.), px(12.)));
         assert_eq!(list_scroll_top(&handle), 0.0);
+    }
+
+    #[test]
+    fn notes_normalize_empty_to_none_and_trim_text() {
+        assert_eq!(normalize_note(""), None);
+        assert_eq!(normalize_note("  \n\t "), None);
+        assert_eq!(normalize_note(" hello \n"), Some("hello"));
+        assert_eq!(normalize_note("line1\nline2"), Some("line1\nline2"));
     }
 
     #[test]
