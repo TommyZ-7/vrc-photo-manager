@@ -351,9 +351,12 @@ fn list_scroll_top(handle: &UniformListScrollHandle) -> f32 {
 
 /// Scroll offset that puts `photo_row` at the top of the grid, clamped to the
 /// list's scrollable range.
+///
+/// `max_offset` is the non-negative extent reported by
+/// `ScrollHandle::max_offset()`; the actual offset is zero or negative.
 fn rail_scroll_offset(photo_row: usize, columns: usize, max_offset: f32) -> f32 {
     let grid_row = photo_row / columns.max(1);
-    (-(grid_row as f32 * PHOTO_ROW_HEIGHT)).clamp(max_offset.min(0.0), 0.0)
+    (-(grid_row as f32 * PHOTO_ROW_HEIGHT)).clamp(-max_offset.max(0.0), 0.0)
 }
 
 /// Ordered snapshot of the library: only IDs and capture timestamps, so the
@@ -5847,12 +5850,18 @@ mod tests {
 
     #[test]
     fn rail_jump_offset_uses_grid_rows_and_clamps_to_the_list() {
-        assert_eq!(rail_scroll_offset(0, 3, -10_000.0), 0.0);
-        assert_eq!(rail_scroll_offset(2, 3, -10_000.0), 0.0);
-        assert_eq!(rail_scroll_offset(3, 3, -10_000.0), -196.0);
-        assert_eq!(rail_scroll_offset(5, 3, -10_000.0), -196.0);
-        assert_eq!(rail_scroll_offset(600, 3, -10_000.0), -10_000.0);
-        assert_eq!(rail_scroll_offset(600, 0, -10_000.0), -10_000.0);
+        // `ScrollHandle::max_offset()` is a non-negative scrollable extent.
+        assert_eq!(rail_scroll_offset(0, 3, 10_000.0), 0.0);
+        assert_eq!(rail_scroll_offset(2, 3, 10_000.0), 0.0);
+        assert_eq!(rail_scroll_offset(3, 3, 10_000.0), -196.0);
+        assert_eq!(rail_scroll_offset(5, 3, 10_000.0), -196.0);
+        // The target (-2156) is clamped to the 1000 px extent.
+        assert_eq!(rail_scroll_offset(11, 1, 1_000.0), -1_000.0);
+        assert_eq!(rail_scroll_offset(600, 3, 10_000.0), -10_000.0);
+        assert_eq!(rail_scroll_offset(600, 0, 10_000.0), -10_000.0);
+        // No scrollable extent means no movement, even for a negative extent
+        // rather than the real non-negative contract.
         assert_eq!(rail_scroll_offset(600, 3, 0.0), 0.0);
+        assert_eq!(rail_scroll_offset(600, 3, -5.0), 0.0);
     }
 }
