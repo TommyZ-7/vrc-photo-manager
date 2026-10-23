@@ -6393,7 +6393,7 @@ fn register_global_actions(cx: &mut gpui_kit::App, app: Entity<App>) {
 }
 
 fn main() {
-    if logging::init("vrc-photo-manager", "info,vrc_photo_ui=debug").is_none() {
+    if logging::init("vrc-photo-manager", "info,vrc_photo_manager=debug").is_none() {
         tracing::warn!("file logging is unavailable; using stderr only");
     }
     if timing_enabled() {
@@ -6402,7 +6402,7 @@ fn main() {
     let options = parse_args(std::env::args());
     if options.background {
         if let Err(error) = run_background_supervisor() {
-            eprintln!("{error}");
+            tracing::error!(%error, "background supervisor failed");
         }
         return;
     }
