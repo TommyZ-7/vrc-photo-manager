@@ -52,7 +52,7 @@ Run:
 cd /home/tommyz7/work/vrc-photo-manager
 git status --short --branch
 ```
-Expected: `main...origin/main` and only `opencode.json` / `.opencode/skills/gnome-wayland-visual-qa/` / the new spec and plan are untracked or modified.
+Expected: `main...origin/main` and only `opencode.json` / local `.opencode/` overrides / the new spec and plan are untracked or modified.
 
 - [ ] **Step 2: Create the worktree from the current `main`**
 
@@ -1084,7 +1084,7 @@ pub fn init(process: &str, default_filter: &str) -> Option<std::path::PathBuf> {
 
 Add `mod logging;` to each binary root. In UI `main()`, before `parse_args`, call:
 ```rust
-if logging::init("vrc-photo-manager", "info,vrc_photo_ui=debug").is_none() {
+if logging::init("vrc-photo-manager", "info,vrc_photo_manager=debug").is_none() {
     tracing::warn!("file logging is unavailable; using stderr only");
 }
 ```
@@ -1693,9 +1693,10 @@ sqlite3 /tmp/vrc-photo-manager-demo/library.db \
 # VALUES('qa-failed', <photo_id>, '<profile_id>', 'failed', 0, 'テスト用の圧縮失敗', 'keep', '2026-10-23T10:00:00+00:00', '2026-10-23T10:00:00+00:00');
 ```
 
-- [ ] **Step 3: Visual QA on GNOME Wayland**
+- [ ] **Step 3: Visual QA on the current desktop session**
 
-Use the `gnome-wayland-visual-qa` skill to launch the app and capture:
+Use the available visual QA skill for the current session (`hyprland-visual-qa`
+on Hyprland, `wsl-gpui-testing` under WSL/WSLg) to launch the app and capture:
 - Photos with the import alert/panel (after an import attempt);
 - Compression with the failed-job section and retry button;
 - Monitor with the processing error card and log card.

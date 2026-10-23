@@ -6,6 +6,10 @@
   - Linux: `~/.local/share/vrc-photo-manager/library.db`
   - Windows: `%LOCALAPPDATA%\vrc-photo-manager\library.db`
 - サムネイル: 同ディレクトリの `thumbnails/<photo_id>.webp`
+- アプリログ: 同ディレクトリの `logs/`
+  - UI: `logs/vrc-photo-manager.log`
+  - デーモン: `logs/vrc-photo-daemon.log`
+  - 起動時に10 MiB以上なら `logs/<name>.log.1` へローテーションする（例: `vrc-photo-manager.log.1`）。
 - 写真ファイルとVRChatログはアプリ管理外。DBにはパスと解析結果だけを保存する。
 
 `VRC_PHOTO_DB` でDBパスを上書きできる。
@@ -22,7 +26,7 @@ PRAGMA busy_timeout = 5000;
 ```
 
 - `user_version` でスキーマバージョンを管理する。
-- 現在のバージョンは **3**。
+- 現在のバージョンは **4**。
 - マイグレーションは `Db::migrate` で起動時に自動実行する。
 
 ## 3. テーブル
@@ -201,7 +205,10 @@ VRChatの1滞在。
 | error | TEXT | |
 | output_path | TEXT | |
 | policy | TEXT | `keep` / `replace` |
+| retry_count | INTEGER | ユーザーが実行済みの再試行回数。既定0、上限3 |
 | created_at / started_at / finished_at | TEXT | |
+
+`retry_count` は自動リトライの回数ではない。再試行は `status='failed'` かつ `retry_count < 3` の行だけを対象に、進捗・エラー・開始/終了時刻をリセットし、`retry_count` を1増やして `pending` に戻す。上限到達後は更新しない。写真・プロファイル・方針は変えない。
 
 取得は単一SQLで原子的に行う。
 
@@ -215,6 +222,38 @@ WHERE id = (
 )
 RETURNING ...;
 ```
+
+### `daemon_errors`
+
+デーモンの現在の処理エラー。操作ごとに最大1行。
+
+| 列 | 型 | 説明 |
+|---|---|---|
+| operation | TEXT PK | `scan` / `log` / `link` |
+| message | TEXT | UIに出す短文（例: 「ログフォルダが見つかりません: ...」） |
+| detail | TEXT | パスやパーサエラーなどの詳細。NULL可 |
+| occurred_at | TEXT | 最後に記録した日時（RFC3339） |
+| attempts | INTEGER | 検出回数。同じ操作の失敗を記録するたびに1増える |
+
+- 同じ操作の新しい失敗は `message` / `detail` / `occurred_at` を置き換える。
+- デーモンはメッセージと詳細の署名が変わったときだけ書き込むため、`attempts` はポーリング回数ではなく「異なる失敗を検出した回数」になる。
+- 操作が成功すると行を削除する。`scan` は失敗のないフルスキャン、`log` は正常に処理できたログ行があるパス、`link` は紐付け成功で消える。
+- UIは発生時刻の降順、同時刻なら `operation` 順で読む。
+
+### `daemon_commands`
+
+UIからデーモンへの再実行要求。FIFOの小さなキュー。
+
+| 列 | 型 | 説明 |
+|---|---|---|
+| id | INTEGER PK AUTOINCREMENT | 投入順 |
+| command | TEXT | `rescan` / `relog` / `relink` |
+| created_at | TEXT | 要求日時（RFC3339） |
+
+- `request_daemon_command` は同じ `command` が未処理で残っていれば追加しない（重複排除）。
+- デーモンは監視ループの先頭で全行を読み、同一トランザクションで削除する。未知の文字列は無視する。
+- デーモン停止中もUIは要求を積める。起動後にまとめて処理される。
+- 要求の処理前に設定を再読込し、写真フォルダの監視を張り直す。
 
 ### `log_imports`
 
@@ -236,6 +275,8 @@ RETURNING ...;
 | `app_settings` | `AppSettings` のJSON |
 | `daemon_heartbeat` | デーモンの最終ハートビート（epoch秒） |
 
+`daemon_heartbeat` は従来どおりUIの稼働判定に使う。処理エラーの表示と再実行要求は `daemon_errors` / `daemon_commands` に分離し、`app_settings` には入れない。
+
 `AppSettings` の主なフィールド:
 
 ```text
@@ -253,6 +294,8 @@ estimated_link, thumbnail_cache_mb, compression_workers
 5. `compression_jobs` は `pending` のものを1件ずつ原子的に取得する。
 6. 写真削除はDB削除ではなく `status='missing'` とOSゴミ箱移動。
 7. 生ログは保存しない。解析済みイベントのみ保存する。
+8. `daemon_errors` は操作（`scan` / `log` / `link`）ごとに1行だけ。解消したら削除する。
+9. `daemon_commands` は同名コマンドを重複して積まない。デーモンは取り出しと削除を同一トランザクションで行う。
 
 ## 5. タイムゾーンと時刻
 
@@ -270,6 +313,9 @@ estimated_link, thumbnail_cache_mb, compression_workers
 | 1 | 初期スキーマ |
 | 2 | `photo_context.author` 追加 |
 | 3 | `idx_photos_captured_id` 追加（`status='present'` の `captured_at_utc DESC, id DESC`） |
+| 4 | `compression_jobs.retry_count`、`daemon_errors`、`daemon_commands` 追加 |
+
+V4は `IMMEDIATE` トランザクションで適用する。UIとデーモンが同時に起動しても、書き込みロックで直列化し、`user_version` と列・テーブルの存在を再確認してから進めるため、中断後の再実行でも安全。
 
 追加手順:
 
@@ -284,6 +330,7 @@ estimated_link, thumbnail_cache_mb, compression_workers
 - 検索は `photo_context` / `photo_players` / `photo_tags` のEXISTS句。
 - UIは `photo_index` / `photo_index_text` で一致する写真の軽量索引（`id`, `captured_at_utc`, `captured_month`）を全件読み、表示範囲の写真だけを `photos_by_ids` で256枚ページ取得する。件数上限はない。
 - `idx_photos_captured_id` はV3で追加済み。100k合成DB（`photo_context` 5万行を含む）のrelease測定は索引61.5 ms、ページ0.72 ms。
+- UIは3秒ごとに `daemon_errors` と失敗ジョブを読む。`daemon_errors` は最大3行、`daemon_commands` は数行なのでインデックスは不要。
 - 未検証の追加インデックス候補:
   - `photo_players(display_name COLLATE NOCASE)`
   - `photo_context(world_name)`
