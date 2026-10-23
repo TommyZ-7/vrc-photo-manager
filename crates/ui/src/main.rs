@@ -19,7 +19,7 @@ use vrc_photo_core::db::Db;
 use vrc_photo_core::importer::{self, ImportMode};
 use vrc_photo_core::model::{
     CompressionFormat, CompressionProfile, Derivative, LibraryStats, NewPhoto, Photo, PhotoContext,
-    PhotoIndexEntry, PhotoPlayer, PhotoSort, QueueStatus,
+    PhotoIndexEntry, PhotoPlayer, PhotoSort, PhotoTextFilter, QueueStatus,
 };
 use vrc_photo_core::settings::AppSettings;
 use vrc_photo_core::thumbnail;
@@ -75,12 +75,6 @@ gpui_kit::actions!(
         QuickLookPrevFocus,
     ]
 );
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PhotoCardLayout {
-    Grid { index: usize },
-    Fixed,
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ButtonTone {
@@ -447,7 +441,9 @@ pub struct App {
     photo_root_input: Entity<InputState>,
     log_dir_input: Entity<InputState>,
     import_dir_input: Entity<InputState>,
-    search_results: Option<Vec<Photo>>,
+    search_active: bool,
+    searching: bool,
+    search_request: u64,
     search_favorite: bool,
     search_days: Option<i64>,
     compress_policy: String,
@@ -561,7 +557,9 @@ impl App {
             photo_root_input,
             log_dir_input,
             import_dir_input,
-            search_results: None,
+            search_active: false,
+            searching: false,
+            search_request: 0,
             search_favorite: false,
             search_days: Some(7),
             compress_policy: "keep".to_string(),
@@ -635,7 +633,9 @@ impl App {
         let entries = self.db.photo_index(PhotoSort::Newest).unwrap_or_default();
         let index = Arc::new(PhotoIndex::new(entries));
         self.library.replace_index(index.clone());
-        if self.search_results.is_none() {
+        // An active result set stays mounted until the user clears it or runs
+        // a new search; Task 6 refines this into the reload contract.
+        if !self.search_active {
             self.search_view.replace_index(index);
         }
         self.profiles = self.db.list_profiles().unwrap_or_default();
@@ -882,25 +882,12 @@ impl App {
     }
 
     fn viewer_source_ids(&self) -> Vec<i64> {
-        let source: Vec<i64> = if self.screen == Screen::Search {
-            match self.search_results.as_ref() {
-                Some(photos) => photos.iter().map(|photo| photo.id).collect(),
-                None => self
-                    .library
-                    .index
-                    .entries
-                    .iter()
-                    .map(|entry| entry.id)
-                    .collect(),
-            }
+        let browser = if self.screen == Screen::Search && self.search_active {
+            &self.search_view
         } else {
-            self.library
-                .index
-                .entries
-                .iter()
-                .map(|entry| entry.id)
-                .collect()
+            &self.library
         };
+        let source: Vec<i64> = browser.index.entries.iter().map(|entry| entry.id).collect();
         match self.selected {
             Some(id) if source.contains(&id) => source,
             Some(id) => vec![id],
@@ -1060,19 +1047,93 @@ impl App {
         let from_utc = self
             .search_days
             .map(|days| Utc::now().timestamp() - days * 86_400);
-        self.search_results = Some(
-            self.db
-                .search_photos_text(
-                    Some(world.as_str()),
-                    Some(player.as_str()),
-                    Some(tag.as_str()),
-                    self.search_favorite,
-                    from_utc,
-                    None,
-                    300,
-                )
-                .unwrap_or_default(),
-        );
+        let filter = PhotoTextFilter {
+            world: Some(world),
+            player: Some(player),
+            tag: Some(tag),
+            favorite: self.search_favorite,
+            from_utc,
+            to_utc: None,
+        };
+        self.search_request = self.search_request.wrapping_add(1);
+        let generation = self.search_request;
+
+        let Some(path) = self.db.path().map(Path::to_path_buf) else {
+            // In-memory demo/fallback databases have no second handle to open.
+            let result = self.db.photo_index_text(&filter);
+            self.apply_search_result(generation, result, cx);
+            return;
+        };
+
+        self.searching = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let background_filter = filter.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    Db::open_read_only(path).and_then(|db| db.photo_index_text(&background_filter))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if generation != this.search_request {
+                    return;
+                }
+                match result {
+                    Ok(entries) => this.apply_search_result(generation, Ok(entries), cx),
+                    // A read-only handle can fail on a locked or WAL-only
+                    // database. Query the live connection on the UI thread
+                    // rather than leaving the spinner up.
+                    Err(_) => {
+                        let fallback = this.db.photo_index_text(&filter);
+                        this.apply_search_result(generation, fallback, cx);
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Applies a completed search to the virtual grid. A stale generation (the
+    /// user searched again or cleared the view) is discarded.
+    fn apply_search_result(
+        &mut self,
+        generation: u64,
+        result: vrc_photo_core::error::Result<Vec<PhotoIndexEntry>>,
+        cx: &mut Context<Self>,
+    ) {
+        if generation != self.search_request {
+            return;
+        }
+        match result {
+            Ok(entries) => {
+                self.search_view
+                    .replace_index(Arc::new(PhotoIndex::new(entries)));
+                self.search_view
+                    .scroll
+                    .scroll_to_item_strict(0, ScrollStrategy::Top);
+                self.search_active = true;
+                self.searching = false;
+            }
+            Err(error) => {
+                self.searching = false;
+                self.message = Some(format!("検索に失敗しました: {error}"));
+            }
+        }
+        cx.notify();
+    }
+
+    fn clear_search(&mut self, cx: &mut Context<Self>) {
+        self.search_active = false;
+        self.searching = false;
+        // Invalidate an in-flight request so it cannot revive the cleared view.
+        self.search_request = self.search_request.wrapping_add(1);
+        let index = self.library.index.clone();
+        self.search_view.replace_index(index);
+        self.search_view
+            .scroll
+            .scroll_to_item_strict(0, ScrollStrategy::Top);
         cx.notify();
     }
 
@@ -1637,12 +1698,18 @@ impl App {
 
         if rows == 0 {
             let empty = if search {
-                glass_panel()
-                    .p(px(20.))
-                    .text_size(px(12.))
-                    .text_color(rgb(MUTED))
-                    .child("条件に一致する写真がありません")
-                    .into_any_element()
+                if self.search_active {
+                    glass_panel()
+                        .p(px(20.))
+                        .text_size(px(12.))
+                        .text_color(rgb(MUTED))
+                        .child("条件に一致する写真がありません")
+                        .into_any_element()
+                } else {
+                    // Before a search runs the browser mirrors the library, so
+                    // an empty library is not an empty result set.
+                    div().into_any_element()
+                }
             } else {
                 div()
                     .mt(px(18.))
@@ -1707,11 +1774,7 @@ impl App {
                         }
                         match this.browser_mut(search).photo_at(photo_index) {
                             Some(photo) => {
-                                line = line.child(this.photo_card(
-                                    photo.as_ref(),
-                                    PhotoCardLayout::Grid { index: photo_index },
-                                    cx,
-                                ));
+                                line = line.child(this.photo_card(photo.as_ref(), photo_index, cx));
                             }
                             None => {
                                 line = line.child(grid_placeholder());
@@ -1810,7 +1873,7 @@ impl App {
     fn photo_card(
         &mut self,
         photo: &Photo,
-        layout: PhotoCardLayout,
+        grid_index: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = photo.id;
@@ -1826,19 +1889,10 @@ impl App {
         }
         let color = self.color_for(photo);
         let hovered = self.hovered_photo == Some(id);
-        let grid_index = match layout {
-            PhotoCardLayout::Grid { index } => Some(index),
-            PhotoCardLayout::Fixed => None,
-        };
-        let intro_index = grid_index.unwrap_or(0);
         let intro_total =
-            CARD_INTRO_SECS + intro_index.min(CARD_STAGGER_MAX) as f32 * CARD_STAGGER_SECS;
-        let intro_started = match grid_index {
-            Some(index) if index < 24 => {
-                Some(*self.intro_seen.entry(id).or_insert_with(Instant::now))
-            }
-            _ => None,
-        };
+            CARD_INTRO_SECS + grid_index.min(CARD_STAGGER_MAX) as f32 * CARD_STAGGER_SECS;
+        let intro_started =
+            (grid_index < 24).then(|| *self.intro_seen.entry(id).or_insert_with(Instant::now));
         let intro = intro_started.is_some_and(|started| {
             Instant::now().duration_since(started).as_secs_f32() < intro_total
         });
@@ -1986,11 +2040,7 @@ impl App {
         // wrapper mounted for the card's lifetime: removing it when the intro
         // ends would change the hover animation's ancestor path and remount it,
         // causing a 4 px settle without a hover.
-        let cell = div()
-            .relative()
-            .when(grid_index.is_some(), |this| this.flex_1().min_w_0())
-            .when(grid_index.is_none(), |this| this.w(px(190.)))
-            .child(card);
+        let cell = div().relative().flex_1().min_w_0().child(card);
 
         cell.with_animation(
             SharedString::from(format!("card-intro-{grid_epoch}-{id}")),
@@ -2002,7 +2052,7 @@ impl App {
             .with_max_fps(60.0),
             move |el, t| {
                 if intro {
-                    let value = stagger_value(t, intro_index);
+                    let value = stagger_value(t, grid_index);
                     el.opacity(value).relative().top(px(14.0 * (1.0 - value)))
                 } else {
                     el
@@ -3446,84 +3496,32 @@ impl App {
     }
 
     fn search_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if self.search_results.is_none() {
-            let filters = self.search_filter_panel(cx);
-            let message = self.message.clone();
-            let total = self.search_view.index.total;
-            return h_flex()
-                .flex_1()
-                .min_h_0()
-                .items_stretch()
-                .child(filters)
-                .child(
-                    v_flex()
-                        .flex_1()
-                        .min_w_0()
-                        .min_h_0()
-                        .h_full()
-                        .px(px(26.))
-                        .pt(px(26.))
-                        .pb(px(26.))
-                        .gap(px(18.))
-                        .child(
-                            v_flex()
-                                .flex_shrink_0()
-                                .gap(px(4.))
-                                .child(
-                                    h_flex()
-                                        .items_center()
-                                        .gap(px(8.))
-                                        .child(
-                                            div()
-                                                .text_size(px(24.))
-                                                .font_semibold()
-                                                .text_color(rgb(TEXT))
-                                                .child(format!("{total} 枚")),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_size(px(10.))
-                                                .text_color(rgb(MUTED_2))
-                                                .child("検索結果"),
-                                        ),
-                                )
-                                .when_some(message, |this, message| {
-                                    this.child(
-                                        div()
-                                            .text_size(px(10.))
-                                            .text_color(rgb(AMBER))
-                                            .truncate()
-                                            .child(message),
-                                    )
-                                }),
-                        )
-                        .child(self.photo_grid(true, window, cx)),
-                )
-                .into_any_element();
-        }
-        let results = self.search_results.clone().unwrap_or_default();
+        let filters = self.search_filter_panel(cx);
         let message = self.message.clone();
-        let cards: Vec<AnyElement> = results
-            .iter()
-            .map(|photo| self.photo_card(photo, PhotoCardLayout::Fixed, cx))
-            .collect();
+        let total = self.search_view.index.total;
+        let count = if self.searching {
+            "検索中…".to_string()
+        } else {
+            format!("{total} 枚")
+        };
         h_flex()
             .flex_1()
             .min_h_0()
             .items_stretch()
-            .child(self.search_filter_panel(cx))
+            .child(filters)
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
+                    .min_h_0()
                     .h_full()
-                    .overflow_y_scrollbar()
                     .px(px(26.))
                     .pt(px(26.))
                     .pb(px(26.))
                     .gap(px(18.))
                     .child(
                         v_flex()
+                            .flex_shrink_0()
                             .gap(px(4.))
                             .child(
                                 h_flex()
@@ -3534,7 +3532,7 @@ impl App {
                                             .text_size(px(24.))
                                             .font_semibold()
                                             .text_color(rgb(TEXT))
-                                            .child(format!("{} 枚", results.len())),
+                                            .child(count),
                                     )
                                     .child(
                                         div()
@@ -3553,16 +3551,7 @@ impl App {
                                 )
                             }),
                     )
-                    .child(h_flex().flex_wrap().gap(px(16.)).children(cards))
-                    .when(results.is_empty(), |this| {
-                        this.child(
-                            glass_panel()
-                                .p(px(20.))
-                                .text_size(px(12.))
-                                .text_color(rgb(MUTED))
-                                .child("条件に一致する写真がありません"),
-                        )
-                    }),
+                    .child(self.photo_grid(true, window, cx)),
             )
             .into_any_element()
     }
@@ -3649,21 +3638,8 @@ impl App {
                             .label("クリア")
                             .small()
                             .secondary()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.search_results = None;
-                                // The grid falls back to the library snapshot;
-                                // drop any search pages and stale generation.
-                                let index = this.library.index.clone();
-                                this.search_view.replace_index(index);
-                                cx.notify();
-                            })),
+                            .on_click(cx.listener(|this, _, _, cx| this.clear_search(cx))),
                     ),
-            )
-            .child(
-                div()
-                    .text_size(px(10.))
-                    .text_color(rgb(MUTED_2))
-                    .child("結果は最大300枚です"),
             )
             .into_any_element()
     }
