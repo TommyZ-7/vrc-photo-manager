@@ -19,8 +19,8 @@ use smallvec::SmallVec;
 use vrc_photo_core::db::Db;
 use vrc_photo_core::importer::{self, ImportMode};
 use vrc_photo_core::model::{
-    CompressionFormat, CompressionProfile, Derivative, LibraryStats, NewPhoto, Photo, PhotoContext,
-    PhotoIndexEntry, PhotoPlayer, PhotoSort, PhotoTextFilter, QueueStatus,
+    CompressionFormat, CompressionProfile, DaemonError, Derivative, LibraryStats, NewPhoto, Photo,
+    PhotoContext, PhotoIndexEntry, PhotoPlayer, PhotoSort, PhotoTextFilter, QueueStatus,
 };
 use vrc_photo_core::settings::AppSettings;
 use vrc_photo_core::thumbnail;
@@ -99,7 +99,7 @@ struct ButtonState {
     enabled: bool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Screen {
     Photos,
     Compression,
@@ -1101,6 +1101,8 @@ pub struct App {
     stats: LibraryStats,
     settings: AppSettings,
     jobs: Vec<vrc_photo_core::model::CompressionJob>,
+    daemon_errors: Vec<DaemonError>,
+    failed_job_count: i64,
     monitor_world: Option<String>,
     monitor_instance: Option<String>,
     monitor_players: Vec<String>,
@@ -1234,6 +1236,8 @@ impl App {
             stats: LibraryStats::default(),
             settings: AppSettings::default(),
             jobs: Vec::new(),
+            daemon_errors: Vec::new(),
+            failed_job_count: 0,
             monitor_world: None,
             monitor_instance: None,
             monitor_players: Vec::new(),
@@ -1312,9 +1316,7 @@ impl App {
         if let Ok(stats) = self.db.stats() {
             self.stats = stats;
         }
-        if let Ok(jobs) = self.db.list_jobs(20) {
-            self.jobs = jobs;
-        }
+        self.reload_job_state();
         self.refresh_monitor();
         if let Some(id) = self.selected {
             self.load_selected_meta(id);
@@ -1342,6 +1344,15 @@ impl App {
         cx.notify();
     }
 
+    fn reload_job_state(&mut self) {
+        self.jobs = self.db.list_jobs(20).unwrap_or_else(|error| {
+            tracing::warn!(%error, "cannot load recent compression jobs");
+            Vec::new()
+        });
+        self.failed_job_count = self.db.count_jobs(QueueStatus::Failed).unwrap_or(0);
+        self.daemon_errors = self.db.daemon_errors().unwrap_or_default();
+    }
+
     fn ensure_profiles(&mut self) {
         self.profiles = self.db.ensure_default_profiles().unwrap_or_default();
     }
@@ -1359,7 +1370,7 @@ impl App {
             .unwrap_or_default()
             .into_iter()
             .collect();
-        self.jobs = self.db.list_jobs(20).unwrap_or_default();
+        self.reload_job_state();
         self.settings = AppSettings::load(&self.db).unwrap_or_default();
         cx.set_reduce_motion(self.settings.ui_reduce_motion);
         self.refresh_monitor();
@@ -2588,14 +2599,74 @@ impl App {
             .into_any_element()
     }
 
+    /// One compact row per failure domain. Detail text stays on the target
+    /// screen so the bar never truncates the actual reason.
+    fn global_alerts(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        alert_summaries(self.failed_job_count, self.daemon_errors.len(), 0)
+            .into_iter()
+            .map(|(target, message)| {
+                let (id, action) = match target {
+                    Screen::Photos => ("alert-photos", "写真を開く"),
+                    Screen::Compression => ("alert-compression", "圧縮を開く"),
+                    Screen::Search => ("alert-search", "検索を開く"),
+                    Screen::Monitor => ("alert-monitor", "ログ監視を開く"),
+                    Screen::Settings => ("alert-settings", "設定を開く"),
+                };
+                h_flex()
+                    .flex_shrink_0()
+                    .w_full()
+                    .items_center()
+                    .gap(px(10.))
+                    .px(px(26.))
+                    .py(px(8.))
+                    .bg(rgb(PANEL))
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .w(px(6.))
+                            .h(px(6.))
+                            .rounded_full()
+                            .bg(rgb(RED)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(11.))
+                            .text_color(rgb(RED))
+                            .child(message),
+                    )
+                    .child(
+                        Button::new(id)
+                            .label(action)
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.switch_screen(target, cx);
+                            })),
+                    )
+                    .into_any_element()
+            })
+            .collect()
+    }
+
     fn content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        match self.screen {
+        let screen = match self.screen {
             Screen::Photos => self.photos_screen(window, cx).into_any_element(),
             Screen::Compression => self.compression_screen(cx).into_any_element(),
             Screen::Search => self.search_screen(window, cx).into_any_element(),
             Screen::Monitor => self.monitor_screen(cx).into_any_element(),
             Screen::Settings => self.settings_screen(cx).into_any_element(),
-        }
+        };
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .children(self.global_alerts(cx))
+            .child(screen)
+            .into_any_element()
     }
 
     fn photos_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -6083,6 +6154,35 @@ fn format_count(value: i64) -> String {
     }
 }
 
+/// Compact, ordered summaries of every failure that deserves a global alert.
+/// The target screen owns the detail, so the bar only carries the count.
+fn alert_summaries(
+    failed_jobs: i64,
+    daemon_errors: usize,
+    import_failed: usize,
+) -> Vec<(Screen, String)> {
+    let mut rows = Vec::new();
+    if failed_jobs > 0 {
+        rows.push((
+            Screen::Compression,
+            format!("圧縮に {failed_jobs} 件の失敗があります"),
+        ));
+    }
+    if daemon_errors > 0 {
+        rows.push((
+            Screen::Monitor,
+            format!("デーモンで {daemon_errors} 件の処理エラーがあります"),
+        ));
+    }
+    if import_failed > 0 {
+        rows.push((
+            Screen::Photos,
+            format!("取り込みで {import_failed} 件失敗しました"),
+        ));
+    }
+    rows
+}
+
 fn average_bgra(bytes: &[u8]) -> u32 {
     let mut blue = 0u64;
     let mut green = 0u64;
@@ -6453,10 +6553,10 @@ mod tests {
     // `gpui_kit::*`, shadowing the built-in `#[test]` and recursing forever.
     use super::{
         CountDebounce, DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH,
-        MAX_PAGES, PAGE_SIZE, PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex, PhotoPageCache,
-        THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, YearBucket, anchor_photo_id,
-        apply_library_index, average_bgra, build_year_buckets, decode_thumbnail, demo_thumb_path,
-        ease_motion, first_visible_photo, format_captured_month, format_count,
+        MAX_PAGES, PAGE_SIZE, PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex, PhotoPageCache, Screen,
+        THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, YearBucket, alert_summaries,
+        anchor_photo_id, apply_library_index, average_bgra, build_year_buckets, decode_thumbnail,
+        demo_thumb_path, ease_motion, first_visible_photo, format_captured_month, format_count,
         grid_available_width, grid_columns, grid_columns_for, has_tag_filter, lerp_color,
         list_scroll_top, moved_profile_order, next_focus_index, normalize_note, parse_args,
         parse_window_size, rail_label_hidden_by_pill, rail_row_at, rail_scroll_offset, rail_y,
@@ -6537,6 +6637,16 @@ mod tests {
         assert_eq!(format_count(1_234), "1,234");
         assert_eq!(format_count(12_842), "12.8k");
         assert_eq!(format_count(100_000), "100k");
+    }
+
+    #[test]
+    fn alert_summaries_follow_priority_order() {
+        let rows = alert_summaries(2, 1, 3);
+        assert_eq!(rows[0].0, Screen::Compression);
+        assert!(rows[0].1.contains("2"));
+        assert_eq!(rows[1].0, Screen::Monitor);
+        assert_eq!(rows[2].0, Screen::Photos);
+        assert!(alert_summaries(0, 0, 0).is_empty());
     }
 
     #[test]
