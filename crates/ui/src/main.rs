@@ -4505,6 +4505,29 @@ impl App {
         cx.notify();
     }
 
+    fn duplicate_profile(&mut self, cx: &mut Context<Self>) {
+        let Some(profile) = self.profiles.get(self.profile_index) else {
+            return;
+        };
+        let id = profile.id.clone();
+        match self.db.duplicate_profile(&id) {
+            Ok(copy) => {
+                self.profiles = self.db.list_profiles().unwrap_or_default();
+                self.profile_index = self
+                    .profiles
+                    .iter()
+                    .position(|profile| profile.id == copy.id)
+                    .unwrap_or(0);
+                self.message = Some(format!(
+                    "「{}」を複製しました（自動適用はOFF）",
+                    copy.name
+                ));
+            }
+            Err(error) => self.message = Some(format!("複製に失敗: {error}")),
+        }
+        cx.notify();
+    }
+
     fn profile_editor(
         &self,
         profile: &CompressionProfile,
@@ -4530,6 +4553,15 @@ impl App {
                     )
                     .child(self.badge(&format_label(&profile.format), BLUE, 0x14283d))
                     .child(div().flex_1())
+                    .child(
+                        Button::new("duplicate-profile")
+                            .label("複製")
+                            .small()
+                            .ghost()
+                            .on_click(
+                                cx.listener(|this, _, _, cx| this.duplicate_profile(cx)),
+                            ),
+                    )
                     .child(
                         Switch::new("profile-auto")
                             .checked(profile.auto_enabled)
