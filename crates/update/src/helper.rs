@@ -1,11 +1,498 @@
-use std::fs::OpenOptions;
-use std::io::Write;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::error::{Result, UpdateError};
-use crate::install::UpdatePaths;
+use crate::install::{ApplyJob, ApplyKind, UpdatePaths};
+use crate::verify::{decode_signature_base64, effective_public_keys, verify_file};
+
+/// Timeouts for the helper. Tests may skip the signature check to exercise
+/// launch/rollback with generated scripts.
+#[derive(Debug, Clone)]
+pub struct HelperOptions {
+    pub exit_timeout: Duration,
+    pub health_timeout: Duration,
+    #[cfg(test)]
+    pub skip_signature_check: bool,
+}
+
+impl Default for HelperOptions {
+    fn default() -> Self {
+        Self {
+            exit_timeout: Duration::from_secs(30),
+            health_timeout: Duration::from_secs(45),
+            #[cfg(test)]
+            skip_signature_check: false,
+        }
+    }
+}
+
+/// Applies the job with production timeouts.
+pub fn run_helper(job_path: &Path) -> Result<()> {
+    run_helper_with_options(job_path, HelperOptions::default())
+}
+
+/// Reads the job, waits for the old processes, applies the update, verifies
+/// the new UI's health marker, and rolls back on failure.
+pub fn run_helper_with_options(job_path: &Path, options: HelperOptions) -> Result<()> {
+    let bytes = std::fs::read(job_path).map_err(|error| UpdateError::io(job_path, error))?;
+    let job: ApplyJob = serde_json::from_slice(&bytes)
+        .map_err(|error| UpdateError::InvalidJob(format!("cannot parse apply job: {error}")))?;
+    job.validate()?;
+
+    let paths = UpdatePaths::new(&job.data_dir);
+    paths.ensure()?;
+    log(
+        &paths,
+        &format!(
+            "apply start: {} -> {} ({:?})",
+            job.from_version, job.to_version, job.kind
+        ),
+    );
+    let _lock = acquire_lock(&paths)?;
+
+    if !wait_for_process_exit(job.ui_pid, options.exit_timeout) {
+        return abort_before_apply(
+            &paths,
+            &job,
+            job_path,
+            "the UI did not exit before the update timeout",
+        );
+    }
+    if let Some(daemon_pid) = job.daemon_pid
+        && !wait_for_process_exit(daemon_pid, options.exit_timeout)
+    {
+        return abort_before_apply(
+            &paths,
+            &job,
+            job_path,
+            "the daemon did not exit before the update timeout",
+        );
+    }
+
+    if let Err(error) = verify_staged(&job, &options) {
+        log(
+            &paths,
+            &format!("staged artifact verification failed: {error}"),
+        );
+        let _ = LastResult::write(
+            &paths,
+            &LastResult {
+                status: LastStatus::Failed,
+                from: job.from_version.clone(),
+                to: job.to_version.clone(),
+                reason: Some(error.to_string()),
+            },
+        );
+        relaunch_old(&paths, &job);
+        cleanup(&paths, &job, job_path);
+        return Err(error);
+    }
+
+    let backup = match apply(&paths, &job) {
+        Ok(backup) => backup,
+        Err(error) => {
+            log(&paths, &format!("apply failed: {error}"));
+            let _ = LastResult::write(
+                &paths,
+                &LastResult {
+                    status: LastStatus::Failed,
+                    from: job.from_version.clone(),
+                    to: job.to_version.clone(),
+                    reason: Some(error.to_string()),
+                },
+            );
+            relaunch_old(&paths, &job);
+            cleanup(&paths, &job, job_path);
+            return Err(error);
+        }
+    };
+
+    let _ = LastResult::write(
+        &paths,
+        &LastResult {
+            status: LastStatus::Success,
+            from: job.from_version.clone(),
+            to: job.to_version.clone(),
+            reason: None,
+        },
+    );
+
+    let mut child = match launch(&job.target, &job.restart_args, Some(&job.health_token)) {
+        Ok(child) => child,
+        Err(error) => {
+            log(&paths, &format!("cannot launch the new version: {error}"));
+            restore(&job, &backup)?;
+            let _ = LastResult::write(
+                &paths,
+                &LastResult {
+                    status: LastStatus::RolledBack,
+                    from: job.from_version.clone(),
+                    to: job.to_version.clone(),
+                    reason: Some(error.to_string()),
+                },
+            );
+            relaunch_old(&paths, &job);
+            cleanup(&paths, &job, job_path);
+            return Err(error);
+        }
+    };
+
+    match wait_for_health(
+        &paths,
+        &job.health_token,
+        &job.to_version,
+        &mut child,
+        options.health_timeout,
+    ) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(paths.health_file(&job.health_token));
+            log(&paths, "update healthy");
+            cleanup(&paths, &job, job_path);
+            Ok(())
+        }
+        Err(error) => {
+            log(&paths, &format!("health check failed: {error}"));
+            let _ = child.kill();
+            let _ = child.wait();
+            restore(&job, &backup)?;
+            let _ = LastResult::write(
+                &paths,
+                &LastResult {
+                    status: LastStatus::RolledBack,
+                    from: job.from_version.clone(),
+                    to: job.to_version.clone(),
+                    reason: Some(error.to_string()),
+                },
+            );
+            relaunch_old(&paths, &job);
+            cleanup(&paths, &job, job_path);
+            Err(error)
+        }
+    }
+}
+
+fn abort_before_apply(
+    paths: &UpdatePaths,
+    job: &ApplyJob,
+    job_path: &Path,
+    reason: &str,
+) -> Result<()> {
+    log(paths, reason);
+    let _ = LastResult::write(
+        paths,
+        &LastResult {
+            status: LastStatus::RolledBack,
+            from: job.from_version.clone(),
+            to: job.to_version.clone(),
+            reason: Some(reason.to_string()),
+        },
+    );
+    relaunch_old(paths, job);
+    cleanup(paths, job, job_path);
+    Err(UpdateError::Other(reason.to_string()))
+}
+
+fn verify_staged(job: &ApplyJob, options: &HelperOptions) -> Result<()> {
+    #[cfg(not(test))]
+    let _ = options;
+    if !job.staged.is_file() {
+        return Err(UpdateError::io(
+            &job.staged,
+            std::io::ErrorKind::NotFound.into(),
+        ));
+    }
+    let digest = sha256_file(&job.staged)?;
+    if !digest.eq_ignore_ascii_case(&job.sha256) {
+        return Err(UpdateError::Integrity(
+            "staged artifact SHA-256 does not match the job".to_string(),
+        ));
+    }
+    #[cfg(test)]
+    if options.skip_signature_check {
+        return Ok(());
+    }
+    let signature = decode_signature_base64(&job.signature)?;
+    verify_file(&job.staged, &signature, &effective_public_keys())
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = File::open(path).map_err(|error| UpdateError::io(path, error))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| UpdateError::io(path, error))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+enum Backup {
+    AppImage(PathBuf),
+    #[cfg_attr(not(windows), allow(dead_code))]
+    Windows(PathBuf),
+}
+
+fn apply(paths: &UpdatePaths, job: &ApplyJob) -> Result<Backup> {
+    match job.kind {
+        ApplyKind::AppImage => replace_appimage(&job.target, &job.staged).map(Backup::AppImage),
+        ApplyKind::Windows => {
+            #[cfg(windows)]
+            {
+                apply_windows(paths, job).map(Backup::Windows)
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = paths;
+                Err(UpdateError::Other(
+                    "Windows updates cannot be applied on this platform".to_string(),
+                ))
+            }
+        }
+    }
+}
+
+fn restore(job: &ApplyJob, backup: &Backup) -> Result<()> {
+    match backup {
+        Backup::AppImage(path) => restore_appimage(&job.target, path),
+        Backup::Windows(_) => {
+            #[cfg(windows)]
+            {
+                let install_dir = job.target.parent().ok_or_else(|| {
+                    UpdateError::InvalidJob("Windows target has no parent".to_string())
+                })?;
+                restore_windows(path, install_dir)
+            }
+            #[cfg(not(windows))]
+            {
+                Err(UpdateError::Other(
+                    "a Windows backup cannot be restored on this platform".to_string(),
+                ))
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn apply_windows(paths: &UpdatePaths, job: &ApplyJob) -> Result<PathBuf> {
+    let install_dir = job
+        .target
+        .parent()
+        .ok_or_else(|| UpdateError::InvalidJob("Windows target has no parent".to_string()))?;
+    let backup = paths.backup_dir(&job.from_version);
+    std::fs::create_dir_all(&backup).map_err(|error| UpdateError::io(&backup, error))?;
+    for name in ["vrc-photo-manager.exe", "vrc-photo-daemon.exe"] {
+        let source = install_dir.join(name);
+        if source.is_file() {
+            std::fs::copy(&source, backup.join(name))
+                .map_err(|error| UpdateError::io(&source, error))?;
+        }
+    }
+
+    let mut child = Command::new(&job.staged)
+        .arg("/S")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| UpdateError::io(&job.staged, error))?;
+    let status = wait_for_exit(&mut child, Duration::from_secs(10 * 60))?;
+    if !status.success() {
+        restore_windows(&backup, install_dir)?;
+        return Err(UpdateError::Other(format!(
+            "the installer exited with {status}"
+        )));
+    }
+    if !job.target.is_file() {
+        restore_windows(&backup, install_dir)?;
+        return Err(UpdateError::Other(
+            "the installer did not leave the UI executable in place".to_string(),
+        ));
+    }
+    Ok(backup)
+}
+
+#[cfg(windows)]
+fn restore_windows(backup: &Path, install_dir: &Path) -> Result<()> {
+    for name in ["vrc-photo-manager.exe", "vrc-photo-daemon.exe"] {
+        let source = backup.join(name);
+        if source.is_file() {
+            let target = install_dir.join(name);
+            std::fs::copy(&source, &target).map_err(|error| UpdateError::io(&target, error))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn wait_for_exit(child: &mut Child, timeout: Duration) -> Result<std::process::ExitStatus> {
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| UpdateError::Other(error.to_string()))?
+        {
+            return Ok(status);
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(UpdateError::Other(
+                "the installer did not finish in time".to_string(),
+            ));
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+}
+
+fn launch(target: &Path, args: &[String], health_token: Option<&str>) -> Result<Child> {
+    let mut command = Command::new(target);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(token) = health_token {
+        command.env("VRC_PHOTO_HEALTH_TOKEN", token);
+    }
+    command
+        .spawn()
+        .map_err(|error| UpdateError::io(target, error))
+}
+
+fn relaunch_old(paths: &UpdatePaths, job: &ApplyJob) {
+    if let Err(error) = launch(&job.target, &job.restart_args, None) {
+        log(
+            paths,
+            &format!("cannot relaunch the previous version: {error}"),
+        );
+    }
+}
+
+fn cleanup(paths: &UpdatePaths, job: &ApplyJob, job_path: &Path) {
+    let _ = std::fs::remove_file(&job.staged);
+    let _ = std::fs::remove_file(job_path);
+    let _ = std::fs::remove_file(paths.health_file(&job.health_token));
+}
+
+/// Returns true when the process exits before the timeout.
+pub fn wait_for_process_exit(pid: u32, timeout: Duration) -> bool {
+    if pid == 0 {
+        return true;
+    }
+    let started = Instant::now();
+    loop {
+        if !process_alive(pid) {
+            return true;
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= timeout {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(250).min(timeout - elapsed));
+    }
+}
+
+/// Waits for the new UI's health marker and verifies its version.
+pub fn wait_for_health(
+    paths: &UpdatePaths,
+    token: &str,
+    expected: &str,
+    child: &mut Child,
+    timeout: Duration,
+) -> Result<()> {
+    let started = Instant::now();
+    loop {
+        match read_health_marker(paths, token)? {
+            Some(marker) if marker.version == expected && marker.mode == "normal" => {
+                return Ok(());
+            }
+            Some(marker) => {
+                return Err(UpdateError::Other(format!(
+                    "health marker reported version {} instead of {expected}",
+                    marker.version
+                )));
+            }
+            None => {}
+        }
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| UpdateError::Other(error.to_string()))?
+        {
+            return Err(UpdateError::Other(format!(
+                "the new version exited before becoming healthy ({status})"
+            )));
+        }
+        if started.elapsed() >= timeout {
+            return Err(UpdateError::Other(
+                "timed out waiting for the new version to become healthy".to_string(),
+            ));
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+}
+
+struct LockGuard {
+    path: PathBuf,
+}
+
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn acquire_lock(paths: &UpdatePaths) -> Result<LockGuard> {
+    let path = paths.lock_file();
+    for attempt in 0..2 {
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                write!(file, "{}", std::process::id())
+                    .map_err(|error| UpdateError::io(&path, error))?;
+                file.sync_all()
+                    .map_err(|error| UpdateError::io(&path, error))?;
+                return Ok(LockGuard { path });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempt == 0 => {
+                if apply_in_progress(paths) {
+                    return Err(UpdateError::Other(
+                        "another update is already being applied".to_string(),
+                    ));
+                }
+            }
+            Err(error) => return Err(UpdateError::io(&path, error)),
+        }
+    }
+    Err(UpdateError::Other(
+        "cannot acquire the update lock".to_string(),
+    ))
+}
+
+fn log(paths: &UpdatePaths, message: &str) {
+    let path = paths.log_file();
+    if std::fs::metadata(&path).is_ok_and(|metadata| metadata.len() > 1024 * 1024) {
+        let rotated = path.with_extension("log.1");
+        let _ = std::fs::rename(&path, rotated);
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(file, "[{}] {message}", Utc::now().to_rfc3339());
+    }
+}
 
 /// The result of the last apply attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -221,9 +708,12 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::time::Duration;
+
+    use sha2::Digest;
 
     use super::*;
-    use crate::install::UpdatePaths;
+    use crate::install::{APPLY_SCHEMA, ApplyJob, ApplyKind, UpdatePaths};
 
     fn paths(dir: &Path) -> UpdatePaths {
         let paths = UpdatePaths::new(dir);
@@ -318,5 +808,196 @@ mod tests {
         std::fs::write(paths.lock_file(), dead_pid.to_string()).unwrap();
         assert!(!apply_in_progress(&paths));
         assert!(!paths.lock_file().exists());
+    }
+
+    #[cfg(unix)]
+    fn dead_pid() -> u32 {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
+    }
+
+    #[test]
+    fn waits_for_a_process_to_exit_with_a_bound() {
+        let mut child = if cfg!(windows) {
+            let mut command = std::process::Command::new("cmd");
+            command.args(["/C", "exit 0"]);
+            command.spawn().unwrap()
+        } else {
+            std::process::Command::new("true").spawn().unwrap()
+        };
+        let pid = child.id();
+        child.wait().unwrap();
+        assert!(wait_for_process_exit(pid, Duration::from_secs(2)));
+        assert!(!wait_for_process_exit(
+            std::process::id(),
+            Duration::from_millis(100)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn health_marker_must_match_the_expected_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        let mut child = std::process::Command::new("sleep")
+            .arg("2")
+            .spawn()
+            .unwrap();
+
+        write_health_marker(&paths, "token", "9.9.9").unwrap();
+        assert!(
+            wait_for_health(&paths, "token", "9.9.9", &mut child, Duration::from_secs(1)).is_ok()
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+
+        write_health_marker(&paths, "wrong", "8.8.8").unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("2")
+            .spawn()
+            .unwrap();
+        assert!(
+            wait_for_health(&paths, "wrong", "9.9.9", &mut child, Duration::from_secs(1)).is_err()
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("2")
+            .spawn()
+            .unwrap();
+        assert!(
+            wait_for_health(
+                &paths,
+                "missing",
+                "9.9.9",
+                &mut child,
+                Duration::from_millis(100)
+            )
+            .is_err()
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[cfg(unix)]
+    fn make_executable(path: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn integration_job(dir: &Path, staged: &Path, token: &str) -> ApplyJob {
+        let target = dir.join("app.AppImage");
+        if !target.exists() {
+            std::fs::write(&target, "#!/bin/sh\nexit 0\n").unwrap();
+            make_executable(&target);
+        }
+        let bytes = std::fs::read(staged).unwrap();
+        ApplyJob {
+            schema: APPLY_SCHEMA,
+            kind: ApplyKind::AppImage,
+            from_version: "0.3.0".to_string(),
+            to_version: "9.9.9".to_string(),
+            target,
+            staged: staged.to_path_buf(),
+            signature: "c2ln".to_string(),
+            sha256: hex::encode(sha2::Sha256::digest(&bytes)),
+            ui_pid: dead_pid(),
+            daemon_pid: None,
+            restart_args: Vec::new(),
+            health_token: token.to_string(),
+            data_dir: dir.to_path_buf(),
+            created_at: "2026-10-24T12:00:00Z".to_string(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn applies_an_appimage_when_the_health_marker_appears() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = "token-success";
+        let marker_path = dir
+            .path()
+            .join("updates")
+            .join(format!("health-{token}.json"));
+        let new_script = dir.path().join("new.AppImage");
+        std::fs::write(
+            &new_script,
+            format!(
+                "#!/bin/sh\nmkdir -p '{}'\nprintf '%s' '{{\"version\":\"9.9.9\",\"mode\":\"normal\"}}' > '{}'\nsleep 0.2\n",
+                marker_path.parent().unwrap().display(),
+                marker_path.display()
+            ),
+        )
+        .unwrap();
+        make_executable(&new_script);
+
+        let job = integration_job(dir.path(), &new_script, token);
+        let new_content = std::fs::read_to_string(&new_script).unwrap();
+        let job_file = dir.path().join("updates/job.json");
+        std::fs::create_dir_all(job_file.parent().unwrap()).unwrap();
+        std::fs::write(&job_file, serde_json::to_vec(&job).unwrap()).unwrap();
+        let target = job.target.clone();
+
+        run_helper_with_options(
+            &job_file,
+            HelperOptions {
+                health_timeout: Duration::from_secs(3),
+                skip_signature_check: true,
+                ..HelperOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), new_content);
+        assert!(target.with_file_name("app.AppImage.previous").exists());
+        assert!(!job_file.exists());
+        let result = LastResult::read(&UpdatePaths::new(dir.path())).unwrap();
+        assert_eq!(result.status, LastStatus::Success);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restores_the_previous_appimage_when_the_new_one_exits() {
+        let dir = tempfile::tempdir().unwrap();
+        let sentinel = dir.path().join("old-ran");
+        let token = "token-failure";
+        let target = dir.path().join("app.AppImage");
+        let old_script = format!("#!/bin/sh\nprintf old > '{}'\n", sentinel.display());
+        std::fs::write(&target, &old_script).unwrap();
+        make_executable(&target);
+
+        let new_script = dir.path().join("new.AppImage");
+        std::fs::write(&new_script, "#!/bin/sh\nexit 0\n").unwrap();
+        make_executable(&new_script);
+
+        let mut job = integration_job(dir.path(), &new_script, token);
+        job.target = target.clone();
+        let job_file = dir.path().join("updates/job.json");
+        std::fs::create_dir_all(job_file.parent().unwrap()).unwrap();
+        std::fs::write(&job_file, serde_json::to_vec(&job).unwrap()).unwrap();
+
+        let error = run_helper_with_options(
+            &job_file,
+            HelperOptions {
+                health_timeout: Duration::from_secs(2),
+                skip_signature_check: true,
+                ..HelperOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, UpdateError::Other(_)));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !sentinel.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(sentinel.exists(), "the old target was not relaunched");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), old_script);
+        let result = LastResult::read(&UpdatePaths::new(dir.path())).unwrap();
+        assert_eq!(result.status, LastStatus::RolledBack);
+        assert!(!job_file.exists());
     }
 }

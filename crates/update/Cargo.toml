@@ -10,6 +10,10 @@ authors.workspace = true
 name = "vrc_photo_update"
 path = "src/lib.rs"
 
+[[bin]]
+name = "vrc-photo-updater"
+path = "src/bin/vrc-photo-updater.rs"
+
 [dependencies]
 base64.workspace = true
 chrono.workspace = true
