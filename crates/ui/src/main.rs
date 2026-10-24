@@ -1069,6 +1069,10 @@ pub struct App {
     inspector_epoch: u64,
     hovered_nav: Option<Screen>,
     daemon_age_secs: Option<i64>,
+    /// Last daemon-side library revision observed by the UI. Path changes and
+    /// replacement status changes do not alter the photo count, so the count
+    /// alone cannot tell the grid to rebuild.
+    last_library_revision: i64,
     library: PhotoBrowser,
     search_view: PhotoBrowser,
     /// The library index changed while another screen was mounted; the next
@@ -1086,6 +1090,7 @@ pub struct App {
     selected_tags: Vec<String>,
     selected_derivatives: Vec<Derivative>,
     compressed_ids: HashSet<i64>,
+    duplicate_ids: HashSet<i64>,
     thumbnails: ThumbnailCache,
     grid_epoch: u64,
     hovered_photo: Option<i64>,
@@ -1157,6 +1162,7 @@ impl App {
     fn new(window: &mut Window, cx: &mut Context<Self>, options: &LaunchOptions) -> Self {
         let (db, demo, mut message, demo_assets) = open_database(options);
         let initial_settings = AppSettings::load(&db).unwrap_or_default();
+        let initial_library_revision = db.library_revision().unwrap_or(0);
         cx.set_reduce_motion(initial_settings.ui_reduce_motion);
         let world_input = cx.new(|cx| InputState::new(window, cx).placeholder("ワールド名 / ID"));
         let player_input =
@@ -1211,6 +1217,7 @@ impl App {
             inspector_epoch: 0,
             hovered_nav: None,
             daemon_age_secs: None,
+            last_library_revision: initial_library_revision,
             library: PhotoBrowser::new(empty_index.clone()),
             search_view: PhotoBrowser::new(empty_index),
             library_dirty: false,
@@ -1224,6 +1231,7 @@ impl App {
             selected_tags: Vec::new(),
             selected_derivatives: Vec::new(),
             compressed_ids: HashSet::new(),
+            duplicate_ids: HashSet::new(),
             thumbnails: ThumbnailCache::default(),
             grid_epoch: 0,
             hovered_photo: None,
@@ -1336,6 +1344,7 @@ impl App {
 
     fn refresh_live(&mut self, cx: &mut Context<Self>) {
         let count = self.db.count_photos();
+        let revision = self.db.library_revision();
         if let Ok(stats) = self.db.stats() {
             self.stats = stats;
         }
@@ -1344,6 +1353,31 @@ impl App {
         if let Some(id) = self.selected {
             self.load_selected_meta(id);
         }
+
+        // Path rebinds and replacement status changes keep the same photo
+        // count. The daemon bumps this revision so the UI can invalidate its
+        // page cache even when `count_photos` is unchanged.
+        if let Ok(revision) = revision
+            && revision != self.last_library_revision
+        {
+            if self.screen == Screen::Photos {
+                if self.reload_library(true, cx) {
+                    self.last_library_revision = revision;
+                    self.count_debounce.reset();
+                } else {
+                    self.mark_library_dirty();
+                }
+            } else {
+                self.last_library_revision = revision;
+                self.mark_library_dirty();
+                if self.screen == Screen::Search
+                    && let Some(filter) = self.applied_search.clone()
+                {
+                    self.start_search(filter, cx);
+                }
+            }
+        }
+
         // Only compare counts when the query succeeds; treating a transient
         // error as zero used to blank the whole library.
         if let Ok(count) = count {
@@ -1459,6 +1493,15 @@ impl App {
             .compressed_photo_ids()
             .unwrap_or_else(|error| {
                 tracing::warn!(%error, "cannot load compressed photo ids");
+                Vec::new()
+            })
+            .into_iter()
+            .collect();
+        self.duplicate_ids = self
+            .db
+            .duplicate_photo_ids()
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "cannot load duplicate photo ids");
                 Vec::new()
             })
             .into_iter()
@@ -1673,7 +1716,7 @@ impl App {
         self.preview = self
             .selected_photo
             .as_ref()
-            .and_then(|photo| load_preview(id, Path::new(&photo.abs_path)));
+            .and_then(|photo| load_preview(id, Path::new(photo.effective_path())));
     }
 
     fn begin_note_edit(
@@ -1747,7 +1790,7 @@ impl App {
             return;
         }
         let id = photo.id;
-        let source = PathBuf::from(&photo.abs_path);
+        let source = PathBuf::from(photo.effective_path());
         let cache_path = match &self.demo_assets {
             Some(assets) => demo_thumb_path(assets, id),
             None => thumbnail::thumbnail_path(id).unwrap_or_default(),
@@ -2012,31 +2055,83 @@ impl App {
             return;
         };
         let id = photo.id;
-        let path = photo.abs_path.clone();
+        let effective_path = photo.effective_path().to_string();
+        let replaced = photo.is_replaced();
+
         if self.delete_armed != Some(id) {
             self.delete_armed = Some(id);
+            if !replaced
+                && let Ok(derivatives) = self.db.derivatives_for_photo(id)
+                && derivatives
+                    .iter()
+                    .any(|derivative| Path::new(&derivative.path).is_file())
+            {
+                self.message = Some(
+                    "もう一度押すと元画像を削除し、圧縮版をライブラリ表示に使います".to_string(),
+                );
+            }
             cx.notify();
             return;
         }
-        match trash::delete(&path) {
+
+        // A replaced photo's "original" is already gone; the effective path is
+        // the compressed derivative that the card is currently displaying.
+        let derivative_to_promote = if replaced {
+            None
+        } else {
+            self.db
+                .derivatives_for_photo(id)
+                .ok()
+                .and_then(|derivatives| {
+                    derivatives
+                        .into_iter()
+                        .find(|derivative| Path::new(&derivative.path).is_file())
+                })
+        };
+
+        if let Some(derivative) = &derivative_to_promote
+            && let Err(error) = self.db.set_replaced(id, derivative.id)
+        {
+            self.delete_armed = None;
+            self.message = Some(format!("圧縮版を表示に設定できません: {error}"));
+            cx.notify();
+            return;
+        }
+
+        match trash::delete(&effective_path) {
             Ok(_) => {
-                if let Err(error) = self.db.mark_missing(id) {
-                    tracing::warn!(%error, photo_id = id, "cannot mark trashed photo missing");
+                if derivative_to_promote.is_some() {
+                    // The row stays visible with the compressed derivative as
+                    // its display asset.
+                    self.delete_armed = None;
+                    let _ = self.db.bump_library_revision();
+                    self.reload_library(true, cx);
+                    self.message =
+                        Some("元画像をゴミ箱へ移動しました（圧縮版を表示中）".to_string());
+                } else {
+                    if let Err(error) = self.db.mark_missing(id) {
+                        tracing::warn!(%error, photo_id = id, "cannot mark trashed photo missing");
+                    }
+                    let _ = self.db.clear_display_derivative(id);
+                    let _ = self.db.bump_library_revision();
+                    self.library.remove_photo(id);
+                    self.search_view.remove_photo(id);
+                    self.thumbnails.unpin(id);
+                    self.selected = None;
+                    self.selected_photo = None;
+                    self.selected_players.clear();
+                    self.selected_tags.clear();
+                    self.selected_derivatives.clear();
+                    self.preview = None;
+                    self.delete_armed = None;
+                    self.message = Some("写真をゴミ箱へ移動しました".to_string());
+                    self.reload_aux(cx);
                 }
-                self.library.remove_photo(id);
-                self.search_view.remove_photo(id);
-                self.thumbnails.unpin(id);
-                self.selected = None;
-                self.selected_photo = None;
-                self.selected_players.clear();
-                self.selected_tags.clear();
-                self.selected_derivatives.clear();
-                self.preview = None;
-                self.delete_armed = None;
-                self.message = Some("写真をゴミ箱へ移動しました".to_string());
-                self.reload_aux(cx);
             }
             Err(error) => {
+                if derivative_to_promote.is_some() {
+                    let _ = self.db.restore_present(id);
+                }
                 self.delete_armed = None;
                 self.message = Some(format!("ゴミ箱へ移動できません: {error}"));
             }
@@ -3225,6 +3320,8 @@ impl App {
         let id = photo.id;
         let selected = self.selected == Some(id);
         let compressed = self.compressed_ids.contains(&id);
+        let duplicate = self.duplicate_ids.contains(&id);
+        let replaced = photo.is_replaced();
         let world = photo
             .world_name
             .clone()
@@ -3265,7 +3362,15 @@ impl App {
                     .size_full(),
             );
         }
-        let status_color = if compressed { GREEN } else { AMBER };
+        let status_color = if replaced {
+            BLUE
+        } else if duplicate {
+            MUTED
+        } else if compressed {
+            GREEN
+        } else {
+            AMBER
+        };
         thumb = thumb
             .child(
                 div()
@@ -3293,7 +3398,15 @@ impl App {
                             .text_size(px(9.))
                             .font_medium()
                             .text_color(rgb(status_color))
-                            .child(if compressed { "圧縮済" } else { "未圧縮" }),
+                            .child(if replaced {
+                                "圧縮版のみ"
+                            } else if duplicate {
+                                "重複"
+                            } else if compressed {
+                                "圧縮済"
+                            } else {
+                                "未圧縮"
+                            }),
                     ),
             )
             .when(photo.is_favorite, |this| {
@@ -3332,7 +3445,7 @@ impl App {
                         .child(format!(
                             "{} · {}",
                             short_date(&photo.captured_at_local),
-                            format_bytes(photo.file_size)
+                            format_bytes(photo.effective_file_size())
                         )),
                 ),
         );
@@ -3686,8 +3799,15 @@ impl App {
                 "インスタンス",
                 photo.instance_id.clone().unwrap_or_else(|| "—".to_string()),
             ))
-            .child(self.meta_row("解像度", format!("{} × {}", photo.width, photo.height)))
-            .child(self.meta_row("サイズ", format_bytes(photo.file_size)))
+            .child(self.meta_row(
+                "解像度",
+                format!(
+                    "{} × {}",
+                    photo.effective_dimensions().0,
+                    photo.effective_dimensions().1
+                ),
+            ))
+            .child(self.meta_row("サイズ", format_bytes(photo.effective_file_size())))
             .child(self.meta_row(
                 "取得元",
                 photo.link_method.clone().unwrap_or_else(|| "—".to_string()),
@@ -4126,8 +4246,15 @@ impl App {
                         photo.author.clone().unwrap_or_else(|| "—".to_string()),
                     ))
                     .child(self.meta_row("ファイル", photo.file_name.clone()))
-                    .child(self.meta_row("解像度", format!("{} × {}", photo.width, photo.height)))
-                    .child(self.meta_row("サイズ", format_bytes(photo.file_size))),
+                    .child(self.meta_row(
+                        "解像度",
+                        format!(
+                            "{} × {}",
+                            photo.effective_dimensions().0,
+                            photo.effective_dimensions().1
+                        ),
+                    ))
+                    .child(self.meta_row("サイズ", format_bytes(photo.effective_file_size()))),
             )
             .child(
                 v_flex()
@@ -4334,8 +4461,9 @@ impl App {
             )
             .child(details_button);
 
-        let aspect = if photo.height > 0 {
-            photo.width as f32 / photo.height as f32
+        let (photo_width, photo_height) = photo.effective_dimensions();
+        let aspect = if photo_height > 0 {
+            photo_width as f32 / photo_height as f32
         } else {
             16.0 / 9.0
         };
@@ -5495,7 +5623,8 @@ impl App {
                     let Ok(Some(photo)) = self.db.photo_by_id(*id) else {
                         continue;
                     };
-                    if let Err(error) = thumbnail::ensure_thumbnail(*id, Path::new(&photo.abs_path))
+                    if let Err(error) =
+                        thumbnail::ensure_thumbnail(*id, Path::new(photo.effective_path()))
                     {
                         tracing::warn!(%error, %id, "cannot generate thumbnail after import");
                     }
@@ -5514,6 +5643,11 @@ impl App {
             && let Some(error) = self.library_error.clone()
         {
             append_scan_error(report, error);
+        }
+        // The daemon may not have watched the new import destination yet.
+        // A rescan makes it reload settings and rebuild its recursive watchers.
+        if let Err(error) = self.db.request_daemon_command(DaemonCommand::Rescan) {
+            tracing::warn!(%error, "cannot request rescan for import destination");
         }
     }
 
@@ -6858,11 +6992,10 @@ fn decode_thumbnail(id: i64, cache_path: &Path, source: &Path) -> Option<(u32, i
             }
         }
     };
-    let mut buffer = match image::open(&path) {
-        Ok(image) => image.to_rgba8(),
-        Err(error) => {
+    let mut buffer = match vrc_photo_core::image_decode::decode_image(&path) {
+        Some(image) => image.to_rgba8(),
+        None => {
             tracing::warn!(
-                %error,
                 photo_id = id,
                 path = %path.display(),
                 "cannot decode thumbnail"
@@ -6892,11 +7025,10 @@ fn load_preview(id: i64, path: &Path) -> Option<Arc<RenderImage>> {
         );
         return None;
     }
-    let image = match image::open(path) {
-        Ok(image) => image.thumbnail(1200, 1200).to_rgba8(),
-        Err(error) => {
+    let image = match vrc_photo_core::image_decode::decode_image(path) {
+        Some(image) => image.thumbnail(1200, 1200).to_rgba8(),
+        None => {
             tracing::warn!(
-                %error,
                 photo_id = id,
                 path = %path.display(),
                 "cannot decode photo preview"
@@ -7973,6 +8105,12 @@ mod tests {
             status: PhotoStatus::Present,
             is_favorite: false,
             note: None,
+            display_derivative_id: None,
+            display_path: None,
+            display_format: None,
+            display_file_size: None,
+            display_width: None,
+            display_height: None,
             world_name: None,
             instance_id: None,
             link_method: None,

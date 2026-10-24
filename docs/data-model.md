@@ -26,7 +26,7 @@ PRAGMA busy_timeout = 5000;
 ```
 
 - `user_version` でスキーマバージョンを管理する。
-- 現在のバージョンは **4**。
+- 現在のバージョンは **5**。
 - マイグレーションは `Db::migrate` で起動時に自動実行する。
 
 ## 3. テーブル
@@ -51,7 +51,7 @@ PRAGMA busy_timeout = 5000;
 
 ### `photos`
 
-写真1枚。`abs_path` を同一性のキーにする。
+写真1枚。`abs_path` を元ファイルの同一性キーにしつつ、移動時は同じ `id` のパスを書き換える。
 
 | 列 | 型 | 説明 |
 |---|---|---|
@@ -66,10 +66,11 @@ PRAGMA busy_timeout = 5000;
 | width / height | INTEGER | ピクセル寸法 |
 | file_size | INTEGER | バイト |
 | mtime | INTEGER | ファイル更新時刻（epoch秒） |
-| blake3 | TEXT | 任意。現状は未計算 |
-| status | TEXT | `present` / `missing` |
+| blake3 | TEXT | 元画像のBLAKE3。移動・改名・重複判定に使う。未計算はNULL |
+| status | TEXT | `present` / `replaced` / `missing` |
 | is_favorite | INTEGER | 0/1 |
 | note | TEXT | メモ |
+| display_derivative_id | INTEGER FK | `replaced` のとき表示に使う `derivatives.id` |
 | created_at / updated_at | TEXT | RFC3339 |
 
 制約:
@@ -81,9 +82,10 @@ PRAGMA busy_timeout = 5000;
 
 ```sql
 idx_photos_captured(captured_at_utc DESC)
-idx_photos_captured_id(captured_at_utc DESC, id DESC) WHERE status = 'present'
+idx_photos_captured_id(captured_at_utc DESC, id DESC) WHERE status IN ('present', 'replaced')
 idx_photos_favorite(is_favorite) WHERE is_favorite = 1
 idx_photos_blake3(blake3)
+idx_photos_move_match(status, file_size, captured_at_utc)
 ```
 
 ### `worlds`
@@ -274,6 +276,7 @@ UIからデーモンへの再実行要求。FIFOの小さなキュー。
 |---|---|
 | `app_settings` | `AppSettings` のJSON |
 | `daemon_heartbeat` | デーモンの最終ハートビート（epoch秒） |
+| `library_revision` | 一覧変更の単調増加カウンタ。UIのページキャッシュ無効化に使う |
 
 `daemon_heartbeat` は従来どおりUIの稼働判定に使う。処理エラーの表示と再実行要求は `daemon_errors` / `daemon_commands` に分離し、`app_settings` には入れない。
 
@@ -287,15 +290,16 @@ estimated_link, thumbnail_cache_mb, compression_workers
 
 ## 4. 不変条件
 
-1. `photos.abs_path` は一意。移動したファイルは別写真として扱う（将来はblake3で同一性判定）。
-2. `photos.status='missing'` の写真はUI一覧に出さない。DBからは消さない。
+1. `photos.abs_path` は一意。移動はBLAKE3またはファイル名・サイズ・寸法・撮影時刻の一致で同じ `id` に再結合する。コピーは別写真として残す。
+2. `photos.status='missing'` の写真はUI一覧に出さない。DBからは消さない。`replaced` は圧縮版を表示するため一覧に出す。
 3. `photo_context` は写真ごとに1行。再紐付けはUPSERTで上書きする。
 4. `derivatives.path` は一意。圧縮出力は既存ファイルを上書きしない。
 5. `compression_jobs` は `pending` のものを1件ずつ原子的に取得する。
-6. 写真削除はDB削除ではなく `status='missing'` とOSゴミ箱移動。
+6. 写真削除はDB削除ではなく `status='missing'` とOSゴミ箱移動。圧縮版が残っている場合は `replaced` として表示を継続する。
 7. 生ログは保存しない。解析済みイベントのみ保存する。
 8. `daemon_errors` は操作（`scan` / `log` / `link`）ごとに1行だけ。解消したら削除する。
 9. `daemon_commands` は同名コマンドを重複して積まない。デーモンは取り出しと削除を同一トランザクションで行う。
+10. `library_revision` はデーモン側の一覧変更（追加・移動・削除・置換）で単調増加し、UIのページキャッシュ無効化に使う。
 
 ## 5. タイムゾーンと時刻
 
@@ -312,10 +316,11 @@ estimated_link, thumbnail_cache_mb, compression_workers
 |---|---|
 | 1 | 初期スキーマ |
 | 2 | `photo_context.author` 追加 |
-| 3 | `idx_photos_captured_id` 追加（`status='present'` の `captured_at_utc DESC, id DESC`） |
+| 3 | `idx_photos_captured_id` 追加（`captured_at_utc DESC, id DESC`） |
 | 4 | `compression_jobs.retry_count`、`daemon_errors`、`daemon_commands` 追加 |
+| 5 | `photos.display_derivative_id`、表示対象インデックス、移動照合インデックス追加 |
 
-V4は `IMMEDIATE` トランザクションで適用する。UIとデーモンが同時に起動しても、書き込みロックで直列化し、`user_version` と列・テーブルの存在を再確認してから進めるため、中断後の再実行でも安全。
+V4以降は `IMMEDIATE` トランザクションで適用する。UIとデーモンが同時に起動しても、書き込みロックで直列化し、`user_version` と列・テーブルの存在を再確認してから進めるため、中断後の再実行でも安全。
 
 追加手順:
 
@@ -326,11 +331,11 @@ V4は `IMMEDIATE` トランザクションで適用する。UIとデーモンが
 
 ## 7. クエリと性能
 
-- 一覧は `photos` + `photo_context` のLEFT JOIN。`captured_at_utc` 降順。
+- 一覧は `photos` + `photo_context` のLEFT JOIN。`status IN ('present', 'replaced')` を対象に `captured_at_utc` 降順。
 - 検索は `photo_context` / `photo_players` / `photo_tags` のEXISTS句。
 - UIは `photo_index` / `photo_index_text` で一致する写真の軽量索引（`id`, `captured_at_utc`, `captured_month`）を全件読み、表示範囲の写真だけを `photos_by_ids` で256枚ページ取得する。件数上限はない。
-- `idx_photos_captured_id` はV3で追加済み。100k合成DB（`photo_context` 5万行を含む）のrelease測定は索引61.5 ms、ページ0.72 ms。
-- UIは3秒ごとに `daemon_errors` と失敗ジョブを読む。`daemon_errors` は最大3行、`daemon_commands` は数行なのでインデックスは不要。
+- `idx_photos_captured_id` はV5で `status IN ('present', 'replaced')` の部分インデックスへ更新した。100k合成DB（`photo_context` 5万行を含む）のrelease測定は索引61.5 ms、ページ0.72 ms。
+- UIは3秒ごとに `library_revision`、`daemon_errors`、失敗ジョブを読む。`library_revision` が変わるとページキャッシュを捨てて一覧を再構築する。
 - 未検証の追加インデックス候補:
   - `photo_players(display_name COLLATE NOCASE)`
   - `photo_context(world_name)`

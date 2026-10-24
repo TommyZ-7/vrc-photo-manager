@@ -6,16 +6,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use vrc_photo_core::compressor;
 use vrc_photo_core::db::Db;
+use vrc_photo_core::hashing;
 use vrc_photo_core::linker;
 use vrc_photo_core::log_parser::LogIngestor;
 use vrc_photo_core::model::{
-    CompressionJob, CompressionProfile, DaemonCommand, DaemonOperation, QueueStatus,
+    CompressionJob, CompressionProfile, DaemonCommand, DaemonOperation, Photo, PhotoStatus,
+    QueueStatus,
 };
 use vrc_photo_core::photo_filename::is_source_photo;
 use vrc_photo_core::scanner::{ScanFailure, ScanReport, scan_and_index, scan_one};
@@ -136,8 +138,10 @@ pub struct Daemon {
     tray_enabled: bool,
     thumbnail_tx: Option<mpsc::Sender<i64>>,
     thumbnail_handle: Option<JoinHandle<()>>,
+    hash_handle: Option<JoinHandle<()>>,
     last_autostart_check: std::time::Instant,
     last_heartbeat: std::time::Instant,
+    last_asset_check: Instant,
     thumbnail_dir: PathBuf,
     last_errors: HashMap<DaemonOperation, String>,
 }
@@ -200,8 +204,10 @@ impl Daemon {
             tray_enabled,
             thumbnail_tx: None,
             thumbnail_handle: None,
+            hash_handle: None,
             last_autostart_check: std::time::Instant::now(),
             last_heartbeat: std::time::Instant::now() - Duration::from_secs(10),
+            last_asset_check: Instant::now() - Duration::from_secs(30),
             thumbnail_dir,
             last_errors,
         })
@@ -374,7 +380,7 @@ impl Daemon {
                 db.photo_by_id(*id)
                     .ok()
                     .flatten()
-                    .map(|photo| photo.abs_path)
+                    .map(|photo| photo.effective_path().to_string())
             };
             if let Some(path) = path {
                 match thumbnail::ensure_thumbnail_in(*id, Path::new(&path), &self.thumbnail_dir) {
@@ -475,6 +481,12 @@ impl Daemon {
                 self.last_log_poll = std::time::Instant::now();
             }
             self.refresh_status().ok();
+            if self.last_asset_check.elapsed() >= Duration::from_secs(30) {
+                if let Err(error) = self.verify_replaced_assets() {
+                    tracing::warn!(%error, "cannot verify replaced photo assets");
+                }
+                self.last_asset_check = Instant::now();
+            }
             if self.last_autostart_check.elapsed() >= Duration::from_secs(10) {
                 self.refresh_autostart_setting();
                 self.last_autostart_check = std::time::Instant::now();
@@ -519,10 +531,13 @@ impl Daemon {
         if paths.is_empty() {
             return Ok(());
         }
-        paths.sort();
+        paths.sort_by_key(|path| !path.is_file());
         paths.dedup();
         let roots = self.settings.photo_roots();
         let mut new_ids = Vec::new();
+        let mut thumbnail_ids = Vec::new();
+        let mut missing_ids = Vec::new();
+        let mut changed = false;
         {
             let db = self.db.lock().unwrap();
             for path in paths {
@@ -531,24 +546,73 @@ impl Daemon {
                 };
                 let root_id = db.add_root(&root.to_string_lossy(), "reference")?;
                 if path.is_file() {
-                    if let Some(scanned) = scan_one(root, &path) {
-                        let abs_path = scanned.path.to_string_lossy().to_string();
-                        let existed = db.photo_by_path(&abs_path)?.is_some();
-                        let id = db.upsert_photo(&scanned.into_new_photo(root_id))?;
-                        if !existed {
-                            new_ids.push(id);
+                    let Some(scanned) = scan_one(root, &path) else {
+                        continue;
+                    };
+                    let mut new_photo = scanned.into_new_photo(root_id);
+                    let abs_path = new_photo.abs_path.clone();
+                    let existing = db.photo_by_path(&abs_path)?;
+                    let existed = existing.is_some();
+                    new_photo.blake3 = match existing.as_ref() {
+                        Some(existing)
+                            if existing.blake3.is_some()
+                                && existing.file_size == new_photo.file_size
+                                && existing.mtime == new_photo.mtime =>
+                        {
+                            existing.blake3.clone()
+                        }
+                        _ => hashing::file_blake3(Path::new(&new_photo.abs_path))
+                            .ok()
+                            .flatten(),
+                    };
+
+                    if !existed && let Some(candidate) = db.find_rebind_candidate(&new_photo)? {
+                        let old_path_exists = Path::new(&candidate.abs_path).exists();
+                        if !old_path_exists && db.rebind_photo(candidate.id, &new_photo)? {
+                            thumbnail_ids.push(candidate.id);
+                            changed = true;
+                            continue;
                         }
                     }
-                } else if let Some(photo) = db.photo_by_path(&path.to_string_lossy())? {
-                    db.mark_missing(photo.id)?;
+
+                    let id = db.upsert_photo(&new_photo)?;
+                    changed = true;
+                    if !existed {
+                        new_ids.push(id);
+                        thumbnail_ids.push(id);
+                    }
+                } else {
+                    let Some(photo) = db.photo_by_path(&path.to_string_lossy())? else {
+                        continue;
+                    };
+                    if photo.status == PhotoStatus::Present
+                        && db.mark_missing_if_path(photo.id, &photo.abs_path)?
+                    {
+                        missing_ids.push(photo.id);
+                        changed = true;
+                    }
                 }
+            }
+            // A remove event and its matching create event can arrive in one
+            // batch. Only after every addition has had a chance to rebind do
+            // we promote a derivative for rows that are still missing.
+            for photo_id in missing_ids {
+                if let Some(photo) = db.photo_by_id(photo_id)?
+                    && photo.status == PhotoStatus::Missing
+                    && promote_display_derivative(&db, &photo)?
+                {
+                    changed = true;
+                }
+            }
+            if changed {
+                db.bump_library_revision()?;
             }
             if self.settings.auto_compress && !new_ids.is_empty() {
                 enqueue_auto_jobs(&db, &new_ids)?;
             }
         }
         if let Some(tx) = &self.thumbnail_tx {
-            for id in &new_ids {
+            for id in &thumbnail_ids {
                 if let Err(error) = tx.send(*id) {
                     tracing::debug!(
                         %error,
@@ -570,6 +634,8 @@ impl Daemon {
         if !roots.is_empty() {
             let db = self.db.lock().unwrap();
             let initial_scan = db.count_photos()? == 0;
+            let mut changed = false;
+            let mut missing_ids = Vec::new();
             for root in roots {
                 if !root.is_dir() {
                     tracing::warn!(path = %root.display(), "photo root does not exist");
@@ -595,19 +661,43 @@ impl Daemon {
                 if root_report.failures.is_empty() {
                     let seen: std::collections::HashSet<&str> =
                         root_report.seen_paths.iter().map(String::as_str).collect();
+                    let rebound: std::collections::HashSet<i64> =
+                        root_report.rebound_ids.iter().copied().collect();
                     for (id, path) in existing {
-                        if !seen.contains(path.as_str())
-                            && let Err(error) = db.mark_missing(id)
-                        {
-                            tracing::warn!(%error, photo_id = id, "cannot mark missing photo");
+                        if !seen.contains(path.as_str()) && !rebound.contains(&id) {
+                            match db.mark_missing_if_path(id, &path) {
+                                Ok(true) => {
+                                    changed = true;
+                                    missing_ids.push(id);
+                                }
+                                Ok(false) => {}
+                                Err(error) => {
+                                    tracing::warn!(%error, photo_id = id, "cannot mark missing photo")
+                                }
+                            }
                         }
                     }
                 }
+                changed |= root_report.indexed > 0;
                 report.found += root_report.found;
                 report.indexed += root_report.indexed;
                 report.skipped += root_report.skipped;
                 report.new_ids.extend(root_report.new_ids);
+                report.rebound_ids.extend(root_report.rebound_ids);
                 report.failures.extend(root_report.failures);
+            }
+            // Give every root a chance to rebind a moved file before falling
+            // back to a compressed derivative for a missing original.
+            for photo_id in missing_ids {
+                if let Some(photo) = db.photo_by_id(photo_id)?
+                    && photo.status == PhotoStatus::Missing
+                    && promote_display_derivative(&db, &photo)?
+                {
+                    changed = true;
+                }
+            }
+            if changed {
+                db.bump_library_revision()?;
             }
             if self.settings.auto_compress
                 && !report.new_ids.is_empty()
@@ -616,6 +706,7 @@ impl Daemon {
                 enqueue_auto_jobs(&db, &report.new_ids)?;
             }
         }
+        self.verify_replaced_assets()?;
         self.report_scan_outcome(&report)?;
         if report.indexed > 0 {
             self.link_unlinked()?;
@@ -817,6 +908,33 @@ impl Daemon {
         }
     }
 
+    /// Marks replaced photos missing when their compressed display file was
+    /// deleted or moved away. The notify watcher intentionally ignores the
+    /// `compressed` directory, so the daemon checks these paths periodically.
+    fn verify_replaced_assets(&mut self) -> Result<()> {
+        let db = self.db.lock().unwrap();
+        let mut changed = false;
+        for (photo_id, path, root) in db.display_derivative_paths(100_000)? {
+            // A disconnected external drive must not mark every replaced photo
+            // missing. Only validate assets whose root is currently available.
+            if !Path::new(&root).is_dir() {
+                continue;
+            }
+            let valid = path
+                .as_deref()
+                .is_some_and(|path| Path::new(path).is_file());
+            if !valid {
+                db.mark_missing(photo_id)?;
+                db.clear_display_derivative(photo_id)?;
+                changed = true;
+            }
+        }
+        if changed {
+            db.bump_library_revision()?;
+        }
+        Ok(())
+    }
+
     fn refresh_status(&self) -> Result<()> {
         let db = self.db.lock().unwrap();
         let now = chrono::Utc::now().timestamp();
@@ -1007,6 +1125,15 @@ impl Daemon {
                 }
             }
         }
+        if self.hash_handle.is_none() {
+            let db = self.db.clone();
+            let running = self.running.clone();
+            let handle = thread::Builder::new()
+                .name("photo-hashes".to_string())
+                .spawn(move || hash_loop(db, running))
+                .expect("cannot spawn photo hash worker");
+            self.hash_handle = Some(handle);
+        }
         if !self.workers.is_empty() {
             return;
         }
@@ -1029,6 +1156,11 @@ impl Daemon {
             && handle.join().is_err()
         {
             tracing::error!("thumbnail worker panicked");
+        }
+        if let Some(handle) = self.hash_handle.take()
+            && handle.join().is_err()
+        {
+            tracing::error!("photo hash worker panicked");
         }
         for (index, handle) in self.workers.drain(..).enumerate() {
             if handle.join().is_err() {
@@ -1080,6 +1212,17 @@ fn enqueue_auto_jobs(db: &Db, new_ids: &[i64]) -> Result<()> {
     Ok(())
 }
 
+/// Keeps a photo visible when its original file was deleted manually but a
+/// completed compression output remains. The newest existing derivative wins.
+fn promote_display_derivative(db: &Db, photo: &Photo) -> Result<bool> {
+    for derivative in db.derivatives_for_photo(photo.id)? {
+        if Path::new(&derivative.path).is_file() {
+            return Ok(db.set_replaced(photo.id, derivative.id)?);
+        }
+    }
+    Ok(false)
+}
+
 fn thumbnail_loop(
     db: Arc<Mutex<Db>>,
     running: Arc<AtomicBool>,
@@ -1094,7 +1237,7 @@ fn thumbnail_loop(
                     db.photo_by_id(id)
                         .ok()
                         .flatten()
-                        .map(|photo| photo.abs_path)
+                        .map(|photo| photo.effective_path().to_string())
                 };
                 if let Some(path) = path {
                     match thumbnail::ensure_thumbnail_in(id, Path::new(&path), &cache_dir) {
@@ -1116,6 +1259,60 @@ fn thumbnail_loop(
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
+    }
+}
+
+/// Fills `photos.blake3` for rows indexed before hashing was introduced.
+/// The worker is deliberately low-frequency so a large first run does not
+/// starve compression or watcher work.
+fn hash_loop(db: Arc<Mutex<Db>>, running: Arc<AtomicBool>) {
+    let mut hashed_since_idle = false;
+    while running.load(Ordering::Relaxed) {
+        let rows = {
+            let Ok(db) = db.lock() else { break };
+            match db.photos_without_hash(16) {
+                Ok(rows) => rows,
+                Err(error) => {
+                    tracing::warn!(%error, "cannot load photos for hashing");
+                    Vec::new()
+                }
+            }
+        };
+        if rows.is_empty() {
+            if hashed_since_idle {
+                if let Ok(db) = db.lock() {
+                    let _ = db.bump_library_revision();
+                }
+                hashed_since_idle = false;
+            }
+            thread::sleep(Duration::from_secs(2));
+            continue;
+        }
+        let mut progressed = false;
+        for (photo_id, path) in rows {
+            if !running.load(Ordering::Relaxed) {
+                break;
+            }
+            match hashing::file_blake3(Path::new(&path)) {
+                Ok(Some(hash)) => {
+                    if let Ok(db) = db.lock()
+                        && let Err(error) = db.set_photo_blake3(photo_id, &hash)
+                    {
+                        tracing::warn!(%error, photo_id, "cannot store photo hash");
+                    } else {
+                        hashed_since_idle = true;
+                        progressed = true;
+                    }
+                }
+                Ok(None) => tracing::debug!(photo_id, path, "photo disappeared before hashing"),
+                Err(error) => tracing::warn!(%error, photo_id, path, "cannot hash photo"),
+            }
+        }
+        thread::sleep(if progressed {
+            Duration::from_millis(200)
+        } else {
+            Duration::from_secs(2)
+        });
     }
 }
 
@@ -1171,8 +1368,16 @@ fn process_job(db: &Arc<Mutex<Db>>, job: &CompressionJob) -> Result<()> {
         db.update_job(&job.id, QueueStatus::Processing, 0.05, None, None)?;
         (photo, profile)
     };
+    let source_path = PathBuf::from(photo.effective_path());
+    let previous_display = photo.display_derivative_id;
+    if photo.blake3.is_none()
+        && photo.display_derivative_id.is_none()
+        && let Ok(Some(hash)) = hashing::file_blake3(&source_path)
+    {
+        db.lock().unwrap().set_photo_blake3(photo.id, &hash)?;
+    }
 
-    let result = compressor::compress_image(Path::new(&photo.abs_path), &profile)?;
+    let result = compressor::compress_image(&source_path, &profile)?;
     if !result.output_path.is_file()
         || std::fs::metadata(&result.output_path)
             .map(|meta| meta.len() == 0)
@@ -1181,7 +1386,7 @@ fn process_job(db: &Arc<Mutex<Db>>, job: &CompressionJob) -> Result<()> {
         anyhow::bail!("compressed output is missing or empty");
     }
     let db = db.lock().unwrap();
-    db.add_derivative(
+    let derivative_id = db.add_derivative(
         photo.id,
         &result.output_path.to_string_lossy(),
         result.format.as_str(),
@@ -1192,9 +1397,26 @@ fn process_job(db: &Arc<Mutex<Db>>, job: &CompressionJob) -> Result<()> {
         &job.policy,
     )?;
     if job.policy == "replace" {
-        trash::delete(&photo.abs_path)
-            .map_err(|error| anyhow::anyhow!("cannot move original to trash: {error}"))?;
-        db.mark_missing(photo.id)?;
+        if !db.set_replaced(photo.id, derivative_id)? {
+            anyhow::bail!("derivative was not attached to the photo");
+        }
+        if let Err(error) = trash::delete(&source_path) {
+            // The database is the source of truth and the source still
+            // exists, so undo the optimistic replacement.
+            let restore_error = if let Some(previous) = previous_display {
+                db.set_replaced(photo.id, previous).map(|_| ())
+            } else {
+                db.restore_present(photo.id)
+            };
+            if let Err(restore_error) = restore_error {
+                tracing::error!(
+                    photo_id = photo.id,
+                    %restore_error,
+                    "cannot restore replaced state after trash failure"
+                );
+            }
+            return Err(anyhow::anyhow!("cannot move original to trash: {error}"));
+        }
     }
     db.update_job(
         &job.id,
@@ -1203,8 +1425,9 @@ fn process_job(db: &Arc<Mutex<Db>>, job: &CompressionJob) -> Result<()> {
         None,
         Some(&result.output_path.to_string_lossy()),
     )?;
+    db.bump_library_revision()?;
     tracing::info!(
-        photo = %photo.abs_path,
+        photo = %source_path.display(),
         output = %result.output_path.display(),
         saved = result.compressed_size,
         "compressed"
@@ -2034,6 +2257,264 @@ mod tests {
             .unwrap()
             .expect("row");
         assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Missing);
+    }
+
+    #[test]
+    fn a_moved_file_keeps_the_same_row_and_tags() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let db_path = dir.path().join("library.db");
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir.clone()), Some(log_dir)).unwrap();
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+
+        let old_path = photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&old_path);
+        daemon.dirty_paths.push(old_path.clone());
+        daemon.index_dirty_paths().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        let photo = db
+            .photo_by_path(old_path.to_str().unwrap())
+            .unwrap()
+            .expect("indexed");
+        let photo_id = photo.id;
+        db.set_photo_tags(photo_id, &["night".to_string()]).unwrap();
+        let revision = db.library_revision().unwrap();
+
+        let moved_dir = photo_dir.join("2026");
+        std::fs::create_dir(&moved_dir).unwrap();
+        let new_path = moved_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        std::fs::rename(&old_path, &new_path).unwrap();
+        // A real watcher may deliver the destination before the source.
+        daemon.dirty_paths.push(new_path.clone());
+        daemon.dirty_paths.push(old_path.clone());
+        daemon.index_dirty_paths().unwrap();
+
+        let photo = db.photo_by_id(photo_id).unwrap().unwrap();
+        assert_eq!(photo.abs_path, new_path.to_string_lossy());
+        assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Present);
+        assert_eq!(db.photo_tags(photo_id).unwrap(), vec!["night".to_string()]);
+        assert_eq!(db.count_photos().unwrap(), 1);
+        assert!(db.library_revision().unwrap() > revision);
+    }
+
+    #[test]
+    fn a_full_scan_rebinds_a_photo_moved_while_the_daemon_was_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let db_path = dir.path().join("library.db");
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir.clone()), Some(log_dir)).unwrap();
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+
+        let old_path = photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&old_path);
+        daemon.run_once().unwrap();
+        let db = Db::open(&db_path).unwrap();
+        let photo_id = db
+            .photo_by_path(old_path.to_str().unwrap())
+            .unwrap()
+            .unwrap()
+            .id;
+        db.set_photo_tags(photo_id, &["night".to_string()]).unwrap();
+
+        let moved_dir = photo_dir.join("2026");
+        std::fs::create_dir(&moved_dir).unwrap();
+        let new_path = moved_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        std::fs::rename(&old_path, &new_path).unwrap();
+        daemon.run_once().unwrap();
+
+        let photo = db.photo_by_id(photo_id).unwrap().unwrap();
+        assert_eq!(photo.abs_path, new_path.to_string_lossy());
+        assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Present);
+        assert_eq!(db.photo_tags(photo_id).unwrap(), vec!["night".to_string()]);
+        assert_eq!(db.count_photos().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_renamed_file_keeps_the_same_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let db_path = dir.path().join("library.db");
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir.clone()), Some(log_dir)).unwrap();
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+
+        let old_path = photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&old_path);
+        daemon.dirty_paths.push(old_path.clone());
+        daemon.index_dirty_paths().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        let photo = db
+            .photo_by_path(old_path.to_str().unwrap())
+            .unwrap()
+            .expect("indexed");
+        let photo_id = photo.id;
+        let captured_at = photo.captured_at_utc;
+        db.set_photo_tags(photo_id, &["night".to_string()]).unwrap();
+
+        let new_path = photo_dir.join("renamed.png");
+        std::fs::rename(&old_path, &new_path).unwrap();
+        daemon.dirty_paths.push(new_path.clone());
+        daemon.dirty_paths.push(old_path.clone());
+        daemon.index_dirty_paths().unwrap();
+
+        let photo = db.photo_by_id(photo_id).unwrap().unwrap();
+        assert_eq!(photo.abs_path, new_path.to_string_lossy());
+        assert_eq!(photo.captured_at_utc, captured_at);
+        assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Present);
+        assert_eq!(db.photo_tags(photo_id).unwrap(), vec!["night".to_string()]);
+        assert_eq!(db.count_photos().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_move_between_configured_roots_keeps_the_same_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let first_root = dir.path().join("photos");
+        let second_root = dir.path().join("imported");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&first_root).unwrap();
+        std::fs::create_dir_all(&second_root).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+
+        let old_path = first_root.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&old_path);
+        let db_path = dir.path().join("library.db");
+        let mut daemon = Daemon::open(&db_path, Some(first_root.clone()), Some(log_dir)).unwrap();
+        daemon.settings.photo_roots = vec![
+            first_root.to_string_lossy().to_string(),
+            second_root.to_string_lossy().to_string(),
+        ];
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+        daemon.run_once().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        let photo = db
+            .photo_by_path(old_path.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        let photo_id = photo.id;
+        let new_path = second_root.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        std::fs::rename(&old_path, &new_path).unwrap();
+        daemon.run_once().unwrap();
+
+        let photo = db.photo_by_id(photo_id).unwrap().unwrap();
+        assert_eq!(photo.abs_path, new_path.to_string_lossy());
+        assert_eq!(
+            photo.root_id,
+            db.add_root(second_root.to_str().unwrap(), "reference")
+                .unwrap()
+        );
+        assert_eq!(db.count_photos().unwrap(), 1);
+    }
+
+    #[test]
+    fn deleting_the_original_promotes_an_existing_derivative() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let db_path = dir.path().join("library.db");
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir.clone()), Some(log_dir)).unwrap();
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+
+        let original = photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&original);
+        daemon.dirty_paths.push(original.clone());
+        daemon.index_dirty_paths().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        let photo = db
+            .photo_by_path(original.to_str().unwrap())
+            .unwrap()
+            .expect("indexed");
+        let compressed = photo_dir.join("compressed").join("kept.webp");
+        std::fs::create_dir_all(compressed.parent().unwrap()).unwrap();
+        std::fs::copy(&original, &compressed).unwrap();
+        let derivative_id = db
+            .add_derivative(
+                photo.id,
+                compressed.to_str().unwrap(),
+                "webp",
+                16,
+                10,
+                std::fs::metadata(&compressed).unwrap().len(),
+                "p",
+                "keep",
+            )
+            .unwrap();
+
+        std::fs::remove_file(&original).unwrap();
+        daemon.dirty_paths.push(original.clone());
+        daemon.index_dirty_paths().unwrap();
+
+        let photo = db.photo_by_id(photo.id).unwrap().unwrap();
+        assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Replaced);
+        assert_eq!(photo.display_derivative_id, Some(derivative_id));
+        assert_eq!(photo.effective_path(), compressed.to_str().unwrap());
+        assert_eq!(db.count_photos().unwrap(), 1);
+    }
+
+    #[test]
+    fn replace_compression_keeps_the_photo_visible() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let original = photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&original);
+
+        let db_path = dir.path().join("library.db");
+        add_auto_profile(&db_path);
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir.clone()), Some(log_dir)).unwrap();
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+        daemon.run_once().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        let photo = db
+            .photo_by_path(original.to_str().unwrap())
+            .unwrap()
+            .expect("indexed");
+        let profile = db.list_profiles().unwrap()[0].id.clone();
+        db.enqueue_job(photo.id, &profile, "replace").unwrap();
+        daemon.compress_pending().unwrap();
+
+        let photo = db.photo_by_id(photo.id).unwrap().unwrap();
+        assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Replaced);
+        assert!(photo.display_derivative_id.is_some());
+        assert!(
+            photo
+                .display_path
+                .as_deref()
+                .is_some_and(|path| Path::new(path).is_file())
+        );
+        assert!(!original.exists());
+        assert_eq!(db.count_photos().unwrap(), 1);
+        assert_eq!(db.stats().unwrap().photo_count, 1);
+
+        // A subsequent full scan must not turn the replaced photo into a
+        // missing one just because its original path is gone.
+        daemon.run_once().unwrap();
+        let photo = db.photo_by_id(photo.id).unwrap().unwrap();
+        assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Replaced);
+
+        let derivative_path = photo.display_path.clone().expect("display derivative");
+        std::fs::remove_file(&derivative_path).unwrap();
+        daemon.verify_replaced_assets().unwrap();
+        let photo = db.photo_by_id(photo.id).unwrap().unwrap();
+        assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Missing);
+        assert!(photo.display_derivative_id.is_none());
+        assert_eq!(db.count_photos().unwrap(), 0);
     }
 
     #[test]

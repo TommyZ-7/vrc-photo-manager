@@ -7,6 +7,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+oxideav-avif = "0.0.16"
 blake3.workspace = true
 chrono.workspace = true
 dirs.workspace = true

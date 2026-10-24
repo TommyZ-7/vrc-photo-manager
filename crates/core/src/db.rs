@@ -204,12 +204,36 @@ CREATE TABLE IF NOT EXISTS daemon_commands (
 );
 "#;
 
+const SCHEMA_V5_DISPLAY_DERIVATIVE: &str = r#"
+ALTER TABLE photos ADD COLUMN display_derivative_id INTEGER
+    REFERENCES derivatives(id) ON DELETE SET NULL;
+"#;
+
+const SCHEMA_V5_VISIBLE_INDEX: &str = r#"
+DROP INDEX IF EXISTS idx_photos_captured_id;
+CREATE INDEX IF NOT EXISTS idx_photos_captured_id
+    ON photos(captured_at_utc DESC, id DESC)
+    WHERE status IN ('present', 'replaced');
+"#;
+
+const SCHEMA_V5_MOVE_INDEX: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_photos_move_match
+    ON photos(status, file_size, captured_at_utc);
+"#;
+
 const PHOTO_SELECT: &str = "p.id, p.root_id, p.rel_path, p.abs_path, p.file_name, \
     p.captured_at_utc, p.captured_at_local, p.tz_offset_sec, p.width, p.height, \
     p.file_size, p.mtime, p.blake3, p.status, p.is_favorite, p.note, \
+    p.display_derivative_id, d.path, d.format, d.file_size, d.width, d.height, \
     c.world_name, c.instance_id, c.link_method, c.confidence, c.author";
 
-const PHOTO_FROM: &str = " FROM photos p LEFT JOIN photo_context c ON c.photo_id = p.id ";
+const PHOTO_FROM: &str = " FROM photos p \
+    LEFT JOIN derivatives d ON d.id = p.display_derivative_id \
+    LEFT JOIN photo_context c ON c.photo_id = p.id ";
+
+/// Statuses that belong in the library. `missing` rows stay in the database
+/// so tags and context survive a restore, but they are not displayed.
+const VISIBLE_STATUS: &str = "p.status IN ('present', 'replaced')";
 
 /// Local capture month as YYYYMM, falling back to the UTC capture time and
 /// finally to 0 when neither can be parsed.
@@ -306,6 +330,9 @@ impl Db {
         if version < 4 {
             self.migrate_v4()?;
         }
+        if version < 5 {
+            self.migrate_v5()?;
+        }
         Ok(())
     }
 
@@ -341,6 +368,37 @@ impl Db {
         Ok(())
     }
 
+    /// Adds the primary derivative reference used by `replaced` photos and
+    /// rebuilds the visible-photo index. The column check makes the step safe
+    /// to retry after a crash between the ALTER and `user_version`.
+    fn migrate_v5(&self) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version >= 5 {
+            tx.commit()?;
+            return Ok(());
+        }
+
+        let has_display_derivative: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('photos') \
+             WHERE name = 'display_derivative_id')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_display_derivative {
+            tx.execute_batch(SCHEMA_V5_DISPLAY_DERIVATIVE)?;
+        }
+        tx.execute_batch(SCHEMA_V5_VISIBLE_INDEX)?;
+        tx.execute_batch(SCHEMA_V5_MOVE_INDEX)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (5, ?1)",
+            params![now_string()],
+        )?;
+        tx.pragma_update(None, "user_version", 5)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn connection(&self) -> &Connection {
         &self.conn
     }
@@ -350,7 +408,9 @@ impl Db {
     pub fn add_root(&self, path: &str, kind: &str) -> Result<i64> {
         let id = self.conn.query_row(
             "INSERT INTO library_roots(path, kind, created_at) VALUES (?1, ?2, ?3) \
-             ON CONFLICT(path) DO UPDATE SET kind = excluded.kind RETURNING id",
+             ON CONFLICT(path) DO UPDATE SET kind = \
+                CASE WHEN library_roots.kind = 'managed' THEN 'managed' ELSE excluded.kind END \
+             RETURNING id",
             params![path, kind, now_string()],
             |row| row.get(0),
         )?;
@@ -387,7 +447,7 @@ impl Db {
                 tz_offset_sec = excluded.tz_offset_sec, width = excluded.width, \
                 height = excluded.height, file_size = excluded.file_size, \
                 mtime = excluded.mtime, blake3 = COALESCE(excluded.blake3, photos.blake3), \
-                status = 'present', updated_at = excluded.updated_at \
+                status = 'present', display_derivative_id = NULL, updated_at = excluded.updated_at \
              RETURNING id",
             params![
                 photo.root_id,
@@ -430,7 +490,7 @@ impl Db {
         let order = photo_order(sort);
         let sql = format!(
             "SELECT p.id, p.captured_at_utc, {PHOTO_MONTH}{PHOTO_FROM} \
-             WHERE p.status = 'present' ORDER BY {order}"
+             WHERE {VISIBLE_STATUS} ORDER BY {order}"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map([], row_to_photo_index)?;
@@ -479,7 +539,7 @@ impl Db {
     pub fn list_photos(&self, limit: i64, offset: i64, sort: PhotoSort) -> Result<Vec<Photo>> {
         let order = photo_order(sort);
         let sql = format!(
-            "SELECT {PHOTO_SELECT}{PHOTO_FROM} WHERE p.status = 'present' \
+            "SELECT {PHOTO_SELECT}{PHOTO_FROM} WHERE {VISIBLE_STATUS} \
              ORDER BY {order} LIMIT ?1 OFFSET ?2"
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -542,7 +602,7 @@ impl Db {
     pub fn unlinked_photos(&self, limit: i64) -> Result<Vec<Photo>> {
         let sql = format!(
             "SELECT {PHOTO_SELECT}{PHOTO_FROM} WHERE c.photo_id IS NULL \
-             AND p.status = 'present' ORDER BY p.captured_at_utc DESC LIMIT ?1"
+             AND {VISIBLE_STATUS} ORDER BY p.captured_at_utc DESC LIMIT ?1"
         );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![limit.max(1)], row_to_photo)?;
@@ -559,7 +619,7 @@ impl Db {
 
     pub fn count_photos(&self) -> Result<i64> {
         let count = self.conn.query_row(
-            "SELECT COUNT(*) FROM photos WHERE status = 'present'",
+            &format!("SELECT COUNT(*) FROM photos p WHERE {VISIBLE_STATUS}"),
             [],
             |row| row.get(0),
         )?;
@@ -590,9 +650,232 @@ impl Db {
         Ok(())
     }
 
+    /// Marks a photo missing only when the row still points at `abs_path`.
+    /// A concurrent move may already have rebound the row to another root.
+    pub fn mark_missing_if_path(&self, photo_id: i64, abs_path: &str) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE photos SET status = 'missing', updated_at = ?1 \
+             WHERE id = ?2 AND abs_path = ?3 AND status = 'present'",
+            params![now_string(), photo_id, abs_path],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Promotes a completed derivative to the library display asset. The
+    /// original file is expected to be removed by the caller.
+    pub fn set_replaced(&self, photo_id: i64, derivative_id: i64) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE photos SET display_derivative_id = ?1, status = 'replaced', updated_at = ?2 \
+             WHERE id = ?3 AND EXISTS (SELECT 1 FROM derivatives \
+                 WHERE id = ?1 AND photo_id = photos.id)",
+            params![derivative_id, now_string(), photo_id],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Returns a replaced photo to the original-file state. Used when trashing
+    /// the original fails after the database was updated optimistically.
+    pub fn restore_present(&self, photo_id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE photos SET display_derivative_id = NULL, status = 'present', \
+                updated_at = ?1 WHERE id = ?2",
+            params![now_string(), photo_id],
+        )?;
+        Ok(())
+    }
+
+    /// Removes the display derivative reference. The caller decides whether
+    /// the row should also become missing or present.
+    pub fn clear_display_derivative(&self, photo_id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE photos SET display_derivative_id = NULL, updated_at = ?1 WHERE id = ?2",
+            params![now_string(), photo_id],
+        )?;
+        Ok(())
+    }
+
+    /// Finds a unique existing row that describes the same original file.
+    /// Exact BLAKE3 matches win; size/name/capture-time matching is the
+    /// fallback for rows indexed before hashing was introduced.
+    pub fn find_rebind_candidate(&self, photo: &NewPhoto) -> Result<Option<Photo>> {
+        if let Some(hash) = photo.blake3.as_deref() {
+            let sql = format!(
+                "SELECT {PHOTO_SELECT}{PHOTO_FROM} \
+                 WHERE p.blake3 = ?1 AND p.abs_path <> ?2 \
+                   AND p.status IN ('present', 'replaced', 'missing') \
+                 ORDER BY p.id LIMIT 2"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(params![hash, photo.abs_path], row_to_photo)?;
+            let mut matches = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+            if matches.len() > 1 {
+                return Ok(None);
+            }
+            if let Some(candidate) = matches.pop() {
+                if candidate.blake3.as_deref().is_some_and(|old| old != hash) {
+                    return Ok(None);
+                }
+                return Ok(Some(candidate));
+            }
+        }
+
+        let sql = format!(
+            "SELECT {PHOTO_SELECT}{PHOTO_FROM} \
+             WHERE p.abs_path <> ?1 AND p.file_name = ?2 AND p.file_size = ?3 \
+               AND p.width = ?4 AND p.height = ?5 AND p.captured_at_utc = ?6 \
+               AND p.status IN ('present', 'replaced', 'missing') \
+             ORDER BY p.id LIMIT 2"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            params![
+                photo.abs_path,
+                photo.file_name,
+                photo.file_size as i64,
+                photo.width as i64,
+                photo.height as i64,
+                photo.captured_at_utc,
+            ],
+            row_to_photo,
+        )?;
+        let mut matches = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        if matches.len() != 1 {
+            return Ok(None);
+        }
+        let candidate = matches.pop().unwrap();
+        if let (Some(old), Some(new)) = (candidate.blake3.as_deref(), photo.blake3.as_deref())
+            && old != new
+        {
+            return Ok(None);
+        }
+        Ok(Some(candidate))
+    }
+
+    /// Rebinds a row to a new path without changing its id or any related
+    /// tags, notes, context, derivatives, or jobs. Capture time and dimensions
+    /// stay as originally indexed even when the file was renamed. Returns
+    /// false when the new path or relative path is already occupied.
+    pub fn rebind_photo(&self, photo_id: i64, photo: &NewPhoto) -> Result<bool> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let abs_conflict: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM photos WHERE abs_path = ?1 AND id <> ?2",
+            params![photo.abs_path, photo_id],
+            |row| row.get(0),
+        )?;
+        if abs_conflict > 0 {
+            return Ok(false);
+        }
+        let rel_conflict: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM photos WHERE root_id = ?1 AND rel_path = ?2 AND id <> ?3",
+            params![photo.root_id, photo.rel_path, photo_id],
+            |row| row.get(0),
+        )?;
+        if rel_conflict > 0 {
+            return Ok(false);
+        }
+        let changed = tx.execute(
+            "UPDATE photos SET root_id = ?1, rel_path = ?2, abs_path = ?3, file_name = ?4, \
+                file_size = ?5, mtime = ?6, blake3 = COALESCE(?7, blake3), status = 'present', \
+                display_derivative_id = NULL, updated_at = ?8 \
+             WHERE id = ?9",
+            params![
+                photo.root_id,
+                photo.rel_path,
+                photo.abs_path,
+                photo.file_name,
+                photo.file_size as i64,
+                photo.mtime,
+                photo.blake3,
+                now_string(),
+                photo_id,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(changed == 1)
+    }
+
+    pub fn photos_without_hash(&self, limit: i64) -> Result<Vec<(i64, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, abs_path FROM photos \
+             WHERE status = 'present' AND blake3 IS NULL ORDER BY id LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit.max(1)], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Returns replaced photos and the derivative path the library displays.
+    /// The daemon stats these paths so a manually deleted compressed file does
+    /// not leave a broken card behind.
+    pub fn display_derivative_paths(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<(i64, Option<String>, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT p.id, d.path, r.path FROM photos p \
+             LEFT JOIN derivatives d ON d.id = p.display_derivative_id \
+             JOIN library_roots r ON r.id = p.root_id \
+             WHERE p.status = 'replaced' ORDER BY p.id LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit.max(1)], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn set_photo_blake3(&self, photo_id: i64, blake3: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE photos SET blake3 = ?1 WHERE id = ?2 AND blake3 IS NULL",
+            params![blake3, photo_id],
+        )?;
+        Ok(())
+    }
+
+    /// Returns ids whose content hash is shared with another visible photo.
+    /// Hashing itself does not merge rows; this query is the duplicate report
+    /// surface used by move matching and future duplicate-management UI.
+    pub fn duplicate_photo_ids(&self) -> Result<Vec<i64>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT p.id FROM photos p \
+             WHERE {VISIBLE_STATUS} AND p.blake3 IS NOT NULL \
+               AND EXISTS (SELECT 1 FROM photos q \
+                 WHERE q.blake3 = p.blake3 AND q.id <> p.id \
+                   AND q.status IN ('present', 'replaced')) \
+             ORDER BY p.id"
+        ))?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Monotonic counter used by the UI to detect daemon-side changes even
+    /// when the number of photos stays the same (for example a moved file).
+    pub fn library_revision(&self) -> Result<i64> {
+        Ok(self
+            .get_setting("library_revision")?
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0))
+    }
+
+    pub fn bump_library_revision(&self) -> Result<i64> {
+        let revision = self.conn.query_row(
+            "INSERT INTO app_settings(key, value) VALUES ('library_revision', '1') \
+             ON CONFLICT(key) DO UPDATE SET \
+                value = CAST(CAST(app_settings.value AS INTEGER) + 1 AS TEXT) \
+             RETURNING CAST(value AS INTEGER)",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(revision)
+    }
+
     pub fn stats(&self) -> Result<LibraryStats> {
         let (photo_count, total_bytes): (i64, i64) = self.conn.query_row(
-            "SELECT COUNT(*), COALESCE(SUM(file_size), 0) FROM photos WHERE status = 'present'",
+            &format!(
+                "SELECT COUNT(*), COALESCE(SUM(\
+                    CASE WHEN p.display_derivative_id IS NOT NULL \
+                         THEN d.file_size ELSE p.file_size END), 0) \
+                 FROM photos p LEFT JOIN derivatives d ON d.id = p.display_derivative_id \
+                 WHERE {VISIBLE_STATUS}"
+            ),
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
@@ -1455,7 +1738,7 @@ fn photo_order(sort: PhotoSort) -> &'static str {
 }
 
 fn build_photo_filter(filter: &PhotoFilter) -> (String, Vec<Value>) {
-    let mut clauses = vec!["p.status = 'present'".to_string()];
+    let mut clauses = vec![VISIBLE_STATUS.to_string()];
     let mut values = Vec::new();
 
     if !filter.world_ids.is_empty() {
@@ -1513,7 +1796,7 @@ fn build_text_filter(
     from_utc: Option<i64>,
     to_utc: Option<i64>,
 ) -> (String, Vec<Value>) {
-    let mut clauses = vec!["p.status = 'present'".to_string()];
+    let mut clauses = vec![VISIBLE_STATUS.to_string()];
     let mut values: Vec<Value> = Vec::new();
 
     if let Some(query) = world.map(str::trim).filter(|query| !query.is_empty()) {
@@ -1579,11 +1862,17 @@ fn row_to_photo(row: &Row<'_>) -> rusqlite::Result<Photo> {
         status: PhotoStatus::parse(&row.get::<_, String>(13)?),
         is_favorite: row.get::<_, i64>(14)? != 0,
         note: row.get(15)?,
-        world_name: row.get(16)?,
-        instance_id: row.get(17)?,
-        link_method: row.get(18)?,
-        confidence: row.get(19)?,
-        author: row.get(20)?,
+        display_derivative_id: row.get(16)?,
+        display_path: row.get(17)?,
+        display_format: row.get(18)?,
+        display_file_size: row.get::<_, Option<i64>>(19)?.map(|size| size as u64),
+        display_width: row.get(20)?,
+        display_height: row.get(21)?,
+        world_name: row.get(22)?,
+        instance_id: row.get(23)?,
+        link_method: row.get(24)?,
+        confidence: row.get(25)?,
+        author: row.get(26)?,
     })
 }
 
@@ -1619,7 +1908,7 @@ fn now_string() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{NewPhoto, PhotoFilter, PhotoPlayer};
+    use crate::model::{NewPhoto, PhotoFilter, PhotoPlayer, PhotoStatus};
 
     fn sample_photo(root_id: i64, path: &str, ts: i64) -> NewPhoto {
         NewPhoto {
@@ -1706,7 +1995,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
 
         let recorded: i64 = db
             .conn
@@ -1736,7 +2025,10 @@ mod tests {
             normalized.contains("on photos(captured_at_utc desc, id desc)"),
             "{sql}"
         );
-        assert!(normalized.contains("where status = 'present'"), "{sql}");
+        assert!(
+            normalized.contains("where status in ('present', 'replaced')"),
+            "{sql}"
+        );
     }
 
     #[test]
@@ -1746,7 +2038,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
         let retry_column: i64 = db
             .conn
             .query_row(
@@ -1769,6 +2061,40 @@ mod tests {
     }
 
     #[test]
+    fn migration_v5_adds_display_derivative_and_visible_index() {
+        let db = Db::open_in_memory().unwrap();
+        let column: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('photos') \
+                 WHERE name = 'display_derivative_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(column, 1);
+
+        let sql: String = db
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_photos_captured_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let normalized = sql
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        assert!(
+            normalized.contains("status in ('present', 'replaced')"),
+            "{sql}"
+        );
+    }
+
+    #[test]
     fn migration_upgrades_version_3_database_with_existing_jobs() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("library.db");
@@ -1779,7 +2105,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
 
         let jobs = db.list_jobs(10).unwrap();
         assert_eq!(jobs.len(), 1);
@@ -1812,7 +2138,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
         assert_eq!(db.list_jobs(10).unwrap()[0].retry_count, 2);
 
         let tables: i64 = db
@@ -2753,5 +3079,165 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(db.count_jobs(QueueStatus::Pending).unwrap(), 1);
+    }
+
+    #[test]
+    fn replaced_photo_stays_visible_and_stats_use_derivative_size() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let id = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        let derivative_id = db
+            .add_derivative(
+                id,
+                "/photos/compressed/a.webp",
+                "webp",
+                16,
+                10,
+                1_234,
+                "p",
+                "replace",
+            )
+            .unwrap();
+
+        assert!(db.set_replaced(id, derivative_id).unwrap());
+
+        let photo = db.photo_by_id(id).unwrap().unwrap();
+        assert_eq!(photo.status, PhotoStatus::Replaced);
+        assert_eq!(
+            photo.display_path.as_deref(),
+            Some("/photos/compressed/a.webp")
+        );
+        assert_eq!(photo.effective_path(), "/photos/compressed/a.webp");
+        assert_eq!(photo.effective_file_size(), 1_234);
+        assert_eq!(photo.effective_dimensions(), (16, 10));
+
+        assert_eq!(db.count_photos().unwrap(), 1);
+        assert_eq!(db.photo_index(PhotoSort::Newest).unwrap().len(), 1);
+        assert_eq!(
+            db.photo_index_text(&PhotoTextFilter::default())
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let stats = db.stats().unwrap();
+        assert_eq!(stats.photo_count, 1);
+        assert_eq!(stats.total_bytes, 1_234);
+    }
+
+    #[test]
+    fn upserting_a_restored_original_clears_the_display_derivative() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let id = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        let derivative_id = db
+            .add_derivative(
+                id,
+                "/photos/compressed/a.webp",
+                "webp",
+                16,
+                10,
+                1_234,
+                "p",
+                "replace",
+            )
+            .unwrap();
+        assert!(db.set_replaced(id, derivative_id).unwrap());
+
+        db.upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+
+        let photo = db.photo_by_id(id).unwrap().unwrap();
+        assert_eq!(photo.status, PhotoStatus::Present);
+        assert!(photo.display_derivative_id.is_none());
+        assert!(photo.display_path.is_none());
+        assert_eq!(photo.effective_path(), "/photos/a.png");
+        assert_eq!(db.stats().unwrap().total_bytes, 12_400_000);
+    }
+
+    #[test]
+    fn library_revision_starts_at_zero_and_is_monotonic() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.library_revision().unwrap(), 0);
+        assert_eq!(db.bump_library_revision().unwrap(), 1);
+        assert_eq!(db.bump_library_revision().unwrap(), 2);
+        assert_eq!(db.library_revision().unwrap(), 2);
+    }
+
+    #[test]
+    fn rebinding_a_photo_preserves_its_id_and_user_metadata() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let id = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        db.set_favorite(id, true).unwrap();
+        db.set_note(id, Some("keep me")).unwrap();
+        db.set_photo_tags(id, &["night".to_string()]).unwrap();
+
+        let mut moved = sample_photo(root, "/photos/2026/a.png", 999);
+        moved.captured_at_local = "2030-01-01 00:00:00".to_string();
+        moved.width = 1;
+        moved.height = 1;
+        moved.blake3 = Some("hash-a".to_string());
+        assert!(db.rebind_photo(id, &moved).unwrap());
+
+        let photo = db.photo_by_id(id).unwrap().unwrap();
+        assert_eq!(photo.abs_path, "/photos/2026/a.png");
+        assert_eq!(photo.rel_path, "photos/2026/a.png");
+        assert_eq!(photo.status, PhotoStatus::Present);
+        assert_eq!(photo.captured_at_utc, 100);
+        assert_eq!(photo.captured_at_local, "2026-10-21 21:14:03");
+        assert_eq!((photo.width, photo.height), (3840, 2160));
+        assert!(photo.is_favorite);
+        assert_eq!(photo.note.as_deref(), Some("keep me"));
+        assert_eq!(photo.blake3.as_deref(), Some("hash-a"));
+        assert_eq!(db.photo_tags(id).unwrap(), vec!["night".to_string()]);
+        assert_eq!(db.count_photos().unwrap(), 1);
+    }
+
+    #[test]
+    fn rebind_candidate_prefers_a_unique_content_hash() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let id = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        let mut moved = sample_photo(root, "/photos/2026/a.png", 100);
+        moved.blake3 = Some("same-content".to_string());
+        db.connection()
+            .execute(
+                "UPDATE photos SET blake3 = 'same-content' WHERE id = ?1",
+                params![id],
+            )
+            .unwrap();
+
+        let candidate = db.find_rebind_candidate(&moved).unwrap().unwrap();
+        assert_eq!(candidate.id, id);
+
+        moved.blake3 = Some("different-content".to_string());
+        assert!(db.find_rebind_candidate(&moved).unwrap().is_none());
+    }
+
+    #[test]
+    fn duplicate_hashes_are_reported_without_merging_rows() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let mut first = sample_photo(root, "/photos/a.png", 100);
+        first.blake3 = Some("same-content".to_string());
+        let first_id = db.upsert_photo(&first).unwrap();
+        let mut copy = sample_photo(root, "/photos/b.png", 101);
+        copy.blake3 = Some("same-content".to_string());
+        let copy_id = db.upsert_photo(&copy).unwrap();
+        let mut other = sample_photo(root, "/photos/c.png", 102);
+        other.blake3 = Some("other-content".to_string());
+        db.upsert_photo(&other).unwrap();
+
+        assert_eq!(db.duplicate_photo_ids().unwrap(), vec![first_id, copy_id]);
+        assert_eq!(db.count_photos().unwrap(), 3);
     }
 }

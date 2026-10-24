@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use crate::db::Db;
 use crate::error::{CoreError, Result};
+use crate::hashing;
 use crate::model::NewPhoto;
 use crate::photo_filename::{
     from_modified_time, image_dimensions, is_source_photo, parse_photo_filename,
@@ -62,6 +63,7 @@ pub struct ScanReport {
     pub indexed: usize,
     pub skipped: usize,
     pub new_ids: Vec<i64>,
+    pub rebound_ids: Vec<i64>,
     pub seen_paths: Vec<String>,
     pub failures: Vec<ScanFailure>,
 }
@@ -240,8 +242,33 @@ pub fn scan_and_index(db: &Db, root_id: i64, root: &Path) -> Result<ScanReport> 
         let path = photo.path.to_string_lossy().to_string();
         report.seen_paths.push(path.clone());
         let photo_path = photo.path.clone();
-        let new_photo = photo.into_new_photo(root_id);
-        let existed = db.photo_by_path(&path)?.is_some();
+        let mut new_photo = photo.into_new_photo(root_id);
+        let existing = db.photo_by_path(&path)?;
+        let existed = existing.is_some();
+        new_photo.blake3 = match existing.as_ref() {
+            Some(existing)
+                if existing.blake3.is_some()
+                    && existing.file_size == new_photo.file_size
+                    && existing.mtime == new_photo.mtime =>
+            {
+                existing.blake3.clone()
+            }
+            _ => hashing::file_blake3(Path::new(&new_photo.abs_path))
+                .ok()
+                .flatten(),
+        };
+
+        if !existed && let Some(candidate) = db.find_rebind_candidate(&new_photo)? {
+            // A copy leaves the old path in place; only rebind when the old
+            // file is gone, which distinguishes a move from a duplicate copy.
+            let old_path_exists = std::path::Path::new(&candidate.abs_path).exists();
+            if !old_path_exists && db.rebind_photo(candidate.id, &new_photo)? {
+                report.indexed += 1;
+                report.rebound_ids.push(candidate.id);
+                continue;
+            }
+        }
+
         match db.upsert_photo(&new_photo) {
             Ok(id) => {
                 report.indexed += 1;
@@ -264,6 +291,7 @@ pub fn scan_and_index(db: &Db, root_id: i64, root: &Path) -> Result<ScanReport> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::PhotoStatus;
     use image::{Rgba, RgbaImage};
     use tempfile::tempdir;
 
@@ -306,6 +334,57 @@ mod tests {
         assert_eq!(photo.width, 4);
         assert_eq!(photo.height, 3);
         assert_eq!(photo.rel_path, "VRChat_2026-10-21_21-14-03.221_4x3.png");
+    }
+
+    #[test]
+    fn a_moved_photo_keeps_its_id_and_tags() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let old_path = root.join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        write_png(&old_path);
+
+        let db = Db::open_in_memory().unwrap();
+        let root_id = db.add_root(root.to_str().unwrap(), "reference").unwrap();
+        let report = scan_and_index(&db, root_id, root).unwrap();
+        let photo_id = report.new_ids[0];
+        db.set_photo_tags(photo_id, &["night".to_string()]).unwrap();
+
+        let new_dir = root.join("2026");
+        std::fs::create_dir(&new_dir).unwrap();
+        let new_path = new_dir.join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        std::fs::rename(&old_path, &new_path).unwrap();
+
+        let report = scan_and_index(&db, root_id, root).unwrap();
+        assert_eq!(report.rebound_ids, vec![photo_id]);
+        assert!(report.new_ids.is_empty());
+        let photo = db.photo_by_id(photo_id).unwrap().unwrap();
+        assert_eq!(photo.abs_path, new_path.to_string_lossy());
+        assert_eq!(photo.status, PhotoStatus::Present);
+        assert_eq!(db.photo_tags(photo_id).unwrap(), vec!["night".to_string()]);
+        assert_eq!(db.count_photos().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_copied_photo_is_not_merged_with_the_original() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let original = root.join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        write_png(&original);
+
+        let db = Db::open_in_memory().unwrap();
+        let root_id = db.add_root(root.to_str().unwrap(), "reference").unwrap();
+        let report = scan_and_index(&db, root_id, root).unwrap();
+        let original_id = report.new_ids[0];
+
+        let copy = root.join("copy.png");
+        std::fs::copy(&original, &copy).unwrap();
+        let report = scan_and_index(&db, root_id, root).unwrap();
+
+        // The old path still exists, so this is a duplicate copy, not a move.
+        assert!(report.rebound_ids.is_empty());
+        assert_eq!(report.new_ids.len(), 1);
+        assert_ne!(report.new_ids[0], original_id);
+        assert_eq!(db.count_photos().unwrap(), 2);
     }
 
     #[test]
