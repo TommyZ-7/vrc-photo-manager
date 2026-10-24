@@ -108,7 +108,7 @@ pub fn classify_linux(
 ) -> InstallKind {
     if let Some(path) = appimage.filter(|path| path.is_file()) {
         return InstallKind::AppImage {
-            path: path.to_path_buf(),
+            path: std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()),
         };
     }
     if current_exe.starts_with("/usr/bin") || current_exe.starts_with("/usr/local/bin") {

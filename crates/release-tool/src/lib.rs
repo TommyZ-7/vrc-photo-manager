@@ -133,12 +133,12 @@ pub fn sign_file(key: &minisign::SecretKey, path: &Path) -> Result<PathBuf> {
     Ok(signature_path)
 }
 
-/// Verifies one file against one base64 public key.
-pub fn verify_file(path: &Path, public_key: &str) -> Result<()> {
+/// Verifies one file against any of the base64 public keys.
+pub fn verify_file(path: &Path, public_keys: &[String]) -> Result<()> {
     let signature_path = path.with_file_name(format!("{}.minisig", file_name(path)?));
     let signature = std::fs::read_to_string(&signature_path)
         .with_context(|| format!("missing signature {}", signature_path.display()))?;
-    vrc_photo_update::verify_file(path, &signature, &[public_key.to_string()])?;
+    vrc_photo_update::verify_file(path, &signature, public_keys)?;
     Ok(())
 }
 
@@ -284,9 +284,9 @@ mod tests {
         let key = load_secret_key(&key_path).unwrap();
         let signature = sign_file(&key, &file).unwrap();
         assert!(signature.exists());
-        verify_file(&file, &public_key).unwrap();
+        verify_file(&file, std::slice::from_ref(&public_key)).unwrap();
 
         std::fs::write(&file, b"tampered").unwrap();
-        assert!(verify_file(&file, &public_key).is_err());
+        assert!(verify_file(&file, std::slice::from_ref(&public_key)).is_err());
     }
 }

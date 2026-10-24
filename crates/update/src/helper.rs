@@ -267,7 +267,7 @@ fn apply(paths: &UpdatePaths, job: &ApplyJob) -> Result<Backup> {
 fn restore(job: &ApplyJob, backup: &Backup) -> Result<()> {
     match backup {
         Backup::AppImage(path) => restore_appimage(&job.target, path),
-        Backup::Windows(_) => {
+        Backup::Windows(path) => {
             #[cfg(windows)]
             {
                 let install_dir = job.target.parent().ok_or_else(|| {
@@ -277,6 +277,7 @@ fn restore(job: &ApplyJob, backup: &Backup) -> Result<()> {
             }
             #[cfg(not(windows))]
             {
+                let _ = path;
                 Err(UpdateError::Other(
                     "a Windows backup cannot be restored on this platform".to_string(),
                 ))

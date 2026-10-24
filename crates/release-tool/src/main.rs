@@ -40,10 +40,10 @@ enum Command {
         #[arg(long = "file")]
         files: Vec<PathBuf>,
     },
-    /// Verify artifacts against the production public key.
+    /// Verify artifacts against the production public key(s).
     Verify {
-        #[arg(long)]
-        public_key: String,
+        #[arg(long = "public-key")]
+        public_keys: Vec<String>,
         #[arg(long)]
         dist: Option<PathBuf>,
         #[arg(long = "file")]
@@ -88,16 +88,19 @@ fn main() -> Result<()> {
             }
         }
         Command::Verify {
-            public_key,
+            public_keys,
             dist,
             files,
         } => {
+            if public_keys.is_empty() {
+                bail!("at least one --public-key is required");
+            }
             let files = collect_files(dist.as_deref(), files)?;
             if files.is_empty() {
                 bail!("no files to verify");
             }
             for file in files {
-                verify_file(&file, &public_key)
+                verify_file(&file, &public_keys)
                     .with_context(|| format!("verification failed for {}", file.display()))?;
                 println!("verified {}", file.display());
             }
