@@ -1516,12 +1516,7 @@ fn cgroup_has_unit(cgroup: &str, unit: &str) -> bool {
         .any(|part| part == unit)
 }
 
-fn enqueue_auto_jobs(
-    db: &Db,
-    new_ids: &[i64],
-    keep_original: bool,
-    immediate: bool,
-) -> Result<()> {
+fn enqueue_auto_jobs(db: &Db, new_ids: &[i64], keep_original: bool, immediate: bool) -> Result<()> {
     let profiles = db.list_profiles()?;
     let auto_profiles: Vec<&CompressionProfile> = profiles
         .iter()
