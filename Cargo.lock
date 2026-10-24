@@ -7559,6 +7559,7 @@ dependencies = [
  "trash",
  "tray-icon",
  "vrc-photo-core",
+ "vrc-photo-ipc",
  "windows 0.62.2",
 ]
 

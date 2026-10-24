@@ -24,6 +24,7 @@ use vrc_photo_core::scanner::{ScanFailure, ScanReport, scan_and_index, scan_one}
 use vrc_photo_core::settings::{AppSettings, detect_vrchat_paths};
 use vrc_photo_core::thumbnail;
 
+mod signals;
 mod tray;
 use tray::{Tray, TrayAction};
 
@@ -42,6 +43,13 @@ pub struct DaemonStatus {
     pub last_log: Option<String>,
     pub photo_count: i64,
     pub pending_jobs: i64,
+    pub scanning: bool,
+    pub scan_phase: Option<vrc_photo_ipc::ScanPhase>,
+    pub scan_processed: usize,
+    pub scan_total: Option<usize>,
+    pub scan_indexed: usize,
+    pub scan_root: usize,
+    pub scan_roots: usize,
 }
 
 #[derive(Debug)]
