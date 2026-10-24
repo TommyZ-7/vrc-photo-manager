@@ -806,13 +806,19 @@ impl Db {
     /// Returns replaced photos and the derivative path the library displays.
     /// The daemon stats these paths so a manually deleted compressed file does
     /// not leave a broken card behind.
-    pub fn display_derivative_paths(&self, limit: i64) -> Result<Vec<(i64, Option<String>)>> {
+    pub fn display_derivative_paths(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<(i64, Option<String>, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT p.id, d.path FROM photos p \
+            "SELECT p.id, d.path, r.path FROM photos p \
              LEFT JOIN derivatives d ON d.id = p.display_derivative_id \
+             JOIN library_roots r ON r.id = p.root_id \
              WHERE p.status = 'replaced' ORDER BY p.id LIMIT ?1",
         )?;
-        let rows = stmt.query_map(params![limit.max(1)], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let rows = stmt.query_map(params![limit.max(1)], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 

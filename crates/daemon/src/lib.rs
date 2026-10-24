@@ -914,7 +914,12 @@ impl Daemon {
     fn verify_replaced_assets(&mut self) -> Result<()> {
         let db = self.db.lock().unwrap();
         let mut changed = false;
-        for (photo_id, path) in db.display_derivative_paths(100_000)? {
+        for (photo_id, path, root) in db.display_derivative_paths(100_000)? {
+            // A disconnected external drive must not mark every replaced photo
+            // missing. Only validate assets whose root is currently available.
+            if !Path::new(&root).is_dir() {
+                continue;
+            }
             let valid = path
                 .as_deref()
                 .is_some_and(|path| Path::new(path).is_file());
