@@ -85,7 +85,15 @@ jobs:
             tar -tzf "$pacman" | grep "$path\$" >/dev/null \
               || { echo "missing $notice in pacman package"; exit 1; }
           done
-          echo "third-party notices verified"
+
+          helper="usr/bin/vrc-photo-updater"
+          dpkg-deb --contents "$deb" | grep "$helper\$" >/dev/null \
+            || { echo "missing $helper in deb"; exit 1; }
+          test -f "squashfs-root/$helper" \
+            || { echo "missing $helper in AppImage"; exit 1; }
+          tar -tzf "$pacman" | grep "$helper\$" >/dev/null \
+            || { echo "missing $helper in pacman package"; exit 1; }
+          echo "third-party notices and update helper verified"
 
       - name: Verify systemd user unit
         run: |
@@ -153,11 +161,56 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+
+      - name: Sign artifacts and build the update manifest
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          CARGO_VERSION=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "vrc-photo-ui") | .version')
+          PACKAGER_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Packager.toml | head -n1)
+          if [ "$VERSION" != "$CARGO_VERSION" ] || [ "$VERSION" != "$PACKAGER_VERSION" ]; then
+            echo "tag $TAG does not match Cargo ($CARGO_VERSION) and Packager ($PACKAGER_VERSION)"
+            exit 1
+          fi
+          if [ -z "${MINISIGN_SECRET_KEY:-}" ]; then
+            echo "MINISIGN_SECRET_KEY is not configured; refusing to publish an unsigned update"
+            exit 1
+          fi
+
+          umask 077
+          KEY="$RUNNER_TEMP/minisign.key"
+          printf '%s' "$MINISIGN_SECRET_KEY" > "$KEY"
+          trap 'rm -f "$KEY"' EXIT
+          PUB=$(grep -m1 '^RW' packaging/update/keys.txt)
+
+          cargo build -p vrc-photo-release-tool --bin vrc-photo-update-manifest
+          ./target/debug/vrc-photo-update-manifest sign --key "$KEY" --dist dist
+          ./target/debug/vrc-photo-update-manifest verify --public-key "$PUB" --dist dist
+          ./target/debug/vrc-photo-update-manifest generate \
+            --dist dist \
+            --tag "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --notes-url "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}" \
+            --output dist/latest.json
+          ./target/debug/vrc-photo-update-manifest sign --key "$KEY" --file dist/latest.json
+          ./target/debug/vrc-photo-update-manifest verify --public-key "$PUB" --file dist/latest.json
+          jq -e '.schema == 1 and (.platforms | length == 2)' dist/latest.json
 
       - name: Publish release (tags only)
         env:

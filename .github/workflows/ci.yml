@@ -112,3 +112,7 @@ jobs:
         run: cargo test -p vrc-photo-ipc
       - name: Clippy IPC transport on Windows
         run: cargo clippy -p vrc-photo-ipc --all-targets -- -D warnings
+      - name: Test updater on Windows
+        run: cargo test -p vrc-photo-update
+      - name: Clippy updater on Windows
+        run: cargo clippy -p vrc-photo-update --all-targets -- -D warnings

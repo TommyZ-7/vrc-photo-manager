@@ -7678,6 +7678,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "vrc-photo-release-tool"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "hex",
+ "minisign",
+ "minisign-verify",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "url",
+ "vrc-photo-update",
+]
+
+[[package]]
 name = "vrc-photo-ui"
 version = "0.3.0"
 dependencies = [

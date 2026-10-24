@@ -6,6 +6,7 @@ members = [
     "crates/ipc",
     "crates/ui",
     "crates/update",
+    "crates/release-tool",
 ]
 
 [workspace.package]
