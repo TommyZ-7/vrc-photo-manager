@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/core",
     "crates/daemon",
+    "crates/ipc",
     "crates/ui",
 ]
 
@@ -19,6 +20,7 @@ blake3 = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
+interprocess = "2.4"
 regex = "1"
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

@@ -1528,6 +1528,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "doctest-file"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2db04e74f0a9a93103b50e90b96024c9b2bdca8bce6a632ec71b88736d3d359"
+
+[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3426,6 +3432,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "interprocess"
+version = "2.4.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4a4fff6c51dece332bdbf3af5fe376c49cfc8dced782725e95be0bb489e35d7"
+dependencies = [
+ "doctest-file",
+ "libc",
+ "recvmsg",
+ "widestring 1.2.1",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5626,6 +5645,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "03251193000f4bd3b042892be858ee50e8b3719f2b08e5833ac4353724632430"
 
 [[package]]
+name = "recvmsg"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3edd4d5d42c92f0a659926464d4cce56b562761267ecf0f469d85b7de384175"
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6413,7 +6438,7 @@ dependencies = [
  "libc",
  "nix 0.23.2",
  "thiserror 1.0.69",
- "widestring",
+ "widestring 0.4.3",
  "winapi",
 ]
 
@@ -7526,6 +7551,7 @@ dependencies = [
  "chrono",
  "clap",
  "image",
+ "interprocess",
  "notify",
  "single-instance",
  "tempfile",
@@ -7534,7 +7560,20 @@ dependencies = [
  "trash",
  "tray-icon",
  "vrc-photo-core",
+ "vrc-photo-ipc",
  "windows 0.62.2",
+]
+
+[[package]]
+name = "vrc-photo-ipc"
+version = "0.3.0"
+dependencies = [
+ "interprocess",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
 ]
 
 [[package]]
@@ -7542,15 +7581,18 @@ name = "vrc-photo-ui"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "async-channel",
  "chrono",
  "gpui-kit",
  "image",
  "rfd",
  "smallvec",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
  "trash",
  "vrc-photo-core",
+ "vrc-photo-ipc",
 ]
 
 [[package]]
@@ -8021,6 +8063,12 @@ name = "widestring"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c168940144dd21fd8046987c16a46a33d5fc84eec29ef9dcddc2ac9e31526b7c"
+
+[[package]]
+name = "widestring"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72069c3113ab32ab29e5584db3c6ec55d416895e60715417b5b883a357c3e471"
 
 [[package]]
 name = "winapi"

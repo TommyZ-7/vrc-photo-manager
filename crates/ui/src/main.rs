@@ -30,7 +30,11 @@ use vrc_photo_core::scanner::ScanFailure;
 use vrc_photo_core::settings::AppSettings;
 use vrc_photo_core::thumbnail;
 use vrc_photo_core::time;
+use vrc_photo_ipc::{
+    Endpoint, Event as IpcEvent, Request as IpcRequest, ScanPhase as IpcScanPhase, StatusSnapshot,
+};
 
+mod ipc_bridge;
 mod logging;
 
 const BG: u32 = 0x07090d;
@@ -1049,6 +1053,16 @@ impl Element for YearRail {
 
 /// Outcome of one import run, kept on the Photos screen until the user closes
 /// it so failed files can be retried without reopening the file picker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScanProgressView {
+    phase: IpcScanPhase,
+    processed: usize,
+    total: Option<usize>,
+    indexed: usize,
+    root: usize,
+    roots: usize,
+}
+
 #[derive(Clone)]
 struct ImportReportView {
     mode: ImportMode,
@@ -1070,6 +1084,11 @@ pub struct App {
     hovered_nav: Option<Screen>,
     daemon_age_secs: Option<i64>,
     daemon_supervisor: Option<String>,
+    ipc_endpoint: Option<Endpoint>,
+    ipc_connected: bool,
+    ipc_error: Option<String>,
+    daemon_paused: bool,
+    scan_progress: Option<ScanProgressView>,
     /// Last daemon-side library revision observed by the UI. Path changes and
     /// replacement status changes do not alter the photo count, so the count
     /// alone cannot tell the grid to rebuild.
@@ -1152,6 +1171,7 @@ pub struct App {
     search_days: Option<i64>,
     compress_policy: String,
     delete_armed: Option<i64>,
+    daemon_shutdown_armed: bool,
     message: Option<String>,
     demo: bool,
     demo_assets: Option<DemoAssets>,
@@ -1219,6 +1239,11 @@ impl App {
             hovered_nav: None,
             daemon_age_secs: None,
             daemon_supervisor: None,
+            ipc_endpoint: None,
+            ipc_connected: false,
+            ipc_error: None,
+            daemon_paused: false,
+            scan_progress: None,
             last_library_revision: initial_library_revision,
             library: PhotoBrowser::new(empty_index.clone()),
             search_view: PhotoBrowser::new(empty_index),
@@ -1294,6 +1319,7 @@ impl App {
             search_days: Some(7),
             compress_policy: "keep".to_string(),
             delete_armed: None,
+            daemon_shutdown_armed: false,
             message: None,
             demo,
             demo_assets,
@@ -1323,6 +1349,9 @@ impl App {
             app.message = Some(format!("デーモンを起動できません: {error}"));
         }
         app.start_auto_refresh(cx);
+        if !app.demo {
+            app.start_ipc(cx);
+        }
         if timing_enabled() {
             let started = process_start();
             cx.on_next_frame(window, move |_, _, _| {
@@ -1342,6 +1371,246 @@ impl App {
             }
         })
         .detach();
+    }
+
+    fn start_ipc(&mut self, cx: &mut Context<Self>) {
+        let Some(data_dir) = vrc_photo_core::data_dir() else {
+            return;
+        };
+        let endpoint = match Endpoint::for_data_dir(&data_dir) {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                tracing::warn!(%error, "cannot resolve daemon IPC endpoint");
+                return;
+            }
+        };
+        self.ipc_endpoint = Some(endpoint.clone());
+        let (tx, rx) = async_channel::unbounded();
+        ipc_bridge::start(endpoint, tx);
+        cx.spawn(async move |this, cx| {
+            while let Ok(incoming) = rx.recv().await {
+                if this
+                    .update(cx, |this, cx| this.handle_ipc_incoming(incoming, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn handle_ipc_incoming(&mut self, incoming: ipc_bridge::Incoming, cx: &mut Context<Self>) {
+        match incoming {
+            ipc_bridge::Incoming::Connected(status) => {
+                self.ipc_connected = true;
+                self.ipc_error = None;
+                self.daemon_shutdown_armed = false;
+                self.refresh_monitor();
+                self.apply_daemon_status(status);
+            }
+            ipc_bridge::Incoming::Disconnected(error) => {
+                let was_connected = self.ipc_connected;
+                self.ipc_connected = false;
+                self.ipc_error = Some(error);
+                self.daemon_paused = false;
+                self.daemon_shutdown_armed = false;
+                self.scan_progress = None;
+                if was_connected {
+                    self.refresh_monitor();
+                }
+            }
+            ipc_bridge::Incoming::Event(event) => self.handle_ipc_event(event, cx),
+        }
+        cx.notify();
+    }
+
+    fn apply_daemon_status(&mut self, status: StatusSnapshot) {
+        self.daemon_paused = status.paused;
+        self.scan_progress = status.scanning.then(|| ScanProgressView {
+            phase: status.scan_phase.unwrap_or(IpcScanPhase::Walking),
+            processed: status.scan_processed,
+            total: status.scan_total,
+            indexed: status.scan_indexed,
+            root: status.scan_root,
+            roots: status.scan_roots,
+        });
+        self.daemon_active = daemon_liveness(self.daemon_age_secs, self.ipc_connected);
+    }
+
+    fn handle_ipc_event(&mut self, event: IpcEvent, cx: &mut Context<Self>) {
+        match event {
+            IpcEvent::ScanStarted { roots } => {
+                self.scan_progress = Some(ScanProgressView {
+                    phase: IpcScanPhase::Walking,
+                    processed: 0,
+                    total: None,
+                    indexed: 0,
+                    root: usize::from(roots > 0),
+                    roots,
+                });
+            }
+            IpcEvent::ScanProgress {
+                phase,
+                processed,
+                total,
+                indexed,
+                root,
+                roots,
+            } => {
+                self.scan_progress = Some(ScanProgressView {
+                    phase,
+                    processed,
+                    total,
+                    indexed,
+                    root,
+                    roots,
+                });
+            }
+            IpcEvent::ScanFinished { .. } => {
+                self.scan_progress = None;
+                self.refresh_live(cx);
+            }
+            IpcEvent::CompressionProgress { .. } => {
+                self.refresh_live(cx);
+            }
+            IpcEvent::DaemonErrorChanged { .. } => {
+                self.reload_job_state();
+            }
+            IpcEvent::StatusChanged { status } => {
+                self.apply_daemon_status(status);
+                self.refresh_monitor();
+            }
+        }
+    }
+
+    fn wake_daemon(&self, request: IpcRequest, cx: &mut Context<Self>) {
+        if !self.ipc_connected {
+            return;
+        }
+        let Some(endpoint) = self.ipc_endpoint.clone() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { ipc_bridge::request(endpoint, request) })
+                .await;
+            if let Err(error) = result {
+                tracing::debug!(%error, "daemon IPC wake failed");
+            }
+            this.update(cx, |_, cx| cx.notify()).ok();
+        })
+        .detach();
+    }
+
+    fn send_wake_commands(&self, cx: &mut Context<Self>) {
+        self.wake_daemon(IpcRequest::WakeCommands, cx);
+    }
+
+    fn send_wake_jobs(&self, cx: &mut Context<Self>) {
+        self.wake_daemon(IpcRequest::WakeJobs, cx);
+    }
+
+    fn send_ipc_request(
+        &mut self,
+        request: IpcRequest,
+        success: Option<String>,
+        failure: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.ipc_connected {
+            if let Some(message) = failure {
+                self.message = Some(message);
+            }
+            cx.notify();
+            return;
+        }
+        let Some(endpoint) = self.ipc_endpoint.clone() else {
+            self.message = Some("IPCの接続先を解決できません".to_string());
+            cx.notify();
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { ipc_bridge::request(endpoint, request) })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(_) => {
+                        if let Some(message) = success {
+                            this.message = Some(message);
+                        }
+                    }
+                    Err(error) => {
+                        this.message =
+                            Some(failure.unwrap_or_else(|| ipc_bridge::error_message(&error)));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn request_daemon_rescan(&mut self, cx: &mut Context<Self>) {
+        match self.db.request_daemon_command(DaemonCommand::Rescan) {
+            Ok(_) => {
+                self.send_wake_commands(cx);
+                self.message = Some(if self.ipc_connected {
+                    "再スキャンを要求しました。デーモンが処理します。".to_string()
+                } else {
+                    "再スキャンを要求しました。デーモン起動後に実行されます。".to_string()
+                });
+            }
+            Err(error) => {
+                self.message = Some(format!("再スキャンを要求できません: {error}"));
+            }
+        }
+        cx.notify();
+    }
+
+    fn toggle_daemon_pause(&mut self, cx: &mut Context<Self>) {
+        if !self.ipc_connected {
+            self.message = Some("デーモン停止中です".to_string());
+            cx.notify();
+            return;
+        }
+        let paused = !self.daemon_paused;
+        let success = if paused {
+            "監視を一時停止しました"
+        } else {
+            "監視を再開しました"
+        };
+        self.send_ipc_request(
+            IpcRequest::SetPaused { paused },
+            Some(success.to_string()),
+            None,
+            cx,
+        );
+    }
+
+    fn toggle_daemon_shutdown(&mut self, cx: &mut Context<Self>) {
+        if !self.ipc_connected {
+            self.message = Some("デーモン停止中です".to_string());
+            cx.notify();
+            return;
+        }
+        if !self.daemon_shutdown_armed {
+            self.daemon_shutdown_armed = true;
+            self.message = Some("もう一度「デーモンを終了」を押すと終了します".to_string());
+            cx.notify();
+            return;
+        }
+        self.daemon_shutdown_armed = false;
+        self.send_ipc_request(
+            IpcRequest::Shutdown,
+            Some("デーモンを終了しました".to_string()),
+            None,
+            cx,
+        );
     }
 
     fn refresh_live(&mut self, cx: &mut Context<Self>) {
@@ -1433,6 +1702,7 @@ impl App {
             Ok(true) => {
                 self.message = Some("再試行をキューに戻しました".to_string());
                 self.reload_job_state();
+                self.send_wake_jobs(cx);
             }
             Ok(false) => {
                 self.message = Some(format!("再試行の上限（{MAX_JOB_RETRIES}回）に達しました"));
@@ -1450,6 +1720,7 @@ impl App {
             Ok(count) => {
                 self.message = Some(format!("{count} 件を再試行に戻しました（上限到達は除外）"));
                 self.reload_job_state();
+                self.send_wake_jobs(cx);
             }
             Err(error) => {
                 tracing::warn!(%error, "cannot retry failed compression jobs");
@@ -1467,6 +1738,7 @@ impl App {
             Ok(false) => self.message = Some("すでに再試行を要求済みです。".to_string()),
             Err(error) => self.message = Some(format!("再試行を要求できません: {error}")),
         }
+        self.send_wake_commands(cx);
         cx.notify();
     }
 
@@ -1612,7 +1884,7 @@ impl App {
             .flatten()
             .and_then(|value| value.parse::<i64>().ok())
             .map(|timestamp| (now - timestamp).max(0));
-        self.daemon_active = self.daemon_age_secs.is_some_and(|age| age < 20);
+        self.daemon_active = daemon_liveness(self.daemon_age_secs, self.ipc_connected);
         self.daemon_supervisor = self.db.get_setting("daemon_supervisor").ok().flatten();
         self.monitor_world = None;
         self.monitor_instance = None;
@@ -2166,6 +2438,7 @@ impl App {
                     "圧縮ジョブをキューに追加しました（元画像を保持）".to_string()
                 });
                 self.reload_aux(cx);
+                self.send_wake_jobs(cx);
             }
             Err(error) => self.message = Some(format!("キュー追加に失敗: {error}")),
         }
@@ -2533,17 +2806,25 @@ impl App {
                         div()
                             .size(px(6.))
                             .rounded_full()
-                            .bg(rgb(if self.daemon_active { GREEN } else { MUTED_2 })),
+                            .bg(rgb(if !self.daemon_active {
+                                MUTED_2
+                            } else if self.daemon_paused {
+                                AMBER
+                            } else {
+                                GREEN
+                            })),
                     )
                     .when(!collapsed, |this| {
                         this.child(
                             div()
                                 .text_size(px(10.))
                                 .text_color(rgb(if self.daemon_active { MUTED } else { MUTED_2 }))
-                                .child(if self.daemon_active {
-                                    "監視中"
-                                } else {
+                                .child(if !self.daemon_active {
                                     "デーモン停止"
+                                } else if self.daemon_paused {
+                                    "一時停止中"
+                                } else {
+                                    "監視中"
                                 }),
                         )
                     }),
@@ -2920,7 +3201,11 @@ impl App {
         let sync = if self.demo_assets.is_some() {
             "デモデータ".to_string()
         } else {
-            daemon_sync_label(self.daemon_age_secs, self.daemon_supervisor.as_deref())
+            daemon_sync_label(
+                self.daemon_age_secs,
+                self.daemon_supervisor.as_deref(),
+                self.ipc_connected,
+            )
         };
         let subtitle = format!(
             "{} 枚 · {} · {}",
@@ -5645,8 +5930,11 @@ impl App {
         }
         // The daemon may not have watched the new import destination yet.
         // A rescan makes it reload settings and rebuild its recursive watchers.
-        if let Err(error) = self.db.request_daemon_command(DaemonCommand::Rescan) {
-            tracing::warn!(%error, "cannot request rescan for import destination");
+        match self.db.request_daemon_command(DaemonCommand::Rescan) {
+            Ok(_) => self.send_wake_commands(cx),
+            Err(error) => {
+                tracing::warn!(%error, "cannot request rescan for import destination");
+            }
         }
     }
 
@@ -6002,7 +6290,7 @@ impl App {
                             .child(self.stat_card(
                                 "監視",
                                 if self.daemon_active {
-                                    "稼働中".to_string()
+                                    daemon_state_label(true, self.daemon_paused).to_string()
                                 } else if self.settings.log_dir.is_some() {
                                     "停止中".to_string()
                                 } else {
@@ -6022,6 +6310,7 @@ impl App {
                                 format!("{} 枚", self.stats.photo_count),
                             )),
                     )
+                    .child(self.daemon_card(cx))
                     .when(!self.daemon_errors.is_empty(), |this| {
                         this.child(self.daemon_error_card(cx))
                     })
@@ -6115,6 +6404,124 @@ impl App {
                             .child("VRChat本体は出力ログを24時間で削除します。アプリ側には解析済みイベントだけを保存します。"),
                     ),
             )
+    }
+
+    fn daemon_card(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let status = if !self.daemon_active {
+            ("停止中", MUTED, PANEL_2)
+        } else if self.daemon_paused {
+            ("一時停止中", AMBER, 0x2a2412)
+        } else {
+            ("稼働中", GREEN, 0x112a22)
+        };
+        let sync = daemon_sync_label(
+            self.daemon_age_secs,
+            self.daemon_supervisor.as_deref(),
+            self.ipc_connected,
+        );
+        let ipc = if self.ipc_connected {
+            "IPC 接続中"
+        } else {
+            "IPC 未接続"
+        };
+        let ipc_detail = ipc_status_label(self.ipc_connected, self.ipc_error.as_deref());
+        let ipc_color = if self.ipc_connected { GREEN } else { RED };
+        let ipc_bg = if self.ipc_connected {
+            0x112a22
+        } else {
+            0x2a1414
+        };
+        let scan = self.scan_progress;
+        let armed = self.daemon_shutdown_armed;
+        let pause_label = if self.daemon_paused {
+            "監視を再開"
+        } else {
+            "監視を一時停止"
+        };
+
+        let mut card = glass_panel()
+            .flex()
+            .flex_col()
+            .p(px(16.))
+            .gap(px(12.))
+            .bg(rgb(PANEL))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .text_size(px(17.))
+                            .font_semibold()
+                            .text_color(rgb(TEXT))
+                            .child("デーモン"),
+                    )
+                    .child(self.badge(status.0, status.1, status.2))
+                    .child(self.badge(ipc, ipc_color, ipc_bg)),
+            )
+            .child(self.meta_row("最終同期", sync))
+            .child(self.meta_row("IPC", ipc_detail))
+            .child(self.meta_row(
+                "監視",
+                daemon_state_label(self.daemon_active, self.daemon_paused).to_string(),
+            ));
+
+        if let Some(progress) = scan {
+            card = card.child(
+                v_flex()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED))
+                            .child(scan_progress_label(&progress)),
+                    )
+                    .child(
+                        div()
+                            .h(px(6.))
+                            .w_full()
+                            .rounded_full()
+                            .bg(rgb(PANEL_2))
+                            .child(
+                                div()
+                                    .h_full()
+                                    .w(relative(scan_progress_ratio(&progress)))
+                                    .rounded_full()
+                                    .bg(rgb(BLUE)),
+                            ),
+                    ),
+            );
+        }
+
+        card.child(
+            h_flex()
+                .flex_wrap()
+                .gap(px(8.))
+                .child(
+                    Button::new("daemon-rescan")
+                        .label("再スキャン")
+                        .small()
+                        .on_click(cx.listener(|this, _, _, cx| this.request_daemon_rescan(cx))),
+                )
+                .child(
+                    Button::new("daemon-pause")
+                        .label(pause_label)
+                        .small()
+                        .disabled(!self.ipc_connected)
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_daemon_pause(cx))),
+                )
+                .child(
+                    Button::new("daemon-shutdown")
+                        .label(if armed {
+                            "もう一度押して終了"
+                        } else {
+                            "デーモンを終了"
+                        })
+                        .small()
+                        .disabled(!self.ipc_connected)
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_daemon_shutdown(cx))),
+                ),
+        )
     }
 
     fn daemon_error_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -6441,6 +6848,9 @@ impl App {
                                                     let requested = this
                                                         .db
                                                         .request_daemon_command(DaemonCommand::Rescan);
+                                                    if requested.is_ok() {
+                                                        this.send_wake_commands(cx);
+                                                    }
                                                     this.message = Some(match requested {
                                                         Ok(_) => "保存しました。デーモンに再スキャンを要求しました（停止中なら起動後に実行）".to_string(),
                                                         Err(error) => {
@@ -7263,12 +7673,72 @@ fn alert_summaries(
     rows
 }
 
-fn daemon_sync_label(age_secs: Option<i64>, supervisor: Option<&str>) -> String {
+fn daemon_liveness(age_secs: Option<i64>, ipc_connected: bool) -> bool {
+    ipc_connected || age_secs.is_some_and(|age| age < 20)
+}
+
+fn daemon_state_label(active: bool, paused: bool) -> &'static str {
+    if !active {
+        "停止中"
+    } else if paused {
+        "一時停止中"
+    } else {
+        "稼働中"
+    }
+}
+
+fn ipc_status_label(connected: bool, error: Option<&str>) -> String {
+    if connected {
+        "IPC 接続中".to_string()
+    } else if let Some(error) = error {
+        format!("IPC 未接続（{error}）")
+    } else {
+        "IPC 未接続".to_string()
+    }
+}
+
+fn scan_progress_label(progress: &ScanProgressView) -> String {
+    match progress.phase {
+        IpcScanPhase::Walking => format!(
+            "フォルダ {}/{} · 検索 {} 件",
+            progress.root, progress.roots, progress.processed
+        ),
+        IpcScanPhase::Indexing => format!(
+            "フォルダ {}/{} · 索引 {}/{}",
+            progress.root,
+            progress.roots,
+            progress.processed,
+            progress
+                .total
+                .map(|total| total.to_string())
+                .unwrap_or_else(|| "?".to_string())
+        ),
+    }
+}
+
+fn scan_progress_ratio(progress: &ScanProgressView) -> f32 {
+    let ratio = match progress.phase {
+        IpcScanPhase::Walking => 0.0,
+        IpcScanPhase::Indexing => progress
+            .total
+            .filter(|total| *total > 0)
+            .map(|total| progress.processed as f32 / total as f32)
+            .unwrap_or(0.0),
+    };
+    ratio.clamp(0.0, 1.0)
+}
+
+fn daemon_sync_label(
+    age_secs: Option<i64>,
+    supervisor: Option<&str>,
+    ipc_connected: bool,
+) -> String {
     match age_secs.filter(|age| *age < 20) {
         Some(age) if supervisor == Some("systemd") => {
             format!("最終同期 {age}秒前 · systemd")
         }
         Some(age) => format!("最終同期 {age}秒前"),
+        None if ipc_connected => "IPC 接続中".to_string(),
         None => "デーモン停止".to_string(),
     }
 }
@@ -7726,15 +8196,17 @@ mod tests {
     // `gpui_kit::*`, shadowing the built-in `#[test]` and recursing forever.
     use super::{
         CountDebounce, DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH,
-        MAX_PAGES, PAGE_SIZE, PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex, PhotoPageCache, Screen,
-        THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, YearBucket, add_photo_root_and_save,
-        alert_summaries, anchor_photo_id, apply_library_index, autostart_description, average_bgra,
-        build_year_buckets, daemon_operation_label, daemon_sync_label, decode_thumbnail,
-        demo_thumb_path, ease_motion, first_visible_photo, format_captured_month, format_count,
-        format_timestamp, grid_available_width, grid_columns, grid_columns_for, has_tag_filter,
-        import_issue_counts, job_retry_available, job_retry_label, lerp_color, list_scroll_top,
-        moved_profile_order, next_focus_index, normalize_note, parse_args, parse_window_size,
-        rail_label_hidden_by_pill, rail_row_at, rail_scroll_offset, rail_y, retryable_sources,
+        IpcScanPhase, MAX_PAGES, PAGE_SIZE, PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex,
+        PhotoPageCache, ScanProgressView, Screen, THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT,
+        ThumbnailCache, YearBucket, add_photo_root_and_save, alert_summaries, anchor_photo_id,
+        apply_library_index, autostart_description, average_bgra, build_year_buckets,
+        daemon_liveness, daemon_operation_label, daemon_state_label, daemon_sync_label,
+        decode_thumbnail, demo_thumb_path, ease_motion, first_visible_photo, format_captured_month,
+        format_count, format_timestamp, grid_available_width, grid_columns, grid_columns_for,
+        has_tag_filter, import_issue_counts, ipc_status_label, job_retry_available,
+        job_retry_label, lerp_color, list_scroll_top, moved_profile_order, next_focus_index,
+        normalize_note, parse_args, parse_window_size, rail_label_hidden_by_pill, rail_row_at,
+        rail_scroll_offset, rail_y, retryable_sources, scan_progress_label, scan_progress_ratio,
         search_anchor_after_result, search_available_width, sidebar_reveal_width, sidebar_width,
         stagger_value, step_index, sync_search_mirror, viewer_details_width, viewer_image_box,
         visible_year_buckets, with_tag, without_tag,
@@ -8612,14 +9084,57 @@ mod tests {
     }
 
     #[test]
+    fn scan_progress_label_uses_root_and_counts() {
+        let progress = ScanProgressView {
+            phase: IpcScanPhase::Indexing,
+            processed: 50,
+            total: Some(100),
+            indexed: 49,
+            root: 2,
+            roots: 3,
+        };
+        assert_eq!(scan_progress_label(&progress), "フォルダ 2/3 · 索引 50/100");
+        assert_eq!(scan_progress_ratio(&progress), 0.5);
+    }
+
+    #[test]
+    fn ipc_status_label_distinguishes_disconnected_and_mismatch() {
+        assert_eq!(ipc_status_label(true, None), "IPC 接続中");
+        assert!(ipc_status_label(false, Some("protocol mismatch")).contains("未接続"));
+    }
+
+    #[test]
+    fn daemon_state_label_prefers_stopped_over_paused() {
+        assert_eq!(daemon_state_label(false, true), "停止中");
+        assert_eq!(daemon_state_label(true, true), "一時停止中");
+        assert_eq!(daemon_state_label(true, false), "稼働中");
+    }
+
+    #[test]
+    fn daemon_liveness_uses_heartbeat_or_ipc() {
+        assert!(daemon_liveness(Some(3), false));
+        assert!(daemon_liveness(None, true));
+        assert!(!daemon_liveness(Some(30), false));
+        assert!(!daemon_liveness(None, false));
+    }
+
+    #[test]
     fn daemon_sync_label_includes_systemd_supervisor() {
         assert_eq!(
-            daemon_sync_label(Some(5), Some("systemd")),
+            daemon_sync_label(Some(5), Some("systemd"), false),
             "最終同期 5秒前 · systemd"
         );
-        assert_eq!(daemon_sync_label(Some(5), Some("app")), "最終同期 5秒前");
-        assert_eq!(daemon_sync_label(Some(30), Some("systemd")), "デーモン停止");
-        assert_eq!(daemon_sync_label(None, None), "デーモン停止");
+        assert_eq!(
+            daemon_sync_label(Some(5), Some("app"), false),
+            "最終同期 5秒前"
+        );
+        assert_eq!(
+            daemon_sync_label(Some(30), Some("systemd"), false),
+            "デーモン停止"
+        );
+        assert_eq!(daemon_sync_label(None, None, false), "デーモン停止");
+        assert_eq!(daemon_sync_label(None, None, true), "IPC 接続中");
+        assert_eq!(daemon_sync_label(Some(30), None, true), "IPC 接続中");
     }
 
     #[test]

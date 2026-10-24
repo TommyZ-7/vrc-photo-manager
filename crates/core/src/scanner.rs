@@ -68,6 +68,22 @@ pub struct ScanReport {
     pub failures: Vec<ScanFailure>,
 }
 
+/// The phase a scan is currently in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanPhase {
+    Walking,
+    Indexing,
+}
+
+/// Progress reported by [`scan_and_index_observed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScanProgress {
+    pub phase: ScanPhase,
+    pub processed: usize,
+    pub total: Option<usize>,
+    pub indexed: usize,
+}
+
 /// Recursively scans a VRChat photo root.
 ///
 /// Only source PNG/JPEG files are returned. The `compressed` subdirectory is
@@ -82,6 +98,16 @@ pub fn scan_root(root: &Path) -> Result<Vec<ScannedPhoto>> {
 /// A failure while reading one directory or photo does not abort the walk;
 /// readable photos are still returned.
 pub fn scan_root_report(root: &Path) -> Result<(Vec<ScannedPhoto>, Vec<ScanFailure>)> {
+    scan_root_report_with_progress(root, |_| {})
+}
+
+fn scan_root_report_with_progress<F>(
+    root: &Path,
+    mut observe: F,
+) -> Result<(Vec<ScannedPhoto>, Vec<ScanFailure>)>
+where
+    F: FnMut(usize),
+{
     if !root.is_dir() {
         return Err(CoreError::Invalid(format!(
             "photo root is not a directory: {}",
@@ -90,7 +116,7 @@ pub fn scan_root_report(root: &Path) -> Result<(Vec<ScannedPhoto>, Vec<ScanFailu
     }
     let mut photos = Vec::new();
     let mut failures = Vec::new();
-    walk(root, root, &mut photos, &mut failures);
+    walk(root, root, &mut photos, &mut failures, &mut observe);
     photos.sort_by_key(|photo| photo.captured_at_utc);
     Ok((photos, failures))
 }
@@ -181,7 +207,15 @@ fn read_photo(root: &Path, path: &Path) -> std::result::Result<ScannedPhoto, Sca
     })
 }
 
-fn walk(root: &Path, dir: &Path, photos: &mut Vec<ScannedPhoto>, failures: &mut Vec<ScanFailure>) {
+fn walk<F>(
+    root: &Path,
+    dir: &Path,
+    photos: &mut Vec<ScannedPhoto>,
+    failures: &mut Vec<ScanFailure>,
+    observe: &mut F,
+) where
+    F: FnMut(usize),
+{
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) => {
@@ -216,11 +250,14 @@ fn walk(root: &Path, dir: &Path, photos: &mut Vec<ScannedPhoto>, failures: &mut 
             if entry.file_name() == "compressed" {
                 continue;
             }
-            walk(root, &path, photos, failures);
+            walk(root, &path, photos, failures, observe);
             continue;
         }
         match scan_one_detailed(root, &path) {
-            Some(Ok(photo)) => photos.push(photo),
+            Some(Ok(photo)) => {
+                photos.push(photo);
+                observe(photos.len());
+            }
             Some(Err(failure)) => failures.push(failure),
             None => {}
         }
@@ -232,12 +269,43 @@ fn walk(root: &Path, dir: &Path, photos: &mut Vec<ScannedPhoto>, failures: &mut 
 /// Per-photo failures are reported in [`ScanReport::failures`] and do not
 /// abort the batch.
 pub fn scan_and_index(db: &Db, root_id: i64, root: &Path) -> Result<ScanReport> {
-    let (photos, failures) = scan_root_report(root)?;
+    scan_and_index_observed(db, root_id, root, |_| {})
+}
+
+/// Scans and indexes one root, reporting walking and indexing progress.
+///
+/// The observer is called once per candidate photo during the walk and once
+/// per processed photo during indexing. `total` is `None` while walking.
+pub fn scan_and_index_observed<F>(
+    db: &Db,
+    root_id: i64,
+    root: &Path,
+    mut observe: F,
+) -> Result<ScanReport>
+where
+    F: FnMut(ScanProgress),
+{
+    let (photos, failures) = scan_root_report_with_progress(root, |found| {
+        observe(ScanProgress {
+            phase: ScanPhase::Walking,
+            processed: found,
+            total: None,
+            indexed: 0,
+        });
+    })?;
+    let total = photos.len();
     let mut report = ScanReport {
-        found: photos.len(),
+        found: total,
         failures,
         ..Default::default()
     };
+    let mut processed = 0;
+    observe(ScanProgress {
+        phase: ScanPhase::Indexing,
+        processed,
+        total: Some(total),
+        indexed: 0,
+    });
     for photo in photos {
         let path = photo.path.to_string_lossy().to_string();
         report.seen_paths.push(path.clone());
@@ -265,6 +333,13 @@ pub fn scan_and_index(db: &Db, root_id: i64, root: &Path) -> Result<ScanReport> 
             if !old_path_exists && db.rebind_photo(candidate.id, &new_photo)? {
                 report.indexed += 1;
                 report.rebound_ids.push(candidate.id);
+                processed += 1;
+                observe(ScanProgress {
+                    phase: ScanPhase::Indexing,
+                    processed,
+                    total: Some(total),
+                    indexed: report.indexed,
+                });
                 continue;
             }
         }
@@ -284,6 +359,13 @@ pub fn scan_and_index(db: &Db, root_id: i64, root: &Path) -> Result<ScanReport> 
                     .push(ScanFailure::new(&photo_path, error.to_string()));
             }
         }
+        processed += 1;
+        observe(ScanProgress {
+            phase: ScanPhase::Indexing,
+            processed,
+            total: Some(total),
+            indexed: report.indexed,
+        });
     }
     Ok(report)
 }
@@ -298,6 +380,37 @@ mod tests {
     fn write_png(path: &Path) {
         let image = RgbaImage::from_pixel(4, 3, Rgba([10, 20, 30, 255]));
         image.save(path).unwrap();
+    }
+
+    #[test]
+    fn observed_scan_reports_walking_and_indexing_progress() {
+        let dir = tempdir().unwrap();
+        for name in [
+            "VRChat_2026-10-21_21-14-03.221_4x3.png",
+            "VRChat_2026-10-21_21-14-04.221_4x3.png",
+        ] {
+            write_png(&dir.path().join(name));
+        }
+        let db = Db::open_in_memory().unwrap();
+        let root_id = db
+            .add_root(&dir.path().to_string_lossy(), "reference")
+            .unwrap();
+        let mut events = Vec::new();
+        let report = scan_and_index_observed(&db, root_id, dir.path(), |progress| {
+            events.push(progress);
+        })
+        .unwrap();
+        assert_eq!(report.indexed, 2);
+        assert!(
+            events
+                .iter()
+                .any(|progress| progress.phase == ScanPhase::Walking && progress.total.is_none())
+        );
+        let last = events.last().unwrap();
+        assert_eq!(last.phase, ScanPhase::Indexing);
+        assert_eq!(last.total, Some(2));
+        assert_eq!(last.processed, 2);
+        assert_eq!(last.indexed, 2);
     }
 
     #[test]

@@ -98,8 +98,10 @@ cargo test --workspace
 3. `crates/core/src/log_parser.rs` — ログイベントとセッション状態。
 4. `crates/core/src/linker.rs` — 写真と文脈の紐付け。
 5. `crates/core/src/compressor.rs` — 画像圧縮。
-6. `crates/daemon/src/lib.rs` — 監視ループ、ワーカー、トレイ制御。
-7. `crates/ui/src/main.rs` — 画面と状態。
+6. `crates/ipc/src/` — IPCプロトコル、エンドポイント、クライアント/サーバー。
+7. `crates/daemon/src/{ipc_server,signals}.rs` — IPCサーバーとwakeシグナル。
+8. `crates/daemon/src/lib.rs` — 監視ループ、ワーカー、トレイ制御。
+9. `crates/ui/src/{main,ipc_bridge}.rs` — 画面、状態、IPC購読。
 
 ## 7. 変更時のルール
 

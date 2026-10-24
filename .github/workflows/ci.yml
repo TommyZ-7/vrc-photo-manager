@@ -95,3 +95,20 @@ jobs:
       - name: Test
         if: needs.changes.outputs.docs_only != 'true'
         run: cargo test --workspace
+
+  ipc-windows:
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+      - name: Test IPC transport on Windows
+        run: cargo test -p vrc-photo-ipc
+      - name: Clippy IPC transport on Windows
+        run: cargo clippy -p vrc-photo-ipc --all-targets -- -D warnings

@@ -20,11 +20,19 @@ use vrc_photo_core::model::{
     QueueStatus,
 };
 use vrc_photo_core::photo_filename::is_source_photo;
-use vrc_photo_core::scanner::{ScanFailure, ScanReport, scan_and_index, scan_one};
+use vrc_photo_core::scanner::{
+    ScanFailure, ScanPhase as CoreScanPhase, ScanProgress, ScanReport, scan_and_index_observed,
+    scan_one,
+};
 use vrc_photo_core::settings::{AppSettings, detect_vrchat_paths};
 use vrc_photo_core::thumbnail;
+use vrc_photo_ipc::{Endpoint, Event, JobStatus, Operation, ScanPhase as IpcScanPhase};
 
+mod ipc_server;
+mod signals;
 mod tray;
+use ipc_server::{EventBus, IpcControl, IpcServer, status_snapshot};
+use signals::{JobSignal, WakeSignal};
 use tray::{Tray, TrayAction};
 
 const PARSER_VERSION: &str = "1";
@@ -42,6 +50,13 @@ pub struct DaemonStatus {
     pub last_log: Option<String>,
     pub photo_count: i64,
     pub pending_jobs: i64,
+    pub scanning: bool,
+    pub scan_phase: Option<vrc_photo_ipc::ScanPhase>,
+    pub scan_processed: usize,
+    pub scan_total: Option<usize>,
+    pub scan_indexed: usize,
+    pub scan_root: usize,
+    pub scan_roots: usize,
 }
 
 #[derive(Debug)]
@@ -128,6 +143,11 @@ pub struct Daemon {
     settings: AppSettings,
     status: Arc<Mutex<DaemonStatus>>,
     running: Arc<AtomicBool>,
+    wake: Arc<WakeSignal>,
+    jobs: Arc<JobSignal>,
+    events: EventBus,
+    ipc_endpoint: Option<Endpoint>,
+    ipc: Option<IpcServer>,
     watchers: Vec<RecommendedWatcher>,
     watcher_rx: Option<Receiver<notify::Result<notify::Event>>>,
     log_tail: Option<LogTail>,
@@ -152,7 +172,8 @@ impl Daemon {
         photo_dir: Option<PathBuf>,
         log_dir: Option<PathBuf>,
     ) -> Result<Self> {
-        let db = Db::open(db_path).context("cannot open library database")?;
+        let db_path = db_path.as_ref().to_path_buf();
+        let db = Db::open(&db_path).context("cannot open library database")?;
         let mut settings = AppSettings::load(&db).context("cannot load settings")?;
         if let Some(path) = photo_dir {
             settings.photo_roots = vec![path.to_string_lossy().to_string()];
@@ -188,12 +209,25 @@ impl Daemon {
                 )
             })
             .collect();
+        let ipc_endpoint =
+            vrc_photo_core::data_dir().and_then(|dir| match Endpoint::for_data_dir(&dir) {
+                Ok(endpoint) => Some(endpoint),
+                Err(error) => {
+                    tracing::warn!(%error, "cannot resolve IPC endpoint");
+                    None
+                }
+            });
 
         Ok(Self {
             db: Arc::new(Mutex::new(db)),
             settings,
             status: Arc::new(Mutex::new(DaemonStatus::default())),
             running: Arc::new(AtomicBool::new(true)),
+            wake: Arc::new(WakeSignal::default()),
+            jobs: Arc::new(JobSignal::default()),
+            events: EventBus::default(),
+            ipc_endpoint,
+            ipc: None,
             watchers: Vec::new(),
             watcher_rx: None,
             log_tail: None,
@@ -228,10 +262,32 @@ impl Daemon {
         }
     }
 
+    /// Overrides the resolved IPC endpoint. Tests disable it with `None`.
+    pub fn set_ipc_endpoint(&mut self, endpoint: Option<Endpoint>) {
+        self.ipc_endpoint = endpoint;
+    }
+
     pub fn set_paused(&self, paused: bool) {
-        if let Ok(mut status) = self.status.lock() {
-            status.paused = paused;
+        let changed = match self.status.lock() {
+            Ok(mut status) => {
+                if status.paused == paused {
+                    false
+                } else {
+                    status.paused = paused;
+                    true
+                }
+            }
+            Err(_) => false,
+        };
+        if changed {
+            self.wake.notify();
+            self.publish_status();
         }
+    }
+
+    fn publish_status(&self) {
+        let status = status_snapshot(&self.status.lock().unwrap());
+        self.events.publish(Event::StatusChanged { status });
     }
 
     pub fn settings(&self) -> &AppSettings {
@@ -255,6 +311,9 @@ impl Daemon {
             db.record_daemon_error(operation, message, detail)?;
         }
         self.last_errors.insert(operation, signature);
+        self.events.publish(Event::DaemonErrorChanged {
+            operation: ipc_operation(operation),
+        });
         Ok(())
     }
 
@@ -268,6 +327,9 @@ impl Daemon {
             db.clear_daemon_error(operation)?;
         }
         self.last_errors.remove(&operation);
+        self.events.publish(Event::DaemonErrorChanged {
+            operation: ipc_operation(operation),
+        });
         Ok(())
     }
 
@@ -432,11 +494,28 @@ impl Daemon {
     }
 
     pub fn run(&mut self) -> Result<()> {
+        self.start_ipc();
+        if self.stopping() {
+            self.shutdown();
+            return Ok(());
+        }
         self.record_supervisor();
         self.ensure_roots()?;
+        if self.stopping() {
+            self.shutdown();
+            return Ok(());
+        }
         self.scan_photos()?;
+        if self.stopping() {
+            self.shutdown();
+            return Ok(());
+        }
         self.ingest_logs()?;
         self.link_unlinked()?;
+        if self.stopping() {
+            self.shutdown();
+            return Ok(());
+        }
         self.write_heartbeat();
         self.restart_watchers();
         self.apply_autostart(self.settings.autostart);
@@ -459,7 +538,7 @@ impl Daemon {
                 .map(|status| status.paused)
                 .unwrap_or(false)
             {
-                thread::sleep(SCAN_INTERVAL);
+                self.wake.wait(SCAN_INTERVAL);
                 continue;
             }
             self.poll_watchers();
@@ -496,10 +575,36 @@ impl Daemon {
                 self.write_heartbeat();
             }
             self.poll_tray();
-            thread::sleep(SCAN_INTERVAL);
+            self.wake.wait(SCAN_INTERVAL);
         }
         self.shutdown();
         Ok(())
+    }
+
+    fn stopping(&self) -> bool {
+        !self.running.load(Ordering::Relaxed)
+    }
+
+    fn start_ipc(&mut self) {
+        if self.ipc.is_some() {
+            return;
+        }
+        let Some(endpoint) = self.ipc_endpoint.clone() else {
+            return;
+        };
+        let control = IpcControl {
+            running: self.running.clone(),
+            status: self.status.clone(),
+            wake: self.wake.clone(),
+            jobs: self.jobs.clone(),
+            events: self.events.clone(),
+        };
+        match IpcServer::start(endpoint, control) {
+            Ok(server) => self.ipc = Some(server),
+            Err(error) => {
+                tracing::warn!(%error, "cannot start IPC server; continuing without IPC")
+            }
+        }
     }
 
     fn ensure_roots(&mut self) -> Result<()> {
@@ -610,6 +715,7 @@ impl Daemon {
             }
             if self.settings.auto_compress && !new_ids.is_empty() {
                 enqueue_auto_jobs(&db, &new_ids)?;
+                self.jobs.notify();
             }
         }
         if let Some(tx) = &self.thumbnail_tx {
@@ -630,14 +736,77 @@ impl Daemon {
     }
 
     fn scan_photos(&mut self) -> Result<ScanReport> {
+        self.begin_scan();
+        let result = self.scan_photos_inner();
+        self.finish_scan(&result);
+        result
+    }
+
+    fn begin_scan(&self) {
+        let roots = self.settings.photo_roots().len();
+        {
+            let mut status = self.status.lock().unwrap();
+            status.scanning = true;
+            status.scan_phase = Some(IpcScanPhase::Walking);
+            status.scan_processed = 0;
+            status.scan_total = None;
+            status.scan_indexed = 0;
+            status.scan_root = usize::from(roots > 0);
+            status.scan_roots = roots;
+        }
+        self.events.publish(Event::ScanStarted { roots });
+    }
+
+    fn finish_scan(&self, result: &Result<ScanReport>) {
+        let (found, indexed, skipped, failures, failed) = match result {
+            Ok(report) => (
+                report.found,
+                report.indexed,
+                report.skipped,
+                report.failures.len(),
+                false,
+            ),
+            Err(_) => (0, 0, 0, 0, true),
+        };
+        {
+            let mut status = self.status.lock().unwrap();
+            status.scanning = false;
+            status.scan_phase = None;
+            status.scan_processed = found;
+            status.scan_total = Some(found);
+            status.scan_indexed = indexed;
+        }
+        self.events.publish(Event::ScanFinished {
+            found,
+            indexed,
+            skipped,
+            failures,
+            failed,
+        });
+    }
+
+    fn scan_photos_inner(&mut self) -> Result<ScanReport> {
         let mut report = ScanReport::default();
         let roots = self.settings.photo_roots();
+        let root_count = roots.len();
         if !roots.is_empty() {
             let db = self.db.lock().unwrap();
             let initial_scan = db.count_photos()? == 0;
             let mut changed = false;
             let mut missing_ids = Vec::new();
-            for root in roots {
+            for (index, root) in roots.into_iter().enumerate() {
+                if self.stopping() {
+                    break;
+                }
+                let root_number = index + 1;
+                {
+                    let mut status = self.status.lock().unwrap();
+                    status.scan_root = root_number;
+                    status.scan_roots = root_count;
+                    status.scan_phase = Some(IpcScanPhase::Walking);
+                    status.scan_processed = 0;
+                    status.scan_total = None;
+                }
                 if !root.is_dir() {
                     tracing::warn!(path = %root.display(), "photo root does not exist");
                     report.failures.push(ScanFailure {
@@ -648,7 +817,17 @@ impl Daemon {
                 }
                 let root_id = db.add_root(&root.to_string_lossy(), "reference")?;
                 let existing = db.photos_for_root(root_id)?;
-                let root_report = match scan_and_index(&db, root_id, &root) {
+                let indexed_before = report.indexed;
+                let mut observer = ScanObserver::new(
+                    self.events.clone(),
+                    self.status.clone(),
+                    indexed_before,
+                    root_number,
+                    root_count,
+                );
+                let root_report = match scan_and_index_observed(&db, root_id, &root, |progress| {
+                    observer.observe(progress);
+                }) {
                     Ok(root_report) => root_report,
                     Err(error) => {
                         tracing::error!(path = %root.display(), %error, "photo scan failed");
@@ -705,6 +884,7 @@ impl Daemon {
                 && (!initial_scan || self.settings.auto_compress_backlog)
             {
                 enqueue_auto_jobs(&db, &report.new_ids)?;
+                self.jobs.notify();
             }
         }
         self.verify_replaced_assets()?;
@@ -1062,7 +1242,10 @@ impl Daemon {
         match tray.poll(&status) {
             TrayAction::Noop => {}
             TrayAction::TogglePause(paused) => self.set_paused(paused),
-            TrayAction::Quit => self.running.store(false, Ordering::Relaxed),
+            TrayAction::Quit => {
+                self.running.store(false, Ordering::Relaxed);
+                self.wake.notify();
+            }
             TrayAction::OpenUi => tray::open_ui(),
         }
     }
@@ -1166,9 +1349,11 @@ impl Daemon {
         for index in 0..count {
             let db = self.db.clone();
             let running = self.running.clone();
+            let jobs = self.jobs.clone();
+            let events = self.events.clone();
             let handle = thread::Builder::new()
                 .name(format!("compress-{index}"))
-                .spawn(move || worker_loop(db, running))
+                .spawn(move || worker_loop(db, running, jobs, events))
                 .expect("cannot spawn compression worker");
             self.workers.push(handle);
         }
@@ -1176,6 +1361,7 @@ impl Daemon {
 
     fn stop_workers(&mut self) {
         self.running.store(false, Ordering::Relaxed);
+        self.jobs.notify();
         self.thumbnail_tx = None;
         if let Some(handle) = self.thumbnail_handle.take()
             && handle.join().is_err()
@@ -1195,7 +1381,9 @@ impl Daemon {
     }
 
     fn shutdown(&mut self) {
+        self.ipc = None;
         self.running.store(false, Ordering::Relaxed);
+        self.wake.notify();
         if let Some(mut tail) = self.log_tail.take() {
             let db = self.db.lock().unwrap();
             if let Err(error) = tail.ingestor.finish(&db, chrono::Utc::now().timestamp()) {
@@ -1209,7 +1397,83 @@ impl Daemon {
 
 impl Drop for Daemon {
     fn drop(&mut self) {
+        self.ipc = None;
         self.running.store(false, Ordering::Relaxed);
+        self.wake.notify();
+    }
+}
+
+struct ScanObserver {
+    events: EventBus,
+    status: Arc<Mutex<DaemonStatus>>,
+    indexed_before: usize,
+    root: usize,
+    roots: usize,
+    last_emit: Instant,
+    last_phase: Option<IpcScanPhase>,
+}
+
+impl ScanObserver {
+    fn new(
+        events: EventBus,
+        status: Arc<Mutex<DaemonStatus>>,
+        indexed_before: usize,
+        root: usize,
+        roots: usize,
+    ) -> Self {
+        Self {
+            events,
+            status,
+            indexed_before,
+            root,
+            roots,
+            last_emit: Instant::now(),
+            last_phase: None,
+        }
+    }
+
+    fn observe(&mut self, progress: ScanProgress) {
+        let phase = match progress.phase {
+            CoreScanPhase::Walking => IpcScanPhase::Walking,
+            CoreScanPhase::Indexing => IpcScanPhase::Indexing,
+        };
+        let final_indexing =
+            progress.phase == CoreScanPhase::Indexing && progress.total == Some(progress.processed);
+        let phase_changed = self.last_phase != Some(phase);
+        if !phase_changed
+            && !final_indexing
+            && self.last_emit.elapsed() < Duration::from_millis(200)
+        {
+            return;
+        }
+        self.last_phase = Some(phase);
+        self.last_emit = Instant::now();
+        let indexed = self.indexed_before + progress.indexed;
+        {
+            let mut status = self.status.lock().unwrap();
+            status.scan_phase = Some(phase);
+            status.scan_processed = progress.processed;
+            status.scan_total = progress.total;
+            status.scan_indexed = indexed;
+            status.scan_root = self.root;
+            status.scan_roots = self.roots;
+        }
+        self.events.publish(Event::ScanProgress {
+            phase,
+            processed: progress.processed,
+            total: progress.total,
+            indexed,
+            root: self.root,
+            roots: self.roots,
+        });
+    }
+}
+
+fn ipc_operation(operation: DaemonOperation) -> Operation {
+    match operation {
+        DaemonOperation::Scan => Operation::Scan,
+        DaemonOperation::Log => Operation::Log,
+        DaemonOperation::Link => Operation::Link,
     }
 }
 
@@ -1363,16 +1627,25 @@ fn hash_loop(db: Arc<Mutex<Db>>, running: Arc<AtomicBool>) {
     }
 }
 
-fn worker_loop(db: Arc<Mutex<Db>>, running: Arc<AtomicBool>) {
+fn worker_loop(
+    db: Arc<Mutex<Db>>,
+    running: Arc<AtomicBool>,
+    jobs: Arc<JobSignal>,
+    events: EventBus,
+) {
+    let mut seen_generation = 0;
     while running.load(Ordering::Relaxed) {
         let job = {
             let db = db.lock().unwrap();
             db.next_pending_job().ok().flatten()
         };
         let Some(job) = job else {
-            thread::sleep(Duration::from_millis(400));
+            // Poll first so a batch keeps all workers busy; the signal only
+            // saves the 400 ms wait when the queue was empty.
+            jobs.wait(&mut seen_generation, Duration::from_millis(400));
             continue;
         };
+        publish_compression(&events, &job, JobStatus::Processing, 0.05, None);
         if let Err(error) = process_job(&db, &job) {
             tracing::error!(job = %job.id, %error, "compression failed");
             match db.lock() {
@@ -1397,8 +1670,33 @@ fn worker_loop(db: Arc<Mutex<Db>>, running: Arc<AtomicBool>) {
                     "cannot lock database to record failed compression job"
                 ),
             }
+            publish_compression(
+                &events,
+                &job,
+                JobStatus::Failed,
+                0.0,
+                Some(error.to_string()),
+            );
+        } else {
+            publish_compression(&events, &job, JobStatus::Completed, 1.0, None);
         }
     }
+}
+
+fn publish_compression(
+    events: &EventBus,
+    job: &CompressionJob,
+    status: JobStatus,
+    progress: f64,
+    error: Option<String>,
+) {
+    events.publish(Event::CompressionProgress {
+        job_id: job.id.clone(),
+        photo_id: job.photo_id,
+        status,
+        progress,
+        error,
+    });
 }
 
 fn process_job(db: &Arc<Mutex<Db>>, job: &CompressionJob) -> Result<()> {
@@ -2141,6 +2439,165 @@ mod tests {
         image::RgbaImage::from_pixel(16, 10, image::Rgba([10, 20, 30, 255]))
             .save(path)
             .unwrap();
+    }
+
+    fn test_daemon(dir: &tempfile::TempDir) -> Daemon {
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let db_path = dir.path().join("library.db");
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        daemon.set_ipc_endpoint(None);
+        daemon
+    }
+
+    #[test]
+    fn compression_workers_process_a_batch_without_idle_delay() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let photo_path = dir
+            .path()
+            .join("photos/VRChat_2026-10-21_21-14-03.221_4x3.png");
+        write_photo(&photo_path);
+        daemon.run_once().unwrap();
+        std::fs::remove_file(&photo_path).unwrap();
+
+        {
+            let db = daemon.db.lock().unwrap();
+            let photo = db
+                .photo_by_path(&photo_path.to_string_lossy())
+                .unwrap()
+                .expect("indexed photo");
+            let profile = db
+                .ensure_default_profiles()
+                .unwrap()
+                .into_iter()
+                .next()
+                .expect("default profile");
+            db.enqueue_job(photo.id, &profile.id, "keep").unwrap();
+            db.enqueue_job(photo.id, &profile.id, "keep").unwrap();
+        }
+
+        daemon.settings.compression_workers = 2;
+        let events = daemon.events.subscribe();
+        let started = Instant::now();
+        daemon.start_workers();
+        let mut failures = 0;
+        while failures < 2 {
+            let event = events
+                .recv_timeout(Duration::from_millis(300))
+                .expect("worker idle delay");
+            if let Event::CompressionProgress {
+                status: JobStatus::Failed,
+                ..
+            } = event
+            {
+                failures += 1;
+            }
+        }
+        assert!(
+            started.elapsed() < Duration::from_millis(300),
+            "batch took {:?}",
+            started.elapsed()
+        );
+        daemon.stop_workers();
+    }
+
+    #[test]
+    fn scan_photos_publishes_started_progress_and_finished() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        write_photo(
+            &dir.path()
+                .join("photos/VRChat_2026-10-21_21-14-03.221_4x3.png"),
+        );
+        let events = daemon.events.subscribe();
+        daemon.run_once().unwrap();
+
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::ScanStarted { .. }
+        ));
+        let mut finished = None;
+        while let Ok(event) = events.try_recv() {
+            if let Event::ScanFinished { .. } = event {
+                finished = Some(event);
+            }
+        }
+        match finished {
+            Some(Event::ScanFinished { indexed, .. }) => assert_eq!(indexed, 1),
+            _ => panic!("scan did not finish"),
+        }
+    }
+
+    #[test]
+    fn scan_photos_stops_between_roots_when_stopping() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let second = dir.path().join("photos2");
+        std::fs::create_dir_all(&second).unwrap();
+        write_photo(&second.join("VRChat_2026-10-21_21-14-04.221_4x3.png"));
+        daemon.settings.photo_roots = vec![
+            dir.path().join("photos").to_string_lossy().to_string(),
+            second.to_string_lossy().to_string(),
+        ];
+        daemon.running.store(false, Ordering::Relaxed);
+
+        let report = daemon.scan_photos().unwrap();
+        assert_eq!(report.indexed, 0);
+        assert_eq!(daemon.db.lock().unwrap().count_photos().unwrap(), 0);
+    }
+
+    #[test]
+    fn set_paused_publishes_status_changed_and_wakes() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = test_daemon(&dir);
+        let events = daemon.events.subscribe();
+        daemon.set_paused(true);
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::StatusChanged { .. }
+        ));
+        assert!(daemon.wake.is_pending());
+    }
+
+    #[test]
+    fn report_daemon_error_publishes_changed_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let events = daemon.events.subscribe();
+        daemon
+            .report_daemon_error(DaemonOperation::Scan, "boom", None)
+            .unwrap();
+        assert!(matches!(
+            events.try_recv().unwrap(),
+            Event::DaemonErrorChanged {
+                operation: Operation::Scan
+            }
+        ));
+        daemon
+            .report_daemon_error(DaemonOperation::Scan, "boom", None)
+            .unwrap();
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn start_ipc_serves_the_daemon_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let endpoint = Endpoint::for_tests(dir.path());
+        daemon.set_ipc_endpoint(Some(endpoint.clone()));
+        daemon.start_ipc();
+
+        let response = vrc_photo_ipc::client::request(
+            &endpoint,
+            vrc_photo_ipc::Request::Status,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(matches!(response, vrc_photo_ipc::Response::Status { .. }));
+        daemon.ipc = None;
     }
 
     #[test]
