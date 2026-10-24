@@ -1,0 +1,14 @@
+[Unit]
+Description=VRC Photo Manager background daemon
+Documentation=https://github.com/TommyZ-7/vrc-photo-manager/blob/main/docs/release.md
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/vrc-photo-daemon
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=graphical-session.target

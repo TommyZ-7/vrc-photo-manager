@@ -29,9 +29,9 @@ git push origin v0.1.0
 
 | 形式 | 例 | 内容 |
 |---|---|---|
-| Debian | `vrc-photo-manager_0.1.0_amd64.deb` | `/usr/bin` にUIとデーモン、desktop entry、アイコン |
+| Debian | `vrc-photo-manager_0.1.0_amd64.deb` | `/usr/bin` にUIとデーモン、desktop entry、アイコン、systemdユーザーunit |
 | AppImage | `vrc-photo-manager_0.1.0_x86_64.AppImage` | UIとデーモンを同梱した単一ファイル |
-| pacman | `vrc-photo-manager_0.1.0_x86_64.tar.gz` + `PKGBUILD` | Arch Linux向け |
+| pacman | `vrc-photo-manager_0.1.0_x86_64.tar.gz` + `PKGBUILD` | Arch Linux向け。systemdユーザーunitを含む |
 | NSIS | `vrc-photo-manager_0.1.0_x64-setup.exe` | Windowsインストーラ（UIとデーモン） |
 
 `Packager.toml` の設定:
@@ -45,6 +45,7 @@ git push origin v0.1.0
 - `resources = ["LICENSE", "packaging/licenses/LICENSE-LUCIDE"]`
 - deb依存: `libxkbcommon0`, `libxkbcommon-x11-0`, `libwayland-client0`, `libvulkan1`, `libx11-6`, `libxcb1`, `libfontconfig1`, `libfreetype6`
 - pacman依存: `libxkbcommon`, `wayland`, `vulkan-icd-loader`, `libx11`, `libxcb`, `fontconfig`, `freetype2`
+- `[deb.files]` / `[pacman.files]`: `packaging/systemd/vrc-photo-daemon.service` を `usr/lib/systemd/user/vrc-photo-daemon.service` に配置
 
 `resources` のライセンス通知は、Linux（deb / AppImage / pacman）では
 `/usr/lib/vrc-photo-manager/`、Windows（NSIS）では実行ファイルと同じディレクトリに配置される。
@@ -58,7 +59,39 @@ git push origin v0.1.0
 - 自動起動:
   - deb/pacman: `/usr/bin/vrc-photo-daemon` を登録。
   - AppImage: `$APPIMAGE --background` を登録。UIの `--background` がデーモンを子プロセスで起動し、終了まで待ってAppImageのマウントを維持する。
+- deb/pacman は任意の systemd ユーザーサービス `vrc-photo-daemon.service` を同梱する。インストール時に enable はされない。アプリ管理の自動起動はフォールバックとして残る。
 - LinuxのトレイはStatusNotifierItem（`ksni`）。トレイ非対応環境ではヘッドレスで動作する。
+
+### systemdユーザーサービス（deb / pacman、任意）
+
+unit は `/usr/lib/systemd/user/vrc-photo-daemon.service` に配置される。
+
+有効化の前に、UIの「設定 → 起動と圧縮 → 自動起動」をOFFにする。ONのままだとログイン時にXDG側が先にデーモンを起動し、systemdサービスがinactiveのまま残る競合が起こり得る。
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now vrc-photo-daemon.service
+systemctl --user is-active vrc-photo-daemon.service
+journalctl --user -u vrc-photo-daemon.service -f
+```
+
+- サービスは `graphical-session.target` に紐付く。GNOME / KDE など、この target を管理するデスクトップ環境でログイン時に起動する。
+- `graphical-session.target` を管理しないデスクトップ環境では、代わりに `default.target` へリンクする:
+
+```bash
+systemctl --user add-wants default.target vrc-photo-daemon.service
+```
+
+- 既にデーモンが動いている状態で `enable --now` すると、サービスは単一インスタンス判定で終了して inactive になる。既存のデーモンを終了してから `systemctl --user restart vrc-photo-daemon.service` を実行する。ログイン後に `systemctl --user is-active` が `active` でない場合も同じ手順で復旧する。
+- アンインストール前に無効化する:
+
+```bash
+systemctl --user disable --now vrc-photo-daemon.service
+systemctl --user remove-wants default.target vrc-photo-daemon.service
+systemctl --user daemon-reload
+```
+
+パッケージマネージャは unit ファイルを削除するが、`systemctl --user enable` が作るシンボリックリンクは `~/.config/systemd/user/graphical-session.target.wants/` に残る。`default.target` へ `add-wants` した場合は `default.target.wants/` にも残るため、先に disable / remove-wants しておくことで、アンインストール後にサービス定義が残らない。
 
 ## 5. ローカルでのパッケージビルド
 
@@ -111,6 +144,7 @@ Required check名を変更した場合は、GitHubのbranch protectionも更新�
 - [ ] `docs/roadmap.md` の未解決事項を確認
 - [ ] 破壊的DB変更がない、またはマイグレーションがある
 - [ ] パッケージ生成物にUIとデーモンの両方が入っている
+- [ ] deb / pacman に `usr/lib/systemd/user/vrc-photo-daemon.service` が入っている
 - [ ] アイコンとdesktop entryが入っている
 - [ ] パッケージ生成物に `LICENSE` と `LICENSE-LUCIDE` が入っている
 - [ ] リリースノートの分類が正しい
@@ -127,7 +161,6 @@ Required check名を変更した場合は、GitHubのbranch protectionも更新�
 - MSIインストーラ（WiX）
 - 自動アップデート
 - コード署名
-- systemdユーザーサービス
 - Flatpak / Snap
 
 これらは [roadmap.md](roadmap.md) で優先度を決める。

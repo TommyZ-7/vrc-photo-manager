@@ -276,7 +276,10 @@ UIからデーモンへの再実行要求。FIFOの小さなキュー。
 |---|---|
 | `app_settings` | `AppSettings` のJSON |
 | `daemon_heartbeat` | デーモンの最終ハートビート（epoch秒） |
+| `daemon_supervisor` | 稼働中のデーモンの起動元。`systemd` または `app` |
 | `library_revision` | 一覧変更の単調増加カウンタ。UIのページキャッシュ無効化に使う |
+
+`daemon_supervisor` はデーモン起動時に上書きされる。判定は `/proc/self/cgroup` の unit 名、または `INVOCATION_ID` と `SYSTEMD_EXEC_PID` が自プロセスを指すことを使う。UIはハートビートが新しい場合だけ値を表示し、停止中は「デーモン停止」を優先する。
 
 `daemon_heartbeat` は従来どおりUIの稼働判定に使う。処理エラーの表示と再実行要求は `daemon_errors` / `daemon_commands` に分離し、`app_settings` には入れない。
 

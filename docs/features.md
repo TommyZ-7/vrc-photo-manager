@@ -165,6 +165,7 @@
 - OSログイン時の自動起動を設定できる。
   - 通常: デーモン実体を登録。
   - AppImage: `$APPIMAGE --background` を登録。UIの `--background` がデーモンを子プロセスで起動して待機する。
+  - deb/pacman: 任意の systemd ユーザーサービス `vrc-photo-daemon.service` を同梱する。利用者が明示的に enable した場合のみサービスとして起動し、アプリ管理の自動起動もフォールバックとして残る。
 - デーモンは `single-instance` で二重起動を防ぐ。
 - Linuxでトレイが使えない環境ではヘッドレスで継続する。
 

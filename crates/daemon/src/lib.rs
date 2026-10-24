@@ -432,6 +432,7 @@ impl Daemon {
     }
 
     pub fn run(&mut self) -> Result<()> {
+        self.record_supervisor();
         self.ensure_roots()?;
         self.scan_photos()?;
         self.ingest_logs()?;
@@ -976,6 +977,30 @@ impl Daemon {
         self.last_heartbeat = std::time::Instant::now();
     }
 
+    fn record_supervisor(&self) {
+        let cgroup = std::fs::read_to_string("/proc/self/cgroup").ok();
+        let supervisor = if cgroup
+            .as_deref()
+            .is_some_and(|cgroup| cgroup_has_unit(cgroup, "vrc-photo-daemon.service"))
+        {
+            "systemd"
+        } else {
+            supervisor_label(
+                std::env::var_os("INVOCATION_ID").as_deref(),
+                std::env::var_os("SYSTEMD_EXEC_PID").as_deref(),
+                std::process::id(),
+            )
+        };
+        match self.db.lock() {
+            Ok(db) => {
+                if let Err(error) = db.set_setting("daemon_supervisor", supervisor) {
+                    tracing::warn!(%error, "cannot record daemon supervisor");
+                }
+            }
+            Err(error) => tracing::warn!(%error, "cannot lock database for supervisor"),
+        }
+    }
+
     fn refresh_autostart_setting(&mut self) {
         let enabled = {
             let db = self.db.lock().unwrap();
@@ -1193,6 +1218,28 @@ fn error_signature(message: &str, detail: Option<&str>) -> String {
         Some(detail) => format!("{message}\n{detail}"),
         None => message.to_string(),
     }
+}
+
+fn supervisor_label(
+    invocation_id: Option<&std::ffi::OsStr>,
+    exec_pid: Option<&std::ffi::OsStr>,
+    current_pid: u32,
+) -> &'static str {
+    let exec_pid = exec_pid
+        .and_then(|pid| pid.to_str())
+        .and_then(|pid| pid.parse::<u32>().ok());
+    if invocation_id.is_some() && exec_pid == Some(current_pid) {
+        "systemd"
+    } else {
+        "app"
+    }
+}
+
+fn cgroup_has_unit(cgroup: &str, unit: &str) -> bool {
+    cgroup
+        .lines()
+        .flat_map(|line| line.split('/'))
+        .any(|part| part == unit)
 }
 
 fn enqueue_auto_jobs(db: &Db, new_ids: &[i64]) -> Result<()> {
@@ -2528,5 +2575,49 @@ mod tests {
             latest.file_name().unwrap(),
             "output_log_2026-10-21_10-00-00.txt"
         );
+    }
+
+    #[test]
+    fn supervisor_label_detects_systemd_main_process() {
+        assert_eq!(
+            supervisor_label(
+                Some(std::ffi::OsStr::new("invocation-id")),
+                Some(std::ffi::OsStr::new("42")),
+                42
+            ),
+            "systemd"
+        );
+        assert_eq!(
+            supervisor_label(
+                Some(std::ffi::OsStr::new("invocation-id")),
+                Some(std::ffi::OsStr::new("41")),
+                42
+            ),
+            "app"
+        );
+        assert_eq!(
+            supervisor_label(Some(std::ffi::OsStr::new("invocation-id")), None, 42),
+            "app"
+        );
+        assert_eq!(
+            supervisor_label(None, Some(std::ffi::OsStr::new("42")), 42),
+            "app"
+        );
+    }
+
+    #[test]
+    fn cgroup_detects_only_the_daemon_unit() {
+        assert!(cgroup_has_unit(
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/vrc-photo-daemon.service\n",
+            "vrc-photo-daemon.service"
+        ));
+        assert!(!cgroup_has_unit(
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-gnome-firefox-123.scope\n",
+            "vrc-photo-daemon.service"
+        ));
+        assert!(!cgroup_has_unit(
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/foo-vrc-photo-daemon.service\n",
+            "vrc-photo-daemon.service"
+        ));
     }
 }

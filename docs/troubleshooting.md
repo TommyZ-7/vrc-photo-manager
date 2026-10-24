@@ -69,6 +69,29 @@ CI/Releaseワークフローにも同じ依存を入れてある。
 - Linux: `~/.config/autostart/` のdesktopファイルを確認。
 - AppImage: `$APPIMAGE --background` が登録されているか。AppImageのパスを移動した場合は再登録が必要。
 - devビルドで有効にすると `target/debug/vrc-photo-daemon` が登録される。リリース版で再度ON/OFFすると更新される。
+- systemdユーザーサービスを使っている場合は、下の「systemdユーザーサービス」を確認する。
+
+### systemdユーザーサービス（deb / pacman）
+
+- unit は `/usr/lib/systemd/user/vrc-photo-daemon.service`。インストール直後は無効で、自動では enable されない。
+- 有効化の前に、UIの「設定 → 起動と圧縮 → 自動起動」をOFFにする。ONのままだとログイン時にXDG側が先に起動し、systemdサービスがinactiveのまま残ることがある。
+- 有効化と状態確認:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now vrc-photo-daemon.service
+systemctl --user is-active vrc-photo-daemon.service
+```
+
+- ログ: `journalctl --user -u vrc-photo-daemon.service -f`
+- `graphical-session.target` を管理しないデスクトップ環境では、ログイン時に起動しないことがある。`systemctl --user is-active graphical-session.target` を確認し、代わりに `default.target` へリンクする:
+
+```bash
+systemctl --user add-wants default.target vrc-photo-daemon.service
+```
+
+- 既にデーモンが動いている状態で `enable --now` すると、`single-instance` によりサービスは inactive になる。既存のデーモンを終了してから `systemctl --user restart vrc-photo-daemon.service` を実行する。ログイン後に `is-active` が `active` でない場合も同じ手順で復旧する。
+- アンインストール前に `systemctl --user disable --now vrc-photo-daemon.service` を実行する。`default.target` へ `add-wants` した場合は `systemctl --user remove-wants default.target vrc-photo-daemon.service` も実行する。unit ファイルはパッケージが削除するが、enable / add-wants のシンボリックリンクはホームに残る。
 
 ### デーモン停止中に「再試行」を押した
 

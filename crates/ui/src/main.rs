@@ -1069,6 +1069,7 @@ pub struct App {
     inspector_epoch: u64,
     hovered_nav: Option<Screen>,
     daemon_age_secs: Option<i64>,
+    daemon_supervisor: Option<String>,
     /// Last daemon-side library revision observed by the UI. Path changes and
     /// replacement status changes do not alter the photo count, so the count
     /// alone cannot tell the grid to rebuild.
@@ -1217,6 +1218,7 @@ impl App {
             inspector_epoch: 0,
             hovered_nav: None,
             daemon_age_secs: None,
+            daemon_supervisor: None,
             last_library_revision: initial_library_revision,
             library: PhotoBrowser::new(empty_index.clone()),
             search_view: PhotoBrowser::new(empty_index),
@@ -1611,6 +1613,7 @@ impl App {
             .and_then(|value| value.parse::<i64>().ok())
             .map(|timestamp| (now - timestamp).max(0));
         self.daemon_active = self.daemon_age_secs.is_some_and(|age| age < 20);
+        self.daemon_supervisor = self.db.get_setting("daemon_supervisor").ok().flatten();
         self.monitor_world = None;
         self.monitor_instance = None;
         self.monitor_players.clear();
@@ -2916,12 +2919,8 @@ impl App {
     fn photos_header(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let sync = if self.demo_assets.is_some() {
             "デモデータ".to_string()
-        } else if let Some(age) = self.daemon_age_secs
-            && age < 20
-        {
-            format!("最終同期 {age}秒前")
         } else {
-            "デーモン停止".to_string()
+            daemon_sync_label(self.daemon_age_secs, self.daemon_supervisor.as_deref())
         };
         let subtitle = format!(
             "{} 枚 · {} · {}",
@@ -6327,6 +6326,8 @@ impl App {
     }
 
     fn settings_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let autostart_hint =
+            autostart_description(self.daemon_active, self.daemon_supervisor.as_deref());
         v_flex()
             .flex_1()
             .min_h_0()
@@ -6480,7 +6481,7 @@ impl App {
                             )
                             .child(self.setting_switch(
                                 "自動起動",
-                                "OSログイン時にデーモンを起動",
+                                autostart_hint,
                                 self.settings.autostart,
                                 cx,
                                 |settings, value| settings.autostart = value,
@@ -7262,6 +7263,24 @@ fn alert_summaries(
     rows
 }
 
+fn daemon_sync_label(age_secs: Option<i64>, supervisor: Option<&str>) -> String {
+    match age_secs.filter(|age| *age < 20) {
+        Some(age) if supervisor == Some("systemd") => {
+            format!("最終同期 {age}秒前 · systemd")
+        }
+        Some(age) => format!("最終同期 {age}秒前"),
+        None => "デーモン停止".to_string(),
+    }
+}
+
+fn autostart_description(daemon_active: bool, supervisor: Option<&str>) -> &'static str {
+    if daemon_active && supervisor == Some("systemd") {
+        "systemd 管理で起動中。サービス利用時はOFF推奨"
+    } else {
+        "OSログイン時にデーモンを起動"
+    }
+}
+
 fn daemon_operation_label(operation: DaemonOperation) -> &'static str {
     match operation {
         DaemonOperation::Scan => "写真スキャン",
@@ -7709,16 +7728,16 @@ mod tests {
         CountDebounce, DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH,
         MAX_PAGES, PAGE_SIZE, PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex, PhotoPageCache, Screen,
         THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, YearBucket, add_photo_root_and_save,
-        alert_summaries, anchor_photo_id, apply_library_index, average_bgra, build_year_buckets,
-        daemon_operation_label, decode_thumbnail, demo_thumb_path, ease_motion,
-        first_visible_photo, format_captured_month, format_count, format_timestamp,
-        grid_available_width, grid_columns, grid_columns_for, has_tag_filter, import_issue_counts,
-        job_retry_available, job_retry_label, lerp_color, list_scroll_top, moved_profile_order,
-        next_focus_index, normalize_note, parse_args, parse_window_size, rail_label_hidden_by_pill,
-        rail_row_at, rail_scroll_offset, rail_y, retryable_sources, search_anchor_after_result,
-        search_available_width, sidebar_reveal_width, sidebar_width, stagger_value, step_index,
-        sync_search_mirror, viewer_details_width, viewer_image_box, visible_year_buckets, with_tag,
-        without_tag,
+        alert_summaries, anchor_photo_id, apply_library_index, autostart_description, average_bgra,
+        build_year_buckets, daemon_operation_label, daemon_sync_label, decode_thumbnail,
+        demo_thumb_path, ease_motion, first_visible_photo, format_captured_month, format_count,
+        format_timestamp, grid_available_width, grid_columns, grid_columns_for, has_tag_filter,
+        import_issue_counts, job_retry_available, job_retry_label, lerp_color, list_scroll_top,
+        moved_profile_order, next_focus_index, normalize_note, parse_args, parse_window_size,
+        rail_label_hidden_by_pill, rail_row_at, rail_scroll_offset, rail_y, retryable_sources,
+        search_anchor_after_result, search_available_width, sidebar_reveal_width, sidebar_width,
+        stagger_value, step_index, sync_search_mirror, viewer_details_width, viewer_image_box,
+        visible_year_buckets, with_tag, without_tag,
     };
     use gpui_kit::{RenderImage, ScrollStrategy, UniformListScrollHandle, point, px};
     use smallvec::SmallVec;
@@ -8590,5 +8609,32 @@ mod tests {
         assert!(!job_retry_available(&test_job(QueueStatus::Failed, 3)));
         assert!(!job_retry_available(&test_job(QueueStatus::Completed, 0)));
         assert!(job_retry_label(&test_job(QueueStatus::Failed, 3)).contains("上限"));
+    }
+
+    #[test]
+    fn daemon_sync_label_includes_systemd_supervisor() {
+        assert_eq!(
+            daemon_sync_label(Some(5), Some("systemd")),
+            "最終同期 5秒前 · systemd"
+        );
+        assert_eq!(daemon_sync_label(Some(5), Some("app")), "最終同期 5秒前");
+        assert_eq!(daemon_sync_label(Some(30), Some("systemd")), "デーモン停止");
+        assert_eq!(daemon_sync_label(None, None), "デーモン停止");
+    }
+
+    #[test]
+    fn autostart_description_mentions_systemd_only_while_active() {
+        assert_eq!(
+            autostart_description(true, Some("systemd")),
+            "systemd 管理で起動中。サービス利用時はOFF推奨"
+        );
+        assert_eq!(
+            autostart_description(false, Some("systemd")),
+            "OSログイン時にデーモンを起動"
+        );
+        assert_eq!(
+            autostart_description(true, Some("app")),
+            "OSログイン時にデーモンを起動"
+        );
     }
 }

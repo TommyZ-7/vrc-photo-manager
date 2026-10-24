@@ -29,3 +29,4 @@
 | [0007](0007-photo-load-cap.md) | MVPの一覧読み込みを300枚に制限する | Superseded by ADR-0009 |
 | [0008](0008-privacy-parsed-events-only.md) | 生ログを保存せず解析済みイベントのみ保存する | Accepted |
 | [0009](0009-photo-index-virtual-window.md) | 10万枚の写真一覧を順序付き索引＋仮想ウィンドウで表示する | Accepted |
+| [0010](0010-systemd-user-service.md) | deb/pacmanはsystemdユーザーサービスを任意提供する | Accepted |
