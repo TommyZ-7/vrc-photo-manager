@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+#[cfg(unix)]
 use interprocess::local_socket::traits::Stream as _;
 use vrc_photo_ipc::framing;
 use vrc_photo_ipc::server::Listener;
@@ -144,12 +145,15 @@ fn accept_loop(listener: Listener, control: IpcControl, stop: Arc<AtomicBool>) {
 
 fn handle_connection(stream: vrc_photo_ipc::server::Stream, control: IpcControl) -> io::Result<()> {
     let mut reader = BufReader::new(stream);
-    reader
-        .get_mut()
-        .set_recv_timeout(Some(Duration::from_secs(5)))?;
-    reader
-        .get_mut()
-        .set_send_timeout(Some(Duration::from_secs(5)))?;
+    #[cfg(unix)]
+    {
+        reader
+            .get_mut()
+            .set_recv_timeout(Some(Duration::from_secs(5)))?;
+        reader
+            .get_mut()
+            .set_send_timeout(Some(Duration::from_secs(5)))?;
+    }
 
     let Some(hello) = framing::read_message::<_, RequestEnvelope>(&mut reader)? else {
         return Ok(());
