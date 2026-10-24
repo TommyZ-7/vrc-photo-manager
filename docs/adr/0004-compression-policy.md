@@ -1,7 +1,9 @@
 # ADR-0004: 自動圧縮は元画像保持、手動置換はゴミ箱
 
-- Status: Accepted
+- Status: Superseded by [ADR-0013](0013-auto-compression-policy.md)
 - Date: 2026-10-21
+
+> この判断は ADR-0013（圧縮ポリシーを全体設定にし、自動圧縮にも適用する）で置き換えられた。履歴として残す。
 
 ## Context
 
