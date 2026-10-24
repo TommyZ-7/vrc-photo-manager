@@ -1510,14 +1510,15 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Promotes every waiting job to pending so workers can pick it up.
-    /// Returns how many rows changed.
-    pub fn release_waiting_jobs(&self) -> Result<usize> {
+    /// Promotes every waiting job to pending so workers can pick it up,
+    /// restamping the current global keep/replace policy. Returns how many
+    /// rows changed.
+    pub fn release_waiting_jobs(&self, policy: &str) -> Result<usize> {
         let changed = self.conn.execute(
             "UPDATE compression_jobs SET status = 'pending', progress = 0, error = NULL, \
-                started_at = NULL, finished_at = NULL \
+                started_at = NULL, finished_at = NULL, policy = ?1 \
              WHERE status = 'waiting'",
-            [],
+            params![policy],
         )?;
         Ok(changed)
     }
@@ -2654,13 +2655,13 @@ mod tests {
         assert_eq!(db.count_active_jobs().unwrap(), 1);
         assert!(db.next_pending_job().unwrap().is_none());
 
-        assert_eq!(db.release_waiting_jobs().unwrap(), 1);
+        assert_eq!(db.release_waiting_jobs("keep").unwrap(), 1);
         assert_eq!(db.count_jobs(QueueStatus::Waiting).unwrap(), 0);
         assert_eq!(db.count_jobs(QueueStatus::Pending).unwrap(), 1);
         let released = db.next_pending_job().unwrap().unwrap();
         assert_eq!(released.id, job);
-        assert_eq!(released.policy, "replace");
-        assert_eq!(db.release_waiting_jobs().unwrap(), 0);
+        assert_eq!(released.policy, "keep");
+        assert_eq!(db.release_waiting_jobs("keep").unwrap(), 0);
     }
 
     #[test]

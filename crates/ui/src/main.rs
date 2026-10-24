@@ -1767,8 +1767,35 @@ impl App {
         cx.notify();
     }
 
+    fn request_release_waiting_jobs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(description) = release_confirmation(
+            self.settings.compression_keep_original,
+            self.waiting_job_count,
+        ) else {
+            self.release_waiting_jobs(cx);
+            return;
+        };
+        let entity = cx.entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let entity = entity.clone();
+            let description = description.clone();
+            alert
+                .title("待機ジョブを圧縮")
+                .description(description)
+                .confirm()
+                .ok_text("圧縮する")
+                .ok_variant(ButtonVariant::Danger)
+                .cancel_text("キャンセル")
+                .on_ok(move |_, _, cx| {
+                    entity.update(cx, |this, cx| this.release_waiting_jobs(cx));
+                    true
+                })
+        });
+    }
+
     fn release_waiting_jobs(&mut self, cx: &mut Context<Self>) {
-        match self.db.release_waiting_jobs() {
+        let policy = compression_policy(self.settings.compression_keep_original);
+        match self.db.release_waiting_jobs(policy) {
             Ok(0) => self.message = Some("未実行のジョブはありません".to_string()),
             Ok(count) => {
                 self.message = Some(format!("{count} 件を圧縮キューに戻しました"));
@@ -5643,6 +5670,13 @@ impl App {
                             0x2a2412,
                         ))
                     })
+                    .when(self.waiting_job_count > 0, |this| {
+                        this.child(if self.settings.compression_keep_original {
+                            self.badge("元画像: 保持", GREEN, 0x112a22)
+                        } else {
+                            self.badge("元画像: 置換", RED, 0x2a1414)
+                        })
+                    })
                     .when(self.failed_job_count > 0, |this| {
                         this.child(self.badge(
                             &format!("失敗 {}", self.failed_job_count),
@@ -5657,9 +5691,9 @@ impl App {
                                 .label("待機をすべて圧縮")
                                 .small()
                                 .primary()
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.release_waiting_jobs(cx)),
-                                ),
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.request_release_waiting_jobs(window, cx)
+                                })),
                         )
                     })
                     .when(retryable_jobs, |this| {
@@ -7865,7 +7899,7 @@ fn alert_summaries(
     let mut rows = Vec::new();
     if failed_jobs > 0 {
         rows.push((
-            Screen::Compression,
+            Screen::Dashboard,
             format!("圧縮に {failed_jobs} 件の失敗があります"),
         ));
     }
@@ -8243,6 +8277,12 @@ fn compression_policy_warning(keep_original: bool, auto_compress: bool) -> Optio
     }
 }
 
+fn release_confirmation(keep_original: bool, count: i64) -> Option<String> {
+    (!keep_original).then(|| {
+        format!("{count} 件を圧縮し、成功した元画像をOSゴミ箱へ移動します。取り消すにはゴミ箱から復元してください。")
+    })
+}
+
 fn lossless_supported(format: &CompressionFormat) -> bool {
     !matches!(format, CompressionFormat::Jpeg)
 }
@@ -8469,8 +8509,8 @@ mod tests {
         import_issue_counts, ipc_status_label, job_retry_available, job_retry_label, lerp_color,
         list_scroll_top, lossless_hint, lossless_supported, moved_profile_order, next_focus_index,
         normalize_note, parse_args, parse_window_size, profile_summary, queue_status_badge,
-        rail_label_hidden_by_pill, rail_row_at, rail_scroll_offset, rail_y, retryable_sources,
-        scan_progress_label, scan_progress_ratio, search_anchor_after_result,
+        rail_label_hidden_by_pill, rail_row_at, rail_scroll_offset, rail_y, release_confirmation,
+        retryable_sources, scan_progress_label, scan_progress_ratio, search_anchor_after_result,
         search_available_width, sidebar_reveal_width, sidebar_width, stagger_value, step_index,
         sync_search_mirror, viewer_details_width, viewer_image_box, visible_year_buckets, with_tag,
         without_tag,
@@ -8560,7 +8600,7 @@ mod tests {
     #[test]
     fn alert_summaries_follow_priority_order() {
         let rows = alert_summaries(2, 1, 3);
-        assert_eq!(rows[0].0, Screen::Compression);
+        assert_eq!(rows[0].0, Screen::Dashboard);
         assert!(rows[0].1.contains("2"));
         assert_eq!(rows[1].0, Screen::Dashboard);
         assert_eq!(rows[2].0, Screen::Photos);
@@ -9381,6 +9421,14 @@ mod tests {
         let manual = compression_policy_warning(false, false).unwrap();
         assert!(!manual.contains("自動圧縮"));
         assert!(manual.contains("OSゴミ箱"));
+    }
+
+    #[test]
+    fn release_confirmation_only_appears_for_replace() {
+        assert!(release_confirmation(true, 3).is_none());
+        let replace = release_confirmation(false, 3).unwrap();
+        assert!(replace.contains("3 件"));
+        assert!(replace.contains("OSゴミ箱"));
     }
 
     #[test]
