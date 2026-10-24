@@ -1172,7 +1172,6 @@ pub struct App {
     search_refresh_pending: bool,
     search_favorite: bool,
     search_days: Option<i64>,
-    compress_policy: String,
     delete_armed: Option<i64>,
     daemon_shutdown_armed: bool,
     message: Option<String>,
@@ -1324,7 +1323,6 @@ impl App {
             search_refresh_pending: false,
             search_favorite: false,
             search_days: Some(7),
-            compress_policy: "keep".to_string(),
             delete_armed: None,
             daemon_shutdown_armed: false,
             message: None,
@@ -2450,7 +2448,7 @@ impl App {
             cx.notify();
             return;
         };
-        let policy = self.compress_policy.clone();
+        let policy = compression_policy(self.settings.compression_keep_original).to_string();
         match self.db.enqueue_job(photo.id, &profile.id, &policy) {
             Ok(_) => {
                 self.message = Some(if policy == "replace" {
@@ -4922,14 +4920,9 @@ impl App {
         let message = self.message.clone();
         let header = self.screen_header(
             "圧縮設定",
-            "自動圧縮は元画像を保持します。置換は手動実行時のみです。".to_string(),
+            "プロファイルと画質を管理します。元画像の扱いは設定タブで変更できます。".to_string(),
             message,
             vec![
-                h_flex()
-                    .gap_1()
-                    .child(self.policy_button("元画像を保持", "keep", cx))
-                    .child(self.policy_button("置換（ゴミ箱）", "replace", cx))
-                    .into_any_element(),
                 Button::new("add-profile")
                     .label("＋ プロファイル")
                     .small()
@@ -6225,30 +6218,6 @@ impl App {
         panel.into_any_element()
     }
 
-    fn policy_button(&self, label: &str, policy: &str, cx: &mut Context<Self>) -> impl IntoElement {
-        let active = self.compress_policy == policy;
-        let policy = policy.to_string();
-        div()
-            .id(SharedString::from(format!("policy-{label}")))
-            .px(px(10.))
-            .py(px(5.))
-            .rounded(px(8.))
-            .bg(if active {
-                rgb(ACCENT_SOFT)
-            } else {
-                rgba(0x00000000)
-            })
-            .text_size(px(12.))
-            .font_medium()
-            .text_color(if active { rgb(BLUE) } else { rgb(MUTED) })
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.compress_policy = policy.clone();
-                cx.notify();
-            }))
-            .child(label.to_string())
-    }
-
     fn preset_button(
         &self,
         label: &str,
@@ -6932,6 +6901,41 @@ impl App {
                                 cx,
                                 |settings, value| settings.auto_compress = value,
                             ))
+                            .when(self.settings.auto_compress, |this| {
+                                this.child(self.setting_switch(
+                                    "新規写真をすぐに圧縮",
+                                    "OFFにすると未実行キューに追加し、ダッシュボードからまとめて実行できます",
+                                    self.settings.auto_compress_immediate,
+                                    cx,
+                                    |settings, value| settings.auto_compress_immediate = value,
+                                ))
+                            })
+                            .child(self.setting_switch(
+                                "圧縮後に元画像を保持",
+                                "OFFにすると圧縮成功後、元画像をOSゴミ箱へ移動します",
+                                self.settings.compression_keep_original,
+                                cx,
+                                |settings, value| settings.compression_keep_original = value,
+                            ))
+                            .when_some(
+                                compression_policy_warning(
+                                    self.settings.compression_keep_original,
+                                    self.settings.auto_compress,
+                                ),
+                                |this, warning| {
+                                    this.child(
+                                        div()
+                                            .p(px(12.))
+                                            .rounded(px(8.))
+                                            .bg(rgb(0x2a1414))
+                                            .border_1()
+                                            .border_color(rgba(0xfb718533))
+                                            .text_size(px(10.))
+                                            .text_color(rgb(RED))
+                                            .child(warning),
+                                    )
+                                },
+                            )
                             .child(
                                 h_flex()
                                     .items_center()
@@ -8049,6 +8053,21 @@ fn format_label(format: &CompressionFormat) -> String {
     .to_string()
 }
 
+fn compression_policy(keep_original: bool) -> &'static str {
+    if keep_original { "keep" } else { "replace" }
+}
+
+fn compression_policy_warning(keep_original: bool, auto_compress: bool) -> Option<&'static str> {
+    if keep_original {
+        return None;
+    }
+    if auto_compress {
+        Some("自動圧縮でも、圧縮に成功すると元画像をOSゴミ箱へ移動します。取り消すにはゴミ箱から復元してください。")
+    } else {
+        Some("圧縮に成功すると元画像をOSゴミ箱へ移動します。取り消すにはゴミ箱から復元してください。")
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn open_path(path: &Path) -> Result<(), String> {
     // explorer.exe reports a non-zero exit code even when it opens the folder,
@@ -8236,7 +8255,8 @@ mod tests {
         PhotoPageCache, ScanProgressView, Screen, THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT,
         ThumbnailCache, YearBucket, add_photo_root_and_save, alert_summaries, anchor_photo_id,
         apply_library_index, autostart_description, average_bgra, build_year_buckets,
-        daemon_liveness, daemon_operation_label, daemon_state_label, daemon_sync_label,
+        compression_policy, compression_policy_warning, daemon_liveness, daemon_operation_label,
+        daemon_state_label, daemon_sync_label,
         decode_thumbnail, demo_thumb_path, ease_motion, first_visible_photo, format_captured_month,
         format_count, format_timestamp, grid_available_width, grid_columns, grid_columns_for,
         has_tag_filter, import_issue_counts, ipc_status_label, job_retry_available,
@@ -9128,6 +9148,26 @@ mod tests {
         assert_eq!(queue_status_badge(&QueueStatus::Completed).0, "完了");
         assert_eq!(queue_status_badge(&QueueStatus::Failed).0, "失敗");
         assert_eq!(queue_status_badge(&QueueStatus::Cancelled).0, "取消");
+    }
+
+    #[test]
+    fn compression_policy_maps_to_stored_values() {
+        assert_eq!(compression_policy(true), "keep");
+        assert_eq!(compression_policy(false), "replace");
+    }
+
+    #[test]
+    fn compression_policy_warning_mentions_automatic_trash_only_when_enabled() {
+        assert!(compression_policy_warning(true, true).is_none());
+        assert!(compression_policy_warning(true, false).is_none());
+
+        let automatic = compression_policy_warning(false, true).unwrap();
+        assert!(automatic.contains("自動圧縮"));
+        assert!(automatic.contains("OSゴミ箱"));
+
+        let manual = compression_policy_warning(false, false).unwrap();
+        assert!(!manual.contains("自動圧縮"));
+        assert!(manual.contains("OSゴミ箱"));
     }
 
     #[test]
