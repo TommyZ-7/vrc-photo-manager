@@ -29,17 +29,18 @@ git push origin v0.1.0
 
 | 形式 | 例 | 内容 |
 |---|---|---|
-| Debian | `vrc-photo-manager_0.1.0_amd64.deb` | `/usr/bin` にUIとデーモン、desktop entry、アイコン、systemdユーザーunit |
-| AppImage | `vrc-photo-manager_0.1.0_x86_64.AppImage` | UIとデーモンを同梱した単一ファイル |
-| pacman | `vrc-photo-manager_0.1.0_x86_64.tar.gz` + `PKGBUILD` | Arch Linux向け。systemdユーザーunitを含む |
-| NSIS | `vrc-photo-manager_0.1.0_x64-setup.exe` | Windowsインストーラ（UIとデーモン） |
+| Debian | `vrc-photo-manager_0.1.0_amd64.deb` | `/usr/bin` にUI・デーモン・更新ヘルパー、desktop entry、アイコン、systemdユーザーunit |
+| AppImage | `vrc-photo-manager_0.1.0_x86_64.AppImage` | UI・デーモン・更新ヘルパーを同梱した単一ファイル |
+| pacman | `vrc-photo-manager_0.1.0_x86_64.tar.gz` + `PKGBUILD` | Arch Linux向け。更新ヘルパーとsystemdユーザーunitを含む |
+| NSIS | `vrc-photo-manager_0.1.0_x64-setup.exe` | Windowsインストーラ（UI・デーモン・更新ヘルパー） |
 
 `Packager.toml` の設定:
 
 - `productName = "VRC Photo Manager"`
 - `identifier = "com.tommyz.vrc-photo-manager"`
 - `formats = ["deb", "appimage", "pacman"]`（Windowsジョブは `-f nsis` で上書き）
-- `beforePackagingCommand = "cargo build --release -p vrc-photo-ui -p vrc-photo-daemon"`
+- `beforePackagingCommand = "cargo build --release -p vrc-photo-ui -p vrc-photo-daemon -p vrc-photo-update"`
+- `[[binaries]]`: `vrc-photo-manager`（main）、`vrc-photo-daemon`、`vrc-photo-updater`
 - `binariesDir = "target/release"` / `outDir = "dist"`
 - アイコン: `packaging/icons/icon.png`（512px）
 - `resources = ["LICENSE", "packaging/licenses/LICENSE-LUCIDE"]`
@@ -123,6 +124,9 @@ ls -lh dist
 - タグ時のみ `publish` ジョブが両artifactをまとめて `gh release create/upload` で公開
 - `publish` ジョブはタグと `Cargo.toml` / `Packager.toml` のバージョン一致を確認し、
   `MINISIGN_SECRET_KEY` がなければ失敗する
+- プレリリースタグ（`-` を含むもの）は安定版フィードに混ざらないよう拒否する
+- `vrc-photo-release-tool` は秘密鍵を渡さないステップでビルドし、署名ステップでは
+  実行だけ行う
 - `vrc-photo-release-tool` で全artifactと `latest.json` を署名・検証し、
   `latest.json` を同じReleaseに添付する
 

@@ -83,6 +83,23 @@ mod tests {
     }
 
     #[test]
+    fn detects_a_writable_appimage_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("VRC.AppImage");
+        std::fs::write(&target, b"appimage").unwrap();
+        let install = InstallKind::AppImage { path: target };
+        assert!(appimage_writable(&install));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+            assert!(!appimage_writable(&install));
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[test]
     fn labels_install_kinds_and_package_commands() {
         assert_eq!(install_label(&appimage()), "AppImage");
         assert_eq!(
@@ -389,6 +406,18 @@ impl App {
     }
 
     pub(crate) fn start_update_download(&mut self, cx: &mut Context<Self>) {
+        if !appimage_writable(&self.update.install) {
+            self.update.phase = UpdatePhase::Error(
+                "AppImageの場所に書き込めないため更新できません。書き込み可能な場所へ移動してください"
+                    .to_string(),
+            );
+            self.message = Some(
+                "AppImageの場所に書き込めないため更新できません。書き込み可能な場所へ移動してください"
+                    .to_string(),
+            );
+            cx.notify();
+            return;
+        }
         let UpdatePhase::Available(update) = &self.update.phase else {
             return;
         };
@@ -490,6 +519,14 @@ impl App {
             cx.notify();
             return;
         };
+        if !appimage_writable(&self.update.install) {
+            self.message = Some(
+                "AppImageの場所に書き込めないため更新できません。書き込み可能な場所へ移動してください"
+                    .to_string(),
+            );
+            cx.notify();
+            return;
+        }
         if !can_apply(
             &self.update.install,
             true,
@@ -502,6 +539,13 @@ impl App {
             } else {
                 "このインストール形式では自動更新を適用できません".to_string()
             });
+            cx.notify();
+            return;
+        }
+        if let Some(data_dir) = self.update.data_dir.as_deref()
+            && vrc_photo_update::helper::apply_in_progress(&UpdatePaths::new(data_dir))
+        {
+            self.message = Some("別の更新処理が進行中です".to_string());
             cx.notify();
             return;
         }
@@ -764,6 +808,13 @@ impl App {
                             .child(command),
                     ),
             );
+        } else if matches!(install, InstallKind::SystemPackage { .. }) {
+            card = card.child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(rgb(MUTED_2))
+                    .child("このディストリビューションのパッケージマネージャで更新してください"),
+            );
         } else if matches!(
             install,
             InstallKind::Development
@@ -832,17 +883,28 @@ impl App {
                         })),
                 )
             })
-            .when(update.asset.is_some(), |this| {
-                this.child(
-                    Button::new("update-download")
-                        .label("ダウンロード")
-                        .small()
-                        .primary()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.start_update_download(cx);
-                        })),
-                )
-            })
+            .when(
+                update.asset.is_some() && appimage_writable(&self.update.install),
+                |this| {
+                    this.child(
+                        Button::new("update-download")
+                            .label("ダウンロード")
+                            .small()
+                            .primary()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.start_update_download(cx);
+                            })),
+                    )
+                },
+            )
+            .when(
+                update.asset.is_some() && !appimage_writable(&self.update.install),
+                |this| {
+                    this.child(div().text_size(px(10.)).text_color(rgb(AMBER)).child(
+                        "AppImageの場所に書き込めません。書き込み可能な場所へ移動してください",
+                    ))
+                },
+            )
     }
 
     fn update_ready_view(&mut self, update: &AvailableUpdate, cx: &mut Context<Self>) -> Div {
@@ -851,7 +913,7 @@ impl App {
             update.asset.is_some(),
             self.daemon_active,
             self.ipc_connected,
-        );
+        ) && appimage_writable(&self.update.install);
         let armed = self.update.armed;
         v_flex()
             .gap(px(8.))
@@ -987,6 +1049,27 @@ fn can_apply(
     ipc_connected: bool,
 ) -> bool {
     install.automatic_apply() && has_asset && (!daemon_active || ipc_connected)
+}
+
+fn appimage_writable(install: &InstallKind) -> bool {
+    let InstallKind::AppImage { path } = install else {
+        return true;
+    };
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let probe = parent.join(format!(".vrc-photo-write-test-{}", std::process::id()));
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 fn install_label(install: &InstallKind) -> &'static str {

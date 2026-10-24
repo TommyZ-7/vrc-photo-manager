@@ -214,6 +214,12 @@ mod tests {
             manifest.platforms["windows-x86_64"].format,
             UpdateFormat::Nsis
         );
+
+        // The generated document must pass the same validation the app uses.
+        let json = serde_json::to_vec(&manifest).unwrap();
+        let (parsed, version) = Manifest::parse_and_validate(&json, false).unwrap();
+        assert_eq!(version.to_string(), "0.4.0");
+        assert_eq!(parsed.platforms.len(), 2);
     }
 
     #[test]

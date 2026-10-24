@@ -21,6 +21,9 @@ pub struct HelperOptions {
     pub health_timeout: Duration,
     #[cfg(test)]
     pub skip_signature_check: bool,
+    /// Test-only trusted keys; empty means the embedded production keys.
+    #[cfg(test)]
+    pub public_keys: Vec<String>,
 }
 
 impl Default for HelperOptions {
@@ -30,6 +33,8 @@ impl Default for HelperOptions {
             health_timeout: Duration::from_secs(45),
             #[cfg(test)]
             skip_signature_check: false,
+            #[cfg(test)]
+            public_keys: Vec::new(),
         }
     }
 }
@@ -48,7 +53,19 @@ pub fn run_helper_with_options(job_path: &Path, options: HelperOptions) -> Resul
     job.validate()?;
 
     let paths = UpdatePaths::new(&job.data_dir);
-    paths.ensure()?;
+    if let Err(error) = paths.ensure() {
+        let _ = LastResult::write(
+            &paths,
+            &LastResult {
+                status: LastStatus::Failed,
+                from: job.from_version.clone(),
+                to: job.to_version.clone(),
+                reason: Some(error.to_string()),
+            },
+        );
+        relaunch_old(&paths, &job);
+        return Err(error);
+    }
     log(
         &paths,
         &format!(
@@ -56,7 +73,16 @@ pub fn run_helper_with_options(job_path: &Path, options: HelperOptions) -> Resul
             job.from_version, job.to_version, job.kind
         ),
     );
-    let _lock = acquire_lock(&paths)?;
+    let _lock = match acquire_lock(&paths) {
+        Ok(lock) => lock,
+        Err(error) => {
+            log(&paths, &format!("cannot acquire the apply lock: {error}"));
+            // Another update is already running. Relaunch this UI but leave
+            // the other helper's job/result untouched.
+            relaunch_old(&paths, &job);
+            return Err(error);
+        }
+    };
 
     if !wait_for_process_exit(job.ui_pid, options.exit_timeout) {
         return abort_before_apply(
@@ -100,17 +126,24 @@ pub fn run_helper_with_options(job_path: &Path, options: HelperOptions) -> Resul
         Ok(backup) => backup,
         Err(error) => {
             log(&paths, &format!("apply failed: {error}"));
+            // The replacement may have failed after touching the target. Keep
+            // the job, staged artifact, and log so the backup can be restored
+            // manually if the automatic path did not finish.
             let _ = LastResult::write(
                 &paths,
                 &LastResult {
                     status: LastStatus::Failed,
                     from: job.from_version.clone(),
                     to: job.to_version.clone(),
-                    reason: Some(error.to_string()),
+                    reason: Some(format!(
+                        "{error} (job: {}, staged: {}, log: {})",
+                        job_path.display(),
+                        job.staged.display(),
+                        paths.log_file().display()
+                    )),
                 },
             );
             relaunch_old(&paths, &job);
-            cleanup(&paths, &job, job_path);
             return Err(error);
         }
     };
@@ -129,19 +162,7 @@ pub fn run_helper_with_options(job_path: &Path, options: HelperOptions) -> Resul
         Ok(child) => child,
         Err(error) => {
             log(&paths, &format!("cannot launch the new version: {error}"));
-            restore(&job, &backup)?;
-            let _ = LastResult::write(
-                &paths,
-                &LastResult {
-                    status: LastStatus::RolledBack,
-                    from: job.from_version.clone(),
-                    to: job.to_version.clone(),
-                    reason: Some(error.to_string()),
-                },
-            );
-            relaunch_old(&paths, &job);
-            cleanup(&paths, &job, job_path);
-            return Err(error);
+            return rollback_after_failure(&paths, &job, job_path, &backup, &error);
         }
     };
 
@@ -162,21 +183,59 @@ pub fn run_helper_with_options(job_path: &Path, options: HelperOptions) -> Resul
             log(&paths, &format!("health check failed: {error}"));
             let _ = child.kill();
             let _ = child.wait();
-            restore(&job, &backup)?;
-            let _ = LastResult::write(
-                &paths,
-                &LastResult {
-                    status: LastStatus::RolledBack,
-                    from: job.from_version.clone(),
-                    to: job.to_version.clone(),
-                    reason: Some(error.to_string()),
-                },
-            );
-            relaunch_old(&paths, &job);
-            cleanup(&paths, &job, job_path);
-            Err(error)
+            rollback_after_failure(&paths, &job, job_path, &backup, &error)
         }
     }
+}
+
+/// Restores the previous version after a failed launch/health check. If the
+/// restore itself fails, the job and backup are kept for manual recovery and
+/// a `rolled_back` result records the paths.
+fn rollback_after_failure(
+    paths: &UpdatePaths,
+    job: &ApplyJob,
+    job_path: &Path,
+    backup: &Backup,
+    error: &UpdateError,
+) -> Result<()> {
+    let backup_hint = match backup {
+        Backup::AppImage(path) | Backup::Windows(path) => path.display().to_string(),
+    };
+    let (restored, reason) = match restore(job, backup) {
+        Ok(()) => (true, error.to_string()),
+        Err(restore_error) => (
+            false,
+            format!(
+                "{error}; the previous version could not be restored: {restore_error} (backup: {backup_hint}, job: {}, log: {})",
+                job_path.display(),
+                paths.log_file().display()
+            ),
+        ),
+    };
+
+    let _ = LastResult::write(
+        paths,
+        &LastResult {
+            status: LastStatus::RolledBack,
+            from: job.from_version.clone(),
+            to: job.to_version.clone(),
+            reason: Some(reason.clone()),
+        },
+    );
+    relaunch_old(paths, job);
+    if restored {
+        cleanup(paths, job, job_path);
+    } else {
+        log(
+            paths,
+            &format!(
+                "manual recovery required; keeping {} and {}: {reason}",
+                job_path.display(),
+                job.staged.display()
+            ),
+        );
+    }
+    Err(UpdateError::Other(reason))
 }
 
 fn abort_before_apply(
@@ -201,8 +260,6 @@ fn abort_before_apply(
 }
 
 fn verify_staged(job: &ApplyJob, options: &HelperOptions) -> Result<()> {
-    #[cfg(not(test))]
-    let _ = options;
     if !job.staged.is_file() {
         return Err(UpdateError::io(
             &job.staged,
@@ -220,7 +277,18 @@ fn verify_staged(job: &ApplyJob, options: &HelperOptions) -> Result<()> {
         return Ok(());
     }
     let signature = decode_signature_base64(&job.signature)?;
-    verify_file(&job.staged, &signature, &effective_public_keys())
+    #[cfg(test)]
+    let keys = if options.public_keys.is_empty() {
+        effective_public_keys()
+    } else {
+        options.public_keys.clone()
+    };
+    #[cfg(not(test))]
+    let keys = {
+        let _ = options;
+        effective_public_keys()
+    };
+    verify_file(&job.staged, &signature, &keys)
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
@@ -309,7 +377,18 @@ fn apply_windows(paths: &UpdatePaths, job: &ApplyJob) -> Result<PathBuf> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|error| UpdateError::io(&job.staged, error))?;
-    let status = wait_for_exit(&mut child, Duration::from_secs(10 * 60))?;
+    let status = match wait_for_exit(&mut child, Duration::from_secs(10 * 60)) {
+        Ok(status) => status,
+        Err(error) => {
+            let reason = match restore_windows(&backup, install_dir) {
+                Ok(()) => error.to_string(),
+                Err(restore_error) => {
+                    format!("{error}; restoring the previous executables failed: {restore_error}")
+                }
+            };
+            return Err(UpdateError::Other(reason));
+        }
+    };
     if !status.success() {
         restore_windows(&backup, install_dir)?;
         return Err(UpdateError::Other(format!(
@@ -414,20 +493,14 @@ pub fn wait_for_health(
     child: &mut Child,
     timeout: Duration,
 ) -> Result<()> {
+    // The marker proves that the new UI reached its first frame, but a crash
+    // immediately afterwards must still roll back. Require the child to stay
+    // alive for this grace period after the marker appears.
+    const GRACE: Duration = Duration::from_secs(1);
     let started = Instant::now();
+    let mut marker_seen = false;
+    let mut marker_since = started;
     loop {
-        match read_health_marker(paths, token)? {
-            Some(marker) if marker.version == expected && marker.mode == "normal" => {
-                return Ok(());
-            }
-            Some(marker) => {
-                return Err(UpdateError::Other(format!(
-                    "health marker reported version {} instead of {expected}",
-                    marker.version
-                )));
-            }
-            None => {}
-        }
         if let Some(status) = child
             .try_wait()
             .map_err(|error| UpdateError::Other(error.to_string()))?
@@ -436,12 +509,32 @@ pub fn wait_for_health(
                 "the new version exited before becoming healthy ({status})"
             )));
         }
-        if started.elapsed() >= timeout {
+
+        match read_health_marker(paths, token)? {
+            Some(marker) if marker.version == expected && marker.mode == "normal" => {
+                if !marker_seen {
+                    marker_seen = true;
+                    marker_since = Instant::now();
+                }
+                if marker_since.elapsed() >= GRACE {
+                    return Ok(());
+                }
+            }
+            Some(marker) => {
+                return Err(UpdateError::Other(format!(
+                    "health marker reported version {} instead of {expected}",
+                    marker.version
+                )));
+            }
+            None => marker_seen = false,
+        }
+
+        if !marker_seen && started.elapsed() >= timeout {
             return Err(UpdateError::Other(
                 "timed out waiting for the new version to become healthy".to_string(),
             ));
         }
-        thread::sleep(Duration::from_millis(250));
+        thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -660,9 +753,12 @@ pub(crate) fn process_alive(pid: u32) -> bool {
             GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
         };
         const STILL_ACTIVE: u32 = 259;
-        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok();
-        let Some(handle) = handle else {
-            return false;
+        // ERROR_INVALID_PARAMETER means the PID does not exist. Any other
+        // failure (notably access denied) could be a live process this user
+        // cannot inspect, so fail safe and treat it as alive.
+        let handle = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
+            Ok(handle) => handle,
+            Err(error) => return (error.code().0 as u32 & 0xffff) != 87,
         };
         let mut code = 0u32;
         let read = unsafe { GetExitCodeProcess(handle, &mut code) }.is_ok();
@@ -711,10 +807,17 @@ mod tests {
     use std::path::Path;
     use std::time::Duration;
 
+    #[cfg(unix)]
+    use base64::Engine;
+    #[cfg(unix)]
+    use minisign::KeyPair;
+    #[cfg(unix)]
     use sha2::Digest;
 
     use super::*;
-    use crate::install::{APPLY_SCHEMA, ApplyJob, ApplyKind, UpdatePaths};
+    use crate::install::UpdatePaths;
+    #[cfg(unix)]
+    use crate::install::{APPLY_SCHEMA, ApplyJob, ApplyKind};
 
     fn paths(dir: &Path) -> UpdatePaths {
         let paths = UpdatePaths::new(dir);
@@ -890,6 +993,117 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn signed_job(dir: &Path, staged: &Path, token: &str) -> (ApplyJob, String) {
+        let keypair = KeyPair::generate_unencrypted_keypair().unwrap();
+        let public_key = keypair
+            .pk
+            .to_box()
+            .unwrap()
+            .to_string()
+            .lines()
+            .find(|line| line.starts_with("RW"))
+            .unwrap()
+            .to_string();
+        let mut job = integration_job(dir, staged, token);
+        let bytes = std::fs::read(staged).unwrap();
+        let signature = minisign::sign(None, &keypair.sk, std::io::Cursor::new(&bytes), None, None)
+            .unwrap()
+            .into_string();
+        job.signature = base64::engine::general_purpose::STANDARD.encode(signature.as_bytes());
+        job.sha256 = hex::encode(sha2::Sha256::digest(&bytes));
+        (job, public_key)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn applies_when_the_staged_signature_is_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = "token-signed";
+        let marker_path = dir
+            .path()
+            .join("updates")
+            .join(format!("health-{token}.json"));
+        let marker_tmp = marker_path.with_extension("json.tmp");
+        let new_script = dir.path().join("new.AppImage");
+        std::fs::write(
+            &new_script,
+            format!(
+                "#!/bin/sh\nmkdir -p '{}'\nprintf '%s' '{{\"version\":\"9.9.9\",\"mode\":\"normal\"}}' > '{}'\nmv '{}' '{}'\nsleep 2\n",
+                marker_path.parent().unwrap().display(),
+                marker_tmp.display(),
+                marker_tmp.display(),
+                marker_path.display()
+            ),
+        )
+        .unwrap();
+        make_executable(&new_script);
+
+        let (job, public_key) = signed_job(dir.path(), &new_script, token);
+        let job_file = dir.path().join("updates/job.json");
+        std::fs::create_dir_all(job_file.parent().unwrap()).unwrap();
+        std::fs::write(&job_file, serde_json::to_vec(&job).unwrap()).unwrap();
+
+        run_helper_with_options(
+            &job_file,
+            HelperOptions {
+                health_timeout: Duration::from_secs(5),
+                skip_signature_check: false,
+                public_keys: vec![public_key],
+                ..HelperOptions::default()
+            },
+        )
+        .unwrap();
+        let result = LastResult::read(&UpdatePaths::new(dir.path())).unwrap();
+        assert_eq!(result.status, LastStatus::Success);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_a_staged_artifact_with_a_bad_signature() {
+        let dir = tempfile::tempdir().unwrap();
+        let token = "token-bad-signature";
+        let new_script = dir.path().join("new.AppImage");
+        std::fs::write(&new_script, "#!/bin/sh\nexit 0\n").unwrap();
+        make_executable(&new_script);
+
+        let (mut job, public_key) = signed_job(dir.path(), &new_script, token);
+        let bytes = std::fs::read(&new_script).unwrap();
+        let other_signature = minisign::sign(
+            None,
+            &KeyPair::generate_unencrypted_keypair().unwrap().sk,
+            std::io::Cursor::new(b"different"),
+            None,
+            None,
+        )
+        .unwrap()
+        .into_string();
+        job.signature =
+            base64::engine::general_purpose::STANDARD.encode(other_signature.as_bytes());
+        job.sha256 = hex::encode(sha2::Sha256::digest(&bytes));
+        let target = job.target.clone();
+        let old_content = std::fs::read_to_string(&target).unwrap();
+        let job_file = dir.path().join("updates/job.json");
+        std::fs::create_dir_all(job_file.parent().unwrap()).unwrap();
+        std::fs::write(&job_file, serde_json::to_vec(&job).unwrap()).unwrap();
+
+        let error = run_helper_with_options(
+            &job_file,
+            HelperOptions {
+                health_timeout: Duration::from_secs(2),
+                skip_signature_check: false,
+                public_keys: vec![public_key],
+                ..HelperOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, UpdateError::Signature));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), old_content);
+        assert!(!job_file.exists());
+        let result = LastResult::read(&UpdatePaths::new(dir.path())).unwrap();
+        assert_eq!(result.status, LastStatus::Failed);
+    }
+
+    #[cfg(unix)]
     fn integration_job(dir: &Path, staged: &Path, token: &str) -> ApplyJob {
         let target = dir.join("app.AppImage");
         if !target.exists() {
@@ -929,7 +1143,7 @@ mod tests {
         std::fs::write(
             &new_script,
             format!(
-                "#!/bin/sh\nmkdir -p '{}'\nprintf '%s' '{{\"version\":\"9.9.9\",\"mode\":\"normal\"}}' > '{}'\nmv '{}' '{}'\nsleep 0.2\n",
+                "#!/bin/sh\nmkdir -p '{}'\nprintf '%s' '{{\"version\":\"9.9.9\",\"mode\":\"normal\"}}' > '{}'\nmv '{}' '{}'\nsleep 2\n",
                 marker_path.parent().unwrap().display(),
                 marker_tmp.display(),
                 marker_tmp.display(),
@@ -961,6 +1175,186 @@ mod tests {
         assert!(!job_file.exists());
         let result = LastResult::read(&UpdatePaths::new(dir.path())).unwrap();
         assert_eq!(result.status, LastStatus::Success);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_failure_keeps_the_job_for_manual_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        let staged = dir.path().join("new.AppImage");
+        std::fs::write(&staged, "#!/bin/sh\nexit 0\n").unwrap();
+        make_executable(&staged);
+        let job = ApplyJob {
+            schema: APPLY_SCHEMA,
+            kind: ApplyKind::AppImage,
+            from_version: "0.3.0".to_string(),
+            to_version: "0.4.0".to_string(),
+            target: dir.path().join("missing.AppImage"),
+            staged: staged.clone(),
+            signature: "c2ln".to_string(),
+            sha256: hex::encode(sha2::Sha256::digest(std::fs::read(&staged).unwrap())),
+            ui_pid: 0,
+            daemon_pid: None,
+            restart_args: Vec::new(),
+            health_token: "token-apply-failure".to_string(),
+            data_dir: dir.path().to_path_buf(),
+            created_at: "2026-10-24T12:00:00Z".to_string(),
+        };
+        let job_file = dir.path().join("updates/job.json");
+        std::fs::write(&job_file, serde_json::to_vec(&job).unwrap()).unwrap();
+
+        let error = run_helper_with_options(
+            &job_file,
+            HelperOptions {
+                skip_signature_check: true,
+                ..HelperOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, UpdateError::Io { .. }));
+        assert!(job_file.exists());
+        assert!(staged.exists());
+        let result = LastResult::read(&paths).unwrap();
+        assert_eq!(result.status, LastStatus::Failed);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn keeps_the_job_and_records_failure_when_restore_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        let target = dir.path().join("app.AppImage");
+        std::fs::write(&target, "#!/bin/sh\nexit 0\n").unwrap();
+        make_executable(&target);
+        let staged = dir.path().join("new.AppImage");
+        std::fs::write(&staged, b"new").unwrap();
+        let job_path = paths.job_file();
+        let job = ApplyJob {
+            schema: APPLY_SCHEMA,
+            kind: ApplyKind::AppImage,
+            from_version: "0.3.0".to_string(),
+            to_version: "0.4.0".to_string(),
+            target,
+            staged,
+            signature: "c2ln".to_string(),
+            sha256: "a".repeat(64),
+            ui_pid: 0,
+            daemon_pid: None,
+            restart_args: Vec::new(),
+            health_token: "token".to_string(),
+            data_dir: dir.path().to_path_buf(),
+            created_at: "2026-10-24T12:00:00Z".to_string(),
+        };
+        std::fs::write(&job_path, serde_json::to_vec(&job).unwrap()).unwrap();
+
+        let backup = Backup::AppImage(dir.path().join("missing.previous"));
+        let error = rollback_after_failure(
+            &paths,
+            &job,
+            &job_path,
+            &backup,
+            &UpdateError::Other("health failed".to_string()),
+        )
+        .unwrap_err();
+        assert!(matches!(error, UpdateError::Other(_)));
+        assert!(
+            job_path.exists(),
+            "the job must be kept for manual recovery"
+        );
+        assert!(job.staged.exists());
+        let result = LastResult::read(&paths).unwrap();
+        assert_eq!(result.status, LastStatus::RolledBack);
+        assert!(result.reason.unwrap().contains("could not be restored"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_live_lock_relaunches_the_ui_without_deleting_the_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let sentinel = dir.path().join("old-ran");
+        let target = dir.path().join("app.AppImage");
+        std::fs::write(
+            &target,
+            format!("#!/bin/sh\nprintf old > '{}'\n", sentinel.display()),
+        )
+        .unwrap();
+        make_executable(&target);
+        let staged = dir.path().join("new.AppImage");
+        std::fs::write(&staged, "#!/bin/sh\nexit 0\n").unwrap();
+        make_executable(&staged);
+        let job = integration_job(dir.path(), &staged, "token-lock");
+        let job_file = dir.path().join("updates/job.json");
+        std::fs::create_dir_all(job_file.parent().unwrap()).unwrap();
+        std::fs::write(&job_file, serde_json::to_vec(&job).unwrap()).unwrap();
+        let paths = paths(dir.path());
+        std::fs::write(paths.lock_file(), std::process::id().to_string()).unwrap();
+
+        let error = run_helper_with_options(&job_file, HelperOptions::default()).unwrap_err();
+        assert!(matches!(error, UpdateError::Other(_)));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !sentinel.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(sentinel.exists());
+        assert!(job_file.exists(), "the other helper's job must be kept");
+        let _ = std::fs::remove_file(paths.lock_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rolls_back_when_the_new_version_writes_health_then_exits() {
+        let dir = tempfile::tempdir().unwrap();
+        let sentinel = dir.path().join("old-ran");
+        let token = "token-quick-exit";
+        let target = dir.path().join("app.AppImage");
+        let old_script = format!("#!/bin/sh\nprintf old > '{}'\n", sentinel.display());
+        std::fs::write(&target, &old_script).unwrap();
+        make_executable(&target);
+
+        let marker_path = dir
+            .path()
+            .join("updates")
+            .join(format!("health-{token}.json"));
+        let marker_tmp = marker_path.with_extension("json.tmp");
+        let new_script = dir.path().join("new.AppImage");
+        std::fs::write(
+            &new_script,
+            format!(
+                "#!/bin/sh\nmkdir -p '{}'\nprintf '%s' '{{\"version\":\"9.9.9\",\"mode\":\"normal\"}}' > '{}'\nmv '{}' '{}'\n",
+                marker_path.parent().unwrap().display(),
+                marker_tmp.display(),
+                marker_tmp.display(),
+                marker_path.display()
+            ),
+        )
+        .unwrap();
+        make_executable(&new_script);
+
+        let mut job = integration_job(dir.path(), &new_script, token);
+        job.target = target.clone();
+        let job_file = dir.path().join("updates/job.json");
+        std::fs::create_dir_all(job_file.parent().unwrap()).unwrap();
+        std::fs::write(&job_file, serde_json::to_vec(&job).unwrap()).unwrap();
+
+        let error = run_helper_with_options(
+            &job_file,
+            HelperOptions {
+                health_timeout: Duration::from_secs(3),
+                skip_signature_check: true,
+                ..HelperOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, UpdateError::Other(_)));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !sentinel.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(sentinel.exists(), "the old target was not relaunched");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), old_script);
+        let result = LastResult::read(&UpdatePaths::new(dir.path())).unwrap();
+        assert_eq!(result.status, LastStatus::RolledBack);
     }
 
     #[cfg(unix)]

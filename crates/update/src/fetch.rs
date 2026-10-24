@@ -53,6 +53,10 @@ impl UreqClient {
         let config = ureq::Agent::config_builder()
             .timeout_connect(Some(self.connect_timeout))
             .timeout_global(Some(global))
+            // Never allow an HTTPS→HTTP redirect in release builds. Debug/QA
+            // loopback tests opt in through `allow_http`.
+            .https_only(!self.allow_http)
+            .user_agent(format!("vrc-photo-manager/{}", crate::CURRENT_VERSION))
             .http_status_as_error(false)
             .build();
         config.into()
@@ -185,13 +189,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reads_a_body_from_loopback_http() {
+    fn reads_a_body_from_loopback_http_with_the_expected_user_agent() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
+        let (request_tx, request_rx) = std::sync::mpsc::channel();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut buffer = [0u8; 1024];
-            let _ = stream.read(&mut buffer).unwrap();
+            let read = stream.read(&mut buffer).unwrap();
+            request_tx
+                .send(String::from_utf8_lossy(&buffer[..read]).to_string())
+                .unwrap();
             stream
                 .write_all(
                     b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
@@ -204,6 +212,12 @@ mod tests {
             .get_bytes(&format!("http://{address}/latest.json"), 1024)
             .unwrap();
         assert_eq!(body, b"hello");
+        let request = request_rx.recv().unwrap();
+        let expected = format!("vrc-photo-manager/{}", crate::CURRENT_VERSION);
+        assert!(
+            request.to_ascii_lowercase().contains(&expected),
+            "{request}"
+        );
         server.join().unwrap();
     }
 

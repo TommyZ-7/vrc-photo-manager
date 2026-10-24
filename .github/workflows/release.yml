@@ -142,6 +142,17 @@ jobs:
       - name: List artifacts
         run: dir dist
 
+      - name: Verify update helper in the installer
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem dist\*-setup.exe | Select-Object -First 1
+          if (-not $installer) { throw "no NSIS installer found" }
+          $listing = & 7z l $installer.FullName
+          if (-not ($listing | Select-String -Quiet 'vrc-photo-updater.exe')) {
+            throw "vrc-photo-updater.exe is missing from $($installer.Name)"
+          }
+          Write-Host "update helper found in $($installer.Name)"
+
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -173,6 +184,9 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Build release tool (without the signing secret)
+        run: cargo build -p vrc-photo-release-tool --bin vrc-photo-update-manifest
+
       - name: Sign artifacts and build the update manifest
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
@@ -180,6 +194,12 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
+          case "$TAG" in
+            *-*)
+              echo "prerelease tags are not supported by the stable update feed"
+              exit 1
+              ;;
+          esac
           VERSION="${TAG#v}"
           CARGO_VERSION=$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "vrc-photo-ui") | .version')
@@ -207,7 +227,6 @@ jobs:
             PUB_ARGS+=(--public-key "$key")
           done
 
-          cargo build -p vrc-photo-release-tool --bin vrc-photo-update-manifest
           ./target/debug/vrc-photo-update-manifest sign --key "$KEY" --dist dist
           ./target/debug/vrc-photo-update-manifest verify "${PUB_ARGS[@]}" --dist dist
           ./target/debug/vrc-photo-update-manifest generate \

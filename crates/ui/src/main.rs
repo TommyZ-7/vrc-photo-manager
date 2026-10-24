@@ -1430,7 +1430,9 @@ impl App {
             ipc_bridge::Incoming::Disconnected(error) => {
                 let was_connected = self.ipc_connected;
                 self.ipc_connected = false;
-                self.daemon_pid = None;
+                // Keep the last PID: the daemon may still be alive with a dead
+                // IPC server. The update helper will wait for it (or time out)
+                // instead of replacing files under a running process.
                 self.ipc_error = Some(error);
                 self.daemon_paused = false;
                 self.daemon_shutdown_armed = false;
