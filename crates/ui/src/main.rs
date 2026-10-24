@@ -113,7 +113,7 @@ enum Screen {
     Photos,
     Compression,
     Search,
-    Monitor,
+    Dashboard,
     Settings,
 }
 
@@ -123,7 +123,7 @@ impl Screen {
             Self::Photos => "写真",
             Self::Compression => "圧縮設定",
             Self::Search => "検索",
-            Self::Monitor => "ログ監視",
+            Self::Dashboard => "ダッシュボード",
             Self::Settings => "設定",
         }
     }
@@ -1146,6 +1146,9 @@ pub struct App {
     settings: AppSettings,
     update: update_view::UpdateState,
     jobs: Vec<CompressionJob>,
+    waiting_jobs: Vec<CompressionJob>,
+    active_job_count: i64,
+    waiting_job_count: i64,
     daemon_errors: Vec<DaemonError>,
     failed_job_count: i64,
     failed_jobs: Vec<CompressionJob>,
@@ -1172,7 +1175,6 @@ pub struct App {
     search_refresh_pending: bool,
     search_favorite: bool,
     search_days: Option<i64>,
-    compress_policy: String,
     delete_armed: Option<i64>,
     daemon_shutdown_armed: bool,
     message: Option<String>,
@@ -1298,6 +1300,9 @@ impl App {
             settings: AppSettings::default(),
             update: update_view::UpdateState::new(health_token, database_ok, demo),
             jobs: Vec::new(),
+            waiting_jobs: Vec::new(),
+            active_job_count: 0,
+            waiting_job_count: 0,
             daemon_errors: Vec::new(),
             failed_job_count: 0,
             failed_jobs: Vec::new(),
@@ -1324,7 +1329,6 @@ impl App {
             search_refresh_pending: false,
             search_favorite: false,
             search_days: Some(7),
-            compress_policy: "keep".to_string(),
             delete_armed: None,
             daemon_shutdown_armed: false,
             message: None,
@@ -1694,18 +1698,30 @@ impl App {
     }
 
     fn reload_job_state(&mut self) {
-        self.jobs = self.db.list_jobs(20).unwrap_or_else(|error| {
-            tracing::warn!(%error, "cannot load recent compression jobs");
-            Vec::new()
-        });
-        self.failed_job_count = self.db.count_jobs(QueueStatus::Failed).unwrap_or(0);
-        self.failed_jobs = self
-            .db
-            .list_jobs_by_status(QueueStatus::Failed, 100)
-            .unwrap_or_else(|error| {
-                tracing::warn!(%error, "cannot load failed compression jobs");
-                Vec::new()
-            });
+        match self.db.list_jobs(20) {
+            Ok(jobs) => self.jobs = jobs,
+            Err(error) => tracing::warn!(%error, "cannot load recent compression jobs"),
+        }
+        match self.db.count_active_jobs() {
+            Ok(count) => self.active_job_count = count,
+            Err(error) => tracing::warn!(%error, "cannot count active compression jobs"),
+        }
+        match self.db.count_jobs(QueueStatus::Waiting) {
+            Ok(count) => self.waiting_job_count = count,
+            Err(error) => tracing::warn!(%error, "cannot count waiting compression jobs"),
+        }
+        match self.db.list_jobs_by_status(QueueStatus::Waiting, 100) {
+            Ok(jobs) => self.waiting_jobs = jobs,
+            Err(error) => tracing::warn!(%error, "cannot load waiting compression jobs"),
+        }
+        match self.db.count_jobs(QueueStatus::Failed) {
+            Ok(count) => self.failed_job_count = count,
+            Err(error) => tracing::warn!(%error, "cannot count failed compression jobs"),
+        }
+        match self.db.list_jobs_by_status(QueueStatus::Failed, 100) {
+            Ok(jobs) => self.failed_jobs = jobs,
+            Err(error) => tracing::warn!(%error, "cannot load failed compression jobs"),
+        }
         self.failed_job_names.clear();
         for job in &self.failed_jobs {
             if self.failed_job_names.contains_key(&job.photo_id) {
@@ -1746,6 +1762,49 @@ impl App {
             Err(error) => {
                 tracing::warn!(%error, "cannot retry failed compression jobs");
                 self.message = Some(format!("再試行できません: {error}"));
+            }
+        }
+        cx.notify();
+    }
+
+    fn request_release_waiting_jobs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(description) = release_confirmation(
+            self.settings.compression_keep_original,
+            self.waiting_job_count,
+        ) else {
+            self.release_waiting_jobs(cx);
+            return;
+        };
+        let entity = cx.entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let entity = entity.clone();
+            let description = description.clone();
+            alert
+                .title("待機ジョブを圧縮")
+                .description(description)
+                .confirm()
+                .ok_text("圧縮する")
+                .ok_variant(ButtonVariant::Danger)
+                .cancel_text("キャンセル")
+                .on_ok(move |_, _, cx| {
+                    entity.update(cx, |this, cx| this.release_waiting_jobs(cx));
+                    true
+                })
+        });
+    }
+
+    fn release_waiting_jobs(&mut self, cx: &mut Context<Self>) {
+        let policy = compression_policy(self.settings.compression_keep_original);
+        match self.db.release_waiting_jobs(policy) {
+            Ok(0) => self.message = Some("未実行のジョブはありません".to_string()),
+            Ok(count) => {
+                self.message = Some(format!("{count} 件を圧縮キューに戻しました"));
+                self.reload_job_state();
+                self.send_wake_jobs(cx);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "cannot release waiting compression jobs");
+                self.message = Some(format!("待機ジョブを開始できません: {error}"));
             }
         }
         cx.notify();
@@ -2450,7 +2509,7 @@ impl App {
             cx.notify();
             return;
         };
-        let policy = self.compress_policy.clone();
+        let policy = compression_policy(self.settings.compression_keep_original).to_string();
         match self.db.enqueue_job(photo.id, &profile.id, &policy) {
             Ok(_) => {
                 self.message = Some(if policy == "replace" {
@@ -2696,12 +2755,8 @@ impl App {
             Duration::from_millis(320)
         };
         let photo_count = format_count(self.stats.photo_count);
-        let pending_jobs = self
-            .jobs
-            .iter()
-            .filter(|job| matches!(job.status, QueueStatus::Pending | QueueStatus::Processing))
-            .count();
-        let compression_count = (pending_jobs > 0).then(|| format_count(pending_jobs as i64));
+        let compression_count =
+            (self.active_job_count > 0).then(|| format_count(self.active_job_count));
 
         let brand_text = v_flex()
             .min_w_0()
@@ -2784,7 +2839,13 @@ impl App {
                 compression_count,
                 cx,
             ))
-            .child(self.nav_item("監視", Screen::Monitor, IconName::Eye, None, cx))
+            .child(self.nav_item(
+                "ダッシュボード",
+                Screen::Dashboard,
+                IconName::LayoutDashboard,
+                None,
+                cx,
+            ))
             .child(self.nav_item(
                 "設定",
                 Screen::Settings,
@@ -3003,7 +3064,7 @@ impl App {
             Screen::Photos => 0,
             Screen::Search => 1,
             Screen::Compression => 2,
-            Screen::Monitor => 3,
+            Screen::Dashboard => 3,
             Screen::Settings => 4,
         };
 
@@ -3146,7 +3207,7 @@ impl App {
                 Screen::Photos => ("alert-photos", "写真を開く"),
                 Screen::Compression => ("alert-compression", "圧縮を開く"),
                 Screen::Search => ("alert-search", "検索を開く"),
-                Screen::Monitor => ("alert-monitor", "ログ監視を開く"),
+                Screen::Dashboard => ("alert-dashboard", "ダッシュボードを開く"),
                 Screen::Settings => ("alert-settings", "設定を開く"),
             };
             h_flex()
@@ -3195,7 +3256,7 @@ impl App {
             Screen::Photos => self.photos_screen(window, cx).into_any_element(),
             Screen::Compression => self.compression_screen(cx).into_any_element(),
             Screen::Search => self.search_screen(window, cx).into_any_element(),
-            Screen::Monitor => self.monitor_screen(cx).into_any_element(),
+            Screen::Dashboard => self.dashboard_screen(cx).into_any_element(),
             Screen::Settings => self.settings_screen(cx).into_any_element(),
         };
         v_flex()
@@ -4922,14 +4983,9 @@ impl App {
         let message = self.message.clone();
         let header = self.screen_header(
             "圧縮設定",
-            "自動圧縮は元画像を保持します。置換は手動実行時のみです。".to_string(),
+            "プロファイルと画質を管理します。元画像の扱いは設定タブで変更できます。".to_string(),
             message,
             vec![
-                h_flex()
-                    .gap_1()
-                    .child(self.policy_button("元画像を保持", "keep", cx))
-                    .child(self.policy_button("置換（ゴミ箱）", "replace", cx))
-                    .into_any_element(),
                 Button::new("add-profile")
                     .label("＋ プロファイル")
                     .small()
@@ -4982,16 +5038,7 @@ impl App {
                                 let active = index == self.profile_index;
                                 let auto = profile.auto_enabled;
                                 let title = profile.name.clone();
-                                let meta = format!(
-                                    "{} · Q{} · {}",
-                                    format_label(&profile.format),
-                                    profile.quality,
-                                    if profile.lossless {
-                                        "Lossless"
-                                    } else {
-                                        "Lossy"
-                                    }
-                                );
+                                let meta = profile_summary(profile);
                                 glass_panel()
                                     .id(SharedString::from(format!("profile-{index}")))
                                     .flex()
@@ -5130,8 +5177,7 @@ impl App {
                                             "圧縮後合計",
                                             format_bytes(self.db.derivative_bytes().unwrap_or(0)),
                                         )),
-                                )
-                                .child(self.queue_panel(cx)),
+                                ),
                         ),
                 ),
         )
@@ -5314,7 +5360,29 @@ impl App {
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.request_delete_profile(&profile_id, window, cx);
                             })),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        v_flex()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(TEXT))
+                                    .child("自動圧縮に使う"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(MUTED_2))
+                                    .child("新規写真にこのプロファイルを適用します"),
+                            ),
                     )
+                    .child(div().flex_1())
                     .child(
                         Switch::new("profile-auto")
                             .checked(profile.auto_enabled)
@@ -5323,6 +5391,7 @@ impl App {
                             })),
                     ),
             )
+            .child(self.section_label("形式と画質"))
             .child(
                 h_flex().gap(px(4.)).children(
                     [
@@ -5352,7 +5421,9 @@ impl App {
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.edit_profile(
-                                    |profile| profile.format = selected_format.clone(),
+                                    |profile| {
+                                        apply_profile_format(profile, selected_format.clone())
+                                    },
                                     cx,
                                 );
                             }))
@@ -5369,12 +5440,39 @@ impl App {
                             .w(px(80.))
                             .text_size(px(12.))
                             .text_color(rgb(MUTED))
+                            .child("ロスレス"),
+                    )
+                    .child(
+                        Switch::new("profile-lossless")
+                            .checked(profile.lossless)
+                            .disabled(!lossless_supported(&profile.format))
+                            .on_click(cx.listener(move |this, checked, _, cx| {
+                                this.edit_profile(|profile| profile.lossless = *checked, cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED_2))
+                            .child(lossless_hint(&profile.format)),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .w(px(80.))
+                            .text_size(px(12.))
+                            .text_color(rgb(MUTED))
                             .child("品質"),
                     )
                     .child(
                         Button::new("quality-minus")
                             .label("−")
                             .small()
+                            .disabled(profile.lossless)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.edit_profile(
                                     |profile| {
@@ -5396,6 +5494,7 @@ impl App {
                         Button::new("quality-plus")
                             .label("＋")
                             .small()
+                            .disabled(profile.lossless)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.edit_profile(
                                     |profile| {
@@ -5408,22 +5507,13 @@ impl App {
                     )
                     .child(div().text_size(px(10.)).text_color(rgb(MUTED_2)).child(
                         if profile.lossless {
-                            "ロスレス"
+                            "ロスレスでは品質指定を使用しません"
                         } else {
                             "品質を調整"
                         },
                     )),
             )
-            .child(
-                self.meta_row(
-                    "出力先",
-                    profile
-                        .output_dir
-                        .clone()
-                        .unwrap_or_else(|| "compressed/".to_string()),
-                ),
-            )
-            .child(self.meta_row("サフィックス", profile.suffix.clone()))
+            .child(self.section_label("リサイズ"))
             .child(
                 h_flex()
                     .items_center()
@@ -5432,7 +5522,7 @@ impl App {
                         div()
                             .text_size(px(12.))
                             .text_color(rgb(MUTED))
-                            .child("リサイズ"),
+                            .child("リサイズを有効にする"),
                     )
                     .child(
                         Switch::new("profile-resize")
@@ -5521,16 +5611,27 @@ impl App {
                         )
                     }),
             )
+            .child(self.section_label("出力"))
+            .child(
+                self.meta_row(
+                    "出力先",
+                    profile
+                        .output_dir
+                        .clone()
+                        .unwrap_or_else(|| "compressed/".to_string()),
+                ),
+            )
+            .child(self.meta_row("サフィックス", profile.suffix.clone()))
             .child(
                 div()
                     .p(px(12.))
                     .rounded(px(8.))
-                    .bg(rgb(0x102a24))
+                    .bg(rgb(PANEL_2))
                     .border_1()
-                    .border_color(rgba(0x5eead433))
+                    .border_color(rgb(BORDER))
                     .text_size(px(10.))
-                    .text_color(rgb(GREEN))
-                    .child("自動圧縮では元画像を必ず保持します。"),
+                    .text_color(rgb(MUTED))
+                    .child("変更は即時保存されます。元画像の扱いは設定タブで変更できます。"),
             )
     }
 
@@ -5555,7 +5656,27 @@ impl App {
                             .text_color(rgb(TEXT))
                             .child("圧縮キュー"),
                     )
-                    .child(self.badge(&format!("{} 件", self.jobs.len()), BLUE, 0x14283d))
+                    .when(self.active_job_count > 0, |this| {
+                        this.child(self.badge(
+                            &format!("未完了 {}", self.active_job_count),
+                            BLUE,
+                            0x14283d,
+                        ))
+                    })
+                    .when(self.waiting_job_count > 0, |this| {
+                        this.child(self.badge(
+                            &format!("未実行 {}", self.waiting_job_count),
+                            AMBER,
+                            0x2a2412,
+                        ))
+                    })
+                    .when(self.waiting_job_count > 0, |this| {
+                        this.child(if self.settings.compression_keep_original {
+                            self.badge("元画像: 保持", GREEN, 0x112a22)
+                        } else {
+                            self.badge("元画像: 置換", RED, 0x2a1414)
+                        })
+                    })
                     .when(self.failed_job_count > 0, |this| {
                         this.child(self.badge(
                             &format!("失敗 {}", self.failed_job_count),
@@ -5564,6 +5685,17 @@ impl App {
                         ))
                     })
                     .child(div().flex_1())
+                    .when(self.waiting_job_count > 0, |this| {
+                        this.child(
+                            Button::new("release-waiting-jobs")
+                                .label("待機をすべて圧縮")
+                                .small()
+                                .primary()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.request_release_waiting_jobs(window, cx)
+                                })),
+                        )
+                    })
                     .when(retryable_jobs, |this| {
                         this.child(
                             Button::new("retry-all-failed-jobs")
@@ -5586,6 +5718,88 @@ impl App {
                         .child("失敗は最新の100件のみ表示しています（再試行は上限内のすべてが対象です）"),
                 )
             })
+            .children(self.waiting_jobs.iter().take(20).map(|job| {
+                let status = queue_status_badge(&job.status);
+                let profile_name = self
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == job.profile_id)
+                    .map(|profile| profile.name.clone())
+                    .unwrap_or_else(|| "不明なプロファイル".to_string());
+                h_flex()
+                    .px(px(16.))
+                    .py(px(10.))
+                    .gap(px(8.))
+                    .items_center()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .child(self.badge(status.0, status.1, status.2))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(12.))
+                            .text_color(rgb(TEXT))
+                            .truncate()
+                            .child(format!("photo #{}", job.photo_id)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED_2))
+                            .child(profile_name),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED_2))
+                            .child(format!("{:.0}%", job.progress * 100.0)),
+                    )
+            }))
+            .children(
+                self.jobs
+                    .iter()
+                    .filter(|job| !matches!(job.status, QueueStatus::Waiting | QueueStatus::Failed))
+                    .take(6)
+                    .map(|job| {
+                        let status = queue_status_badge(&job.status);
+                        let profile_name = self
+                            .profiles
+                            .iter()
+                            .find(|profile| profile.id == job.profile_id)
+                            .map(|profile| profile.name.clone())
+                            .unwrap_or_else(|| "不明なプロファイル".to_string());
+                        h_flex()
+                            .px(px(16.))
+                            .py(px(10.))
+                            .gap(px(8.))
+                            .items_center()
+                            .border_b_1()
+                            .border_color(rgb(BORDER))
+                            .child(self.badge(status.0, status.1, status.2))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(TEXT))
+                                    .truncate()
+                                    .child(format!("photo #{}", job.photo_id)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(MUTED_2))
+                                    .child(profile_name),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(MUTED_2))
+                                    .child(format!("{:.0}%", job.progress * 100.0)),
+                            )
+                    }),
+            )
             .children(self.failed_jobs.iter().map(|job| {
                 let name = self
                     .failed_job_names
@@ -5663,53 +5877,20 @@ impl App {
                             }),
                     )
             }))
-            .children(
-                self.jobs
-                    .iter()
-                    .filter(|job| job.status != QueueStatus::Failed)
-                    .take(6)
-                    .map(|job| {
-                        let status = match job.status {
-                            QueueStatus::Pending => ("待機", AMBER, 0x2a2412),
-                            QueueStatus::Processing => ("処理中", BLUE, 0x14283d),
-                            QueueStatus::Completed => ("完了", GREEN, 0x112a22),
-                            QueueStatus::Failed => ("失敗", RED, 0x2a1414),
-                            QueueStatus::Cancelled => ("取消", MUTED, PANEL_2),
-                        };
-                        h_flex()
-                            .px(px(16.))
-                            .py(px(10.))
-                            .gap(px(8.))
-                            .items_center()
-                            .border_b_1()
-                            .border_color(rgb(BORDER))
-                            .child(self.badge(status.0, status.1, status.2))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_size(px(12.))
-                                    .text_color(rgb(TEXT))
-                                    .truncate()
-                                    .child(format!("photo #{}", job.photo_id)),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(MUTED_2))
-                                    .child(format!("{:.0}%", job.progress * 100.0)),
-                            )
-                    }),
+            .when(
+                self.waiting_jobs.is_empty()
+                    && self.jobs.is_empty()
+                    && self.failed_jobs.is_empty(),
+                |this| {
+                    this.child(
+                        div()
+                            .p(px(16.))
+                            .text_size(px(12.))
+                            .text_color(rgb(MUTED_2))
+                            .child("キューは空です"),
+                    )
+                },
             )
-            .when(self.jobs.is_empty(), |this| {
-                this.child(
-                    div()
-                        .p(px(16.))
-                        .text_size(px(12.))
-                        .text_color(rgb(MUTED_2))
-                        .child("キューは空です"),
-                )
-            })
     }
 
     fn search_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -6231,30 +6412,6 @@ impl App {
         panel.into_any_element()
     }
 
-    fn policy_button(&self, label: &str, policy: &str, cx: &mut Context<Self>) -> impl IntoElement {
-        let active = self.compress_policy == policy;
-        let policy = policy.to_string();
-        div()
-            .id(SharedString::from(format!("policy-{label}")))
-            .px(px(10.))
-            .py(px(5.))
-            .rounded(px(8.))
-            .bg(if active {
-                rgb(ACCENT_SOFT)
-            } else {
-                rgba(0x00000000)
-            })
-            .text_size(px(12.))
-            .font_medium()
-            .text_color(if active { rgb(BLUE) } else { rgb(MUTED) })
-            .cursor_pointer()
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.compress_policy = policy.clone();
-                cx.notify();
-            }))
-            .child(label.to_string())
-    }
-
     fn preset_button(
         &self,
         label: &str,
@@ -6283,16 +6440,16 @@ impl App {
             .child(input.w_full())
     }
 
-    fn monitor_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn dashboard_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .flex_1()
             .min_h_0()
             .child(self.screen_header(
-                "ログ監視",
-                "VRChatの出力ログからワールドとプレイヤーを記録します。".to_string(),
+                "ダッシュボード",
+                "ライブラリ、圧縮キュー、ログ監視の状況をまとめて確認できます。".to_string(),
                 self.message.clone(),
                 vec![
-                    Button::new("monitor-refresh")
+                    Button::new("dashboard-refresh")
                         .label("再読込")
                         .small()
                         .ghost()
@@ -6316,7 +6473,19 @@ impl App {
                         h_flex()
                             .gap(px(16.))
                             .child(self.stat_card(
-                                "監視",
+                                "写真",
+                                format!("{} 枚", self.stats.photo_count),
+                            ))
+                            .child(self.stat_card(
+                                "未完了ジョブ",
+                                format!("{} 件", self.active_job_count),
+                            ))
+                            .child(self.stat_card(
+                                "未実行",
+                                format!("{} 件", self.waiting_job_count),
+                            ))
+                            .child(self.stat_card(
+                                "デーモン",
                                 if self.daemon_active {
                                     daemon_state_label(true, self.daemon_paused).to_string()
                                 } else if self.settings.log_dir.is_some() {
@@ -6324,20 +6493,9 @@ impl App {
                                 } else {
                                     "未設定".to_string()
                                 },
-                            ))
-                            .child(self.stat_card(
-                                "現在のワールド",
-                                self.monitor_world.clone().unwrap_or_else(|| "待機".to_string()),
-                            ))
-                            .child(self.stat_card(
-                                "同接",
-                                format!("{} 人", self.monitor_players.len()),
-                            ))
-                            .child(self.stat_card(
-                                "写真",
-                                format!("{} 枚", self.stats.photo_count),
                             )),
                     )
+                    .child(self.queue_panel(cx))
                     .child(self.daemon_card(cx))
                     .when(!self.daemon_errors.is_empty(), |this| {
                         this.child(self.daemon_error_card(cx))
@@ -6362,10 +6520,20 @@ impl App {
                                             .child("現在のセッション"),
                                     )
                                     .child(self.meta_row(
+                                        "ワールド",
+                                        self.monitor_world
+                                            .clone()
+                                            .unwrap_or_else(|| "—".to_string()),
+                                    ))
+                                    .child(self.meta_row(
                                         "インスタンス",
                                         self.monitor_instance
                                             .clone()
                                             .unwrap_or_else(|| "—".to_string()),
+                                    ))
+                                    .child(self.meta_row(
+                                        "同接",
+                                        format!("{} 人", self.monitor_players.len()),
                                     ))
                                     .child(self.section_label(if self.monitor_players.is_empty() {
                                         "プレイヤー情報はまだありません"
@@ -6938,6 +7106,41 @@ impl App {
                                 cx,
                                 |settings, value| settings.auto_compress = value,
                             ))
+                            .when(self.settings.auto_compress, |this| {
+                                this.child(self.setting_switch(
+                                    "新規写真をすぐに圧縮",
+                                    "OFFにすると未実行キューに追加し、ダッシュボードからまとめて実行できます",
+                                    self.settings.auto_compress_immediate,
+                                    cx,
+                                    |settings, value| settings.auto_compress_immediate = value,
+                                ))
+                            })
+                            .child(self.setting_switch(
+                                "圧縮後に元画像を保持",
+                                "OFFにすると圧縮成功後、元画像をOSゴミ箱へ移動します",
+                                self.settings.compression_keep_original,
+                                cx,
+                                |settings, value| settings.compression_keep_original = value,
+                            ))
+                            .when_some(
+                                compression_policy_warning(
+                                    self.settings.compression_keep_original,
+                                    self.settings.auto_compress,
+                                ),
+                                |this, warning| {
+                                    this.child(
+                                        div()
+                                            .p(px(12.))
+                                            .rounded(px(8.))
+                                            .bg(rgb(0x2a1414))
+                                            .border_1()
+                                            .border_color(rgba(0xfb718533))
+                                            .text_size(px(10.))
+                                            .text_color(rgb(RED))
+                                            .child(warning),
+                                    )
+                                },
+                            )
                             .child(
                                 h_flex()
                                     .items_center()
@@ -7578,6 +7781,17 @@ fn format_count(value: i64) -> String {
     }
 }
 
+fn queue_status_badge(status: &QueueStatus) -> (&'static str, u32, u32) {
+    match status {
+        QueueStatus::Waiting => ("未実行", AMBER, 0x2a2412),
+        QueueStatus::Pending => ("実行待ち", MUTED, PANEL_2),
+        QueueStatus::Processing => ("処理中", BLUE, 0x14283d),
+        QueueStatus::Completed => ("完了", GREEN, 0x112a22),
+        QueueStatus::Failed => ("失敗", RED, 0x2a1414),
+        QueueStatus::Cancelled => ("取消", MUTED, PANEL_2),
+    }
+}
+
 /// Whether a failed job can return to the queue without exceeding the cap.
 fn job_retry_available(job: &CompressionJob) -> bool {
     job.status == QueueStatus::Failed && job.retry_count < MAX_JOB_RETRIES
@@ -7685,13 +7899,13 @@ fn alert_summaries(
     let mut rows = Vec::new();
     if failed_jobs > 0 {
         rows.push((
-            Screen::Compression,
+            Screen::Dashboard,
             format!("圧縮に {failed_jobs} 件の失敗があります"),
         ));
     }
     if daemon_errors > 0 {
         rows.push((
-            Screen::Monitor,
+            Screen::Dashboard,
             format!("デーモンで {daemon_errors} 件の処理エラーがあります"),
         ));
     }
@@ -8044,6 +8258,63 @@ fn format_label(format: &CompressionFormat) -> String {
     .to_string()
 }
 
+fn compression_policy(keep_original: bool) -> &'static str {
+    if keep_original { "keep" } else { "replace" }
+}
+
+fn compression_policy_warning(keep_original: bool, auto_compress: bool) -> Option<&'static str> {
+    if keep_original {
+        return None;
+    }
+    if auto_compress {
+        Some(
+            "自動圧縮でも、圧縮に成功すると元画像をOSゴミ箱へ移動します。取り消すにはゴミ箱から復元してください。",
+        )
+    } else {
+        Some(
+            "圧縮に成功すると元画像をOSゴミ箱へ移動します。取り消すにはゴミ箱から復元してください。",
+        )
+    }
+}
+
+fn release_confirmation(keep_original: bool, count: i64) -> Option<String> {
+    (!keep_original).then(|| {
+        format!("{count} 件を圧縮し、成功した元画像をOSゴミ箱へ移動します。取り消すにはゴミ箱から復元してください。")
+    })
+}
+
+fn lossless_supported(format: &CompressionFormat) -> bool {
+    !matches!(format, CompressionFormat::Jpeg)
+}
+
+fn lossless_hint(format: &CompressionFormat) -> &'static str {
+    match format {
+        CompressionFormat::Jpeg => "JPEGはロスレス非対応",
+        CompressionFormat::Avif => "AVIFは近似ロスレス（品質100）",
+        CompressionFormat::Webp => "WebPの可逆圧縮",
+        CompressionFormat::JpegXl => "JPEG XLの可逆圧縮",
+    }
+}
+
+fn profile_summary(profile: &CompressionProfile) -> String {
+    if profile.lossless {
+        format!("{} · Lossless", format_label(&profile.format))
+    } else {
+        format!(
+            "{} · Q{} · Lossy",
+            format_label(&profile.format),
+            profile.quality
+        )
+    }
+}
+
+fn apply_profile_format(profile: &mut CompressionProfile, format: CompressionFormat) {
+    if !lossless_supported(&format) {
+        profile.lossless = false;
+    }
+    profile.format = format;
+}
+
 #[cfg(target_os = "windows")]
 fn open_path(path: &Path) -> Result<(), String> {
     // explorer.exe reports a non-zero exit code even when it opens the folder,
@@ -8230,17 +8501,19 @@ mod tests {
         IpcScanPhase, MAX_PAGES, PAGE_SIZE, PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex,
         PhotoPageCache, ScanProgressView, Screen, THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT,
         ThumbnailCache, YearBucket, add_photo_root_and_save, alert_summaries, anchor_photo_id,
-        apply_library_index, autostart_description, average_bgra, build_year_buckets,
-        daemon_liveness, daemon_operation_label, daemon_state_label, daemon_sync_label,
-        decode_thumbnail, demo_thumb_path, ease_motion, first_visible_photo, format_captured_month,
-        format_count, format_timestamp, grid_available_width, grid_columns, grid_columns_for,
-        has_tag_filter, import_issue_counts, ipc_status_label, job_retry_available,
-        job_retry_label, lerp_color, list_scroll_top, moved_profile_order, next_focus_index,
-        normalize_note, parse_args, parse_window_size, rail_label_hidden_by_pill, rail_row_at,
-        rail_scroll_offset, rail_y, retryable_sources, scan_progress_label, scan_progress_ratio,
-        search_anchor_after_result, search_available_width, sidebar_reveal_width, sidebar_width,
-        stagger_value, step_index, sync_search_mirror, viewer_details_width, viewer_image_box,
-        visible_year_buckets, with_tag, without_tag,
+        apply_library_index, apply_profile_format, autostart_description, average_bgra,
+        build_year_buckets, compression_policy, compression_policy_warning, daemon_liveness,
+        daemon_operation_label, daemon_state_label, daemon_sync_label, decode_thumbnail,
+        demo_thumb_path, ease_motion, first_visible_photo, format_captured_month, format_count,
+        format_timestamp, grid_available_width, grid_columns, grid_columns_for, has_tag_filter,
+        import_issue_counts, ipc_status_label, job_retry_available, job_retry_label, lerp_color,
+        list_scroll_top, lossless_hint, lossless_supported, moved_profile_order, next_focus_index,
+        normalize_note, parse_args, parse_window_size, profile_summary, queue_status_badge,
+        rail_label_hidden_by_pill, rail_row_at, rail_scroll_offset, rail_y, release_confirmation,
+        retryable_sources, scan_progress_label, scan_progress_ratio, search_anchor_after_result,
+        search_available_width, sidebar_reveal_width, sidebar_width, stagger_value, step_index,
+        sync_search_mirror, viewer_details_width, viewer_image_box, visible_year_buckets, with_tag,
+        without_tag,
     };
     use gpui_kit::{RenderImage, ScrollStrategy, UniformListScrollHandle, point, px};
     use smallvec::SmallVec;
@@ -8251,8 +8524,8 @@ mod tests {
     use vrc_photo_core::error::CoreError;
     use vrc_photo_core::importer::{ImportIssue, ImportIssueKind};
     use vrc_photo_core::model::{
-        CompressionJob, DaemonOperation, Photo, PhotoIndexEntry, PhotoStatus, PhotoTextFilter,
-        QueueStatus,
+        CompressionFormat, CompressionJob, CompressionProfile, DaemonOperation, Photo,
+        PhotoIndexEntry, PhotoStatus, PhotoTextFilter, QueueStatus,
     };
     use vrc_photo_core::settings::AppSettings;
 
@@ -8327,11 +8600,17 @@ mod tests {
     #[test]
     fn alert_summaries_follow_priority_order() {
         let rows = alert_summaries(2, 1, 3);
-        assert_eq!(rows[0].0, Screen::Compression);
+        assert_eq!(rows[0].0, Screen::Dashboard);
         assert!(rows[0].1.contains("2"));
-        assert_eq!(rows[1].0, Screen::Monitor);
+        assert_eq!(rows[1].0, Screen::Dashboard);
         assert_eq!(rows[2].0, Screen::Photos);
         assert!(alert_summaries(0, 0, 0).is_empty());
+    }
+
+    #[test]
+    fn dashboard_replaces_the_monitor_screen() {
+        assert_eq!(Screen::Dashboard.title(), "ダッシュボード");
+        assert_eq!(alert_summaries(0, 1, 0)[0].0, Screen::Dashboard);
     }
 
     #[test]
@@ -9112,6 +9391,91 @@ mod tests {
         assert!(!job_retry_available(&test_job(QueueStatus::Failed, 3)));
         assert!(!job_retry_available(&test_job(QueueStatus::Completed, 0)));
         assert!(job_retry_label(&test_job(QueueStatus::Failed, 3)).contains("上限"));
+    }
+
+    #[test]
+    fn queue_status_badge_distinguishes_waiting_and_pending() {
+        assert_eq!(queue_status_badge(&QueueStatus::Waiting).0, "未実行");
+        assert_eq!(queue_status_badge(&QueueStatus::Pending).0, "実行待ち");
+        assert_eq!(queue_status_badge(&QueueStatus::Processing).0, "処理中");
+        assert_eq!(queue_status_badge(&QueueStatus::Completed).0, "完了");
+        assert_eq!(queue_status_badge(&QueueStatus::Failed).0, "失敗");
+        assert_eq!(queue_status_badge(&QueueStatus::Cancelled).0, "取消");
+    }
+
+    #[test]
+    fn compression_policy_maps_to_stored_values() {
+        assert_eq!(compression_policy(true), "keep");
+        assert_eq!(compression_policy(false), "replace");
+    }
+
+    #[test]
+    fn compression_policy_warning_mentions_automatic_trash_only_when_enabled() {
+        assert!(compression_policy_warning(true, true).is_none());
+        assert!(compression_policy_warning(true, false).is_none());
+
+        let automatic = compression_policy_warning(false, true).unwrap();
+        assert!(automatic.contains("自動圧縮"));
+        assert!(automatic.contains("OSゴミ箱"));
+
+        let manual = compression_policy_warning(false, false).unwrap();
+        assert!(!manual.contains("自動圧縮"));
+        assert!(manual.contains("OSゴミ箱"));
+    }
+
+    #[test]
+    fn release_confirmation_only_appears_for_replace() {
+        assert!(release_confirmation(true, 3).is_none());
+        let replace = release_confirmation(false, 3).unwrap();
+        assert!(replace.contains("3 件"));
+        assert!(replace.contains("OSゴミ箱"));
+    }
+
+    #[test]
+    fn lossless_is_unsupported_for_jpeg_and_resets_on_format_change() {
+        assert!(!lossless_supported(&CompressionFormat::Jpeg));
+        assert!(lossless_supported(&CompressionFormat::Webp));
+        assert!(lossless_supported(&CompressionFormat::Avif));
+        assert!(lossless_supported(&CompressionFormat::JpegXl));
+
+        let mut profile = CompressionProfile {
+            format: CompressionFormat::Webp,
+            lossless: true,
+            ..Default::default()
+        };
+        apply_profile_format(&mut profile, CompressionFormat::Jpeg);
+        assert_eq!(profile.format, CompressionFormat::Jpeg);
+        assert!(!profile.lossless);
+
+        profile.lossless = true;
+        apply_profile_format(&mut profile, CompressionFormat::Webp);
+        assert!(profile.lossless);
+    }
+
+    #[test]
+    fn lossless_hints_cover_every_format() {
+        assert!(lossless_hint(&CompressionFormat::Jpeg).contains("非対応"));
+        assert!(lossless_hint(&CompressionFormat::Avif).contains("近似"));
+        assert!(lossless_hint(&CompressionFormat::Webp).contains("可逆"));
+        assert!(lossless_hint(&CompressionFormat::JpegXl).contains("可逆"));
+    }
+
+    #[test]
+    fn profile_summary_hides_quality_when_lossless() {
+        let lossless = CompressionProfile {
+            format: CompressionFormat::JpegXl,
+            lossless: true,
+            ..Default::default()
+        };
+        assert_eq!(profile_summary(&lossless), "JPEG XL · Lossless");
+
+        let lossy = CompressionProfile {
+            format: CompressionFormat::Webp,
+            quality: 82,
+            lossless: false,
+            ..Default::default()
+        };
+        assert_eq!(profile_summary(&lossy), "WebP · Q82 · Lossy");
     }
 
     #[test]

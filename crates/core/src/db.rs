@@ -1323,7 +1323,7 @@ impl Db {
     pub fn active_job_count_for_profile(&self, profile_id: &str) -> Result<i64> {
         Ok(self.conn.query_row(
             "SELECT COUNT(*) FROM compression_jobs \
-             WHERE profile_id = ?1 AND status IN ('pending', 'processing')",
+             WHERE profile_id = ?1 AND status IN ('waiting', 'pending', 'processing')",
             params![profile_id],
             |row| row.get(0),
         )?)
@@ -1342,7 +1342,7 @@ impl Db {
 
         let active: i64 = tx.query_row(
             "SELECT COUNT(*) FROM compression_jobs \
-             WHERE profile_id = ?1 AND status IN ('pending', 'processing')",
+             WHERE profile_id = ?1 AND status IN ('waiting', 'pending', 'processing')",
             params![id],
             |row| row.get(0),
         )?;
@@ -1375,11 +1375,28 @@ impl Db {
     // ---------- compression jobs ----------
 
     pub fn enqueue_job(&self, photo_id: i64, profile_id: &str, policy: &str) -> Result<String> {
+        self.enqueue_job_with_status(photo_id, profile_id, policy, QueueStatus::Pending)
+    }
+
+    pub fn enqueue_job_with_status(
+        &self,
+        photo_id: i64,
+        profile_id: &str,
+        policy: &str,
+        status: QueueStatus,
+    ) -> Result<String> {
         let id = uuid::Uuid::new_v4().to_string();
         self.conn.execute(
             "INSERT INTO compression_jobs(id, photo_id, profile_id, status, progress, policy, created_at) \
-             VALUES (?1, ?2, ?3, 'pending', 0, ?4, ?5)",
-            params![id, photo_id, profile_id, policy, now_string()],
+             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)",
+            params![
+                id,
+                photo_id,
+                profile_id,
+                status.as_str(),
+                policy,
+                now_string()
+            ],
         )?;
         Ok(id)
     }
@@ -1390,12 +1407,34 @@ impl Db {
         profile_id: &str,
         policy: &str,
     ) -> Result<bool> {
+        self.enqueue_job_for_existing_profile_with_status(
+            photo_id,
+            profile_id,
+            policy,
+            QueueStatus::Pending,
+        )
+    }
+
+    pub fn enqueue_job_for_existing_profile_with_status(
+        &self,
+        photo_id: i64,
+        profile_id: &str,
+        policy: &str,
+        status: QueueStatus,
+    ) -> Result<bool> {
         let id = uuid::Uuid::new_v4().to_string();
         let inserted = self.conn.execute(
             "INSERT INTO compression_jobs(id, photo_id, profile_id, status, progress, policy, created_at) \
-             SELECT ?1, ?2, ?3, 'pending', 0, ?4, ?5 \
+             SELECT ?1, ?2, ?3, ?4, 0, ?5, ?6 \
              WHERE EXISTS (SELECT 1 FROM compression_profiles WHERE id = ?3)",
-            params![id, photo_id, profile_id, policy, now_string()],
+            params![
+                id,
+                photo_id,
+                profile_id,
+                status.as_str(),
+                policy,
+                now_string()
+            ],
         )?;
         Ok(inserted == 1)
     }
@@ -1471,6 +1510,19 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Promotes every waiting job to pending so workers can pick it up,
+    /// restamping the current global keep/replace policy. Returns how many
+    /// rows changed.
+    pub fn release_waiting_jobs(&self, policy: &str) -> Result<usize> {
+        let changed = self.conn.execute(
+            "UPDATE compression_jobs SET status = 'pending', progress = 0, error = NULL, \
+                started_at = NULL, finished_at = NULL, policy = ?1 \
+             WHERE status = 'waiting'",
+            params![policy],
+        )?;
+        Ok(changed)
+    }
+
     /// Returns a failed job to the queue once, incrementing its retry count.
     /// Returns false when the job is missing, not failed, or already at the
     /// retry cap.
@@ -1500,6 +1552,18 @@ impl Db {
         let count = self.conn.query_row(
             "SELECT COUNT(*) FROM compression_jobs WHERE status = ?1",
             params![status.as_str()],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Counts jobs a user still expects to run or finish: waiting, pending,
+    /// and processing. Failed and completed jobs are excluded.
+    pub fn count_active_jobs(&self) -> Result<i64> {
+        let count = self.conn.query_row(
+            "SELECT COUNT(*) FROM compression_jobs \
+             WHERE status IN ('waiting', 'pending', 'processing')",
+            [],
             |row| row.get(0),
         )?;
         Ok(count)
@@ -2574,6 +2638,51 @@ mod tests {
         )
         .unwrap();
         assert_eq!(db.count_jobs(QueueStatus::Completed).unwrap(), 1);
+    }
+
+    #[test]
+    fn waiting_jobs_are_not_dequeued_until_released() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        let job = db
+            .enqueue_job_with_status(photo, "p", "replace", QueueStatus::Waiting)
+            .unwrap();
+
+        assert_eq!(db.count_jobs(QueueStatus::Waiting).unwrap(), 1);
+        assert_eq!(db.count_active_jobs().unwrap(), 1);
+        assert!(db.next_pending_job().unwrap().is_none());
+
+        assert_eq!(db.release_waiting_jobs("keep").unwrap(), 1);
+        assert_eq!(db.count_jobs(QueueStatus::Waiting).unwrap(), 0);
+        assert_eq!(db.count_jobs(QueueStatus::Pending).unwrap(), 1);
+        let released = db.next_pending_job().unwrap().unwrap();
+        assert_eq!(released.id, job);
+        assert_eq!(released.policy, "keep");
+        assert_eq!(db.release_waiting_jobs("keep").unwrap(), 0);
+    }
+
+    #[test]
+    fn waiting_job_blocks_profile_deletion() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_profile(&profile("p", "P")).unwrap();
+        db.save_profile(&profile("q", "Q")).unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        let job = db
+            .enqueue_job_with_status(photo, "p", "keep", QueueStatus::Waiting)
+            .unwrap();
+
+        assert_eq!(db.active_job_count_for_profile("p").unwrap(), 1);
+        assert!(matches!(db.delete_profile("p"), Err(CoreError::Invalid(_))));
+
+        db.update_job(&job, QueueStatus::Completed, 1.0, None, None)
+            .unwrap();
+        db.delete_profile("p").unwrap();
     }
 
     #[test]
