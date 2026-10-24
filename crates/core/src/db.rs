@@ -756,7 +756,7 @@ impl Db {
     /// stay as originally indexed even when the file was renamed. Returns
     /// false when the new path or relative path is already occupied.
     pub fn rebind_photo(&self, photo_id: i64, photo: &NewPhoto) -> Result<bool> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let abs_conflict: i64 = tx.query_row(
             "SELECT COUNT(*) FROM photos WHERE abs_path = ?1 AND id <> ?2",
             params![photo.abs_path, photo_id],
