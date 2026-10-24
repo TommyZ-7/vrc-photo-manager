@@ -5669,13 +5669,7 @@ impl App {
                     .filter(|job| job.status != QueueStatus::Failed)
                     .take(6)
                     .map(|job| {
-                        let status = match job.status {
-                            QueueStatus::Pending => ("待機", AMBER, 0x2a2412),
-                            QueueStatus::Processing => ("処理中", BLUE, 0x14283d),
-                            QueueStatus::Completed => ("完了", GREEN, 0x112a22),
-                            QueueStatus::Failed => ("失敗", RED, 0x2a1414),
-                            QueueStatus::Cancelled => ("取消", MUTED, PANEL_2),
-                        };
+                        let status = queue_status_badge(&job.status);
                         h_flex()
                             .px(px(16.))
                             .py(px(10.))
@@ -7578,6 +7572,17 @@ fn format_count(value: i64) -> String {
     }
 }
 
+fn queue_status_badge(status: &QueueStatus) -> (&'static str, u32, u32) {
+    match status {
+        QueueStatus::Waiting => ("未実行", AMBER, 0x2a2412),
+        QueueStatus::Pending => ("実行待ち", MUTED, PANEL_2),
+        QueueStatus::Processing => ("処理中", BLUE, 0x14283d),
+        QueueStatus::Completed => ("完了", GREEN, 0x112a22),
+        QueueStatus::Failed => ("失敗", RED, 0x2a1414),
+        QueueStatus::Cancelled => ("取消", MUTED, PANEL_2),
+    }
+}
+
 /// Whether a failed job can return to the queue without exceeding the cap.
 fn job_retry_available(job: &CompressionJob) -> bool {
     job.status == QueueStatus::Failed && job.retry_count < MAX_JOB_RETRIES
@@ -8236,6 +8241,7 @@ mod tests {
         format_count, format_timestamp, grid_available_width, grid_columns, grid_columns_for,
         has_tag_filter, import_issue_counts, ipc_status_label, job_retry_available,
         job_retry_label, lerp_color, list_scroll_top, moved_profile_order, next_focus_index,
+        queue_status_badge,
         normalize_note, parse_args, parse_window_size, rail_label_hidden_by_pill, rail_row_at,
         rail_scroll_offset, rail_y, retryable_sources, scan_progress_label, scan_progress_ratio,
         search_anchor_after_result, search_available_width, sidebar_reveal_width, sidebar_width,
@@ -9112,6 +9118,16 @@ mod tests {
         assert!(!job_retry_available(&test_job(QueueStatus::Failed, 3)));
         assert!(!job_retry_available(&test_job(QueueStatus::Completed, 0)));
         assert!(job_retry_label(&test_job(QueueStatus::Failed, 3)).contains("上限"));
+    }
+
+    #[test]
+    fn queue_status_badge_distinguishes_waiting_and_pending() {
+        assert_eq!(queue_status_badge(&QueueStatus::Waiting).0, "未実行");
+        assert_eq!(queue_status_badge(&QueueStatus::Pending).0, "実行待ち");
+        assert_eq!(queue_status_badge(&QueueStatus::Processing).0, "処理中");
+        assert_eq!(queue_status_badge(&QueueStatus::Completed).0, "完了");
+        assert_eq!(queue_status_badge(&QueueStatus::Failed).0, "失敗");
+        assert_eq!(queue_status_badge(&QueueStatus::Cancelled).0, "取消");
     }
 
     #[test]

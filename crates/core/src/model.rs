@@ -146,6 +146,7 @@ impl CompressionProfile {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QueueStatus {
+    Waiting,
     Pending,
     Processing,
     Completed,
@@ -156,6 +157,7 @@ pub enum QueueStatus {
 impl QueueStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Waiting => "waiting",
             Self::Pending => "pending",
             Self::Processing => "processing",
             Self::Completed => "completed",
@@ -166,12 +168,17 @@ impl QueueStatus {
 
     pub fn parse(value: &str) -> Self {
         match value {
+            "waiting" => Self::Waiting,
             "processing" => Self::Processing,
             "completed" => Self::Completed,
             "failed" => Self::Failed,
             "cancelled" => Self::Cancelled,
             _ => Self::Pending,
         }
+    }
+
+    pub fn is_active(&self) -> bool {
+        matches!(self, Self::Waiting | Self::Pending | Self::Processing)
     }
 }
 
@@ -451,4 +458,21 @@ pub struct LibraryStats {
     pub photo_count: i64,
     pub total_bytes: u64,
     pub compressed_count: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_status_roundtrips_waiting() {
+        assert_eq!(QueueStatus::Waiting.as_str(), "waiting");
+        assert_eq!(QueueStatus::parse("waiting"), QueueStatus::Waiting);
+        assert!(QueueStatus::Waiting.is_active());
+        assert!(QueueStatus::Pending.is_active());
+        assert!(QueueStatus::Processing.is_active());
+        assert!(!QueueStatus::Completed.is_active());
+        assert!(!QueueStatus::Failed.is_active());
+        assert!(!QueueStatus::Cancelled.is_active());
+    }
 }
