@@ -1,6 +1,14 @@
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+use semver::Version;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::error::{Result, UpdateError};
+use crate::helper::write_atomic;
+
+pub const APPLY_SCHEMA: u32 = 1;
 
 /// The package family used to show the right update command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -244,6 +252,175 @@ fn safe_component(value: &str) -> String {
     }
 }
 
+/// The installation type an apply job targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplyKind {
+    AppImage,
+    Windows,
+}
+
+/// The handoff file written by the UI and consumed by the helper.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplyJob {
+    pub schema: u32,
+    pub kind: ApplyKind,
+    pub from_version: String,
+    pub to_version: String,
+    pub target: PathBuf,
+    pub staged: PathBuf,
+    pub signature: String,
+    pub sha256: String,
+    pub ui_pid: u32,
+    pub daemon_pid: Option<u32>,
+    pub restart_args: Vec<String>,
+    pub health_token: String,
+    pub data_dir: PathBuf,
+    pub created_at: String,
+}
+
+impl ApplyJob {
+    pub fn new_health_token() -> String {
+        Uuid::new_v4().to_string()
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.schema != APPLY_SCHEMA {
+            return Err(UpdateError::InvalidJob(format!(
+                "unsupported apply schema {}",
+                self.schema
+            )));
+        }
+        parse_job_version(&self.from_version)?;
+        parse_job_version(&self.to_version)?;
+        for (label, path) in [
+            ("target", &self.target),
+            ("staged", &self.staged),
+            ("data_dir", &self.data_dir),
+        ] {
+            if !path.is_absolute() {
+                return Err(UpdateError::InvalidJob(format!(
+                    "{label} must be an absolute path"
+                )));
+            }
+        }
+        if self.target == self.staged {
+            return Err(UpdateError::InvalidJob(
+                "target and staged must differ".to_string(),
+            ));
+        }
+        if self.health_token.is_empty()
+            || !self
+                .health_token
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '-')
+        {
+            return Err(UpdateError::InvalidJob(
+                "health token contains invalid characters".to_string(),
+            ));
+        }
+        if self.signature.trim().is_empty() {
+            return Err(UpdateError::InvalidJob("signature is empty".to_string()));
+        }
+        if self.sha256.len() != 64
+            || !self
+                .sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err(UpdateError::InvalidJob(
+                "sha256 must be 64 lowercase hex characters".to_string(),
+            ));
+        }
+        if self
+            .restart_args
+            .iter()
+            .any(|argument| argument.contains('\0'))
+        {
+            return Err(UpdateError::InvalidJob(
+                "restart arguments contain a NUL".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn parse_job_version(raw: &str) -> Result<Version> {
+    Version::parse(raw.strip_prefix('v').unwrap_or(raw))
+        .map_err(|error| UpdateError::InvalidJob(format!("invalid version {raw}: {error}")))
+}
+
+/// Copies the helper next to the staged job and writes the job atomically.
+///
+/// This does not spawn the helper; see [`start_apply`].
+pub fn prepare_apply(job: &ApplyJob, current_exe: &Path, data_dir: &Path) -> Result<PathBuf> {
+    job.validate()?;
+    if job.data_dir != data_dir {
+        return Err(UpdateError::InvalidJob(
+            "job data_dir does not match the caller".to_string(),
+        ));
+    }
+
+    let paths = UpdatePaths::new(data_dir);
+    paths.ensure()?;
+
+    let helper_name = if cfg!(windows) {
+        "vrc-photo-updater.exe"
+    } else {
+        "vrc-photo-updater"
+    };
+    let source = current_exe
+        .parent()
+        .ok_or_else(|| UpdateError::InvalidJob("current executable has no parent".to_string()))?
+        .join(helper_name);
+    if !source.is_file() {
+        return Err(UpdateError::io(
+            &source,
+            std::io::ErrorKind::NotFound.into(),
+        ));
+    }
+
+    let helper = paths.bin_dir().join(helper_name);
+    let _ = std::fs::remove_file(&helper);
+    std::fs::copy(&source, &helper).map_err(|error| UpdateError::io(&helper, error))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| UpdateError::io(&helper, error))?;
+    }
+
+    let bytes = serde_json::to_vec_pretty(job)
+        .map_err(|error| UpdateError::Other(format!("cannot serialize apply job: {error}")))?;
+    write_atomic(&paths.job_file(), &bytes, 0o600)?;
+    Ok(helper)
+}
+
+/// Prepares the job and spawns the helper, redirecting its output to the
+/// updater log. The caller is expected to exit after this returns.
+pub fn start_apply(job: &ApplyJob, current_exe: &Path, data_dir: &Path) -> Result<()> {
+    let helper = prepare_apply(job, current_exe, data_dir)?;
+    let paths = UpdatePaths::new(data_dir);
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(paths.log_file())
+        .map_err(|error| UpdateError::io(paths.log_file(), error))?;
+    let stderr = log
+        .try_clone()
+        .map_err(|error| UpdateError::io(paths.log_file(), error))?;
+    Command::new(&helper)
+        .arg("--apply")
+        .arg(paths.job_file())
+        .current_dir(&paths.root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .map_err(|error| UpdateError::io(&helper, error))?;
+    Ok(())
+}
+
 fn create_private_dir(path: &Path) -> Result<()> {
     std::fs::create_dir_all(path).map_err(|error| UpdateError::io(path, error))?;
     #[cfg(unix)]
@@ -453,6 +630,107 @@ mod tests {
                     0o700
                 );
             }
+        }
+    }
+
+    fn test_job(dir: &Path) -> ApplyJob {
+        let target = dir.join("app.AppImage");
+        let staged = dir.join("new.AppImage");
+        std::fs::write(&target, b"old").unwrap();
+        std::fs::write(&staged, b"new").unwrap();
+        ApplyJob {
+            schema: APPLY_SCHEMA,
+            kind: ApplyKind::AppImage,
+            from_version: "0.3.0".to_string(),
+            to_version: "0.4.0".to_string(),
+            target,
+            staged,
+            signature: "c2ln".to_string(),
+            sha256: "a".repeat(64),
+            ui_pid: 1,
+            daemon_pid: Some(2),
+            restart_args: Vec::new(),
+            health_token: "abc-123".to_string(),
+            data_dir: dir.to_path_buf(),
+            created_at: "2026-10-24T12:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn apply_job_round_trips_and_validates() {
+        let dir = tempfile::tempdir().unwrap();
+        let job = test_job(dir.path());
+        job.validate().unwrap();
+        let json = serde_json::to_string(&job).unwrap();
+        let decoded: ApplyJob = serde_json::from_str(&json).unwrap();
+        assert_eq!(job, decoded);
+
+        let mut relative = job.clone();
+        relative.target = "app.AppImage".into();
+        assert!(matches!(
+            relative.validate(),
+            Err(crate::error::UpdateError::InvalidJob(_))
+        ));
+
+        let mut empty_token = job.clone();
+        empty_token.health_token.clear();
+        assert!(empty_token.validate().is_err());
+
+        let mut slash_token = job.clone();
+        slash_token.health_token = "abc/def".to_string();
+        assert!(slash_token.validate().is_err());
+
+        let mut bad_version = job.clone();
+        bad_version.to_version = "latest".to_string();
+        assert!(bad_version.validate().is_err());
+
+        let mut bad_schema = job.clone();
+        bad_schema.schema = 2;
+        assert!(bad_schema.validate().is_err());
+    }
+
+    #[test]
+    fn new_health_token_is_a_uuid() {
+        let token = ApplyJob::new_health_token();
+        assert_eq!(token.len(), 36);
+        assert!(token.chars().all(|c| c.is_ascii_hexdigit() || c == '-'));
+    }
+
+    #[test]
+    fn prepare_apply_copies_the_helper_and_writes_the_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let install = dir.path().join("install");
+        std::fs::create_dir_all(&install).unwrap();
+        let helper_name = if cfg!(windows) {
+            "vrc-photo-updater.exe"
+        } else {
+            "vrc-photo-updater"
+        };
+        let current_exe = install.join(if cfg!(windows) {
+            "vrc-photo-manager.exe"
+        } else {
+            "vrc-photo-manager"
+        });
+        std::fs::write(&current_exe, b"ui").unwrap();
+        std::fs::write(install.join(helper_name), b"helper").unwrap();
+
+        let data_dir = dir.path().join("data");
+        let mut job = test_job(dir.path());
+        job.data_dir = data_dir.clone();
+        let copied = prepare_apply(&job, &current_exe, &data_dir).unwrap();
+        assert_eq!(copied, data_dir.join("updates/bin").join(helper_name));
+        assert_eq!(std::fs::read(&copied).unwrap(), b"helper");
+        let job_file = data_dir.join("updates/job.json");
+        let stored: ApplyJob = serde_json::from_slice(&std::fs::read(job_file).unwrap()).unwrap();
+        assert_eq!(stored, job);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&copied).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
         }
     }
 
