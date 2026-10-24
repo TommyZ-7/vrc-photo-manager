@@ -8,3 +8,5 @@
 .env
 .DS_Store
 Thumbs.db
+/packaging/update/*.key
+/update.key
