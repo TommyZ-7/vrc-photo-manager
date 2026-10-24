@@ -113,7 +113,7 @@ enum Screen {
     Photos,
     Compression,
     Search,
-    Monitor,
+    Dashboard,
     Settings,
 }
 
@@ -123,7 +123,7 @@ impl Screen {
             Self::Photos => "写真",
             Self::Compression => "圧縮設定",
             Self::Search => "検索",
-            Self::Monitor => "ログ監視",
+            Self::Dashboard => "ダッシュボード",
             Self::Settings => "設定",
         }
     }
@@ -1146,6 +1146,9 @@ pub struct App {
     settings: AppSettings,
     update: update_view::UpdateState,
     jobs: Vec<CompressionJob>,
+    waiting_jobs: Vec<CompressionJob>,
+    active_job_count: i64,
+    waiting_job_count: i64,
     daemon_errors: Vec<DaemonError>,
     failed_job_count: i64,
     failed_jobs: Vec<CompressionJob>,
@@ -1297,6 +1300,9 @@ impl App {
             settings: AppSettings::default(),
             update: update_view::UpdateState::new(health_token, database_ok, demo),
             jobs: Vec::new(),
+            waiting_jobs: Vec::new(),
+            active_job_count: 0,
+            waiting_job_count: 0,
             daemon_errors: Vec::new(),
             failed_job_count: 0,
             failed_jobs: Vec::new(),
@@ -1692,18 +1698,30 @@ impl App {
     }
 
     fn reload_job_state(&mut self) {
-        self.jobs = self.db.list_jobs(20).unwrap_or_else(|error| {
-            tracing::warn!(%error, "cannot load recent compression jobs");
-            Vec::new()
-        });
-        self.failed_job_count = self.db.count_jobs(QueueStatus::Failed).unwrap_or(0);
-        self.failed_jobs = self
-            .db
-            .list_jobs_by_status(QueueStatus::Failed, 100)
-            .unwrap_or_else(|error| {
-                tracing::warn!(%error, "cannot load failed compression jobs");
-                Vec::new()
-            });
+        match self.db.list_jobs(20) {
+            Ok(jobs) => self.jobs = jobs,
+            Err(error) => tracing::warn!(%error, "cannot load recent compression jobs"),
+        }
+        match self.db.count_active_jobs() {
+            Ok(count) => self.active_job_count = count,
+            Err(error) => tracing::warn!(%error, "cannot count active compression jobs"),
+        }
+        match self.db.count_jobs(QueueStatus::Waiting) {
+            Ok(count) => self.waiting_job_count = count,
+            Err(error) => tracing::warn!(%error, "cannot count waiting compression jobs"),
+        }
+        match self.db.list_jobs_by_status(QueueStatus::Waiting, 100) {
+            Ok(jobs) => self.waiting_jobs = jobs,
+            Err(error) => tracing::warn!(%error, "cannot load waiting compression jobs"),
+        }
+        match self.db.count_jobs(QueueStatus::Failed) {
+            Ok(count) => self.failed_job_count = count,
+            Err(error) => tracing::warn!(%error, "cannot count failed compression jobs"),
+        }
+        match self.db.list_jobs_by_status(QueueStatus::Failed, 100) {
+            Ok(jobs) => self.failed_jobs = jobs,
+            Err(error) => tracing::warn!(%error, "cannot load failed compression jobs"),
+        }
         self.failed_job_names.clear();
         for job in &self.failed_jobs {
             if self.failed_job_names.contains_key(&job.photo_id) {
@@ -1744,6 +1762,22 @@ impl App {
             Err(error) => {
                 tracing::warn!(%error, "cannot retry failed compression jobs");
                 self.message = Some(format!("再試行できません: {error}"));
+            }
+        }
+        cx.notify();
+    }
+
+    fn release_waiting_jobs(&mut self, cx: &mut Context<Self>) {
+        match self.db.release_waiting_jobs() {
+            Ok(0) => self.message = Some("未実行のジョブはありません".to_string()),
+            Ok(count) => {
+                self.message = Some(format!("{count} 件を圧縮キューに戻しました"));
+                self.reload_job_state();
+                self.send_wake_jobs(cx);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "cannot release waiting compression jobs");
+                self.message = Some(format!("待機ジョブを開始できません: {error}"));
             }
         }
         cx.notify();
@@ -2694,12 +2728,8 @@ impl App {
             Duration::from_millis(320)
         };
         let photo_count = format_count(self.stats.photo_count);
-        let pending_jobs = self
-            .jobs
-            .iter()
-            .filter(|job| matches!(job.status, QueueStatus::Pending | QueueStatus::Processing))
-            .count();
-        let compression_count = (pending_jobs > 0).then(|| format_count(pending_jobs as i64));
+        let compression_count =
+            (self.active_job_count > 0).then(|| format_count(self.active_job_count));
 
         let brand_text = v_flex()
             .min_w_0()
@@ -2782,7 +2812,13 @@ impl App {
                 compression_count,
                 cx,
             ))
-            .child(self.nav_item("監視", Screen::Monitor, IconName::Eye, None, cx))
+            .child(self.nav_item(
+                "ダッシュボード",
+                Screen::Dashboard,
+                IconName::LayoutDashboard,
+                None,
+                cx,
+            ))
             .child(self.nav_item(
                 "設定",
                 Screen::Settings,
@@ -3001,7 +3037,7 @@ impl App {
             Screen::Photos => 0,
             Screen::Search => 1,
             Screen::Compression => 2,
-            Screen::Monitor => 3,
+            Screen::Dashboard => 3,
             Screen::Settings => 4,
         };
 
@@ -3144,7 +3180,7 @@ impl App {
                 Screen::Photos => ("alert-photos", "写真を開く"),
                 Screen::Compression => ("alert-compression", "圧縮を開く"),
                 Screen::Search => ("alert-search", "検索を開く"),
-                Screen::Monitor => ("alert-monitor", "ログ監視を開く"),
+                Screen::Dashboard => ("alert-dashboard", "ダッシュボードを開く"),
                 Screen::Settings => ("alert-settings", "設定を開く"),
             };
             h_flex()
@@ -3193,7 +3229,7 @@ impl App {
             Screen::Photos => self.photos_screen(window, cx).into_any_element(),
             Screen::Compression => self.compression_screen(cx).into_any_element(),
             Screen::Search => self.search_screen(window, cx).into_any_element(),
-            Screen::Monitor => self.monitor_screen(cx).into_any_element(),
+            Screen::Dashboard => self.dashboard_screen(cx).into_any_element(),
             Screen::Settings => self.settings_screen(cx).into_any_element(),
         };
         v_flex()
@@ -5114,8 +5150,7 @@ impl App {
                                             "圧縮後合計",
                                             format_bytes(self.db.derivative_bytes().unwrap_or(0)),
                                         )),
-                                )
-                                .child(self.queue_panel(cx)),
+                                ),
                         ),
                 ),
         )
@@ -5594,7 +5629,20 @@ impl App {
                             .text_color(rgb(TEXT))
                             .child("圧縮キュー"),
                     )
-                    .child(self.badge(&format!("{} 件", self.jobs.len()), BLUE, 0x14283d))
+                    .when(self.active_job_count > 0, |this| {
+                        this.child(self.badge(
+                            &format!("未完了 {}", self.active_job_count),
+                            BLUE,
+                            0x14283d,
+                        ))
+                    })
+                    .when(self.waiting_job_count > 0, |this| {
+                        this.child(self.badge(
+                            &format!("未実行 {}", self.waiting_job_count),
+                            AMBER,
+                            0x2a2412,
+                        ))
+                    })
                     .when(self.failed_job_count > 0, |this| {
                         this.child(self.badge(
                             &format!("失敗 {}", self.failed_job_count),
@@ -5603,6 +5651,17 @@ impl App {
                         ))
                     })
                     .child(div().flex_1())
+                    .when(self.waiting_job_count > 0, |this| {
+                        this.child(
+                            Button::new("release-waiting-jobs")
+                                .label("待機をすべて圧縮")
+                                .small()
+                                .primary()
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.release_waiting_jobs(cx)),
+                                ),
+                        )
+                    })
                     .when(retryable_jobs, |this| {
                         this.child(
                             Button::new("retry-all-failed-jobs")
@@ -5625,6 +5684,88 @@ impl App {
                         .child("失敗は最新の100件のみ表示しています（再試行は上限内のすべてが対象です）"),
                 )
             })
+            .children(self.waiting_jobs.iter().take(20).map(|job| {
+                let status = queue_status_badge(&job.status);
+                let profile_name = self
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == job.profile_id)
+                    .map(|profile| profile.name.clone())
+                    .unwrap_or_else(|| "不明なプロファイル".to_string());
+                h_flex()
+                    .px(px(16.))
+                    .py(px(10.))
+                    .gap(px(8.))
+                    .items_center()
+                    .border_b_1()
+                    .border_color(rgb(BORDER))
+                    .child(self.badge(status.0, status.1, status.2))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(12.))
+                            .text_color(rgb(TEXT))
+                            .truncate()
+                            .child(format!("photo #{}", job.photo_id)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED_2))
+                            .child(profile_name),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED_2))
+                            .child(format!("{:.0}%", job.progress * 100.0)),
+                    )
+            }))
+            .children(
+                self.jobs
+                    .iter()
+                    .filter(|job| !matches!(job.status, QueueStatus::Waiting | QueueStatus::Failed))
+                    .take(6)
+                    .map(|job| {
+                        let status = queue_status_badge(&job.status);
+                        let profile_name = self
+                            .profiles
+                            .iter()
+                            .find(|profile| profile.id == job.profile_id)
+                            .map(|profile| profile.name.clone())
+                            .unwrap_or_else(|| "不明なプロファイル".to_string());
+                        h_flex()
+                            .px(px(16.))
+                            .py(px(10.))
+                            .gap(px(8.))
+                            .items_center()
+                            .border_b_1()
+                            .border_color(rgb(BORDER))
+                            .child(self.badge(status.0, status.1, status.2))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(TEXT))
+                                    .truncate()
+                                    .child(format!("photo #{}", job.photo_id)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(MUTED_2))
+                                    .child(profile_name),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(MUTED_2))
+                                    .child(format!("{:.0}%", job.progress * 100.0)),
+                            )
+                    }),
+            )
             .children(self.failed_jobs.iter().map(|job| {
                 let name = self
                     .failed_job_names
@@ -5702,47 +5843,20 @@ impl App {
                             }),
                     )
             }))
-            .children(
-                self.jobs
-                    .iter()
-                    .filter(|job| job.status != QueueStatus::Failed)
-                    .take(6)
-                    .map(|job| {
-                        let status = queue_status_badge(&job.status);
-                        h_flex()
-                            .px(px(16.))
-                            .py(px(10.))
-                            .gap(px(8.))
-                            .items_center()
-                            .border_b_1()
-                            .border_color(rgb(BORDER))
-                            .child(self.badge(status.0, status.1, status.2))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_size(px(12.))
-                                    .text_color(rgb(TEXT))
-                                    .truncate()
-                                    .child(format!("photo #{}", job.photo_id)),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(MUTED_2))
-                                    .child(format!("{:.0}%", job.progress * 100.0)),
-                            )
-                    }),
+            .when(
+                self.waiting_jobs.is_empty()
+                    && self.jobs.is_empty()
+                    && self.failed_jobs.is_empty(),
+                |this| {
+                    this.child(
+                        div()
+                            .p(px(16.))
+                            .text_size(px(12.))
+                            .text_color(rgb(MUTED_2))
+                            .child("キューは空です"),
+                    )
+                },
             )
-            .when(self.jobs.is_empty(), |this| {
-                this.child(
-                    div()
-                        .p(px(16.))
-                        .text_size(px(12.))
-                        .text_color(rgb(MUTED_2))
-                        .child("キューは空です"),
-                )
-            })
     }
 
     fn search_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -6292,16 +6406,16 @@ impl App {
             .child(input.w_full())
     }
 
-    fn monitor_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn dashboard_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .flex_1()
             .min_h_0()
             .child(self.screen_header(
-                "ログ監視",
-                "VRChatの出力ログからワールドとプレイヤーを記録します。".to_string(),
+                "ダッシュボード",
+                "ライブラリ、圧縮キュー、ログ監視の状況をまとめて確認できます。".to_string(),
                 self.message.clone(),
                 vec![
-                    Button::new("monitor-refresh")
+                    Button::new("dashboard-refresh")
                         .label("再読込")
                         .small()
                         .ghost()
@@ -6325,7 +6439,19 @@ impl App {
                         h_flex()
                             .gap(px(16.))
                             .child(self.stat_card(
-                                "監視",
+                                "写真",
+                                format!("{} 枚", self.stats.photo_count),
+                            ))
+                            .child(self.stat_card(
+                                "未完了ジョブ",
+                                format!("{} 件", self.active_job_count),
+                            ))
+                            .child(self.stat_card(
+                                "未実行",
+                                format!("{} 件", self.waiting_job_count),
+                            ))
+                            .child(self.stat_card(
+                                "デーモン",
                                 if self.daemon_active {
                                     daemon_state_label(true, self.daemon_paused).to_string()
                                 } else if self.settings.log_dir.is_some() {
@@ -6333,20 +6459,9 @@ impl App {
                                 } else {
                                     "未設定".to_string()
                                 },
-                            ))
-                            .child(self.stat_card(
-                                "現在のワールド",
-                                self.monitor_world.clone().unwrap_or_else(|| "待機".to_string()),
-                            ))
-                            .child(self.stat_card(
-                                "同接",
-                                format!("{} 人", self.monitor_players.len()),
-                            ))
-                            .child(self.stat_card(
-                                "写真",
-                                format!("{} 枚", self.stats.photo_count),
                             )),
                     )
+                    .child(self.queue_panel(cx))
                     .child(self.daemon_card(cx))
                     .when(!self.daemon_errors.is_empty(), |this| {
                         this.child(self.daemon_error_card(cx))
@@ -7746,7 +7861,7 @@ fn alert_summaries(
     }
     if daemon_errors > 0 {
         rows.push((
-            Screen::Monitor,
+            Screen::Dashboard,
             format!("デーモンで {daemon_errors} 件の処理エラーがあります"),
         ));
     }
@@ -8108,9 +8223,13 @@ fn compression_policy_warning(keep_original: bool, auto_compress: bool) -> Optio
         return None;
     }
     if auto_compress {
-        Some("自動圧縮でも、圧縮に成功すると元画像をOSゴミ箱へ移動します。取り消すにはゴミ箱から復元してください。")
+        Some(
+            "自動圧縮でも、圧縮に成功すると元画像をOSゴミ箱へ移動します。取り消すにはゴミ箱から復元してください。",
+        )
     } else {
-        Some("圧縮に成功すると元画像をOSゴミ箱へ移動します。取り消すにはゴミ箱から復元してください。")
+        Some(
+            "圧縮に成功すると元画像をOSゴミ箱へ移動します。取り消すにはゴミ箱から復元してください。",
+        )
     }
 }
 
@@ -8334,17 +8453,17 @@ mod tests {
         ThumbnailCache, YearBucket, add_photo_root_and_save, alert_summaries, anchor_photo_id,
         apply_library_index, apply_profile_format, autostart_description, average_bgra,
         build_year_buckets, compression_policy, compression_policy_warning, daemon_liveness,
-        daemon_operation_label, daemon_state_label, daemon_sync_label,
-        decode_thumbnail, demo_thumb_path, ease_motion, first_visible_photo, format_captured_month,
-        format_count, format_timestamp, grid_available_width, grid_columns, grid_columns_for,
-        has_tag_filter, import_issue_counts, ipc_status_label, job_retry_available,
-        job_retry_label, lerp_color, list_scroll_top, lossless_hint, lossless_supported,
-        moved_profile_order, next_focus_index, profile_summary, queue_status_badge,
-        normalize_note, parse_args, parse_window_size, rail_label_hidden_by_pill, rail_row_at,
-        rail_scroll_offset, rail_y, retryable_sources, scan_progress_label, scan_progress_ratio,
-        search_anchor_after_result, search_available_width, sidebar_reveal_width, sidebar_width,
-        stagger_value, step_index, sync_search_mirror, viewer_details_width, viewer_image_box,
-        visible_year_buckets, with_tag, without_tag,
+        daemon_operation_label, daemon_state_label, daemon_sync_label, decode_thumbnail,
+        demo_thumb_path, ease_motion, first_visible_photo, format_captured_month, format_count,
+        format_timestamp, grid_available_width, grid_columns, grid_columns_for, has_tag_filter,
+        import_issue_counts, ipc_status_label, job_retry_available, job_retry_label, lerp_color,
+        list_scroll_top, lossless_hint, lossless_supported, moved_profile_order, next_focus_index,
+        normalize_note, parse_args, parse_window_size, profile_summary, queue_status_badge,
+        rail_label_hidden_by_pill, rail_row_at, rail_scroll_offset, rail_y, retryable_sources,
+        scan_progress_label, scan_progress_ratio, search_anchor_after_result,
+        search_available_width, sidebar_reveal_width, sidebar_width, stagger_value, step_index,
+        sync_search_mirror, viewer_details_width, viewer_image_box, visible_year_buckets, with_tag,
+        without_tag,
     };
     use gpui_kit::{RenderImage, ScrollStrategy, UniformListScrollHandle, point, px};
     use smallvec::SmallVec;
@@ -8433,9 +8552,15 @@ mod tests {
         let rows = alert_summaries(2, 1, 3);
         assert_eq!(rows[0].0, Screen::Compression);
         assert!(rows[0].1.contains("2"));
-        assert_eq!(rows[1].0, Screen::Monitor);
+        assert_eq!(rows[1].0, Screen::Dashboard);
         assert_eq!(rows[2].0, Screen::Photos);
         assert!(alert_summaries(0, 0, 0).is_empty());
+    }
+
+    #[test]
+    fn dashboard_replaces_the_monitor_screen() {
+        assert_eq!(Screen::Dashboard.title(), "ダッシュボード");
+        assert_eq!(alert_summaries(0, 1, 0)[0].0, Screen::Dashboard);
     }
 
     #[test]
