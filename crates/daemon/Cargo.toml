@@ -19,6 +19,7 @@ anyhow.workspace = true
 auto-launch = "0.6"
 chrono.workspace = true
 clap.workspace = true
+interprocess.workspace = true
 notify = "8"
 single-instance = "0.3"
 trash = "5"

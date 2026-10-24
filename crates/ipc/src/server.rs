@@ -7,9 +7,11 @@ use std::time::Duration;
 use std::os::unix::fs::PermissionsExt;
 
 use interprocess::local_socket::{
-    Listener as LocalSocketListener, ListenerNonblockingMode, ListenerOptions, Stream,
+    Listener as LocalSocketListener, ListenerNonblockingMode, ListenerOptions,
     traits::Listener as _,
 };
+
+pub use interprocess::local_socket::Stream;
 
 use crate::client;
 use crate::endpoint::Endpoint;

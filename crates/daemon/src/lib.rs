@@ -24,6 +24,7 @@ use vrc_photo_core::scanner::{ScanFailure, ScanReport, scan_and_index, scan_one}
 use vrc_photo_core::settings::{AppSettings, detect_vrchat_paths};
 use vrc_photo_core::thumbnail;
 
+mod ipc_server;
 mod signals;
 mod tray;
 use tray::{Tray, TrayAction};
