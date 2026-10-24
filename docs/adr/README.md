@@ -23,7 +23,7 @@
 | [0001](0001-gpui-kit.md) | UIにgpui-kit 0.8を採用する | Accepted |
 | [0002](0002-sqlite-shared-state.md) | UIとデーモンはSQLiteを共有する | Accepted（ADR-0011で補完） |
 | [0003](0003-log-and-xmp.md) | 文脈取得はログ監視＋XMP補完とする | Accepted |
-| [0004](0004-compression-policy.md) | 自動圧縮は元画像保持、手動置換はゴミ箱 | Accepted |
+| [0004](0004-compression-policy.md) | 自動圧縮は元画像保持、手動置換はゴミ箱 | Superseded by ADR-0013 |
 | [0005](0005-reference-library.md) | 参照ライブラリ＋任意取り込み | Accepted |
 | [0006](0006-linux-packaging.md) | Linux配布はdeb/AppImage/pacman | Accepted |
 | [0007](0007-photo-load-cap.md) | MVPの一覧読み込みを300枚に制限する | Superseded by ADR-0009 |
@@ -32,3 +32,4 @@
 | [0010](0010-systemd-user-service.md) | deb/pacmanはsystemdユーザーサービスを任意提供する | Accepted |
 | [0011](0011-daemon-ipc.md) | UIとデーモンはローカルIPCで即時コマンドとイベントを補完する | Accepted |
 | [0012](0012-auto-update.md) | 自動アップデートは署名付きマニフェストと専用ヘルパーで行う | Accepted |
+| [0013](0013-auto-compression-policy.md) | 圧縮ポリシーを全体設定にし、自動圧縮にも適用する | Accepted（ADR-0004を置き換え） |

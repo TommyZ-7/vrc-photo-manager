@@ -195,14 +195,14 @@ VRChatの1滞在。
 
 ### `compression_jobs`
 
-永続キュー。デーモン再起動後も `pending` を再開できる。
+永続キュー。デーモン再起動後も `pending` を再開できる。キューは全プロファイル共有で、UIはダッシュボードに表示する。
 
 | 列 | 型 | 説明 |
 |---|---|---|
 | id | TEXT PK | UUID |
 | photo_id | INTEGER FK | |
 | profile_id | TEXT | |
-| status | TEXT | `pending` / `processing` / `completed` / `failed` / `cancelled` |
+| status | TEXT | `waiting` / `pending` / `processing` / `completed` / `failed` / `cancelled` |
 | progress | REAL | 0.0〜1.0 |
 | error | TEXT | |
 | output_path | TEXT | |
@@ -211,6 +211,8 @@ VRChatの1滞在。
 | created_at / started_at / finished_at | TEXT | |
 
 `retry_count` は自動リトライの回数ではない。再試行は `status='failed'` かつ `retry_count < 3` の行だけを対象に、進捗・エラー・開始/終了時刻をリセットし、`retry_count` を1増やして `pending` に戻す。上限到達後は更新しない。写真・プロファイル・方針は変えない。
+
+`waiting` は自動圧縮の即時実行がOFFのときに積まれる未実行状態。ワーカーは取得しない。ダッシュボードの「待機をすべて圧縮」が、全プロファイルの `waiting` を `pending` に一括変更する。
 
 取得は単一SQLで原子的に行う。
 
@@ -290,6 +292,7 @@ UIからデーモンへの再実行要求。FIFOの小さなキュー。
 ```text
 photo_roots, log_dir, managed_dir, language,
 autostart, tray, auto_compress, auto_compress_backlog,
+auto_compress_immediate, compression_keep_original,
 estimated_link, thumbnail_cache_mb, compression_workers
 ```
 
@@ -299,7 +302,7 @@ estimated_link, thumbnail_cache_mb, compression_workers
 2. `photos.status='missing'` の写真はUI一覧に出さない。DBからは消さない。`replaced` は圧縮版を表示するため一覧に出す。
 3. `photo_context` は写真ごとに1行。再紐付けはUPSERTで上書きする。
 4. `derivatives.path` は一意。圧縮出力は既存ファイルを上書きしない。
-5. `compression_jobs` は `pending` のものを1件ずつ原子的に取得する。
+5. `compression_jobs` は `pending` のものを1件ずつ原子的に取得する。`waiting` は取得せず、明示的な一括解放だけで `pending` に移す。
 6. 写真削除はDB削除ではなく `status='missing'` とOSゴミ箱移動。圧縮版が残っている場合は `replaced` として表示を継続する。
 7. 生ログは保存しない。解析済みイベントのみ保存する。
 8. `daemon_errors` は操作（`scan` / `log` / `link`）ごとに1行だけ。解消したら削除する。
