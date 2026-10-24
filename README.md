@@ -18,6 +18,7 @@ VRChatの写真を、撮影時のワールド・同接プレイヤー・日時�
 - 写真のOSゴミ箱移動（2段階確認）
 - トレイ常駐、自動起動、デーモンのハートビート表示
 - UI⇔デーモンのローカルIPC（即時再スキャン、一時停止/再開、スキャン/圧縮進捗、終了）
+- 署名付き自動アップデート（AppImage / Windows current-user NSIS。deb/pacmanは通知のみ。更新確認はGitHub ReleasesへのHTTPS GETだけで、写真・ログは送信しない）
 - deb/pacman向けの任意のsystemdユーザーサービス（journalctlでログ確認可能）
 - 外部削除された写真の `missing` 検出
 
@@ -110,6 +111,7 @@ cargo run -p vrc-photo-daemon -- --no-tray
 | `VRC_PHOTO_DIR` | 写真フォルダの上書き |
 | `VRC_LOG_DIR` | VRChatログフォルダの上書き |
 | `VRC_PHOTO_DB` | SQLiteファイルの上書き |
+| `VRC_PHOTO_UPDATE_FEED` | 更新マニフェストURLの上書き（ミラー・QA用） |
 | `RUST_LOG` | ログレベル（例: `debug`） |
 
 ## データの保存先
@@ -118,6 +120,7 @@ cargo run -p vrc-photo-daemon -- --no-tray
   - Linux: `~/.local/share/vrc-photo-manager/`
   - Windows: `%LOCALAPPDATA%\vrc-photo-manager\`
 - サムネイル: 同ディレクトリの `thumbnails/`
+- 更新ファイル・適用ログ・旧版バックアップ: 同ディレクトリの `updates/`
 
 写真ファイル自体は移動しない。圧縮版は既定で元写真の `compressed/` に生成する。
 

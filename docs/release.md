@@ -121,6 +121,10 @@ ls -lh dist
 - Windowsランナー: `cargo packager --release -f nsis`（NSISは自動取得）
 - 両ジョブの `dist/*` をworkflow artifactとして保存
 - タグ時のみ `publish` ジョブが両artifactをまとめて `gh release create/upload` で公開
+- `publish` ジョブはタグと `Cargo.toml` / `Packager.toml` のバージョン一致を確認し、
+  `MINISIGN_SECRET_KEY` がなければ失敗する
+- `vrc-photo-release-tool` で全artifactと `latest.json` を署名・検証し、
+  `latest.json` を同じReleaseに添付する
 
 Releaseノートは前回タグとの差分から `feat:` / `fix:` / その他を分類して生成する。
 
@@ -147,6 +151,9 @@ Required check名を変更した場合は、GitHubのbranch protectionも更新�
 - [ ] deb / pacman に `usr/lib/systemd/user/vrc-photo-daemon.service` が入っている
 - [ ] アイコンとdesktop entryが入っている
 - [ ] パッケージ生成物に `LICENSE` と `LICENSE-LUCIDE` が入っている
+- [ ] パッケージ生成物に `vrc-photo-updater` が入っている
+- [ ] `MINISIGN_SECRET_KEY` が登録されている
+- [ ] `latest.json` と `latest.json.minisig` がReleaseに添付されている
 - [ ] リリースノートの分類が正しい
 
 ## 9. ロールバック
@@ -156,11 +163,91 @@ Required check名を変更した場合は、GitHubのbranch protectionも更新�
 - GitHub Releaseを非公開/削除する場合も、タグは残す。ユーザーの明示指示が必要。
 - DBマイグレーションは前方互換を基本とし、ダウングレードは保証しない。
 
-## 10. 未対応
+## 10. 自動アップデートの署名と配信
+
+### 10.1 フィード
+
+- 更新確認は `https://github.com/TommyZ-7/vrc-photo-manager/releases/latest/download/latest.json`
+  を取得する。GitHub API は使わない。
+- `latest.json` の隣に `latest.json.minisig` を置く。
+- `latest.json` の `platforms` は `linux-x86_64`（AppImage）と
+  `windows-x86_64`（NSIS）を持つ。各エントリは `url`、`format`、`size`、
+  `sha256`、`signature`（`.minisig` 全体のbase64）を含む。
+- クライアントはマニフェスト署名をJSONパース前に検証し、成果物は
+  ダウンロードしながら署名とSHA-256を検証する。
+
+### 10.2 署名鍵
+
+- 秘密鍵は GitHub Actions の repository secret `MINISIGN_SECRET_KEY` にだけ置く。
+  値は `crates/update/examples/generate_update_key.rs` が生成する
+  minisign secret key box のファイル内容。
+- 公開鍵は `packaging/update/keys.txt` に1行1鍵で置く。アプリはこのファイルを
+  `include_str!` で埋め込み、複数鍵のどれかで検証できれば成功とする。
+- 秘密鍵のオフラインバックアップを必ず保管する。GitHub secretは再表示できない。
+- 鍵の生成:
+
+```bash
+cargo run -p vrc-photo-update --example generate_update_key -- /secure/path/minisign.key
+```
+
+  出力された `RW...` 行を `packaging/update/keys.txt` に追記し、秘密鍵を
+  `gh secret set MINISIGN_SECRET_KEY < /secure/path/minisign.key` で登録する。
+  秘密鍵はリポジトリに置かない。
+
+- ローテーション:
+  1. 新しい鍵を生成し、公開鍵を `keys.txt` に追記する。
+  2. そのバージョンを旧鍵で署名してリリースする。
+  3. 次のリリースから `MINISIGN_SECRET_KEY` を新鍵に切り替える。
+  4. 旧鍵での更新が行き渡った後、旧公開鍵を `keys.txt` から外す。
+  旧鍵が漏洩した場合は 2〜4 を待たず、手動更新を案内する。
+
+### 10.3 ローカルでの署名・検証
+
+`vrc-photo-release-tool` はRelease専用で、アプリには同梱しない。
+
+```bash
+cargo run -p vrc-photo-release-tool --bin vrc-photo-update-manifest -- \
+  sign --key /secure/path/minisign.key --dist dist
+PUB=$(grep -m1 '^RW' packaging/update/keys.txt)
+cargo run -p vrc-photo-release-tool --bin vrc-photo-update-manifest -- \
+  verify --public-key "$PUB" --dist dist
+cargo run -p vrc-photo-release-tool --bin vrc-photo-update-manifest -- \
+  generate --dist dist --tag v0.4.0 --repo TommyZ-7/vrc-photo-manager \
+  --notes-url https://github.com/TommyZ-7/vrc-photo-manager/releases/tag/v0.4.0 \
+  --output dist/latest.json
+```
+
+`sign` / `verify` / `generate` は `dist` 内の `*.minisig` を除く全ファイルを
+対象にする。`generate` はAppImageとNSISが各1個あること、ファイル名にタグ
+バージョンが含まれることを要求する。
+
+### 10.4 手動復旧
+
+AppImage:
+
+```bash
+ls -l "/path/to/VRC Photo Manager.AppImage.previous"
+cp "/path/to/VRC Photo Manager.AppImage.previous" "/path/to/VRC Photo Manager.AppImage"
+chmod +x "/path/to/VRC Photo Manager.AppImage"
+```
+
+Windows（current-user NSIS）:
+
+```powershell
+$backup = "$env:LOCALAPPDATA\vrc-photo-manager\updates\backup\<version>"
+Copy-Item "$backup\vrc-photo-manager.exe" "$env:LOCALAPPDATA\VRC Photo Manager\vrc-photo-manager.exe" -Force
+Copy-Item "$backup\vrc-photo-daemon.exe" "$env:LOCALAPPDATA\VRC Photo Manager\vrc-photo-daemon.exe" -Force
+```
+
+`<data_dir>/updates/updater.log` と `last-result.json` に失敗理由が残る。
+`last-result.json` はUIが起動時に一度読んで削除する。
+
+## 11. 未対応
 
 - MSIインストーラ（WiX）
-- 自動アップデート
-- コード署名
+- Windows Authenticode コード署名
+- deb / pacman のアプリ内自己更新
 - Flatpak / Snap
+- UIを閉じている間の更新確認
 
 これらは [roadmap.md](roadmap.md) で優先度を決める。

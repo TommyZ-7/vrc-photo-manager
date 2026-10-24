@@ -19,6 +19,13 @@
 ```bash
 cargo build -p vrc-photo-ui
 cargo build -p vrc-photo-daemon
+cargo build -p vrc-photo-update
+```
+
+更新の署名・マニフェスト生成ツールはRelease専用:
+
+```bash
+cargo build -p vrc-photo-release-tool --bin vrc-photo-update-manifest
 ```
 
 ### デモUI
@@ -71,7 +78,10 @@ cargo run -p vrc-photo-daemon -- --no-tray
 | `VRC_LOG_DIR` | ログフォルダの上書き |
 | `VRC_PHOTO_DB` | DBパスの上書き |
 | `RUST_LOG` | ログレベル（例: `debug`） |
-| `APPIMAGE` | AppImage実行時に自動設定される。自動起動のパス解決に使用 |
+| `APPIMAGE` | AppImage実行時に自動設定される。自動起動と更新のパス解決に使用 |
+| `VRC_PHOTO_UPDATE_FEED` | 更新マニフェストURLの上書き（ミラー・QA用） |
+| `VRC_PHOTO_UPDATE_PUBLIC_KEY` | デバッグビルドのみ。埋め込み公開鍵を1つ上書き（QA用） |
+| `VRC_PHOTO_HEALTH_TOKEN` | 更新ヘルパーが新UIへ渡す内部トークン。通常は設定しない |
 
 ## 4. データの場所
 
@@ -80,6 +90,13 @@ cargo run -p vrc-photo-daemon -- --no-tray
   - Windows: `%LOCALAPPDATA%\vrc-photo-manager\`
 - サムネイル: 同 `thumbnails/`
 - 取り込み先の既定: 同 `imported/`
+- 更新: 同 `updates/`（ダウンロード、ジョブ、健康マーカー、結果、ログ、
+  旧版バックアップ）
+
+更新フィードと署名鍵の設定は [release.md](release.md#10-自動アップデートの署名と配信)
+を参照する。ローカルで更新UIを試すときは、デバッグビルドで
+`VRC_PHOTO_UPDATE_FEED` と `VRC_PHOTO_UPDATE_PUBLIC_KEY` を設定する。
+`VRC_PHOTO_UPDATE_PUBLIC_KEY` はリリースビルドでは無視される。
 
 ## 5. ローカル検証
 
@@ -101,7 +118,9 @@ cargo test --workspace
 6. `crates/ipc/src/` — IPCプロトコル、エンドポイント、クライアント/サーバー。
 7. `crates/daemon/src/{ipc_server,signals}.rs` — IPCサーバーとwakeシグナル。
 8. `crates/daemon/src/lib.rs` — 監視ループ、ワーカー、トレイ制御。
-9. `crates/ui/src/{main,ipc_bridge}.rs` — 画面、状態、IPC購読。
+9. `crates/ui/src/{main,ipc_bridge,update_view}.rs` — 画面、状態、IPC購読、更新UI。
+10. `crates/update/src/` — 署名付き更新確認、ダウンロード、適用ジョブ、ヘルパー。
+11. `crates/release-tool/src/` — Release時の署名と `latest.json` 生成。
 
 ## 7. 変更時のルール
 
