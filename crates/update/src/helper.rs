@@ -672,6 +672,7 @@ pub fn replace_appimage(target: &Path, staged: &Path) -> Result<PathBuf> {
         .file_name()
         .ok_or_else(|| UpdateError::InvalidJob("target has no file name".to_string()))?;
     let backup = target.with_file_name(format!("{}.previous", file_name.to_string_lossy()));
+    #[cfg(unix)]
     let metadata = std::fs::metadata(target).map_err(|error| UpdateError::io(target, error))?;
 
     if backup.exists() {
@@ -689,8 +690,10 @@ pub fn replace_appimage(target: &Path, staged: &Path) -> Result<PathBuf> {
             std::fs::set_permissions(target, permissions)
                 .map_err(|error| UpdateError::io(target, error))?;
         }
+        // Windows requires write access for FlushFileBuffers (sync_all).
         let file = OpenOptions::new()
             .read(true)
+            .write(true)
             .open(target)
             .map_err(|error| UpdateError::io(target, error))?;
         file.sync_all()
@@ -768,6 +771,8 @@ pub(crate) fn process_alive(pid: u32) -> bool {
 }
 
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+    #[cfg(not(unix))]
+    let _ = mode;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|error| UpdateError::io(parent, error))?;
     }
