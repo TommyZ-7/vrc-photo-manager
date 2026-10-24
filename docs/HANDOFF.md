@@ -39,6 +39,7 @@
 - デーモンの二重起動防止
 - デーモンハートビート表示
 - UI⇔デーモンのローカルIPC（即時wake、スキャン/圧縮/エラーイベント、一時停止/再開、終了）
+- 署名付き自動アップデート（AppImage / Windows current-user NSIS。deb/pacmanは通知、ADR-0012）
 - 外部削除された写真の `missing` 検出
 - notifyによる増分スキャン
 
@@ -96,6 +97,7 @@ cargo packager --release
 6. AVIFの「ロスレス」は `ravif` の制約で品質100の近似。JPEG XLはαを保持しない。
 7. ログはVRChat本体が24時間で削除する。過去復元は残存ログのみ。
 8. 初回デーモン起動で自動起動が登録される。開発用バイナリのパスが入る点に注意。
+9. 自動アップデートは署名付き `latest.json`（GitHub Releases）を使う。初回の署名付きリリースより前のバージョンは手動更新が必要。AppImage/Windowsの実更新とロールバック、Windows実機のSmartScreenは未検証。deb/pacmanは自己更新しない（ADR-0012）。
 
 ## 重要な設計メモ
 

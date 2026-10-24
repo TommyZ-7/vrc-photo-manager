@@ -7,7 +7,10 @@ use vrc_photo_ipc::{Endpoint, Event, Request, Response, StatusSnapshot};
 /// Messages sent from the IPC subscription thread to the GPUI task.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Incoming {
-    Connected(StatusSnapshot),
+    Connected {
+        status: StatusSnapshot,
+        daemon_pid: u32,
+    },
     Disconnected(String),
     Event(Event),
 }
@@ -43,8 +46,14 @@ pub fn error_message(error: &IpcError) -> String {
 fn bridge_loop(endpoint: Endpoint, tx: async_channel::Sender<Incoming>) {
     loop {
         match Subscription::open(&endpoint, Duration::from_millis(500)) {
-            Ok((mut subscription, status)) => {
-                if tx.send_blocking(Incoming::Connected(status)).is_err() {
+            Ok((mut subscription, info)) => {
+                if tx
+                    .send_blocking(Incoming::Connected {
+                        status: info.status,
+                        daemon_pid: info.daemon_pid,
+                    })
+                    .is_err()
+                {
                     return;
                 }
                 loop {
@@ -150,7 +159,10 @@ mod tests {
         let (tx, rx) = async_channel::unbounded();
         start(endpoint, tx);
         match rx.recv_blocking().unwrap() {
-            Incoming::Connected(status) => assert_eq!(status.photo_count, 5),
+            Incoming::Connected { status, daemon_pid } => {
+                assert_eq!(status.photo_count, 5);
+                assert_eq!(daemon_pid, 1);
+            }
             other => panic!("expected connected, got {other:?}"),
         }
         match rx.recv_blocking().unwrap() {

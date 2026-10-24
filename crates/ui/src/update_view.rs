@@ -1,0 +1,1096 @@
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use async_channel::{Receiver, Sender};
+use chrono::{DateTime, Local, Utc};
+use gpui_kit::component::button::{Button, ButtonVariants};
+use semver::Version;
+use vrc_photo_update::{
+    ApplyJob, ApplyKind, AvailableUpdate, FeedConfig, InstallKind, LastResult, LastStatus,
+    UpdateError, UpdatePaths, UreqClient, check, download, start_apply,
+};
+
+use super::App;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vrc_photo_update::{InstallKind, LastResult, LastStatus, PackageFamily};
+
+    fn appimage() -> InstallKind {
+        InstallKind::AppImage {
+            path: "/tmp/VRC.AppImage".into(),
+        }
+    }
+
+    #[test]
+    fn formats_byte_sizes() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(1536), "1.5 KB");
+        assert_eq!(format_bytes(2 * 1024 * 1024), "2.0 MB");
+    }
+
+    #[test]
+    fn labels_the_never_checked_state() {
+        assert_eq!(last_checked_label(None), "未確認");
+    }
+
+    #[test]
+    fn describes_a_successful_result_only_for_the_new_version() {
+        let result = LastResult {
+            status: LastStatus::Success,
+            from: "0.3.0".to_string(),
+            to: "0.4.0".to_string(),
+            reason: None,
+        };
+        assert_eq!(
+            result_notice(&result, "0.4.0").as_deref(),
+            Some("v0.4.0 に更新しました")
+        );
+        assert!(result_notice(&result, "0.3.0").is_none());
+    }
+
+    #[test]
+    fn describes_a_rollback_with_its_reason() {
+        let result = LastResult {
+            status: LastStatus::RolledBack,
+            from: "0.3.0".to_string(),
+            to: "0.4.0".to_string(),
+            reason: Some("起動しませんでした".to_string()),
+        };
+        let notice = result_notice(&result, "0.3.0").unwrap();
+        assert!(notice.contains("v0.3.0 に戻しました"));
+        assert!(notice.contains("起動しませんでした"));
+        assert!(result_notice(&result, "0.4.0").is_none());
+    }
+
+    #[test]
+    fn only_self_update_capable_installs_with_assets_can_apply() {
+        assert!(!can_apply(
+            &InstallKind::SystemPackage {
+                family: PackageFamily::Deb
+            },
+            true,
+            false,
+            false
+        ));
+        assert!(can_apply(&appimage(), true, false, false));
+        assert!(!can_apply(&appimage(), true, true, false));
+        assert!(can_apply(&appimage(), true, true, true));
+        assert!(!can_apply(&appimage(), false, false, false));
+    }
+
+    #[test]
+    fn detects_a_writable_appimage_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("VRC.AppImage");
+        std::fs::write(&target, b"appimage").unwrap();
+        let install = InstallKind::AppImage { path: target };
+        assert!(appimage_writable(&install));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+            assert!(!appimage_writable(&install));
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[test]
+    fn labels_install_kinds_and_package_commands() {
+        assert_eq!(install_label(&appimage()), "AppImage");
+        assert_eq!(
+            install_label(&InstallKind::SystemPackage {
+                family: PackageFamily::Deb
+            }),
+            "deb"
+        );
+        assert_eq!(
+            package_command(&InstallKind::SystemPackage {
+                family: PackageFamily::Pacman
+            }),
+            Some("sudo pacman -Syu vrc-photo-manager")
+        );
+        assert_eq!(package_command(&appimage()), None);
+    }
+}
+
+use super::ipc_bridge;
+use super::{
+    ACCENT_SOFT, AMBER, BLUE, GREEN, MUTED, MUTED_2, PANEL, PANEL_2, RED, TEXT, glass_panel,
+    open_path, spawn_daemon_process,
+};
+use gpui_kit::base::{Disableable as _, StyledExt as _, h_flex, v_flex};
+use gpui_kit::component::Sizable as _;
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::prelude::*;
+use gpui_kit::{Context, Div, Window, div, px, relative, rgb};
+
+enum UpdateMessage {
+    Checked {
+        manual: bool,
+        result: std::result::Result<Option<AvailableUpdate>, String>,
+    },
+    DownloadProgress {
+        received: u64,
+        total: Option<u64>,
+    },
+    Downloaded {
+        staged: PathBuf,
+    },
+    DownloadFailed(String),
+}
+
+#[derive(Debug, Clone)]
+pub enum UpdatePhase {
+    Idle,
+    Checking,
+    UpToDate,
+    Available(AvailableUpdate),
+    Downloading {
+        update: AvailableUpdate,
+        received: u64,
+        total: Option<u64>,
+    },
+    Ready {
+        update: AvailableUpdate,
+        staged: PathBuf,
+    },
+    Applying,
+    Error(String),
+}
+
+impl UpdatePhase {
+    fn badge(&self) -> (&'static str, u32, u32) {
+        match self {
+            Self::Idle => ("待機", MUTED, PANEL_2),
+            Self::Checking => ("確認中", BLUE, ACCENT_SOFT),
+            Self::UpToDate => ("最新", GREEN, 0x112a22),
+            Self::Available(_) => ("更新あり", AMBER, 0x2a2412),
+            Self::Downloading { .. } => ("ダウンロード中", BLUE, ACCENT_SOFT),
+            Self::Ready { .. } => ("準備完了", GREEN, 0x112a22),
+            Self::Applying => ("適用中", AMBER, 0x2a2412),
+            Self::Error(_) => ("エラー", RED, 0x2a1414),
+        }
+    }
+}
+
+/// UI state for the signed application updater.
+pub struct UpdateState {
+    pub phase: UpdatePhase,
+    pub install: InstallKind,
+    armed: bool,
+    notice: Option<String>,
+    tx: Sender<UpdateMessage>,
+    rx: Option<Receiver<UpdateMessage>>,
+    health_token: Option<String>,
+    database_ok: bool,
+    demo: bool,
+    data_dir: Option<PathBuf>,
+    in_flight: bool,
+    cancel: Arc<AtomicBool>,
+}
+
+impl UpdateState {
+    pub fn new(health_token: Option<String>, database_ok: bool, demo: bool) -> Self {
+        let install = if demo {
+            InstallKind::Development
+        } else {
+            vrc_photo_update::install_kind()
+        };
+        let data_dir = vrc_photo_core::data_dir();
+        let notice = if demo || !database_ok {
+            None
+        } else {
+            data_dir.as_deref().and_then(|dir| {
+                let result = LastResult::take(&UpdatePaths::new(dir))?;
+                result_notice(&result, vrc_photo_update::CURRENT_VERSION)
+            })
+        };
+        let (tx, rx) = async_channel::unbounded();
+        Self {
+            phase: UpdatePhase::Idle,
+            install,
+            armed: false,
+            notice,
+            tx,
+            rx: Some(rx),
+            health_token,
+            database_ok,
+            demo,
+            data_dir,
+            in_flight: false,
+            cancel: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn busy(&self) -> bool {
+        self.in_flight
+            || matches!(
+                self.phase,
+                UpdatePhase::Checking | UpdatePhase::Downloading { .. } | UpdatePhase::Applying
+            )
+    }
+
+    fn take_rx(&mut self) -> Option<Receiver<UpdateMessage>> {
+        self.rx.take()
+    }
+
+    fn start_channel(&mut self, cx: &mut Context<App>) {
+        let Some(rx) = self.take_rx() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            while let Ok(message) = rx.recv().await {
+                if this
+                    .update(cx, |this, cx| this.handle_update_message(message, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    pub(crate) fn nav_badge(&self) -> Option<String> {
+        matches!(
+            self.phase,
+            UpdatePhase::Available(_) | UpdatePhase::Downloading { .. } | UpdatePhase::Ready { .. }
+        )
+        .then(|| "更新".to_string())
+    }
+
+    pub fn notice(&self) -> Option<&str> {
+        self.notice.as_deref()
+    }
+
+    fn write_health_marker(&self) -> std::result::Result<(), String> {
+        if !self.database_ok || self.demo {
+            return Err("データベースを開けなかったため、更新を確定できません".to_string());
+        }
+        let token = self
+            .health_token
+            .as_deref()
+            .ok_or_else(|| "更新用トークンがありません".to_string())?;
+        let data_dir = self
+            .data_dir
+            .as_deref()
+            .ok_or_else(|| "データディレクトリを特定できません".to_string())?;
+        let paths = UpdatePaths::new(data_dir);
+        paths.ensure().map_err(|error| error.to_string())?;
+        vrc_photo_update::helper::write_health_marker(
+            &paths,
+            token,
+            vrc_photo_update::CURRENT_VERSION,
+        )
+        .map_err(|error| error.to_string())
+    }
+}
+
+fn update_error_message(error: &UpdateError) -> String {
+    match error {
+        UpdateError::Network(_) => {
+            "更新を確認できませんでした（ネットワークまたはサーバーの問題）".to_string()
+        }
+        UpdateError::Signature => "署名の検証に失敗したため、更新を中止しました".to_string(),
+        UpdateError::Integrity(_) => {
+            "更新ファイルの検証に失敗したため、更新を中止しました".to_string()
+        }
+        UpdateError::InvalidManifest(_) => "更新情報を検証できませんでした".to_string(),
+        UpdateError::UnsupportedPlatform => {
+            "このプラットフォーム向けの更新ファイルがありません".to_string()
+        }
+        UpdateError::Cancelled => "更新をキャンセルしました".to_string(),
+        UpdateError::NotFound => "更新情報が見つかりません".to_string(),
+        UpdateError::Io { .. } => "更新ファイルを保存できませんでした".to_string(),
+        UpdateError::InvalidJob(_) => "更新の適用情報が不正です".to_string(),
+        UpdateError::Other(message) => format!("更新処理に失敗しました: {message}"),
+    }
+}
+
+impl App {
+    pub(crate) fn start_update_timers(&mut self, cx: &mut Context<Self>) {
+        if self.demo {
+            return;
+        }
+        self.update.start_channel(cx);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_secs(15))
+                .await;
+            if this
+                .update(cx, |this, cx| this.maybe_auto_update_check(cx))
+                .is_err()
+            {
+                return;
+            }
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_secs(60 * 60))
+                    .await;
+                if this
+                    .update(cx, |this, cx| this.maybe_auto_update_check(cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn maybe_auto_update_check(&mut self, cx: &mut Context<Self>) {
+        if !self.settings.auto_update_check
+            || !self.update.install.automatic_check()
+            || self.update.busy()
+            || !matches!(
+                self.update.phase,
+                UpdatePhase::Idle | UpdatePhase::UpToDate | UpdatePhase::Error(_)
+            )
+        {
+            return;
+        }
+        let now = Utc::now().timestamp();
+        if self
+            .settings
+            .update_last_checked_at
+            .is_some_and(|last| now - last < 86_400)
+        {
+            return;
+        }
+        self.start_update_check(false, cx);
+    }
+
+    pub(crate) fn start_update_check(&mut self, manual: bool, cx: &mut Context<Self>) {
+        if self.update.busy() {
+            if manual {
+                self.message = Some("更新を確認しています".to_string());
+                cx.notify();
+            }
+            return;
+        }
+        self.update.in_flight = true;
+        self.update.armed = false;
+        self.update.phase = UpdatePhase::Checking;
+        cx.notify();
+
+        let tx = self.update.tx.clone();
+        let install = self.update.install.clone();
+        let spawned = std::thread::Builder::new()
+            .name("update-check".to_string())
+            .spawn(move || {
+                let client = UreqClient::new(cfg!(debug_assertions));
+                let feed = FeedConfig::from_env();
+                let Ok(current) = Version::parse(vrc_photo_update::CURRENT_VERSION) else {
+                    let _ = tx.send_blocking(UpdateMessage::Checked {
+                        manual,
+                        result: Err("現在のバージョンを解析できません".to_string()),
+                    });
+                    return;
+                };
+                let result = check(&client, &feed, &current, &install)
+                    .map_err(|error| update_error_message(&error));
+                let _ = tx.send_blocking(UpdateMessage::Checked { manual, result });
+            });
+        if let Err(error) = spawned {
+            self.update.in_flight = false;
+            self.update.phase =
+                UpdatePhase::Error(format!("更新確認スレッドを開始できません: {error}"));
+            self.message = Some("更新を確認できませんでした".to_string());
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn start_update_download(&mut self, cx: &mut Context<Self>) {
+        if !appimage_writable(&self.update.install) {
+            self.update.phase = UpdatePhase::Error(
+                "AppImageの場所に書き込めないため更新できません。書き込み可能な場所へ移動してください"
+                    .to_string(),
+            );
+            self.message = Some(
+                "AppImageの場所に書き込めないため更新できません。書き込み可能な場所へ移動してください"
+                    .to_string(),
+            );
+            cx.notify();
+            return;
+        }
+        let UpdatePhase::Available(update) = &self.update.phase else {
+            return;
+        };
+        let update = update.clone();
+        let Some(asset) = update.asset.clone() else {
+            self.update.phase = UpdatePhase::Error(
+                "このプラットフォーム向けの更新ファイルがありません".to_string(),
+            );
+            cx.notify();
+            return;
+        };
+        let Some(data_dir) = self.update.data_dir.clone() else {
+            self.update.phase =
+                UpdatePhase::Error("データディレクトリを特定できません".to_string());
+            cx.notify();
+            return;
+        };
+        let file_name = match asset.file_name() {
+            Ok(name) => name,
+            Err(error) => {
+                self.update.phase = UpdatePhase::Error(update_error_message(&error));
+                cx.notify();
+                return;
+            }
+        };
+        let dest = UpdatePaths::new(&data_dir)
+            .downloads_dir()
+            .join(update.version.to_string())
+            .join(file_name);
+        self.update.cancel.store(false, Ordering::Relaxed);
+        self.update.phase = UpdatePhase::Downloading {
+            update: update.clone(),
+            received: 0,
+            total: Some(asset.size),
+        };
+        self.update.armed = false;
+        cx.notify();
+
+        let tx = self.update.tx.clone();
+        let cancel = self.update.cancel.clone();
+        let update_for_download = update;
+        let spawned = std::thread::Builder::new()
+            .name("update-download".to_string())
+            .spawn(move || {
+                let client = UreqClient::new(cfg!(debug_assertions));
+                let mut last_reported = 0u64;
+                let result = download(
+                    &client,
+                    &update_for_download,
+                    &dest,
+                    &mut |received, total| {
+                        if received.saturating_sub(last_reported) >= 256 * 1024
+                            || Some(received) == total
+                        {
+                            last_reported = received;
+                            let _ = tx
+                                .send_blocking(UpdateMessage::DownloadProgress { received, total });
+                        }
+                    },
+                    &cancel,
+                );
+                match result {
+                    Ok(staged) => {
+                        let _ = tx.send_blocking(UpdateMessage::Downloaded { staged });
+                    }
+                    Err(error) => {
+                        let _ = tx.send_blocking(UpdateMessage::DownloadFailed(
+                            update_error_message(&error),
+                        ));
+                    }
+                }
+            });
+        if let Err(error) = spawned {
+            self.update.phase =
+                UpdatePhase::Error(format!("ダウンロードを開始できません: {error}"));
+            self.message = Some("更新ファイルをダウンロードできませんでした".to_string());
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn apply_update(&mut self, cx: &mut Context<Self>) {
+        if !self.update.armed {
+            self.update.armed = true;
+            self.message = Some("もう一度押すと更新して再起動します".to_string());
+            cx.notify();
+            return;
+        }
+        self.update.armed = false;
+
+        let UpdatePhase::Ready { update, staged } = &self.update.phase else {
+            return;
+        };
+        let update = update.clone();
+        let staged = staged.clone();
+        let Some(asset) = update.asset.clone() else {
+            self.update.phase = UpdatePhase::Error(
+                "このプラットフォーム向けの更新ファイルがありません".to_string(),
+            );
+            cx.notify();
+            return;
+        };
+        if !appimage_writable(&self.update.install) {
+            self.message = Some(
+                "AppImageの場所に書き込めないため更新できません。書き込み可能な場所へ移動してください"
+                    .to_string(),
+            );
+            cx.notify();
+            return;
+        }
+        if !can_apply(
+            &self.update.install,
+            true,
+            self.daemon_active,
+            self.ipc_connected,
+        ) {
+            self.message = Some(if self.daemon_active && !self.ipc_connected {
+                "デーモンに接続できないため更新できません。デーモンを停止してから再試行してください"
+                    .to_string()
+            } else {
+                "このインストール形式では自動更新を適用できません".to_string()
+            });
+            cx.notify();
+            return;
+        }
+        if let Some(data_dir) = self.update.data_dir.as_deref()
+            && vrc_photo_update::helper::apply_in_progress(&UpdatePaths::new(data_dir))
+        {
+            self.message = Some("別の更新処理が進行中です".to_string());
+            cx.notify();
+            return;
+        }
+        let Some(data_dir) = self.update.data_dir.clone() else {
+            self.message = Some("データディレクトリを特定できません".to_string());
+            cx.notify();
+            return;
+        };
+        let Ok(current_exe) = std::env::current_exe() else {
+            self.message = Some("現在の実行ファイルを特定できません".to_string());
+            cx.notify();
+            return;
+        };
+        let (kind, target) = match &self.update.install {
+            InstallKind::AppImage { path } => (ApplyKind::AppImage, path.clone()),
+            InstallKind::WindowsCurrentUser { .. } => (ApplyKind::Windows, current_exe.clone()),
+            _ => {
+                self.message = Some("このインストール形式では自動更新を適用できません".to_string());
+                cx.notify();
+                return;
+            }
+        };
+        let job = ApplyJob {
+            schema: vrc_photo_update::APPLY_SCHEMA,
+            kind,
+            from_version: vrc_photo_update::CURRENT_VERSION.to_string(),
+            to_version: update.version.to_string(),
+            target,
+            staged,
+            signature: asset.signature,
+            sha256: asset.sha256,
+            ui_pid: std::process::id(),
+            daemon_pid: self.daemon_pid,
+            restart_args: std::env::args().skip(1).collect(),
+            health_token: ApplyJob::new_health_token(),
+            data_dir,
+            created_at: Utc::now().to_rfc3339(),
+        };
+
+        let endpoint = self.ipc_endpoint.clone();
+        let shutdown = self.ipc_connected;
+        let apply_data_dir = job.data_dir.clone();
+        cx.spawn(async move |this, cx| {
+            if shutdown
+                && let Some(endpoint) = endpoint
+                && let Err(error) = cx
+                    .background_executor()
+                    .spawn(async move {
+                        ipc_bridge::request(endpoint, vrc_photo_ipc::Request::Shutdown)
+                    })
+                    .await
+            {
+                tracing::warn!(%error, "cannot stop the daemon for the update");
+            }
+            this.update(cx, |this, cx| {
+                match start_apply(&job, &current_exe, &apply_data_dir) {
+                    Ok(()) => {
+                        this.update.phase = UpdatePhase::Applying;
+                        cx.notify();
+                        cx.quit();
+                    }
+                    Err(error) => {
+                        let message = update_error_message(&error);
+                        this.update.phase = UpdatePhase::Error(message.clone());
+                        this.message = Some(message);
+                        if this.daemon_active {
+                            let _ = spawn_daemon_process();
+                        }
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn complete_update_startup(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.update.health_token.is_none() {
+            return;
+        }
+        if let Err(error) = self.update.write_health_marker() {
+            self.message = Some(format!("更新の起動確認を記録できません: {error}"));
+            tracing::error!(%error, "cannot write update health marker");
+            cx.notify();
+            return;
+        }
+        if !self.demo
+            && let Err(error) = spawn_daemon_process()
+        {
+            self.message = Some(format!("デーモンを起動できません: {error}"));
+        }
+        cx.notify();
+    }
+
+    fn handle_update_message(&mut self, message: UpdateMessage, cx: &mut Context<Self>) {
+        match message {
+            UpdateMessage::Checked { manual, result } => {
+                self.update.in_flight = false;
+                self.settings.update_last_checked_at = Some(Utc::now().timestamp());
+                if let Err(error) = self.settings.save(&self.db) {
+                    tracing::warn!(%error, "cannot save update check time");
+                }
+                match result {
+                    Ok(Some(update)) => {
+                        if !manual {
+                            self.message.get_or_insert_with(|| {
+                                format!(
+                                    "アップデート v{} があります（設定 → アップデート）",
+                                    update.version
+                                )
+                            });
+                        } else {
+                            self.message = Some(format!("v{} が利用可能です", update.version));
+                        }
+                        self.update.phase = UpdatePhase::Available(update);
+                    }
+                    Ok(None) => {
+                        self.update.phase = UpdatePhase::UpToDate;
+                        if manual {
+                            self.message = Some("最新のバージョンです".to_string());
+                        }
+                    }
+                    Err(message) => {
+                        if manual {
+                            self.update.phase = UpdatePhase::Error(message.clone());
+                            self.message = Some(message);
+                        } else {
+                            tracing::warn!(%message, "automatic update check failed");
+                            self.update.phase = UpdatePhase::Idle;
+                        }
+                    }
+                }
+                cx.notify();
+            }
+            UpdateMessage::DownloadProgress { received, total } => {
+                if let UpdatePhase::Downloading {
+                    received: current,
+                    total: current_total,
+                    ..
+                } = &mut self.update.phase
+                {
+                    *current = received;
+                    *current_total = total;
+                    cx.notify();
+                }
+            }
+            UpdateMessage::Downloaded { staged } => {
+                if let UpdatePhase::Downloading { update, .. } = &self.update.phase {
+                    self.update.phase = UpdatePhase::Ready {
+                        update: update.clone(),
+                        staged,
+                    };
+                    self.message = Some(
+                        "ダウンロードと署名検証が完了しました。再起動して更新できます".to_string(),
+                    );
+                    cx.notify();
+                }
+            }
+            UpdateMessage::DownloadFailed(message) => {
+                self.update.phase = UpdatePhase::Error(message.clone());
+                self.message = Some(message);
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn update_card(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let phase = self.update.phase.clone();
+        let install = self.update.install.clone();
+        let last_checked = last_checked_label(self.settings.update_last_checked_at);
+        let demo = self.demo;
+        let busy = self.update.busy();
+        let (status, fg, bg) = phase.badge();
+
+        let mut card = glass_panel()
+            .flex()
+            .flex_col()
+            .p(px(24.))
+            .gap(px(16.))
+            .bg(rgb(PANEL))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .text_size(px(17.))
+                            .font_semibold()
+                            .text_color(rgb(TEXT))
+                            .child("アップデート"),
+                    )
+                    .child(self.badge(status, fg, bg)),
+            )
+            .child(self.meta_row(
+                "現在のバージョン",
+                format!("v{}", vrc_photo_update::CURRENT_VERSION),
+            ))
+            .child(self.meta_row("インストール形式", install_label(&install).to_string()))
+            .child(self.meta_row("最終確認", last_checked));
+
+        if demo {
+            return card.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgb(MUTED))
+                    .child("デモではアップデートを利用できません"),
+            );
+        }
+
+        if let Some(notice) = self.update.notice() {
+            card = card.child(
+                div()
+                    .p(px(10.))
+                    .rounded(px(8.))
+                    .bg(rgb(PANEL_2))
+                    .text_size(px(11.))
+                    .text_color(rgb(GREEN))
+                    .child(notice.to_string()),
+            );
+        }
+
+        card = card.child(self.setting_switch(
+            "アップデートを自動確認",
+            "起動中に24時間ごとに確認します",
+            self.settings.auto_update_check,
+            cx,
+            |settings, value| settings.auto_update_check = value,
+        ));
+
+        card = card.child(
+            h_flex().flex_wrap().gap(px(8.)).child(
+                Button::new("update-check")
+                    .label("今すぐ確認")
+                    .small()
+                    .disabled(busy)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.start_update_check(true, cx);
+                    })),
+            ),
+        );
+
+        card = card.child(self.update_phase_view(&phase, cx));
+
+        if let Some(command) = package_command(&install) {
+            card = card.child(
+                v_flex()
+                    .gap(px(4.))
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED))
+                            .child("このインストール形式はパッケージマネージャで更新します"),
+                    )
+                    .child(
+                        div()
+                            .font_family("monospace")
+                            .text_size(px(10.))
+                            .text_color(rgb(TEXT))
+                            .child(command),
+                    ),
+            );
+        } else if matches!(install, InstallKind::SystemPackage { .. }) {
+            card = card.child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(rgb(MUTED_2))
+                    .child("このディストリビューションのパッケージマネージャで更新してください"),
+            );
+        } else if matches!(
+            install,
+            InstallKind::Development
+                | InstallKind::WindowsOther
+                | InstallKind::WindowsPerMachine { .. }
+        ) {
+            card = card.child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(rgb(MUTED_2))
+                    .child("このインストール形式は自動更新の対象外です"),
+            );
+        }
+
+        card
+    }
+
+    fn update_phase_view(&mut self, phase: &UpdatePhase, cx: &mut Context<Self>) -> Div {
+        match phase {
+            UpdatePhase::Idle => div(),
+            UpdatePhase::Checking => div()
+                .text_size(px(11.))
+                .text_color(rgb(MUTED))
+                .child("更新を確認しています…"),
+            UpdatePhase::UpToDate => div()
+                .text_size(px(11.))
+                .text_color(rgb(GREEN))
+                .child("最新のバージョンです"),
+            UpdatePhase::Available(update) => self.update_available_view(update, cx),
+            UpdatePhase::Downloading {
+                received, total, ..
+            } => update_downloading_view(*received, *total),
+            UpdatePhase::Ready { update, .. } => self.update_ready_view(update, cx),
+            UpdatePhase::Applying => div()
+                .text_size(px(11.))
+                .text_color(rgb(AMBER))
+                .child("更新を適用しています。アプリを再起動します…"),
+            UpdatePhase::Error(message) => div()
+                .text_size(px(11.))
+                .text_color(rgb(RED))
+                .child(message.clone()),
+        }
+    }
+
+    fn update_available_view(&mut self, update: &AvailableUpdate, cx: &mut Context<Self>) -> Div {
+        v_flex()
+            .gap(px(10.))
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .font_semibold()
+                    .text_color(rgb(TEXT))
+                    .child(format!("v{} が利用可能です", update.version)),
+            )
+            .when_some(update.notes_url.clone(), |this, url| {
+                this.child(
+                    Button::new("update-notes")
+                        .label("リリースノート")
+                        .small()
+                        .ghost()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Err(error) = open_path(Path::new(&url)) {
+                                this.message = Some(format!("リリースノートを開けません: {error}"));
+                                cx.notify();
+                            }
+                        })),
+                )
+            })
+            .when(
+                update.asset.is_some() && appimage_writable(&self.update.install),
+                |this| {
+                    this.child(
+                        Button::new("update-download")
+                            .label("ダウンロード")
+                            .small()
+                            .primary()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.start_update_download(cx);
+                            })),
+                    )
+                },
+            )
+            .when(
+                update.asset.is_some() && !appimage_writable(&self.update.install),
+                |this| {
+                    this.child(div().text_size(px(10.)).text_color(rgb(AMBER)).child(
+                        "AppImageの場所に書き込めません。書き込み可能な場所へ移動してください",
+                    ))
+                },
+            )
+    }
+
+    fn update_ready_view(&mut self, update: &AvailableUpdate, cx: &mut Context<Self>) -> Div {
+        let apply_ok = can_apply(
+            &self.update.install,
+            update.asset.is_some(),
+            self.daemon_active,
+            self.ipc_connected,
+        ) && appimage_writable(&self.update.install);
+        let armed = self.update.armed;
+        v_flex()
+            .gap(px(8.))
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgb(GREEN))
+                    .child("ダウンロードと署名検証が完了しました"),
+            )
+            .child(
+                Button::new("update-apply")
+                    .label(if armed {
+                        "もう一度押して更新"
+                    } else {
+                        "更新して再起動"
+                    })
+                    .small()
+                    .primary()
+                    .disabled(!apply_ok)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.apply_update(cx);
+                    })),
+            )
+            .when(!apply_ok, |this| {
+                this.child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(rgb(AMBER))
+                        .child(if self.daemon_active && !self.ipc_connected {
+                            "デーモンに接続できないため更新できません。デーモンを停止してから再試行してください"
+                        } else {
+                            "このインストール形式では自動更新を適用できません"
+                        }),
+                )
+            })
+    }
+}
+
+fn update_downloading_view(received: u64, total: Option<u64>) -> Div {
+    let ratio = total
+        .map(|total| (received as f32 / total as f32).clamp(0.0, 1.0))
+        .unwrap_or(0.0);
+    v_flex()
+        .gap(px(6.))
+        .child(
+            div()
+                .text_size(px(11.))
+                .text_color(rgb(MUTED))
+                .child(format!(
+                    "ダウンロード中 {:.0}% · {} / {}",
+                    ratio * 100.0,
+                    format_bytes(received),
+                    total.map(format_bytes).unwrap_or_else(|| "?".to_string())
+                )),
+        )
+        .child(
+            div()
+                .h(px(6.))
+                .w_full()
+                .rounded_full()
+                .bg(rgb(PANEL_2))
+                .child(
+                    div()
+                        .h_full()
+                        .w(relative(ratio))
+                        .rounded_full()
+                        .bg(rgb(BLUE)),
+                ),
+        )
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let value = bytes as f64;
+    if value < KB {
+        format!("{bytes} B")
+    } else if value < MB {
+        format!("{:.1} KB", value / KB)
+    } else if value < GB {
+        format!("{:.1} MB", value / MB)
+    } else {
+        format!("{:.1} GB", value / GB)
+    }
+}
+
+fn last_checked_label(checked_at: Option<i64>) -> String {
+    let Some(checked_at) = checked_at else {
+        return "未確認".to_string();
+    };
+    let Some(timestamp) = DateTime::from_timestamp(checked_at, 0) else {
+        return "不明".to_string();
+    };
+    format!(
+        "最終確認: {}",
+        timestamp.with_timezone(&Local).format("%Y/%m/%d %H:%M")
+    )
+}
+
+fn result_notice(result: &LastResult, current_version: &str) -> Option<String> {
+    match result.status {
+        LastStatus::Success if result.to == current_version => {
+            Some(format!("v{} に更新しました", result.to))
+        }
+        LastStatus::RolledBack if result.from == current_version => {
+            let reason = result
+                .reason
+                .as_deref()
+                .map(|reason| format!("（{reason}）"))
+                .unwrap_or_default();
+            Some(format!(
+                "更新に失敗したため v{} に戻しました{reason}",
+                result.from
+            ))
+        }
+        LastStatus::Failed if result.from == current_version => {
+            let reason = result
+                .reason
+                .as_deref()
+                .map(|reason| format!("（{reason}）"))
+                .unwrap_or_default();
+            Some(format!("更新に失敗しました{reason}"))
+        }
+        _ => None,
+    }
+}
+
+fn can_apply(
+    install: &InstallKind,
+    has_asset: bool,
+    daemon_active: bool,
+    ipc_connected: bool,
+) -> bool {
+    install.automatic_apply() && has_asset && (!daemon_active || ipc_connected)
+}
+
+fn appimage_writable(install: &InstallKind) -> bool {
+    let InstallKind::AppImage { path } = install else {
+        return true;
+    };
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let probe = parent.join(format!(".vrc-photo-write-test-{}", std::process::id()));
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+    {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+fn install_label(install: &InstallKind) -> &'static str {
+    match install {
+        InstallKind::AppImage { .. } => "AppImage",
+        InstallKind::WindowsCurrentUser { .. } | InstallKind::WindowsPerMachine { .. } => {
+            "Windows (NSIS)"
+        }
+        InstallKind::WindowsOther => "Windows (手動更新)",
+        InstallKind::SystemPackage { family } => match family {
+            vrc_photo_update::PackageFamily::Deb => "deb",
+            vrc_photo_update::PackageFamily::Pacman => "pacman",
+            vrc_photo_update::PackageFamily::Unknown => "Linux パッケージ",
+        },
+        InstallKind::Development => "開発ビルド",
+    }
+}
+
+fn package_command(install: &InstallKind) -> Option<&'static str> {
+    match install {
+        InstallKind::SystemPackage { family } => family.update_command(),
+        _ => None,
+    }
+}

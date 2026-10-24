@@ -338,9 +338,8 @@ mod tests {
         let (_dir, endpoint, control) = test_control();
         control.status.lock().unwrap().photo_count = 7;
         let _server = IpcServer::start(endpoint.clone(), control.clone()).unwrap();
-        let (_subscription, status) =
-            Subscription::open(&endpoint, Duration::from_secs(1)).unwrap();
-        assert_eq!(status.photo_count, 7);
+        let (_subscription, info) = Subscription::open(&endpoint, Duration::from_secs(1)).unwrap();
+        assert_eq!(info.status.photo_count, 7);
         let response = request(&endpoint, Request::Status, Duration::from_secs(1)).unwrap();
         match response {
             Response::Status { status } => assert_eq!(status.photo_count, 7),

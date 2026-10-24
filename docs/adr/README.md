@@ -31,3 +31,4 @@
 | [0009](0009-photo-index-virtual-window.md) | 10万枚の写真一覧を順序付き索引＋仮想ウィンドウで表示する | Accepted |
 | [0010](0010-systemd-user-service.md) | deb/pacmanはsystemdユーザーサービスを任意提供する | Accepted |
 | [0011](0011-daemon-ipc.md) | UIとデーモンはローカルIPCで即時コマンドとイベントを補完する | Accepted |
+| [0012](0012-auto-update.md) | 自動アップデートは署名付きマニフェストと専用ヘルパーで行う | Accepted |

@@ -1,0 +1,38 @@
+[package]
+name = "vrc-photo-update"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "vrc_photo_update"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vrc-photo-updater"
+path = "src/bin/vrc-photo-updater.rs"
+
+[dependencies]
+base64.workspace = true
+chrono.workspace = true
+hex.workspace = true
+minisign-verify.workspace = true
+semver.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+ureq.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+minisign = "0.10"
+tempfile = "3"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Threading"] }
+winreg = "0.56"

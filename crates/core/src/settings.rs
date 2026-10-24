@@ -30,6 +30,14 @@ pub struct AppSettings {
     pub ui_inspector_collapsed: bool,
     #[serde(default)]
     pub ui_reduce_motion: bool,
+    #[serde(default = "default_auto_update_check")]
+    pub auto_update_check: bool,
+    #[serde(default)]
+    pub update_last_checked_at: Option<i64>,
+}
+
+fn default_auto_update_check() -> bool {
+    true
 }
 
 impl Default for AppSettings {
@@ -49,6 +57,8 @@ impl Default for AppSettings {
             ui_sidebar_collapsed: false,
             ui_inspector_collapsed: false,
             ui_reduce_motion: false,
+            auto_update_check: true,
+            update_last_checked_at: None,
         }
     }
 }
@@ -242,6 +252,15 @@ mod tests {
         assert!(!settings.ui_sidebar_collapsed);
         assert!(!settings.ui_inspector_collapsed);
         assert!(!settings.ui_reduce_motion);
+        assert!(settings.auto_update_check);
+        assert_eq!(settings.update_last_checked_at, None);
+    }
+
+    #[test]
+    fn defaults_auto_update_check_to_on() {
+        let settings = AppSettings::default();
+        assert!(settings.auto_update_check);
+        assert_eq!(settings.update_last_checked_at, None);
     }
 
     #[test]

@@ -66,8 +66,21 @@ crates/
     src/lib.rs            # 監視ループ、ジョブワーカー、トレイ制御
     src/main.rs           # CLI、単一インスタンス
     src/tray.rs           # Windows tray-icon / Linux ksni
+  update/
+    src/manifest.rs       # 署名付き更新マニフェストの型と検証
+    src/verify.rs         # minisign検証
+    src/fetch.rs          # HTTPSクライアント
+    src/check.rs          # フィード確認
+    src/download.rs       # ストリーミングDLと検証
+    src/install.rs        # インストール形式、適用ジョブ
+    src/helper.rs         # 置換・健康確認・ロールバック
+    src/bin/vrc-photo-updater.rs # 適用ヘルパー
+  release-tool/
+    src/lib.rs            # latest.json生成、署名、検証
+    src/main.rs           # vrc-photo-update-manifest CLI（Release専用）
   ui/
     src/main.rs           # gpui-kitアプリ本体
+    src/update_view.rs    # 更新カード、バックグラウンド確認/DL/適用
     assets/               # Noto Sans JP、ライセンス
 ```
 
@@ -75,16 +88,20 @@ crates/
 
 ```text
 ui ────────┬──> ipc
-           └──> core
+           ├──> core
+           └──> update
 daemon ────┼──> ipc
            └──> core
+release-tool ───> update
 ```
 
 - `core` はUI・プロセス・トレイ・IPCに依存しない。
 - `ipc` はプロトコルとトランスポートだけを持ち、`core` / `daemon` / `ui` に依存しない。
+- `update` はUI・GPUI・SQLiteに依存しない。署名検証、HTTP、適用ジョブ、ヘルパーだけを持つ。
+- `release-tool` は `update` のマニフェスト型を使うRelease専用ツールで、アプリには同梱しない。
 - `daemon` は `core` のDB・スキャナ・解析・圧縮・サムネイルと、`ipc` のサーバー/プロトコルを使う。
-- `ui` は `core` のDB・モデル・設定・圧縮キューと、`ipc` のクライアント/プロトコルを使う。
-- GPUI（`gpui-kit` / `gpui-pre`）に依存するのは `ui` のみ。`core` / `daemon` / `ipc` はGPUI非依存。
+- `ui` は `core` のDB・モデル・設定・圧縮キュー、`ipc` のクライアント/プロトコル、`update` の確認/DL/適用を使う。
+- GPUI（`gpui-kit` / `gpui-pre`）に依存するのは `ui` のみ。`core` / `daemon` / `ipc` / `update` はGPUI非依存。
 
 ## 4. データフロー
 
@@ -139,6 +156,20 @@ daemon ────┼──> ipc
 - `importer::import_files` が管理フォルダへコピー/移動する。名前衝突は連番。
 - 取り込み先を `library_roots` に `managed` として登録し、その場で索引・紐付け・サムネイル生成を行う。
 
+### 4.7 アプリのアップデート
+
+1. UIが起動15秒後と24時間ごとに `latest.json` と `latest.json.minisig` を取得する。
+2. マニフェスト署名をJSONパース前に検証し、semverで現行版と比較する。
+3. 利用者がダウンロードを選ぶと、`<data_dir>/updates/downloads/<version>/` に
+   `.part` で書きながらSHA-256とminisign署名を検証する。
+4. 利用者が適用を確定すると、UIはデーモンへ `shutdown` を送り、
+   `updates/bin/vrc-photo-updater` をコピーして `updates/job.json` を書く。
+5. ヘルパーはUI/デーモンの終了を待ち、AppImageを `.previous` に退避して置換、
+   またはNSISインストーラを `/S` で実行する。
+6. 新UIは最初のフレームで `updates/health-<token>.json` を書き、ヘルパーが
+   バージョンを確認する。失敗時は旧版へ戻して再起動する。
+7. 結果は `last-result.json` と `updater.log` に残る。UIは次回起動時に一度表示する。
+
 ## 5. 並行性
 
 | 実行単位 | 役割 | 共有状態 |
@@ -146,6 +177,9 @@ daemon ────┼──> ipc
 | UIメインスレッド | GPUI描画、入力 | `App` が `Db` を保持 |
 | UI自動更新タスク | 3秒ごとに状態・キュー・枚数を再読込（IPCのフォールバック） | DB読み取り |
 | UI IPC購読スレッド | デーモンへ接続し、イベントを受信。切断時は2秒後に再接続 | ローカルソケット |
+| UI更新確認スレッド | 起動15秒後と24時間ごとに署名付きフィードを確認 | HTTP、`async-channel` |
+| UI更新DLスレッド | 成果物を `.part` に書きながら署名/SHA-256を検証 | ファイル、`async-channel` |
+| 更新ヘルパー | UI/デーモン終了待ち、置換、健康確認、ロールバック | `updates/`、プロセス |
 | デーモン監視ループ | notifyポーリング、ログ追記、増分索引、UIコマンドの消化、wake待ち | `Arc<Mutex<Db>>` |
 | デーモンIPCサーバー | 接続ごとにスレッド。hello/status/wake/pause/shutdown/subscribeを処理 | `DaemonStatus`、`WakeSignal`、`JobSignal`、`EventBus` |
 | 圧縮ワーカー | 1〜4スレッド。ジョブを原子的に取得 | `Arc<Mutex<Db>>` |
@@ -160,6 +194,8 @@ daemon ────┼──> ipc
 ## 6. 起動・停止
 
 - パッケージ版のUIは、ハートビートが古い場合に同じディレクトリの `vrc-photo-daemon` を起動する。
+- 更新直後のUIは `VRC_PHOTO_HEALTH_TOKEN` を受け取り、健康マーカーを書くまで
+  デーモンの自動起動を遅らせる。成功後に通常の起動処理でデーモンを起動する。
 - AppImageの自動起動は `$APPIMAGE --background` を登録する。UIの `--background` はデーモンを子プロセスとして起動し、終了まで待つ（マウント維持のため）。
 - deb/pacmanではデーモン実体（`/usr/bin/vrc-photo-daemon`）を自動起動に登録する。
 - deb/pacmanは任意の systemd ユーザーサービス `vrc-photo-daemon.service` を `/usr/lib/systemd/user/` に同梱する。unit は `graphical-session.target` に紐付き、インストール時には enable されない。

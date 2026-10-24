@@ -14,7 +14,7 @@ resources = [
 category = "Photography"
 outDir = "dist"
 binariesDir = "target/release"
-beforePackagingCommand = "cargo build --release -p vrc-photo-ui -p vrc-photo-daemon"
+beforePackagingCommand = "cargo build --release -p vrc-photo-ui -p vrc-photo-daemon -p vrc-photo-update"
 formats = ["deb", "appimage", "pacman"]
 icons = ["packaging/icons/icon.png"]
 
@@ -24,6 +24,9 @@ main = true
 
 [[binaries]]
 path = "vrc-photo-daemon"
+
+[[binaries]]
+path = "vrc-photo-updater"
 
 [linux]
 generateDesktopEntry = true

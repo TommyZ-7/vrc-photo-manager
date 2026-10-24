@@ -17,12 +17,14 @@ chrono.workspace = true
 gpui-kit = "=0.8.0"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 rfd = "0.17"
+semver.workspace = true
 smallvec = "1"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 trash = "5"
 vrc-photo-core = { path = "../core" }
 vrc-photo-ipc = { path = "../ipc" }
+vrc-photo-update = { path = "../update" }
 
 [dev-dependencies]
 tempfile = "3"

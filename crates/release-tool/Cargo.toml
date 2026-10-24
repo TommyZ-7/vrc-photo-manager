@@ -1,0 +1,31 @@
+[package]
+name = "vrc-photo-release-tool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "vrc-photo-update-manifest"
+path = "src/main.rs"
+
+[lib]
+name = "vrc_photo_release_tool"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+chrono.workspace = true
+clap.workspace = true
+hex.workspace = true
+minisign = "0.10"
+minisign-verify.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+url.workspace = true
+vrc-photo-update = { path = "../update" }
+
+[dev-dependencies]
+tempfile = "3"

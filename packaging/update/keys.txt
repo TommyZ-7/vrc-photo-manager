@@ -1,0 +1,7 @@
+# Minisign public keys for application update verification.
+# One base64 public key per line; blank lines and lines starting with # are
+# ignored. Keep at least the current key here. During rotation, list both the
+# old and new keys until the old-key-signed release is widely installed.
+#
+# Production update key (generated 2026-10-24)
+RWQa3MhAcXhldGc0jaM2iPNBQPqSwl5SinXY87OPt49pp5E/ujyF/RFx
