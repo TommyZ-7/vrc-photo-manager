@@ -4975,16 +4975,7 @@ impl App {
                                 let active = index == self.profile_index;
                                 let auto = profile.auto_enabled;
                                 let title = profile.name.clone();
-                                let meta = format!(
-                                    "{} · Q{} · {}",
-                                    format_label(&profile.format),
-                                    profile.quality,
-                                    if profile.lossless {
-                                        "Lossless"
-                                    } else {
-                                        "Lossy"
-                                    }
-                                );
+                                let meta = profile_summary(profile);
                                 glass_panel()
                                     .id(SharedString::from(format!("profile-{index}")))
                                     .flex()
@@ -5307,7 +5298,29 @@ impl App {
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.request_delete_profile(&profile_id, window, cx);
                             })),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        v_flex()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(TEXT))
+                                    .child("自動圧縮に使う"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(MUTED_2))
+                                    .child("新規写真にこのプロファイルを適用します"),
+                            ),
                     )
+                    .child(div().flex_1())
                     .child(
                         Switch::new("profile-auto")
                             .checked(profile.auto_enabled)
@@ -5316,6 +5329,7 @@ impl App {
                             })),
                     ),
             )
+            .child(self.section_label("形式と画質"))
             .child(
                 h_flex().gap(px(4.)).children(
                     [
@@ -5345,7 +5359,9 @@ impl App {
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.edit_profile(
-                                    |profile| profile.format = selected_format.clone(),
+                                    |profile| {
+                                        apply_profile_format(profile, selected_format.clone())
+                                    },
                                     cx,
                                 );
                             }))
@@ -5362,12 +5378,39 @@ impl App {
                             .w(px(80.))
                             .text_size(px(12.))
                             .text_color(rgb(MUTED))
+                            .child("ロスレス"),
+                    )
+                    .child(
+                        Switch::new("profile-lossless")
+                            .checked(profile.lossless)
+                            .disabled(!lossless_supported(&profile.format))
+                            .on_click(cx.listener(move |this, checked, _, cx| {
+                                this.edit_profile(|profile| profile.lossless = *checked, cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED_2))
+                            .child(lossless_hint(&profile.format)),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .w(px(80.))
+                            .text_size(px(12.))
+                            .text_color(rgb(MUTED))
                             .child("品質"),
                     )
                     .child(
                         Button::new("quality-minus")
                             .label("−")
                             .small()
+                            .disabled(profile.lossless)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.edit_profile(
                                     |profile| {
@@ -5389,6 +5432,7 @@ impl App {
                         Button::new("quality-plus")
                             .label("＋")
                             .small()
+                            .disabled(profile.lossless)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.edit_profile(
                                     |profile| {
@@ -5401,22 +5445,13 @@ impl App {
                     )
                     .child(div().text_size(px(10.)).text_color(rgb(MUTED_2)).child(
                         if profile.lossless {
-                            "ロスレス"
+                            "ロスレスでは品質指定を使用しません"
                         } else {
                             "品質を調整"
                         },
                     )),
             )
-            .child(
-                self.meta_row(
-                    "出力先",
-                    profile
-                        .output_dir
-                        .clone()
-                        .unwrap_or_else(|| "compressed/".to_string()),
-                ),
-            )
-            .child(self.meta_row("サフィックス", profile.suffix.clone()))
+            .child(self.section_label("リサイズ"))
             .child(
                 h_flex()
                     .items_center()
@@ -5425,7 +5460,7 @@ impl App {
                         div()
                             .text_size(px(12.))
                             .text_color(rgb(MUTED))
-                            .child("リサイズ"),
+                            .child("リサイズを有効にする"),
                     )
                     .child(
                         Switch::new("profile-resize")
@@ -5514,16 +5549,27 @@ impl App {
                         )
                     }),
             )
+            .child(self.section_label("出力"))
+            .child(
+                self.meta_row(
+                    "出力先",
+                    profile
+                        .output_dir
+                        .clone()
+                        .unwrap_or_else(|| "compressed/".to_string()),
+                ),
+            )
+            .child(self.meta_row("サフィックス", profile.suffix.clone()))
             .child(
                 div()
                     .p(px(12.))
                     .rounded(px(8.))
-                    .bg(rgb(0x102a24))
+                    .bg(rgb(PANEL_2))
                     .border_1()
-                    .border_color(rgba(0x5eead433))
+                    .border_color(rgb(BORDER))
                     .text_size(px(10.))
-                    .text_color(rgb(GREEN))
-                    .child("自動圧縮では元画像を必ず保持します。"),
+                    .text_color(rgb(MUTED))
+                    .child("変更は即時保存されます。元画像の扱いは設定タブで変更できます。"),
             )
     }
 
@@ -8068,6 +8114,38 @@ fn compression_policy_warning(keep_original: bool, auto_compress: bool) -> Optio
     }
 }
 
+fn lossless_supported(format: &CompressionFormat) -> bool {
+    !matches!(format, CompressionFormat::Jpeg)
+}
+
+fn lossless_hint(format: &CompressionFormat) -> &'static str {
+    match format {
+        CompressionFormat::Jpeg => "JPEGはロスレス非対応",
+        CompressionFormat::Avif => "AVIFは近似ロスレス（品質100）",
+        CompressionFormat::Webp => "WebPの可逆圧縮",
+        CompressionFormat::JpegXl => "JPEG XLの可逆圧縮",
+    }
+}
+
+fn profile_summary(profile: &CompressionProfile) -> String {
+    if profile.lossless {
+        format!("{} · Lossless", format_label(&profile.format))
+    } else {
+        format!(
+            "{} · Q{} · Lossy",
+            format_label(&profile.format),
+            profile.quality
+        )
+    }
+}
+
+fn apply_profile_format(profile: &mut CompressionProfile, format: CompressionFormat) {
+    if !lossless_supported(&format) {
+        profile.lossless = false;
+    }
+    profile.format = format;
+}
+
 #[cfg(target_os = "windows")]
 fn open_path(path: &Path) -> Result<(), String> {
     // explorer.exe reports a non-zero exit code even when it opens the folder,
@@ -8254,14 +8332,14 @@ mod tests {
         IpcScanPhase, MAX_PAGES, PAGE_SIZE, PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex,
         PhotoPageCache, ScanProgressView, Screen, THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT,
         ThumbnailCache, YearBucket, add_photo_root_and_save, alert_summaries, anchor_photo_id,
-        apply_library_index, autostart_description, average_bgra, build_year_buckets,
-        compression_policy, compression_policy_warning, daemon_liveness, daemon_operation_label,
-        daemon_state_label, daemon_sync_label,
+        apply_library_index, apply_profile_format, autostart_description, average_bgra,
+        build_year_buckets, compression_policy, compression_policy_warning, daemon_liveness,
+        daemon_operation_label, daemon_state_label, daemon_sync_label,
         decode_thumbnail, demo_thumb_path, ease_motion, first_visible_photo, format_captured_month,
         format_count, format_timestamp, grid_available_width, grid_columns, grid_columns_for,
         has_tag_filter, import_issue_counts, ipc_status_label, job_retry_available,
-        job_retry_label, lerp_color, list_scroll_top, moved_profile_order, next_focus_index,
-        queue_status_badge,
+        job_retry_label, lerp_color, list_scroll_top, lossless_hint, lossless_supported,
+        moved_profile_order, next_focus_index, profile_summary, queue_status_badge,
         normalize_note, parse_args, parse_window_size, rail_label_hidden_by_pill, rail_row_at,
         rail_scroll_offset, rail_y, retryable_sources, scan_progress_label, scan_progress_ratio,
         search_anchor_after_result, search_available_width, sidebar_reveal_width, sidebar_width,
@@ -8277,8 +8355,8 @@ mod tests {
     use vrc_photo_core::error::CoreError;
     use vrc_photo_core::importer::{ImportIssue, ImportIssueKind};
     use vrc_photo_core::model::{
-        CompressionJob, DaemonOperation, Photo, PhotoIndexEntry, PhotoStatus, PhotoTextFilter,
-        QueueStatus,
+        CompressionFormat, CompressionJob, CompressionProfile, DaemonOperation, Photo,
+        PhotoIndexEntry, PhotoStatus, PhotoTextFilter, QueueStatus,
     };
     use vrc_photo_core::settings::AppSettings;
 
@@ -9168,6 +9246,53 @@ mod tests {
         let manual = compression_policy_warning(false, false).unwrap();
         assert!(!manual.contains("自動圧縮"));
         assert!(manual.contains("OSゴミ箱"));
+    }
+
+    #[test]
+    fn lossless_is_unsupported_for_jpeg_and_resets_on_format_change() {
+        assert!(!lossless_supported(&CompressionFormat::Jpeg));
+        assert!(lossless_supported(&CompressionFormat::Webp));
+        assert!(lossless_supported(&CompressionFormat::Avif));
+        assert!(lossless_supported(&CompressionFormat::JpegXl));
+
+        let mut profile = CompressionProfile {
+            format: CompressionFormat::Webp,
+            lossless: true,
+            ..Default::default()
+        };
+        apply_profile_format(&mut profile, CompressionFormat::Jpeg);
+        assert_eq!(profile.format, CompressionFormat::Jpeg);
+        assert!(!profile.lossless);
+
+        profile.lossless = true;
+        apply_profile_format(&mut profile, CompressionFormat::Webp);
+        assert!(profile.lossless);
+    }
+
+    #[test]
+    fn lossless_hints_cover_every_format() {
+        assert!(lossless_hint(&CompressionFormat::Jpeg).contains("非対応"));
+        assert!(lossless_hint(&CompressionFormat::Avif).contains("近似"));
+        assert!(lossless_hint(&CompressionFormat::Webp).contains("可逆"));
+        assert!(lossless_hint(&CompressionFormat::JpegXl).contains("可逆"));
+    }
+
+    #[test]
+    fn profile_summary_hides_quality_when_lossless() {
+        let lossless = CompressionProfile {
+            format: CompressionFormat::JpegXl,
+            lossless: true,
+            ..Default::default()
+        };
+        assert_eq!(profile_summary(&lossless), "JPEG XL · Lossless");
+
+        let lossy = CompressionProfile {
+            format: CompressionFormat::Webp,
+            quality: 82,
+            lossless: false,
+            ..Default::default()
+        };
+        assert_eq!(profile_summary(&lossy), "WebP · Q82 · Lossy");
     }
 
     #[test]
