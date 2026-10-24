@@ -87,6 +87,26 @@ jobs:
           done
           echo "third-party notices verified"
 
+      - name: Verify systemd user unit
+        run: |
+          set -euo pipefail
+          unit="usr/lib/systemd/user/vrc-photo-daemon.service"
+          deb=$(ls dist/*.deb)
+          pacman=$(ls dist/*.tar.gz)
+          tmp=$(mktemp -d)
+          mkdir -p "$tmp/deb" "$tmp/pacman"
+          dpkg-deb --extract "$deb" "$tmp/deb"
+          tar -xzf "$pacman" -C "$tmp/pacman"
+          test -f "$tmp/deb/$unit" \
+            || { echo "missing $unit in deb"; exit 1; }
+          test -f "$tmp/pacman/$unit" \
+            || { echo "missing $unit in pacman package"; exit 1; }
+          grep -qx 'ExecStart=/usr/bin/vrc-photo-daemon' "$tmp/deb/$unit" \
+            || { echo "unexpected ExecStart in deb unit"; exit 1; }
+          grep -qx 'ExecStart=/usr/bin/vrc-photo-daemon' "$tmp/pacman/$unit" \
+            || { echo "unexpected ExecStart in pacman unit"; exit 1; }
+          echo "systemd user unit verified"
+
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
