@@ -3445,7 +3445,7 @@ impl App {
                         .child(format!(
                             "{} · {}",
                             short_date(&photo.captured_at_local),
-                            format_bytes(photo.file_size)
+                            format_bytes(photo.effective_file_size())
                         )),
                 ),
         );
@@ -3799,8 +3799,15 @@ impl App {
                 "インスタンス",
                 photo.instance_id.clone().unwrap_or_else(|| "—".to_string()),
             ))
-            .child(self.meta_row("解像度", format!("{} × {}", photo.width, photo.height)))
-            .child(self.meta_row("サイズ", format_bytes(photo.file_size)))
+            .child(self.meta_row(
+                "解像度",
+                format!(
+                    "{} × {}",
+                    photo.effective_dimensions().0,
+                    photo.effective_dimensions().1
+                ),
+            ))
+            .child(self.meta_row("サイズ", format_bytes(photo.effective_file_size())))
             .child(self.meta_row(
                 "取得元",
                 photo.link_method.clone().unwrap_or_else(|| "—".to_string()),
@@ -4239,8 +4246,15 @@ impl App {
                         photo.author.clone().unwrap_or_else(|| "—".to_string()),
                     ))
                     .child(self.meta_row("ファイル", photo.file_name.clone()))
-                    .child(self.meta_row("解像度", format!("{} × {}", photo.width, photo.height)))
-                    .child(self.meta_row("サイズ", format_bytes(photo.file_size))),
+                    .child(self.meta_row(
+                        "解像度",
+                        format!(
+                            "{} × {}",
+                            photo.effective_dimensions().0,
+                            photo.effective_dimensions().1
+                        ),
+                    ))
+                    .child(self.meta_row("サイズ", format_bytes(photo.effective_file_size()))),
             )
             .child(
                 v_flex()
@@ -4447,8 +4461,9 @@ impl App {
             )
             .child(details_button);
 
-        let aspect = if photo.height > 0 {
-            photo.width as f32 / photo.height as f32
+        let (photo_width, photo_height) = photo.effective_dimensions();
+        let aspect = if photo_height > 0 {
+            photo_width as f32 / photo_height as f32
         } else {
             16.0 / 9.0
         };
@@ -8093,6 +8108,9 @@ mod tests {
             display_derivative_id: None,
             display_path: None,
             display_format: None,
+            display_file_size: None,
+            display_width: None,
+            display_height: None,
             world_name: None,
             instance_id: None,
             link_method: None,

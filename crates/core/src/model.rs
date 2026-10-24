@@ -222,6 +222,9 @@ pub struct Photo {
     pub display_derivative_id: Option<i64>,
     pub display_path: Option<String>,
     pub display_format: Option<String>,
+    pub display_file_size: Option<u64>,
+    pub display_width: Option<u32>,
+    pub display_height: Option<u32>,
     pub world_name: Option<String>,
     pub instance_id: Option<String>,
     pub link_method: Option<String>,
@@ -238,6 +241,17 @@ impl Photo {
 
     pub fn is_replaced(&self) -> bool {
         self.status == PhotoStatus::Replaced
+    }
+
+    pub fn effective_file_size(&self) -> u64 {
+        self.display_file_size.unwrap_or(self.file_size)
+    }
+
+    pub fn effective_dimensions(&self) -> (u32, u32) {
+        (
+            self.display_width.unwrap_or(self.width),
+            self.display_height.unwrap_or(self.height),
+        )
     }
 }
 

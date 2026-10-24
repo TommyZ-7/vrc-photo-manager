@@ -224,7 +224,7 @@ CREATE INDEX IF NOT EXISTS idx_photos_move_match
 const PHOTO_SELECT: &str = "p.id, p.root_id, p.rel_path, p.abs_path, p.file_name, \
     p.captured_at_utc, p.captured_at_local, p.tz_offset_sec, p.width, p.height, \
     p.file_size, p.mtime, p.blake3, p.status, p.is_favorite, p.note, \
-    p.display_derivative_id, d.path, d.format, \
+    p.display_derivative_id, d.path, d.format, d.file_size, d.width, d.height, \
     c.world_name, c.instance_id, c.link_method, c.confidence, c.author";
 
 const PHOTO_FROM: &str = " FROM photos p \
@@ -1865,11 +1865,14 @@ fn row_to_photo(row: &Row<'_>) -> rusqlite::Result<Photo> {
         display_derivative_id: row.get(16)?,
         display_path: row.get(17)?,
         display_format: row.get(18)?,
-        world_name: row.get(19)?,
-        instance_id: row.get(20)?,
-        link_method: row.get(21)?,
-        confidence: row.get(22)?,
-        author: row.get(23)?,
+        display_file_size: row.get::<_, Option<i64>>(19)?.map(|size| size as u64),
+        display_width: row.get(20)?,
+        display_height: row.get(21)?,
+        world_name: row.get(22)?,
+        instance_id: row.get(23)?,
+        link_method: row.get(24)?,
+        confidence: row.get(25)?,
+        author: row.get(26)?,
     })
 }
 
@@ -3107,6 +3110,8 @@ mod tests {
             Some("/photos/compressed/a.webp")
         );
         assert_eq!(photo.effective_path(), "/photos/compressed/a.webp");
+        assert_eq!(photo.effective_file_size(), 1_234);
+        assert_eq!(photo.effective_dimensions(), (16, 10));
 
         assert_eq!(db.count_photos().unwrap(), 1);
         assert_eq!(db.photo_index(PhotoSort::Newest).unwrap().len(), 1);
