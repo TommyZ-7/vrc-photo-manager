@@ -84,6 +84,14 @@ fn request_blocking(endpoint: &Endpoint, request: Request) -> Result<Response, I
     }
 }
 
+/// Identity and status returned by the subscription handshake.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubscriptionInfo {
+    pub status: StatusSnapshot,
+    pub daemon_pid: u32,
+    pub daemon_version: String,
+}
+
 /// A live event subscription.
 #[derive(Debug)]
 pub struct Subscription {
@@ -95,7 +103,7 @@ impl Subscription {
     pub fn open(
         endpoint: &Endpoint,
         timeout: Duration,
-    ) -> Result<(Self, StatusSnapshot), IpcError> {
+    ) -> Result<(Self, SubscriptionInfo), IpcError> {
         let endpoint = endpoint.clone();
         with_timeout(timeout, move || subscription_open_blocking(&endpoint))
     }
@@ -114,10 +122,10 @@ impl Subscription {
 
 fn subscription_open_blocking(
     endpoint: &Endpoint,
-) -> Result<(Subscription, StatusSnapshot), IpcError> {
+) -> Result<(Subscription, SubscriptionInfo), IpcError> {
     let stream = connect(endpoint, Duration::from_secs(2))?;
     let mut reader = BufReader::new(stream);
-    handshake(&mut reader)?;
+    let hello = handshake(&mut reader)?;
 
     let id = 2;
     framing::write_message(
@@ -131,7 +139,14 @@ fn subscription_open_blocking(
         ServerMessage::Response {
             id: response_id,
             response: Response::Subscribed { status },
-        } if response_id == id => Ok((Subscription { reader }, status)),
+        } if response_id == id => Ok((
+            Subscription { reader },
+            SubscriptionInfo {
+                status,
+                daemon_pid: hello.daemon_pid,
+                daemon_version: hello.daemon_version,
+            },
+        )),
         ServerMessage::Response {
             response: Response::Error { message, .. },
             ..
@@ -161,7 +176,13 @@ where
     }
 }
 
-fn handshake(reader: &mut BufReader<Stream>) -> Result<(), IpcError> {
+#[derive(Debug)]
+struct HelloInfo {
+    daemon_pid: u32,
+    daemon_version: String,
+}
+
+fn handshake(reader: &mut BufReader<Stream>) -> Result<HelloInfo, IpcError> {
     let id = 1;
     framing::write_message(
         reader.get_mut(),
@@ -180,12 +201,19 @@ fn handshake(reader: &mut BufReader<Stream>) -> Result<(), IpcError> {
     match read_server_message(reader)? {
         ServerMessage::Response {
             id: response_id,
-            response: Response::Hello {
-                protocol_version, ..
-            },
+            response:
+                Response::Hello {
+                    protocol_version,
+                    daemon_version,
+                    pid,
+                    ..
+                },
         } if response_id == id => {
             if protocol_version == PROTOCOL_VERSION {
-                Ok(())
+                Ok(HelloInfo {
+                    daemon_pid: pid,
+                    daemon_version,
+                })
             } else {
                 Err(IpcError::ProtocolMismatch {
                     daemon: protocol_version,
@@ -331,9 +359,11 @@ mod tests {
             .unwrap();
         });
 
-        let (mut subscription, status) =
+        let (mut subscription, info) =
             Subscription::open(&endpoint, Duration::from_secs(1)).unwrap();
-        assert_eq!(status.photo_count, 3);
+        assert_eq!(info.status.photo_count, 3);
+        assert_eq!(info.daemon_pid, 1);
+        assert_eq!(info.daemon_version, "test");
         assert_eq!(subscription.next_event().unwrap(), Some(event));
         server.join().unwrap();
     }

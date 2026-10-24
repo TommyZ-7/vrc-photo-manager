@@ -6,7 +6,7 @@ pub mod framing;
 pub mod protocol;
 pub mod server;
 
-pub use client::IpcError;
+pub use client::{IpcError, SubscriptionInfo};
 pub use endpoint::Endpoint;
 pub use protocol::*;
 

@@ -1402,7 +1402,7 @@ impl App {
 
     fn handle_ipc_incoming(&mut self, incoming: ipc_bridge::Incoming, cx: &mut Context<Self>) {
         match incoming {
-            ipc_bridge::Incoming::Connected(status) => {
+            ipc_bridge::Incoming::Connected { status, .. } => {
                 self.ipc_connected = true;
                 self.ipc_error = None;
                 self.daemon_shutdown_armed = false;
