@@ -15,15 +15,16 @@ deb / pacman 利用者には、デーモンを常駐させる手段としてア�
 - インストール時に enable しない。利用者が `systemctl --user daemon-reload` と `systemctl --user enable --now vrc-photo-daemon.service` を実行する opt-in とする。
 - unit は `graphical-session.target` に紐付ける。`Type=simple`、`ExecStart=/usr/bin/vrc-photo-daemon`、`Restart=on-failure` とし、トレイは有効のままにする。
 - 既存の XDG 自動起動はフォールバックとして残す。両方が起動を試みても、デーモンの `single-instance` が二重起動を防ぐ。
-- デーモンは `INVOCATION_ID` の有無で systemd 管理下を判定し、`app_settings.daemon_supervisor` に `systemd` / `app` を記録する。UI は稼働中の supervisor を表示する。
+- サービス利用時は、有効化の前にアプリ側の「自動起動」を OFF にする。ON のままだとログイン時に XDG 側が先に起動し、systemd サービスが inactive のまま残る競合が起こり得る。
+- デーモンは `/proc/self/cgroup` が `vrc-photo-daemon.service` を含むか、`INVOCATION_ID` と `SYSTEMD_EXEC_PID` が自プロセスを指す場合に systemd 管理下と判定し、`app_settings.daemon_supervisor` に `systemd` / `app` を記録する。UI は稼働中の supervisor を表示する。
 - アンインストール前に `systemctl --user disable --now vrc-photo-daemon.service` を実行するよう文書化する。パッケージマネージャは unit ファイルを削除するが、enable のシンボリックリンクはユーザーのホームに残るため。
 
 ## Consequences
 
 - systemd 利用者は再起動制御と `journalctl --user -u vrc-photo-daemon.service` によるログ確認を得る。
 - 非 systemd 環境、AppImage、Windows は従来どおりアプリ管理の自動起動を使う。
-- サービス利用時はアプリ側の「自動起動」を OFF にする運用を推奨する。ON のままでも `single-instance` により実害はないが、ログイン時に起動試行が重複する。
-- `graphical-session.target` を管理しないデスクトップ環境では、ログイン時に自動起動しない場合がある。troubleshooting に確認方法を記載する。
+- サービス利用時にアプリ側の「自動起動」を OFF にし忘れると、`single-instance` によりデーモンは1つに保たれるが、XDG 側が先に起動した場合は systemd の再起動制御と journald ログが効かない。有効化手順で OFF を前提とし、ログイン後に `systemctl --user is-active vrc-photo-daemon.service` で確認する。
+- `graphical-session.target` を管理しないデスクトップ環境では、ログイン時に自動起動しない場合がある。troubleshooting に確認方法と `default.target` への代替を記載する。
 
 ## Alternatives
 

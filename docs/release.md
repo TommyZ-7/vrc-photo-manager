@@ -66,25 +66,32 @@ git push origin v0.1.0
 
 unit は `/usr/lib/systemd/user/vrc-photo-daemon.service` に配置される。
 
+有効化の前に、UIの「設定 → 起動と圧縮 → 自動起動」をOFFにする。ONのままだとログイン時にXDG側が先にデーモンを起動し、systemdサービスがinactiveのまま残る競合が起こり得る。
+
 ```bash
 systemctl --user daemon-reload
 systemctl --user enable --now vrc-photo-daemon.service
-systemctl --user status vrc-photo-daemon.service
+systemctl --user is-active vrc-photo-daemon.service
 journalctl --user -u vrc-photo-daemon.service -f
 ```
 
 - サービスは `graphical-session.target` に紐付く。GNOME / KDE など、この target を管理するデスクトップ環境でログイン時に起動する。
-- アプリ管理の自動起動と併用しても、`single-instance` によりデーモンは1つだけ動く。サービスを使う場合は、設定の「自動起動」をOFFにすると起動試行の重複を避けられる。
-- 既にデーモンが動いている状態で `enable --now` すると、サービスは単一インスタンス判定で終了して inactive になる。次のログインから有効になるか、既存のデーモンを終了してから `systemctl --user restart vrc-photo-daemon.service` を実行する。
+- `graphical-session.target` を管理しないデスクトップ環境では、代わりに `default.target` へリンクする:
+
+```bash
+systemctl --user add-wants default.target vrc-photo-daemon.service
+```
+
+- 既にデーモンが動いている状態で `enable --now` すると、サービスは単一インスタンス判定で終了して inactive になる。既存のデーモンを終了してから `systemctl --user restart vrc-photo-daemon.service` を実行する。ログイン後に `systemctl --user is-active` が `active` でない場合も同じ手順で復旧する。
 - アンインストール前に無効化する:
 
 ```bash
 systemctl --user disable --now vrc-photo-daemon.service
+systemctl --user remove-wants default.target vrc-photo-daemon.service
 systemctl --user daemon-reload
 ```
 
-パッケージマネージャは unit ファイルを削除するが、`systemctl --user enable` が作るシンボリックリンクは `~/.config/systemd/user/graphical-session.target.wants/` に残る。先に disable しておくことで、アンインストール後にサービス定義が残らない。
-
+パッケージマネージャは unit ファイルを削除するが、`systemctl --user enable` が作るシンボリックリンクは `~/.config/systemd/user/graphical-session.target.wants/` に残る。`default.target` へ `add-wants` した場合は `default.target.wants/` にも残るため、先に disable / remove-wants しておくことで、アンインストール後にサービス定義が残らない。
 
 ## 5. ローカルでのパッケージビルド
 

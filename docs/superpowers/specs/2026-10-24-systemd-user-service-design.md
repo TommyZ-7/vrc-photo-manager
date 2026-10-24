@@ -2,7 +2,7 @@
 
 - Date: 2026-10-24
 - Issue: #23
-- Status: Proposed
+- Status: Accepted
 
 ## 意図
 
@@ -28,8 +28,8 @@ systemd を必須にはしない。既存のアプリ管理自動起動と AppIm
 ## 制約
 
 - パッケージのインストール処理は root で実行されるため、各ユーザーの systemd ユーザーサービスを安全に自動 enable できない。unit の同梱までとし、enable はユーザー操作にする。
-- ユーザーサービスは `graphical-session.target` に紐付ける。GNOME / KDE など、この target を管理するデスクトップ環境が対象。
-- デーモンの二重起動防止は既存の `single-instance` を維持する。
+- ユーザーサービスは `graphical-session.target` に紐付ける。GNOME / KDE など、この target を管理するデスクトップ環境が対象。管理しない環境向けに、`default.target` へ `add-wants` する代替を troubleshooting に記載する。
+- デーモンの二重起動防止は既存の `single-instance` を維持する。サービス利用時は、有効化の前にアプリ側の自動起動を OFF にしないと、ログイン時の競合で systemd サービスが inactive のまま残る可能性がある。
 - `cargo-packager` 0.11.8 の `[deb.files]` / `[pacman.files]` で、パッケージルート基準の任意パスへファイルを配置できる。
 - サービスは `/usr/bin/vrc-photo-daemon` を実行する。トレイは有効のままにする。
 
@@ -43,7 +43,7 @@ deb / pacman に opt-in の systemd ユーザーサービスを同梱し、既�
    - `Restart=on-failure`, `RestartSec=5s`
    - `WantedBy=graphical-session.target`
 2. `Packager.toml` の `[deb.files]` / `[pacman.files]` で `usr/lib/systemd/user/vrc-photo-daemon.service` に配置する。
-3. デーモン起動時に `INVOCATION_ID` の有無で systemd 管理下かを判定し、`app_settings.daemon_supervisor` に `systemd` / `app` を記録する。
+3. デーモン起動時に `/proc/self/cgroup` が `vrc-photo-daemon.service` を含むか、`INVOCATION_ID` と `SYSTEMD_EXEC_PID` が自プロセスを指すかで systemd 管理下を判定し、`app_settings.daemon_supervisor` に `systemd` / `app` を記録する。
 4. UI は稼働中のデーモンが systemd 管理なら、同期表示に `systemd` を付ける。設定画面には、サービス利用時はアプリ側の自動起動を OFF にする運用を短く表示する。
 5. ADR-0010 を追加し、release / troubleshooting / roadmap / packaging / features / architecture / data-model を更新する。
 6. Release CI で deb / pacman に unit が含まれることを検証する。

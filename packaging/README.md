@@ -32,11 +32,22 @@ The deb and pacman packages also install
 package manager because installation runs as root and cannot safely enable a
 service for each user.
 
+Turn off the in-app autostart before enabling the service. If both paths run
+at login, the XDG-autostarted daemon can win the race and leave the systemd
+service inactive.
+
 ```bash
 systemctl --user daemon-reload
 systemctl --user enable --now vrc-photo-daemon.service
-systemctl --user status vrc-photo-daemon.service
+systemctl --user is-active vrc-photo-daemon.service
 journalctl --user -u vrc-photo-daemon.service -f
+```
+
+On a desktop environment that does not manage `graphical-session.target`, link
+the unit into `default.target` instead:
+
+```bash
+systemctl --user add-wants default.target vrc-photo-daemon.service
 ```
 
 Disable it before removing the package so the enable symlink in the user's
@@ -44,6 +55,7 @@ home directory is cleaned up:
 
 ```bash
 systemctl --user disable --now vrc-photo-daemon.service
+systemctl --user remove-wants default.target vrc-photo-daemon.service
 systemctl --user daemon-reload
 ```
 
