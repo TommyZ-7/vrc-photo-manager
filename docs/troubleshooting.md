@@ -69,6 +69,24 @@ CI/Releaseワークフローにも同じ依存を入れてある。
 - Linux: `~/.config/autostart/` のdesktopファイルを確認。
 - AppImage: `$APPIMAGE --background` が登録されているか。AppImageのパスを移動した場合は再登録が必要。
 - devビルドで有効にすると `target/debug/vrc-photo-daemon` が登録される。リリース版で再度ON/OFFすると更新される。
+- systemdユーザーサービスを使っている場合は、下の「systemdユーザーサービス」を確認する。
+
+### systemdユーザーサービス（deb / pacman）
+
+- unit は `/usr/lib/systemd/user/vrc-photo-daemon.service`。インストール直後は無効で、自動では enable されない。
+- 有効化と状態確認:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now vrc-photo-daemon.service
+systemctl --user status vrc-photo-daemon.service
+```
+
+- ログ: `journalctl --user -u vrc-photo-daemon.service -f`
+- `graphical-session.target` を管理しないデスクトップ環境では、ログイン時に起動しないことがある。`systemctl --user is-active graphical-session.target` を確認し、必要なら `systemctl --user start vrc-photo-daemon.service` で手動起動する。
+- 既にデーモンが動いている状態で `enable --now` すると、`single-instance` によりサービスは inactive になる。次のログインから有効になるか、既存のデーモンを終了してから `systemctl --user restart vrc-photo-daemon.service` を実行する。
+- サービスと設定の「自動起動」を併用しても二重起動はしない。ログイン時の起動試行を重複させたくなければ、設定の「自動起動」をOFFにする。
+- アンインストール前に `systemctl --user disable --now vrc-photo-daemon.service` を実行する。unit ファイルはパッケージが削除するが、enable のシンボリックリンクはホームに残る。
 
 ### デーモン停止中に「再試行」を押した
 
