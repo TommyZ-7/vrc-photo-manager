@@ -36,6 +36,7 @@ use vrc_photo_ipc::{
 
 mod ipc_bridge;
 mod logging;
+mod update_view;
 
 const BG: u32 = 0x07090d;
 const PANEL: u32 = 0x121722;
@@ -1084,6 +1085,7 @@ pub struct App {
     hovered_nav: Option<Screen>,
     daemon_age_secs: Option<i64>,
     daemon_supervisor: Option<String>,
+    daemon_pid: Option<u32>,
     ipc_endpoint: Option<Endpoint>,
     ipc_connected: bool,
     ipc_error: Option<String>,
@@ -1142,6 +1144,7 @@ pub struct App {
     profile_index: usize,
     stats: LibraryStats,
     settings: AppSettings,
+    update: update_view::UpdateState,
     jobs: Vec<CompressionJob>,
     daemon_errors: Vec<DaemonError>,
     failed_job_count: i64,
@@ -1181,7 +1184,9 @@ type ViewerActivate = Rc<dyn Fn(&mut App, &mut Window, &mut Context<App>)>;
 
 impl App {
     fn new(window: &mut Window, cx: &mut Context<Self>, options: &LaunchOptions) -> Self {
-        let (db, demo, mut message, demo_assets) = open_database(options);
+        let (db, demo, database_ok, mut message, demo_assets) = open_database(options);
+        let health_token = std::env::var("VRC_PHOTO_HEALTH_TOKEN").ok();
+        let updating = health_token.is_some();
         let initial_settings = AppSettings::load(&db).unwrap_or_default();
         let initial_library_revision = db.library_revision().unwrap_or(0);
         cx.set_reduce_motion(initial_settings.ui_reduce_motion);
@@ -1239,6 +1244,7 @@ impl App {
             hovered_nav: None,
             daemon_age_secs: None,
             daemon_supervisor: None,
+            daemon_pid: None,
             ipc_endpoint: None,
             ipc_connected: false,
             ipc_error: None,
@@ -1290,6 +1296,7 @@ impl App {
             profile_index: 0,
             stats: LibraryStats::default(),
             settings: AppSettings::default(),
+            update: update_view::UpdateState::new(health_token, database_ok, demo),
             jobs: Vec::new(),
             daemon_errors: Vec::new(),
             failed_job_count: 0,
@@ -1332,6 +1339,9 @@ impl App {
                     .to_string()
             });
         }
+        if let Some(notice) = app.update.notice() {
+            message.get_or_insert_with(|| notice.to_string());
+        }
         app.message = message;
         if let Some(id) = app.library.index.entries.first().map(|entry| entry.id) {
             app.select_photo(id, cx);
@@ -1344,6 +1354,7 @@ impl App {
         }
         if !app.demo
             && !app.daemon_active
+            && !updating
             && let Err(error) = spawn_daemon_process()
         {
             app.message = Some(format!("デーモンを起動できません: {error}"));
@@ -1351,6 +1362,12 @@ impl App {
         app.start_auto_refresh(cx);
         if !app.demo {
             app.start_ipc(cx);
+        }
+        app.start_update_timers(cx);
+        if updating {
+            cx.on_next_frame(window, move |app, window, cx| {
+                app.complete_update_startup(window, cx);
+            });
         }
         if timing_enabled() {
             let started = process_start();
@@ -1402,8 +1419,9 @@ impl App {
 
     fn handle_ipc_incoming(&mut self, incoming: ipc_bridge::Incoming, cx: &mut Context<Self>) {
         match incoming {
-            ipc_bridge::Incoming::Connected { status, .. } => {
+            ipc_bridge::Incoming::Connected { status, daemon_pid } => {
                 self.ipc_connected = true;
+                self.daemon_pid = Some(daemon_pid);
                 self.ipc_error = None;
                 self.daemon_shutdown_armed = false;
                 self.refresh_monitor();
@@ -1412,6 +1430,7 @@ impl App {
             ipc_bridge::Incoming::Disconnected(error) => {
                 let was_connected = self.ipc_connected;
                 self.ipc_connected = false;
+                self.daemon_pid = None;
                 self.ipc_error = Some(error);
                 self.daemon_paused = false;
                 self.daemon_shutdown_armed = false;
@@ -2667,6 +2686,7 @@ impl App {
 
     fn sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let collapsed = self.sidebar_collapsed;
+        let update_badge = self.update.nav_badge();
         let epoch = self.sidebar_motion_epoch;
         let reveal_duration = if epoch == 0 {
             Duration::ZERO
@@ -2763,7 +2783,13 @@ impl App {
                 cx,
             ))
             .child(self.nav_item("監視", Screen::Monitor, IconName::Eye, None, cx))
-            .child(self.nav_item("設定", Screen::Settings, IconName::Settings, None, cx))
+            .child(self.nav_item(
+                "設定",
+                Screen::Settings,
+                IconName::Settings,
+                update_badge,
+                cx,
+            ))
             .child(div().flex_1())
             .when(!collapsed, |this| {
                 this.child(
@@ -6943,6 +6969,7 @@ impl App {
                                     ),
                             ),
                     )
+                    .child(self.update_card(cx))
                     .child(self.log_card(cx))
                     .child(
                         h_flex()
@@ -7171,13 +7198,14 @@ fn empty_database() -> Db {
     Db::open_in_memory().expect("fallback in-memory database")
 }
 
-fn open_database(options: &LaunchOptions) -> (Db, bool, Option<String>, Option<DemoAssets>) {
+fn open_database(options: &LaunchOptions) -> (Db, bool, bool, Option<String>, Option<DemoAssets>) {
     if options.demo {
         return match prepare_demo(options.demo_reset) {
-            Ok((db, assets)) => (db, true, None, Some(assets)),
+            Ok((db, assets)) => (db, true, false, None, Some(assets)),
             Err(error) => (
                 empty_database(),
                 true,
+                false,
                 Some(format!(
                     "デモデータを準備できませんでした（{error}）。空のライブラリで起動します。"
                 )),
@@ -7191,14 +7219,15 @@ fn open_database(options: &LaunchOptions) -> (Db, bool, Option<String>, Option<D
         .or_else(vrc_photo_core::default_db_path)
         .unwrap_or_else(|| PathBuf::from("vrc-photo-manager.db"));
     match Db::open(&path) {
-        Ok(db) => (db, false, None, None),
+        Ok(db) => (db, false, true, None, None),
         Err(error) => {
             let message = format!("DBを開けませんでした（{error}）。デモデータで起動します。");
             match prepare_demo(true) {
-                Ok((db, assets)) => (db, true, Some(message), Some(assets)),
+                Ok((db, assets)) => (db, true, false, Some(message), Some(assets)),
                 Err(demo_error) => (
                     empty_database(),
                     true,
+                    false,
                     Some(format!(
                         "DBを開けませんでした（{error}）。デモデータも準備できませんでした（{demo_error}）。空のライブラリで起動します。"
                     )),

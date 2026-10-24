@@ -16,10 +16,12 @@ pub use check::{FeedConfig, check};
 pub use download::download;
 pub use error::{Result, UpdateError};
 pub use fetch::{HttpClient, UreqClient};
+
+pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub use helper::{HealthMarker, LastResult, LastStatus};
 pub use install::{
-    APPLY_SCHEMA, ApplyJob, ApplyKind, InstallKind, PackageFamily, UpdatePaths, prepare_apply,
-    start_apply,
+    APPLY_SCHEMA, ApplyJob, ApplyKind, InstallKind, PackageFamily, UpdatePaths, install_kind,
+    prepare_apply, start_apply,
 };
 pub use manifest::{
     AvailableUpdate, MANIFEST_SCHEMA, MAX_ARTIFACT_BYTES, MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES,

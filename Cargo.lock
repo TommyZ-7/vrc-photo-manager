@@ -7687,6 +7687,7 @@ dependencies = [
  "gpui-kit",
  "image",
  "rfd",
+ "semver",
  "smallvec",
  "tempfile",
  "tracing",
@@ -7694,6 +7695,7 @@ dependencies = [
  "trash",
  "vrc-photo-core",
  "vrc-photo-ipc",
+ "vrc-photo-update",
 ]
 
 [[package]]
