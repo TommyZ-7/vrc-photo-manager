@@ -8,7 +8,6 @@ pub struct WakeSignal {
     condvar: Condvar,
 }
 
-#[allow(dead_code)] // wired into the daemon loop in the next task
 impl WakeSignal {
     pub fn notify(&self) {
         *self.pending.lock().unwrap() = true;
@@ -25,6 +24,7 @@ impl WakeSignal {
         *pending = false;
     }
 
+    #[cfg(test)]
     pub fn is_pending(&self) -> bool {
         *self.pending.lock().unwrap()
     }
@@ -37,7 +37,6 @@ pub struct JobSignal {
     condvar: Condvar,
 }
 
-#[allow(dead_code)] // wired into the compression workers in the next task
 impl JobSignal {
     pub fn notify(&self) {
         let mut generation = self.generation.lock().unwrap();

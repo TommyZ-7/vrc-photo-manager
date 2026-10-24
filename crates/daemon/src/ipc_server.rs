@@ -1,5 +1,3 @@
-#![allow(dead_code)] // wired into Daemon::run in the next task
-
 use std::io::{self, BufReader};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
