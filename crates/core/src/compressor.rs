@@ -20,9 +20,8 @@ pub struct CompressionResult {
 /// The output is written to a temporary file and renamed only after a complete
 /// encode. Existing files are never overwritten; a numeric suffix is added.
 pub fn compress_image(source: &Path, profile: &CompressionProfile) -> Result<CompressionResult> {
-    let image = image::open(source).map_err(|error| {
-        CoreError::Invalid(format!("cannot decode {}: {error}", source.display()))
-    })?;
+    let image = crate::image_decode::decode_image(source)
+        .ok_or_else(|| CoreError::Invalid(format!("cannot decode {}", source.display())))?;
     compress_decoded(image, source, profile)
 }
 
@@ -274,6 +273,16 @@ mod tests {
         let result = compress_image(&source, &profile(CompressionFormat::Jpeg)).unwrap();
         assert!(result.compressed_size > 0);
         assert_eq!(result.format, CompressionFormat::Jpeg);
+    }
+
+    #[test]
+    fn recompresses_an_avif_derivative() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("VRChat_2026-10-21_21-14-03.221_16x10.png");
+        sample(&source);
+        let avif = compress_image(&source, &profile(CompressionFormat::Avif)).unwrap();
+        let webp = compress_image(&avif.output_path, &profile(CompressionFormat::Webp)).unwrap();
+        assert_eq!((webp.width, webp.height), (16, 10));
     }
 
     #[test]

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PhotoStatus {
     Present,
+    Replaced,
     Missing,
 }
 
@@ -10,12 +11,14 @@ impl PhotoStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Present => "present",
+            Self::Replaced => "replaced",
             Self::Missing => "missing",
         }
     }
 
     pub fn parse(value: &str) -> Self {
         match value {
+            "replaced" => Self::Replaced,
             "missing" => Self::Missing,
             _ => Self::Present,
         }
@@ -213,11 +216,29 @@ pub struct Photo {
     pub status: PhotoStatus,
     pub is_favorite: bool,
     pub note: Option<String>,
+    /// Derivative used instead of the original file after a successful
+    /// `replace` compression or after the original was deleted while a
+    /// completed derivative existed.
+    pub display_derivative_id: Option<i64>,
+    pub display_path: Option<String>,
+    pub display_format: Option<String>,
     pub world_name: Option<String>,
     pub instance_id: Option<String>,
     pub link_method: Option<String>,
     pub confidence: Option<f64>,
     pub author: Option<String>,
+}
+
+impl Photo {
+    /// Path the UI and compression workers should read. Replaced photos use
+    /// their primary derivative because the original file no longer exists.
+    pub fn effective_path(&self) -> &str {
+        self.display_path.as_deref().unwrap_or(&self.abs_path)
+    }
+
+    pub fn is_replaced(&self) -> bool {
+        self.status == PhotoStatus::Replaced
+    }
 }
 
 #[derive(Debug, Clone)]

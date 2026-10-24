@@ -6,6 +6,8 @@
 pub mod compressor;
 pub mod db;
 pub mod error;
+pub mod hashing;
+pub mod image_decode;
 pub mod importer;
 pub mod linker;
 pub mod log_parser;

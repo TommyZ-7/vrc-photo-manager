@@ -43,10 +43,10 @@ pub fn ensure_thumbnail_in(
     if !source.is_file() {
         return Ok(None);
     }
-    let image = match image::open(source) {
-        Ok(image) => image.thumbnail(THUMBNAIL_MAX, THUMBNAIL_MAX).to_rgba8(),
-        Err(error) => {
-            tracing::warn!(path = %source.display(), %error, "cannot decode thumbnail source");
+    let image = match crate::image_decode::decode_image(source) {
+        Some(image) => image.thumbnail(THUMBNAIL_MAX, THUMBNAIL_MAX).to_rgba8(),
+        None => {
+            tracing::warn!(path = %source.display(), "cannot decode thumbnail source");
             return Ok(None);
         }
     };
