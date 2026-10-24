@@ -147,7 +147,9 @@ jobs:
         run: |
           $installer = Get-ChildItem dist\*-setup.exe | Select-Object -First 1
           if (-not $installer) { throw "no NSIS installer found" }
-          $listing = & 7z l $installer.FullName
+          $sevenZip = Join-Path $env:ProgramFiles "7-Zip\7z.exe"
+          if (-not (Test-Path $sevenZip)) { throw "7-Zip not found" }
+          $listing = & $sevenZip l $installer.FullName
           if (-not ($listing | Select-String -Quiet 'vrc-photo-updater.exe')) {
             throw "vrc-photo-updater.exe is missing from $($installer.Name)"
           }
