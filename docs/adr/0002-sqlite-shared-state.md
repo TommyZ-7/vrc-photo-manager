@@ -1,6 +1,6 @@
 # ADR-0002: UIとデーモンはSQLiteを共有する
 
-- Status: Accepted
+- Status: Accepted（ADR-0011で補完）
 - Date: 2026-10-21
 
 ## Context
@@ -19,8 +19,8 @@ UIと常駐デーモンを別プロセスにし、写真索引・ログ解析・
 
 - IPCなしでUIとデーモンを分離できる。
 - DBスキーマが実質的なAPIになる。変更時は両プロセスの互換性に注意する。
-- UIとデーモンの同時書き込みはWALと `busy_timeout` で吸収する。頻繁な競合が出たらIPCを再検討する。
-- UIからデーモンへの即時コマンド（再スキャン等）は未実装。必要ならIPCを追加する。
+- UIとデーモンの同時書き込みはWALと `busy_timeout` で吸収する。
+- UIからデーモンへの即時コマンドとイベントは [ADR-0011](0011-daemon-ipc.md) のローカルIPCで補完する。SQLiteは耐久データの正のままで、IPCはwake-upとイベント配信だけを担う。
 
 ## Alternatives
 

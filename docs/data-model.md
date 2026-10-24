@@ -256,6 +256,8 @@ UIからデーモンへの再実行要求。FIFOの小さなキュー。
 - デーモンは監視ループの先頭で全行を読み、同一トランザクションで削除する。未知の文字列は無視する。
 - デーモン停止中もUIは要求を積める。起動後にまとめて処理される。
 - 要求の処理前に設定を再読込し、写真フォルダの監視を張り直す。
+- IPCの `wake_commands` はこのテーブルを変更しない。UIが積んだ行を見てデーモンのループを即時起床するだけ。IPCリクエスト側でコマンドを挿入しないため、二重実行にならない。
+- 既存の3秒ポーリングとハートビートはIPCのフォールバックとして残る。
 
 ### `log_imports`
 
@@ -281,7 +283,7 @@ UIからデーモンへの再実行要求。FIFOの小さなキュー。
 
 `daemon_supervisor` はデーモン起動時に上書きされる。判定は `/proc/self/cgroup` の unit 名、または `INVOCATION_ID` と `SYSTEMD_EXEC_PID` が自プロセスを指すことを使う。UIはハートビートが新しい場合だけ値を表示し、停止中は「デーモン停止」を優先する。
 
-`daemon_heartbeat` は従来どおりUIの稼働判定に使う。処理エラーの表示と再実行要求は `daemon_errors` / `daemon_commands` に分離し、`app_settings` には入れない。
+`daemon_heartbeat` はUIの稼働判定に使う。UIはハートビートが20秒以内、またはIPC購読が接続中なら稼働中とみなす（長時間スキャン対策）。IPCが使えない場合は従来どおりハートビートだけに戻る。処理エラーの表示と再実行要求は `daemon_errors` / `daemon_commands` に分離し、`app_settings` には入れない。
 
 `AppSettings` の主なフィールド:
 
@@ -303,6 +305,7 @@ estimated_link, thumbnail_cache_mb, compression_workers
 8. `daemon_errors` は操作（`scan` / `log` / `link`）ごとに1行だけ。解消したら削除する。
 9. `daemon_commands` は同名コマンドを重複して積まない。デーモンは取り出しと削除を同一トランザクションで行う。
 10. `library_revision` はデーモン側の一覧変更（追加・移動・削除・置換）で単調増加し、UIのページキャッシュ無効化に使う。
+11. IPCの `wake_commands` はDBを変更しない。UIが積んだ `daemon_commands` をデーモンが即時取り出すための通知で、IPC側からコマンドを挿入しない。
 
 ## 5. タイムゾーンと時刻
 

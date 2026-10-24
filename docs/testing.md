@@ -10,16 +10,25 @@ cargo test --workspace
 
 2026-10-24時点:
 
-- `vrc-photo-core`: 62件
-- `vrc-photo-daemon`: 21件
-- UI: 59件（GPUIを起動しない純粋ヘルパーの単体テスト）
+- `vrc-photo-core`: 80件（1件はignored）
+- `vrc-photo-daemon`: 42件
+- `vrc-photo-ipc`: 10件
+- UI: 67件（GPUIを起動しない純粋ヘルパーとIPCブリッジの単体テスト）
+
+### ipcの主なテスト
+
+- プロトコル型のJSON往復（リクエスト、イベント、バージョン）。
+- 改行区切りフレーミング（複数メッセージ、EOF）。
+- 一時エンドポイントでのリクエスト/レスポンス、購読イベント。
+- プロトコルバージョン不一致。
+- 生存中エンドポイントをunlinkしないこと、stale socketの置き換え（Unix）。
 
 ### coreの主なテスト
 
 | ファイル | 内容 |
 |---|---|
 | `db.rs` | マイグレーション（V4の再実行を含む）、写真UPSERT、文脈/プレイヤー、検索、キューの原子的取得、`retry_count` と再試行上限、`daemon_errors` のUPSERT/削除、`daemon_commands` の重複排除と取り出し |
-| `scanner.rs` | フォルダ走査、単一ファイル索引、compressed除外、読めないファイル・ディレクトリの失敗記録 |
+| `scanner.rs` | フォルダ走査、単一ファイル索引、compressed除外、読めないファイル・ディレクトリの失敗記録、walking/indexing進捗コールバック |
 | `photo_filename.rs` | VRChatファイル名、無効名、拡張子 |
 | `log_parser.rs` | イベント解析、セッション、入退室 |
 | `linker.rs` | ログ紐付け、XMPのみの紐付け |
@@ -43,6 +52,9 @@ cargo test --workspace
 - 失敗ジョブをDBで作り、再試行 → 圧縮 → 完了まで通す。
 - `daemon_commands` の処理で設定を再読込し、新しいルートの監視を張り直す。
 - `run_once` が処理前にコマンドを消化する。
+- IPCサーバーのhello/status、`wake_commands` がDBを触らずにwakeすること、`set_paused` の状態変更とイベント、`shutdown` のrunning/wake。
+- `scan_photos` のScanStarted / ScanProgress / ScanFinished、`set_paused` のStatusChanged、`daemon_errors` 変更イベントの重複抑止。
+- `Daemon::start_ipc` がstatusを返すこと。
 
 ### UIの主なテスト
 
@@ -53,6 +65,9 @@ GPUIのウィンドウは開かず、表示に使う純粋関数だけを検証�
 - 取り込み結果の失敗数・部分移動数の集計と、再試行対象（`Failed` かつ `retryable`）の抽出。
 - 圧縮ジョブの再試行可否と `再試行 n/3` の表示（0回・2回・上限3回）。
 - タイムスタンプの `MM/DD HH:MM` 変換と生文字列フォールバック。
+- `daemon_liveness` がハートビートまたはIPC接続で稼働と判定すること。
+- IPCブリッジの接続→イベント受信、デーモン不在時の切断通知。
+- スキャン進捗ラベル/比率、IPC接続ラベル。
 
 ## 2. 追加すべきテスト
 
@@ -77,6 +92,16 @@ GPUIのウィンドウは開かず、表示に使う純粋関数だけを検証�
 - [ ] `compressed/` 内の生成物が写真として索引されない
 - [ ] 外部で削除した写真が一覧から消える
 - [ ] 同名・別パスの写真が別エントリになる
+
+### IPC
+
+- [ ] UIとデーモンを起動すると監視画面が「IPC 接続中」になる
+- [ ] 「再スキャン」でスキャン進捗が即時表示される
+- [ ] 「監視を一時停止/再開」が状態とサイドバーに反映される
+- [ ] 圧縮ジョブの開始・完了がポーリング待ちなしでキューに反映される
+- [ ] 「デーモンを終了」でデーモンが終了し、UIは落ちずに「デーモン停止」になる
+- [ ] デーモン停止中にUIを起動しても落ちず、再試行要求がDBに残る
+- [ ] UIとデーモンのバージョンが違うとき、IPCエラーが出てもUIは操作を継続できる
 
 ### ログ・XMP
 

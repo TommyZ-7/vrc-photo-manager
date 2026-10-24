@@ -28,20 +28,27 @@ VRChatの写真を、撮影時のワールド・同接プレイヤー・撮影�
         VRChat写真フォルダ                         VRChatログ / XMP
 ```
 
+UIとデーモンは同じSQLite（WAL）に加えて、ローカルIPC（Unix domain socket / Windows名前付きパイプ、改行区切りJSON）で接続する。IPCは即時wake-upとイベント配信だけを担い、耐久データの正はSQLiteのまま。
+
 ### プロセスの役割
 
 | プロセス | バイナリ | 役割 |
 |---|---|---|
 | UI | `crates/ui` → `vrc-photo-manager` | 画面表示、検索、タグ・お気に入り・メモ編集、手動圧縮のキュー投入、取り込み |
-| デーモン | `crates/daemon` → `vrc-photo-daemon` | 写真・ログの監視、索引、文脈紐付け、サムネイル、自動圧縮、トレイ、自動起動 |
+| デーモン | `crates/daemon` → `vrc-photo-daemon` | 写真・ログの監視、索引、文脈紐付け、サムネイル、自動圧縮、トレイ、自動起動、IPCサーバー |
+| 共通IPC | `crates/ipc` | プロトコル型、エンドポイント、改行区切りJSON、ローカルソケットの送受信 |
 | 共通コア | `crates/core` | DB、スキャン、ログ解析、XMP、圧縮、設定、サムネイル |
 
-現時点では**IPCは未実装**。UIとデーモンは同じSQLite（WAL）を共有し、状態とジョブをやり取りする。UIはデーモンのハートビート（`app_settings.daemon_heartbeat`）で稼働状態を判定する。デーモンの処理エラーは `daemon_errors`、UIからの再実行要求は `daemon_commands` に置き、同じ共有状態の一部として扱う（ソケット等は追加しない）。
+UIとデーモンは同じSQLite（WAL）を共有し、状態とジョブをやり取りする。これに加えて、即時コマンドのwake-upとイベント配信のためにローカルIPCを使う（ADR-0011）。UIはデーモンのハートビート（`app_settings.daemon_heartbeat`）とIPC購読のどちらかが生きていれば稼働中と判定する。デーモンの処理エラーは `daemon_errors`、UIからの再実行要求は `daemon_commands` に置く。IPCは `daemon_commands` / `compression_jobs` を置き換えず、デーモンを起こすだけ。デーモン停止中も要求はDBに残り、起動後に処理される。
 
 ## 3. クレート構成
 
 ```text
 crates/
+  ipc/
+    src/lib.rs            # プロトコル型、エンドポイント、フレーミング
+    src/client.rs         # リクエストと購読
+    src/server.rs         # ローカルソケットのbind/accept
   core/
     src/lib.rs            # アプリ名、データディレクトリ
     src/db.rs             # SQLiteスキーマ、マイグレーション、CRUD、検索
@@ -67,15 +74,17 @@ crates/
 ### 依存方向
 
 ```text
-ui ────────┐
-           ├──> core
-daemon ────┘
+ui ────────┬──> ipc
+           └──> core
+daemon ────┼──> ipc
+           └──> core
 ```
 
-- `core` はUI・プロセス・トレイに依存しない。
-- `daemon` は `core` のDB・スキャナ・解析・圧縮・サムネイルを使う。
-- `ui` は `core` のDB・モデル・設定・圧縮キューを使う。
-- GPUI（`gpui-kit` / `gpui-pre`）に依存するのは `ui` のみ。`core` / `daemon` はGPUI非依存。
+- `core` はUI・プロセス・トレイ・IPCに依存しない。
+- `ipc` はプロトコルとトランスポートだけを持ち、`core` / `daemon` / `ui` に依存しない。
+- `daemon` は `core` のDB・スキャナ・解析・圧縮・サムネイルと、`ipc` のサーバー/プロトコルを使う。
+- `ui` は `core` のDB・モデル・設定・圧縮キューと、`ipc` のクライアント/プロトコルを使う。
+- GPUI（`gpui-kit` / `gpui-pre`）に依存するのは `ui` のみ。`core` / `daemon` / `ipc` はGPUI非依存。
 
 ## 4. データフロー
 
@@ -85,7 +94,8 @@ daemon ────┘
 2. `journal_mode=WAL`、`foreign_keys=ON`、`busy_timeout=5s` を設定。
 3. `PRAGMA user_version` を見てマイグレーションを実行。
 4. 設定（`app_settings` の `app_settings` キー）を読む。なければVRChatパスを自動検出。
-5. デーモンは `scan_photos` で写真ルートを走査し、ログの末尾から解析を開始する。
+5. デーモンはIPCサーバーを起動する。UIはIPC購読を開始し、接続できなければハートビート/DB表示にフォールバックする。
+6. デーモンは `scan_photos` で写真ルートを走査し、ログの末尾から解析を開始する。走査中は `scan_started` / `scan_progress` / `scan_finished` を配信する。
 
 ### 4.2 写真の索引
 
@@ -113,7 +123,7 @@ daemon ────┘
 2. 手動圧縮はUIが同じテーブルへ積む（`policy=keep` / `replace`）。
 3. ワーカーはSQLiteの単一 `UPDATE ... RETURNING` で1件を原子的に `processing` にする。
 4. 圧縮結果を一時ファイルへ書き、サイズ検証後にリネームする。
-5. `derivatives` に生成物を記録し、ジョブを `completed` にする。
+5. `derivatives` に生成物を記録し、ジョブを `completed` にする。開始・完了・失敗は `compression_progress` イベントでも配信する。
 6. `replace` の場合、検証後に元画像をOSゴミ箱へ移し、`photos.status='missing'` にする。
 
 ### 4.5 サムネイル
@@ -134,8 +144,10 @@ daemon ────┘
 | 実行単位 | 役割 | 共有状態 |
 |---|---|---|
 | UIメインスレッド | GPUI描画、入力 | `App` が `Db` を保持 |
-| UI自動更新タスク | 3秒ごとに状態・キュー・枚数を再読込 | DB読み取り |
-| デーモン監視ループ | notifyポーリング、ログ追記、増分索引、UIコマンドの消化 | `Arc<Mutex<Db>>` |
+| UI自動更新タスク | 3秒ごとに状態・キュー・枚数を再読込（IPCのフォールバック） | DB読み取り |
+| UI IPC購読スレッド | デーモンへ接続し、イベントを受信。切断時は2秒後に再接続 | ローカルソケット |
+| デーモン監視ループ | notifyポーリング、ログ追記、増分索引、UIコマンドの消化、wake待ち | `Arc<Mutex<Db>>` |
+| デーモンIPCサーバー | 接続ごとにスレッド。hello/status/wake/pause/shutdown/subscribeを処理 | `DaemonStatus`、`WakeSignal`、`JobSignal`、`EventBus` |
 | 圧縮ワーカー | 1〜4スレッド。ジョブを原子的に取得 | `Arc<Mutex<Db>>` |
 | サムネイルワーカー | 1スレッド。キューを順次処理 | `Arc<Mutex<Db>>` |
 | トレイ | Windowsメッセージポンプ / Linux StatusNotifierItem | `DaemonStatus` |
@@ -152,7 +164,9 @@ daemon ────┘
 - deb/pacmanではデーモン実体（`/usr/bin/vrc-photo-daemon`）を自動起動に登録する。
 - deb/pacmanは任意の systemd ユーザーサービス `vrc-photo-daemon.service` を `/usr/lib/systemd/user/` に同梱する。unit は `graphical-session.target` に紐付き、インストール時には enable されない。
 - デーモンは `/proc/self/cgroup` が `vrc-photo-daemon.service` を含むか、`INVOCATION_ID` と `SYSTEMD_EXEC_PID` が自プロセスを指す場合に systemd 管理下と判定し、`app_settings.daemon_supervisor` に `systemd` / `app` を記録する。UIはハートビートが新しい間だけこの値を表示に使う。
-- 終了時、デーモンは開いているログセッションを閉じ、ワーカーを停止する。
+- デーモンは初期スキャンの前にIPCサーバーを起動する。Unixでは `$XDG_RUNTIME_DIR/vrc-photo-manager/daemon.sock`（未設定なら `<data_dir>/run/daemon.sock`）を使い、ディレクトリ `0700`、ソケット `0600` にする。Windowsはユーザー名を含む名前付きパイプを使う。
+- bind前に既存エンドポイントへ接続し、生存中ならunlinkしない。接続拒否ならstaleとして削除する。
+- 終了時、デーモンはIPCサーバーを止め、開いているログセッションを閉じ、ワーカーを停止する。
 
 ## 7. 障害時の考え方
 
@@ -163,7 +177,9 @@ daemon ────┘
 - DBが壊れた場合は、ユーザーデータディレクトリの `library.db` をバックアップしてから再作成する（写真ファイルは削除しない）。
 - 生ログは保存しない。解析済みイベントのみ残す。
 
-エラー報告と再試行は、既存のSQLite共有状態を拡張して行う。デーモンはスキャン・ログ解析・紐付けの回復可能な失敗を `daemon_errors` に書き、成功したら行を消す。UIは3秒更新でこれを読み、全画面の通知バーとログ監視画面の「処理エラー」カードに出す。UIの「再試行」は `daemon_commands` に `rescan` / `relog` / `relink` を積むだけにし、デーモンが監視ループの先頭で全件を取り出して設定を再読込し、監視を張り直してから実行する。コマンドは取り出し時に削除するため、失敗しても自動では再実行しない。圧縮と取り込みの失敗はそれぞれのジョブ・取り込み結果に残し、この経路には載せない（圧縮は `compression_jobs.retry_count`、取り込みはUIの結果パネルで再試行する）。
+エラー報告と再試行は、既存のSQLite共有状態を拡張して行う。デーモンはスキャン・ログ解析・紐付けの回復可能な失敗を `daemon_errors` に書き、成功したら行を消す。UIは3秒更新とIPCイベントの両方でこれを読み、全画面の通知バーとログ監視画面の「処理エラー」カードに出す。UIの「再試行」は `daemon_commands` に `rescan` / `relog` / `relink` を積み、IPC接続中なら `wake_commands` でデーモンを即座に起こす。デーモンは監視ループの先頭で全件を取り出して設定を再読込し、監視を張り直してから実行する。コマンドは取り出し時に削除するため、失敗しても自動では再実行しない。圧縮と取り込みの失敗はそれぞれのジョブ・取り込み結果に残し、この経路には載せない（圧縮は `compression_jobs.retry_count`、取り込みはUIの結果パネルで再試行する）。
+
+IPCが使えない場合（デーモン停止、ソケット権限、バージョン不一致）は、UIは非致命的に扱い、ハートビートと3秒ポーリングに戻る。IPCのイベントはベストエフォートで、取りこぼしてもDBの最終状態に追いつく。IPCサーバーはSQLiteを直接触らないため、長時間のスキャンがDBロックを保持していても `status` / `wake` / `pause` / `shutdown` に応答できる。
 
 ## 8. 関連ドキュメント
 
