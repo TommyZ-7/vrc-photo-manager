@@ -4,10 +4,12 @@
 //! The UI drives checks and downloads; the helper binary applies them.
 
 pub mod error;
+pub mod install;
 pub mod manifest;
 pub mod verify;
 
 pub use error::{Result, UpdateError};
+pub use install::{InstallKind, PackageFamily, UpdatePaths};
 pub use manifest::{
     AvailableUpdate, MANIFEST_SCHEMA, MAX_ARTIFACT_BYTES, MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES,
     Manifest, PlatformAsset, UpdateFormat,

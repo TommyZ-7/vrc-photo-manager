@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::error::{Result, UpdateError};
+use crate::install::InstallKind;
 
 pub const MANIFEST_SCHEMA: u32 = 1;
 pub const MAX_MANIFEST_BYTES: u64 = 512 * 1024;
@@ -100,6 +101,18 @@ impl Manifest {
         }
 
         Ok((manifest, version))
+    }
+
+    /// Returns the artifact for an install kind that can apply automatically.
+    pub fn asset_for(&self, kind: &InstallKind) -> Option<&PlatformAsset> {
+        let (platform, format) = match kind {
+            InstallKind::AppImage { .. } => (LINUX_PLATFORM, UpdateFormat::AppImage),
+            InstallKind::WindowsCurrentUser { .. } => (WINDOWS_PLATFORM, UpdateFormat::Nsis),
+            _ => return None,
+        };
+        self.platforms
+            .get(platform)
+            .filter(|asset| asset.format == format)
     }
 }
 
