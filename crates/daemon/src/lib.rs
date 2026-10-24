@@ -160,6 +160,7 @@ pub struct Daemon {
     thumbnail_handle: Option<JoinHandle<()>>,
     hash_handle: Option<JoinHandle<()>>,
     last_autostart_check: std::time::Instant,
+    last_settings_check: std::time::Instant,
     last_heartbeat: std::time::Instant,
     last_asset_check: Instant,
     thumbnail_dir: PathBuf,
@@ -240,6 +241,7 @@ impl Daemon {
             thumbnail_handle: None,
             hash_handle: None,
             last_autostart_check: std::time::Instant::now(),
+            last_settings_check: Instant::now() - Duration::from_secs(2),
             last_heartbeat: std::time::Instant::now() - Duration::from_secs(10),
             last_asset_check: Instant::now() - Duration::from_secs(30),
             thumbnail_dir,
@@ -571,6 +573,10 @@ impl Daemon {
                 self.refresh_autostart_setting();
                 self.last_autostart_check = std::time::Instant::now();
             }
+            if self.last_settings_check.elapsed() >= Duration::from_secs(2) {
+                self.refresh_compression_settings();
+                self.last_settings_check = Instant::now();
+            }
             if self.last_heartbeat.elapsed() >= Duration::from_secs(10) {
                 self.write_heartbeat();
             }
@@ -637,6 +643,7 @@ impl Daemon {
         if paths.is_empty() {
             return Ok(());
         }
+        self.refresh_compression_settings();
         paths.sort_by_key(|path| !path.is_file());
         paths.dedup();
         let roots = self.settings.photo_roots();
@@ -714,7 +721,12 @@ impl Daemon {
                 db.bump_library_revision()?;
             }
             if self.settings.auto_compress && !new_ids.is_empty() {
-                enqueue_auto_jobs(&db, &new_ids)?;
+                enqueue_auto_jobs(
+                    &db,
+                    &new_ids,
+                    self.settings.compression_keep_original,
+                    self.settings.auto_compress_immediate,
+                )?;
                 self.jobs.notify();
             }
         }
@@ -786,6 +798,7 @@ impl Daemon {
     }
 
     fn scan_photos_inner(&mut self) -> Result<ScanReport> {
+        self.refresh_compression_settings();
         let mut report = ScanReport::default();
         let roots = self.settings.photo_roots();
         let root_count = roots.len();
@@ -883,7 +896,12 @@ impl Daemon {
                 && !report.new_ids.is_empty()
                 && (!initial_scan || self.settings.auto_compress_backlog)
             {
-                enqueue_auto_jobs(&db, &report.new_ids)?;
+                enqueue_auto_jobs(
+                    &db,
+                    &report.new_ids,
+                    self.settings.compression_keep_original,
+                    self.settings.auto_compress_immediate,
+                )?;
                 self.jobs.notify();
             }
         }
@@ -1192,6 +1210,23 @@ impl Daemon {
             self.settings.autostart = enabled;
             self.apply_autostart(enabled);
         }
+    }
+
+    /// Applies the compression switches without touching paths or restarting
+    /// watchers. The UI saves these immediately; a running daemon must not keep
+    /// enqueuing with the previous keep/replace or immediate policy.
+    fn refresh_compression_settings(&mut self) {
+        let loaded = {
+            let db = self.db.lock().unwrap();
+            AppSettings::load(&db).ok()
+        };
+        let Some(settings) = loaded else {
+            return;
+        };
+        self.settings.auto_compress = settings.auto_compress;
+        self.settings.auto_compress_backlog = settings.auto_compress_backlog;
+        self.settings.auto_compress_immediate = settings.auto_compress_immediate;
+        self.settings.compression_keep_original = settings.compression_keep_original;
     }
 
     fn apply_autostart(&self, enabled: bool) {
@@ -1506,7 +1541,7 @@ fn cgroup_has_unit(cgroup: &str, unit: &str) -> bool {
         .any(|part| part == unit)
 }
 
-fn enqueue_auto_jobs(db: &Db, new_ids: &[i64]) -> Result<()> {
+fn enqueue_auto_jobs(db: &Db, new_ids: &[i64], keep_original: bool, immediate: bool) -> Result<()> {
     let profiles = db.list_profiles()?;
     let auto_profiles: Vec<&CompressionProfile> = profiles
         .iter()
@@ -1515,9 +1550,20 @@ fn enqueue_auto_jobs(db: &Db, new_ids: &[i64]) -> Result<()> {
     if auto_profiles.is_empty() {
         return Ok(());
     }
+    let policy = if keep_original { "keep" } else { "replace" };
+    let status = if immediate {
+        QueueStatus::Pending
+    } else {
+        QueueStatus::Waiting
+    };
     for photo_id in new_ids {
         for profile in &auto_profiles {
-            db.enqueue_job_for_existing_profile(*photo_id, &profile.id, "keep")?;
+            db.enqueue_job_for_existing_profile_with_status(
+                *photo_id,
+                &profile.id,
+                policy,
+                status,
+            )?;
         }
     }
     Ok(())
@@ -2422,6 +2468,13 @@ mod tests {
         assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Missing);
     }
 
+    fn save_daemon_settings(daemon: &Daemon, update: impl FnOnce(&mut AppSettings)) {
+        let db = daemon.db.lock().unwrap();
+        let mut settings = AppSettings::load(&db).unwrap_or_default();
+        update(&mut settings);
+        settings.save(&db).unwrap();
+    }
+
     fn add_auto_profile(db_path: &Path) {
         let db = Db::open(db_path).unwrap();
         db.save_profile(&CompressionProfile {
@@ -2638,7 +2691,7 @@ mod tests {
             .unwrap();
 
         // One photo: its auto profiles are enqueued in the saved order.
-        enqueue_auto_jobs(&db, &[photo_id]).unwrap();
+        enqueue_auto_jobs(&db, &[photo_id], true, true).unwrap();
         // Force the tie the rowid tie-break exists for.
         db.connection()
             .execute(
@@ -2655,6 +2708,141 @@ mod tests {
     }
 
     #[test]
+    fn auto_jobs_use_replace_policy_and_waiting_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let original = photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&original);
+
+        let db_path = dir.path().join("library.db");
+        add_auto_profile(&db_path);
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+        daemon.run_once().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        let photo_id = db
+            .photo_by_path(original.to_str().unwrap())
+            .unwrap()
+            .unwrap()
+            .id;
+        enqueue_auto_jobs(&db, &[photo_id], false, false).unwrap();
+
+        let job = db.list_jobs(1).unwrap().remove(0);
+        assert_eq!(job.policy, "replace");
+        assert_eq!(job.status, QueueStatus::Waiting);
+        assert!(db.next_pending_job().unwrap().is_none());
+    }
+
+    #[test]
+    fn refresh_compression_settings_applies_live_policy_and_waiting_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let first = photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&first);
+
+        let db_path = dir.path().join("library.db");
+        add_auto_profile(&db_path);
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir.clone()), Some(log_dir)).unwrap();
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+        daemon.run_once().unwrap();
+
+        {
+            let db = Db::open(&db_path).unwrap();
+            let mut settings = AppSettings::load(&db).unwrap_or_default();
+            settings.auto_compress = true;
+            settings.auto_compress_immediate = false;
+            settings.compression_keep_original = false;
+            settings.save(&db).unwrap();
+        }
+        let second = photo_dir.join("VRChat_2026-10-21_21-25-00.000_4x3.png");
+        write_photo(&second);
+        daemon.dirty_paths.push(second);
+        daemon.index_dirty_paths().unwrap();
+
+        assert!(!daemon.settings.auto_compress_immediate);
+        assert!(!daemon.settings.compression_keep_original);
+        let db = Db::open(&db_path).unwrap();
+        let job = db.list_jobs(1).unwrap().remove(0);
+        assert_eq!(job.status, QueueStatus::Waiting);
+        assert_eq!(job.policy, "replace");
+    }
+
+    #[test]
+    fn auto_compress_holds_waiting_jobs_until_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let original = photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&original);
+
+        let db_path = dir.path().join("library.db");
+        add_auto_profile(&db_path);
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+        save_daemon_settings(&daemon, |settings| {
+            settings.auto_compress_backlog = true;
+            settings.auto_compress_immediate = false;
+        });
+        daemon.run_once().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        let photo = db
+            .photo_by_path(original.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(db.count_jobs(QueueStatus::Waiting).unwrap(), 1);
+        daemon.compress_pending().unwrap();
+        assert!(db.derivatives_for_photo(photo.id).unwrap().is_empty());
+
+        db.release_waiting_jobs("keep").unwrap();
+        daemon.compress_pending().unwrap();
+        assert_eq!(db.derivatives_for_photo(photo.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn auto_replace_failure_leaves_the_original_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let original = photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&original);
+        // Make the default output directory impossible to create.
+        std::fs::write(photo_dir.join("compressed"), b"not a directory").unwrap();
+
+        let db_path = dir.path().join("library.db");
+        add_auto_profile(&db_path);
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+        save_daemon_settings(&daemon, |settings| {
+            settings.auto_compress_backlog = true;
+            settings.compression_keep_original = false;
+        });
+        daemon.run_once().unwrap();
+        daemon.compress_pending().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        assert!(original.exists());
+        let photo = db
+            .photo_by_path(original.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(photo.status, PhotoStatus::Present);
+        assert!(db.derivatives_for_photo(photo.id).unwrap().is_empty());
+        assert_eq!(db.list_jobs(1).unwrap()[0].status, QueueStatus::Failed);
+    }
+
+    #[test]
     fn end_to_end_auto_compress() {
         let dir = tempfile::tempdir().unwrap();
         let photo_dir = dir.path().join("photos");
@@ -2668,7 +2856,9 @@ mod tests {
         add_auto_profile(&db_path);
         let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
         daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
-        daemon.settings.auto_compress_backlog = true;
+        save_daemon_settings(&daemon, |settings| {
+            settings.auto_compress_backlog = true;
+        });
         daemon.run_once().unwrap();
         daemon.compress_pending().unwrap();
 
@@ -2721,7 +2911,9 @@ mod tests {
         add_auto_profile(&db_path);
         let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
         daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
-        daemon.settings.auto_compress_backlog = true;
+        save_daemon_settings(&daemon, |settings| {
+            settings.auto_compress_backlog = true;
+        });
         daemon.run_once().unwrap();
 
         let db = Db::open(&db_path).unwrap();
