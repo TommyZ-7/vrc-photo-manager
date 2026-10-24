@@ -113,7 +113,12 @@ mod tests {
         let endpoint = Endpoint::for_tests(dir.path());
         let _listener = Listener::bind(endpoint.clone()).unwrap();
         let error = Listener::bind(endpoint).unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::AddrInUse);
+        // Windows reports an existing named pipe as PermissionDenied; Unix
+        // reports AddrInUse. Both mean the live endpoint was not replaced.
+        assert!(matches!(
+            error.kind(),
+            io::ErrorKind::AddrInUse | io::ErrorKind::PermissionDenied
+        ));
     }
 
     #[cfg(unix)]
