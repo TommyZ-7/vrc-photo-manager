@@ -40,6 +40,9 @@ depends = [
   "libfreetype6",
 ]
 
+[deb.files]
+"packaging/systemd/vrc-photo-daemon.service" = "usr/lib/systemd/user/vrc-photo-daemon.service"
+
 [pacman]
 depends = [
   "libxkbcommon",
@@ -50,3 +53,6 @@ depends = [
   "fontconfig",
   "freetype2",
 ]
+
+[pacman.files]
+"packaging/systemd/vrc-photo-daemon.service" = "usr/lib/systemd/user/vrc-photo-daemon.service"
