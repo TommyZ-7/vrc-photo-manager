@@ -21,6 +21,10 @@ pub struct AppSettings {
     pub tray: bool,
     pub auto_compress: bool,
     pub auto_compress_backlog: bool,
+    #[serde(default = "default_true")]
+    pub compression_keep_original: bool,
+    #[serde(default = "default_true")]
+    pub auto_compress_immediate: bool,
     pub estimated_link: bool,
     pub thumbnail_cache_mb: u64,
     pub compression_workers: usize,
@@ -34,6 +38,10 @@ pub struct AppSettings {
     pub auto_update_check: bool,
     #[serde(default)]
     pub update_last_checked_at: Option<i64>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_auto_update_check() -> bool {
@@ -51,6 +59,8 @@ impl Default for AppSettings {
             tray: true,
             auto_compress: true,
             auto_compress_backlog: false,
+            compression_keep_original: true,
+            auto_compress_immediate: true,
             estimated_link: true,
             thumbnail_cache_mb: 2048,
             compression_workers: 1,
@@ -216,6 +226,40 @@ pub fn is_under(path: &Path, root: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_settings_default_to_keep_originals_and_immediate_auto_compress() {
+        let json = r#"{
+            "photo_roots": [],
+            "log_dir": null,
+            "managed_dir": null,
+            "language": "ja",
+            "autostart": true,
+            "tray": true,
+            "auto_compress": true,
+            "auto_compress_backlog": false,
+            "estimated_link": true,
+            "thumbnail_cache_mb": 2048,
+            "compression_workers": 1
+        }"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+        assert!(settings.compression_keep_original);
+        assert!(settings.auto_compress_immediate);
+    }
+
+    #[test]
+    fn compression_policy_settings_roundtrip() {
+        let db = Db::open_in_memory().unwrap();
+        let settings = AppSettings {
+            compression_keep_original: false,
+            auto_compress_immediate: false,
+            ..Default::default()
+        };
+        settings.save(&db).unwrap();
+        let loaded = AppSettings::load(&db).unwrap();
+        assert!(!loaded.compression_keep_original);
+        assert!(!loaded.auto_compress_immediate);
+    }
 
     #[test]
     fn settings_roundtrip() {
