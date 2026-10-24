@@ -25,6 +25,7 @@ ureq.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+minisign = "0.10"
 tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]

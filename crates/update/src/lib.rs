@@ -5,9 +5,13 @@
 
 pub mod error;
 pub mod manifest;
+pub mod verify;
 
 pub use error::{Result, UpdateError};
 pub use manifest::{
     AvailableUpdate, MANIFEST_SCHEMA, MAX_ARTIFACT_BYTES, MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES,
     Manifest, PlatformAsset, UpdateFormat,
+};
+pub use verify::{
+    decode_signature_base64, effective_public_keys, embedded_public_keys, verify_bytes, verify_file,
 };
