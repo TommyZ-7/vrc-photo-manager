@@ -184,7 +184,7 @@ fn parse_version(raw: &str) -> Result<Version> {
         .map_err(|error| UpdateError::InvalidManifest(format!("invalid version {raw}: {error}")))
 }
 
-fn validate_url(raw: &str, allow_http: bool, label: &str) -> Result<Url> {
+pub(crate) fn validate_url(raw: &str, allow_http: bool, label: &str) -> Result<Url> {
     let url = Url::parse(raw)
         .map_err(|error| UpdateError::InvalidManifest(format!("invalid {label}: {error}")))?;
     if !url.username().is_empty() || url.password().is_some() {
