@@ -1,6 +1,9 @@
+#[cfg(unix)]
 use std::fs;
 use std::io;
+#[cfg(unix)]
 use std::path::Path;
+#[cfg(unix)]
 use std::time::Duration;
 
 #[cfg(unix)]
@@ -13,6 +16,7 @@ use interprocess::local_socket::{
 
 pub use interprocess::local_socket::Stream;
 
+#[cfg(unix)]
 use crate::client;
 use crate::endpoint::Endpoint;
 
@@ -120,7 +124,8 @@ mod tests {
         let listener = Listener::bind(endpoint.clone()).unwrap();
         let path = endpoint.path().unwrap().to_path_buf();
         drop(listener);
-        fs::write(&path, b"stale").unwrap();
+        let stale = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        drop(stale);
         let _listener = Listener::bind(endpoint).unwrap();
     }
 }

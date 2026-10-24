@@ -30,7 +30,7 @@ Issue #18 では、即時コマンド（再スキャン、監視の一時停止/
 
 - `interprocess` 2.4 のローカルソケットを使う。
   - Unix: `${XDG_RUNTIME_DIR}/vrc-photo-manager/daemon.sock`。未設定なら `<data_dir>/run/daemon.sock`。パスが長すぎる場合は `/tmp/vrc-photo-manager-<user>/daemon.sock`。
-  - Windows: ユーザー名を含む名前付きパイプ。
+  - Windows: ユーザー名の安定ハッシュを含む名前付きパイプ（非ASCII名や記号違いの衝突を避ける）。
 - Unixではディレクトリを `0700`、ソケットを `0600` にする。
 - bind前に既存エンドポイントへ接続を試す。接続できれば生存中のデーモンとみなし、unlinkしない。接続拒否ならstaleとして削除してbindする。
 - TCPは使わない。ポート管理、認証トークン、ネットワーク公開面が増えるため。

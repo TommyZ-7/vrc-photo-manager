@@ -164,7 +164,7 @@ daemon ────┼──> ipc
 - deb/pacmanではデーモン実体（`/usr/bin/vrc-photo-daemon`）を自動起動に登録する。
 - deb/pacmanは任意の systemd ユーザーサービス `vrc-photo-daemon.service` を `/usr/lib/systemd/user/` に同梱する。unit は `graphical-session.target` に紐付き、インストール時には enable されない。
 - デーモンは `/proc/self/cgroup` が `vrc-photo-daemon.service` を含むか、`INVOCATION_ID` と `SYSTEMD_EXEC_PID` が自プロセスを指す場合に systemd 管理下と判定し、`app_settings.daemon_supervisor` に `systemd` / `app` を記録する。UIはハートビートが新しい間だけこの値を表示に使う。
-- デーモンは初期スキャンの前にIPCサーバーを起動する。Unixでは `$XDG_RUNTIME_DIR/vrc-photo-manager/daemon.sock`（未設定なら `<data_dir>/run/daemon.sock`）を使い、ディレクトリ `0700`、ソケット `0600` にする。Windowsはユーザー名を含む名前付きパイプを使う。
+- デーモンは初期スキャンの前にIPCサーバーを起動する。Unixでは `$XDG_RUNTIME_DIR/vrc-photo-manager/daemon.sock`（未設定なら `<data_dir>/run/daemon.sock`）を使い、ディレクトリ `0700`、ソケット `0600` にする。Windowsはユーザー名の安定ハッシュを含む名前付きパイプを使う。
 - bind前に既存エンドポイントへ接続し、生存中ならunlinkしない。接続拒否ならstaleとして削除する。
 - 終了時、デーモンはIPCサーバーを止め、開いているログセッションを閉じ、ワーカーを停止する。
 

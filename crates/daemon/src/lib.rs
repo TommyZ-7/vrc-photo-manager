@@ -495,11 +495,27 @@ impl Daemon {
 
     pub fn run(&mut self) -> Result<()> {
         self.start_ipc();
+        if self.stopping() {
+            self.shutdown();
+            return Ok(());
+        }
         self.record_supervisor();
         self.ensure_roots()?;
+        if self.stopping() {
+            self.shutdown();
+            return Ok(());
+        }
         self.scan_photos()?;
+        if self.stopping() {
+            self.shutdown();
+            return Ok(());
+        }
         self.ingest_logs()?;
         self.link_unlinked()?;
+        if self.stopping() {
+            self.shutdown();
+            return Ok(());
+        }
         self.write_heartbeat();
         self.restart_watchers();
         self.apply_autostart(self.settings.autostart);
@@ -563,6 +579,10 @@ impl Daemon {
         }
         self.shutdown();
         Ok(())
+    }
+
+    fn stopping(&self) -> bool {
+        !self.running.load(Ordering::Relaxed)
     }
 
     fn start_ipc(&mut self) {
@@ -775,6 +795,9 @@ impl Daemon {
             let mut changed = false;
             let mut missing_ids = Vec::new();
             for (index, root) in roots.into_iter().enumerate() {
+                if self.stopping() {
+                    break;
+                }
                 let root_number = index + 1;
                 {
                     let mut status = self.status.lock().unwrap();
@@ -1612,12 +1635,14 @@ fn worker_loop(
 ) {
     let mut seen_generation = 0;
     while running.load(Ordering::Relaxed) {
-        jobs.wait(&mut seen_generation, Duration::from_millis(400));
         let job = {
             let db = db.lock().unwrap();
             db.next_pending_job().ok().flatten()
         };
         let Some(job) = job else {
+            // Poll first so a batch keeps all workers busy; the signal only
+            // saves the 400 ms wait when the queue was empty.
+            jobs.wait(&mut seen_generation, Duration::from_millis(400));
             continue;
         };
         publish_compression(&events, &job, JobStatus::Processing, 0.05, None);
@@ -2428,6 +2453,58 @@ mod tests {
     }
 
     #[test]
+    fn compression_workers_process_a_batch_without_idle_delay() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let photo_path = dir
+            .path()
+            .join("photos/VRChat_2026-10-21_21-14-03.221_4x3.png");
+        write_photo(&photo_path);
+        daemon.run_once().unwrap();
+        std::fs::remove_file(&photo_path).unwrap();
+
+        {
+            let db = daemon.db.lock().unwrap();
+            let photo = db
+                .photo_by_path(&photo_path.to_string_lossy())
+                .unwrap()
+                .expect("indexed photo");
+            let profile = db
+                .ensure_default_profiles()
+                .unwrap()
+                .into_iter()
+                .next()
+                .expect("default profile");
+            db.enqueue_job(photo.id, &profile.id, "keep").unwrap();
+            db.enqueue_job(photo.id, &profile.id, "keep").unwrap();
+        }
+
+        daemon.settings.compression_workers = 2;
+        let events = daemon.events.subscribe();
+        let started = Instant::now();
+        daemon.start_workers();
+        let mut failures = 0;
+        while failures < 2 {
+            let event = events
+                .recv_timeout(Duration::from_millis(300))
+                .expect("worker idle delay");
+            if let Event::CompressionProgress {
+                status: JobStatus::Failed,
+                ..
+            } = event
+            {
+                failures += 1;
+            }
+        }
+        assert!(
+            started.elapsed() < Duration::from_millis(300),
+            "batch took {:?}",
+            started.elapsed()
+        );
+        daemon.stop_workers();
+    }
+
+    #[test]
     fn scan_photos_publishes_started_progress_and_finished() {
         let dir = tempfile::tempdir().unwrap();
         let mut daemon = test_daemon(&dir);
@@ -2452,6 +2529,24 @@ mod tests {
             Some(Event::ScanFinished { indexed, .. }) => assert_eq!(indexed, 1),
             _ => panic!("scan did not finish"),
         }
+    }
+
+    #[test]
+    fn scan_photos_stops_between_roots_when_stopping() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let second = dir.path().join("photos2");
+        std::fs::create_dir_all(&second).unwrap();
+        write_photo(&second.join("VRChat_2026-10-21_21-14-04.221_4x3.png"));
+        daemon.settings.photo_roots = vec![
+            dir.path().join("photos").to_string_lossy().to_string(),
+            second.to_string_lossy().to_string(),
+        ];
+        daemon.running.store(false, Ordering::Relaxed);
+
+        let report = daemon.scan_photos().unwrap();
+        assert_eq!(report.indexed, 0);
+        assert_eq!(daemon.db.lock().unwrap().count_photos().unwrap(), 0);
     }
 
     #[test]

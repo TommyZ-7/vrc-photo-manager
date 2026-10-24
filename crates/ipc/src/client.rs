@@ -1,8 +1,9 @@
 use std::io::{self, BufReader};
+use std::sync::mpsc;
 use std::time::Duration;
 
 use interprocess::ConnectWaitMode;
-use interprocess::local_socket::{ConnectOptions, Stream, traits::Stream as _};
+use interprocess::local_socket::{ConnectOptions, Stream};
 
 use crate::endpoint::Endpoint;
 use crate::framing;
@@ -22,6 +23,8 @@ pub enum IpcError {
     Protocol(String),
     #[error("connection closed")]
     Disconnected,
+    #[error("IPC request timed out")]
+    Timeout,
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -55,9 +58,12 @@ pub fn request(
         ));
     }
 
-    let stream = connect(endpoint, timeout)?;
-    stream.set_recv_timeout(Some(timeout))?;
-    stream.set_send_timeout(Some(timeout))?;
+    let endpoint = endpoint.clone();
+    with_timeout(timeout, move || request_blocking(&endpoint, request))
+}
+
+fn request_blocking(endpoint: &Endpoint, request: Request) -> Result<Response, IpcError> {
+    let stream = connect(endpoint, Duration::from_secs(2))?;
     let mut reader = BufReader::new(stream);
     handshake(&mut reader)?;
 
@@ -90,36 +96,8 @@ impl Subscription {
         endpoint: &Endpoint,
         timeout: Duration,
     ) -> Result<(Self, StatusSnapshot), IpcError> {
-        let stream = connect(endpoint, timeout)?;
-        stream.set_recv_timeout(Some(timeout))?;
-        stream.set_send_timeout(Some(timeout))?;
-        let mut reader = BufReader::new(stream);
-        handshake(&mut reader)?;
-
-        let id = 2;
-        framing::write_message(
-            reader.get_mut(),
-            &RequestEnvelope {
-                id,
-                request: Request::Subscribe,
-            },
-        )?;
-        match read_server_message(&mut reader)? {
-            ServerMessage::Response {
-                id: response_id,
-                response: Response::Subscribed { status },
-            } if response_id == id => {
-                reader.get_mut().set_recv_timeout(None)?;
-                Ok((Self { reader }, status))
-            }
-            ServerMessage::Response {
-                response: Response::Error { message, .. },
-                ..
-            } => Err(IpcError::Daemon(message)),
-            _ => Err(IpcError::Protocol(
-                "unexpected subscription response".to_string(),
-            )),
-        }
+        let endpoint = endpoint.clone();
+        with_timeout(timeout, move || subscription_open_blocking(&endpoint))
     }
 
     /// Reads the next event, or `None` when the daemon closes the connection.
@@ -131,6 +109,55 @@ impl Subscription {
             }
             None => Ok(None),
         }
+    }
+}
+
+fn subscription_open_blocking(
+    endpoint: &Endpoint,
+) -> Result<(Subscription, StatusSnapshot), IpcError> {
+    let stream = connect(endpoint, Duration::from_secs(2))?;
+    let mut reader = BufReader::new(stream);
+    handshake(&mut reader)?;
+
+    let id = 2;
+    framing::write_message(
+        reader.get_mut(),
+        &RequestEnvelope {
+            id,
+            request: Request::Subscribe,
+        },
+    )?;
+    match read_server_message(&mut reader)? {
+        ServerMessage::Response {
+            id: response_id,
+            response: Response::Subscribed { status },
+        } if response_id == id => Ok((Subscription { reader }, status)),
+        ServerMessage::Response {
+            response: Response::Error { message, .. },
+            ..
+        } => Err(IpcError::Daemon(message)),
+        _ => Err(IpcError::Protocol(
+            "unexpected subscription response".to_string(),
+        )),
+    }
+}
+
+/// Runs one blocking IPC operation with a single deadline. This avoids
+/// relying on stream timeouts, which Windows named pipes do not support.
+fn with_timeout<T, F>(timeout: Duration, operation: F) -> Result<T, IpcError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, IpcError> + Send + 'static,
+{
+    let (sender, receiver) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("ipc-request".to_string())
+        .spawn(move || {
+            let _ = sender.send(operation());
+        })?;
+    match receiver.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(_) => Err(IpcError::Timeout),
     }
 }
 
@@ -249,6 +276,21 @@ mod tests {
             }
             other => panic!("unexpected error: {other}"),
         }
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn request_times_out_when_the_server_does_not_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let endpoint = Endpoint::for_tests(dir.path());
+        let listener = server::Listener::bind(endpoint.clone()).unwrap();
+        let server = std::thread::spawn(move || {
+            let _stream = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(300));
+        });
+
+        let error = request(&endpoint, Request::Status, Duration::from_millis(100)).unwrap_err();
+        assert!(matches!(error, IpcError::Timeout));
         server.join().unwrap();
     }
 

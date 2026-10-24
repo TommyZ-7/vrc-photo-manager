@@ -1,5 +1,7 @@
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
 
 use interprocess::local_socket::Name;
 #[cfg(unix)]
@@ -50,7 +52,7 @@ impl Endpoint {
     #[cfg(windows)]
     pub fn for_data_dir(_data_dir: &Path) -> io::Result<Self> {
         Ok(Self {
-            inner: EndpointInner::Namespaced(user_namespaced("vrc-photo-manager-daemon")),
+            inner: EndpointInner::Namespaced(current_user_namespaced("vrc-photo-manager-daemon")),
         })
     }
 
@@ -115,12 +117,12 @@ impl Endpoint {
     }
 }
 
-#[cfg(windows)]
-fn user_namespaced(prefix: &str) -> String {
-    let user = std::env::var("USERNAME")
-        .or_else(|_| std::env::var("USER"))
-        .unwrap_or_else(|_| "user".to_string());
-    let user: String = user
+#[cfg(any(windows, test))]
+fn user_namespaced(prefix: &str, user: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let sanitized: String = user
         .chars()
         .map(|character| {
             if character.is_ascii_alphanumeric() {
@@ -130,7 +132,17 @@ fn user_namespaced(prefix: &str) -> String {
             }
         })
         .collect();
-    format!("{prefix}-{user}")
+    let mut hasher = DefaultHasher::new();
+    user.hash(&mut hasher);
+    format!("{prefix}-{sanitized}-{:016x}", hasher.finish())
+}
+
+#[cfg(windows)]
+fn current_user_namespaced(prefix: &str) -> String {
+    let user = std::env::var("USERNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "user".to_string());
+    user_namespaced(prefix, &user)
 }
 
 #[cfg(test)]
@@ -150,5 +162,21 @@ mod tests {
     fn endpoint_display_is_non_empty() {
         let dir = tempfile::tempdir().unwrap();
         assert!(!Endpoint::for_tests(dir.path()).display().is_empty());
+    }
+
+    #[test]
+    fn windows_names_include_a_stable_user_hash() {
+        assert_ne!(
+            user_namespaced("daemon", "山田"),
+            user_namespaced("daemon", "田中")
+        );
+        assert_ne!(
+            user_namespaced("daemon", "a-b"),
+            user_namespaced("daemon", "a_b")
+        );
+        assert_eq!(
+            user_namespaced("daemon", "same"),
+            user_namespaced("daemon", "same")
+        );
     }
 }

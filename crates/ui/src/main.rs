@@ -1405,6 +1405,7 @@ impl App {
             ipc_bridge::Incoming::Connected(status) => {
                 self.ipc_connected = true;
                 self.ipc_error = None;
+                self.daemon_shutdown_armed = false;
                 self.refresh_monitor();
                 self.apply_daemon_status(status);
             }
@@ -1413,6 +1414,7 @@ impl App {
                 self.ipc_connected = false;
                 self.ipc_error = Some(error);
                 self.daemon_paused = false;
+                self.daemon_shutdown_armed = false;
                 self.scan_progress = None;
                 if was_connected {
                     self.refresh_monitor();
@@ -1542,9 +1544,8 @@ impl App {
                         }
                     }
                     Err(error) => {
-                        this.message = Some(
-                            failure.unwrap_or_else(|| format!("デーモンに接続できません: {error}")),
-                        );
+                        this.message =
+                            Some(failure.unwrap_or_else(|| ipc_bridge::error_message(&error)));
                     }
                 }
                 cx.notify();
@@ -1586,7 +1587,7 @@ impl App {
         self.send_ipc_request(
             IpcRequest::SetPaused { paused },
             Some(success.to_string()),
-            Some("デーモンに接続できません".to_string()),
+            None,
             cx,
         );
     }
@@ -1607,7 +1608,7 @@ impl App {
         self.send_ipc_request(
             IpcRequest::Shutdown,
             Some("デーモンを終了しました".to_string()),
-            Some("デーモンに接続できません".to_string()),
+            None,
             cx,
         );
     }
@@ -1701,6 +1702,7 @@ impl App {
             Ok(true) => {
                 self.message = Some("再試行をキューに戻しました".to_string());
                 self.reload_job_state();
+                self.send_wake_jobs(cx);
             }
             Ok(false) => {
                 self.message = Some(format!("再試行の上限（{MAX_JOB_RETRIES}回）に達しました"));
@@ -1718,6 +1720,7 @@ impl App {
             Ok(count) => {
                 self.message = Some(format!("{count} 件を再試行に戻しました（上限到達は除外）"));
                 self.reload_job_state();
+                self.send_wake_jobs(cx);
             }
             Err(error) => {
                 tracing::warn!(%error, "cannot retry failed compression jobs");
@@ -3198,7 +3201,11 @@ impl App {
         let sync = if self.demo_assets.is_some() {
             "デモデータ".to_string()
         } else {
-            daemon_sync_label(self.daemon_age_secs, self.daemon_supervisor.as_deref())
+            daemon_sync_label(
+                self.daemon_age_secs,
+                self.daemon_supervisor.as_deref(),
+                self.ipc_connected,
+            )
         };
         let subtitle = format!(
             "{} 枚 · {} · {}",
@@ -6407,7 +6414,11 @@ impl App {
         } else {
             ("稼働中", GREEN, 0x112a22)
         };
-        let sync = daemon_sync_label(self.daemon_age_secs, self.daemon_supervisor.as_deref());
+        let sync = daemon_sync_label(
+            self.daemon_age_secs,
+            self.daemon_supervisor.as_deref(),
+            self.ipc_connected,
+        );
         let ipc = if self.ipc_connected {
             "IPC 接続中"
         } else {
@@ -7717,12 +7728,17 @@ fn scan_progress_ratio(progress: &ScanProgressView) -> f32 {
     ratio.clamp(0.0, 1.0)
 }
 
-fn daemon_sync_label(age_secs: Option<i64>, supervisor: Option<&str>) -> String {
+fn daemon_sync_label(
+    age_secs: Option<i64>,
+    supervisor: Option<&str>,
+    ipc_connected: bool,
+) -> String {
     match age_secs.filter(|age| *age < 20) {
         Some(age) if supervisor == Some("systemd") => {
             format!("最終同期 {age}秒前 · systemd")
         }
         Some(age) => format!("最終同期 {age}秒前"),
+        None if ipc_connected => "IPC 接続中".to_string(),
         None => "デーモン停止".to_string(),
     }
 }
@@ -9105,12 +9121,20 @@ mod tests {
     #[test]
     fn daemon_sync_label_includes_systemd_supervisor() {
         assert_eq!(
-            daemon_sync_label(Some(5), Some("systemd")),
+            daemon_sync_label(Some(5), Some("systemd"), false),
             "最終同期 5秒前 · systemd"
         );
-        assert_eq!(daemon_sync_label(Some(5), Some("app")), "最終同期 5秒前");
-        assert_eq!(daemon_sync_label(Some(30), Some("systemd")), "デーモン停止");
-        assert_eq!(daemon_sync_label(None, None), "デーモン停止");
+        assert_eq!(
+            daemon_sync_label(Some(5), Some("app"), false),
+            "最終同期 5秒前"
+        );
+        assert_eq!(
+            daemon_sync_label(Some(30), Some("systemd"), false),
+            "デーモン停止"
+        );
+        assert_eq!(daemon_sync_label(None, None, false), "デーモン停止");
+        assert_eq!(daemon_sync_label(None, None, true), "IPC 接続中");
+        assert_eq!(daemon_sync_label(Some(30), None, true), "IPC 接続中");
     }
 
     #[test]

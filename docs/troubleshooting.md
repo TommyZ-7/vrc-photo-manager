@@ -95,7 +95,7 @@ systemctl --user add-wants default.target vrc-photo-daemon.service
 
 ### IPCが接続しない / 「IPC 未接続」と出る
 
-- UIとデーモンはローカルソケットで接続する。Unixは `$XDG_RUNTIME_DIR/vrc-photo-manager/daemon.sock`（未設定なら `<data_dir>/run/daemon.sock`）、Windowsはユーザー名を含む名前付きパイプ。
+- UIとデーモンはローカルソケットで接続する。Unixは `$XDG_RUNTIME_DIR/vrc-photo-manager/daemon.sock`（未設定なら `<data_dir>/run/daemon.sock`）、Windowsはユーザー名の安定ハッシュを含む名前付きパイプ。
 - デーモンが動いているのにIPCだけ未接続の場合は、ハートビートと3秒ポーリングで表示は継続する。再スキャンなどのコマンドもDBに残り、デーモンが処理する。
 - Unixでソケットのパスと権限を確認する: `ls -l "$XDG_RUNTIME_DIR/vrc-photo-manager/daemon.sock"`。ディレクトリは `0700`、ソケットは `0600` が正常。
 - デーモンが異常終了してstale socketが残った場合、次の起動時に接続確認してから削除する。手動で削除してもよい。

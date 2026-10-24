@@ -11,9 +11,9 @@ cargo test --workspace
 2026-10-24時点:
 
 - `vrc-photo-core`: 80件（1件はignored）
-- `vrc-photo-daemon`: 42件
-- `vrc-photo-ipc`: 10件
-- UI: 68件（GPUIを起動しない純粋ヘルパーとIPCブリッジの単体テスト）
+- `vrc-photo-daemon`: 44件
+- `vrc-photo-ipc`: 12件
+- UI: 70件（GPUIを起動しない純粋ヘルパーとIPCブリッジの単体テスト）
 
 ### ipcの主なテスト
 

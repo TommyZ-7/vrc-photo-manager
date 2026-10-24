@@ -149,8 +149,8 @@ Envelope:
 ```json
 {"id":1,"request":{"type":"hello","protocol_version":1,"client":{"name":"vrc-photo-manager","version":"0.3.0"}}}
 {"id":2,"request":{"type":"wake_commands"}}
-{"event":{"type":"compression_progress","job_id":"...","photo_id":42,"status":"processing","progress":0.05}}
-{"id":2,"response":{"type":"ok"}}
+{"type":"event","event":{"type":"compression_progress","job_id":"...","photo_id":42,"status":"processing","progress":0.05}}
+{"type":"response","id":2,"response":{"type":"ok"}}
 ```
 
 Requests:

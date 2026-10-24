@@ -28,6 +28,18 @@ pub fn request(endpoint: Endpoint, request: Request) -> Result<Response, IpcErro
     client::request(&endpoint, request, Duration::from_secs(2))
 }
 
+/// Converts an IPC failure into a user-facing Japanese message.
+pub fn error_message(error: &IpcError) -> String {
+    match error {
+        IpcError::ProtocolMismatch { daemon, client } => {
+            format!("デーモンの更新が必要です（プロトコル {daemon} / {client}）")
+        }
+        IpcError::Timeout => "デーモンの応答がタイムアウトしました".to_string(),
+        IpcError::Disconnected => "デーモンとの接続が終了しました".to_string(),
+        other => format!("デーモンに接続できません: {other}"),
+    }
+}
+
 fn bridge_loop(endpoint: Endpoint, tx: async_channel::Sender<Incoming>) {
     loop {
         match Subscription::open(&endpoint, Duration::from_millis(500)) {
@@ -55,7 +67,7 @@ fn bridge_loop(endpoint: Endpoint, tx: async_channel::Sender<Incoming>) {
                         }
                         Err(error) => {
                             if tx
-                                .send_blocking(Incoming::Disconnected(error.to_string()))
+                                .send_blocking(Incoming::Disconnected(error_message(&error)))
                                 .is_err()
                             {
                                 return;
@@ -67,7 +79,7 @@ fn bridge_loop(endpoint: Endpoint, tx: async_channel::Sender<Incoming>) {
             }
             Err(error) => {
                 if tx
-                    .send_blocking(Incoming::Disconnected(error.to_string()))
+                    .send_blocking(Incoming::Disconnected(error_message(&error)))
                     .is_err()
                 {
                     return;
@@ -146,6 +158,79 @@ mod tests {
             other => panic!("expected scan event, got {other:?}"),
         }
         drop(rx);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn protocol_mismatch_reports_the_update_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let endpoint = vrc_photo_ipc::Endpoint::for_tests(dir.path());
+        let listener = Listener::bind(endpoint.clone()).unwrap();
+        let server = std::thread::spawn(move || {
+            let stream = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream);
+            let hello: RequestEnvelope = framing::read_message(&mut reader).unwrap().unwrap();
+            framing::write_message(
+                reader.get_mut(),
+                &ServerMessage::Response {
+                    id: hello.id,
+                    response: Response::Hello {
+                        protocol_version: vrc_photo_ipc::PROTOCOL_VERSION + 1,
+                        daemon_version: "test".to_string(),
+                        pid: 1,
+                        status: StatusSnapshot::default(),
+                    },
+                },
+            )
+            .unwrap();
+        });
+
+        let (tx, rx) = async_channel::unbounded();
+        start(endpoint, tx);
+        match rx.recv_blocking().unwrap() {
+            Incoming::Disconnected(error) => {
+                assert!(error.contains("デーモンの更新が必要です"), "{error}");
+            }
+            other => panic!("expected protocol mismatch, got {other:?}"),
+        }
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn request_round_trips_and_maps_daemon_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let endpoint = vrc_photo_ipc::Endpoint::for_tests(dir.path());
+        let listener = Listener::bind(endpoint.clone()).unwrap();
+        let server = std::thread::spawn(move || {
+            for response in [
+                Response::Ok,
+                Response::Error {
+                    code: vrc_photo_ipc::ErrorCode::InvalidRequest,
+                    message: "nope".to_string(),
+                },
+            ] {
+                let stream = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream);
+                let hello: RequestEnvelope = framing::read_message(&mut reader).unwrap().unwrap();
+                framing::write_message(reader.get_mut(), &hello_response(hello.id)).unwrap();
+                let request: RequestEnvelope = framing::read_message(&mut reader).unwrap().unwrap();
+                framing::write_message(
+                    reader.get_mut(),
+                    &ServerMessage::Response {
+                        id: request.id,
+                        response,
+                    },
+                )
+                .unwrap();
+            }
+        });
+
+        assert!(matches!(
+            request(endpoint.clone(), Request::WakeCommands).unwrap(),
+            Response::Ok
+        ));
+        let error = request(endpoint, Request::Status).unwrap_err();
+        assert!(matches!(error, IpcError::Daemon(_)));
         server.join().unwrap();
     }
 
