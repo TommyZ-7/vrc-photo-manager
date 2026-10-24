@@ -463,6 +463,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn classifies_linux_paths() {
         let dir = tempfile::tempdir().unwrap();
@@ -748,14 +749,17 @@ mod tests {
                 install_dir: exe.parent().unwrap().into()
             }
         );
-        assert!(matches!(
+        let machine_exe = Path::new(r"C:\Program Files\VRC Photo Manager\vrc-photo-manager.exe");
+        assert_eq!(
             classify_windows(
-                exe,
+                machine_exe,
                 None,
                 Some(Path::new(r"C:\Program Files\VRC Photo Manager"))
             ),
-            InstallKind::WindowsPerMachine { .. }
-        ));
+            InstallKind::WindowsPerMachine {
+                install_dir: machine_exe.parent().unwrap().into()
+            }
+        );
         assert_eq!(classify_windows(exe, None, None), InstallKind::WindowsOther);
     }
 }
