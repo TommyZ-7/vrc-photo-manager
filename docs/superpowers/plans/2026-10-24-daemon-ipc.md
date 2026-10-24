@@ -477,7 +477,7 @@ git commit -m "feat: publish daemon events and wake on IPC"
 
 **Interfaces:**
 - Consumes: Task 1/2 IPC client/protocol.
-- Produces: `ipc_bridge::{Incoming, start, request}`, `App::{ipc_connected, ipc_error, daemon_paused, scan_progress}`, `daemon_liveness(Option<i64>, bool) -> bool`.
+- Produces: `ipc_bridge::{Incoming, start, request}`, `App::{ipc_connected, ipc_error, daemon_paused, scan_progress}`, `ScanProgressView { phase, processed, total, indexed, root, roots }`, `daemon_liveness(Option<i64>, bool) -> bool`.
 
 - [ ] **Step 1: Write the failing UI helper/bridge tests**
 
