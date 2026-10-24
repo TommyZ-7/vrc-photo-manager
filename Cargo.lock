@@ -7581,15 +7581,18 @@ name = "vrc-photo-ui"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "async-channel",
  "chrono",
  "gpui-kit",
  "image",
  "rfd",
  "smallvec",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
  "trash",
  "vrc-photo-core",
+ "vrc-photo-ipc",
 ]
 
 [[package]]

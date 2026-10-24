@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+async-channel = "2.5"
 chrono.workspace = true
 gpui-kit = "=0.8.0"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
@@ -21,3 +22,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 trash = "5"
 vrc-photo-core = { path = "../core" }
+vrc-photo-ipc = { path = "../ipc" }
+
+[dev-dependencies]
+tempfile = "3"

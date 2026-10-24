@@ -30,7 +30,11 @@ use vrc_photo_core::scanner::ScanFailure;
 use vrc_photo_core::settings::AppSettings;
 use vrc_photo_core::thumbnail;
 use vrc_photo_core::time;
+use vrc_photo_ipc::{
+    Endpoint, Event as IpcEvent, Request as IpcRequest, ScanPhase as IpcScanPhase, StatusSnapshot,
+};
 
+mod ipc_bridge;
 mod logging;
 
 const BG: u32 = 0x07090d;
@@ -1049,6 +1053,16 @@ impl Element for YearRail {
 
 /// Outcome of one import run, kept on the Photos screen until the user closes
 /// it so failed files can be retried without reopening the file picker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ScanProgressView {
+    phase: IpcScanPhase,
+    processed: usize,
+    total: Option<usize>,
+    indexed: usize,
+    root: usize,
+    roots: usize,
+}
+
 #[derive(Clone)]
 struct ImportReportView {
     mode: ImportMode,
@@ -1070,6 +1084,11 @@ pub struct App {
     hovered_nav: Option<Screen>,
     daemon_age_secs: Option<i64>,
     daemon_supervisor: Option<String>,
+    ipc_endpoint: Option<Endpoint>,
+    ipc_connected: bool,
+    ipc_error: Option<String>,
+    daemon_paused: bool,
+    scan_progress: Option<ScanProgressView>,
     /// Last daemon-side library revision observed by the UI. Path changes and
     /// replacement status changes do not alter the photo count, so the count
     /// alone cannot tell the grid to rebuild.
@@ -1219,6 +1238,11 @@ impl App {
             hovered_nav: None,
             daemon_age_secs: None,
             daemon_supervisor: None,
+            ipc_endpoint: None,
+            ipc_connected: false,
+            ipc_error: None,
+            daemon_paused: false,
+            scan_progress: None,
             last_library_revision: initial_library_revision,
             library: PhotoBrowser::new(empty_index.clone()),
             search_view: PhotoBrowser::new(empty_index),
@@ -1323,6 +1347,9 @@ impl App {
             app.message = Some(format!("デーモンを起動できません: {error}"));
         }
         app.start_auto_refresh(cx);
+        if !app.demo {
+            app.start_ipc(cx);
+        }
         if timing_enabled() {
             let started = process_start();
             cx.on_next_frame(window, move |_, _, _| {
@@ -1340,6 +1367,186 @@ impl App {
                     break;
                 }
             }
+        })
+        .detach();
+    }
+
+    fn start_ipc(&mut self, cx: &mut Context<Self>) {
+        let Some(data_dir) = vrc_photo_core::data_dir() else {
+            return;
+        };
+        let endpoint = match Endpoint::for_data_dir(&data_dir) {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                tracing::warn!(%error, "cannot resolve daemon IPC endpoint");
+                return;
+            }
+        };
+        self.ipc_endpoint = Some(endpoint.clone());
+        let (tx, rx) = async_channel::unbounded();
+        ipc_bridge::start(endpoint, tx);
+        cx.spawn(async move |this, cx| {
+            while let Ok(incoming) = rx.recv().await {
+                if this
+                    .update(cx, |this, cx| this.handle_ipc_incoming(incoming, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn handle_ipc_incoming(&mut self, incoming: ipc_bridge::Incoming, cx: &mut Context<Self>) {
+        match incoming {
+            ipc_bridge::Incoming::Connected(status) => {
+                self.ipc_connected = true;
+                self.ipc_error = None;
+                self.apply_daemon_status(status);
+            }
+            ipc_bridge::Incoming::Disconnected(error) => {
+                let was_connected = self.ipc_connected;
+                self.ipc_connected = false;
+                self.ipc_error = Some(error);
+                self.scan_progress = None;
+                if was_connected {
+                    self.refresh_monitor();
+                }
+            }
+            ipc_bridge::Incoming::Event(event) => self.handle_ipc_event(event, cx),
+        }
+        cx.notify();
+    }
+
+    fn apply_daemon_status(&mut self, status: StatusSnapshot) {
+        self.daemon_paused = status.paused;
+        self.scan_progress = status.scanning.then(|| ScanProgressView {
+            phase: status.scan_phase.unwrap_or(IpcScanPhase::Walking),
+            processed: status.scan_processed,
+            total: status.scan_total,
+            indexed: status.scan_indexed,
+            root: status.scan_root,
+            roots: status.scan_roots,
+        });
+        self.daemon_active = daemon_liveness(self.daemon_age_secs, self.ipc_connected);
+    }
+
+    fn handle_ipc_event(&mut self, event: IpcEvent, cx: &mut Context<Self>) {
+        match event {
+            IpcEvent::ScanStarted { roots } => {
+                self.scan_progress = Some(ScanProgressView {
+                    phase: IpcScanPhase::Walking,
+                    processed: 0,
+                    total: None,
+                    indexed: 0,
+                    root: usize::from(roots > 0),
+                    roots,
+                });
+            }
+            IpcEvent::ScanProgress {
+                phase,
+                processed,
+                total,
+                indexed,
+                root,
+                roots,
+            } => {
+                self.scan_progress = Some(ScanProgressView {
+                    phase,
+                    processed,
+                    total,
+                    indexed,
+                    root,
+                    roots,
+                });
+            }
+            IpcEvent::ScanFinished { .. } => {
+                self.scan_progress = None;
+                self.refresh_live(cx);
+            }
+            IpcEvent::CompressionProgress { .. } => {
+                self.refresh_live(cx);
+            }
+            IpcEvent::DaemonErrorChanged { .. } => {
+                self.reload_job_state();
+            }
+            IpcEvent::StatusChanged { status } => {
+                self.apply_daemon_status(status);
+                self.refresh_monitor();
+            }
+        }
+    }
+
+    fn wake_daemon(&self, request: IpcRequest, cx: &mut Context<Self>) {
+        if !self.ipc_connected {
+            return;
+        }
+        let Some(endpoint) = self.ipc_endpoint.clone() else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { ipc_bridge::request(endpoint, request) })
+                .await;
+            if let Err(error) = result {
+                tracing::debug!(%error, "daemon IPC wake failed");
+            }
+            this.update(cx, |_, cx| cx.notify()).ok();
+        })
+        .detach();
+    }
+
+    fn send_wake_commands(&self, cx: &mut Context<Self>) {
+        self.wake_daemon(IpcRequest::WakeCommands, cx);
+    }
+
+    fn send_wake_jobs(&self, cx: &mut Context<Self>) {
+        self.wake_daemon(IpcRequest::WakeJobs, cx);
+    }
+
+    #[allow(dead_code)] // used by the monitor controls in the next task
+    fn send_ipc_request(
+        &mut self,
+        request: IpcRequest,
+        success: Option<String>,
+        failure: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.ipc_connected {
+            if let Some(message) = failure {
+                self.message = Some(message);
+            }
+            cx.notify();
+            return;
+        }
+        let Some(endpoint) = self.ipc_endpoint.clone() else {
+            self.message = Some("IPCの接続先を解決できません".to_string());
+            cx.notify();
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { ipc_bridge::request(endpoint, request) })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(_) => {
+                        if let Some(message) = success {
+                            this.message = Some(message);
+                        }
+                    }
+                    Err(error) => {
+                        this.message = Some(
+                            failure.unwrap_or_else(|| format!("デーモンに接続できません: {error}")),
+                        );
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
         })
         .detach();
     }
@@ -1467,6 +1674,7 @@ impl App {
             Ok(false) => self.message = Some("すでに再試行を要求済みです。".to_string()),
             Err(error) => self.message = Some(format!("再試行を要求できません: {error}")),
         }
+        self.send_wake_commands(cx);
         cx.notify();
     }
 
@@ -1612,7 +1820,7 @@ impl App {
             .flatten()
             .and_then(|value| value.parse::<i64>().ok())
             .map(|timestamp| (now - timestamp).max(0));
-        self.daemon_active = self.daemon_age_secs.is_some_and(|age| age < 20);
+        self.daemon_active = daemon_liveness(self.daemon_age_secs, self.ipc_connected);
         self.daemon_supervisor = self.db.get_setting("daemon_supervisor").ok().flatten();
         self.monitor_world = None;
         self.monitor_instance = None;
@@ -2166,6 +2374,7 @@ impl App {
                     "圧縮ジョブをキューに追加しました（元画像を保持）".to_string()
                 });
                 self.reload_aux(cx);
+                self.send_wake_jobs(cx);
             }
             Err(error) => self.message = Some(format!("キュー追加に失敗: {error}")),
         }
@@ -5645,8 +5854,11 @@ impl App {
         }
         // The daemon may not have watched the new import destination yet.
         // A rescan makes it reload settings and rebuild its recursive watchers.
-        if let Err(error) = self.db.request_daemon_command(DaemonCommand::Rescan) {
-            tracing::warn!(%error, "cannot request rescan for import destination");
+        match self.db.request_daemon_command(DaemonCommand::Rescan) {
+            Ok(_) => self.send_wake_commands(cx),
+            Err(error) => {
+                tracing::warn!(%error, "cannot request rescan for import destination");
+            }
         }
     }
 
@@ -6441,6 +6653,9 @@ impl App {
                                                     let requested = this
                                                         .db
                                                         .request_daemon_command(DaemonCommand::Rescan);
+                                                    if requested.is_ok() {
+                                                        this.send_wake_commands(cx);
+                                                    }
                                                     this.message = Some(match requested {
                                                         Ok(_) => "保存しました。デーモンに再スキャンを要求しました（停止中なら起動後に実行）".to_string(),
                                                         Err(error) => {
@@ -7263,6 +7478,10 @@ fn alert_summaries(
     rows
 }
 
+fn daemon_liveness(age_secs: Option<i64>, ipc_connected: bool) -> bool {
+    ipc_connected || age_secs.is_some_and(|age| age < 20)
+}
+
 fn daemon_sync_label(age_secs: Option<i64>, supervisor: Option<&str>) -> String {
     match age_secs.filter(|age| *age < 20) {
         Some(age) if supervisor == Some("systemd") => {
@@ -7729,15 +7948,15 @@ mod tests {
         MAX_PAGES, PAGE_SIZE, PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex, PhotoPageCache, Screen,
         THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, YearBucket, add_photo_root_and_save,
         alert_summaries, anchor_photo_id, apply_library_index, autostart_description, average_bgra,
-        build_year_buckets, daemon_operation_label, daemon_sync_label, decode_thumbnail,
-        demo_thumb_path, ease_motion, first_visible_photo, format_captured_month, format_count,
-        format_timestamp, grid_available_width, grid_columns, grid_columns_for, has_tag_filter,
-        import_issue_counts, job_retry_available, job_retry_label, lerp_color, list_scroll_top,
-        moved_profile_order, next_focus_index, normalize_note, parse_args, parse_window_size,
-        rail_label_hidden_by_pill, rail_row_at, rail_scroll_offset, rail_y, retryable_sources,
-        search_anchor_after_result, search_available_width, sidebar_reveal_width, sidebar_width,
-        stagger_value, step_index, sync_search_mirror, viewer_details_width, viewer_image_box,
-        visible_year_buckets, with_tag, without_tag,
+        build_year_buckets, daemon_liveness, daemon_operation_label, daemon_sync_label,
+        decode_thumbnail, demo_thumb_path, ease_motion, first_visible_photo, format_captured_month,
+        format_count, format_timestamp, grid_available_width, grid_columns, grid_columns_for,
+        has_tag_filter, import_issue_counts, job_retry_available, job_retry_label, lerp_color,
+        list_scroll_top, moved_profile_order, next_focus_index, normalize_note, parse_args,
+        parse_window_size, rail_label_hidden_by_pill, rail_row_at, rail_scroll_offset, rail_y,
+        retryable_sources, search_anchor_after_result, search_available_width,
+        sidebar_reveal_width, sidebar_width, stagger_value, step_index, sync_search_mirror,
+        viewer_details_width, viewer_image_box, visible_year_buckets, with_tag, without_tag,
     };
     use gpui_kit::{RenderImage, ScrollStrategy, UniformListScrollHandle, point, px};
     use smallvec::SmallVec;
@@ -8609,6 +8828,14 @@ mod tests {
         assert!(!job_retry_available(&test_job(QueueStatus::Failed, 3)));
         assert!(!job_retry_available(&test_job(QueueStatus::Completed, 0)));
         assert!(job_retry_label(&test_job(QueueStatus::Failed, 3)).contains("上限"));
+    }
+
+    #[test]
+    fn daemon_liveness_uses_heartbeat_or_ipc() {
+        assert!(daemon_liveness(Some(3), false));
+        assert!(daemon_liveness(None, true));
+        assert!(!daemon_liveness(Some(30), false));
+        assert!(!daemon_liveness(None, false));
     }
 
     #[test]
