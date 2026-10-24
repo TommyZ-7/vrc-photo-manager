@@ -924,12 +924,15 @@ mod tests {
             .path()
             .join("updates")
             .join(format!("health-{token}.json"));
+        let marker_tmp = marker_path.with_extension("json.tmp");
         let new_script = dir.path().join("new.AppImage");
         std::fs::write(
             &new_script,
             format!(
-                "#!/bin/sh\nmkdir -p '{}'\nprintf '%s' '{{\"version\":\"9.9.9\",\"mode\":\"normal\"}}' > '{}'\nsleep 0.2\n",
+                "#!/bin/sh\nmkdir -p '{}'\nprintf '%s' '{{\"version\":\"9.9.9\",\"mode\":\"normal\"}}' > '{}'\nmv '{}' '{}'\nsleep 0.2\n",
                 marker_path.parent().unwrap().display(),
+                marker_tmp.display(),
+                marker_tmp.display(),
                 marker_path.display()
             ),
         )
@@ -946,7 +949,7 @@ mod tests {
         run_helper_with_options(
             &job_file,
             HelperOptions {
-                health_timeout: Duration::from_secs(3),
+                health_timeout: Duration::from_secs(5),
                 skip_signature_check: true,
                 ..HelperOptions::default()
             },

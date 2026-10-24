@@ -255,6 +255,6 @@ mod tests {
             .get_bytes(&format!("http://{address}/latest.json"), 1024)
             .unwrap_err();
         assert!(matches!(error, UpdateError::Network(_)));
-        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 }

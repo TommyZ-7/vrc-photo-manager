@@ -208,13 +208,19 @@ cargo run -p vrc-photo-update --example generate_update_key -- /secure/path/mini
 ```bash
 cargo run -p vrc-photo-release-tool --bin vrc-photo-update-manifest -- \
   sign --key /secure/path/minisign.key --dist dist
-PUB=$(grep -m1 '^RW' packaging/update/keys.txt)
+PUB_ARGS=()
+while read -r key; do PUB_ARGS+=(--public-key "$key"); done \
+  < <(grep '^RW' packaging/update/keys.txt)
 cargo run -p vrc-photo-release-tool --bin vrc-photo-update-manifest -- \
-  verify --public-key "$PUB" --dist dist
+  verify "${PUB_ARGS[@]}" --dist dist
 cargo run -p vrc-photo-release-tool --bin vrc-photo-update-manifest -- \
   generate --dist dist --tag v0.4.0 --repo TommyZ-7/vrc-photo-manager \
   --notes-url https://github.com/TommyZ-7/vrc-photo-manager/releases/tag/v0.4.0 \
   --output dist/latest.json
+cargo run -p vrc-photo-release-tool --bin vrc-photo-update-manifest -- \
+  sign --key /secure/path/minisign.key --file dist/latest.json
+cargo run -p vrc-photo-release-tool --bin vrc-photo-update-manifest -- \
+  verify "${PUB_ARGS[@]}" --file dist/latest.json
 ```
 
 `sign` / `verify` / `generate` は `dist` 内の `*.minisig` を除く全ファイルを
