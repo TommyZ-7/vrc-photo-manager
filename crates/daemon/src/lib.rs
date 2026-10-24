@@ -2337,6 +2337,45 @@ mod tests {
     }
 
     #[test]
+    fn a_renamed_file_keeps_the_same_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let db_path = dir.path().join("library.db");
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir.clone()), Some(log_dir)).unwrap();
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+
+        let old_path = photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&old_path);
+        daemon.dirty_paths.push(old_path.clone());
+        daemon.index_dirty_paths().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        let photo = db
+            .photo_by_path(old_path.to_str().unwrap())
+            .unwrap()
+            .expect("indexed");
+        let photo_id = photo.id;
+        let captured_at = photo.captured_at_utc;
+        db.set_photo_tags(photo_id, &["night".to_string()]).unwrap();
+
+        let new_path = photo_dir.join("renamed.png");
+        std::fs::rename(&old_path, &new_path).unwrap();
+        daemon.dirty_paths.push(new_path.clone());
+        daemon.dirty_paths.push(old_path.clone());
+        daemon.index_dirty_paths().unwrap();
+
+        let photo = db.photo_by_id(photo_id).unwrap().unwrap();
+        assert_eq!(photo.abs_path, new_path.to_string_lossy());
+        assert_eq!(photo.captured_at_utc, captured_at);
+        assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Present);
+        assert_eq!(db.photo_tags(photo_id).unwrap(), vec!["night".to_string()]);
+        assert_eq!(db.count_photos().unwrap(), 1);
+    }
+
+    #[test]
     fn a_move_between_configured_roots_keeps_the_same_row() {
         let dir = tempfile::tempdir().unwrap();
         let first_root = dir.path().join("photos");
@@ -2462,6 +2501,12 @@ mod tests {
         assert!(!original.exists());
         assert_eq!(db.count_photos().unwrap(), 1);
         assert_eq!(db.stats().unwrap().photo_count, 1);
+
+        // A subsequent full scan must not turn the replaced photo into a
+        // missing one just because its original path is gone.
+        daemon.run_once().unwrap();
+        let photo = db.photo_by_id(photo.id).unwrap().unwrap();
+        assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Replaced);
 
         let derivative_path = photo.display_path.clone().expect("display derivative");
         std::fs::remove_file(&derivative_path).unwrap();
