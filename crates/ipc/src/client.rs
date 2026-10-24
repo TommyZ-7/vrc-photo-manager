@@ -55,14 +55,15 @@ pub fn request(
         ));
     }
 
-    let mut stream = connect(endpoint, timeout)?;
+    let stream = connect(endpoint, timeout)?;
     stream.set_recv_timeout(Some(timeout))?;
     stream.set_send_timeout(Some(timeout))?;
-    handshake(&mut stream)?;
+    let mut reader = BufReader::new(stream);
+    handshake(&mut reader)?;
 
     let id = 2;
-    framing::write_message(&mut stream, &RequestEnvelope { id, request })?;
-    match read_server_message(&mut stream)? {
+    framing::write_message(reader.get_mut(), &RequestEnvelope { id, request })?;
+    match read_server_message(&mut reader)? {
         ServerMessage::Response {
             id: response_id,
             response,
@@ -89,31 +90,27 @@ impl Subscription {
         endpoint: &Endpoint,
         timeout: Duration,
     ) -> Result<(Self, StatusSnapshot), IpcError> {
-        let mut stream = connect(endpoint, timeout)?;
+        let stream = connect(endpoint, timeout)?;
         stream.set_recv_timeout(Some(timeout))?;
         stream.set_send_timeout(Some(timeout))?;
-        handshake(&mut stream)?;
+        let mut reader = BufReader::new(stream);
+        handshake(&mut reader)?;
 
         let id = 2;
         framing::write_message(
-            &mut stream,
+            reader.get_mut(),
             &RequestEnvelope {
                 id,
                 request: Request::Subscribe,
             },
         )?;
-        match read_server_message(&mut stream)? {
+        match read_server_message(&mut reader)? {
             ServerMessage::Response {
                 id: response_id,
                 response: Response::Subscribed { status },
             } if response_id == id => {
-                stream.set_recv_timeout(None)?;
-                Ok((
-                    Self {
-                        reader: BufReader::new(stream),
-                    },
-                    status,
-                ))
+                reader.get_mut().set_recv_timeout(None)?;
+                Ok((Self { reader }, status))
             }
             ServerMessage::Response {
                 response: Response::Error { message, .. },
@@ -137,10 +134,10 @@ impl Subscription {
     }
 }
 
-fn handshake(stream: &mut Stream) -> Result<(), IpcError> {
+fn handshake(reader: &mut BufReader<Stream>) -> Result<(), IpcError> {
     let id = 1;
     framing::write_message(
-        stream,
+        reader.get_mut(),
         &RequestEnvelope {
             id,
             request: Request::Hello {
@@ -153,7 +150,7 @@ fn handshake(stream: &mut Stream) -> Result<(), IpcError> {
         },
     )?;
 
-    match read_server_message(stream)? {
+    match read_server_message(reader)? {
         ServerMessage::Response {
             id: response_id,
             response: Response::Hello {
@@ -179,9 +176,8 @@ fn handshake(stream: &mut Stream) -> Result<(), IpcError> {
     }
 }
 
-fn read_server_message(stream: &mut Stream) -> Result<ServerMessage, IpcError> {
-    let mut reader = BufReader::new(stream);
-    framing::read_message(&mut reader)?.ok_or(IpcError::Disconnected)
+fn read_server_message(reader: &mut BufReader<Stream>) -> Result<ServerMessage, IpcError> {
+    framing::read_message(reader)?.ok_or(IpcError::Disconnected)
 }
 
 #[cfg(test)]
