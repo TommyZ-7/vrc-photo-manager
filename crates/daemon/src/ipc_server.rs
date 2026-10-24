@@ -226,8 +226,10 @@ fn handle_connection(stream: vrc_photo_ipc::server::Stream, control: IpcControl)
                 write_response(reader.get_mut(), id, Response::Ok)?;
             }
             Request::Shutdown => {
-                write_response(reader.get_mut(), id, Response::Ok)?;
+                // Clear the running flag before acknowledging so a client that
+                // observes `Ok` also observes a stopped daemon.
                 control.shutdown();
+                write_response(reader.get_mut(), id, Response::Ok)?;
                 return Ok(());
             }
             Request::Subscribe => {
