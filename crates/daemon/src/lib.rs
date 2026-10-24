@@ -714,7 +714,12 @@ impl Daemon {
                 db.bump_library_revision()?;
             }
             if self.settings.auto_compress && !new_ids.is_empty() {
-                enqueue_auto_jobs(&db, &new_ids)?;
+                enqueue_auto_jobs(
+                    &db,
+                    &new_ids,
+                    self.settings.compression_keep_original,
+                    self.settings.auto_compress_immediate,
+                )?;
                 self.jobs.notify();
             }
         }
@@ -883,7 +888,12 @@ impl Daemon {
                 && !report.new_ids.is_empty()
                 && (!initial_scan || self.settings.auto_compress_backlog)
             {
-                enqueue_auto_jobs(&db, &report.new_ids)?;
+                enqueue_auto_jobs(
+                    &db,
+                    &report.new_ids,
+                    self.settings.compression_keep_original,
+                    self.settings.auto_compress_immediate,
+                )?;
                 self.jobs.notify();
             }
         }
@@ -1506,7 +1516,12 @@ fn cgroup_has_unit(cgroup: &str, unit: &str) -> bool {
         .any(|part| part == unit)
 }
 
-fn enqueue_auto_jobs(db: &Db, new_ids: &[i64]) -> Result<()> {
+fn enqueue_auto_jobs(
+    db: &Db,
+    new_ids: &[i64],
+    keep_original: bool,
+    immediate: bool,
+) -> Result<()> {
     let profiles = db.list_profiles()?;
     let auto_profiles: Vec<&CompressionProfile> = profiles
         .iter()
@@ -1515,9 +1530,20 @@ fn enqueue_auto_jobs(db: &Db, new_ids: &[i64]) -> Result<()> {
     if auto_profiles.is_empty() {
         return Ok(());
     }
+    let policy = if keep_original { "keep" } else { "replace" };
+    let status = if immediate {
+        QueueStatus::Pending
+    } else {
+        QueueStatus::Waiting
+    };
     for photo_id in new_ids {
         for profile in &auto_profiles {
-            db.enqueue_job_for_existing_profile(*photo_id, &profile.id, "keep")?;
+            db.enqueue_job_for_existing_profile_with_status(
+                *photo_id,
+                &profile.id,
+                policy,
+                status,
+            )?;
         }
     }
     Ok(())
@@ -2638,7 +2664,7 @@ mod tests {
             .unwrap();
 
         // One photo: its auto profiles are enqueued in the saved order.
-        enqueue_auto_jobs(&db, &[photo_id]).unwrap();
+        enqueue_auto_jobs(&db, &[photo_id], true, true).unwrap();
         // Force the tie the rowid tie-break exists for.
         db.connection()
             .execute(
@@ -2652,6 +2678,100 @@ mod tests {
             order.push(job.profile_id);
         }
         assert_eq!(order, vec![c.id, a.id, b.id]);
+    }
+
+    #[test]
+    fn auto_jobs_use_replace_policy_and_waiting_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let original = photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&original);
+
+        let db_path = dir.path().join("library.db");
+        add_auto_profile(&db_path);
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+        daemon.run_once().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        let photo_id = db
+            .photo_by_path(original.to_str().unwrap())
+            .unwrap()
+            .unwrap()
+            .id;
+        enqueue_auto_jobs(&db, &[photo_id], false, false).unwrap();
+
+        let job = db.list_jobs(1).unwrap().remove(0);
+        assert_eq!(job.policy, "replace");
+        assert_eq!(job.status, QueueStatus::Waiting);
+        assert!(db.next_pending_job().unwrap().is_none());
+    }
+
+    #[test]
+    fn auto_compress_holds_waiting_jobs_until_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let original = photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&original);
+
+        let db_path = dir.path().join("library.db");
+        add_auto_profile(&db_path);
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+        daemon.settings.auto_compress_backlog = true;
+        daemon.settings.auto_compress_immediate = false;
+        daemon.run_once().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        let photo = db
+            .photo_by_path(original.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(db.count_jobs(QueueStatus::Waiting).unwrap(), 1);
+        daemon.compress_pending().unwrap();
+        assert!(db.derivatives_for_photo(photo.id).unwrap().is_empty());
+
+        db.release_waiting_jobs().unwrap();
+        daemon.compress_pending().unwrap();
+        assert_eq!(db.derivatives_for_photo(photo.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn auto_replace_failure_leaves_the_original_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let original = photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&original);
+        // Make the default output directory impossible to create.
+        std::fs::write(photo_dir.join("compressed"), b"not a directory").unwrap();
+
+        let db_path = dir.path().join("library.db");
+        add_auto_profile(&db_path);
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+        daemon.settings.auto_compress_backlog = true;
+        daemon.settings.compression_keep_original = false;
+        daemon.run_once().unwrap();
+        daemon.compress_pending().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        assert!(original.exists());
+        let photo = db
+            .photo_by_path(original.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(photo.status, PhotoStatus::Present);
+        assert!(db.derivatives_for_photo(photo.id).unwrap().is_empty());
+        assert_eq!(db.list_jobs(1).unwrap()[0].status, QueueStatus::Failed);
     }
 
     #[test]
