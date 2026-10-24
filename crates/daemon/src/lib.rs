@@ -432,6 +432,7 @@ impl Daemon {
     }
 
     pub fn run(&mut self) -> Result<()> {
+        self.record_supervisor();
         self.ensure_roots()?;
         self.scan_photos()?;
         self.ingest_logs()?;
@@ -976,6 +977,14 @@ impl Daemon {
         self.last_heartbeat = std::time::Instant::now();
     }
 
+    fn record_supervisor(&self) {
+        let supervisor = supervisor_label(std::env::var_os("INVOCATION_ID").as_deref());
+        let db = self.db.lock().unwrap();
+        if let Err(error) = db.set_setting("daemon_supervisor", supervisor) {
+            tracing::warn!(%error, "cannot record daemon supervisor");
+        }
+    }
+
     fn refresh_autostart_setting(&mut self) {
         let enabled = {
             let db = self.db.lock().unwrap();
@@ -1192,6 +1201,14 @@ fn error_signature(message: &str, detail: Option<&str>) -> String {
     match detail {
         Some(detail) => format!("{message}\n{detail}"),
         None => message.to_string(),
+    }
+}
+
+fn supervisor_label(invocation_id: Option<&std::ffi::OsStr>) -> &'static str {
+    if invocation_id.is_some() {
+        "systemd"
+    } else {
+        "app"
     }
 }
 
@@ -2528,5 +2545,14 @@ mod tests {
             latest.file_name().unwrap(),
             "output_log_2026-10-21_10-00-00.txt"
         );
+    }
+
+    #[test]
+    fn supervisor_label_detects_systemd() {
+        assert_eq!(
+            supervisor_label(Some(std::ffi::OsStr::new("invocation-id"))),
+            "systemd"
+        );
+        assert_eq!(supervisor_label(None), "app");
     }
 }
