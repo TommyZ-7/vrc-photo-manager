@@ -6486,10 +6486,20 @@ impl App {
                                             .child("現在のセッション"),
                                     )
                                     .child(self.meta_row(
+                                        "ワールド",
+                                        self.monitor_world
+                                            .clone()
+                                            .unwrap_or_else(|| "—".to_string()),
+                                    ))
+                                    .child(self.meta_row(
                                         "インスタンス",
                                         self.monitor_instance
                                             .clone()
                                             .unwrap_or_else(|| "—".to_string()),
+                                    ))
+                                    .child(self.meta_row(
+                                        "同接",
+                                        format!("{} 人", self.monitor_players.len()),
                                     ))
                                     .child(self.section_label(if self.monitor_players.is_empty() {
                                         "プレイヤー情報はまだありません"
