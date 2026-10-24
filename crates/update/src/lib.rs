@@ -4,6 +4,7 @@
 //! The UI drives checks and downloads; the helper binary applies them.
 
 pub mod check;
+pub mod download;
 pub mod error;
 pub mod fetch;
 pub mod install;
@@ -11,6 +12,7 @@ pub mod manifest;
 pub mod verify;
 
 pub use check::{FeedConfig, check};
+pub use download::download;
 pub use error::{Result, UpdateError};
 pub use fetch::{HttpClient, UreqClient};
 pub use install::{InstallKind, PackageFamily, UpdatePaths};
