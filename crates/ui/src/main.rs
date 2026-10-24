@@ -1405,12 +1405,14 @@ impl App {
             ipc_bridge::Incoming::Connected(status) => {
                 self.ipc_connected = true;
                 self.ipc_error = None;
+                self.refresh_monitor();
                 self.apply_daemon_status(status);
             }
             ipc_bridge::Incoming::Disconnected(error) => {
                 let was_connected = self.ipc_connected;
                 self.ipc_connected = false;
                 self.ipc_error = Some(error);
+                self.daemon_paused = false;
                 self.scan_progress = None;
                 if was_connected {
                     self.refresh_monitor();
@@ -2801,29 +2803,25 @@ impl App {
                         div()
                             .size(px(6.))
                             .rounded_full()
-                            .bg(rgb(if self.daemon_paused {
-                                AMBER
-                            } else if self.daemon_active {
-                                GREEN
-                            } else {
+                            .bg(rgb(if !self.daemon_active {
                                 MUTED_2
+                            } else if self.daemon_paused {
+                                AMBER
+                            } else {
+                                GREEN
                             })),
                     )
                     .when(!collapsed, |this| {
                         this.child(
                             div()
                                 .text_size(px(10.))
-                                .text_color(rgb(if self.daemon_paused || self.daemon_active {
-                                    MUTED
-                                } else {
-                                    MUTED_2
-                                }))
-                                .child(if self.daemon_paused {
-                                    "一時停止中"
-                                } else if self.daemon_active {
-                                    "監視中"
-                                } else {
+                                .text_color(rgb(if self.daemon_active { MUTED } else { MUTED_2 }))
+                                .child(if !self.daemon_active {
                                     "デーモン停止"
+                                } else if self.daemon_paused {
+                                    "一時停止中"
+                                } else {
+                                    "監視中"
                                 }),
                         )
                     }),
@@ -6284,10 +6282,8 @@ impl App {
                             .gap(px(16.))
                             .child(self.stat_card(
                                 "監視",
-                                if self.daemon_paused {
-                                    "一時停止中".to_string()
-                                } else if self.daemon_active {
-                                    "稼働中".to_string()
+                                if self.daemon_active {
+                                    daemon_state_label(true, self.daemon_paused).to_string()
                                 } else if self.settings.log_dir.is_some() {
                                     "停止中".to_string()
                                 } else {
@@ -6404,12 +6400,12 @@ impl App {
     }
 
     fn daemon_card(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let status = if self.daemon_paused {
-            ("一時停止中", AMBER, 0x2a2412)
-        } else if self.daemon_active {
-            ("稼働中", GREEN, 0x112a22)
-        } else {
+        let status = if !self.daemon_active {
             ("停止中", MUTED, PANEL_2)
+        } else if self.daemon_paused {
+            ("一時停止中", AMBER, 0x2a2412)
+        } else {
+            ("稼働中", GREEN, 0x112a22)
         };
         let sync = daemon_sync_label(self.daemon_age_secs, self.daemon_supervisor.as_deref());
         let ipc = if self.ipc_connected {
@@ -6456,13 +6452,7 @@ impl App {
             .child(self.meta_row("IPC", ipc_detail))
             .child(self.meta_row(
                 "監視",
-                if self.daemon_paused {
-                    "一時停止中".to_string()
-                } else if self.daemon_active {
-                    "稼働中".to_string()
-                } else {
-                    "停止中".to_string()
-                },
+                daemon_state_label(self.daemon_active, self.daemon_paused).to_string(),
             ));
 
         if let Some(progress) = scan {
@@ -7676,6 +7666,16 @@ fn daemon_liveness(age_secs: Option<i64>, ipc_connected: bool) -> bool {
     ipc_connected || age_secs.is_some_and(|age| age < 20)
 }
 
+fn daemon_state_label(active: bool, paused: bool) -> &'static str {
+    if !active {
+        "停止中"
+    } else if paused {
+        "一時停止中"
+    } else {
+        "稼働中"
+    }
+}
+
 fn ipc_status_label(connected: bool, error: Option<&str>) -> String {
     if connected {
         "IPC 接続中".to_string()
@@ -8184,16 +8184,16 @@ mod tests {
         PhotoPageCache, ScanProgressView, Screen, THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT,
         ThumbnailCache, YearBucket, add_photo_root_and_save, alert_summaries, anchor_photo_id,
         apply_library_index, autostart_description, average_bgra, build_year_buckets,
-        daemon_liveness, daemon_operation_label, daemon_sync_label, decode_thumbnail,
-        demo_thumb_path, ease_motion, first_visible_photo, format_captured_month, format_count,
-        format_timestamp, grid_available_width, grid_columns, grid_columns_for, has_tag_filter,
-        import_issue_counts, ipc_status_label, job_retry_available, job_retry_label, lerp_color,
-        list_scroll_top, moved_profile_order, next_focus_index, normalize_note, parse_args,
-        parse_window_size, rail_label_hidden_by_pill, rail_row_at, rail_scroll_offset, rail_y,
-        retryable_sources, scan_progress_label, scan_progress_ratio, search_anchor_after_result,
-        search_available_width, sidebar_reveal_width, sidebar_width, stagger_value, step_index,
-        sync_search_mirror, viewer_details_width, viewer_image_box, visible_year_buckets, with_tag,
-        without_tag,
+        daemon_liveness, daemon_operation_label, daemon_state_label, daemon_sync_label,
+        decode_thumbnail, demo_thumb_path, ease_motion, first_visible_photo, format_captured_month,
+        format_count, format_timestamp, grid_available_width, grid_columns, grid_columns_for,
+        has_tag_filter, import_issue_counts, ipc_status_label, job_retry_available,
+        job_retry_label, lerp_color, list_scroll_top, moved_profile_order, next_focus_index,
+        normalize_note, parse_args, parse_window_size, rail_label_hidden_by_pill, rail_row_at,
+        rail_scroll_offset, rail_y, retryable_sources, scan_progress_label, scan_progress_ratio,
+        search_anchor_after_result, search_available_width, sidebar_reveal_width, sidebar_width,
+        stagger_value, step_index, sync_search_mirror, viewer_details_width, viewer_image_box,
+        visible_year_buckets, with_tag, without_tag,
     };
     use gpui_kit::{RenderImage, ScrollStrategy, UniformListScrollHandle, point, px};
     use smallvec::SmallVec;
@@ -9085,6 +9085,13 @@ mod tests {
     fn ipc_status_label_distinguishes_disconnected_and_mismatch() {
         assert_eq!(ipc_status_label(true, None), "IPC 接続中");
         assert!(ipc_status_label(false, Some("protocol mismatch")).contains("未接続"));
+    }
+
+    #[test]
+    fn daemon_state_label_prefers_stopped_over_paused() {
+        assert_eq!(daemon_state_label(false, true), "停止中");
+        assert_eq!(daemon_state_label(true, true), "一時停止中");
+        assert_eq!(daemon_state_label(true, false), "稼働中");
     }
 
     #[test]
