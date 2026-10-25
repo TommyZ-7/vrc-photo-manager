@@ -82,7 +82,7 @@ const CARD_META_LINE_HEIGHT: f32 = 15.0;
 const CARD_ROW_SLACK: f32 = 24.0;
 const RAIL_WIDTH: f32 = 20.0;
 const RAIL_TOP_PAD: f32 = 24.0;
-const RAIL_TRACK_INSET: f32 = 10.0;
+const RAIL_TRACK_INSET: f32 = 6.0;
 const RAIL_LABEL_GAP: f32 = 16.0;
 const RAIL_YEAR_HIT_SLOP: f32 = 8.0;
 const RAIL_PILL_HEIGHT: f32 = 18.0;
@@ -9750,21 +9750,21 @@ mod tests {
     use super::{
         CountDebounce, DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH,
         IpcScanPhase, MAX_PAGES, MIN_CARD_WIDTH, ManualOutputTarget, PAGE_SIZE, PHOTO_ROW_HEIGHT,
-        PhotoBrowser, PhotoIndex, PhotoPageCache, RAIL_MARKER_SIZE, RAIL_PILL_WIDTH, RAIL_WIDTH,
-        ScanProgressView, Screen, THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, YearBucket,
-        add_photo_root_and_save, alert_summaries, anchor_photo_id, apply_library_index,
-        apply_profile_format, autostart_description, average_bgra, build_year_buckets,
-        card_meta_line, card_metrics, card_size_label, card_size_options, compression_policy,
-        compression_policy_warning, daemon_liveness, daemon_operation_label, daemon_state_label,
-        daemon_sync_label, decode_thumbnail, demo_thumb_path, ease_motion, first_visible_photo,
-        format_captured_month, format_count, format_timestamp, grid_available_width, grid_columns,
-        grid_columns_for, has_tag_filter, import_issue_counts, ipc_status_label,
-        job_retry_available, job_retry_label, lerp_color, list_scroll_top, lossless_hint,
-        lossless_supported, manual_output_available, moved_profile_order, next_focus_index,
-        normalize_note, parse_args, parse_window_size, profile_summary, queue_status_badge,
-        rail_hover_hits, rail_label_hidden_by_pill, rail_marker_bounds, rail_pill_bounds,
-        rail_press_allowed, rail_press_hits, rail_row_at, rail_scroll_offset,
-        rail_track_hit_bounds, rail_y, release_confirmation, retryable_sources,
+        PhotoBrowser, PhotoIndex, PhotoPageCache, RAIL_MARKER_SIZE, RAIL_PILL_WIDTH,
+        RAIL_TRACK_INSET, RAIL_WIDTH, ScanProgressView, Screen, THUMB_CACHE_ENTRIES,
+        THUMB_IN_FLIGHT, ThumbnailCache, YearBucket, add_photo_root_and_save, alert_summaries,
+        anchor_photo_id, apply_library_index, apply_profile_format, autostart_description,
+        average_bgra, build_year_buckets, card_meta_line, card_metrics, card_size_label,
+        card_size_options, compression_policy, compression_policy_warning, daemon_liveness,
+        daemon_operation_label, daemon_state_label, daemon_sync_label, decode_thumbnail,
+        demo_thumb_path, ease_motion, first_visible_photo, format_captured_month, format_count,
+        format_timestamp, grid_available_width, grid_columns, grid_columns_for, has_tag_filter,
+        import_issue_counts, ipc_status_label, job_retry_available, job_retry_label, lerp_color,
+        list_scroll_top, lossless_hint, lossless_supported, manual_output_available,
+        moved_profile_order, next_focus_index, normalize_note, parse_args, parse_window_size,
+        profile_summary, queue_status_badge, rail_hover_hits, rail_label_hidden_by_pill,
+        rail_marker_bounds, rail_pill_bounds, rail_press_allowed, rail_press_hits, rail_row_at,
+        rail_scroll_offset, rail_track_hit_bounds, rail_y, release_confirmation, retryable_sources,
         scan_progress_label, scan_progress_ratio, search_anchor_after_result,
         search_available_width, selection_range, sidebar_reveal_width, sidebar_width,
         stagger_value, step_index, sync_search_mirror, toggle_selected_id, viewer_details_width,
@@ -10830,9 +10830,9 @@ mod tests {
         let bounds = Bounds::new(point(px(10.), px(20.)), size(px(RAIL_WIDTH), px(600.)));
         let pill_y = 300.0;
 
-        // Track strip: x 14..26, y 44..596 for this 20 px gutter.
+        // Track strip: x 18..30, y 44..596 for this 20 px gutter.
         assert!(rail_press_hits(
-            point(px(18.), px(100.)),
+            point(px(24.), px(100.)),
             bounds,
             pill_y,
             false
@@ -10852,22 +10852,22 @@ mod tests {
             pill_y,
             false
         ));
-        // Blank gutter right of the pill never jumps.
+        // Left of the track stays inert while the pill is collapsed.
         assert!(!rail_press_hits(
-            point(px(28.), px(320.)),
+            point(px(15.), px(320.)),
             bounds,
             pill_y,
-            true
+            false
         ));
         // Top and bottom padding of the track are outside the interactive strip.
         assert!(!rail_press_hits(
-            point(px(18.), px(30.)),
+            point(px(24.), px(30.)),
             bounds,
             pill_y,
             true
         ));
         assert!(!rail_press_hits(
-            point(px(18.), px(610.)),
+            point(px(24.), px(610.)),
             bounds,
             pill_y,
             true
@@ -10878,7 +10878,7 @@ mod tests {
     fn rail_press_requires_a_hovered_gutter() {
         let bounds = Bounds::new(point(px(10.), px(20.)), size(px(RAIL_WIDTH), px(600.)));
         let pill_y = 300.0;
-        let track = point(px(18.), px(100.));
+        let track = point(px(24.), px(100.));
         let pill = point(px(0.), px(320.));
 
         assert!(!rail_press_allowed(false, track, bounds, pill_y, false));
@@ -10887,10 +10887,10 @@ mod tests {
         assert!(rail_press_allowed(true, pill, bounds, pill_y, true));
         assert!(!rail_press_allowed(
             true,
-            point(px(28.), px(320.)),
+            point(px(15.), px(320.)),
             bounds,
             pill_y,
-            true
+            false
         ));
     }
 
@@ -10900,7 +10900,7 @@ mod tests {
         let pill_y = 300.0;
 
         assert!(rail_hover_hits(
-            point(px(18.), px(100.)),
+            point(px(24.), px(100.)),
             bounds,
             pill_y,
             false
@@ -10926,9 +10926,14 @@ mod tests {
     }
 
     #[test]
-    fn rail_track_is_centered_in_the_gutter() {
+    fn rail_track_sits_right_of_the_gutter_center() {
         let bounds = Bounds::new(point(px(10.), px(20.)), size(px(RAIL_WIDTH), px(600.)));
-        assert_eq!(rail_track_hit_bounds(bounds).center().x, bounds.center().x);
+        let track = rail_track_hit_bounds(bounds);
+        assert!(track.center().x > bounds.center().x);
+        assert_eq!(
+            f32::from(bounds.right() - track.center().x),
+            RAIL_TRACK_INSET
+        );
     }
 
     #[test]
