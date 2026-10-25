@@ -90,6 +90,15 @@ const RAIL_PILL_WIDTH: f32 = 80.0;
 const RAIL_PILL_RIGHT_MARGIN: f32 = 4.0;
 const RAIL_MARKER_SIZE: f32 = 10.0;
 const RAIL_HIT_WIDTH: f32 = 12.0;
+const MOTION_FAST: Duration = Duration::from_millis(160);
+const MOTION_BASE: Duration = Duration::from_millis(220);
+const MOTION_SLOW: Duration = Duration::from_millis(300);
+const MOTION_MORPH: Duration = Duration::from_millis(340);
+const MOTION_FPS: f32 = 60.0;
+const SCREEN_SLIDE: f32 = 14.0;
+const VIEWER_NAV_SLIDE: f32 = 28.0;
+const NAV_ITEM_HEIGHT: f32 = 40.0;
+const NAV_ITEM_GAP: f32 = 3.0;
 
 gpui_kit::actions!(
     ui,
@@ -9338,6 +9347,105 @@ fn ease_motion(t: f32) -> f32 {
     cubic_bezier(guess, 0.8, 1.0).clamp(0.0, 1.0) as f32
 }
 
+fn nav_index(screen: Screen) -> usize {
+    match screen {
+        Screen::Photos => 0,
+        Screen::Search => 1,
+        Screen::Compression => 2,
+        Screen::Dashboard => 3,
+        Screen::Settings => 4,
+    }
+}
+
+fn nav_item_top(index: usize) -> f32 {
+    index as f32 * (NAV_ITEM_HEIGHT + NAV_ITEM_GAP)
+}
+
+fn nav_bar_left(collapsed: bool) -> f32 {
+    if collapsed { 5.0 } else { -1.0 }
+}
+
+fn screen_direction(from: Screen, to: Screen) -> f32 {
+    if nav_index(to) >= nav_index(from) {
+        1.0
+    } else {
+        -1.0
+    }
+}
+
+fn lerp_bounds(from: Bounds<Pixels>, to: Bounds<Pixels>, t: f32) -> Bounds<Pixels> {
+    let t = t.clamp(0.0, 1.0);
+    let x = f32::from(from.origin.x) + (f32::from(to.origin.x) - f32::from(from.origin.x)) * t;
+    let y = f32::from(from.origin.y) + (f32::from(to.origin.y) - f32::from(from.origin.y)) * t;
+    let width =
+        f32::from(from.size.width) + (f32::from(to.size.width) - f32::from(from.size.width)) * t;
+    let height =
+        f32::from(from.size.height) + (f32::from(to.size.height) - f32::from(from.size.height)) * t;
+    Bounds::new(point(px(x), px(y)), size(px(width), px(height)))
+}
+
+fn eased_progress(started_at: Instant, duration: Duration, now: Instant) -> f32 {
+    if duration.is_zero() {
+        return 1.0;
+    }
+    let elapsed = now.saturating_duration_since(started_at).as_secs_f32();
+    ease_motion((elapsed / duration.as_secs_f32()).clamp(0.0, 1.0))
+}
+
+fn morph_bounds_at(
+    from: Bounds<Pixels>,
+    to: Bounds<Pixels>,
+    started_at: Instant,
+    now: Instant,
+) -> Bounds<Pixels> {
+    lerp_bounds(from, to, eased_progress(started_at, MOTION_MORPH, now))
+}
+
+fn viewer_image_rect(
+    viewport: gpui_kit::Size<Pixels>,
+    details_open: bool,
+    aspect: f32,
+) -> Bounds<Pixels> {
+    let (width, height) = viewer_image_box(
+        viewport.width.into(),
+        viewport.height.into(),
+        details_open,
+        aspect,
+    );
+    let details = if details_open {
+        VIEWER_DETAILS_WIDTH
+    } else {
+        0.0
+    };
+    let center_x = (f32::from(viewport.width) - details) / 2.0;
+    let center_y = VIEWER_TOP_BAR + (f32::from(viewport.height) - VIEWER_TOP_BAR) / 2.0;
+    Bounds::new(
+        point(px(center_x - width / 2.0), px(center_y - height / 2.0)),
+        size(px(width), px(height)),
+    )
+}
+
+fn current_tagged_bounds(
+    entry: Option<(u64, Bounds<Pixels>)>,
+    current_epoch: u64,
+) -> Option<Bounds<Pixels>> {
+    entry
+        .filter(|(epoch, _)| *epoch == current_epoch)
+        .map(|(_, bounds)| bounds)
+}
+
+fn preferred_bounds(
+    prefer_card: bool,
+    card: Option<Bounds<Pixels>>,
+    inspector: Option<Bounds<Pixels>>,
+) -> Option<Bounds<Pixels>> {
+    if prefer_card {
+        card.or(inspector)
+    } else {
+        inspector.or(card)
+    }
+}
+
 fn stagger_value(elapsed: f32, index: usize) -> f32 {
     let delay = index.min(CARD_STAGGER_MAX) as f32 * CARD_STAGGER_SECS;
     let total = CARD_INTRO_SECS + delay;
@@ -9910,28 +10018,31 @@ mod tests {
     // `gpui_kit::*`, shadowing the built-in `#[test]` and recursing forever.
     use super::{
         CountDebounce, DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH,
-        IpcScanPhase, MAX_PAGES, MIN_CARD_WIDTH, ManualOutputTarget, PAGE_SIZE, PHOTO_ROW_HEIGHT,
-        PhotoBrowser, PhotoIndex, PhotoPageCache, RAIL_MARKER_SIZE, RAIL_PILL_WIDTH,
-        RAIL_TRACK_INSET, RAIL_WIDTH, ScanProgressView, Screen, THUMB_CACHE_ENTRIES,
-        THUMB_IN_FLIGHT, ThumbnailCache, YearBucket, add_photo_root_and_save, alert_summaries,
-        anchor_photo_id, apply_library_index, apply_profile_format, autostart_description,
-        average_bgra, build_year_buckets, card_meta_line, card_metrics, card_size_label,
-        card_size_options, compression_policy, compression_policy_warning, daemon_liveness,
-        daemon_operation_label, daemon_state_label, daemon_sync_label, decode_thumbnail,
-        demo_thumb_path, ease_motion, first_visible_photo, format_captured_month, format_count,
-        format_timestamp, grid_available_width, grid_columns, grid_columns_for, has_tag_filter,
-        import_issue_counts, inner_corner_radius, ipc_status_label, job_retry_available,
-        job_retry_label, lerp_color, list_scroll_top, lossless_hint, lossless_supported,
-        manual_output_available, moved_profile_order, next_focus_index, normalize_note, parse_args,
-        parse_window_size, profile_summary, queue_status_badge, rail_hover_hits,
-        rail_label_hidden_by_pill, rail_marker_bounds, rail_pill_bounds, rail_press_allowed,
-        rail_press_hits, rail_row_at, rail_scroll_offset, rail_track_hit_bounds, rail_y,
-        release_confirmation, retryable_sources, scan_progress_label, scan_progress_ratio,
-        search_anchor_after_result, search_available_width, selection_range, sidebar_reveal_width,
-        sidebar_width, stagger_value, step_index, sync_search_mirror, toggle_selected_id,
-        viewer_details_width, viewer_image_box, visible_year_buckets, with_tag, without_tag,
+        IpcScanPhase, MAX_PAGES, MIN_CARD_WIDTH, MOTION_BASE, MOTION_FAST, MOTION_MORPH,
+        MOTION_SLOW, ManualOutputTarget, NAV_ITEM_GAP, NAV_ITEM_HEIGHT, PAGE_SIZE,
+        PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex, PhotoPageCache, RAIL_MARKER_SIZE,
+        RAIL_PILL_WIDTH, RAIL_TRACK_INSET, RAIL_WIDTH, ScanProgressView, Screen,
+        THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, YearBucket, add_photo_root_and_save,
+        alert_summaries, anchor_photo_id, apply_library_index, apply_profile_format,
+        autostart_description, average_bgra, build_year_buckets, card_meta_line, card_metrics,
+        card_size_label, card_size_options, compression_policy, compression_policy_warning,
+        current_tagged_bounds, daemon_liveness, daemon_operation_label, daemon_state_label,
+        daemon_sync_label, decode_thumbnail, demo_thumb_path, ease_motion, eased_progress,
+        first_visible_photo, format_captured_month, format_count, format_timestamp,
+        grid_available_width, grid_columns, grid_columns_for, has_tag_filter, import_issue_counts,
+        inner_corner_radius, ipc_status_label, job_retry_available, job_retry_label, lerp_bounds,
+        lerp_color, list_scroll_top, lossless_hint, lossless_supported, manual_output_available,
+        morph_bounds_at, moved_profile_order, nav_index, nav_item_top, next_focus_index,
+        normalize_note, parse_args, parse_window_size, preferred_bounds, profile_summary,
+        queue_status_badge, rail_hover_hits, rail_label_hidden_by_pill, rail_marker_bounds,
+        rail_pill_bounds, rail_press_allowed, rail_press_hits, rail_row_at, rail_scroll_offset,
+        rail_track_hit_bounds, rail_y, release_confirmation, retryable_sources,
+        scan_progress_label, scan_progress_ratio, screen_direction, search_anchor_after_result,
+        search_available_width, selection_range, sidebar_reveal_width, sidebar_width, stagger_value,
+        step_index, sync_search_mirror, toggle_selected_id, viewer_details_width, viewer_image_box,
+        viewer_image_rect, visible_year_buckets, with_tag, without_tag,
     };
-    use gpui_kit::{Bounds, RenderImage, ScrollStrategy, UniformListScrollHandle, point, px, size};
+    use gpui_kit::{Bounds, RenderImage, ScrollStrategy, Size, UniformListScrollHandle, point, px, size};
     use smallvec::SmallVec;
     use std::cell::Cell;
     use std::ffi::OsString;
@@ -10160,6 +10271,104 @@ mod tests {
             previous = value;
         }
         assert!(ease_motion(0.5) > 0.5);
+    }
+
+    #[test]
+    fn nav_index_matches_sidebar_order() {
+        assert_eq!(nav_index(Screen::Photos), 0);
+        assert_eq!(nav_index(Screen::Search), 1);
+        assert_eq!(nav_index(Screen::Compression), 2);
+        assert_eq!(nav_index(Screen::Dashboard), 3);
+        assert_eq!(nav_index(Screen::Settings), 4);
+    }
+
+    #[test]
+    fn nav_item_top_uses_item_height_and_gap() {
+        assert_eq!(nav_item_top(0), 0.0);
+        assert_eq!(nav_item_top(1), NAV_ITEM_HEIGHT + NAV_ITEM_GAP);
+        assert_eq!(nav_item_top(4), 4.0 * (NAV_ITEM_HEIGHT + NAV_ITEM_GAP));
+    }
+
+    #[test]
+    fn screen_direction_follows_sidebar_order() {
+        assert_eq!(screen_direction(Screen::Photos, Screen::Settings), 1.0);
+        assert_eq!(screen_direction(Screen::Settings, Screen::Photos), -1.0);
+        assert_eq!(screen_direction(Screen::Search, Screen::Search), 1.0);
+    }
+
+    #[test]
+    fn lerp_bounds_hits_endpoints_and_midpoint() {
+        let from = Bounds::new(point(px(10.), px(20.)), size(px(100.), px(50.)));
+        let to = Bounds::new(point(px(30.), px(60.)), size(px(200.), px(150.)));
+        assert_eq!(lerp_bounds(from, to, 0.0), from);
+        assert_eq!(lerp_bounds(from, to, 1.0), to);
+        let middle = lerp_bounds(from, to, 0.5);
+        assert_eq!(f32::from(middle.origin.x), 20.0);
+        assert_eq!(f32::from(middle.origin.y), 40.0);
+        assert_eq!(f32::from(middle.size.width), 150.0);
+        assert_eq!(f32::from(middle.size.height), 100.0);
+    }
+
+    #[test]
+    fn viewer_image_rect_centers_the_box_and_respects_details() {
+        let viewport = size(px(1200.), px(800.));
+        let closed = viewer_image_rect(viewport, false, 16.0 / 10.0);
+        let open = viewer_image_rect(viewport, true, 16.0 / 10.0);
+        assert!((f32::from(closed.center().x) - 600.0).abs() < 0.01);
+        assert!((f32::from(closed.center().y) - 428.0).abs() < 0.01);
+        assert!((f32::from(open.center().x) - 410.0).abs() < 0.01);
+        assert!((f32::from(open.center().y) - 428.0).abs() < 0.01);
+        assert!(closed.size.width > open.size.width);
+    }
+
+    #[test]
+    fn eased_progress_is_clamped_and_eased() {
+        let start = Instant::now();
+        assert_eq!(eased_progress(start, MOTION_BASE, start), 0.0);
+        assert_eq!(
+            eased_progress(start, MOTION_BASE, start + MOTION_BASE),
+            1.0
+        );
+        let half = eased_progress(start, MOTION_BASE, start + MOTION_BASE / 2);
+        assert!(half > 0.5 && half < 1.0);
+        assert_eq!(eased_progress(start, Duration::ZERO, start), 1.0);
+    }
+
+    #[test]
+    fn morph_bounds_at_hits_both_ends() {
+        let start = Instant::now();
+        let from = Bounds::new(point(px(0.), px(0.)), size(px(10.), px(10.)));
+        let to = Bounds::new(point(px(100.), px(200.)), size(px(300.), px(400.)));
+        assert_eq!(morph_bounds_at(from, to, start, start), from);
+        assert_eq!(
+            morph_bounds_at(from, to, start, start + MOTION_MORPH),
+            to
+        );
+    }
+
+    #[test]
+    fn current_tagged_bounds_rejects_stale_frames() {
+        let bounds = Bounds::new(point(px(1.), px(2.)), size(px(3.), px(4.)));
+        assert_eq!(current_tagged_bounds(Some((7, bounds)), 7), Some(bounds));
+        assert_eq!(current_tagged_bounds(Some((7, bounds)), 8), None);
+        assert_eq!(current_tagged_bounds(None, 7), None);
+    }
+
+    #[test]
+    fn preferred_bounds_falls_back_to_the_other_source() {
+        let card = Bounds::new(point(px(0.), px(0.)), size(px(10.), px(10.)));
+        let inspector = Bounds::new(point(px(20.), px(20.)), size(px(30.), px(30.)));
+        assert_eq!(preferred_bounds(true, Some(card), Some(inspector)), Some(card));
+        assert_eq!(preferred_bounds(true, None, Some(inspector)), Some(inspector));
+        assert_eq!(preferred_bounds(false, Some(card), Some(inspector)), Some(inspector));
+        assert_eq!(preferred_bounds(false, Some(card), None), Some(card));
+    }
+
+    #[test]
+    fn motion_durations_are_ordered() {
+        assert!(MOTION_FAST < MOTION_BASE);
+        assert!(MOTION_BASE < MOTION_SLOW);
+        assert!(MOTION_SLOW < MOTION_MORPH);
     }
 
     #[test]
