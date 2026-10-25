@@ -8726,49 +8726,50 @@ impl App {
         }
     }
 
-    /// Re-imports only the retryable failed sources of the current report with
-    /// the same destination and mode.
-    fn retry_import(&mut self, cx: &mut Context<Self>) {
-        let Some(previous) = self.import_report.clone() else {
+    /// Opens the import modal in retry mode for the retryable failed sources.
+    fn open_retry_dialog(&mut self, cx: &mut Context<Self>) {
+        let Some(report) = self.import_report.clone() else {
             return;
         };
-        let sources = retryable_sources(&previous.issues);
+        let sources = retryable_sources(&report.issues);
         if sources.is_empty() {
             return;
         }
-        let result = match importer::import_files(&sources, &previous.dest, previous.mode) {
-            Ok(result) => result,
-            Err(error) => {
-                tracing::warn!(%error, "cannot retry import");
-                self.message = Some(format!("再取り込みに失敗: {error}"));
-                cx.notify();
-                return;
-            }
+        self.import_dialog = Some(ImportDialogState {
+            origin: ImportDialogOrigin::Retry {
+                report: report.clone(),
+                sources: sources.clone(),
+            },
+            mode: report.mode,
+            dest: report.dest.clone(),
+            source: None,
+            error: None,
+            phase: ImportDialogPhase::Ready,
+        });
+        self.start_import_run(sources, cx);
+    }
+
+    /// Opens the import modal in resume mode for the unprocessed sources.
+    fn open_resume_dialog(&mut self, cx: &mut Context<Self>) {
+        let Some(report) = self.import_report.clone() else {
+            return;
         };
-        let mut report = ImportReportView {
-            mode: previous.mode,
-            dest: previous.dest.clone(),
-            total: previous.total,
-            processed: result.processed,
-            imported: previous.imported + result.imported.len(),
-            skipped: previous.skipped + result.skipped,
-            issues: previous
-                .issues
-                .iter()
-                .filter(|issue| issue.kind != ImportIssueKind::Failed || !issue.retryable)
-                .cloned()
-                .collect(),
-            renamed: result.renamed,
-            remaining: Vec::new(),
-            cancelled: result.cancelled,
-            scan_failures: Vec::new(),
-            scan_error: None,
-        };
-        report.issues.extend(result.issues);
-        self.index_import_destination(&mut report, cx);
-        self.message = Some(import_summary(&report));
-        self.import_report = Some(report);
-        cx.notify();
+        let sources = report.remaining.clone();
+        if sources.is_empty() {
+            return;
+        }
+        self.import_dialog = Some(ImportDialogState {
+            origin: ImportDialogOrigin::Resume {
+                report: report.clone(),
+                sources: sources.clone(),
+            },
+            mode: report.mode,
+            dest: report.dest.clone(),
+            source: None,
+            error: None,
+            phase: ImportDialogPhase::Ready,
+        });
+        self.start_import_run(sources, cx);
     }
 
     fn import_report_panel(&self, report: &ImportReportView, cx: &mut Context<Self>) -> AnyElement {
@@ -8822,12 +8823,28 @@ impl App {
                             .child(dest),
                     )
                     .when(!retryable.is_empty(), |this| {
+                        let button = Button::new("import-retry-failed")
+                            .label("失敗分を再試行")
+                            .small();
+                        let button = if report.remaining.is_empty() {
+                            button.primary()
+                        } else {
+                            button.ghost()
+                        };
                         this.child(
-                            Button::new("import-retry-failed")
-                                .label("失敗分を再試行")
+                            button
+                                .on_click(cx.listener(|this, _, _, cx| this.open_retry_dialog(cx))),
+                        )
+                    })
+                    .when(!report.remaining.is_empty(), |this| {
+                        this.child(
+                            Button::new("import-resume")
+                                .label(format!("残り {} 件を再開", report.remaining.len()))
                                 .small()
                                 .primary()
-                                .on_click(cx.listener(|this, _, _, cx| this.retry_import(cx))),
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.open_resume_dialog(cx)),
+                                ),
                         )
                     })
                     .child(
@@ -8854,6 +8871,20 @@ impl App {
                     })
                     .when(partial > 0, |this| {
                         this.child(self.badge(&format!("部分移動 {partial}"), AMBER, 0x2b2210))
+                    })
+                    .when(!report.renamed.is_empty(), |this| {
+                        this.child(self.badge(
+                            &format!("連番 {}", report.renamed.len()),
+                            BLUE,
+                            0x14283d,
+                        ))
+                    })
+                    .when(!report.remaining.is_empty(), |this| {
+                        this.child(self.badge(
+                            &format!("未処理 {}", report.remaining.len()),
+                            AMBER,
+                            0x2b2210,
+                        ))
                     })
                     .when(scan_failed > 0, |this| {
                         this.child(self.badge(
@@ -8945,6 +8976,45 @@ impl App {
                                     .child(issue.message.clone()),
                             )
                     })),
+            );
+        }
+
+        if !report.renamed.is_empty() {
+            panel = panel.child(
+                v_flex()
+                    .px(px(16.))
+                    .py(px(8.))
+                    .gap(px(6.))
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .child(self.section_label("連番を付けたファイル"))
+                    .child(
+                        v_flex()
+                            .gap(px(6.))
+                            .max_h(px(150.))
+                            .overflow_y_scrollbar()
+                            .children(report.renamed.iter().map(|rename| {
+                                v_flex()
+                                    .gap(px(2.))
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_size(px(10.))
+                                            .text_color(rgb(MUTED))
+                                            .child(rename.source.to_string_lossy().to_string()),
+                                    )
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_size(px(9.))
+                                            .text_color(rgb(BLUE))
+                                            .child(format!(
+                                                "→ {}",
+                                                rename.target.to_string_lossy()
+                                            )),
+                                    )
+                            })),
+                    ),
             );
         }
 
@@ -11604,7 +11674,7 @@ mod tests {
     use smallvec::SmallVec;
     use std::cell::Cell;
     use std::ffi::OsString;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use vrc_photo_core::error::CoreError;
@@ -13346,10 +13416,12 @@ mod tests {
             scan_error: Some("scan error".to_string()),
             ..import_report_fixture()
         };
-        let mut result = ImportResult::default();
-        result.processed = 1;
-        result.imported = vec![PathBuf::from("/dest/a.png")];
-        result.renamed = vec![rename_fixture("/a.png", "/dest/a-1.png")];
+        let result = ImportResult {
+            processed: 1,
+            imported: vec![PathBuf::from("/dest/a.png")],
+            renamed: vec![rename_fixture("/a.png", "/dest/a-1.png")],
+            ..ImportResult::default()
+        };
 
         let merged = merge_retry_report(
             &previous,
@@ -13364,19 +13436,19 @@ mod tests {
             merged
                 .issues
                 .iter()
-                .any(|issue| issue.source == PathBuf::from("/b.png"))
+                .any(|issue| issue.source.as_path() == Path::new("/b.png"))
         );
         assert!(
             merged
                 .issues
                 .iter()
-                .any(|issue| issue.source == PathBuf::from("/c.png"))
+                .any(|issue| issue.source.as_path() == Path::new("/c.png"))
         );
         assert!(
             !merged
                 .issues
                 .iter()
-                .any(|issue| issue.source == PathBuf::from("/a.png"))
+                .any(|issue| issue.source.as_path() == Path::new("/a.png"))
         );
         assert_eq!(merged.renamed.len(), 2);
         assert!(merged.scan_error.is_some());
@@ -13389,9 +13461,11 @@ mod tests {
             issues: vec![retryable_issue("/a.png"), retryable_issue("/d.png")],
             ..import_report_fixture()
         };
-        let mut result = ImportResult::default();
-        result.processed = 1;
-        result.issues = vec![retryable_issue("/a.png")];
+        let result = ImportResult {
+            processed: 1,
+            issues: vec![retryable_issue("/a.png")],
+            ..ImportResult::default()
+        };
 
         let merged = merge_retry_report(
             &previous,
@@ -13404,7 +13478,7 @@ mod tests {
             merged
                 .issues
                 .iter()
-                .any(|issue| issue.source == PathBuf::from("/d.png"))
+                .any(|issue| issue.source.as_path() == Path::new("/d.png"))
         );
         assert_eq!(
             retryable_sources(&merged.issues),
@@ -13426,10 +13500,12 @@ mod tests {
             cancelled: true,
             ..import_report_fixture()
         };
-        let mut result = ImportResult::default();
-        result.processed = 2;
-        result.imported = vec![PathBuf::from("/dest/c.png")];
-        result.skipped = 1;
+        let result = ImportResult {
+            processed: 2,
+            imported: vec![PathBuf::from("/dest/c.png")],
+            skipped: 1,
+            ..ImportResult::default()
+        };
 
         let merged = merge_resume_report(&previous, result);
 
