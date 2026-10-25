@@ -221,6 +221,9 @@ CREATE INDEX IF NOT EXISTS idx_photos_move_match
     ON photos(status, file_size, captured_at_utc);
 "#;
 
+const SCHEMA_V6_JOB_OUTPUT_DIR: &str =
+    "ALTER TABLE compression_jobs ADD COLUMN output_dir TEXT;";
+
 const PHOTO_SELECT: &str = "p.id, p.root_id, p.rel_path, p.abs_path, p.file_name, \
     p.captured_at_utc, p.captured_at_local, p.tz_offset_sec, p.width, p.height, \
     p.file_size, p.mtime, p.blake3, p.status, p.is_favorite, p.note, \
@@ -333,6 +336,9 @@ impl Db {
         if version < 5 {
             self.migrate_v5()?;
         }
+        if version < 6 {
+            self.migrate_v6()?;
+        }
         Ok(())
     }
 
@@ -395,6 +401,34 @@ impl Db {
             params![now_string()],
         )?;
         tx.pragma_update(None, "user_version", 5)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Adds the per-job output directory used by manual compression. The
+    /// column check makes the step safe to retry after an interrupted upgrade.
+    fn migrate_v6(&self) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version >= 6 {
+            tx.commit()?;
+            return Ok(());
+        }
+
+        let has_output_dir: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('compression_jobs') \
+             WHERE name = 'output_dir')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_output_dir {
+            tx.execute_batch(SCHEMA_V6_JOB_OUTPUT_DIR)?;
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (6, ?1)",
+            params![now_string()],
+        )?;
+        tx.pragma_update(None, "user_version", 6)?;
         tx.commit()?;
         Ok(())
     }
@@ -1375,7 +1409,13 @@ impl Db {
     // ---------- compression jobs ----------
 
     pub fn enqueue_job(&self, photo_id: i64, profile_id: &str, policy: &str) -> Result<String> {
-        self.enqueue_job_with_status(photo_id, profile_id, policy, QueueStatus::Pending)
+        self.enqueue_job_with_options(
+            photo_id,
+            profile_id,
+            policy,
+            QueueStatus::Pending,
+            None,
+        )
     }
 
     pub fn enqueue_job_with_status(
@@ -1385,16 +1425,45 @@ impl Db {
         policy: &str,
         status: QueueStatus,
     ) -> Result<String> {
+        self.enqueue_job_with_options(photo_id, profile_id, policy, status, None)
+    }
+
+    /// Enqueues a manual job whose output directory overrides the profile.
+    pub fn enqueue_job_with_output_dir(
+        &self,
+        photo_id: i64,
+        profile_id: &str,
+        policy: &str,
+        output_dir: Option<&str>,
+    ) -> Result<String> {
+        self.enqueue_job_with_options(
+            photo_id,
+            profile_id,
+            policy,
+            QueueStatus::Pending,
+            output_dir,
+        )
+    }
+
+    fn enqueue_job_with_options(
+        &self,
+        photo_id: i64,
+        profile_id: &str,
+        policy: &str,
+        status: QueueStatus,
+        output_dir: Option<&str>,
+    ) -> Result<String> {
         let id = uuid::Uuid::new_v4().to_string();
         self.conn.execute(
-            "INSERT INTO compression_jobs(id, photo_id, profile_id, status, progress, policy, created_at) \
-             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)",
+            "INSERT INTO compression_jobs(id, photo_id, profile_id, status, progress, policy, output_dir, created_at) \
+             VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7)",
             params![
                 id,
                 photo_id,
                 profile_id,
                 status.as_str(),
                 policy,
+                output_dir,
                 now_string()
             ],
         )?;
@@ -1407,11 +1476,12 @@ impl Db {
         profile_id: &str,
         policy: &str,
     ) -> Result<bool> {
-        self.enqueue_job_for_existing_profile_with_status(
+        self.enqueue_job_for_existing_profile_with_options(
             photo_id,
             profile_id,
             policy,
             QueueStatus::Pending,
+            None,
         )
     }
 
@@ -1422,10 +1492,45 @@ impl Db {
         policy: &str,
         status: QueueStatus,
     ) -> Result<bool> {
+        self.enqueue_job_for_existing_profile_with_options(
+            photo_id,
+            profile_id,
+            policy,
+            status,
+            None,
+        )
+    }
+
+    /// Enqueues a manual job for an existing profile with an optional output
+    /// directory override.
+    pub fn enqueue_job_for_existing_profile_with_output_dir(
+        &self,
+        photo_id: i64,
+        profile_id: &str,
+        policy: &str,
+        output_dir: Option<&str>,
+    ) -> Result<bool> {
+        self.enqueue_job_for_existing_profile_with_options(
+            photo_id,
+            profile_id,
+            policy,
+            QueueStatus::Pending,
+            output_dir,
+        )
+    }
+
+    fn enqueue_job_for_existing_profile_with_options(
+        &self,
+        photo_id: i64,
+        profile_id: &str,
+        policy: &str,
+        status: QueueStatus,
+        output_dir: Option<&str>,
+    ) -> Result<bool> {
         let id = uuid::Uuid::new_v4().to_string();
         let inserted = self.conn.execute(
-            "INSERT INTO compression_jobs(id, photo_id, profile_id, status, progress, policy, created_at) \
-             SELECT ?1, ?2, ?3, ?4, 0, ?5, ?6 \
+            "INSERT INTO compression_jobs(id, photo_id, profile_id, status, progress, policy, output_dir, created_at) \
+             SELECT ?1, ?2, ?3, ?4, 0, ?5, ?6, ?7 \
              WHERE EXISTS (SELECT 1 FROM compression_profiles WHERE id = ?3)",
             params![
                 id,
@@ -1433,6 +1538,7 @@ impl Db {
                 profile_id,
                 status.as_str(),
                 policy,
+                output_dir,
                 now_string()
             ],
         )?;
@@ -1446,7 +1552,7 @@ impl Db {
                 "UPDATE compression_jobs SET status = 'processing', started_at = ?1 \
                  WHERE id = (SELECT id FROM compression_jobs WHERE status = 'pending' \
                     ORDER BY created_at, rowid LIMIT 1) \
-                 RETURNING id, photo_id, profile_id, status, progress, error, output_path, policy, \
+                 RETURNING id, photo_id, profile_id, status, progress, error, output_path, policy, output_dir, \
                     retry_count, created_at, started_at, finished_at",
                 params![now_string()],
                 row_to_job,
@@ -1489,7 +1595,7 @@ impl Db {
     pub fn list_jobs(&self, limit: i64) -> Result<Vec<CompressionJob>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, photo_id, profile_id, status, progress, error, output_path, policy, \
-                retry_count, created_at, started_at, finished_at FROM compression_jobs \
+                output_dir, retry_count, created_at, started_at, finished_at FROM compression_jobs \
              ORDER BY created_at DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit.max(1)], row_to_job)?;
@@ -1503,7 +1609,7 @@ impl Db {
     ) -> Result<Vec<CompressionJob>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, photo_id, profile_id, status, progress, error, output_path, policy, \
-                retry_count, created_at, started_at, finished_at FROM compression_jobs \
+                output_dir, retry_count, created_at, started_at, finished_at FROM compression_jobs \
              WHERE status = ?1 ORDER BY created_at DESC LIMIT ?2",
         )?;
         let rows = stmt.query_map(params![status.as_str(), limit.max(1)], row_to_job)?;
@@ -1958,10 +2064,11 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<CompressionJob> {
         error: row.get(5)?,
         output_path: row.get(6)?,
         policy: row.get(7)?,
-        retry_count: row.get(8)?,
-        created_at: row.get(9)?,
-        started_at: row.get(10)?,
-        finished_at: row.get(11)?,
+        output_dir: row.get(8)?,
+        retry_count: row.get(9)?,
+        created_at: row.get(10)?,
+        started_at: row.get(11)?,
+        finished_at: row.get(12)?,
     })
 }
 
@@ -2053,13 +2160,33 @@ mod tests {
     }
 
     #[test]
+    fn migration_v6_adds_job_output_dir() {
+        let db = Db::open_in_memory().unwrap();
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 6);
+        let has_output_dir: bool = db
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('compression_jobs') \
+                 WHERE name = 'output_dir')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(has_output_dir);
+    }
+
+    #[test]
     fn migration_adds_captured_id_index() {
         let db = Db::open_in_memory().unwrap();
         let version: i64 = db
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
 
         let recorded: i64 = db
             .conn
@@ -2102,7 +2229,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
         let retry_column: i64 = db
             .conn
             .query_row(
@@ -2169,7 +2296,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
 
         let jobs = db.list_jobs(10).unwrap();
         assert_eq!(jobs.len(), 1);
@@ -2202,7 +2329,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
         assert_eq!(db.list_jobs(10).unwrap()[0].retry_count, 2);
 
         let tables: i64 = db
@@ -2638,6 +2765,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(db.count_jobs(QueueStatus::Completed).unwrap(), 1);
+    }
+
+    #[test]
+    fn manual_job_keeps_its_output_directory() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        db.enqueue_job_with_output_dir(photo, "profile", "keep", Some("/exports"))
+            .unwrap();
+        let job = db.next_pending_job().unwrap().unwrap();
+        assert_eq!(job.output_dir.as_deref(), Some("/exports"));
+        assert_eq!(job.policy, "keep");
+    }
+
+    #[test]
+    fn automatic_jobs_leave_the_output_directory_unset() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        db.enqueue_job(photo, "profile", "keep").unwrap();
+        let job = db.next_pending_job().unwrap().unwrap();
+        assert!(job.output_dir.is_none());
     }
 
     #[test]
