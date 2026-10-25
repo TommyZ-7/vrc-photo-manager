@@ -1746,7 +1746,7 @@ fn publish_compression(
 }
 
 fn process_job(db: &Arc<Mutex<Db>>, job: &CompressionJob) -> Result<()> {
-    let (photo, profile) = {
+    let (photo, mut profile) = {
         let db = db.lock().unwrap();
         let photo = db
             .photo_by_id(job.photo_id)?
@@ -1759,6 +1759,9 @@ fn process_job(db: &Arc<Mutex<Db>>, job: &CompressionJob) -> Result<()> {
         db.update_job(&job.id, QueueStatus::Processing, 0.05, None, None)?;
         (photo, profile)
     };
+    if let Some(output_dir) = job.output_dir.as_deref().filter(|dir| !dir.trim().is_empty()) {
+        profile.output_dir = Some(output_dir.to_string());
+    }
     let source_path = PathBuf::from(photo.effective_path());
     let previous_display = photo.display_derivative_id;
     if photo.blake3.is_none()
@@ -3211,6 +3214,54 @@ mod tests {
         assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Missing);
         assert!(photo.display_derivative_id.is_none());
         assert_eq!(db.count_photos().unwrap(), 0);
+    }
+
+    #[test]
+    fn manual_output_directory_overrides_the_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let photo_path = dir
+            .path()
+            .join("photos/VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&photo_path);
+        daemon.run_once().unwrap();
+
+        let export_dir = dir.path().join("exports");
+        let job_id = {
+            let db = daemon.db.lock().unwrap();
+            let photo = db
+                .photo_by_path(&photo_path.to_string_lossy())
+                .unwrap()
+                .expect("indexed photo");
+            let profile = db
+                .ensure_default_profiles()
+                .unwrap()
+                .into_iter()
+                .next()
+                .expect("default profile");
+            db.enqueue_job_with_output_dir(
+                photo.id,
+                &profile.id,
+                "keep",
+                Some(export_dir.to_str().unwrap()),
+            )
+            .unwrap()
+        };
+
+        daemon.compress_pending().unwrap();
+
+        let db = daemon.db.lock().unwrap();
+        let stored = db
+            .list_jobs(1)
+            .unwrap()
+            .into_iter()
+            .find(|stored| stored.id == job_id)
+            .unwrap();
+        assert_eq!(stored.status, QueueStatus::Completed);
+        let output = stored.output_path.expect("output path");
+        assert!(Path::new(&output).starts_with(&export_dir));
+        assert!(Path::new(&output).is_file());
+        assert!(photo_path.is_file(), "keep must leave the original in place");
     }
 
     #[test]
