@@ -667,6 +667,14 @@ pub fn read_health_marker(paths: &UpdatePaths, token: &str) -> Result<Option<Hea
 /// Atomically replaces `target` with `staged`, keeping the old file as
 /// `<target>.previous`.
 pub fn replace_appimage(target: &Path, staged: &Path) -> Result<PathBuf> {
+    replace_appimage_impl(target, staged, &sync_parent_directory)
+}
+
+fn replace_appimage_impl(
+    target: &Path,
+    staged: &Path,
+    sync_parent: &dyn Fn(&Path) -> Result<()>,
+) -> Result<PathBuf> {
     if !target.is_file() {
         return Err(UpdateError::io_at(
             IoOperation::Apply,
@@ -715,6 +723,10 @@ pub fn replace_appimage(target: &Path, staged: &Path) -> Result<PathBuf> {
             .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))?;
         file.sync_all()
             .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))?;
+        let parent = target
+            .parent()
+            .ok_or_else(|| UpdateError::InvalidJob("target has no parent".to_string()))?;
+        sync_parent(parent)?;
         Ok(())
     })();
 
@@ -724,6 +736,19 @@ pub fn replace_appimage(target: &Path, staged: &Path) -> Result<PathBuf> {
         return Err(error);
     }
     Ok(backup)
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> Result<()> {
+    let dir =
+        File::open(path).map_err(|error| UpdateError::io_at(IoOperation::Apply, path, error))?;
+    dir.sync_all()
+        .map_err(|error| UpdateError::io_at(IoOperation::Apply, path, error))
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 pub fn restore_appimage(target: &Path, backup: &Path) -> Result<()> {
@@ -869,6 +894,37 @@ mod tests {
         restore_appimage(&target, &backup).unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"old");
         assert!(!backup.exists());
+    }
+
+    #[test]
+    fn a_parent_directory_sync_failure_restores_the_previous_appimage() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("app.AppImage");
+        let staged = dir.path().join("new.AppImage");
+        std::fs::write(&target, b"old").unwrap();
+        std::fs::write(&staged, b"new").unwrap();
+
+        let error = replace_appimage_impl(&target, &staged, &|path| {
+            Err(UpdateError::io_at(
+                crate::error::IoOperation::Apply,
+                path,
+                std::io::Error::other("sync failed"),
+            ))
+        })
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            UpdateError::Io {
+                operation: crate::error::IoOperation::Apply,
+                ..
+            }
+        ));
+        assert_eq!(std::fs::read(&target).unwrap(), b"old");
+        assert!(
+            !dir.path().join("app.AppImage.previous").exists(),
+            "the rollback renames .previous back to the target"
+        );
     }
 
     #[test]
