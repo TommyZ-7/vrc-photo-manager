@@ -29,7 +29,7 @@ use vrc_photo_core::model::{
 };
 use vrc_photo_core::scanner;
 use vrc_photo_core::scanner::ScanFailure;
-use vrc_photo_core::settings::AppSettings;
+use vrc_photo_core::settings::{AppSettings, CardSize};
 use vrc_photo_core::thumbnail;
 use vrc_photo_core::time;
 use vrc_photo_ipc::{
@@ -75,6 +75,11 @@ const THUMB_IN_FLIGHT: usize = 4;
 const PAGE_SIZE: usize = 256;
 const MAX_PAGES: usize = 24;
 const PHOTO_ROW_HEIGHT: f32 = 196.0;
+const CARD_BODY_GAP: f32 = 8.0;
+const CARD_TEXT_GAP: f32 = 3.0;
+const CARD_WORLD_LINE_HEIGHT: f32 = 18.0;
+const CARD_META_LINE_HEIGHT: f32 = 15.0;
+const CARD_ROW_SLACK: f32 = 24.0;
 const RAIL_WIDTH: f32 = 88.0;
 const RAIL_TOP_PAD: f32 = 24.0;
 const RAIL_TRACK_INSET: f32 = 12.0;
@@ -413,9 +418,9 @@ fn list_scroll_top(handle: &UniformListScrollHandle) -> f32 {
 ///
 /// `max_offset` is the non-negative extent reported by
 /// `ScrollHandle::max_offset()`; the actual offset is zero or negative.
-fn rail_scroll_offset(photo_row: usize, columns: usize, max_offset: f32) -> f32 {
+fn rail_scroll_offset(photo_row: usize, columns: usize, row_height: f32, max_offset: f32) -> f32 {
     let grid_row = photo_row / columns.max(1);
-    (-(grid_row as f32 * PHOTO_ROW_HEIGHT)).clamp(-max_offset.max(0.0), 0.0)
+    (-(grid_row as f32 * row_height)).clamp(-max_offset.max(0.0), 0.0)
 }
 
 /// Ordered snapshot of the library: only IDs and capture timestamps, so the
@@ -448,12 +453,12 @@ impl PhotoIndex {
 /// `scroll_top` is the non-negative scroll distance from the top of the list.
 /// The row is floored before multiplying by the column count: halfway into
 /// row 2 the top row is still row 2, not the first card of row 3.
-fn first_visible_photo(scroll_top: f32, columns: usize, total: usize) -> usize {
+fn first_visible_photo(scroll_top: f32, columns: usize, row_height: f32, total: usize) -> usize {
     if total == 0 {
         return 0;
     }
     let columns = columns.max(1);
-    let row = (scroll_top.max(0.0) / PHOTO_ROW_HEIGHT).floor() as usize;
+    let row = (scroll_top.max(0.0) / row_height).floor() as usize;
     row.saturating_mul(columns).min(total - 1)
 }
 
@@ -461,12 +466,17 @@ fn first_visible_photo(scroll_top: f32, columns: usize, total: usize) -> usize {
 ///
 /// `offset_y` is the non-negative scroll distance from the top of the list;
 /// callers convert the scroll handle's negative offset before calling.
-fn anchor_photo_id(index: &PhotoIndex, offset_y: f32, columns: usize) -> Option<i64> {
+fn anchor_photo_id(
+    index: &PhotoIndex,
+    offset_y: f32,
+    columns: usize,
+    row_height: f32,
+) -> Option<i64> {
     let total = index.total;
     if total == 0 {
         return None;
     }
-    let first_photo = first_visible_photo(offset_y, columns, total);
+    let first_photo = first_visible_photo(offset_y, columns, row_height, total);
     index.entries.get(first_photo).map(|entry| entry.id)
 }
 
@@ -566,6 +576,9 @@ struct PhotoBrowser {
     pages: PhotoPageCache,
     scroll: UniformListScrollHandle,
     columns: usize,
+    /// Row height of the current card layout, used when clamping after a
+    /// removal. `photo_grid` refreshes it from the display settings.
+    row_height: f32,
     generation: u64,
     labels_generation: u64,
     labels: Option<Arc<YearRailLabels>>,
@@ -581,6 +594,7 @@ impl PhotoBrowser {
             pages: PhotoPageCache::new(),
             scroll: UniformListScrollHandle::new(),
             columns: 1,
+            row_height: PHOTO_ROW_HEIGHT,
             generation: 0,
             labels_generation: 0,
             labels: None,
@@ -615,7 +629,7 @@ impl PhotoBrowser {
             self.scroll.scroll_to_item_strict(0, ScrollStrategy::Top);
             return;
         }
-        let current_row = (list_scroll_top(&self.scroll) / PHOTO_ROW_HEIGHT).floor() as usize;
+        let current_row = (list_scroll_top(&self.scroll) / self.row_height).floor() as usize;
         if current_row >= rows {
             self.scroll
                 .scroll_to_item_strict(rows - 1, ScrollStrategy::Nearest);
@@ -797,6 +811,7 @@ struct YearRail {
     index: Arc<PhotoIndex>,
     scroll: UniformListScrollHandle,
     columns: usize,
+    row_height: f32,
     drag_active: Rc<Cell<bool>>,
 }
 
@@ -807,6 +822,7 @@ impl YearRail {
         index: Arc<PhotoIndex>,
         scroll: UniformListScrollHandle,
         columns: usize,
+        row_height: f32,
         drag_active: Rc<Cell<bool>>,
     ) -> Self {
         Self {
@@ -815,6 +831,7 @@ impl YearRail {
             index,
             scroll,
             columns,
+            row_height,
             drag_active,
         }
     }
@@ -842,7 +859,7 @@ impl YearRail {
             .unwrap_or_else(|| rail_row_at(local_y, total, height))
             .min(total - 1);
         let max_offset = f32::from(self.scroll.0.borrow().base_handle.max_offset().y);
-        let offset = rail_scroll_offset(photo_row, self.columns, max_offset);
+        let offset = rail_scroll_offset(photo_row, self.columns, self.row_height, max_offset);
         self.scroll
             .0
             .borrow_mut()
@@ -935,7 +952,7 @@ impl Element for YearRail {
 
         let scroll_top = list_scroll_top(&self.scroll);
         let columns = self.columns.max(1);
-        let first_visible = first_visible_photo(scroll_top, columns, total);
+        let first_visible = first_visible_photo(scroll_top, columns, self.row_height, total);
         let month = self
             .index
             .entries
@@ -1208,6 +1225,8 @@ pub struct App {
     search_request: u64,
     applied_search: Option<PhotoTextFilter>,
     pending_search_anchor: Option<i64>,
+    pending_layout_anchor_library: Option<i64>,
+    pending_layout_anchor_search: Option<i64>,
     search_refresh_pending: bool,
     search_favorite: bool,
     search_days: Option<i64>,
@@ -1366,6 +1385,8 @@ impl App {
             search_request: 0,
             applied_search: None,
             pending_search_anchor: None,
+            pending_layout_anchor_library: None,
+            pending_layout_anchor_search: None,
             search_refresh_pending: false,
             search_favorite: false,
             search_days: Some(7),
@@ -1927,6 +1948,7 @@ impl App {
                 &self.library.index,
                 list_scroll_top(&self.library.scroll),
                 self.library.columns,
+                self.card_metrics().row_height,
             )
         });
         let anchor = anchor.flatten();
@@ -2833,11 +2855,13 @@ impl App {
         };
         self.applied_search = Some(filter.clone());
         self.pending_search_anchor = None;
+        self.pending_layout_anchor_search = None;
         self.search_refresh_pending = false;
         self.start_search(filter, cx);
     }
 
     fn start_search(&mut self, filter: PhotoTextFilter, cx: &mut Context<Self>) {
+        self.pending_layout_anchor_search = None;
         self.search_request = self.search_request.wrapping_add(1);
         let generation = self.search_request;
 
@@ -2893,6 +2917,7 @@ impl App {
         if generation != self.search_request {
             return;
         }
+        self.pending_layout_anchor_search = None;
         match result {
             Ok(entries) => {
                 self.search_view
@@ -2938,6 +2963,7 @@ impl App {
         self.searching = false;
         self.applied_search = None;
         self.pending_search_anchor = None;
+        self.pending_layout_anchor_search = None;
         self.search_refresh_pending = false;
         self.message = None;
         // Invalidate an in-flight request so it cannot revive the cleared view.
@@ -2970,6 +2996,7 @@ impl App {
             &self.search_view.index,
             list_scroll_top(&self.search_view.scroll),
             self.search_view.columns,
+            self.card_metrics().row_height,
         );
         self.start_search_refresh(anchor, cx);
     }
@@ -3740,14 +3767,32 @@ impl App {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let width: f32 = window.viewport_size().width.into();
+        let metrics = self.card_metrics();
+        let pending = if search {
+            self.pending_layout_anchor_search.take()
+        } else {
+            self.pending_layout_anchor_library.take()
+        };
         let next_columns = grid_columns_for(
             search,
             width,
             self.sidebar_collapsed,
             self.inspector_collapsed,
+            metrics.min_card_width,
         );
         let browser = self.browser_mut(search);
         browser.columns = next_columns;
+        browser.row_height = metrics.row_height;
+        if let Some(id) = pending {
+            let row = browser
+                .index
+                .row_of_id(id)
+                .map(|position| position / browser.columns.max(1))
+                .unwrap_or(0);
+            browser
+                .scroll
+                .scroll_to_item_strict(row, ScrollStrategy::Top);
+        }
         let labels = if browser.labels.is_none() || browser.labels_generation != browser.generation
         {
             // Shaping is expensive, so do it once per index snapshot instead
@@ -3852,7 +3897,7 @@ impl App {
                 let mut rendered = Vec::with_capacity(range.len());
                 for row in range {
                     let mut line = h_flex()
-                        .h(px(PHOTO_ROW_HEIGHT))
+                        .h(px(metrics.row_height))
                         .w_full()
                         .min_w_0()
                         .items_start()
@@ -3865,10 +3910,15 @@ impl App {
                         }
                         match this.browser_mut(search).photo_at(photo_index) {
                             Some(photo) => {
-                                line = line.child(this.photo_card(photo.as_ref(), photo_index, cx));
+                                line = line.child(this.photo_card(
+                                    photo.as_ref(),
+                                    photo_index,
+                                    metrics,
+                                    cx,
+                                ));
                             }
                             None => {
-                                line = line.child(grid_placeholder());
+                                line = line.child(grid_placeholder(metrics.image_height));
                             }
                         }
                     }
@@ -3921,6 +3971,7 @@ impl App {
                         index,
                         scroll,
                         columns,
+                        metrics.row_height,
                         rail_drag,
                     )),
             );
@@ -4019,6 +4070,7 @@ impl App {
         &mut self,
         photo: &Photo,
         grid_index: usize,
+        metrics: CardMetrics,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = photo.id;
@@ -4027,6 +4079,10 @@ impl App {
         let compressed = self.compressed_ids.contains(&id);
         let duplicate = self.duplicate_ids.contains(&id);
         let replaced = photo.is_replaced();
+        let show_status = self.settings.ui_card_show_status;
+        let show_world = self.settings.ui_card_show_world;
+        let show_date = self.settings.ui_card_show_date;
+        let show_size = self.settings.ui_card_show_size;
         let world = photo
             .world_name
             .clone()
@@ -4048,7 +4104,7 @@ impl App {
 
         let mut thumb = div()
             .relative()
-            .h(px(128.))
+            .h(px(metrics.image_height))
             .w_full()
             .rounded(px(14.))
             .overflow_hidden()
@@ -4073,113 +4129,120 @@ impl App {
                     .size_full(),
             );
         }
-        let status_color = if replaced {
-            BLUE
-        } else if duplicate {
-            MUTED
-        } else if compressed {
-            GREEN
-        } else {
-            AMBER
-        };
-        thumb = thumb
-            .child(
+        if show_status {
+            let status_color = if replaced {
+                BLUE
+            } else if duplicate {
+                MUTED
+            } else if compressed {
+                GREEN
+            } else {
+                AMBER
+            };
+            thumb = thumb
+                .child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .bottom_0()
+                        .h(px(56.))
+                        .bg(linear_gradient(
+                            180.,
+                            linear_color_stop(rgba(0x07090d00), 0.),
+                            linear_color_stop(rgba(0x07090dcc), 1.),
+                        )),
+                )
+                .child(
+                    h_flex()
+                        .absolute()
+                        .left(px(9.))
+                        .bottom(px(8.))
+                        .gap(px(5.))
+                        .items_center()
+                        .child(div().size(px(5.)).rounded_full().bg(rgb(status_color)))
+                        .child(
+                            div()
+                                .text_size(px(9.))
+                                .font_medium()
+                                .text_color(rgb(status_color))
+                                .child(if replaced {
+                                    "圧縮版のみ"
+                                } else if duplicate {
+                                    "重複"
+                                } else if compressed {
+                                    "圧縮済"
+                                } else {
+                                    "未圧縮"
+                                }),
+                        ),
+                );
+        }
+        thumb = thumb.when(selected, |this| {
+            this.child(
                 div()
                     .absolute()
-                    .left_0()
-                    .right_0()
-                    .bottom_0()
-                    .h(px(56.))
-                    .bg(linear_gradient(
-                        180.,
-                        linear_color_stop(rgba(0x07090d00), 0.),
-                        linear_color_stop(rgba(0x07090dcc), 1.),
-                    )),
-            )
-            .child(
-                h_flex()
-                    .absolute()
+                    .top(px(9.))
                     .left(px(9.))
-                    .bottom(px(8.))
-                    .gap(px(5.))
+                    .size(px(19.))
+                    .rounded_full()
+                    .bg(rgb(BLUE))
+                    .border_2()
+                    .border_color(rgb(0x07090d))
+                    .flex()
                     .items_center()
-                    .child(div().size(px(5.)).rounded_full().bg(rgb(status_color)))
-                    .child(
-                        div()
-                            .text_size(px(9.))
-                            .font_medium()
-                            .text_color(rgb(status_color))
-                            .child(if replaced {
-                                "圧縮版のみ"
-                            } else if duplicate {
-                                "重複"
-                            } else if compressed {
-                                "圧縮済"
-                            } else {
-                                "未圧縮"
-                            }),
-                    ),
+                    .justify_center()
+                    .text_size(px(11.))
+                    .font_semibold()
+                    .text_color(rgb(0x071018))
+                    .child("✓"),
             )
-            .when(selected, |this| {
-                this.child(
-                    div()
-                        .absolute()
-                        .top(px(9.))
-                        .left(px(9.))
-                        .size(px(19.))
-                        .rounded_full()
-                        .bg(rgb(BLUE))
-                        .border_2()
-                        .border_color(rgb(0x07090d))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(11.))
-                        .font_semibold()
-                        .text_color(rgb(0x071018))
-                        .child("✓"),
-                )
-            })
-            .when(photo.is_favorite, |this| {
-                this.child(
-                    div()
-                        .absolute()
-                        .top(px(9.))
-                        .right(px(9.))
-                        .size(px(7.))
-                        .rounded_full()
-                        .bg(rgb(AMBER))
-                        .shadow(vec![
-                            BoxShadow::new(px(0.), px(0.), rgba(0x00000080).into())
-                                .blur_radius(px(3.)),
-                        ]),
-                )
-            });
+        });
+        thumb = thumb.when(photo.is_favorite, |this| {
+            this.child(
+                div()
+                    .absolute()
+                    .top(px(9.))
+                    .right(px(9.))
+                    .size(px(7.))
+                    .rounded_full()
+                    .bg(rgb(AMBER))
+                    .shadow(vec![
+                        BoxShadow::new(px(0.), px(0.), rgba(0x00000080).into()).blur_radius(px(3.)),
+                    ]),
+            )
+        });
 
-        let body = v_flex().min_w_0().gap(px(8.)).child(thumb).child(
-            v_flex()
-                .min_w_0()
-                .gap(px(3.))
-                .child(
+        let meta_line = card_meta_line(
+            show_date,
+            show_size,
+            &photo.captured_at_local,
+            format_bytes(photo.effective_file_size()),
+        );
+        let mut body = v_flex().min_w_0().gap(px(CARD_BODY_GAP)).child(thumb);
+        if show_world || meta_line.is_some() {
+            let mut text = v_flex().min_w_0().gap(px(CARD_TEXT_GAP));
+            if show_world {
+                text = text.child(
                     div()
                         .text_size(px(12.))
                         .font_semibold()
                         .text_color(rgb(TEXT))
                         .truncate()
                         .child(world),
-                )
-                .child(
+                );
+            }
+            if let Some(meta) = meta_line {
+                text = text.child(
                     div()
                         .text_size(px(10.))
                         .text_color(rgb(MUTED_2))
                         .truncate()
-                        .child(format!(
-                            "{} · {}",
-                            short_date(&photo.captured_at_local),
-                            format_bytes(photo.effective_file_size())
-                        )),
-                ),
-        );
+                        .child(meta),
+                );
+            }
+            body = body.child(text);
+        }
 
         let card = v_flex()
             .id(SharedString::from(format!("photo-{id}")))
@@ -7626,6 +7689,44 @@ impl App {
         cx.notify();
     }
 
+    fn card_metrics(&self) -> CardMetrics {
+        card_metrics(&self.settings)
+    }
+
+    fn set_card_size(&mut self, size: CardSize, cx: &mut Context<Self>) {
+        if self.settings.ui_card_size == size {
+            return;
+        }
+        self.capture_display_layout_anchors();
+        self.settings.ui_card_size = size;
+        if let Err(error) = self.settings.save(&self.db) {
+            tracing::warn!(%error, "cannot save card size");
+        }
+        cx.notify();
+    }
+
+    /// Remembers the top-left photo before a display change alters columns or
+    /// row height. The next render of each grid restores that photo.
+    fn capture_display_layout_anchors(&mut self) {
+        let metrics = self.card_metrics();
+        if self.pending_layout_anchor_library.is_none() {
+            self.pending_layout_anchor_library = anchor_photo_id(
+                &self.library.index,
+                list_scroll_top(&self.library.scroll),
+                self.library.columns,
+                metrics.row_height,
+            );
+        }
+        if self.pending_layout_anchor_search.is_none() {
+            self.pending_layout_anchor_search = anchor_photo_id(
+                &self.search_view.index,
+                list_scroll_top(&self.search_view.scroll),
+                self.search_view.columns,
+                metrics.row_height,
+            );
+        }
+    }
+
     fn set_reduce_motion(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.settings.ui_reduce_motion = enabled;
         if let Err(error) = self.settings.save(&self.db) {
@@ -7790,12 +7891,91 @@ impl App {
                                     .text_size(px(17.))
                                     .font_semibold()
                                     .text_color(rgb(TEXT))
+                                    .child("表示（ライブラリ・検索）"),
+                            )
+                            .child(self.setting_switch(
+                                "圧縮状態",
+                                "写真カード左下の圧縮状態ラベルを表示します",
+                                self.settings.ui_card_show_status,
+                                true,
+                                cx,
+                                |settings, value| settings.ui_card_show_status = value,
+                            ))
+                            .child(self.setting_switch(
+                                "ワールド名",
+                                "カードのワールド名を表示します",
+                                self.settings.ui_card_show_world,
+                                true,
+                                cx,
+                                |settings, value| settings.ui_card_show_world = value,
+                            ))
+                            .child(self.setting_switch(
+                                "日付",
+                                "撮影日を表示します",
+                                self.settings.ui_card_show_date,
+                                true,
+                                cx,
+                                |settings, value| settings.ui_card_show_date = value,
+                            ))
+                            .child(self.setting_switch(
+                                "サイズ",
+                                "ファイルサイズを表示します",
+                                self.settings.ui_card_show_size,
+                                true,
+                                cx,
+                                |settings, value| settings.ui_card_show_size = value,
+                            ))
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap(px(12.))
+                                    .py(px(2.))
+                                    .child(
+                                        v_flex()
+                                            .gap(px(2.))
+                                            .child(
+                                                div()
+                                                    .text_size(px(12.))
+                                                    .text_color(rgb(TEXT))
+                                                    .child("カードの大きさ"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(10.))
+                                                    .text_color(rgb(MUTED_2))
+                                                    .child("ライブラリと検索の両方に適用されます"),
+                                            ),
+                                    )
+                                    .child(div().flex_1())
+                                    .child(
+                                        h_flex()
+                                            .gap(px(6.))
+                                            .child(self.card_size_button(CardSize::Small, cx))
+                                            .child(self.card_size_button(CardSize::Medium, cx))
+                                            .child(self.card_size_button(CardSize::Large, cx))
+                                            .child(self.card_size_button(CardSize::ExtraLarge, cx)),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        glass_panel()
+                            .flex()
+                            .flex_col()
+                            .p(px(24.))
+                            .gap(px(16.))
+                            .bg(rgb(PANEL))
+                            .child(
+                                div()
+                                    .text_size(px(17.))
+                                    .font_semibold()
+                                    .text_color(rgb(TEXT))
                                     .child("起動と圧縮"),
                             )
                             .child(self.setting_switch(
                                 "自動起動",
                                 autostart_hint,
                                 self.settings.autostart,
+                                false,
                                 cx,
                                 |settings, value| settings.autostart = value,
                             ))
@@ -7803,6 +7983,7 @@ impl App {
                                 "トレイ常駐",
                                 "UIを閉じても監視を継続",
                                 self.settings.tray,
+                                false,
                                 cx,
                                 |settings, value| settings.tray = value,
                             ))
@@ -7810,6 +7991,7 @@ impl App {
                                 "自動圧縮",
                                 "新規写真に自動で圧縮を適用",
                                 self.settings.auto_compress,
+                                false,
                                 cx,
                                 |settings, value| settings.auto_compress = value,
                             ))
@@ -7818,6 +8000,7 @@ impl App {
                                     "新規写真をすぐに圧縮",
                                     "OFFにすると未実行キューに追加し、ダッシュボードからまとめて実行できます",
                                     self.settings.auto_compress_immediate,
+                                    false,
                                     cx,
                                     |settings, value| settings.auto_compress_immediate = value,
                                 ))
@@ -7826,6 +8009,7 @@ impl App {
                                 "自動圧縮後に元画像を保持",
                                 "OFFにすると自動圧縮の成功後、元画像をOSゴミ箱へ移動します。手動圧縮では実行時に選べます",
                                 self.settings.auto_compress_keep_original,
+                                false,
                                 cx,
                                 |settings, value| settings.auto_compress_keep_original = value,
                             ))
@@ -7914,6 +8098,7 @@ impl App {
         label: &str,
         description: &str,
         checked: bool,
+        capture_layout: bool,
         cx: &mut Context<Self>,
         apply: fn(&mut AppSettings, bool),
     ) -> impl IntoElement {
@@ -7943,6 +8128,9 @@ impl App {
                 Switch::new(SharedString::from(format!("setting-{label}")))
                     .checked(checked)
                     .on_click(cx.listener(move |this, value, _, cx| {
+                        if capture_layout {
+                            this.capture_display_layout_anchors();
+                        }
                         apply(&mut this.settings, *value);
                         if let Err(error) = this.settings.save(&this.db) {
                             tracing::warn!(%error, setting = %label, "cannot save setting");
@@ -7950,6 +8138,18 @@ impl App {
                         cx.notify();
                     })),
             )
+    }
+
+    fn card_size_button(&self, size: CardSize, cx: &mut Context<Self>) -> AnyElement {
+        let selected = self.settings.ui_card_size == size;
+        let label = card_size_label(size);
+        Button::new(SharedString::from(format!("card-size-{label}")))
+            .label(label)
+            .small()
+            .selected(selected)
+            .toggled(selected)
+            .on_click(cx.listener(move |this, _, _, cx| this.set_card_size(size, cx)))
+            .into_any_element()
     }
 
     fn stat_card(&self, label: &str, value: String) -> impl IntoElement {
@@ -8930,8 +9130,50 @@ fn viewer_image_box(
     (width, width / ratio)
 }
 
-fn grid_columns(available_width: f32) -> usize {
-    (((available_width + GRID_GAP) / (MIN_CARD_WIDTH + GRID_GAP)).floor() as usize).max(1)
+/// Presentation metrics for one photo card and the uniform grid row it sits in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CardMetrics {
+    image_height: f32,
+    row_height: f32,
+    min_card_width: f32,
+}
+
+/// Derives the card layout from the display settings.
+///
+/// The text line heights are the values already implicit in the fixed 196 px
+/// medium row: 128 image + 8 body gap + 18 world + 3 text gap + 15 meta + 24
+/// slack. Hiding a text group removes its height so the grid tightens instead
+/// of leaving a blank strip.
+fn card_metrics(settings: &AppSettings) -> CardMetrics {
+    let (image_height, min_card_width) = match settings.ui_card_size {
+        CardSize::Small => (96.0, 140.0),
+        CardSize::Medium => (128.0, MIN_CARD_WIDTH),
+        CardSize::Large => (168.0, 220.0),
+        CardSize::ExtraLarge => (208.0, 280.0),
+    };
+    let meta_line = settings.ui_card_show_date || settings.ui_card_show_size;
+    let mut row_height = image_height + CARD_ROW_SLACK;
+    if settings.ui_card_show_world || meta_line {
+        row_height += CARD_BODY_GAP;
+    }
+    if settings.ui_card_show_world {
+        row_height += CARD_WORLD_LINE_HEIGHT;
+    }
+    if meta_line {
+        if settings.ui_card_show_world {
+            row_height += CARD_TEXT_GAP;
+        }
+        row_height += CARD_META_LINE_HEIGHT;
+    }
+    CardMetrics {
+        image_height,
+        row_height,
+        min_card_width,
+    }
+}
+
+fn grid_columns(available_width: f32, min_card_width: f32) -> usize {
+    (((available_width + GRID_GAP) / (min_card_width + GRID_GAP)).floor() as usize).max(1)
 }
 
 /// Column count for a grid screen. Search uses its own available width because
@@ -8942,22 +9184,23 @@ fn grid_columns_for(
     window_width: f32,
     sidebar_collapsed: bool,
     inspector_collapsed: bool,
+    min_card_width: f32,
 ) -> usize {
     let available = if search {
         search_available_width(window_width, sidebar_collapsed)
     } else {
         grid_available_width(window_width, sidebar_collapsed, inspector_collapsed)
     };
-    grid_columns(available)
+    grid_columns(available, min_card_width)
 }
 
 /// Stands in for a photo whose page has not loaded yet. Matches the card's
-/// 128 px image area so the fixed 196 px row height never changes.
-fn grid_placeholder() -> AnyElement {
+/// current image height so the uniform row never changes height.
+fn grid_placeholder(image_height: f32) -> AnyElement {
     div()
         .flex_1()
         .min_w_0()
-        .h(px(128.))
+        .h(px(image_height))
         .rounded(px(14.))
         .bg(rgb(PANEL_2))
         .border_2()
@@ -8972,6 +9215,31 @@ fn short_date(value: &str) -> String {
         .and_then(|value| value.get(5..))
         .unwrap_or(value)
         .to_string()
+}
+
+fn card_meta_line(show_date: bool, show_size: bool, date: &str, size: String) -> Option<String> {
+    match (show_date, show_size) {
+        (true, true) => Some(format!("{} · {}", short_date(date), size)),
+        (true, false) => Some(short_date(date)),
+        (false, true) => Some(size),
+        (false, false) => None,
+    }
+}
+
+fn card_size_options() -> [(CardSize, &'static str); 4] {
+    [
+        (CardSize::Small, "小"),
+        (CardSize::Medium, "中"),
+        (CardSize::Large, "大"),
+        (CardSize::ExtraLarge, "特大"),
+    ]
+}
+
+fn card_size_label(size: CardSize) -> &'static str {
+    card_size_options()
+        .into_iter()
+        .find_map(|(option, label)| (option == size).then_some(label))
+        .unwrap_or("中")
 }
 
 fn scene_color(world: &str) -> u32 {
@@ -9285,11 +9553,12 @@ mod tests {
     // `gpui_kit::*`, shadowing the built-in `#[test]` and recursing forever.
     use super::{
         CountDebounce, DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH,
-        IpcScanPhase, MAX_PAGES, ManualOutputTarget, PAGE_SIZE, PHOTO_ROW_HEIGHT, PhotoBrowser,
-        PhotoIndex, PhotoPageCache, ScanProgressView, Screen, THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT,
-        ThumbnailCache, YearBucket, add_photo_root_and_save, alert_summaries, anchor_photo_id,
-        apply_library_index, apply_profile_format, autostart_description, average_bgra,
-        build_year_buckets, compression_policy, compression_policy_warning, daemon_liveness,
+        IpcScanPhase, MAX_PAGES, MIN_CARD_WIDTH, ManualOutputTarget, PAGE_SIZE, PHOTO_ROW_HEIGHT,
+        PhotoBrowser, PhotoIndex, PhotoPageCache, ScanProgressView, Screen, THUMB_CACHE_ENTRIES,
+        THUMB_IN_FLIGHT, ThumbnailCache, YearBucket, add_photo_root_and_save, alert_summaries,
+        anchor_photo_id, apply_library_index, apply_profile_format, autostart_description,
+        average_bgra, build_year_buckets, card_meta_line, card_metrics, card_size_label,
+        card_size_options, compression_policy, compression_policy_warning, daemon_liveness,
         daemon_operation_label, daemon_state_label, daemon_sync_label, decode_thumbnail,
         demo_thumb_path, ease_motion, first_visible_photo, format_captured_month, format_count,
         format_timestamp, grid_available_width, grid_columns, grid_columns_for, has_tag_filter,
@@ -9316,7 +9585,7 @@ mod tests {
         CompressionFormat, CompressionJob, CompressionProfile, DaemonOperation, Photo,
         PhotoIndexEntry, PhotoStatus, PhotoTextFilter, QueueStatus,
     };
-    use vrc_photo_core::settings::AppSettings;
+    use vrc_photo_core::settings::{AppSettings, CardSize};
 
     #[test]
     fn sidebar_widths_match_the_rail() {
@@ -9337,15 +9606,39 @@ mod tests {
 
     #[test]
     fn grid_columns_adapt_to_window_rail_and_inspector() {
-        assert_eq!(grid_columns(grid_available_width(1280.0, false, false)), 3);
-        assert_eq!(grid_columns(grid_available_width(1440.0, false, false)), 4);
-        assert_eq!(grid_columns(grid_available_width(1280.0, true, false)), 4);
-        assert_eq!(grid_columns(grid_available_width(1440.0, true, false)), 5);
-        assert_eq!(grid_columns(grid_available_width(1280.0, false, true)), 5);
-        assert_eq!(grid_columns(grid_available_width(1440.0, false, true)), 6);
-        assert_eq!(grid_columns(grid_available_width(1080.0, false, false)), 2);
-        assert_eq!(grid_columns(grid_available_width(1080.0, false, true)), 4);
-        assert_eq!(grid_columns(0.0), 1);
+        assert_eq!(
+            grid_columns(grid_available_width(1280.0, false, false), MIN_CARD_WIDTH),
+            3
+        );
+        assert_eq!(
+            grid_columns(grid_available_width(1440.0, false, false), MIN_CARD_WIDTH),
+            4
+        );
+        assert_eq!(
+            grid_columns(grid_available_width(1280.0, true, false), MIN_CARD_WIDTH),
+            4
+        );
+        assert_eq!(
+            grid_columns(grid_available_width(1440.0, true, false), MIN_CARD_WIDTH),
+            5
+        );
+        assert_eq!(
+            grid_columns(grid_available_width(1280.0, false, true), MIN_CARD_WIDTH),
+            5
+        );
+        assert_eq!(
+            grid_columns(grid_available_width(1440.0, false, true), MIN_CARD_WIDTH),
+            6
+        );
+        assert_eq!(
+            grid_columns(grid_available_width(1080.0, false, false), MIN_CARD_WIDTH),
+            2
+        );
+        assert_eq!(
+            grid_columns(grid_available_width(1080.0, false, true), MIN_CARD_WIDTH),
+            4
+        );
+        assert_eq!(grid_columns(0.0, MIN_CARD_WIDTH), 1);
     }
 
     #[test]
@@ -9873,30 +10166,45 @@ mod tests {
             index_entry(3, 202411),
         ];
         let index = PhotoIndex::new(entries);
-        assert_eq!(anchor_photo_id(&index, 0.0, 3), Some(1));
-        assert_eq!(anchor_photo_id(&index, PHOTO_ROW_HEIGHT + 1.0, 1), Some(2));
+        assert_eq!(anchor_photo_id(&index, 0.0, 3, PHOTO_ROW_HEIGHT), Some(1));
         assert_eq!(
-            anchor_photo_id(&index, PHOTO_ROW_HEIGHT * 2.0 + 1.0, 1),
+            anchor_photo_id(&index, PHOTO_ROW_HEIGHT + 1.0, 1, PHOTO_ROW_HEIGHT),
+            Some(2)
+        );
+        assert_eq!(
+            anchor_photo_id(&index, PHOTO_ROW_HEIGHT * 2.0 + 1.0, 1, PHOTO_ROW_HEIGHT),
             Some(3)
         );
     }
 
     #[test]
     fn anchor_photo_id_handles_empty_and_overscrolled_indexes() {
-        assert_eq!(anchor_photo_id(&PhotoIndex::new(Vec::new()), 0.0, 3), None);
+        assert_eq!(
+            anchor_photo_id(&PhotoIndex::new(Vec::new()), 0.0, 3, PHOTO_ROW_HEIGHT),
+            None
+        );
         let index = PhotoIndex::new(vec![index_entry(1, 202601), index_entry(2, 202512)]);
-        assert_eq!(anchor_photo_id(&index, PHOTO_ROW_HEIGHT * 50.0, 4), Some(2));
+        assert_eq!(
+            anchor_photo_id(&index, PHOTO_ROW_HEIGHT * 50.0, 4, PHOTO_ROW_HEIGHT),
+            Some(2)
+        );
     }
 
     #[test]
     fn first_visible_photo_floors_the_row_before_applying_columns() {
         // Halfway into row 2 with 3 columns: the top row starts at entry 6.
         // Truncating after multiplying (`2.5 * 3 = 7.5`) would pick entry 7.
-        assert_eq!(first_visible_photo(PHOTO_ROW_HEIGHT * 2.5, 3, 100), 6);
-        assert_eq!(first_visible_photo(0.0, 3, 100), 0);
-        assert_eq!(first_visible_photo(-20.0, 3, 100), 0);
-        assert_eq!(first_visible_photo(PHOTO_ROW_HEIGHT * 50.0, 3, 10), 9);
-        assert_eq!(first_visible_photo(0.0, 3, 0), 0);
+        assert_eq!(
+            first_visible_photo(PHOTO_ROW_HEIGHT * 2.5, 3, PHOTO_ROW_HEIGHT, 100),
+            6
+        );
+        assert_eq!(first_visible_photo(0.0, 3, PHOTO_ROW_HEIGHT, 100), 0);
+        assert_eq!(first_visible_photo(-20.0, 3, PHOTO_ROW_HEIGHT, 100), 0);
+        assert_eq!(
+            first_visible_photo(PHOTO_ROW_HEIGHT * 50.0, 3, PHOTO_ROW_HEIGHT, 10),
+            9
+        );
+        assert_eq!(first_visible_photo(0.0, 3, PHOTO_ROW_HEIGHT, 0), 0);
     }
 
     #[test]
@@ -9910,7 +10218,7 @@ mod tests {
         ]);
         assert_eq!(updated.row_of_id(11), Some(2));
         assert_eq!(
-            anchor_photo_id(&updated, PHOTO_ROW_HEIGHT * 2.0 + 1.0, 1),
+            anchor_photo_id(&updated, PHOTO_ROW_HEIGHT * 2.0 + 1.0, 1, PHOTO_ROW_HEIGHT),
             Some(11)
         );
     }
@@ -9918,6 +10226,120 @@ mod tests {
     #[test]
     fn grid_row_height_matches_the_card_height() {
         assert_eq!(PHOTO_ROW_HEIGHT, 196.0);
+    }
+
+    #[test]
+    fn default_card_metrics_match_the_current_grid() {
+        let metrics = card_metrics(&AppSettings::default());
+        assert_eq!(metrics.image_height, 128.0);
+        assert_eq!(metrics.row_height, PHOTO_ROW_HEIGHT);
+        assert_eq!(metrics.min_card_width, MIN_CARD_WIDTH);
+    }
+
+    #[test]
+    fn hidden_card_text_shrinks_the_row_but_keeps_the_image() {
+        let settings = AppSettings {
+            ui_card_show_world: false,
+            ui_card_show_date: false,
+            ui_card_show_size: false,
+            ..Default::default()
+        };
+        let metrics = card_metrics(&settings);
+        assert_eq!(metrics.image_height, 128.0);
+        assert_eq!(metrics.row_height, 152.0);
+    }
+
+    #[test]
+    fn card_metrics_count_only_visible_text_lines() {
+        let world_only = AppSettings {
+            ui_card_show_date: false,
+            ui_card_show_size: false,
+            ..Default::default()
+        };
+        assert_eq!(card_metrics(&world_only).row_height, 178.0);
+
+        let meta_only = AppSettings {
+            ui_card_show_world: false,
+            ..Default::default()
+        };
+        assert_eq!(card_metrics(&meta_only).row_height, 175.0);
+
+        let status_hidden = AppSettings {
+            ui_card_show_status: false,
+            ..Default::default()
+        };
+        assert_eq!(card_metrics(&status_hidden).row_height, PHOTO_ROW_HEIGHT);
+    }
+
+    #[test]
+    fn card_size_presets_scale_the_grid() {
+        let expected = [
+            (CardSize::Small, 96.0, 140.0),
+            (CardSize::Medium, 128.0, 170.0),
+            (CardSize::Large, 168.0, 220.0),
+            (CardSize::ExtraLarge, 208.0, 280.0),
+        ];
+        for (size, image, min_width) in expected {
+            let metrics = card_metrics(&AppSettings {
+                ui_card_size: size,
+                ..Default::default()
+            });
+            assert_eq!(metrics.image_height, image);
+            assert_eq!(metrics.min_card_width, min_width);
+            assert_eq!(metrics.row_height, image + 68.0);
+        }
+    }
+
+    #[test]
+    fn grid_columns_respect_the_card_size() {
+        assert!(grid_columns(1280.0, 140.0) >= grid_columns(1280.0, 280.0));
+        assert_eq!(grid_columns(300.0, 280.0), 1);
+        assert_eq!(grid_columns_for(true, 1280.0, false, false, 170.0), 3);
+    }
+
+    #[test]
+    fn anchor_and_rail_helpers_accept_a_custom_row_height() {
+        let index = PhotoIndex::new(vec![
+            index_entry(1, 202601),
+            index_entry(2, 202601),
+            index_entry(3, 202601),
+        ]);
+        assert_eq!(anchor_photo_id(&index, 153.0, 2, 152.0), Some(3));
+        assert_eq!(rail_scroll_offset(3, 3, 152.0, 10_000.0), -152.0);
+    }
+
+    #[test]
+    fn card_meta_line_joins_only_visible_parts() {
+        let date = "2026-10-25 12:34:56.000";
+        let size = "12.3 MB".to_string();
+        assert_eq!(
+            card_meta_line(true, true, date, size.clone()),
+            Some("10-25 12:34:56 · 12.3 MB".to_string())
+        );
+        assert_eq!(
+            card_meta_line(true, false, date, size.clone()),
+            Some("10-25 12:34:56".to_string())
+        );
+        assert_eq!(
+            card_meta_line(false, true, date, size.clone()),
+            Some("12.3 MB".to_string())
+        );
+        assert_eq!(card_meta_line(false, false, date, size), None);
+    }
+
+    #[test]
+    fn card_size_options_cover_every_preset_in_order() {
+        let options = card_size_options();
+        assert_eq!(
+            options.map(|(size, _)| size),
+            [
+                CardSize::Small,
+                CardSize::Medium,
+                CardSize::Large,
+                CardSize::ExtraLarge,
+            ]
+        );
+        assert_eq!(card_size_label(CardSize::ExtraLarge), "特大");
     }
 
     #[test]
@@ -9964,20 +10386,44 @@ mod tests {
 
     #[test]
     fn search_available_width_drops_to_the_filter_panel_width() {
-        assert_eq!(grid_columns(search_available_width(1280.0, false)), 3);
-        assert_eq!(grid_columns(search_available_width(1440.0, false)), 4);
-        assert_eq!(grid_columns(search_available_width(1080.0, false)), 2);
-        assert_eq!(grid_columns(search_available_width(1280.0, true)), 4);
+        assert_eq!(
+            grid_columns(search_available_width(1280.0, false), MIN_CARD_WIDTH),
+            3
+        );
+        assert_eq!(
+            grid_columns(search_available_width(1440.0, false), MIN_CARD_WIDTH),
+            4
+        );
+        assert_eq!(
+            grid_columns(search_available_width(1080.0, false), MIN_CARD_WIDTH),
+            2
+        );
+        assert_eq!(
+            grid_columns(search_available_width(1280.0, true), MIN_CARD_WIDTH),
+            4
+        );
     }
 
     #[test]
     fn search_grid_columns_ignore_the_inspector_state() {
         // The Search screen has no inspector column, so the default expanded
         // inspector must not shrink its grid.
-        assert_eq!(grid_columns_for(true, 1280.0, false, false), 3);
-        assert_eq!(grid_columns_for(true, 1440.0, false, false), 4);
-        assert_eq!(grid_columns_for(true, 1080.0, false, false), 2);
-        assert_eq!(grid_columns_for(false, 1280.0, false, false), 3);
+        assert_eq!(
+            grid_columns_for(true, 1280.0, false, false, MIN_CARD_WIDTH),
+            3
+        );
+        assert_eq!(
+            grid_columns_for(true, 1440.0, false, false, MIN_CARD_WIDTH),
+            4
+        );
+        assert_eq!(
+            grid_columns_for(true, 1080.0, false, false, MIN_CARD_WIDTH),
+            2
+        );
+        assert_eq!(
+            grid_columns_for(false, 1280.0, false, false, MIN_CARD_WIDTH),
+            3
+        );
     }
 
     fn index_entry(id: i64, month: i32) -> PhotoIndexEntry {
@@ -10156,18 +10602,27 @@ mod tests {
     #[test]
     fn rail_jump_offset_uses_grid_rows_and_clamps_to_the_list() {
         // `ScrollHandle::max_offset()` is a non-negative scrollable extent.
-        assert_eq!(rail_scroll_offset(0, 3, 10_000.0), 0.0);
-        assert_eq!(rail_scroll_offset(2, 3, 10_000.0), 0.0);
-        assert_eq!(rail_scroll_offset(3, 3, 10_000.0), -196.0);
-        assert_eq!(rail_scroll_offset(5, 3, 10_000.0), -196.0);
+        assert_eq!(rail_scroll_offset(0, 3, PHOTO_ROW_HEIGHT, 10_000.0), 0.0);
+        assert_eq!(rail_scroll_offset(2, 3, PHOTO_ROW_HEIGHT, 10_000.0), 0.0);
+        assert_eq!(rail_scroll_offset(3, 3, PHOTO_ROW_HEIGHT, 10_000.0), -196.0);
+        assert_eq!(rail_scroll_offset(5, 3, PHOTO_ROW_HEIGHT, 10_000.0), -196.0);
         // The target (-2156) is clamped to the 1000 px extent.
-        assert_eq!(rail_scroll_offset(11, 1, 1_000.0), -1_000.0);
-        assert_eq!(rail_scroll_offset(600, 3, 10_000.0), -10_000.0);
-        assert_eq!(rail_scroll_offset(600, 0, 10_000.0), -10_000.0);
+        assert_eq!(
+            rail_scroll_offset(11, 1, PHOTO_ROW_HEIGHT, 1_000.0),
+            -1_000.0
+        );
+        assert_eq!(
+            rail_scroll_offset(600, 3, PHOTO_ROW_HEIGHT, 10_000.0),
+            -10_000.0
+        );
+        assert_eq!(
+            rail_scroll_offset(600, 0, PHOTO_ROW_HEIGHT, 10_000.0),
+            -10_000.0
+        );
         // No scrollable extent means no movement, even for a negative extent
         // rather than the real non-negative contract.
-        assert_eq!(rail_scroll_offset(600, 3, 0.0), 0.0);
-        assert_eq!(rail_scroll_offset(600, 3, -5.0), 0.0);
+        assert_eq!(rail_scroll_offset(600, 3, PHOTO_ROW_HEIGHT, 0.0), 0.0);
+        assert_eq!(rail_scroll_offset(600, 3, PHOTO_ROW_HEIGHT, -5.0), 0.0);
     }
 
     fn test_job(status: QueueStatus, retry_count: i64) -> CompressionJob {

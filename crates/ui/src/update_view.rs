@@ -981,6 +981,7 @@ impl App {
             "アップデートを自動確認",
             "起動中に24時間ごとに確認します",
             self.settings.auto_update_check,
+            false,
             cx,
             |settings, value| settings.auto_update_check = value,
         ));
