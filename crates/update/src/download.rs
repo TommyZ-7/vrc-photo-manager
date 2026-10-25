@@ -9,13 +9,14 @@ use sha2::{Digest, Sha256};
 use crate::error::{Result, UpdateError};
 use crate::fetch::HttpClient;
 use crate::manifest::AvailableUpdate;
-use crate::verify::{decode_signature_base64, effective_public_keys};
+use crate::verify::decode_signature_base64;
 
 /// Downloads, verifies, and stores an update artifact.
 ///
 /// The artifact is written to `<dest>.part` first. The signature and SHA-256
 /// are checked while streaming; on any failure the partial file is removed and
-/// the destination is left untouched.
+/// the destination is left untouched. The keys carried by `update` are the
+/// same keys that verified its manifest.
 pub fn download(
     client: &dyn HttpClient,
     update: &AvailableUpdate,
@@ -23,18 +24,7 @@ pub fn download(
     progress: &mut dyn FnMut(u64, Option<u64>),
     cancel: &AtomicBool,
 ) -> Result<PathBuf> {
-    let keys = effective_public_keys();
-    download_with_keys(client, update, dest, &keys, progress, cancel)
-}
-
-pub(crate) fn download_with_keys(
-    client: &dyn HttpClient,
-    update: &AvailableUpdate,
-    dest: &Path,
-    keys: &[String],
-    progress: &mut dyn FnMut(u64, Option<u64>),
-    cancel: &AtomicBool,
-) -> Result<PathBuf> {
+    let keys = &update.public_keys;
     let asset = update
         .asset
         .as_ref()
@@ -203,11 +193,12 @@ mod tests {
         }
     }
 
-    fn available(asset: PlatformAsset) -> AvailableUpdate {
+    fn available(asset: PlatformAsset, keys: &Keys) -> AvailableUpdate {
         AvailableUpdate {
             version: Version::new(0, 4, 0),
             notes_url: None,
             asset: Some(asset),
+            public_keys: vec![keys.public_key.clone()],
         }
     }
 
@@ -215,17 +206,16 @@ mod tests {
     fn downloads_and_verifies_a_valid_artifact() {
         let keys = test_keys();
         let body = b"new appimage bytes";
-        let update = available(asset(&keys, body, body, None));
+        let update = available(asset(&keys, body, body, None), &keys);
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("vrc-photo-manager.AppImage");
         let mut last_progress = 0;
-        let path = download_with_keys(
+        let path = download(
             &FakeClient {
                 body: body.to_vec(),
             },
             &update,
             &dest,
-            &[keys.public_key],
             &mut |received, total| {
                 assert_eq!(total, Some(body.len() as u64));
                 last_progress = received;
@@ -245,16 +235,15 @@ mod tests {
         let keys = test_keys();
         let signed = b"original contents";
         let tampered = b"tampered contents";
-        let update = available(asset(&keys, tampered, signed, None));
+        let update = available(asset(&keys, tampered, signed, None), &keys);
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("vrc-photo-manager.AppImage");
-        let error = download_with_keys(
+        let error = download(
             &FakeClient {
                 body: tampered.to_vec(),
             },
             &update,
             &dest,
-            &[keys.public_key],
             &mut |_, _| {},
             &AtomicBool::new(false),
         )
@@ -270,16 +259,15 @@ mod tests {
         let body = b"payload";
         let mut manifest_asset = asset(&keys, body, body, None);
         manifest_asset.sha256 = "0".repeat(64);
-        let update = available(manifest_asset);
+        let update = available(manifest_asset, &keys);
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("artifact.AppImage");
-        let error = download_with_keys(
+        let error = download(
             &FakeClient {
                 body: body.to_vec(),
             },
             &update,
             &dest,
-            &[keys.public_key],
             &mut |_, _| {},
             &AtomicBool::new(false),
         )
@@ -292,16 +280,15 @@ mod tests {
     fn rejects_an_artifact_larger_than_the_manifest() {
         let keys = test_keys();
         let body = b"longer than declared";
-        let update = available(asset(&keys, body, body, Some(4)));
+        let update = available(asset(&keys, body, body, Some(4)), &keys);
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("artifact.AppImage");
-        let error = download_with_keys(
+        let error = download(
             &FakeClient {
                 body: body.to_vec(),
             },
             &update,
             &dest,
-            &[keys.public_key],
             &mut |_, _| {},
             &AtomicBool::new(false),
         )
@@ -314,17 +301,16 @@ mod tests {
     fn cancellation_removes_the_partial_file() {
         let keys = test_keys();
         let body = b"cancel me";
-        let update = available(asset(&keys, body, body, None));
+        let update = available(asset(&keys, body, body, None), &keys);
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("artifact.AppImage");
         let cancel = AtomicBool::new(true);
-        let error = download_with_keys(
+        let error = download(
             &FakeClient {
                 body: body.to_vec(),
             },
             &update,
             &dest,
-            &[keys.public_key],
             &mut |_, _| {},
             &cancel,
         )
@@ -340,13 +326,13 @@ mod tests {
             version: Version::new(0, 4, 0),
             notes_url: None,
             asset: None,
+            public_keys: Vec::new(),
         };
         let dir = tempfile::tempdir().unwrap();
-        let error = download_with_keys(
+        let error = download(
             &FakeClient { body: Vec::new() },
             &update,
             &dir.path().join("artifact.AppImage"),
-            &[],
             &mut |_, _| {},
             &AtomicBool::new(false),
         )
@@ -358,17 +344,16 @@ mod tests {
     fn a_second_cancellation_check_stops_mid_stream() {
         let keys = test_keys();
         let body = b"0123456789abcdef";
-        let update = available(asset(&keys, body, body, None));
+        let update = available(asset(&keys, body, body, None), &keys);
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("artifact.AppImage");
         let cancel = AtomicBool::new(false);
-        let error = download_with_keys(
+        let error = download(
             &FakeClient {
                 body: body.to_vec(),
             },
             &update,
             &dest,
-            &[keys.public_key],
             &mut |received, _| {
                 if received >= 8 {
                     cancel.store(true, Ordering::Relaxed);

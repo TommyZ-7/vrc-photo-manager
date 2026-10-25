@@ -54,6 +54,8 @@ pub struct AvailableUpdate {
     pub version: Version,
     pub notes_url: Option<String>,
     pub asset: Option<PlatformAsset>,
+    /// Keys used to verify the manifest that produced this update.
+    pub public_keys: Vec<String>,
 }
 
 impl Manifest {
