@@ -9,7 +9,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::error::{Result, UpdateError};
+use crate::error::{IoOperation, Result, UpdateError};
 use crate::install::{ApplyJob, ApplyKind, UpdatePaths};
 use crate::verify::{decode_signature_base64, effective_public_keys, verify_file};
 
@@ -47,7 +47,8 @@ pub fn run_helper(job_path: &Path) -> Result<()> {
 /// Reads the job, waits for the old processes, applies the update, verifies
 /// the new UI's health marker, and rolls back on failure.
 pub fn run_helper_with_options(job_path: &Path, options: HelperOptions) -> Result<()> {
-    let bytes = std::fs::read(job_path).map_err(|error| UpdateError::io(job_path, error))?;
+    let bytes = std::fs::read(job_path)
+        .map_err(|error| UpdateError::io_at(IoOperation::Job, job_path, error))?;
     let job: ApplyJob = serde_json::from_slice(&bytes)
         .map_err(|error| UpdateError::InvalidJob(format!("cannot parse apply job: {error}")))?;
     job.validate()?;
@@ -261,7 +262,8 @@ fn abort_before_apply(
 
 fn verify_staged(job: &ApplyJob, options: &HelperOptions) -> Result<()> {
     if !job.staged.is_file() {
-        return Err(UpdateError::io(
+        return Err(UpdateError::io_at(
+            IoOperation::Apply,
             &job.staged,
             std::io::ErrorKind::NotFound.into(),
         ));
@@ -292,13 +294,14 @@ fn verify_staged(job: &ApplyJob, options: &HelperOptions) -> Result<()> {
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
-    let mut file = File::open(path).map_err(|error| UpdateError::io(path, error))?;
+    let mut file =
+        File::open(path).map_err(|error| UpdateError::io_at(IoOperation::Apply, path, error))?;
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     loop {
         let read = file
             .read(&mut buffer)
-            .map_err(|error| UpdateError::io(path, error))?;
+            .map_err(|error| UpdateError::io_at(IoOperation::Apply, path, error))?;
         if read == 0 {
             break;
         }
@@ -361,12 +364,13 @@ fn apply_windows(paths: &UpdatePaths, job: &ApplyJob) -> Result<PathBuf> {
         .parent()
         .ok_or_else(|| UpdateError::InvalidJob("Windows target has no parent".to_string()))?;
     let backup = paths.backup_dir(&job.from_version);
-    std::fs::create_dir_all(&backup).map_err(|error| UpdateError::io(&backup, error))?;
+    std::fs::create_dir_all(&backup)
+        .map_err(|error| UpdateError::io_at(IoOperation::Apply, &backup, error))?;
     for name in ["vrc-photo-manager.exe", "vrc-photo-daemon.exe"] {
         let source = install_dir.join(name);
         if source.is_file() {
             std::fs::copy(&source, backup.join(name))
-                .map_err(|error| UpdateError::io(&source, error))?;
+                .map_err(|error| UpdateError::io_at(IoOperation::Apply, &source, error))?;
         }
     }
 
@@ -376,7 +380,7 @@ fn apply_windows(paths: &UpdatePaths, job: &ApplyJob) -> Result<PathBuf> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|error| UpdateError::io(&job.staged, error))?;
+        .map_err(|error| UpdateError::io_at(IoOperation::Apply, &job.staged, error))?;
     let status = match wait_for_exit(&mut child, Duration::from_secs(10 * 60)) {
         Ok(status) => status,
         Err(error) => {
@@ -410,7 +414,8 @@ fn restore_windows(backup: &Path, install_dir: &Path) -> Result<()> {
         let source = backup.join(name);
         if source.is_file() {
             let target = install_dir.join(name);
-            std::fs::copy(&source, &target).map_err(|error| UpdateError::io(&target, error))?;
+            std::fs::copy(&source, &target)
+                .map_err(|error| UpdateError::io_at(IoOperation::Apply, &target, error))?;
         }
     }
     Ok(())
@@ -449,7 +454,7 @@ fn launch(target: &Path, args: &[String], health_token: Option<&str>) -> Result<
     }
     command
         .spawn()
-        .map_err(|error| UpdateError::io(target, error))
+        .map_err(|error| UpdateError::io_at(IoOperation::Spawn, target, error))
 }
 
 fn relaunch_old(paths: &UpdatePaths, job: &ApplyJob) {
@@ -663,41 +668,53 @@ pub fn read_health_marker(paths: &UpdatePaths, token: &str) -> Result<Option<Hea
 /// `<target>.previous`.
 pub fn replace_appimage(target: &Path, staged: &Path) -> Result<PathBuf> {
     if !target.is_file() {
-        return Err(UpdateError::io(target, std::io::ErrorKind::NotFound.into()));
+        return Err(UpdateError::io_at(
+            IoOperation::Apply,
+            target,
+            std::io::ErrorKind::NotFound.into(),
+        ));
     }
     if !staged.is_file() {
-        return Err(UpdateError::io(staged, std::io::ErrorKind::NotFound.into()));
+        return Err(UpdateError::io_at(
+            IoOperation::Apply,
+            staged,
+            std::io::ErrorKind::NotFound.into(),
+        ));
     }
     let file_name = target
         .file_name()
         .ok_or_else(|| UpdateError::InvalidJob("target has no file name".to_string()))?;
     let backup = target.with_file_name(format!("{}.previous", file_name.to_string_lossy()));
     #[cfg(unix)]
-    let metadata = std::fs::metadata(target).map_err(|error| UpdateError::io(target, error))?;
+    let metadata = std::fs::metadata(target)
+        .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))?;
 
     if backup.exists() {
-        std::fs::remove_file(&backup).map_err(|error| UpdateError::io(&backup, error))?;
+        std::fs::remove_file(&backup)
+            .map_err(|error| UpdateError::io_at(IoOperation::Apply, &backup, error))?;
     }
-    std::fs::rename(target, &backup).map_err(|error| UpdateError::io(target, error))?;
+    std::fs::rename(target, &backup)
+        .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))?;
 
     let result = (|| -> Result<()> {
-        std::fs::copy(staged, target).map_err(|error| UpdateError::io(target, error))?;
+        std::fs::copy(staged, target)
+            .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mut permissions = metadata.permissions();
             permissions.set_mode((permissions.mode() & 0o777) | 0o111);
             std::fs::set_permissions(target, permissions)
-                .map_err(|error| UpdateError::io(target, error))?;
+                .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))?;
         }
         // Windows requires write access for FlushFileBuffers (sync_all).
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .open(target)
-            .map_err(|error| UpdateError::io(target, error))?;
+            .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))?;
         file.sync_all()
-            .map_err(|error| UpdateError::io(target, error))?;
+            .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))?;
         Ok(())
     })();
 
@@ -711,12 +728,18 @@ pub fn replace_appimage(target: &Path, staged: &Path) -> Result<PathBuf> {
 
 pub fn restore_appimage(target: &Path, backup: &Path) -> Result<()> {
     if !backup.is_file() {
-        return Err(UpdateError::io(backup, std::io::ErrorKind::NotFound.into()));
+        return Err(UpdateError::io_at(
+            IoOperation::Apply,
+            backup,
+            std::io::ErrorKind::NotFound.into(),
+        ));
     }
     if target.exists() {
-        std::fs::remove_file(target).map_err(|error| UpdateError::io(target, error))?;
+        std::fs::remove_file(target)
+            .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))?;
     }
-    std::fs::rename(backup, target).map_err(|error| UpdateError::io(target, error))
+    std::fs::rename(backup, target)
+        .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))
 }
 
 /// Whether a live helper holds the apply lock. A stale lock is removed.

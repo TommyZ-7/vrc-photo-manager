@@ -5,7 +5,7 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::error::{Result, UpdateError};
+use crate::error::{IoOperation, Result, UpdateError};
 use crate::helper::write_atomic;
 
 pub const APPLY_SCHEMA: u32 = 1;
@@ -374,25 +374,24 @@ pub fn prepare_apply(job: &ApplyJob, current_exe: &Path, data_dir: &Path) -> Res
         .ok_or_else(|| UpdateError::InvalidJob("current executable has no parent".to_string()))?
         .join(helper_name);
     if !source.is_file() {
-        return Err(UpdateError::io(
-            &source,
-            std::io::ErrorKind::NotFound.into(),
-        ));
+        return Err(UpdateError::HelperMissing);
     }
 
     let helper = paths.bin_dir().join(helper_name);
     let _ = std::fs::remove_file(&helper);
-    std::fs::copy(&source, &helper).map_err(|error| UpdateError::io(&helper, error))?;
+    std::fs::copy(&source, &helper)
+        .map_err(|error| UpdateError::io_at(IoOperation::Helper, &helper, error))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700))
-            .map_err(|error| UpdateError::io(&helper, error))?;
+            .map_err(|error| UpdateError::io_at(IoOperation::Helper, &helper, error))?;
     }
 
     let bytes = serde_json::to_vec_pretty(job)
         .map_err(|error| UpdateError::Other(format!("cannot serialize apply job: {error}")))?;
-    write_atomic(&paths.job_file(), &bytes, 0o600)?;
+    write_atomic(&paths.job_file(), &bytes, 0o600)
+        .map_err(|error| error.with_io_operation(IoOperation::Job))?;
     Ok(helper)
 }
 
@@ -405,10 +404,10 @@ pub fn start_apply(job: &ApplyJob, current_exe: &Path, data_dir: &Path) -> Resul
         .create(true)
         .append(true)
         .open(paths.log_file())
-        .map_err(|error| UpdateError::io(paths.log_file(), error))?;
+        .map_err(|error| UpdateError::io_at(IoOperation::Job, paths.log_file(), error))?;
     let stderr = log
         .try_clone()
-        .map_err(|error| UpdateError::io(paths.log_file(), error))?;
+        .map_err(|error| UpdateError::io_at(IoOperation::Job, paths.log_file(), error))?;
     Command::new(&helper)
         .arg("--apply")
         .arg(paths.job_file())
@@ -417,7 +416,7 @@ pub fn start_apply(job: &ApplyJob, current_exe: &Path, data_dir: &Path) -> Resul
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(stderr))
         .spawn()
-        .map_err(|error| UpdateError::io(&helper, error))?;
+        .map_err(|error| UpdateError::io_at(IoOperation::Spawn, &helper, error))?;
     Ok(())
 }
 
@@ -577,7 +576,8 @@ mod tests {
             }
           }
         }"#;
-        let json = String::from_utf8_lossy(json).replace("__SIGNATURE__", &crate::verify::test_signature());
+        let json = String::from_utf8_lossy(json)
+            .replace("__SIGNATURE__", &crate::verify::test_signature());
         let (manifest, _) = Manifest::parse_and_validate(json.as_bytes(), false).unwrap();
 
         let appimage = InstallKind::AppImage {

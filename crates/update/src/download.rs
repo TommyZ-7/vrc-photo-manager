@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use minisign_verify::{PublicKey, Signature};
 use sha2::{Digest, Sha256};
 
-use crate::error::{Result, UpdateError};
+use crate::error::{IoOperation, Result, UpdateError};
 use crate::fetch::HttpClient;
 use crate::manifest::AvailableUpdate;
 use crate::verify::decode_signature_base64;
@@ -35,7 +35,8 @@ pub fn download(
     let part = dest.with_file_name(format!("{}.part", file_name.to_string_lossy()));
 
     if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| UpdateError::io(parent, error))?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| UpdateError::io_at(IoOperation::Download, parent, error))?;
     }
 
     let result = (|| -> Result<()> {
@@ -55,7 +56,7 @@ pub fn download(
             .create(true)
             .truncate(true)
             .open(&part)
-            .map_err(|error| UpdateError::io(&part, error))?;
+            .map_err(|error| UpdateError::io_at(IoOperation::Download, &part, error))?;
         let mut hasher = Sha256::new();
         let mut total = 0u64;
 
@@ -70,7 +71,7 @@ pub fn download(
                 ));
             }
             file.write_all(chunk)
-                .map_err(|error| UpdateError::io(&part, error))?;
+                .map_err(|error| UpdateError::io_at(IoOperation::Download, &part, error))?;
             hasher.update(chunk);
             verifier.update(chunk);
             total = next;
@@ -86,9 +87,9 @@ pub fn download(
         }
 
         file.flush()
-            .map_err(|error| UpdateError::io(&part, error))?;
+            .map_err(|error| UpdateError::io_at(IoOperation::Download, &part, error))?;
         file.sync_all()
-            .map_err(|error| UpdateError::io(&part, error))?;
+            .map_err(|error| UpdateError::io_at(IoOperation::Download, &part, error))?;
         drop(file);
 
         verifier.finalize().map_err(|_| UpdateError::Signature)?;
@@ -108,7 +109,7 @@ pub fn download(
 
     if let Err(error) = std::fs::rename(&part, dest) {
         let _ = std::fs::remove_file(&part);
-        return Err(UpdateError::io(dest, error));
+        return Err(UpdateError::io_at(IoOperation::Download, dest, error));
     }
     Ok(dest.to_path_buf())
 }

@@ -8,8 +8,8 @@ use chrono::{DateTime, Local, Utc};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use semver::Version;
 use vrc_photo_update::{
-    ApplyJob, ApplyKind, AvailableUpdate, FeedConfig, InstallKind, LastResult, LastStatus,
-    UpdateError, UpdatePaths, UreqClient, check, download, start_apply,
+    ApplyJob, ApplyKind, AvailableUpdate, FeedConfig, InstallKind, IoOperation, LastResult,
+    LastStatus, UpdateError, UpdatePaths, UreqClient, check, download, start_apply,
 };
 
 use super::App;
@@ -97,6 +97,63 @@ mod tests {
             assert!(!appimage_writable(&install));
             std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
         }
+    }
+
+    #[test]
+    fn explains_update_io_failures_by_operation() {
+        use vrc_photo_update::IoOperation;
+
+        let cases = [
+            (UpdateError::HelperMissing, "更新ヘルパーが見つかりません"),
+            (
+                UpdateError::io_at(
+                    IoOperation::Job,
+                    "/tmp/job.json",
+                    std::io::ErrorKind::PermissionDenied.into(),
+                ),
+                "更新ジョブを書き込めません",
+            ),
+            (
+                UpdateError::io_at(
+                    IoOperation::Apply,
+                    "/tmp/app.AppImage",
+                    std::io::ErrorKind::PermissionDenied.into(),
+                ),
+                "AppImageを置き換えられません",
+            ),
+            (
+                UpdateError::io_at(
+                    IoOperation::Spawn,
+                    "/tmp/helper",
+                    std::io::ErrorKind::NotFound.into(),
+                ),
+                "更新ヘルパーを起動できません",
+            ),
+            (
+                UpdateError::io_at(
+                    IoOperation::Download,
+                    "/tmp/artifact",
+                    std::io::ErrorKind::NotFound.into(),
+                ),
+                "更新ファイルを保存できません",
+            ),
+        ];
+        let messages: std::collections::HashSet<_> = cases
+            .iter()
+            .map(|(error, expected)| {
+                let message = update_error_message(error);
+                assert!(message.contains(*expected), "{message}");
+                message
+            })
+            .collect();
+        assert_eq!(messages.len(), cases.len());
+    }
+
+    #[test]
+    fn keeps_existing_update_error_messages() {
+        assert!(update_error_message(&UpdateError::Signature).contains("署名"));
+        assert!(update_error_message(&UpdateError::Integrity("x".into())).contains("検証"));
+        assert!(update_error_message(&UpdateError::Network("x".into())).contains("ネットワーク"));
     }
 
     #[test]
@@ -306,7 +363,18 @@ fn update_error_message(error: &UpdateError) -> String {
         }
         UpdateError::Cancelled => "更新をキャンセルしました".to_string(),
         UpdateError::NotFound => "更新情報が見つかりません".to_string(),
-        UpdateError::Io { .. } => "更新ファイルを保存できませんでした".to_string(),
+        UpdateError::HelperMissing => {
+            "更新ヘルパーが見つかりません。アプリを再インストールしてください".to_string()
+        }
+        UpdateError::Io { operation, .. } => match operation {
+            IoOperation::Helper => "更新ヘルパーを準備できませんでした".to_string(),
+            IoOperation::Job => "更新ジョブを書き込めませんでした".to_string(),
+            IoOperation::Apply => "AppImageを置き換えられませんでした".to_string(),
+            IoOperation::Spawn => "更新ヘルパーを起動できませんでした".to_string(),
+            IoOperation::Download | IoOperation::Other => {
+                "更新ファイルを保存できませんでした".to_string()
+            }
+        },
         UpdateError::InvalidJob(_) => "更新の適用情報が不正です".to_string(),
         UpdateError::Other(message) => format!("更新処理に失敗しました: {message}"),
     }
