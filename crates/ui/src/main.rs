@@ -73,12 +73,16 @@ const THUMB_IN_FLIGHT: usize = 4;
 const PAGE_SIZE: usize = 256;
 const MAX_PAGES: usize = 24;
 const PHOTO_ROW_HEIGHT: f32 = 196.0;
-const RAIL_WIDTH: f32 = 88.0;
+const RAIL_WIDTH: f32 = 96.0;
 const RAIL_TOP_PAD: f32 = 24.0;
 const RAIL_TRACK_INSET: f32 = 12.0;
 const RAIL_LABEL_GAP: f32 = 16.0;
 const RAIL_YEAR_HIT_SLOP: f32 = 8.0;
 const RAIL_PILL_HEIGHT: f32 = 18.0;
+const RAIL_PILL_WIDTH: f32 = 80.0;
+const RAIL_PILL_RIGHT_MARGIN: f32 = 4.0;
+const RAIL_MARKER_SIZE: f32 = 10.0;
+const RAIL_HIT_WIDTH: f32 = 12.0;
 
 gpui_kit::actions!(
     ui,
@@ -390,6 +394,57 @@ fn visible_year_buckets(buckets: &[YearBucket], height: f32) -> Vec<usize> {
 /// covers would only show through as a duplicate at rest.
 fn rail_label_hidden_by_pill(label_y: f32, pill_y: f32) -> bool {
     (label_y - pill_y).abs() < RAIL_PILL_HEIGHT / 2.0 + 6.0
+}
+
+/// Hit strip centered on the 2 px rail track.
+fn rail_track_hit_bounds(bounds: Bounds<Pixels>) -> Bounds<Pixels> {
+    let track_x = bounds.right() - px(RAIL_TRACK_INSET);
+    let usable = (f32::from(bounds.size.height) - 2.0 * RAIL_TOP_PAD).max(0.0);
+    Bounds::new(
+        point(
+            track_x - px(RAIL_HIT_WIDTH / 2.0),
+            bounds.top() + px(RAIL_TOP_PAD),
+        ),
+        size(px(RAIL_HIT_WIDTH), px(usable)),
+    )
+}
+
+/// The expanded month pill, right-aligned inside the rail.
+fn rail_pill_bounds(bounds: Bounds<Pixels>, pill_y: f32) -> Bounds<Pixels> {
+    let center_y = bounds.top() + px(pill_y);
+    Bounds::new(
+        point(
+            bounds.right() - px(RAIL_PILL_WIDTH + RAIL_PILL_RIGHT_MARGIN),
+            center_y - px(RAIL_PILL_HEIGHT / 2.0),
+        ),
+        size(px(RAIL_PILL_WIDTH), px(RAIL_PILL_HEIGHT)),
+    )
+}
+
+/// The compact black marker shown at rest, centered on the track.
+fn rail_marker_bounds(bounds: Bounds<Pixels>, pill_y: f32) -> Bounds<Pixels> {
+    let center = point(
+        bounds.right() - px(RAIL_TRACK_INSET),
+        bounds.top() + px(pill_y),
+    );
+    Bounds::new(
+        point(
+            center.x - px(RAIL_MARKER_SIZE / 2.0),
+            center.y - px(RAIL_MARKER_SIZE / 2.0),
+        ),
+        size(px(RAIL_MARKER_SIZE), px(RAIL_MARKER_SIZE)),
+    )
+}
+
+/// A press may start a rail drag only on the track or, while expanded, the pill.
+fn rail_press_hits(
+    position: Point<Pixels>,
+    bounds: Bounds<Pixels>,
+    pill_y: f32,
+    expanded: bool,
+) -> bool {
+    rail_track_hit_bounds(bounds).contains(&position)
+        || (expanded && rail_pill_bounds(bounds, pill_y).contains(&position))
 }
 
 /// Scroll distance from the top of a uniform list, in pixels.
@@ -8499,7 +8554,8 @@ mod tests {
     use super::{
         CountDebounce, DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH,
         IpcScanPhase, MAX_PAGES, PAGE_SIZE, PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex,
-        PhotoPageCache, ScanProgressView, Screen, THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT,
+        PhotoPageCache, RAIL_MARKER_SIZE, RAIL_PILL_WIDTH, RAIL_WIDTH, ScanProgressView, Screen,
+        THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT,
         ThumbnailCache, YearBucket, add_photo_root_and_save, alert_summaries, anchor_photo_id,
         apply_library_index, apply_profile_format, autostart_description, average_bgra,
         build_year_buckets, compression_policy, compression_policy_warning, daemon_liveness,
@@ -8509,13 +8565,14 @@ mod tests {
         import_issue_counts, ipc_status_label, job_retry_available, job_retry_label, lerp_color,
         list_scroll_top, lossless_hint, lossless_supported, moved_profile_order, next_focus_index,
         normalize_note, parse_args, parse_window_size, profile_summary, queue_status_badge,
-        rail_label_hidden_by_pill, rail_row_at, rail_scroll_offset, rail_y, release_confirmation,
+        rail_label_hidden_by_pill, rail_marker_bounds, rail_pill_bounds, rail_press_hits,
+        rail_row_at, rail_scroll_offset, rail_track_hit_bounds, rail_y, release_confirmation,
         retryable_sources, scan_progress_label, scan_progress_ratio, search_anchor_after_result,
         search_available_width, sidebar_reveal_width, sidebar_width, stagger_value, step_index,
         sync_search_mirror, viewer_details_width, viewer_image_box, visible_year_buckets, with_tag,
         without_tag,
     };
-    use gpui_kit::{RenderImage, ScrollStrategy, UniformListScrollHandle, point, px};
+    use gpui_kit::{Bounds, RenderImage, ScrollStrategy, UniformListScrollHandle, point, px, size};
     use smallvec::SmallVec;
     use std::cell::Cell;
     use std::path::PathBuf;
@@ -9365,6 +9422,68 @@ mod tests {
         // rather than the real non-negative contract.
         assert_eq!(rail_scroll_offset(600, 3, 0.0), 0.0);
         assert_eq!(rail_scroll_offset(600, 3, -5.0), 0.0);
+    }
+
+    #[test]
+    fn rail_geometry_limits_presses_to_track_and_expanded_pill() {
+        let bounds = Bounds::new(point(px(10.), px(20.)), size(px(RAIL_WIDTH), px(600.)));
+        let pill_y = 300.0;
+
+        // Track strip: x 88..100, y 44..596 for this rail.
+        assert!(rail_press_hits(
+            point(px(94.), px(100.)),
+            bounds,
+            pill_y,
+            false
+        ));
+        // Expanded pill: x 22..102, y 311..329.
+        assert!(rail_press_hits(
+            point(px(50.), px(320.)),
+            bounds,
+            pill_y,
+            true
+        ));
+        // The same point is inert while the pill is collapsed.
+        assert!(!rail_press_hits(
+            point(px(50.), px(320.)),
+            bounds,
+            pill_y,
+            false
+        ));
+        // Blank gutter left of the pill never jumps.
+        assert!(!rail_press_hits(
+            point(px(15.), px(320.)),
+            bounds,
+            pill_y,
+            true
+        ));
+        // Top and bottom padding of the track are outside the interactive strip.
+        assert!(!rail_press_hits(
+            point(px(94.), px(30.)),
+            bounds,
+            pill_y,
+            true
+        ));
+        assert!(!rail_press_hits(
+            point(px(94.), px(610.)),
+            bounds,
+            pill_y,
+            true
+        ));
+    }
+
+    #[test]
+    fn rail_marker_sits_on_the_track_at_the_pill_center() {
+        let bounds = Bounds::new(point(px(10.), px(20.)), size(px(RAIL_WIDTH), px(600.)));
+        let pill_y = 300.0;
+        let marker = rail_marker_bounds(bounds, pill_y);
+        let pill = rail_pill_bounds(bounds, pill_y);
+
+        assert_eq!(f32::from(marker.size.width), RAIL_MARKER_SIZE);
+        assert_eq!(f32::from(marker.size.height), RAIL_MARKER_SIZE);
+        assert_eq!(f32::from(pill.size.width), RAIL_PILL_WIDTH);
+        assert_eq!(marker.center().y, pill.center().y);
+        assert!(rail_track_hit_bounds(bounds).contains(&marker.center()));
     }
 
     fn test_job(status: QueueStatus, retry_count: i64) -> CompressionJob {
