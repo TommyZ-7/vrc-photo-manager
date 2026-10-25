@@ -16,6 +16,7 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use smallvec::SmallVec;
+use vrc_photo_core::compressor;
 use vrc_photo_core::db::Db;
 use vrc_photo_core::importer::{self, ImportIssue, ImportIssueKind, ImportMode};
 use vrc_photo_core::linker;
@@ -1075,6 +1076,26 @@ struct ImportReportView {
     scan_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManualOutputTarget {
+    Folder,
+    Profile,
+    Clipboard,
+}
+
+fn manual_output_available(photo_count: usize, target: ManualOutputTarget) -> bool {
+    target != ManualOutputTarget::Clipboard || photo_count == 1
+}
+
+#[derive(Debug, Clone)]
+struct ManualCompressionDialog {
+    photo_ids: Vec<i64>,
+    profile_id: String,
+    output: ManualOutputTarget,
+    folder: Option<String>,
+    keep_original: bool,
+}
+
 pub struct App {
     db: Db,
     screen: Screen,
@@ -1147,6 +1168,7 @@ pub struct App {
     previous_color: Option<u32>,
     profiles: Vec<CompressionProfile>,
     profile_index: usize,
+    manual_compress: Option<ManualCompressionDialog>,
     stats: LibraryStats,
     settings: AppSettings,
     update: update_view::UpdateState,
@@ -1303,6 +1325,7 @@ impl App {
             previous_color: None,
             profiles: Vec::new(),
             profile_index: 0,
+            manual_compress: None,
             stats: LibraryStats::default(),
             settings: AppSettings::default(),
             update: update_view::UpdateState::new(health_token, database_ok, demo),
@@ -2268,7 +2291,10 @@ impl App {
         if toggle_selected_id(&mut self.selected_ids, id) {
             self.selection_anchor = Some(id);
             self.set_primary_photo(id, cx);
-        } else if self.selected == Some(id) {
+        } else if self.selection_anchor == Some(id) {
+            self.selection_anchor = self.selected_ids.last().copied();
+        }
+        if self.selected == Some(id) && !self.selected_ids.contains(&id) {
             if let Some(next) = self.selected_ids.last().copied() {
                 self.set_primary_photo(next, cx);
             } else {
@@ -2604,12 +2630,21 @@ impl App {
         cx.notify();
     }
 
-    fn enqueue_selected(&mut self, cx: &mut Context<Self>) {
-        let Some(photo) = &self.selected_photo else {
+    fn open_manual_compression(&mut self, photo_ids: Vec<i64>, cx: &mut Context<Self>) {
+        let mut ids = Vec::new();
+        for id in photo_ids {
+            if ids.contains(&id) {
+                continue;
+            }
+            if self.db.photo_by_id(id).ok().flatten().is_some() {
+                ids.push(id);
+            }
+        }
+        if ids.is_empty() {
             self.message = Some("先に写真を選択してください".to_string());
             cx.notify();
             return;
-        };
+        }
         let Some(profile) = self
             .profiles
             .get(self.profile_index)
@@ -2619,18 +2654,145 @@ impl App {
             cx.notify();
             return;
         };
-        let policy = compression_policy(self.settings.auto_compress_keep_original).to_string();
-        match self.db.enqueue_job(photo.id, &profile.id, &policy) {
-            Ok(_) => {
-                self.message = Some(if policy == "replace" {
-                    "圧縮ジョブを追加しました（成功後に元画像をゴミ箱へ移動）".to_string()
-                } else {
-                    "圧縮ジョブをキューに追加しました（元画像を保持）".to_string()
-                });
-                self.reload_aux(cx);
-                self.send_wake_jobs(cx);
+        self.manual_compress = Some(ManualCompressionDialog {
+            photo_ids: ids,
+            profile_id: profile.id.clone(),
+            output: ManualOutputTarget::Profile,
+            folder: None,
+            keep_original: true,
+        });
+        cx.notify();
+    }
+
+    fn close_manual_compression(&mut self, cx: &mut Context<Self>) {
+        self.manual_compress = None;
+        cx.notify();
+    }
+
+    fn choose_manual_folder(&mut self, cx: &mut Context<Self>) {
+        let current = self
+            .manual_compress
+            .as_ref()
+            .and_then(|dialog| dialog.folder.clone());
+        let mut picker = rfd::FileDialog::new();
+        if let Some(dir) = current {
+            picker = picker.set_directory(dir);
+        }
+        if let Some(dir) = picker.pick_folder()
+            && let Some(dialog) = &mut self.manual_compress
+        {
+            dialog.folder = Some(dir.to_string_lossy().to_string());
+            dialog.output = ManualOutputTarget::Folder;
+        }
+        cx.notify();
+    }
+
+    fn confirm_manual_compression(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.manual_compress.clone() else {
+            return;
+        };
+        let Some(profile) = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == dialog.profile_id)
+            .cloned()
+        else {
+            self.message = Some("選択したプロファイルが見つかりません".to_string());
+            cx.notify();
+            return;
+        };
+        if !manual_output_available(dialog.photo_ids.len(), dialog.output) {
+            self.message = Some("クリップボード出力は1枚選択時のみ使えます".to_string());
+            cx.notify();
+            return;
+        }
+
+        if dialog.output == ManualOutputTarget::Clipboard {
+            let photo_id = dialog.photo_ids[0];
+            let Some(photo) = self.db.photo_by_id(photo_id).ok().flatten() else {
+                self.manual_compress = None;
+                self.message = Some("写真が見つかりません".to_string());
+                cx.notify();
+                return;
+            };
+            let source = PathBuf::from(photo.effective_path());
+            self.manual_compress = None;
+            self.message = Some("クリップボードへコピーしています…".to_string());
+            cx.notify();
+            cx.spawn(async move |this, cx| {
+                let bytes = cx
+                    .background_executor()
+                    .spawn(async move { compressor::render_clipboard_png(&source, &profile) })
+                    .await;
+                this.update(cx, |this, cx| {
+                    match bytes {
+                        Ok(bytes) => {
+                            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_image(
+                                &gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, bytes),
+                            ));
+                            this.message =
+                                Some("圧縮画像をクリップボードへコピーしました".to_string());
+                        }
+                        Err(error) => {
+                            this.message =
+                                Some(format!("クリップボードへコピーできません: {error}"));
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
+
+        let output_dir = if dialog.output == ManualOutputTarget::Folder {
+            let Some(folder) = dialog.folder.as_deref() else {
+                self.message = Some("出力フォルダを選択してください".to_string());
+                cx.notify();
+                return;
+            };
+            Some(folder)
+        } else {
+            None
+        };
+        let policy = compression_policy(dialog.keep_original);
+        let mut enqueued = 0usize;
+        let mut failed = 0usize;
+        for photo_id in &dialog.photo_ids {
+            match self.db.enqueue_job_for_existing_profile_with_output_dir(
+                *photo_id,
+                &profile.id,
+                policy,
+                output_dir,
+            ) {
+                Ok(true) => enqueued += 1,
+                Ok(false) => failed += 1,
+                Err(error) => {
+                    failed += 1;
+                    tracing::warn!(%error, photo_id, "cannot enqueue manual compression");
+                }
             }
-            Err(error) => self.message = Some(format!("キュー追加に失敗: {error}")),
+        }
+        self.manual_compress = None;
+        if enqueued > 0 {
+            let policy_note = if dialog.keep_original {
+                "元画像を保持"
+            } else {
+                "成功後に元画像をゴミ箱へ移動"
+            };
+            let failure_note = if failed > 0 {
+                format!("（{failed} 件は追加できませんでした）")
+            } else {
+                String::new()
+            };
+            self.message = Some(format!(
+                "{enqueued} 件を圧縮キューに追加しました（{policy_note}）{failure_note}"
+            ));
+            self.reload_aux(cx);
+            self.send_wake_jobs(cx);
+        } else {
+            self.message = Some("圧縮ジョブを追加できませんでした".to_string());
         }
         cx.notify();
     }
@@ -2641,6 +2803,9 @@ impl App {
         // this method.
         if self.searching {
             return;
+        }
+        if !self.selected_ids.is_empty() {
+            self.clear_selection(cx);
         }
         let world = self.world_input.read(cx).value().to_string();
         let player = self.player_input.read(cx).value().to_string();
@@ -2756,6 +2921,9 @@ impl App {
     }
 
     fn clear_search(&mut self, cx: &mut Context<Self>) {
+        if !self.selected_ids.is_empty() {
+            self.clear_selection(cx);
+        }
         self.search_active = false;
         self.searching = false;
         self.applied_search = None;
@@ -3396,6 +3564,48 @@ impl App {
             )
     }
 
+    fn selection_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let count = self.selected_ids.len();
+        if count <= 1 {
+            return div().into_any_element();
+        }
+        let ids = self.selected_ids.clone();
+        h_flex()
+            .flex_shrink_0()
+            .items_center()
+            .gap(px(10.))
+            .px(px(26.))
+            .py(px(8.))
+            .bg(rgb(ACCENT_SOFT))
+            .border_b_1()
+            .border_color(rgb(BORDER))
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .font_medium()
+                    .text_color(rgb(TEXT))
+                    .child(format!("{count} 件選択中")),
+            )
+            .child(div().flex_1())
+            .child(
+                Button::new("selection-clear")
+                    .label("選択解除")
+                    .small()
+                    .ghost()
+                    .on_click(cx.listener(|this, _, _, cx| this.clear_selection(cx))),
+            )
+            .child(
+                Button::new("selection-compress")
+                    .label(format!("{count} 件を圧縮"))
+                    .small()
+                    .primary()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_manual_compression(ids.clone(), cx)
+                    })),
+            )
+            .into_any_element()
+    }
+
     fn photos_header(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let sync = if self.demo_assets.is_some() {
             "デモデータ".to_string()
@@ -3458,6 +3668,7 @@ impl App {
         let mut header = v_flex()
             .flex_shrink_0()
             .child(self.screen_header("ライブラリ", subtitle, message, actions))
+            .child(self.selection_bar(cx))
             .child(
                 h_flex()
                     .px(px(26.))
@@ -4374,13 +4585,25 @@ impl App {
                         this.open_quick_look(window, cx);
                     })),
             )
-            .child(
+            .child({
+                let compress_ids = if self.selected_ids.is_empty() {
+                    vec![id]
+                } else {
+                    self.selected_ids.clone()
+                };
+                let label = if compress_ids.len() > 1 {
+                    format!("{} 件を圧縮", compress_ids.len())
+                } else {
+                    "圧縮".to_string()
+                };
                 Button::new("compress-selected")
-                    .label("圧縮")
+                    .label(label)
                     .small()
                     .w_full()
-                    .on_click(cx.listener(|this, _, _, cx| this.enqueue_selected(cx))),
-            );
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.open_manual_compression(compress_ids.clone(), cx)
+                    }))
+            });
 
         card = card.child(
             v_flex()
@@ -4651,7 +4874,7 @@ impl App {
                 enabled: true,
             },
             cx,
-            |this, _, cx| this.enqueue_selected(cx),
+            move |this, _, cx| this.open_manual_compression(vec![id], cx),
         );
         let trash_button = self.focusable_text_button(
             "viewer-trash",
@@ -5115,13 +5338,291 @@ impl App {
             .into_any_element()
     }
 
+    fn manual_compression_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(dialog) = self.manual_compress.clone() else {
+            return div().into_any_element();
+        };
+        let count = dialog.photo_ids.len();
+        let selected_profile = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == dialog.profile_id)
+            .cloned();
+        let profile_description = selected_profile
+            .as_ref()
+            .map(|profile| {
+                profile
+                    .output_dir
+                    .clone()
+                    .filter(|dir| !dir.trim().is_empty())
+                    .unwrap_or_else(|| "プロファイル既定（元画像の隣の compressed/）".to_string())
+            })
+            .unwrap_or_else(|| "プロファイルを選択してください".to_string());
+        let folder_ready = dialog.folder.is_some();
+        let can_confirm = match dialog.output {
+            ManualOutputTarget::Folder => folder_ready,
+            ManualOutputTarget::Profile => selected_profile.is_some(),
+            ManualOutputTarget::Clipboard => manual_output_available(count, dialog.output),
+        };
+
+        let profiles = self.profiles.clone();
+        let profile_rows = profiles.into_iter().map(|profile| {
+            let id = profile.id.clone();
+            let selected = profile.id == dialog.profile_id;
+            manual_option_row(
+                SharedString::from(format!("manual-profile-{}", profile.id)),
+                profile.name.clone(),
+                profile_summary(&profile),
+                selected,
+                true,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if let Some(dialog) = &mut this.manual_compress {
+                    dialog.profile_id = id.clone();
+                }
+                cx.notify();
+            }))
+        });
+
+        let folder_row = manual_option_row(
+            "manual-output-folder",
+            "指定したフォルダに出力",
+            "実行のたびに出力先を選びます",
+            dialog.output == ManualOutputTarget::Folder,
+            true,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            if let Some(dialog) = &mut this.manual_compress {
+                dialog.output = ManualOutputTarget::Folder;
+            }
+            cx.notify();
+        }));
+
+        let profile_row = manual_option_row(
+            "manual-output-profile",
+            "プロファイル指定のフォルダに出力",
+            profile_description,
+            dialog.output == ManualOutputTarget::Profile,
+            true,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            if let Some(dialog) = &mut this.manual_compress {
+                dialog.output = ManualOutputTarget::Profile;
+            }
+            cx.notify();
+        }));
+
+        let clipboard_enabled = manual_output_available(count, ManualOutputTarget::Clipboard);
+        let clipboard_row = manual_option_row(
+            "manual-output-clipboard",
+            "クリップボードに出力",
+            if clipboard_enabled {
+                "PNG 1枚をクリップボードへコピーします（元画像は保持）"
+            } else {
+                "クリップボード出力は1枚選択時のみ使えます"
+            },
+            dialog.output == ManualOutputTarget::Clipboard,
+            clipboard_enabled,
+        )
+        .when(clipboard_enabled, |this| {
+            this.on_click(cx.listener(|this, _, _, cx| {
+                if let Some(dialog) = &mut this.manual_compress {
+                    dialog.output = ManualOutputTarget::Clipboard;
+                }
+                cx.notify();
+            }))
+        });
+
+        let keep_row = manual_option_row(
+            "manual-keep-original",
+            "元画像を保持",
+            "圧縮版を別ファイルで出力します",
+            dialog.keep_original,
+            true,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            if let Some(dialog) = &mut this.manual_compress {
+                dialog.keep_original = true;
+            }
+            cx.notify();
+        }));
+        let trash_row = manual_option_row(
+            "manual-trash-original",
+            "元画像をゴミ箱へ移動",
+            "圧縮に成功した場合だけOSゴミ箱へ移動します",
+            !dialog.keep_original,
+            true,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            if let Some(dialog) = &mut this.manual_compress {
+                dialog.keep_original = false;
+            }
+            cx.notify();
+        }));
+
+        let folder_path = dialog
+            .folder
+            .clone()
+            .unwrap_or_else(|| "フォルダが選択されていません".to_string());
+        let confirm_label = if dialog.output == ManualOutputTarget::Clipboard {
+            "クリップボードへコピー".to_string()
+        } else {
+            format!("{count} 件を圧縮")
+        };
+
+        let panel = v_flex()
+            .id("manual-compression-panel")
+            .w(px(580.))
+            .max_h(px(720.))
+            .gap(px(16.))
+            .p(px(22.))
+            .rounded(px(18.))
+            .bg(rgb(PANEL))
+            .border_1()
+            .border_color(rgb(BORDER_STRONG))
+            .shadow(vec![
+                BoxShadow::new(px(0.), px(24.), rgba(0x00000099).into()).blur_radius(px(60.)),
+            ])
+            .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
+            .overflow_y_scrollbar()
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .text_size(px(20.))
+                            .font_semibold()
+                            .text_color(rgb(TEXT))
+                            .child("手動圧縮"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(MUTED_2))
+                            .child(format!("{count} 枚を対象")),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgb(MUTED))
+                    .child("使用するプロファイル、出力先、元画像の扱いを選んでから実行します。"),
+            )
+            .child(self.section_label("プロファイル"))
+            .child(
+                v_flex()
+                    .id("manual-profile-list")
+                    .max_h(px(190.))
+                    .overflow_y_scrollbar()
+                    .gap(px(6.))
+                    .children(profile_rows),
+            )
+            .child(self.section_label("出力先"))
+            .child(v_flex().gap(px(6.)).child(folder_row).when(
+                dialog.output == ManualOutputTarget::Folder,
+                |this| {
+                    this.child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .pl(px(24.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(if folder_ready { MUTED } else { AMBER }))
+                                    .child(folder_path),
+                            )
+                            .child(
+                                Button::new("manual-choose-folder")
+                                    .label("フォルダを選択")
+                                    .small()
+                                    .ghost()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.choose_manual_folder(cx)
+                                    })),
+                            ),
+                    )
+                },
+            ))
+            .child(profile_row)
+            .child(clipboard_row)
+            .when(dialog.output != ManualOutputTarget::Clipboard, |this| {
+                this.child(self.section_label("元画像"))
+                    .child(v_flex().gap(px(6.)).child(keep_row).child(trash_row))
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED_2))
+                            .child("「ゴミ箱へ移動」は圧縮ファイルの検証に成功した場合だけ実行します。"),
+                    )
+            })
+            .when(dialog.output == ManualOutputTarget::Clipboard, |this| {
+                this.child(
+                    div()
+                        .p(px(10.))
+                        .rounded(px(8.))
+                        .bg(rgb(PANEL_2))
+                        .text_size(px(10.))
+                        .text_color(rgb(MUTED))
+                        .child("クリップボード出力では元画像を変更しません。形式はPNG、リサイズ設定のみ反映します。"),
+                )
+            })
+            .child(
+                h_flex()
+                    .justify_end()
+                    .gap(px(8.))
+                    .child(
+                        Button::new("manual-cancel")
+                            .label("キャンセル")
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.close_manual_compression(cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("manual-confirm")
+                            .label(confirm_label)
+                            .small()
+                            .primary()
+                            .disabled(!can_confirm)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.confirm_manual_compression(cx)
+                            })),
+                    ),
+            );
+
+        div()
+            .id("manual-compression-scrim")
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .size_full()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x05070acc))
+            .on_click(cx.listener(|this, _, _, cx| this.close_manual_compression(cx)))
+            .child(panel)
+            .into_any_element()
+    }
+
     fn compression_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let profile = self.profiles.get(self.profile_index).cloned();
         let profile_count = self.profiles.len();
         let message = self.message.clone();
         let header = self.screen_header(
             "圧縮設定",
-            "プロファイルと画質を管理します。元画像の扱いは設定タブで変更できます。".to_string(),
+            "プロファイルと画質を管理します。手動圧縮の出力先と元画像は実行時に選べます。"
+                .to_string(),
             message,
             vec![
                 Button::new("add-profile")
@@ -5153,7 +5654,14 @@ impl App {
                     .label("手動圧縮")
                     .small()
                     .primary()
-                    .on_click(cx.listener(|this, _, _, cx| this.enqueue_selected(cx)))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let ids = if this.selected_ids.is_empty() {
+                            this.selected.into_iter().collect()
+                        } else {
+                            this.selected_ids.clone()
+                        };
+                        this.open_manual_compression(ids, cx);
+                    }))
                     .into_any_element(),
             ],
         );
@@ -5751,13 +6259,63 @@ impl App {
             )
             .child(self.section_label("出力"))
             .child(
-                self.meta_row(
-                    "出力先",
-                    profile
-                        .output_dir
-                        .clone()
-                        .unwrap_or_else(|| "compressed/".to_string()),
-                ),
+                h_flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED_2))
+                            .child("出力先"),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(11.))
+                            .text_color(rgb(MUTED))
+                            .child(
+                                profile
+                                    .output_dir
+                                    .clone()
+                                    .unwrap_or_else(|| "compressed/".to_string()),
+                            ),
+                    )
+                    .child(
+                        Button::new("profile-output-pick")
+                            .label("フォルダを選択")
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let current = this
+                                    .profiles
+                                    .get(this.profile_index)
+                                    .and_then(|profile| profile.output_dir.clone());
+                                let mut picker = rfd::FileDialog::new();
+                                if let Some(dir) = current {
+                                    picker = picker.set_directory(dir);
+                                }
+                                if let Some(dir) = picker.pick_folder() {
+                                    let path = dir.to_string_lossy().to_string();
+                                    this.edit_profile(
+                                        move |profile| profile.output_dir = Some(path.clone()),
+                                        cx,
+                                    );
+                                }
+                            })),
+                    )
+                    .when(profile.output_dir.is_some(), |this| {
+                        this.child(
+                            Button::new("profile-output-clear")
+                                .label("既定に戻す")
+                                .small()
+                                .ghost()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.edit_profile(|profile| profile.output_dir = None, cx);
+                                })),
+                        )
+                    }),
             )
             .child(self.meta_row("サフィックス", profile.suffix.clone()))
             .child(
@@ -5769,7 +6327,7 @@ impl App {
                     .border_color(rgb(BORDER))
                     .text_size(px(10.))
                     .text_color(rgb(MUTED))
-                    .child("変更は即時保存されます。元画像の扱いは設定タブで変更できます。"),
+                    .child("変更は即時保存されます。手動圧縮の出力先と元画像の扱いは実行時に選べます。"),
             )
     }
 
@@ -6085,7 +6643,8 @@ impl App {
                                         .truncate()
                                         .child(message),
                                 )
-                            }),
+                            })
+                            .child(self.selection_bar(cx)),
                     )
                     .child(self.photo_grid(true, window, cx)),
             )
@@ -7488,8 +8047,13 @@ impl Render for App {
             .child(workspace.child(self.content(window, cx)))
             .child(self.nav_tooltip())
             .child(self.rail_toggle(cx));
-        if self.quick_look_open {
+        let root = if self.quick_look_open {
             root.child(self.quick_look(window, cx))
+        } else {
+            root
+        };
+        if self.manual_compress.is_some() {
+            root.child(self.manual_compression_overlay(cx))
         } else {
             root
         }
@@ -8425,6 +8989,63 @@ fn compression_policy(keep_original: bool) -> &'static str {
     if keep_original { "keep" } else { "replace" }
 }
 
+fn manual_option_row(
+    id: impl Into<SharedString>,
+    title: impl Into<SharedString>,
+    description: impl Into<SharedString>,
+    selected: bool,
+    enabled: bool,
+) -> Stateful<Div> {
+    let id: SharedString = id.into();
+    let title: SharedString = title.into();
+    let description: SharedString = description.into();
+    h_flex()
+        .id(id)
+        .w_full()
+        .items_start()
+        .gap(px(10.))
+        .p(px(11.))
+        .rounded(px(10.))
+        .bg(rgb(if selected { ACCENT_SOFT } else { PANEL_2 }))
+        .border_1()
+        .border_color(rgb(if selected { BLUE } else { BORDER }))
+        .opacity(if enabled { 1.0 } else { 0.5 })
+        .when(enabled, |this| this.cursor_pointer())
+        .child(
+            div()
+                .mt(px(1.))
+                .size(px(14.))
+                .rounded_full()
+                .border_2()
+                .border_color(rgb(if selected { BLUE } else { BORDER_STRONG }))
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(selected, |this| {
+                    this.child(div().size(px(6.)).rounded_full().bg(rgb(BLUE)))
+                }),
+        )
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap(px(2.))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .font_medium()
+                        .text_color(rgb(if enabled { TEXT } else { MUTED_2 }))
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(rgb(MUTED_2))
+                        .child(description),
+                ),
+        )
+}
+
 fn compression_policy_warning(keep_original: bool, auto_compress: bool) -> Option<&'static str> {
     (auto_compress && !keep_original).then_some(
         "自動圧縮で圧縮に成功すると元画像をOSゴミ箱へ移動します。取り消すにはゴミ箱から復元してください。",
@@ -8654,8 +9275,8 @@ mod tests {
     // `gpui_kit::*`, shadowing the built-in `#[test]` and recursing forever.
     use super::{
         CountDebounce, DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH,
-        IpcScanPhase, MAX_PAGES, PAGE_SIZE, PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex,
-        PhotoPageCache, ScanProgressView, Screen, THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT,
+        IpcScanPhase, MAX_PAGES, ManualOutputTarget, PAGE_SIZE, PHOTO_ROW_HEIGHT, PhotoBrowser,
+        PhotoIndex, PhotoPageCache, ScanProgressView, Screen, THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT,
         ThumbnailCache, YearBucket, add_photo_root_and_save, alert_summaries, anchor_photo_id,
         apply_library_index, apply_profile_format, autostart_description, average_bgra,
         build_year_buckets, compression_policy, compression_policy_warning, daemon_liveness,
@@ -8663,13 +9284,14 @@ mod tests {
         demo_thumb_path, ease_motion, first_visible_photo, format_captured_month, format_count,
         format_timestamp, grid_available_width, grid_columns, grid_columns_for, has_tag_filter,
         import_issue_counts, ipc_status_label, job_retry_available, job_retry_label, lerp_color,
-        list_scroll_top, lossless_hint, lossless_supported, moved_profile_order, next_focus_index,
-        normalize_note, parse_args, parse_window_size, profile_summary, queue_status_badge,
-        rail_label_hidden_by_pill, rail_row_at, rail_scroll_offset, rail_y, release_confirmation,
-        retryable_sources, scan_progress_label, scan_progress_ratio, search_anchor_after_result,
-        search_available_width, selection_range, sidebar_reveal_width, sidebar_width,
-        stagger_value, step_index, sync_search_mirror, toggle_selected_id, viewer_details_width,
-        viewer_image_box, visible_year_buckets, with_tag, without_tag,
+        list_scroll_top, lossless_hint, lossless_supported, manual_output_available,
+        moved_profile_order, next_focus_index, normalize_note, parse_args, parse_window_size,
+        profile_summary, queue_status_badge, rail_label_hidden_by_pill, rail_row_at,
+        rail_scroll_offset, rail_y, release_confirmation, retryable_sources, scan_progress_label,
+        scan_progress_ratio, search_anchor_after_result, search_available_width, selection_range,
+        sidebar_reveal_width, sidebar_width, stagger_value, step_index, sync_search_mirror,
+        toggle_selected_id, viewer_details_width, viewer_image_box, visible_year_buckets, with_tag,
+        without_tag,
     };
     use gpui_kit::{RenderImage, ScrollStrategy, UniformListScrollHandle, point, px};
     use smallvec::SmallVec;
@@ -9558,6 +10180,14 @@ mod tests {
         assert_eq!(queue_status_badge(&QueueStatus::Completed).0, "完了");
         assert_eq!(queue_status_badge(&QueueStatus::Failed).0, "失敗");
         assert_eq!(queue_status_badge(&QueueStatus::Cancelled).0, "取消");
+    }
+
+    #[test]
+    fn clipboard_output_is_limited_to_one_photo() {
+        assert!(manual_output_available(1, ManualOutputTarget::Clipboard));
+        assert!(!manual_output_available(2, ManualOutputTarget::Clipboard));
+        assert!(manual_output_available(2, ManualOutputTarget::Folder));
+        assert!(manual_output_available(2, ManualOutputTarget::Profile));
     }
 
     #[test]
