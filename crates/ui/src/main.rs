@@ -6467,26 +6467,42 @@ impl App {
             )
             .child(self.section_label("リサイズ"))
             .child(
-                h_flex()
-                    .items_center()
-                    .gap_2()
+                v_flex()
+                    .gap(px(8.))
                     .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(rgb(MUTED))
-                            .child("リサイズを有効にする"),
-                    )
-                    .child(
-                        Switch::new("profile-resize")
-                            .checked(profile.resize_enabled)
-                            .on_click(cx.listener(|this, checked, _, cx| {
-                                this.edit_profile(|profile| profile.resize_enabled = *checked, cx);
-                            })),
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(MUTED))
+                                    .child("リサイズを有効にする"),
+                            )
+                            .child(
+                                Switch::new("profile-resize")
+                                    .checked(profile.resize_enabled)
+                                    .on_click(cx.listener(|this, checked, _, cx| {
+                                        this.edit_profile(
+                                            |profile| profile.resize_enabled = *checked,
+                                            cx,
+                                        );
+                                    })),
+                            ),
                     )
                     .when(profile.resize_enabled, |this| {
                         this.child(
                             h_flex()
+                                .items_center()
                                 .gap_1()
+                                .child(
+                                    div()
+                                        .w(px(96.))
+                                        .flex_shrink_0()
+                                        .text_size(px(12.))
+                                        .text_color(rgb(MUTED))
+                                        .child("解像度"),
+                                )
                                 .children(
                                     [
                                         ("HD", 1280u32, 720u32),
@@ -6542,14 +6558,15 @@ impl App {
                     .when(profile.resize_enabled, |this| {
                         this.child(
                             v_flex()
-                                .gap(px(6.))
+                                .gap(px(4.))
                                 .child(
                                     h_flex()
                                         .items_center()
                                         .gap_2()
                                         .child(
                                             div()
-                                                .w(px(80.))
+                                                .w(px(96.))
+                                                .flex_shrink_0()
                                                 .text_size(px(12.))
                                                 .text_color(rgb(MUTED))
                                                 .child("リサイズ方法"),
@@ -6601,6 +6618,7 @@ impl App {
                                 )
                                 .child(
                                     div()
+                                        .pl(px(104.))
                                         .text_size(px(10.))
                                         .text_color(rgb(MUTED_2))
                                         .child(match profile.resize_mode {
@@ -6621,6 +6639,8 @@ impl App {
                                 .gap_2()
                                 .child(
                                     div()
+                                        .w(px(96.))
+                                        .flex_shrink_0()
                                         .text_size(px(12.))
                                         .text_color(rgb(MUTED_2))
                                         .child("アスペクト比維持"),
