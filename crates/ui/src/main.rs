@@ -1332,6 +1332,9 @@ pub struct App {
     render_epoch: u64,
     card_image_bounds: Rc<RefCell<HashMap<i64, (u64, Bounds<Pixels>)>>>,
     inspector_preview_bounds: Rc<RefCell<Option<(u64, Bounds<Pixels>)>>>,
+    viewer_morph: Option<ViewerMorph>,
+    viewer_morph_epoch: u64,
+    viewer_return_source: Option<ViewerOpenSource>,
     inspector_collapsed: bool,
     inspector_epoch: u64,
     hovered_nav: Option<Screen>,
@@ -1444,6 +1447,35 @@ pub struct App {
     demo_assets: Option<DemoAssets>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ViewerOpenSource {
+    Card,
+    Inspector,
+    Auto,
+}
+
+struct ViewerMorph {
+    epoch: u64,
+    started_at: Instant,
+    from: Bounds<Pixels>,
+    to: Bounds<Pixels>,
+    thumbnail: Option<Arc<RenderImage>>,
+    preview: Option<Arc<RenderImage>>,
+    color: u32,
+    source: ViewerOpenSource,
+    closing: bool,
+    fade_only: bool,
+}
+
+impl ViewerMorph {
+    fn current_bounds(&self, now: Instant) -> Bounds<Pixels> {
+        if self.fade_only {
+            return self.from;
+        }
+        morph_bounds_at(self.from, self.to, self.started_at, now)
+    }
+}
+
 type ViewerActivate = Rc<dyn Fn(&mut App, &mut Window, &mut Context<App>)>;
 
 impl App {
@@ -1522,6 +1554,9 @@ impl App {
             render_epoch: 0,
             card_image_bounds: Rc::new(RefCell::new(HashMap::new())),
             inspector_preview_bounds: Rc::new(RefCell::new(None)),
+            viewer_morph: None,
+            viewer_morph_epoch: 0,
+            viewer_return_source: None,
             inspector_collapsed: initial_settings.ui_inspector_collapsed,
             inspector_epoch: 0,
             hovered_nav: None,
@@ -2618,7 +2653,33 @@ impl App {
         }
     }
 
-    fn open_quick_look(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn actual_source(
+        &self,
+        id: i64,
+        source: ViewerOpenSource,
+    ) -> Option<(ViewerOpenSource, Bounds<Pixels>)> {
+        let card = current_tagged_bounds(
+            self.card_image_bounds.borrow().get(&id).copied(),
+            self.render_epoch,
+        );
+        let inspector =
+            current_tagged_bounds(*self.inspector_preview_bounds.borrow(), self.render_epoch);
+        if source == ViewerOpenSource::Inspector {
+            inspector
+                .map(|bounds| (ViewerOpenSource::Inspector, bounds))
+                .or_else(|| card.map(|bounds| (ViewerOpenSource::Card, bounds)))
+        } else {
+            card.map(|bounds| (ViewerOpenSource::Card, bounds))
+                .or_else(|| inspector.map(|bounds| (ViewerOpenSource::Inspector, bounds)))
+        }
+    }
+
+    fn open_quick_look(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        source: ViewerOpenSource,
+    ) {
         if self.quick_look_open || self.selected_photo.is_none() {
             return;
         }
@@ -2632,6 +2693,69 @@ impl App {
             .iter()
             .position(|id| Some(*id) == self.selected)
             .unwrap_or(0);
+        let id = self.selected.expect("selected photo");
+        let aspect = self
+            .selected_photo
+            .as_ref()
+            .map(|photo| {
+                let (width, height) = photo.effective_dimensions();
+                if height > 0 {
+                    width as f32 / height as f32
+                } else {
+                    16.0 / 9.0
+                }
+            })
+            .unwrap_or(16.0 / 9.0);
+        let to = viewer_image_rect(window.viewport_size(), self.quick_look_details_open, aspect);
+        let resolved = self.actual_source(id, source);
+        if let Some((actual_source, _)) = resolved {
+            self.viewer_return_source = Some(actual_source);
+        }
+        if !cx.reduce_motion()
+            && let Some((actual_source, from)) = resolved
+        {
+            let thumbnail = self.thumbnails.get(id);
+            let preview = self.preview.clone();
+            if thumbnail.is_some() || preview.is_some() {
+                self.viewer_morph_epoch = self.viewer_morph_epoch.wrapping_add(1);
+                let epoch = self.viewer_morph_epoch;
+                let color = self
+                    .selected_photo
+                    .as_ref()
+                    .map(|photo| self.color_for(photo))
+                    .unwrap_or(0);
+                self.viewer_morph = Some(ViewerMorph {
+                    epoch,
+                    started_at: Instant::now(),
+                    from,
+                    to,
+                    thumbnail,
+                    preview,
+                    color,
+                    source: actual_source,
+                    closing: false,
+                    fade_only: false,
+                });
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(MOTION_MORPH + Duration::from_millis(60))
+                        .await;
+                    this.update(cx, |this, cx| {
+                        if this.viewer_morph_epoch == epoch
+                            && this
+                                .viewer_morph
+                                .as_ref()
+                                .is_some_and(|morph| !morph.closing)
+                        {
+                            this.viewer_morph = None;
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
         self.quick_look_open = true;
         self.quick_look_epoch = self.quick_look_epoch.wrapping_add(1);
         self.quick_look_focus_index = 0;
@@ -4658,7 +4782,7 @@ impl App {
                     && click.down.click_count >= 2
                     && !event.modifiers().modified()
                 {
-                    this.open_quick_look(window, cx);
+                    this.open_quick_look(window, cx, ViewerOpenSource::Card);
                 }
             }))
             .child(body)
@@ -5056,7 +5180,7 @@ impl App {
                     .w_full()
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.load_selected_meta(id);
-                        this.open_quick_look(window, cx);
+                        this.open_quick_look(window, cx, ViewerOpenSource::Inspector);
                     })),
             )
             .child({
@@ -5724,6 +5848,10 @@ impl App {
             |el, t| el.opacity(t),
         );
 
+        let opening_morph = self
+            .viewer_morph
+            .as_ref()
+            .is_some_and(|morph| !morph.closing);
         let image_area = div()
             .id("viewer-image-area")
             .relative()
@@ -5735,6 +5863,7 @@ impl App {
             .justify_center()
             .overflow_hidden()
             .p(px(VIEWER_PAD))
+            .opacity(if opening_morph { 0.0 } else { 1.0 })
             .on_click(cx.listener(|this, _, window, cx| this.close_quick_look(window, cx)))
             .child(image);
 
@@ -5810,6 +5939,86 @@ impl App {
                 Animation::new(Duration::from_millis(240)).with_easing(ease_motion),
                 |el, t| el.opacity(t),
             )
+            .into_any_element()
+    }
+
+    fn viewer_morph_overlay(&self) -> AnyElement {
+        let Some(morph) = self.viewer_morph.as_ref() else {
+            return div().into_any_element();
+        };
+        let Some(old_image) = morph.thumbnail.clone().or_else(|| morph.preview.clone()) else {
+            return div().into_any_element();
+        };
+        let new_image = morph.preview.clone().or_else(|| morph.thumbnail.clone());
+        let from = morph.from;
+        let to = morph.to;
+        let epoch = morph.epoch;
+        let color = morph.color;
+        let closing = morph.closing;
+        let fade_only = morph.fade_only;
+        let old_fit = if closing {
+            ObjectFit::Contain
+        } else {
+            ObjectFit::Cover
+        };
+        let new_fit = if closing {
+            ObjectFit::Cover
+        } else {
+            ObjectFit::Contain
+        };
+        let layer_anim = || {
+            Animation::new(MOTION_MORPH)
+                .with_easing(ease_motion)
+                .with_max_fps(MOTION_FPS)
+        };
+        let old_layer = gpui_kit::img(old_image)
+            .object_fit(old_fit)
+            .size_full()
+            .with_animation(("viewer-morph-old", epoch), layer_anim(), move |el, t| {
+                let radius = 12.0 + (10.0 - 12.0) * t;
+                el.opacity(1.0 - t).rounded(px(radius))
+            });
+        let new_layer = new_image.map(|image| {
+            gpui_kit::img(image)
+                .object_fit(new_fit)
+                .size_full()
+                .with_animation(("viewer-morph-new", epoch), layer_anim(), move |el, t| {
+                    let radius = 12.0 + (10.0 - 12.0) * t;
+                    el.opacity(t).rounded(px(radius))
+                })
+        });
+        let frame = div()
+            .absolute()
+            .overflow_hidden()
+            .bg(rgb(color))
+            .child(old_layer)
+            .when(!fade_only, |this| {
+                this.when_some(new_layer, |this, layer| this.child(layer))
+            })
+            .with_animation(
+                ("viewer-morph-frame", epoch),
+                Animation::new(MOTION_MORPH)
+                    .with_easing(ease_motion)
+                    .with_max_fps(MOTION_FPS),
+                move |el, t| {
+                    let bounds = lerp_bounds(from, to, t);
+                    let radius = 12.0 + (10.0 - 12.0) * t;
+                    el.left(bounds.origin.x)
+                        .top(bounds.origin.y)
+                        .w(bounds.size.width)
+                        .h(bounds.size.height)
+                        .rounded(px(radius))
+                },
+            );
+
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .size_full()
+            .child(frame)
             .into_any_element()
     }
 
@@ -8763,9 +8972,9 @@ impl Render for App {
             .on_action(
                 cx.listener(|this, _: &FocusSearch, window, cx| this.focus_search(window, cx)),
             )
-            .on_action(
-                cx.listener(|this, _: &OpenQuickLook, window, cx| this.open_quick_look(window, cx)),
-            )
+            .on_action(cx.listener(|this, _: &OpenQuickLook, window, cx| {
+                this.open_quick_look(window, cx, ViewerOpenSource::Auto)
+            }))
             .on_action(cx.listener(|this, _: &CloseQuickLook, window, cx| {
                 this.handle_viewer_escape(window, cx)
             }))
@@ -8790,11 +8999,12 @@ impl Render for App {
         } else {
             root
         };
-        if self.manual_compress.is_some() {
+        let root = if self.manual_compress.is_some() {
             root.child(self.manual_compression_overlay(cx))
         } else {
             root
-        }
+        };
+        root.child(self.viewer_morph_overlay())
     }
 }
 
@@ -10194,13 +10404,13 @@ mod tests {
         MOTION_SLOW, ManualOutputTarget, NAV_ITEM_GAP, NAV_ITEM_HEIGHT, PAGE_SIZE,
         PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex, PhotoPageCache, RAIL_MARKER_SIZE,
         RAIL_PILL_WIDTH, RAIL_TRACK_INSET, RAIL_WIDTH, ScanProgressView, Screen,
-        THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, YearBucket, add_photo_root_and_save,
-        alert_summaries, anchor_photo_id, apply_library_index, apply_profile_format,
-        autostart_description, average_bgra, build_year_buckets, card_meta_line, card_metrics,
-        card_size_label, card_size_options, compression_policy, compression_policy_warning,
-        current_tagged_bounds, daemon_liveness, daemon_operation_label, daemon_state_label,
-        daemon_sync_label, decode_thumbnail, demo_thumb_path, ease_motion, eased_progress,
-        first_visible_photo, format_captured_month, format_count, format_timestamp,
+        THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, ViewerMorph, ViewerOpenSource,
+        YearBucket, add_photo_root_and_save, alert_summaries, anchor_photo_id, apply_library_index,
+        apply_profile_format, autostart_description, average_bgra, build_year_buckets,
+        card_meta_line, card_metrics, card_size_label, card_size_options, compression_policy,
+        compression_policy_warning, current_tagged_bounds, daemon_liveness, daemon_operation_label,
+        daemon_state_label, daemon_sync_label, decode_thumbnail, demo_thumb_path, ease_motion,
+        eased_progress, first_visible_photo, format_captured_month, format_count, format_timestamp,
         grid_available_width, grid_columns, grid_columns_for, has_tag_filter, import_issue_counts,
         inner_corner_radius, ipc_status_label, job_retry_available, job_retry_label, lerp_bounds,
         lerp_color, list_scroll_top, lossless_hint, lossless_supported, manual_output_available,
@@ -10510,6 +10720,29 @@ mod tests {
         let to = Bounds::new(point(px(100.), px(200.)), size(px(300.), px(400.)));
         assert_eq!(morph_bounds_at(from, to, start, start), from);
         assert_eq!(morph_bounds_at(from, to, start, start + MOTION_MORPH), to);
+    }
+
+    #[test]
+    fn viewer_morph_current_bounds_follows_the_timeline() {
+        let from = Bounds::new(point(px(10.), px(20.)), size(px(100.), px(80.)));
+        let to = Bounds::new(point(px(200.), px(100.)), size(px(400.), px(300.)));
+        let start = Instant::now();
+        let morph = ViewerMorph {
+            epoch: 1,
+            started_at: start,
+            from,
+            to,
+            thumbnail: None,
+            preview: None,
+            color: 0,
+            source: ViewerOpenSource::Card,
+            closing: false,
+            fade_only: false,
+        };
+        assert_eq!(morph.current_bounds(start), from);
+        assert_eq!(morph.current_bounds(start + MOTION_MORPH), to);
+        let middle = morph.current_bounds(start + MOTION_MORPH / 2);
+        assert!(middle.origin.x > from.origin.x && middle.origin.x < to.origin.x);
     }
 
     #[test]
