@@ -4246,7 +4246,7 @@ impl App {
                     if self.failed_job_count > 0 {
                         row = row.child(
                             Button::new("sidebar-status-retry-failed")
-                                .label("失敗を再試行")
+                                .label("再試行")
                                 .small()
                                 .ghost()
                                 .tooltip("上限内の失敗ジョブを再試行します")
