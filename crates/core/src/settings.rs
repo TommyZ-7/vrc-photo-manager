@@ -7,6 +7,17 @@ use crate::error::Result;
 
 const SETTINGS_KEY: &str = "app_settings";
 
+/// Presentation size for photo cards. Pixel metrics live in the UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CardSize {
+    Small,
+    #[default]
+    Medium,
+    Large,
+    ExtraLarge,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     /// Photo roots to index. The first entry is the primary VRChat folder.
@@ -36,6 +47,16 @@ pub struct AppSettings {
     pub ui_inspector_collapsed: bool,
     #[serde(default)]
     pub ui_reduce_motion: bool,
+    #[serde(default = "default_true")]
+    pub ui_card_show_status: bool,
+    #[serde(default = "default_true")]
+    pub ui_card_show_world: bool,
+    #[serde(default = "default_true")]
+    pub ui_card_show_date: bool,
+    #[serde(default = "default_true")]
+    pub ui_card_show_size: bool,
+    #[serde(default, deserialize_with = "deserialize_card_size")]
+    pub ui_card_size: CardSize,
     #[serde(default = "default_auto_update_check")]
     pub auto_update_check: bool,
     #[serde(default)]
@@ -48,6 +69,18 @@ fn default_true() -> bool {
 
 fn default_auto_update_check() -> bool {
     true
+}
+
+fn deserialize_card_size<'de, D>(deserializer: D) -> std::result::Result<CardSize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // Consume exactly one JSON value even when it is not a string. Calling
+    // `CardSize::deserialize` directly on a null/number/object would leave the
+    // streaming parser mid-value when we discard the error, and the outer
+    // struct parse would then fail — resetting every setting.
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
 }
 
 impl Default for AppSettings {
@@ -69,6 +102,11 @@ impl Default for AppSettings {
             ui_sidebar_collapsed: false,
             ui_inspector_collapsed: false,
             ui_reduce_motion: false,
+            ui_card_show_status: true,
+            ui_card_show_world: true,
+            ui_card_show_date: true,
+            ui_card_show_size: true,
+            ui_card_size: CardSize::Medium,
             auto_update_check: true,
             update_last_checked_at: None,
         }
@@ -285,6 +323,71 @@ mod tests {
     }
 
     #[test]
+    fn card_display_settings_roundtrip() {
+        let db = Db::open_in_memory().unwrap();
+        let settings = AppSettings {
+            ui_card_show_status: false,
+            ui_card_show_world: false,
+            ui_card_show_date: false,
+            ui_card_show_size: false,
+            ui_card_size: CardSize::ExtraLarge,
+            ..Default::default()
+        };
+        settings.save(&db).unwrap();
+        let loaded = AppSettings::load(&db).unwrap();
+        assert!(!loaded.ui_card_show_status);
+        assert!(!loaded.ui_card_show_world);
+        assert!(!loaded.ui_card_show_date);
+        assert!(!loaded.ui_card_show_size);
+        assert_eq!(loaded.ui_card_size, CardSize::ExtraLarge);
+    }
+
+    #[test]
+    fn missing_card_display_fields_default_to_visible_medium() {
+        let json = r#"{
+            "photo_roots": [],
+            "log_dir": null,
+            "managed_dir": null,
+            "language": "ja",
+            "autostart": true,
+            "tray": true,
+            "auto_compress": true,
+            "auto_compress_backlog": false,
+            "estimated_link": true,
+            "thumbnail_cache_mb": 2048,
+            "compression_workers": 1
+        }"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+        assert!(settings.ui_card_show_status);
+        assert!(settings.ui_card_show_world);
+        assert!(settings.ui_card_show_date);
+        assert!(settings.ui_card_show_size);
+        assert_eq!(settings.ui_card_size, CardSize::Medium);
+    }
+
+    #[test]
+    fn malformed_card_size_does_not_reset_other_settings() {
+        let base = serde_json::to_string(&AppSettings {
+            photo_roots: vec!["/tmp/photos".to_string()],
+            ..Default::default()
+        })
+        .unwrap();
+        for invalid in ["\"gigantic\"", "null", "123", "true", "{}", "[]"] {
+            let json = base.replace(
+                "\"ui_card_size\":\"medium\"",
+                &format!("\"ui_card_size\":{invalid}"),
+            );
+            let settings: AppSettings = serde_json::from_str(&json).unwrap();
+            assert_eq!(settings.ui_card_size, CardSize::Medium, "input: {invalid}");
+            assert_eq!(
+                settings.photo_roots,
+                vec!["/tmp/photos".to_string()],
+                "input: {invalid}"
+            );
+        }
+    }
+
+    #[test]
     fn settings_roundtrip() {
         let db = Db::open_in_memory().unwrap();
         let settings = AppSettings {
@@ -319,6 +422,11 @@ mod tests {
         assert!(!settings.ui_sidebar_collapsed);
         assert!(!settings.ui_inspector_collapsed);
         assert!(!settings.ui_reduce_motion);
+        assert!(settings.ui_card_show_status);
+        assert!(settings.ui_card_show_world);
+        assert!(settings.ui_card_show_date);
+        assert!(settings.ui_card_show_size);
+        assert_eq!(settings.ui_card_size, CardSize::Medium);
         assert!(settings.auto_update_check);
         assert_eq!(settings.update_last_checked_at, None);
     }
