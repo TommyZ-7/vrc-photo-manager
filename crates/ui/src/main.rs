@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use chrono::Utc;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
-use gpui_kit::component::input::{Input, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
@@ -25,7 +25,7 @@ use vrc_photo_core::logging::{DAEMON_LOG_FILE, UI_LOG_FILE, logs_dir};
 use vrc_photo_core::model::{
     CompressionFormat, CompressionJob, CompressionProfile, DaemonCommand, DaemonError,
     DaemonOperation, Derivative, LibraryStats, MAX_JOB_RETRIES, NewPhoto, Photo, PhotoContext,
-    PhotoIndexEntry, PhotoPlayer, PhotoSort, PhotoTextFilter, QueueStatus,
+    PhotoIndexEntry, PhotoPlayer, PhotoSort, PhotoTextFilter, QueueStatus, ResizeMode,
 };
 use vrc_photo_core::scanner;
 use vrc_photo_core::scanner::ScanFailure;
@@ -1383,6 +1383,8 @@ pub struct App {
     previous_color: Option<u32>,
     profiles: Vec<CompressionProfile>,
     profile_index: usize,
+    profile_suffix_input: Entity<InputState>,
+    _profile_suffix_subscription: Subscription,
     manual_compress: Option<ManualCompressionDialog>,
     stats: LibraryStats,
     settings: AppSettings,
@@ -1468,6 +1470,17 @@ impl App {
                 .placeholder("取り込み先フォルダ")
                 .default_value(initial_settings.import_dir().display().to_string())
         });
+        let profile_suffix_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("例: _webp"));
+        let profile_suffix_subscription = cx.subscribe(
+            &profile_suffix_input,
+            |this, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let value = input.read(cx).value().to_string();
+                    this.edit_profile(|profile| profile.suffix = value.clone(), cx);
+                }
+            },
+        );
         let photo_grid_focus = cx.focus_handle();
         let quick_look_close_focus = cx.focus_handle();
         let quick_look_prev_focus = cx.focus_handle();
@@ -1543,6 +1556,8 @@ impl App {
             previous_color: None,
             profiles: Vec::new(),
             profile_index: 0,
+            profile_suffix_input,
+            _profile_suffix_subscription: profile_suffix_subscription,
             manual_compress: None,
             stats: LibraryStats::default(),
             settings: AppSettings::default(),
@@ -3758,7 +3773,7 @@ impl App {
     fn content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let screen = match self.screen {
             Screen::Photos => self.photos_screen(window, cx).into_any_element(),
-            Screen::Compression => self.compression_screen(cx).into_any_element(),
+            Screen::Compression => self.compression_screen(window, cx).into_any_element(),
             Screen::Search => self.search_screen(window, cx).into_any_element(),
             Screen::Dashboard => self.dashboard_screen(cx).into_any_element(),
             Screen::Settings => self.settings_screen(cx).into_any_element(),
@@ -5895,7 +5910,11 @@ impl App {
             .into_any_element()
     }
 
-    fn compression_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn compression_screen(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let profile = self.profiles.get(self.profile_index).cloned();
         let profile_count = self.profiles.len();
         let message = self.message.clone();
@@ -6084,7 +6103,7 @@ impl App {
                                 .min_w_0()
                                 .gap(px(24.))
                                 .when_some(profile, |this, profile| {
-                                    this.child(self.profile_editor(&profile, cx))
+                                    this.child(self.profile_editor(&profile, window, cx))
                                 })
                                 .child(
                                     h_flex()
@@ -6249,9 +6268,16 @@ impl App {
     fn profile_editor(
         &self,
         profile: &CompressionProfile,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let profile_id = profile.id.clone();
+        let suffix_value = self.profile_suffix_input.read(cx).value();
+        if suffix_value.as_ref() != profile.suffix.as_str() {
+            self.profile_suffix_input.update(cx, |input, cx| {
+                input.set_value(profile.suffix.clone(), window, cx);
+            });
+        }
         glass_panel()
             .flex()
             .flex_col()
@@ -6441,26 +6467,42 @@ impl App {
             )
             .child(self.section_label("リサイズ"))
             .child(
-                h_flex()
-                    .items_center()
-                    .gap_2()
+                v_flex()
+                    .gap(px(8.))
                     .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(rgb(MUTED))
-                            .child("リサイズを有効にする"),
-                    )
-                    .child(
-                        Switch::new("profile-resize")
-                            .checked(profile.resize_enabled)
-                            .on_click(cx.listener(|this, checked, _, cx| {
-                                this.edit_profile(|profile| profile.resize_enabled = *checked, cx);
-                            })),
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(MUTED))
+                                    .child("リサイズを有効にする"),
+                            )
+                            .child(
+                                Switch::new("profile-resize")
+                                    .checked(profile.resize_enabled)
+                                    .on_click(cx.listener(|this, checked, _, cx| {
+                                        this.edit_profile(
+                                            |profile| profile.resize_enabled = *checked,
+                                            cx,
+                                        );
+                                    })),
+                            ),
                     )
                     .when(profile.resize_enabled, |this| {
                         this.child(
                             h_flex()
+                                .items_center()
                                 .gap_1()
+                                .child(
+                                    div()
+                                        .w(px(96.))
+                                        .flex_shrink_0()
+                                        .text_size(px(12.))
+                                        .text_color(rgb(MUTED))
+                                        .child("解像度"),
+                                )
                                 .children(
                                     [
                                         ("HD", 1280u32, 720u32),
@@ -6515,11 +6557,90 @@ impl App {
                     })
                     .when(profile.resize_enabled, |this| {
                         this.child(
+                            v_flex()
+                                .gap(px(4.))
+                                .child(
+                                    h_flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(
+                                            div()
+                                                .w(px(96.))
+                                                .flex_shrink_0()
+                                                .text_size(px(12.))
+                                                .text_color(rgb(MUTED))
+                                                .child("リサイズ方法"),
+                                        )
+                                        .child(
+                                            h_flex().gap(px(4.)).children(
+                                                [
+                                                    (ResizeMode::DownscaleOnly, "大きい場合のみ"),
+                                                    (ResizeMode::Always, "毎回"),
+                                                ]
+                                                .into_iter()
+                                                .map(|(mode, label)| {
+                                                    let active = profile.resize_mode == mode;
+                                                    div()
+                                                        .id(SharedString::from(format!(
+                                                            "resize-mode-{}",
+                                                            mode.as_str()
+                                                        )))
+                                                        .px(px(8.))
+                                                        .py(px(4.))
+                                                        .rounded(px(8.))
+                                                        .bg(if active {
+                                                            rgb(ACCENT_SOFT)
+                                                        } else {
+                                                            rgba(0x00000000)
+                                                        })
+                                                        .text_size(px(10.))
+                                                        .font_medium()
+                                                        .text_color(if active {
+                                                            rgb(BLUE)
+                                                        } else {
+                                                            rgb(MUTED)
+                                                        })
+                                                        .cursor_pointer()
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                this.edit_profile(
+                                                                    |profile| {
+                                                                        profile.resize_mode = mode;
+                                                                    },
+                                                                    cx,
+                                                                );
+                                                            },
+                                                        ))
+                                                        .child(label)
+                                                }),
+                                            ),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .pl(px(104.))
+                                        .text_size(px(10.))
+                                        .text_color(rgb(MUTED_2))
+                                        .child(match profile.resize_mode {
+                                            ResizeMode::DownscaleOnly => {
+                                                "指定解像度より大きい画像だけ縮小します"
+                                            }
+                                            ResizeMode::Always => {
+                                                "小さい画像も指定解像度に合わせて拡大します"
+                                            }
+                                        }),
+                                ),
+                        )
+                    })
+                    .when(profile.resize_enabled, |this| {
+                        this.child(
                             h_flex()
                                 .items_center()
                                 .gap_2()
                                 .child(
                                     div()
+                                        .w(px(96.))
+                                        .flex_shrink_0()
                                         .text_size(px(12.))
                                         .text_color(rgb(MUTED_2))
                                         .child("アスペクト比維持"),
@@ -6597,7 +6718,26 @@ impl App {
                         )
                     }),
             )
-            .child(self.meta_row("サフィックス", profile.suffix.clone()))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .w(px(86.))
+                            .flex_shrink_0()
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED_2))
+                            .child("サフィックス"),
+                    )
+                    .child(Input::new(&self.profile_suffix_input).small().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED_2))
+                            .child("空欄可"),
+                    ),
+            )
             .child(
                 div()
                     .p(px(12.))
@@ -6607,7 +6747,7 @@ impl App {
                     .border_color(rgb(BORDER))
                     .text_size(px(10.))
                     .text_color(rgb(MUTED))
-                    .child("変更は即時保存されます。手動圧縮の出力先と元画像の扱いは実行時に選べます。"),
+                    .child("変更は即時保存されます。サフィックスの使用不可文字は _ に置換されます。手動圧縮の出力先と元画像の扱いは実行時に選べます。"),
             )
     }
 
