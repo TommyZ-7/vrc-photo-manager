@@ -5,6 +5,46 @@
 - Target: `crates/ui/src/main.rs`
 - Related: existing "アニメーションを減らす" (`ui_reduce_motion`) setting
 
+## Post-review adjustments (2026-10-25)
+
+The implementation and the whole-branch review settled these points; they
+supersede the corresponding text below.
+
+- **Nav layers are state-driven.** `viewer_nav_started_at` + `nav_t` compute
+  the outgoing/incoming layer opacity and offset at render time. A zero-size
+  `("viewer-nav-driver", epoch)` animation only requests frames. The layers no
+  longer use `with_animation` themselves, so a details toggle (which changes
+  the frame's animation ID) cannot replay a navigation cross-fade.
+- **`ViewerPanelState` carries fractional details width.** The panel retargets
+  from its current width on every toggle instead of restarting from a boolean.
+  `ViewerBoxState` stores the visible `from_size` plus the target aspect and
+  target details width, so rapid toggles/steps retarget from what is on screen.
+- **`morph_image_plan` owns the layer choice.** Opening from a card uses
+  thumbnail -> preview; opening from the inspector uses preview -> preview;
+  closing to a card uses preview -> thumbnail; closing to the inspector uses
+  preview -> preview. Radii mirror: 12 -> 10 for cards, 11 -> 10 for inspector
+  previews, and the reverse on close. Opening keeps the old layer at a 0.35
+  opacity floor so a still-uploading preview cannot expose the bare frame.
+- **Fade-only close fades the whole frame**, not just the image, and the
+  closing backdrop starts at the viewer's current open-fade opacity
+  (`backdrop_from`).
+- **A successful open clears any closing morph**, and
+  `guard_viewer_selection()` clears the morph epoch/source so a deleted photo
+  cannot leave an overlay above the grid.
+- **Collapsing the sidebar resets `nav_previous` to the current screen** before
+  the width animation changes the sidebar epoch. The nav subtree is remounted by
+  that epoch, so this keeps the pill/colors at the current tab instead of
+  replaying the previous tab transition.
+- **The blue bar's x animation is the outer wrapper** and the y animation is the
+  inner 18 px bar, so a tab change does not restart a mid-collapse x slide.
+- **The card check-badge entrance animation was removed.** It could leave the
+  selected badge invisible after a viewer session; the badge is now static and
+  always visible.
+- **Verification limitation:** this environment cannot deliver synthetic
+  button/keyboard events to the XWayland window. Build, clippy, unit tests,
+  static screenshots, and debug-timed auto-open frames were used; click,
+  keyboard, inspector-launch, and immediate-Esc paths remain manual QA items.
+
 ## 1. Intent
 
 The app currently animates card hover, card intro, the inspector, and the

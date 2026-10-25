@@ -1333,3 +1333,29 @@ locally and remotely, and remove the docs worktree.
 - **Type consistency:** `ViewerOpenSource`, `ViewerMorph`, `ViewerBoxState`, `size_at`, `current_bounds`, `source_bounds`, and `actual_source` are defined before their consumers. `nav_index`, `nav_item_top`, `nav_bar_left`, `screen_direction`, `lerp_bounds`, `eased_progress`, `morph_bounds_at`, `viewer_image_rect`, `current_tagged_bounds`, and `preferred_bounds` are all defined in Task 1.
 - **Review Focus tests:** mid-morph interactions are covered by Task 6's manual step; off-screen close by Task 6 step 7; mixed aspect by Task 7's unit and manual checks; reduce motion by Task 5's `cx.reduce_motion()` guard and Task 10's manual pass; rapid sidebar changes by Task 2's visual check.
 - **Proportion:** the plan names signatures, test assertions, and file locations; implementation bodies are left to the builder except for algorithms the tests do not determine.
+
+## Implementation adjustments (2026-10-25)
+
+The whole-branch review changed these details during execution; the design's
+post-review section is authoritative.
+
+- `ViewerBoxState` became `from_size + to_aspect + to_details_width` instead of
+  aspect/detail booleans, so a transition retargets from the visible size.
+- Added `ViewerPanelState` for fractional details width. The panel, close
+  origin, and image box all retarget from the current width.
+- Nav image layers are state-driven (`viewer_nav_started_at` + `nav_t`) with a
+  zero-size frame driver; they are no longer `with_animation` descendants of the
+  box animation.
+- Added `morph_image_plan` (card/inspector source and target, Cover/Contain,
+  mirrored radii) plus tests. Opening keeps the old layer at 0.35 opacity as a
+  safe underlay.
+- `fade_only` closes fade the frame itself; closing morphs store
+  `backdrop_from` from the viewer's open fade.
+- Opening clears any closing morph; `guard_viewer_selection` clears morph
+  state.
+- Sidebar collapse resets `nav_previous`; the bar x animation is now the outer
+  wrapper and y is the inner bar.
+- The card check-badge entrance animation was dropped (it could leave the
+  badge invisible); the badge is static.
+- Interactive QA remains manual where the environment cannot deliver synthetic
+  input to the XWayland window.
