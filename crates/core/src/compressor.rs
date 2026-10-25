@@ -82,7 +82,10 @@ pub fn render_clipboard_png(source: &Path, profile: &CompressionProfile) -> Resu
     let image = resize_for_profile(image, profile);
     let mut bytes = Vec::new();
     image
-        .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
         .map_err(|error| CoreError::Invalid(format!("cannot encode clipboard PNG: {error}")))?;
     Ok(bytes)
 }

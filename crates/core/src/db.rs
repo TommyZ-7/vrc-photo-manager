@@ -221,8 +221,7 @@ CREATE INDEX IF NOT EXISTS idx_photos_move_match
     ON photos(status, file_size, captured_at_utc);
 "#;
 
-const SCHEMA_V6_JOB_OUTPUT_DIR: &str =
-    "ALTER TABLE compression_jobs ADD COLUMN output_dir TEXT;";
+const SCHEMA_V6_JOB_OUTPUT_DIR: &str = "ALTER TABLE compression_jobs ADD COLUMN output_dir TEXT;";
 
 const PHOTO_SELECT: &str = "p.id, p.root_id, p.rel_path, p.abs_path, p.file_name, \
     p.captured_at_utc, p.captured_at_local, p.tz_offset_sec, p.width, p.height, \
@@ -1409,13 +1408,7 @@ impl Db {
     // ---------- compression jobs ----------
 
     pub fn enqueue_job(&self, photo_id: i64, profile_id: &str, policy: &str) -> Result<String> {
-        self.enqueue_job_with_options(
-            photo_id,
-            profile_id,
-            policy,
-            QueueStatus::Pending,
-            None,
-        )
+        self.enqueue_job_with_options(photo_id, profile_id, policy, QueueStatus::Pending, None)
     }
 
     pub fn enqueue_job_with_status(
@@ -1493,11 +1486,7 @@ impl Db {
         status: QueueStatus,
     ) -> Result<bool> {
         self.enqueue_job_for_existing_profile_with_options(
-            photo_id,
-            profile_id,
-            policy,
-            status,
-            None,
+            photo_id, profile_id, policy, status, None,
         )
     }
 

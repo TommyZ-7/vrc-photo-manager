@@ -1759,7 +1759,11 @@ fn process_job(db: &Arc<Mutex<Db>>, job: &CompressionJob) -> Result<()> {
         db.update_job(&job.id, QueueStatus::Processing, 0.05, None, None)?;
         (photo, profile)
     };
-    if let Some(output_dir) = job.output_dir.as_deref().filter(|dir| !dir.trim().is_empty()) {
+    if let Some(output_dir) = job
+        .output_dir
+        .as_deref()
+        .filter(|dir| !dir.trim().is_empty())
+    {
         profile.output_dir = Some(output_dir.to_string());
     }
     let source_path = PathBuf::from(photo.effective_path());
@@ -3261,7 +3265,10 @@ mod tests {
         let output = stored.output_path.expect("output path");
         assert!(Path::new(&output).starts_with(&export_dir));
         assert!(Path::new(&output).is_file());
-        assert!(photo_path.is_file(), "keep must leave the original in place");
+        assert!(
+            photo_path.is_file(),
+            "keep must leave the original in place"
+        );
     }
 
     #[test]
