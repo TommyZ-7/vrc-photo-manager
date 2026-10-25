@@ -5090,6 +5090,8 @@ impl App {
                 |_, _, _, _| {},
             )
             .absolute()
+            .top_0()
+            .left_0()
             .size_full(),
         );
         if show_status {
@@ -5513,6 +5515,8 @@ impl App {
                 |_, _, _, _| {},
             )
             .absolute()
+            .top_0()
+            .left_0()
             .size_full(),
         );
 
@@ -6263,13 +6267,16 @@ impl App {
         let nav_epoch = self.viewer_nav_epoch;
         let nav_direction = self.viewer_nav_direction;
         let nav_t = if nav_epoch == 0 {
-            0.0
+            1.0
         } else {
-            eased_progress(self.viewer_nav_started_at, MOTION_BASE, Instant::now())
+            viewer_nav_progress(
+                self.viewer_nav_started_at,
+                Instant::now(),
+                cx.reduce_motion(),
+            )
         };
         let previous_preview = self.previous_preview.clone();
         let current_preview = self.preview.clone();
-        let thumbnail = self.thumbnails.get(photo.id);
         let (start_w, start_h) = box_state.size_at(0.0, viewport);
 
         let mut image_frame = div()
@@ -6282,17 +6289,6 @@ impl App {
             .rounded(px(10.))
             .bg(rgb(color))
             .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()));
-
-        // Keep the cached thumbnail behind the preview so a still-uploading
-        // preview never flashes the bare frame color.
-        if let Some(thumbnail) = thumbnail.clone() {
-            image_frame = image_frame.child(
-                gpui_kit::img(thumbnail)
-                    .object_fit(ObjectFit::Contain)
-                    .size_full()
-                    .rounded(px(10.)),
-            );
-        }
 
         if nav_epoch > 0
             && nav_t < 1.0
@@ -6324,7 +6320,7 @@ impl App {
                     .relative()
                     .left(px(current_offset)),
             );
-        } else if thumbnail.is_none() {
+        } else {
             image_frame = image_frame.child(
                 div()
                     .absolute()
@@ -6485,7 +6481,10 @@ impl App {
         let Some(old_image) = old_kind.and_then(image_for) else {
             return div().into_any_element();
         };
-        let new_image = if fade_only {
+        let new_image = if fade_only || (!closing && morph.preview.is_none()) {
+            // Never present the thumbnail as the full-size incoming image.
+            // If the preview is missing, the viewer shows its explicit failure
+            // state after the overlay clears.
             None
         } else {
             new_kind.and_then(image_for)
@@ -6510,16 +6509,7 @@ impl App {
             .size_full()
             .with_animation(("viewer-morph-old", epoch), layer_anim(), move |el, t| {
                 let radius = start_radius + (end_radius - start_radius) * t;
-                let opacity = if fade_only {
-                    1.0
-                } else if closing {
-                    1.0 - t
-                } else {
-                    // Keep a little of the cached image under the incoming
-                    // preview: a still-uploading preview must not expose the
-                    // bare frame color. The opaque preview hides it otherwise.
-                    0.35 + 0.65 * (1.0 - t)
-                };
+                let opacity = if fade_only { 1.0 } else { 1.0 - t };
                 el.opacity(opacity).rounded(px(radius))
             });
         let new_layer = new_image.map(|image| {
@@ -11065,6 +11055,14 @@ fn eased_progress(started_at: Instant, duration: Duration, now: Instant) -> f32 
     ease_motion((elapsed / duration.as_secs_f32()).clamp(0.0, 1.0))
 }
 
+fn viewer_nav_progress(started_at: Instant, now: Instant, reduce_motion: bool) -> f32 {
+    if reduce_motion {
+        1.0
+    } else {
+        eased_progress(started_at, MOTION_BASE, now)
+    }
+}
+
 fn morph_bounds_at(
     from: Bounds<Pixels>,
     to: Bounds<Pixels>,
@@ -11727,8 +11725,8 @@ mod tests {
         reserve_import_dialog, retryable_sources, scan_progress_label, scan_progress_ratio,
         screen_direction, search_anchor_after_result, search_available_width, selection_range,
         sidebar_reveal_width, sidebar_width, stagger_value, step_index, sync_search_mirror,
-        toggle_selected_id, viewer_image_box, viewer_image_rect, visible_year_buckets, with_tag,
-        without_tag,
+        toggle_selected_id, viewer_image_box, viewer_image_rect, viewer_nav_progress,
+        visible_year_buckets, with_tag, without_tag,
     };
     use gpui_kit::{Bounds, RenderImage, ScrollStrategy, UniformListScrollHandle, point, px, size};
     use smallvec::SmallVec;
@@ -12045,6 +12043,14 @@ mod tests {
         assert_eq!(morph.current_bounds(start + MOTION_MORPH), to);
         let middle = morph.current_bounds(start + MOTION_MORPH / 2);
         assert!(middle.origin.x > from.origin.x && middle.origin.x < to.origin.x);
+    }
+
+    #[test]
+    fn viewer_nav_progress_respects_reduce_motion() {
+        let start = Instant::now();
+        assert_eq!(viewer_nav_progress(start, start, true), 1.0);
+        assert_eq!(viewer_nav_progress(start, start, false), 0.0);
+        assert_eq!(viewer_nav_progress(start, start + MOTION_BASE, false), 1.0);
     }
 
     #[test]
