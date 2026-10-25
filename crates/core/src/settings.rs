@@ -73,7 +73,12 @@ fn deserialize_card_size<'de, D>(deserializer: D) -> std::result::Result<CardSiz
 where
     D: serde::Deserializer<'de>,
 {
-    Ok(CardSize::deserialize(deserializer).unwrap_or_default())
+    // Consume exactly one JSON value even when it is not a string. Calling
+    // `CardSize::deserialize` directly on a null/number/object would leave the
+    // streaming parser mid-value when we discard the error, and the outer
+    // struct parse would then fail — resetting every setting.
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
 }
 
 impl Default for AppSettings {
@@ -338,11 +343,25 @@ mod tests {
     }
 
     #[test]
-    fn unknown_card_size_falls_back_to_medium() {
-        let mut value = serde_json::to_value(AppSettings::default()).unwrap();
-        value["ui_card_size"] = serde_json::json!("gigantic");
-        let settings: AppSettings = serde_json::from_value(value).unwrap();
-        assert_eq!(settings.ui_card_size, CardSize::Medium);
+    fn malformed_card_size_does_not_reset_other_settings() {
+        let base = serde_json::to_string(&AppSettings {
+            photo_roots: vec!["/tmp/photos".to_string()],
+            ..Default::default()
+        })
+        .unwrap();
+        for invalid in ["\"gigantic\"", "null", "123", "true", "{}", "[]"] {
+            let json = base.replace(
+                "\"ui_card_size\":\"medium\"",
+                &format!("\"ui_card_size\":{invalid}"),
+            );
+            let settings: AppSettings = serde_json::from_str(&json).unwrap();
+            assert_eq!(settings.ui_card_size, CardSize::Medium, "input: {invalid}");
+            assert_eq!(
+                settings.photo_roots,
+                vec!["/tmp/photos".to_string()],
+                "input: {invalid}"
+            );
+        }
     }
 
     #[test]
