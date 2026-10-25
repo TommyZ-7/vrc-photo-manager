@@ -189,7 +189,7 @@ mod tests {
                 "format": "appimage",
                 "size": 1024,
                 "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "signature": "sig"
+                "signature": crate::verify::test_signature()
             }
         })
     }
@@ -361,7 +361,7 @@ mod tests {
                     "format": "nsis",
                     "size": 1024,
                     "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                    "signature": "sig"
+                    "signature": crate::verify::test_signature()
                 }
             }),
         );

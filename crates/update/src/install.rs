@@ -557,7 +557,7 @@ mod tests {
 
     #[test]
     fn selects_the_asset_for_the_install_kind() {
-        let bytes = br#"{
+        let json = br#"{
           "schema": 1,
           "version": "0.4.0",
           "platforms": {
@@ -566,18 +566,19 @@ mod tests {
               "format": "appimage",
               "size": 10,
               "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-              "signature": "sig"
+              "signature": "__SIGNATURE__"
             },
             "windows-x86_64": {
               "url": "https://example.com/vrc-photo-manager_0.4.0_x64-setup.exe",
               "format": "nsis",
               "size": 10,
               "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-              "signature": "sig"
+              "signature": "__SIGNATURE__"
             }
           }
         }"#;
-        let (manifest, _) = Manifest::parse_and_validate(bytes, false).unwrap();
+        let json = String::from_utf8_lossy(json).replace("__SIGNATURE__", &crate::verify::test_signature());
+        let (manifest, _) = Manifest::parse_and_validate(json.as_bytes(), false).unwrap();
 
         let appimage = InstallKind::AppImage {
             path: "/tmp/VRC.AppImage".into(),
