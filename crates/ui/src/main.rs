@@ -1412,6 +1412,41 @@ struct ManualCompressionDialog {
     keep_original: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SidebarStatusTab {
+    Compression,
+    Import,
+    Scan,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StatusTone {
+    Idle,
+    Running,
+    Waiting,
+    Failed,
+    Success,
+}
+
+impl StatusTone {
+    fn color(self) -> u32 {
+        match self {
+            Self::Idle => MUTED_2,
+            Self::Running => BLUE,
+            Self::Waiting => AMBER,
+            Self::Failed => RED,
+            Self::Success => GREEN,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CardStatus {
+    headline: String,
+    detail: String,
+    tone: StatusTone,
+}
+
 type BoundsFrame = (u64, Bounds<Pixels>);
 type CardBoundsMap = Rc<RefCell<HashMap<i64, BoundsFrame>>>;
 type InspectorBounds = Rc<RefCell<Option<BoundsFrame>>>;
@@ -10914,6 +10949,187 @@ fn scan_progress_ratio(progress: &ScanProgressView) -> f32 {
     ratio.clamp(0.0, 1.0)
 }
 
+fn running_job_count(active: i64, waiting: i64) -> i64 {
+    (active - waiting).max(0)
+}
+
+fn compression_card_status(active: i64, waiting: i64, failed: i64) -> CardStatus {
+    let running = running_job_count(active, waiting);
+    if waiting > 0 {
+        CardStatus {
+            headline: format!("未実行 {waiting}"),
+            detail: format!("実行中 {running} · 失敗 {failed}"),
+            tone: StatusTone::Waiting,
+        }
+    } else if running > 0 {
+        CardStatus {
+            headline: format!("実行中 {running}"),
+            detail: format!("未実行 0 · 失敗 {failed}"),
+            tone: StatusTone::Running,
+        }
+    } else if failed > 0 {
+        CardStatus {
+            headline: format!("失敗 {failed}"),
+            detail: "未実行 0 · 実行中 0".to_string(),
+            tone: StatusTone::Failed,
+        }
+    } else {
+        CardStatus {
+            headline: "キューは空です".to_string(),
+            detail: "未実行のジョブはありません".to_string(),
+            tone: StatusTone::Idle,
+        }
+    }
+}
+
+fn import_card_status(
+    progress: Option<&ImportProgress>,
+    report: Option<&ImportReportView>,
+) -> CardStatus {
+    if let Some(progress) = progress {
+        return CardStatus {
+            headline: "取り込み中".to_string(),
+            detail: format!(
+                "{}/{} · 取込 {} · 失敗 {}",
+                progress.processed, progress.total, progress.imported, progress.failed
+            ),
+            tone: StatusTone::Running,
+        };
+    }
+    let Some(report) = report else {
+        return CardStatus {
+            headline: "履歴なし".to_string(),
+            detail: "取り込み結果がここに残ります".to_string(),
+            tone: StatusTone::Idle,
+        };
+    };
+    let (failed, partial) = import_issue_counts(&report.issues);
+    if !report.remaining.is_empty() {
+        return CardStatus {
+            headline: format!("未処理 {}", report.remaining.len()),
+            detail: format!("取込 {}/{} · 失敗 {failed}", report.imported, report.total),
+            tone: StatusTone::Waiting,
+        };
+    }
+    if failed > 0 {
+        return CardStatus {
+            headline: format!("失敗 {failed}"),
+            detail: format!("取込 {}/{}", report.imported, report.total),
+            tone: StatusTone::Failed,
+        };
+    }
+    if partial > 0 {
+        return CardStatus {
+            headline: format!("部分移動 {partial}"),
+            detail: format!("取込 {}/{} · 完了", report.imported, report.total),
+            tone: StatusTone::Waiting,
+        };
+    }
+    CardStatus {
+        headline: format!("完了 {} 枚", report.imported),
+        detail: if report.renamed.is_empty() {
+            "前回の取り込み".to_string()
+        } else {
+            format!("前回の取り込み · 連番 {}", report.renamed.len())
+        },
+        tone: StatusTone::Success,
+    }
+}
+
+fn scan_card_status(
+    progress: Option<&ScanProgressView>,
+    daemon_active: bool,
+    daemon_paused: bool,
+) -> CardStatus {
+    if let Some(progress) = progress {
+        let detail = scan_progress_label(progress);
+        let has_total = progress.total.is_some_and(|total| total > 0);
+        let headline = if progress.phase == IpcScanPhase::Indexing && has_total {
+            format!(
+                "{}%",
+                (scan_progress_ratio(progress) * 100.0).round() as i32
+            )
+        } else {
+            "走査中…".to_string()
+        };
+        return CardStatus {
+            headline,
+            detail,
+            tone: StatusTone::Running,
+        };
+    }
+    if !daemon_active {
+        return CardStatus {
+            headline: "停止中".to_string(),
+            detail: "デーモンは接続されていません".to_string(),
+            tone: StatusTone::Idle,
+        };
+    }
+    if daemon_paused {
+        return CardStatus {
+            headline: "一時停止中".to_string(),
+            detail: "監視を再開すると走査します".to_string(),
+            tone: StatusTone::Waiting,
+        };
+    }
+    CardStatus {
+        headline: "待機中".to_string(),
+        detail: "変更を監視しています".to_string(),
+        tone: StatusTone::Idle,
+    }
+}
+
+fn compression_attention(active: i64, waiting: i64, failed: i64) -> Option<StatusTone> {
+    if failed > 0 {
+        Some(StatusTone::Failed)
+    } else if running_job_count(active, waiting) > 0 {
+        Some(StatusTone::Running)
+    } else if waiting > 0 {
+        Some(StatusTone::Waiting)
+    } else {
+        None
+    }
+}
+
+fn import_attention(
+    progress: Option<&ImportProgress>,
+    report: Option<&ImportReportView>,
+) -> Option<StatusTone> {
+    if progress.is_some() {
+        return Some(StatusTone::Running);
+    }
+    let report = report?;
+    let (failed, partial) = import_issue_counts(&report.issues);
+    if failed > 0 {
+        Some(StatusTone::Failed)
+    } else if !report.remaining.is_empty() || partial > 0 {
+        Some(StatusTone::Waiting)
+    } else {
+        None
+    }
+}
+
+fn scan_attention(
+    progress: Option<&ScanProgressView>,
+    daemon_active: bool,
+    daemon_paused: bool,
+) -> Option<StatusTone> {
+    if progress.is_some() {
+        Some(StatusTone::Running)
+    } else if daemon_active && daemon_paused {
+        Some(StatusTone::Waiting)
+    } else {
+        None
+    }
+}
+
+fn import_running_progress(dialog: Option<&ImportDialogState>) -> Option<&ImportProgress> {
+    match dialog.map(|dialog| &dialog.phase) {
+        Some(ImportDialogPhase::Running { progress, .. }) => Some(progress),
+        _ => None,
+    }
+}
+
 fn daemon_sync_label(
     age_secs: Option<i64>,
     supervisor: Option<&str>,
@@ -11700,6 +11916,11 @@ mod tests {
     // `use super::*` would also import GPUI's `test` attribute macro through
     // `gpui_kit::*`, shadowing the built-in `#[test]` and recursing forever.
     use super::{
+        AMBER, BLUE, GREEN, MUTED_2, RED, StatusTone, compression_attention,
+        compression_card_status, import_attention, import_card_status, import_running_progress,
+        running_job_count, scan_attention, scan_card_status,
+    };
+    use super::{
         CountDebounce, DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH,
         ImportDialogOrigin, ImportDialogPhase, ImportDialogState, ImportReportView, IpcScanPhase,
         MAX_PAGES, MIN_CARD_WIDTH, MOTION_BASE, MOTION_FAST, MOTION_MORPH, MOTION_SLOW,
@@ -11736,6 +11957,7 @@ mod tests {
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
     use std::time::{Duration, Instant};
     use vrc_photo_core::error::CoreError;
     use vrc_photo_core::importer::{
@@ -13649,5 +13871,255 @@ mod tests {
             import_summary(&report),
             "100 件中 40 枚を取り込みました（1 枚スキップ、失敗 1 件、連番 1 件）。残り 1 件は未処理です"
         );
+    }
+
+    fn indexing_fixture() -> ScanProgressView {
+        ScanProgressView {
+            phase: IpcScanPhase::Indexing,
+            processed: 12,
+            total: Some(20),
+            indexed: 12,
+            root: 1,
+            roots: 1,
+        }
+    }
+
+    #[test]
+    fn running_job_count_clamps_waiting_above_active() {
+        assert_eq!(running_job_count(6, 2), 4);
+        assert_eq!(running_job_count(2, 6), 0);
+        assert_eq!(running_job_count(0, 0), 0);
+    }
+
+    #[test]
+    fn compression_card_status_prioritizes_waiting_running_and_failed() {
+        let waiting = compression_card_status(6, 5, 2);
+        assert_eq!(waiting.headline, "未実行 5");
+        assert_eq!(waiting.detail, "実行中 1 · 失敗 2");
+        assert_eq!(waiting.tone, StatusTone::Waiting);
+
+        let running = compression_card_status(3, 0, 0);
+        assert_eq!(running.headline, "実行中 3");
+        assert_eq!(running.detail, "未実行 0 · 失敗 0");
+        assert_eq!(running.tone, StatusTone::Running);
+
+        let failed = compression_card_status(0, 0, 2);
+        assert_eq!(failed.headline, "失敗 2");
+        assert_eq!(failed.detail, "未実行 0 · 実行中 0");
+        assert_eq!(failed.tone, StatusTone::Failed);
+
+        let idle = compression_card_status(0, 0, 0);
+        assert_eq!(idle.headline, "キューは空です");
+        assert_eq!(idle.detail, "未実行のジョブはありません");
+        assert_eq!(idle.tone, StatusTone::Idle);
+    }
+
+    #[test]
+    fn import_card_status_covers_running_remaining_failed_partial_and_success() {
+        let mut progress = progress_fixture(42, 100);
+        progress.imported = 40;
+        progress.failed = 1;
+        let running = import_card_status(Some(&progress), None);
+        assert_eq!(running.headline, "取り込み中");
+        assert_eq!(running.detail, "42/100 · 取込 40 · 失敗 1");
+        assert_eq!(running.tone, StatusTone::Running);
+
+        let pending = ImportReportView {
+            total: 100,
+            processed: 40,
+            imported: 40,
+            issues: vec![non_retryable_issue("/bad.png")],
+            remaining: vec![PathBuf::from("/next.png")],
+            ..import_report_fixture()
+        };
+        let pending = import_card_status(None, Some(&pending));
+        assert_eq!(pending.headline, "未処理 1");
+        assert_eq!(pending.detail, "取込 40/100 · 失敗 1");
+        assert_eq!(pending.tone, StatusTone::Waiting);
+
+        let failed = ImportReportView {
+            total: 10,
+            processed: 10,
+            imported: 8,
+            issues: vec![non_retryable_issue("/a.png"), non_retryable_issue("/b.png")],
+            ..import_report_fixture()
+        };
+        let failed = import_card_status(None, Some(&failed));
+        assert_eq!(failed.headline, "失敗 2");
+        assert_eq!(failed.detail, "取込 8/10");
+        assert_eq!(failed.tone, StatusTone::Failed);
+
+        let partial = ImportReportView {
+            total: 10,
+            processed: 10,
+            imported: 9,
+            issues: vec![partial_issue("/c.png")],
+            ..import_report_fixture()
+        };
+        let partial = import_card_status(None, Some(&partial));
+        assert_eq!(partial.headline, "部分移動 1");
+        assert_eq!(partial.detail, "取込 9/10 · 完了");
+        assert_eq!(partial.tone, StatusTone::Waiting);
+
+        let success = ImportReportView {
+            total: 10,
+            processed: 10,
+            imported: 10,
+            renamed: vec![rename_fixture("/a.png", "/dest/a-1.png")],
+            ..import_report_fixture()
+        };
+        let success = import_card_status(None, Some(&success));
+        assert_eq!(success.headline, "完了 10 枚");
+        assert_eq!(success.detail, "前回の取り込み · 連番 1");
+        assert_eq!(success.tone, StatusTone::Success);
+
+        let none = import_card_status(None, None);
+        assert_eq!(none.headline, "履歴なし");
+        assert_eq!(none.detail, "取り込み結果がここに残ります");
+        assert_eq!(none.tone, StatusTone::Idle);
+    }
+
+    #[test]
+    fn scan_card_status_handles_percent_walking_paused_and_stopped() {
+        let indexing = ScanProgressView {
+            phase: IpcScanPhase::Indexing,
+            processed: 50,
+            total: Some(100),
+            indexed: 49,
+            root: 2,
+            roots: 3,
+        };
+        let indexing = scan_card_status(Some(&indexing), true, false);
+        assert_eq!(indexing.headline, "50%");
+        assert_eq!(indexing.detail, "フォルダ 2/3 · 索引 50/100");
+        assert_eq!(indexing.tone, StatusTone::Running);
+
+        let walking = ScanProgressView {
+            phase: IpcScanPhase::Walking,
+            processed: 12,
+            total: None,
+            indexed: 0,
+            root: 1,
+            roots: 2,
+        };
+        let walking = scan_card_status(Some(&walking), true, false);
+        assert_eq!(walking.headline, "走査中…");
+        assert_eq!(walking.detail, "フォルダ 1/2 · 検索 12 件");
+        assert_eq!(walking.tone, StatusTone::Running);
+
+        let unknown_total = ScanProgressView {
+            total: None,
+            ..indexing_fixture()
+        };
+        assert_eq!(
+            scan_card_status(Some(&unknown_total), true, false).headline,
+            "走査中…"
+        );
+
+        let zero_total = ScanProgressView {
+            total: Some(0),
+            ..indexing_fixture()
+        };
+        assert_eq!(
+            scan_card_status(Some(&zero_total), true, false).headline,
+            "走査中…"
+        );
+
+        let paused = scan_card_status(None, true, true);
+        assert_eq!(paused.headline, "一時停止中");
+        assert_eq!(paused.detail, "監視を再開すると走査します");
+        assert_eq!(paused.tone, StatusTone::Waiting);
+
+        let stopped = scan_card_status(None, false, false);
+        assert_eq!(stopped.headline, "停止中");
+        assert_eq!(stopped.detail, "デーモンは接続されていません");
+        assert_eq!(stopped.tone, StatusTone::Idle);
+
+        let idle = scan_card_status(None, true, false);
+        assert_eq!(idle.headline, "待機中");
+        assert_eq!(idle.detail, "変更を監視しています");
+        assert_eq!(idle.tone, StatusTone::Idle);
+    }
+
+    #[test]
+    fn attention_dots_prioritize_failures_over_running_and_waiting() {
+        assert_eq!(compression_attention(6, 5, 2), Some(StatusTone::Failed));
+        assert_eq!(compression_attention(4, 1, 0), Some(StatusTone::Running));
+        assert_eq!(compression_attention(2, 2, 0), Some(StatusTone::Waiting));
+        assert_eq!(compression_attention(0, 0, 0), None);
+
+        let progress = progress_fixture(1, 10);
+        assert_eq!(
+            import_attention(Some(&progress), None),
+            Some(StatusTone::Running)
+        );
+
+        let failed = ImportReportView {
+            total: 2,
+            processed: 2,
+            imported: 1,
+            issues: vec![non_retryable_issue("/a.png")],
+            remaining: vec![PathBuf::from("/b.png")],
+            ..import_report_fixture()
+        };
+        assert_eq!(
+            import_attention(None, Some(&failed)),
+            Some(StatusTone::Failed)
+        );
+
+        let pending = ImportReportView {
+            remaining: vec![PathBuf::from("/b.png")],
+            ..import_report_fixture()
+        };
+        assert_eq!(
+            import_attention(None, Some(&pending)),
+            Some(StatusTone::Waiting)
+        );
+
+        assert_eq!(import_attention(None, None), None);
+
+        let scanning = ScanProgressView {
+            phase: IpcScanPhase::Indexing,
+            processed: 1,
+            total: Some(10),
+            indexed: 1,
+            root: 1,
+            roots: 1,
+        };
+        assert_eq!(
+            scan_attention(Some(&scanning), true, false),
+            Some(StatusTone::Running)
+        );
+        assert_eq!(scan_attention(None, true, true), Some(StatusTone::Waiting));
+        assert_eq!(scan_attention(None, true, false), None);
+        assert_eq!(scan_attention(None, false, false), None);
+    }
+
+    #[test]
+    fn import_running_progress_only_reads_the_running_phase() {
+        assert!(import_running_progress(None).is_none());
+
+        let ready = import_dialog_fixture();
+        assert!(import_running_progress(Some(&ready)).is_none());
+
+        let mut running = import_dialog_fixture();
+        running.phase = ImportDialogPhase::Running {
+            progress: progress_fixture(1, 2),
+            cancel: Arc::new(AtomicBool::new(false)),
+            cancel_requested: false,
+        };
+        assert_eq!(
+            import_running_progress(Some(&running)).map(|progress| progress.processed),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn tone_colors_use_the_sidebar_palette() {
+        assert_eq!(StatusTone::Idle.color(), MUTED_2);
+        assert_eq!(StatusTone::Running.color(), BLUE);
+        assert_eq!(StatusTone::Waiting.color(), AMBER);
+        assert_eq!(StatusTone::Failed.color(), RED);
+        assert_eq!(StatusTone::Success.color(), GREEN);
     }
 }
