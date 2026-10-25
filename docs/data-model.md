@@ -6,6 +6,7 @@
   - Linux: `~/.local/share/vrc-photo-manager/library.db`
   - Windows: `%LOCALAPPDATA%\vrc-photo-manager\library.db`
 - サムネイル: 同ディレクトリの `thumbnails/<photo_id>.webp`
+- プレビュー: 同ディレクトリの `previews/<photo_id>-<variant>.webp`（`variant` は表示derivative ID、元画像は `0`）
 - アプリログ: 同ディレクトリの `logs/`
   - UI: `logs/vrc-photo-manager.log`
   - デーモン: `logs/vrc-photo-daemon.log`
@@ -355,4 +356,5 @@ V4以降は `IMMEDIATE` トランザクションで適用する。UIとデーモ
 
 - DBをバックアップする場合は、WAL/SHMを含めずにSQLiteの `.backup` を使うか、アプリ終了後に `library.db` をコピーする。
 - サムネイルは再生成可能。バックアップ必須ではない。
+- プレビューも再生成可能なキャッシュ。バックアップ必須ではない。
 - 写真ファイルとログはDBに含まれない。
