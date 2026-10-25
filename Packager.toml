@@ -1,6 +1,6 @@
 name = "vrc-photo-manager"
 productName = "VRC Photo Manager"
-version = "0.5.0"
+version = "0.6.0"
 identifier = "com.tommyz.vrc-photo-manager"
 description = "VRChat photo library with log-based world/player context and built-in compression."
 longDescription = "Index VRChat screenshots, link them to the world and players from VRChat output logs and XMP metadata, then search and compress them locally."
