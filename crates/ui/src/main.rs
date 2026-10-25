@@ -1189,6 +1189,8 @@ pub struct App {
     search_request: u64,
     applied_search: Option<PhotoTextFilter>,
     pending_search_anchor: Option<i64>,
+    pending_layout_anchor_library: Option<i64>,
+    pending_layout_anchor_search: Option<i64>,
     search_refresh_pending: bool,
     search_favorite: bool,
     search_days: Option<i64>,
@@ -1343,6 +1345,8 @@ impl App {
             search_request: 0,
             applied_search: None,
             pending_search_anchor: None,
+            pending_layout_anchor_library: None,
+            pending_layout_anchor_search: None,
             search_refresh_pending: false,
             search_favorite: false,
             search_days: Some(7),
@@ -2566,11 +2570,13 @@ impl App {
         };
         self.applied_search = Some(filter.clone());
         self.pending_search_anchor = None;
+        self.pending_layout_anchor_search = None;
         self.search_refresh_pending = false;
         self.start_search(filter, cx);
     }
 
     fn start_search(&mut self, filter: PhotoTextFilter, cx: &mut Context<Self>) {
+        self.pending_layout_anchor_search = None;
         self.search_request = self.search_request.wrapping_add(1);
         let generation = self.search_request;
 
@@ -2626,6 +2632,7 @@ impl App {
         if generation != self.search_request {
             return;
         }
+        self.pending_layout_anchor_search = None;
         match result {
             Ok(entries) => {
                 self.search_view
@@ -2668,6 +2675,7 @@ impl App {
         self.searching = false;
         self.applied_search = None;
         self.pending_search_anchor = None;
+        self.pending_layout_anchor_search = None;
         self.search_refresh_pending = false;
         self.message = None;
         // Invalidate an in-flight request so it cannot revive the cleared view.
@@ -3429,6 +3437,11 @@ impl App {
     ) -> AnyElement {
         let width: f32 = window.viewport_size().width.into();
         let metrics = self.card_metrics();
+        let pending = if search {
+            self.pending_layout_anchor_search.take()
+        } else {
+            self.pending_layout_anchor_library.take()
+        };
         let next_columns = grid_columns_for(
             search,
             width,
@@ -3439,6 +3452,16 @@ impl App {
         let browser = self.browser_mut(search);
         browser.columns = next_columns;
         browser.row_height = metrics.row_height;
+        if let Some(id) = pending {
+            let row = browser
+                .index
+                .row_of_id(id)
+                .map(|position| position / browser.columns.max(1))
+                .unwrap_or(0);
+            browser
+                .scroll
+                .scroll_to_item_strict(row, ScrollStrategy::Top);
+        }
         let labels = if browser.labels.is_none() || browser.labels_generation != browser.generation
         {
             // Shaping is expensive, so do it once per index snapshot instead
@@ -3838,10 +3861,7 @@ impl App {
             &photo.captured_at_local,
             format_bytes(photo.effective_file_size()),
         );
-        let mut body = v_flex()
-            .min_w_0()
-            .gap(px(CARD_BODY_GAP))
-            .child(thumb);
+        let mut body = v_flex().min_w_0().gap(px(CARD_BODY_GAP)).child(thumb);
         if show_world || meta_line.is_some() {
             let mut text = v_flex().min_w_0().gap(px(CARD_TEXT_GAP));
             if show_world {
@@ -6966,6 +6986,40 @@ impl App {
         card_metrics(&self.settings)
     }
 
+    fn set_card_size(&mut self, size: CardSize, cx: &mut Context<Self>) {
+        if self.settings.ui_card_size == size {
+            return;
+        }
+        self.capture_display_layout_anchors();
+        self.settings.ui_card_size = size;
+        if let Err(error) = self.settings.save(&self.db) {
+            tracing::warn!(%error, "cannot save card size");
+        }
+        cx.notify();
+    }
+
+    /// Remembers the top-left photo before a display change alters columns or
+    /// row height. The next render of each grid restores that photo.
+    fn capture_display_layout_anchors(&mut self) {
+        let metrics = self.card_metrics();
+        if self.pending_layout_anchor_library.is_none() {
+            self.pending_layout_anchor_library = anchor_photo_id(
+                &self.library.index,
+                list_scroll_top(&self.library.scroll),
+                self.library.columns,
+                metrics.row_height,
+            );
+        }
+        if self.pending_layout_anchor_search.is_none() {
+            self.pending_layout_anchor_search = anchor_photo_id(
+                &self.search_view.index,
+                list_scroll_top(&self.search_view.scroll),
+                self.search_view.columns,
+                metrics.row_height,
+            );
+        }
+    }
+
     fn set_reduce_motion(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.settings.ui_reduce_motion = enabled;
         if let Err(error) = self.settings.save(&self.db) {
@@ -7130,12 +7184,91 @@ impl App {
                                     .text_size(px(17.))
                                     .font_semibold()
                                     .text_color(rgb(TEXT))
+                                    .child("表示（ライブラリ・検索）"),
+                            )
+                            .child(self.setting_switch(
+                                "圧縮状態",
+                                "写真カード左下の圧縮状態ラベルを表示します",
+                                self.settings.ui_card_show_status,
+                                true,
+                                cx,
+                                |settings, value| settings.ui_card_show_status = value,
+                            ))
+                            .child(self.setting_switch(
+                                "ワールド名",
+                                "カードのワールド名を表示します",
+                                self.settings.ui_card_show_world,
+                                true,
+                                cx,
+                                |settings, value| settings.ui_card_show_world = value,
+                            ))
+                            .child(self.setting_switch(
+                                "日付",
+                                "撮影日を表示します",
+                                self.settings.ui_card_show_date,
+                                true,
+                                cx,
+                                |settings, value| settings.ui_card_show_date = value,
+                            ))
+                            .child(self.setting_switch(
+                                "サイズ",
+                                "ファイルサイズを表示します",
+                                self.settings.ui_card_show_size,
+                                true,
+                                cx,
+                                |settings, value| settings.ui_card_show_size = value,
+                            ))
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap(px(12.))
+                                    .py(px(2.))
+                                    .child(
+                                        v_flex()
+                                            .gap(px(2.))
+                                            .child(
+                                                div()
+                                                    .text_size(px(12.))
+                                                    .text_color(rgb(TEXT))
+                                                    .child("カードの大きさ"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(10.))
+                                                    .text_color(rgb(MUTED_2))
+                                                    .child("ライブラリと検索の両方に適用されます"),
+                                            ),
+                                    )
+                                    .child(div().flex_1())
+                                    .child(
+                                        h_flex()
+                                            .gap(px(6.))
+                                            .child(self.card_size_button(CardSize::Small, cx))
+                                            .child(self.card_size_button(CardSize::Medium, cx))
+                                            .child(self.card_size_button(CardSize::Large, cx))
+                                            .child(self.card_size_button(CardSize::ExtraLarge, cx)),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        glass_panel()
+                            .flex()
+                            .flex_col()
+                            .p(px(24.))
+                            .gap(px(16.))
+                            .bg(rgb(PANEL))
+                            .child(
+                                div()
+                                    .text_size(px(17.))
+                                    .font_semibold()
+                                    .text_color(rgb(TEXT))
                                     .child("起動と圧縮"),
                             )
                             .child(self.setting_switch(
                                 "自動起動",
                                 autostart_hint,
                                 self.settings.autostart,
+                                false,
                                 cx,
                                 |settings, value| settings.autostart = value,
                             ))
@@ -7143,6 +7276,7 @@ impl App {
                                 "トレイ常駐",
                                 "UIを閉じても監視を継続",
                                 self.settings.tray,
+                                false,
                                 cx,
                                 |settings, value| settings.tray = value,
                             ))
@@ -7150,6 +7284,7 @@ impl App {
                                 "自動圧縮",
                                 "新規写真に自動で圧縮を適用",
                                 self.settings.auto_compress,
+                                false,
                                 cx,
                                 |settings, value| settings.auto_compress = value,
                             ))
@@ -7158,6 +7293,7 @@ impl App {
                                     "新規写真をすぐに圧縮",
                                     "OFFにすると未実行キューに追加し、ダッシュボードからまとめて実行できます",
                                     self.settings.auto_compress_immediate,
+                                    false,
                                     cx,
                                     |settings, value| settings.auto_compress_immediate = value,
                                 ))
@@ -7166,6 +7302,7 @@ impl App {
                                 "圧縮後に元画像を保持",
                                 "OFFにすると圧縮成功後、元画像をOSゴミ箱へ移動します",
                                 self.settings.compression_keep_original,
+                                false,
                                 cx,
                                 |settings, value| settings.compression_keep_original = value,
                             ))
@@ -7254,6 +7391,7 @@ impl App {
         label: &str,
         description: &str,
         checked: bool,
+        capture_layout: bool,
         cx: &mut Context<Self>,
         apply: fn(&mut AppSettings, bool),
     ) -> impl IntoElement {
@@ -7283,6 +7421,9 @@ impl App {
                 Switch::new(SharedString::from(format!("setting-{label}")))
                     .checked(checked)
                     .on_click(cx.listener(move |this, value, _, cx| {
+                        if capture_layout {
+                            this.capture_display_layout_anchors();
+                        }
                         apply(&mut this.settings, *value);
                         if let Err(error) = this.settings.save(&this.db) {
                             tracing::warn!(%error, setting = %label, "cannot save setting");
@@ -7290,6 +7431,18 @@ impl App {
                         cx.notify();
                     })),
             )
+    }
+
+    fn card_size_button(&self, size: CardSize, cx: &mut Context<Self>) -> AnyElement {
+        let selected = self.settings.ui_card_size == size;
+        let label = card_size_label(size);
+        Button::new(SharedString::from(format!("card-size-{label}")))
+            .label(label)
+            .small()
+            .selected(selected)
+            .toggled(selected)
+            .on_click(cx.listener(move |this, _, _, cx| this.set_card_size(size, cx)))
+            .into_any_element()
     }
 
     fn stat_card(&self, label: &str, value: String) -> impl IntoElement {
@@ -8336,6 +8489,22 @@ fn card_meta_line(show_date: bool, show_size: bool, date: &str, size: String) ->
     }
 }
 
+fn card_size_options() -> [(CardSize, &'static str); 4] {
+    [
+        (CardSize::Small, "小"),
+        (CardSize::Medium, "中"),
+        (CardSize::Large, "大"),
+        (CardSize::ExtraLarge, "特大"),
+    ]
+}
+
+fn card_size_label(size: CardSize) -> &'static str {
+    card_size_options()
+        .into_iter()
+        .find_map(|(option, label)| (option == size).then_some(label))
+        .unwrap_or("中")
+}
+
 fn scene_color(world: &str) -> u32 {
     let mut hash = 0u32;
     for byte in world.as_bytes() {
@@ -8601,18 +8770,19 @@ mod tests {
         PhotoIndex, PhotoPageCache, ScanProgressView, Screen, THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT,
         ThumbnailCache, YearBucket, add_photo_root_and_save, alert_summaries, anchor_photo_id,
         apply_library_index, apply_profile_format, autostart_description, average_bgra,
-        build_year_buckets, card_metrics, card_meta_line, compression_policy,
-        compression_policy_warning, daemon_liveness, daemon_operation_label, daemon_state_label,
-        daemon_sync_label, decode_thumbnail, demo_thumb_path, ease_motion, first_visible_photo,
-        format_captured_month, format_count, format_timestamp, grid_available_width, grid_columns,
-        grid_columns_for, has_tag_filter, import_issue_counts, ipc_status_label, job_retry_available,
-        job_retry_label, lerp_color, list_scroll_top, lossless_hint, lossless_supported,
-        moved_profile_order, next_focus_index, normalize_note, parse_args, parse_window_size,
-        profile_summary, queue_status_badge, rail_label_hidden_by_pill, rail_row_at,
-        rail_scroll_offset, rail_y, release_confirmation, retryable_sources, scan_progress_label,
-        scan_progress_ratio, search_anchor_after_result, search_available_width,
-        sidebar_reveal_width, sidebar_width, stagger_value, step_index, sync_search_mirror,
-        viewer_details_width, viewer_image_box, visible_year_buckets, with_tag, without_tag,
+        build_year_buckets, card_meta_line, card_metrics, card_size_label, card_size_options,
+        compression_policy, compression_policy_warning, daemon_liveness, daemon_operation_label,
+        daemon_state_label, daemon_sync_label, decode_thumbnail, demo_thumb_path, ease_motion,
+        first_visible_photo, format_captured_month, format_count, format_timestamp,
+        grid_available_width, grid_columns, grid_columns_for, has_tag_filter, import_issue_counts,
+        ipc_status_label, job_retry_available, job_retry_label, lerp_color, list_scroll_top,
+        lossless_hint, lossless_supported, moved_profile_order, next_focus_index, normalize_note,
+        parse_args, parse_window_size, profile_summary, queue_status_badge,
+        rail_label_hidden_by_pill, rail_row_at, rail_scroll_offset, rail_y, release_confirmation,
+        retryable_sources, scan_progress_label, scan_progress_ratio, search_anchor_after_result,
+        search_available_width, sidebar_reveal_width, sidebar_width, stagger_value, step_index,
+        sync_search_mirror, viewer_details_width, viewer_image_box, visible_year_buckets, with_tag,
+        without_tag,
     };
     use gpui_kit::{RenderImage, ScrollStrategy, UniformListScrollHandle, point, px};
     use smallvec::SmallVec;
@@ -9355,6 +9525,21 @@ mod tests {
     }
 
     #[test]
+    fn card_size_options_cover_every_preset_in_order() {
+        let options = card_size_options();
+        assert_eq!(
+            options.map(|(size, _)| size),
+            [
+                CardSize::Small,
+                CardSize::Medium,
+                CardSize::Large,
+                CardSize::ExtraLarge,
+            ]
+        );
+        assert_eq!(card_size_label(CardSize::ExtraLarge), "特大");
+    }
+
+    #[test]
     fn removing_a_photo_clears_pages_and_rebuilds_year_counts() {
         let entries = vec![
             index_entry(1, 202601),
@@ -9616,14 +9801,8 @@ mod tests {
         // `ScrollHandle::max_offset()` is a non-negative scrollable extent.
         assert_eq!(rail_scroll_offset(0, 3, PHOTO_ROW_HEIGHT, 10_000.0), 0.0);
         assert_eq!(rail_scroll_offset(2, 3, PHOTO_ROW_HEIGHT, 10_000.0), 0.0);
-        assert_eq!(
-            rail_scroll_offset(3, 3, PHOTO_ROW_HEIGHT, 10_000.0),
-            -196.0
-        );
-        assert_eq!(
-            rail_scroll_offset(5, 3, PHOTO_ROW_HEIGHT, 10_000.0),
-            -196.0
-        );
+        assert_eq!(rail_scroll_offset(3, 3, PHOTO_ROW_HEIGHT, 10_000.0), -196.0);
+        assert_eq!(rail_scroll_offset(5, 3, PHOTO_ROW_HEIGHT, 10_000.0), -196.0);
         // The target (-2156) is clamped to the 1000 px extent.
         assert_eq!(
             rail_scroll_offset(11, 1, PHOTO_ROW_HEIGHT, 1_000.0),
