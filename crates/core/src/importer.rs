@@ -139,6 +139,95 @@ where
     Ok(result)
 }
 
+/// Source files and unreadable directories found under a folder.
+#[derive(Debug, Clone, Default)]
+pub struct FolderScan {
+    pub files: Vec<PathBuf>,
+    /// Unreadable directories, expressed as non-retryable import failures.
+    pub issues: Vec<ImportIssue>,
+}
+
+/// Collects supported photos under `folder` recursively.
+///
+/// The walk skips symlinks, a directory named `compressed` (the scanner's
+/// derivative folder), and the `exclude` subtree (normally the import
+/// destination). Files are sorted by path so collision suffixes and progress
+/// are deterministic.
+pub fn collect_folder_sources(folder: &Path, exclude: Option<&Path>) -> Result<FolderScan> {
+    if !folder.is_dir() {
+        return Err(CoreError::Invalid(format!(
+            "not a directory: {}",
+            folder.display()
+        )));
+    }
+    let root = fs::canonicalize(folder)?;
+    let exclude = exclude.and_then(|path| fs::canonicalize(path).ok());
+    let mut scan = FolderScan::default();
+    walk_folder(&root, exclude.as_deref(), &mut scan);
+    scan.files.sort();
+    Ok(scan)
+}
+
+fn walk_folder(dir: &Path, exclude: Option<&Path>, scan: &mut FolderScan) {
+    if exclude == Some(dir) {
+        return;
+    }
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(path = %dir.display(), %error, "cannot read import folder");
+            scan.issues.push(failed_issue(
+                dir,
+                None,
+                format!("フォルダを読み取れませんでした: {error}"),
+                false,
+            ));
+            return;
+        }
+    };
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(path = %dir.display(), %error, "cannot read import folder entry");
+                scan.issues.push(failed_issue(
+                    dir,
+                    None,
+                    format!("フォルダを読み取れませんでした: {error}"),
+                    false,
+                ));
+                continue;
+            }
+        };
+        let path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "cannot read import file type");
+                scan.issues.push(failed_issue(
+                    &path,
+                    None,
+                    format!("フォルダを読み取れませんでした: {error}"),
+                    false,
+                ));
+                continue;
+            }
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
+            if entry.file_name() == "compressed" {
+                continue;
+            }
+            walk_folder(&path, exclude, scan);
+        } else if file_type.is_file() && is_source_photo(&path) {
+            scan.files.push(path);
+        }
+    }
+}
+
 fn import_one(source: &Path, dest: &Path, mode: ImportMode, result: &mut ImportResult) {
     if !source.is_file() {
         result.issues.push(failed_issue(
@@ -629,5 +718,70 @@ mod tests {
             "VRChat_2026-10-21_21-14-03.221_4x3-1.png"
         );
         assert_eq!(result.renamed[0].target, result.imported[1]);
+    }
+
+    #[test]
+    fn folder_scan_is_recursive_and_filters_compressed_symlinks_and_destination() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("photos");
+        fs::create_dir_all(root.join("nested")).unwrap();
+        fs::create_dir_all(root.join("compressed")).unwrap();
+        fs::create_dir_all(root.join("imported")).unwrap();
+        let top = root.join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        let nested = root.join("nested/VRChat_2026-10-21_21-14-04.221_4x3.png");
+        let compressed = root.join("compressed/VRChat_2026-10-21_21-14-05.221_4x3.png");
+        let excluded = root.join("imported/VRChat_2026-10-21_21-14-06.221_4x3.png");
+        write_png(&top);
+        write_png(&nested);
+        write_png(&compressed);
+        write_png(&excluded);
+        fs::write(root.join("nested/note.txt"), "not a photo").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("nested"), root.join("link")).unwrap();
+
+        let scan = collect_folder_sources(&root, Some(&root.join("imported"))).unwrap();
+
+        assert_eq!(scan.files, vec![top, nested]);
+        assert!(scan.issues.is_empty());
+    }
+
+    #[test]
+    fn folder_scan_rejects_a_file_path() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        write_png(&file);
+
+        assert!(collect_folder_sources(&file, None).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn folder_scan_reports_unreadable_directories() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("photos");
+        let locked = root.join("locked");
+        fs::create_dir_all(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let probe = fs::read_dir(&locked);
+        let scan = collect_folder_sources(&root, None).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+
+        if probe.is_ok() {
+            eprintln!(
+                "skipping unreadable-directory assertions: running with elevated permissions"
+            );
+            return;
+        }
+        assert_eq!(scan.issues.len(), 1);
+        assert_eq!(scan.issues[0].source, locked);
+        assert!(!scan.issues[0].retryable);
+        assert_eq!(scan.issues[0].kind, ImportIssueKind::Failed);
+        assert!(
+            scan.issues[0].message.contains("フォルダを読み取れませんでした"),
+            "unexpected message: {}",
+            scan.issues[0].message
+        );
     }
 }
