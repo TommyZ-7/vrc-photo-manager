@@ -1327,6 +1327,8 @@ pub struct App {
     sidebar_motion_epoch: u64,
     nav_previous: Screen,
     nav_epoch: u64,
+    screen_epoch: u64,
+    screen_direction: f32,
     inspector_collapsed: bool,
     inspector_epoch: u64,
     hovered_nav: Option<Screen>,
@@ -1512,6 +1514,8 @@ impl App {
             sidebar_motion_epoch: 0,
             nav_previous: Screen::Photos,
             nav_epoch: 0,
+            screen_epoch: 0,
+            screen_direction: 1.0,
             inspector_collapsed: initial_settings.ui_inspector_collapsed,
             inspector_epoch: 0,
             hovered_nav: None,
@@ -2221,6 +2225,8 @@ impl App {
         if self.screen != screen {
             self.nav_previous = self.screen;
             self.nav_epoch = self.nav_epoch.wrapping_add(1);
+            self.screen_direction = screen_direction(self.screen, screen);
+            self.screen_epoch = self.screen_epoch.wrapping_add(1);
         }
         // The two photo grids have separate snapshots, so a selection made in
         // one tab cannot stay meaningful in the other. Keep it when visiting
@@ -3905,6 +3911,23 @@ impl App {
             Screen::Dashboard => self.dashboard_screen(cx).into_any_element(),
             Screen::Settings => self.settings_screen(cx).into_any_element(),
         };
+        let enter = Animation::new(if self.screen_epoch == 0 {
+            Duration::ZERO
+        } else {
+            MOTION_BASE
+        })
+        .with_easing(ease_motion)
+        .with_max_fps(MOTION_FPS);
+        let direction = self.screen_direction;
+        let screen = v_flex().flex_1().min_h_0().child(screen).with_animation(
+            ("screen-enter", self.screen_epoch),
+            enter,
+            move |el, t| {
+                el.relative()
+                    .left(px(direction * SCREEN_SLIDE * (1.0 - t)))
+                    .opacity(t)
+            },
+        );
         v_flex()
             .flex_1()
             .min_h_0()
