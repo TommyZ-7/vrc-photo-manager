@@ -27,7 +27,7 @@ use vrc_photo_core::model::{
 };
 use vrc_photo_core::scanner;
 use vrc_photo_core::scanner::ScanFailure;
-use vrc_photo_core::settings::AppSettings;
+use vrc_photo_core::settings::{AppSettings, CardSize};
 use vrc_photo_core::thumbnail;
 use vrc_photo_core::time;
 use vrc_photo_ipc::{
@@ -73,6 +73,11 @@ const THUMB_IN_FLIGHT: usize = 4;
 const PAGE_SIZE: usize = 256;
 const MAX_PAGES: usize = 24;
 const PHOTO_ROW_HEIGHT: f32 = 196.0;
+const CARD_BODY_GAP: f32 = 8.0;
+const CARD_TEXT_GAP: f32 = 3.0;
+const CARD_WORLD_LINE_HEIGHT: f32 = 18.0;
+const CARD_META_LINE_HEIGHT: f32 = 15.0;
+const CARD_ROW_SLACK: f32 = 24.0;
 const RAIL_WIDTH: f32 = 88.0;
 const RAIL_TOP_PAD: f32 = 24.0;
 const RAIL_TRACK_INSET: f32 = 12.0;
@@ -403,9 +408,9 @@ fn list_scroll_top(handle: &UniformListScrollHandle) -> f32 {
 ///
 /// `max_offset` is the non-negative extent reported by
 /// `ScrollHandle::max_offset()`; the actual offset is zero or negative.
-fn rail_scroll_offset(photo_row: usize, columns: usize, max_offset: f32) -> f32 {
+fn rail_scroll_offset(photo_row: usize, columns: usize, row_height: f32, max_offset: f32) -> f32 {
     let grid_row = photo_row / columns.max(1);
-    (-(grid_row as f32 * PHOTO_ROW_HEIGHT)).clamp(-max_offset.max(0.0), 0.0)
+    (-(grid_row as f32 * row_height)).clamp(-max_offset.max(0.0), 0.0)
 }
 
 /// Ordered snapshot of the library: only IDs and capture timestamps, so the
@@ -438,12 +443,12 @@ impl PhotoIndex {
 /// `scroll_top` is the non-negative scroll distance from the top of the list.
 /// The row is floored before multiplying by the column count: halfway into
 /// row 2 the top row is still row 2, not the first card of row 3.
-fn first_visible_photo(scroll_top: f32, columns: usize, total: usize) -> usize {
+fn first_visible_photo(scroll_top: f32, columns: usize, row_height: f32, total: usize) -> usize {
     if total == 0 {
         return 0;
     }
     let columns = columns.max(1);
-    let row = (scroll_top.max(0.0) / PHOTO_ROW_HEIGHT).floor() as usize;
+    let row = (scroll_top.max(0.0) / row_height).floor() as usize;
     row.saturating_mul(columns).min(total - 1)
 }
 
@@ -451,12 +456,17 @@ fn first_visible_photo(scroll_top: f32, columns: usize, total: usize) -> usize {
 ///
 /// `offset_y` is the non-negative scroll distance from the top of the list;
 /// callers convert the scroll handle's negative offset before calling.
-fn anchor_photo_id(index: &PhotoIndex, offset_y: f32, columns: usize) -> Option<i64> {
+fn anchor_photo_id(
+    index: &PhotoIndex,
+    offset_y: f32,
+    columns: usize,
+    row_height: f32,
+) -> Option<i64> {
     let total = index.total;
     if total == 0 {
         return None;
     }
-    let first_photo = first_visible_photo(offset_y, columns, total);
+    let first_photo = first_visible_photo(offset_y, columns, row_height, total);
     index.entries.get(first_photo).map(|entry| entry.id)
 }
 
@@ -556,6 +566,9 @@ struct PhotoBrowser {
     pages: PhotoPageCache,
     scroll: UniformListScrollHandle,
     columns: usize,
+    /// Row height of the current card layout, used when clamping after a
+    /// removal. `photo_grid` refreshes it from the display settings.
+    row_height: f32,
     generation: u64,
     labels_generation: u64,
     labels: Option<Arc<YearRailLabels>>,
@@ -571,6 +584,7 @@ impl PhotoBrowser {
             pages: PhotoPageCache::new(),
             scroll: UniformListScrollHandle::new(),
             columns: 1,
+            row_height: PHOTO_ROW_HEIGHT,
             generation: 0,
             labels_generation: 0,
             labels: None,
@@ -605,7 +619,7 @@ impl PhotoBrowser {
             self.scroll.scroll_to_item_strict(0, ScrollStrategy::Top);
             return;
         }
-        let current_row = (list_scroll_top(&self.scroll) / PHOTO_ROW_HEIGHT).floor() as usize;
+        let current_row = (list_scroll_top(&self.scroll) / self.row_height).floor() as usize;
         if current_row >= rows {
             self.scroll
                 .scroll_to_item_strict(rows - 1, ScrollStrategy::Nearest);
@@ -787,6 +801,7 @@ struct YearRail {
     index: Arc<PhotoIndex>,
     scroll: UniformListScrollHandle,
     columns: usize,
+    row_height: f32,
     drag_active: Rc<Cell<bool>>,
 }
 
@@ -797,6 +812,7 @@ impl YearRail {
         index: Arc<PhotoIndex>,
         scroll: UniformListScrollHandle,
         columns: usize,
+        row_height: f32,
         drag_active: Rc<Cell<bool>>,
     ) -> Self {
         Self {
@@ -805,6 +821,7 @@ impl YearRail {
             index,
             scroll,
             columns,
+            row_height,
             drag_active,
         }
     }
@@ -832,7 +849,7 @@ impl YearRail {
             .unwrap_or_else(|| rail_row_at(local_y, total, height))
             .min(total - 1);
         let max_offset = f32::from(self.scroll.0.borrow().base_handle.max_offset().y);
-        let offset = rail_scroll_offset(photo_row, self.columns, max_offset);
+        let offset = rail_scroll_offset(photo_row, self.columns, self.row_height, max_offset);
         self.scroll
             .0
             .borrow_mut()
@@ -925,7 +942,7 @@ impl Element for YearRail {
 
         let scroll_top = list_scroll_top(&self.scroll);
         let columns = self.columns.max(1);
-        let first_visible = first_visible_photo(scroll_top, columns, total);
+        let first_visible = first_visible_photo(scroll_top, columns, self.row_height, total);
         let month = self
             .index
             .entries
@@ -1887,6 +1904,7 @@ impl App {
                 &self.library.index,
                 list_scroll_top(&self.library.scroll),
                 self.library.columns,
+                self.card_metrics().row_height,
             )
         });
         let anchor = anchor.flatten();
@@ -2682,6 +2700,7 @@ impl App {
             &self.search_view.index,
             list_scroll_top(&self.search_view.scroll),
             self.search_view.columns,
+            self.card_metrics().row_height,
         );
         self.start_search_refresh(anchor, cx);
     }
@@ -3409,14 +3428,17 @@ impl App {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let width: f32 = window.viewport_size().width.into();
+        let metrics = self.card_metrics();
         let next_columns = grid_columns_for(
             search,
             width,
             self.sidebar_collapsed,
             self.inspector_collapsed,
+            metrics.min_card_width,
         );
         let browser = self.browser_mut(search);
         browser.columns = next_columns;
+        browser.row_height = metrics.row_height;
         let labels = if browser.labels.is_none() || browser.labels_generation != browser.generation
         {
             // Shaping is expensive, so do it once per index snapshot instead
@@ -3521,7 +3543,7 @@ impl App {
                 let mut rendered = Vec::with_capacity(range.len());
                 for row in range {
                     let mut line = h_flex()
-                        .h(px(PHOTO_ROW_HEIGHT))
+                        .h(px(metrics.row_height))
                         .w_full()
                         .min_w_0()
                         .items_start()
@@ -3537,7 +3559,7 @@ impl App {
                                 line = line.child(this.photo_card(photo.as_ref(), photo_index, cx));
                             }
                             None => {
-                                line = line.child(grid_placeholder());
+                                line = line.child(grid_placeholder(metrics.image_height));
                             }
                         }
                     }
@@ -3590,6 +3612,7 @@ impl App {
                         index,
                         scroll,
                         columns,
+                        metrics.row_height,
                         rail_drag,
                     )),
             );
@@ -6919,6 +6942,10 @@ impl App {
         cx.notify();
     }
 
+    fn card_metrics(&self) -> CardMetrics {
+        card_metrics(&self.settings)
+    }
+
     fn set_reduce_motion(&mut self, enabled: bool, cx: &mut Context<Self>) {
         self.settings.ui_reduce_motion = enabled;
         if let Err(error) = self.settings.save(&self.db) {
@@ -8193,8 +8220,50 @@ fn viewer_image_box(
     (width, width / ratio)
 }
 
-fn grid_columns(available_width: f32) -> usize {
-    (((available_width + GRID_GAP) / (MIN_CARD_WIDTH + GRID_GAP)).floor() as usize).max(1)
+/// Presentation metrics for one photo card and the uniform grid row it sits in.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CardMetrics {
+    image_height: f32,
+    row_height: f32,
+    min_card_width: f32,
+}
+
+/// Derives the card layout from the display settings.
+///
+/// The text line heights are the values already implicit in the fixed 196 px
+/// medium row: 128 image + 8 body gap + 18 world + 3 text gap + 15 meta + 24
+/// slack. Hiding a text group removes its height so the grid tightens instead
+/// of leaving a blank strip.
+fn card_metrics(settings: &AppSettings) -> CardMetrics {
+    let (image_height, min_card_width) = match settings.ui_card_size {
+        CardSize::Small => (96.0, 140.0),
+        CardSize::Medium => (128.0, MIN_CARD_WIDTH),
+        CardSize::Large => (168.0, 220.0),
+        CardSize::ExtraLarge => (208.0, 280.0),
+    };
+    let meta_line = settings.ui_card_show_date || settings.ui_card_show_size;
+    let mut row_height = image_height + CARD_ROW_SLACK;
+    if settings.ui_card_show_world || meta_line {
+        row_height += CARD_BODY_GAP;
+    }
+    if settings.ui_card_show_world {
+        row_height += CARD_WORLD_LINE_HEIGHT;
+    }
+    if meta_line {
+        if settings.ui_card_show_world {
+            row_height += CARD_TEXT_GAP;
+        }
+        row_height += CARD_META_LINE_HEIGHT;
+    }
+    CardMetrics {
+        image_height,
+        row_height,
+        min_card_width,
+    }
+}
+
+fn grid_columns(available_width: f32, min_card_width: f32) -> usize {
+    (((available_width + GRID_GAP) / (min_card_width + GRID_GAP)).floor() as usize).max(1)
 }
 
 /// Column count for a grid screen. Search uses its own available width because
@@ -8205,22 +8274,23 @@ fn grid_columns_for(
     window_width: f32,
     sidebar_collapsed: bool,
     inspector_collapsed: bool,
+    min_card_width: f32,
 ) -> usize {
     let available = if search {
         search_available_width(window_width, sidebar_collapsed)
     } else {
         grid_available_width(window_width, sidebar_collapsed, inspector_collapsed)
     };
-    grid_columns(available)
+    grid_columns(available, min_card_width)
 }
 
 /// Stands in for a photo whose page has not loaded yet. Matches the card's
-/// 128 px image area so the fixed 196 px row height never changes.
-fn grid_placeholder() -> AnyElement {
+/// current image height so the uniform row never changes height.
+fn grid_placeholder(image_height: f32) -> AnyElement {
     div()
         .flex_1()
         .min_w_0()
-        .h(px(128.))
+        .h(px(image_height))
         .rounded(px(14.))
         .bg(rgb(PANEL_2))
         .border_2()
@@ -8498,22 +8568,22 @@ mod tests {
     // `gpui_kit::*`, shadowing the built-in `#[test]` and recursing forever.
     use super::{
         CountDebounce, DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH,
-        IpcScanPhase, MAX_PAGES, PAGE_SIZE, PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex,
-        PhotoPageCache, ScanProgressView, Screen, THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT,
+        IpcScanPhase, MAX_PAGES, MIN_CARD_WIDTH, PAGE_SIZE, PHOTO_ROW_HEIGHT, PhotoBrowser,
+        PhotoIndex, PhotoPageCache, ScanProgressView, Screen, THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT,
         ThumbnailCache, YearBucket, add_photo_root_and_save, alert_summaries, anchor_photo_id,
         apply_library_index, apply_profile_format, autostart_description, average_bgra,
-        build_year_buckets, compression_policy, compression_policy_warning, daemon_liveness,
-        daemon_operation_label, daemon_state_label, daemon_sync_label, decode_thumbnail,
-        demo_thumb_path, ease_motion, first_visible_photo, format_captured_month, format_count,
-        format_timestamp, grid_available_width, grid_columns, grid_columns_for, has_tag_filter,
-        import_issue_counts, ipc_status_label, job_retry_available, job_retry_label, lerp_color,
-        list_scroll_top, lossless_hint, lossless_supported, moved_profile_order, next_focus_index,
-        normalize_note, parse_args, parse_window_size, profile_summary, queue_status_badge,
-        rail_label_hidden_by_pill, rail_row_at, rail_scroll_offset, rail_y, release_confirmation,
-        retryable_sources, scan_progress_label, scan_progress_ratio, search_anchor_after_result,
-        search_available_width, sidebar_reveal_width, sidebar_width, stagger_value, step_index,
-        sync_search_mirror, viewer_details_width, viewer_image_box, visible_year_buckets, with_tag,
-        without_tag,
+        build_year_buckets, card_metrics, compression_policy, compression_policy_warning,
+        daemon_liveness, daemon_operation_label, daemon_state_label, daemon_sync_label,
+        decode_thumbnail, demo_thumb_path, ease_motion, first_visible_photo, format_captured_month,
+        format_count, format_timestamp, grid_available_width, grid_columns, grid_columns_for,
+        has_tag_filter, import_issue_counts, ipc_status_label, job_retry_available, job_retry_label,
+        lerp_color, list_scroll_top, lossless_hint, lossless_supported, moved_profile_order,
+        next_focus_index, normalize_note, parse_args, parse_window_size, profile_summary,
+        queue_status_badge, rail_label_hidden_by_pill, rail_row_at, rail_scroll_offset, rail_y,
+        release_confirmation, retryable_sources, scan_progress_label, scan_progress_ratio,
+        search_anchor_after_result, search_available_width, sidebar_reveal_width, sidebar_width,
+        stagger_value, step_index, sync_search_mirror, viewer_details_width, viewer_image_box,
+        visible_year_buckets, with_tag, without_tag,
     };
     use gpui_kit::{RenderImage, ScrollStrategy, UniformListScrollHandle, point, px};
     use smallvec::SmallVec;
@@ -8527,7 +8597,7 @@ mod tests {
         CompressionFormat, CompressionJob, CompressionProfile, DaemonOperation, Photo,
         PhotoIndexEntry, PhotoStatus, PhotoTextFilter, QueueStatus,
     };
-    use vrc_photo_core::settings::AppSettings;
+    use vrc_photo_core::settings::{AppSettings, CardSize};
 
     #[test]
     fn sidebar_widths_match_the_rail() {
@@ -8548,15 +8618,39 @@ mod tests {
 
     #[test]
     fn grid_columns_adapt_to_window_rail_and_inspector() {
-        assert_eq!(grid_columns(grid_available_width(1280.0, false, false)), 3);
-        assert_eq!(grid_columns(grid_available_width(1440.0, false, false)), 4);
-        assert_eq!(grid_columns(grid_available_width(1280.0, true, false)), 4);
-        assert_eq!(grid_columns(grid_available_width(1440.0, true, false)), 5);
-        assert_eq!(grid_columns(grid_available_width(1280.0, false, true)), 5);
-        assert_eq!(grid_columns(grid_available_width(1440.0, false, true)), 6);
-        assert_eq!(grid_columns(grid_available_width(1080.0, false, false)), 2);
-        assert_eq!(grid_columns(grid_available_width(1080.0, false, true)), 4);
-        assert_eq!(grid_columns(0.0), 1);
+        assert_eq!(
+            grid_columns(grid_available_width(1280.0, false, false), MIN_CARD_WIDTH),
+            3
+        );
+        assert_eq!(
+            grid_columns(grid_available_width(1440.0, false, false), MIN_CARD_WIDTH),
+            4
+        );
+        assert_eq!(
+            grid_columns(grid_available_width(1280.0, true, false), MIN_CARD_WIDTH),
+            4
+        );
+        assert_eq!(
+            grid_columns(grid_available_width(1440.0, true, false), MIN_CARD_WIDTH),
+            5
+        );
+        assert_eq!(
+            grid_columns(grid_available_width(1280.0, false, true), MIN_CARD_WIDTH),
+            5
+        );
+        assert_eq!(
+            grid_columns(grid_available_width(1440.0, false, true), MIN_CARD_WIDTH),
+            6
+        );
+        assert_eq!(
+            grid_columns(grid_available_width(1080.0, false, false), MIN_CARD_WIDTH),
+            2
+        );
+        assert_eq!(
+            grid_columns(grid_available_width(1080.0, false, true), MIN_CARD_WIDTH),
+            4
+        );
+        assert_eq!(grid_columns(0.0, MIN_CARD_WIDTH), 1);
     }
 
     #[test]
@@ -9070,30 +9164,45 @@ mod tests {
             index_entry(3, 202411),
         ];
         let index = PhotoIndex::new(entries);
-        assert_eq!(anchor_photo_id(&index, 0.0, 3), Some(1));
-        assert_eq!(anchor_photo_id(&index, PHOTO_ROW_HEIGHT + 1.0, 1), Some(2));
+        assert_eq!(anchor_photo_id(&index, 0.0, 3, PHOTO_ROW_HEIGHT), Some(1));
         assert_eq!(
-            anchor_photo_id(&index, PHOTO_ROW_HEIGHT * 2.0 + 1.0, 1),
+            anchor_photo_id(&index, PHOTO_ROW_HEIGHT + 1.0, 1, PHOTO_ROW_HEIGHT),
+            Some(2)
+        );
+        assert_eq!(
+            anchor_photo_id(&index, PHOTO_ROW_HEIGHT * 2.0 + 1.0, 1, PHOTO_ROW_HEIGHT),
             Some(3)
         );
     }
 
     #[test]
     fn anchor_photo_id_handles_empty_and_overscrolled_indexes() {
-        assert_eq!(anchor_photo_id(&PhotoIndex::new(Vec::new()), 0.0, 3), None);
+        assert_eq!(
+            anchor_photo_id(&PhotoIndex::new(Vec::new()), 0.0, 3, PHOTO_ROW_HEIGHT),
+            None
+        );
         let index = PhotoIndex::new(vec![index_entry(1, 202601), index_entry(2, 202512)]);
-        assert_eq!(anchor_photo_id(&index, PHOTO_ROW_HEIGHT * 50.0, 4), Some(2));
+        assert_eq!(
+            anchor_photo_id(&index, PHOTO_ROW_HEIGHT * 50.0, 4, PHOTO_ROW_HEIGHT),
+            Some(2)
+        );
     }
 
     #[test]
     fn first_visible_photo_floors_the_row_before_applying_columns() {
         // Halfway into row 2 with 3 columns: the top row starts at entry 6.
         // Truncating after multiplying (`2.5 * 3 = 7.5`) would pick entry 7.
-        assert_eq!(first_visible_photo(PHOTO_ROW_HEIGHT * 2.5, 3, 100), 6);
-        assert_eq!(first_visible_photo(0.0, 3, 100), 0);
-        assert_eq!(first_visible_photo(-20.0, 3, 100), 0);
-        assert_eq!(first_visible_photo(PHOTO_ROW_HEIGHT * 50.0, 3, 10), 9);
-        assert_eq!(first_visible_photo(0.0, 3, 0), 0);
+        assert_eq!(
+            first_visible_photo(PHOTO_ROW_HEIGHT * 2.5, 3, PHOTO_ROW_HEIGHT, 100),
+            6
+        );
+        assert_eq!(first_visible_photo(0.0, 3, PHOTO_ROW_HEIGHT, 100), 0);
+        assert_eq!(first_visible_photo(-20.0, 3, PHOTO_ROW_HEIGHT, 100), 0);
+        assert_eq!(
+            first_visible_photo(PHOTO_ROW_HEIGHT * 50.0, 3, PHOTO_ROW_HEIGHT, 10),
+            9
+        );
+        assert_eq!(first_visible_photo(0.0, 3, PHOTO_ROW_HEIGHT, 0), 0);
     }
 
     #[test]
@@ -9107,7 +9216,7 @@ mod tests {
         ]);
         assert_eq!(updated.row_of_id(11), Some(2));
         assert_eq!(
-            anchor_photo_id(&updated, PHOTO_ROW_HEIGHT * 2.0 + 1.0, 1),
+            anchor_photo_id(&updated, PHOTO_ROW_HEIGHT * 2.0 + 1.0, 1, PHOTO_ROW_HEIGHT),
             Some(11)
         );
     }
@@ -9115,6 +9224,86 @@ mod tests {
     #[test]
     fn grid_row_height_matches_the_card_height() {
         assert_eq!(PHOTO_ROW_HEIGHT, 196.0);
+    }
+
+    #[test]
+    fn default_card_metrics_match_the_current_grid() {
+        let metrics = card_metrics(&AppSettings::default());
+        assert_eq!(metrics.image_height, 128.0);
+        assert_eq!(metrics.row_height, PHOTO_ROW_HEIGHT);
+        assert_eq!(metrics.min_card_width, MIN_CARD_WIDTH);
+    }
+
+    #[test]
+    fn hidden_card_text_shrinks_the_row_but_keeps_the_image() {
+        let settings = AppSettings {
+            ui_card_show_world: false,
+            ui_card_show_date: false,
+            ui_card_show_size: false,
+            ..Default::default()
+        };
+        let metrics = card_metrics(&settings);
+        assert_eq!(metrics.image_height, 128.0);
+        assert_eq!(metrics.row_height, 152.0);
+    }
+
+    #[test]
+    fn card_metrics_count_only_visible_text_lines() {
+        let world_only = AppSettings {
+            ui_card_show_date: false,
+            ui_card_show_size: false,
+            ..Default::default()
+        };
+        assert_eq!(card_metrics(&world_only).row_height, 178.0);
+
+        let meta_only = AppSettings {
+            ui_card_show_world: false,
+            ..Default::default()
+        };
+        assert_eq!(card_metrics(&meta_only).row_height, 175.0);
+
+        let status_hidden = AppSettings {
+            ui_card_show_status: false,
+            ..Default::default()
+        };
+        assert_eq!(card_metrics(&status_hidden).row_height, PHOTO_ROW_HEIGHT);
+    }
+
+    #[test]
+    fn card_size_presets_scale_the_grid() {
+        let expected = [
+            (CardSize::Small, 96.0, 140.0),
+            (CardSize::Medium, 128.0, 170.0),
+            (CardSize::Large, 168.0, 220.0),
+            (CardSize::ExtraLarge, 208.0, 280.0),
+        ];
+        for (size, image, min_width) in expected {
+            let metrics = card_metrics(&AppSettings {
+                ui_card_size: size,
+                ..Default::default()
+            });
+            assert_eq!(metrics.image_height, image);
+            assert_eq!(metrics.min_card_width, min_width);
+            assert_eq!(metrics.row_height, image + 68.0);
+        }
+    }
+
+    #[test]
+    fn grid_columns_respect_the_card_size() {
+        assert!(grid_columns(1280.0, 140.0) >= grid_columns(1280.0, 280.0));
+        assert_eq!(grid_columns(300.0, 280.0), 1);
+        assert_eq!(grid_columns_for(true, 1280.0, false, false, 170.0), 3);
+    }
+
+    #[test]
+    fn anchor_and_rail_helpers_accept_a_custom_row_height() {
+        let index = PhotoIndex::new(vec![
+            index_entry(1, 202601),
+            index_entry(2, 202601),
+            index_entry(3, 202601),
+        ]);
+        assert_eq!(anchor_photo_id(&index, 153.0, 2, 152.0), Some(3));
+        assert_eq!(rail_scroll_offset(3, 3, 152.0, 10_000.0), -152.0);
     }
 
     #[test]
@@ -9161,20 +9350,44 @@ mod tests {
 
     #[test]
     fn search_available_width_drops_to_the_filter_panel_width() {
-        assert_eq!(grid_columns(search_available_width(1280.0, false)), 3);
-        assert_eq!(grid_columns(search_available_width(1440.0, false)), 4);
-        assert_eq!(grid_columns(search_available_width(1080.0, false)), 2);
-        assert_eq!(grid_columns(search_available_width(1280.0, true)), 4);
+        assert_eq!(
+            grid_columns(search_available_width(1280.0, false), MIN_CARD_WIDTH),
+            3
+        );
+        assert_eq!(
+            grid_columns(search_available_width(1440.0, false), MIN_CARD_WIDTH),
+            4
+        );
+        assert_eq!(
+            grid_columns(search_available_width(1080.0, false), MIN_CARD_WIDTH),
+            2
+        );
+        assert_eq!(
+            grid_columns(search_available_width(1280.0, true), MIN_CARD_WIDTH),
+            4
+        );
     }
 
     #[test]
     fn search_grid_columns_ignore_the_inspector_state() {
         // The Search screen has no inspector column, so the default expanded
         // inspector must not shrink its grid.
-        assert_eq!(grid_columns_for(true, 1280.0, false, false), 3);
-        assert_eq!(grid_columns_for(true, 1440.0, false, false), 4);
-        assert_eq!(grid_columns_for(true, 1080.0, false, false), 2);
-        assert_eq!(grid_columns_for(false, 1280.0, false, false), 3);
+        assert_eq!(
+            grid_columns_for(true, 1280.0, false, false, MIN_CARD_WIDTH),
+            3
+        );
+        assert_eq!(
+            grid_columns_for(true, 1440.0, false, false, MIN_CARD_WIDTH),
+            4
+        );
+        assert_eq!(
+            grid_columns_for(true, 1080.0, false, false, MIN_CARD_WIDTH),
+            2
+        );
+        assert_eq!(
+            grid_columns_for(false, 1280.0, false, false, MIN_CARD_WIDTH),
+            3
+        );
     }
 
     fn index_entry(id: i64, month: i32) -> PhotoIndexEntry {
@@ -9353,18 +9566,33 @@ mod tests {
     #[test]
     fn rail_jump_offset_uses_grid_rows_and_clamps_to_the_list() {
         // `ScrollHandle::max_offset()` is a non-negative scrollable extent.
-        assert_eq!(rail_scroll_offset(0, 3, 10_000.0), 0.0);
-        assert_eq!(rail_scroll_offset(2, 3, 10_000.0), 0.0);
-        assert_eq!(rail_scroll_offset(3, 3, 10_000.0), -196.0);
-        assert_eq!(rail_scroll_offset(5, 3, 10_000.0), -196.0);
+        assert_eq!(rail_scroll_offset(0, 3, PHOTO_ROW_HEIGHT, 10_000.0), 0.0);
+        assert_eq!(rail_scroll_offset(2, 3, PHOTO_ROW_HEIGHT, 10_000.0), 0.0);
+        assert_eq!(
+            rail_scroll_offset(3, 3, PHOTO_ROW_HEIGHT, 10_000.0),
+            -196.0
+        );
+        assert_eq!(
+            rail_scroll_offset(5, 3, PHOTO_ROW_HEIGHT, 10_000.0),
+            -196.0
+        );
         // The target (-2156) is clamped to the 1000 px extent.
-        assert_eq!(rail_scroll_offset(11, 1, 1_000.0), -1_000.0);
-        assert_eq!(rail_scroll_offset(600, 3, 10_000.0), -10_000.0);
-        assert_eq!(rail_scroll_offset(600, 0, 10_000.0), -10_000.0);
+        assert_eq!(
+            rail_scroll_offset(11, 1, PHOTO_ROW_HEIGHT, 1_000.0),
+            -1_000.0
+        );
+        assert_eq!(
+            rail_scroll_offset(600, 3, PHOTO_ROW_HEIGHT, 10_000.0),
+            -10_000.0
+        );
+        assert_eq!(
+            rail_scroll_offset(600, 0, PHOTO_ROW_HEIGHT, 10_000.0),
+            -10_000.0
+        );
         // No scrollable extent means no movement, even for a negative extent
         // rather than the real non-negative contract.
-        assert_eq!(rail_scroll_offset(600, 3, 0.0), 0.0);
-        assert_eq!(rail_scroll_offset(600, 3, -5.0), 0.0);
+        assert_eq!(rail_scroll_offset(600, 3, PHOTO_ROW_HEIGHT, 0.0), 0.0);
+        assert_eq!(rail_scroll_offset(600, 3, PHOTO_ROW_HEIGHT, -5.0), 0.0);
     }
 
     fn test_job(status: QueueStatus, retry_count: i64) -> CompressionJob {
