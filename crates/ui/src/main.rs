@@ -3580,7 +3580,11 @@ impl App {
                         .w_full()
                         .min_w_0()
                         .items_start()
-                        .gap(px(16.));
+                        .gap(px(16.))
+                        // Keep cards out from under the year rail. The list
+                        // itself stays full width so wheel events over the
+                        // gutter still reach its scroll handle.
+                        .pr(px(RAIL_WIDTH));
                     for column in 0..columns {
                         let photo_index = row * columns + column;
                         if photo_index >= list_index.total {
@@ -8211,14 +8215,21 @@ fn grid_available_width(
     } else {
         INSPECTOR_WIDTH
     };
-    (window_width - sidebar_width(sidebar_collapsed) - inspector - WORKSPACE_PAD_X).max(0.0)
+    (window_width - sidebar_width(sidebar_collapsed) - inspector - WORKSPACE_PAD_X - RAIL_WIDTH)
+        .max(0.0)
 }
 
 /// Width left for the search grid after the filter panel (290 px + 26 px
-/// margin) and the right column's 26 px padding on both sides. The Search
-/// screen has no inspector column, so none is subtracted.
+/// margin), the right column's 26 px padding on both sides, and the rail
+/// gutter. The Search screen has no inspector column, so none is subtracted.
 fn search_available_width(window_width: f32, sidebar_collapsed: bool) -> f32 {
-    (window_width - sidebar_width(sidebar_collapsed) - 290.0 - 26.0 - 52.0).max(0.0)
+    (window_width
+        - sidebar_width(sidebar_collapsed)
+        - 290.0
+        - 26.0
+        - 52.0
+        - RAIL_WIDTH)
+        .max(0.0)
 }
 
 fn viewer_details_width(open: bool, t: f32) -> f32 {
@@ -8608,12 +8619,14 @@ mod tests {
         assert_eq!(grid_columns(grid_available_width(1280.0, false, false)), 3);
         assert_eq!(grid_columns(grid_available_width(1440.0, false, false)), 4);
         assert_eq!(grid_columns(grid_available_width(1280.0, true, false)), 4);
-        assert_eq!(grid_columns(grid_available_width(1440.0, true, false)), 5);
-        assert_eq!(grid_columns(grid_available_width(1280.0, false, true)), 5);
-        assert_eq!(grid_columns(grid_available_width(1440.0, false, true)), 6);
+        assert_eq!(grid_columns(grid_available_width(1440.0, true, false)), 4);
+        assert_eq!(grid_columns(grid_available_width(1280.0, false, true)), 4);
+        assert_eq!(grid_columns(grid_available_width(1440.0, false, true)), 5);
         assert_eq!(grid_columns(grid_available_width(1080.0, false, false)), 2);
-        assert_eq!(grid_columns(grid_available_width(1080.0, false, true)), 4);
+        assert_eq!(grid_columns(grid_available_width(1080.0, false, true)), 3);
         assert_eq!(grid_columns(0.0), 1);
+        assert_eq!(grid_available_width(1440.0, true, false), 892.0);
+        assert_eq!(search_available_width(1280.0, false), 578.0);
     }
 
     #[test]
