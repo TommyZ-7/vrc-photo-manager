@@ -3556,7 +3556,12 @@ impl App {
                         }
                         match this.browser_mut(search).photo_at(photo_index) {
                             Some(photo) => {
-                                line = line.child(this.photo_card(photo.as_ref(), photo_index, cx));
+                                line = line.child(this.photo_card(
+                                    photo.as_ref(),
+                                    photo_index,
+                                    metrics,
+                                    cx,
+                                ));
                             }
                             None => {
                                 line = line.child(grid_placeholder(metrics.image_height));
@@ -3711,6 +3716,7 @@ impl App {
         &mut self,
         photo: &Photo,
         grid_index: usize,
+        metrics: CardMetrics,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = photo.id;
@@ -3718,6 +3724,10 @@ impl App {
         let compressed = self.compressed_ids.contains(&id);
         let duplicate = self.duplicate_ids.contains(&id);
         let replaced = photo.is_replaced();
+        let show_status = self.settings.ui_card_show_status;
+        let show_world = self.settings.ui_card_show_world;
+        let show_date = self.settings.ui_card_show_date;
+        let show_size = self.settings.ui_card_show_size;
         let world = photo
             .world_name
             .clone()
@@ -3739,7 +3749,7 @@ impl App {
 
         let mut thumb = div()
             .relative()
-            .h(px(128.))
+            .h(px(metrics.image_height))
             .w_full()
             .rounded(px(14.))
             .overflow_hidden()
@@ -3758,93 +3768,103 @@ impl App {
                     .size_full(),
             );
         }
-        let status_color = if replaced {
-            BLUE
-        } else if duplicate {
-            MUTED
-        } else if compressed {
-            GREEN
-        } else {
-            AMBER
-        };
-        thumb = thumb
-            .child(
-                div()
-                    .absolute()
-                    .left_0()
-                    .right_0()
-                    .bottom_0()
-                    .h(px(56.))
-                    .bg(linear_gradient(
-                        180.,
-                        linear_color_stop(rgba(0x07090d00), 0.),
-                        linear_color_stop(rgba(0x07090dcc), 1.),
-                    )),
-            )
-            .child(
-                h_flex()
-                    .absolute()
-                    .left(px(9.))
-                    .bottom(px(8.))
-                    .gap(px(5.))
-                    .items_center()
-                    .child(div().size(px(5.)).rounded_full().bg(rgb(status_color)))
-                    .child(
-                        div()
-                            .text_size(px(9.))
-                            .font_medium()
-                            .text_color(rgb(status_color))
-                            .child(if replaced {
-                                "圧縮版のみ"
-                            } else if duplicate {
-                                "重複"
-                            } else if compressed {
-                                "圧縮済"
-                            } else {
-                                "未圧縮"
-                            }),
-                    ),
-            )
-            .when(photo.is_favorite, |this| {
-                this.child(
+        if show_status {
+            let status_color = if replaced {
+                BLUE
+            } else if duplicate {
+                MUTED
+            } else if compressed {
+                GREEN
+            } else {
+                AMBER
+            };
+            thumb = thumb
+                .child(
                     div()
                         .absolute()
-                        .top(px(9.))
-                        .right(px(9.))
-                        .size(px(7.))
-                        .rounded_full()
-                        .bg(rgb(AMBER))
-                        .shadow(vec![
-                            BoxShadow::new(px(0.), px(0.), rgba(0x00000080).into())
-                                .blur_radius(px(3.)),
-                        ]),
+                        .left_0()
+                        .right_0()
+                        .bottom_0()
+                        .h(px(56.))
+                        .bg(linear_gradient(
+                            180.,
+                            linear_color_stop(rgba(0x07090d00), 0.),
+                            linear_color_stop(rgba(0x07090dcc), 1.),
+                        )),
                 )
-            });
-
-        let body = v_flex().min_w_0().gap(px(8.)).child(thumb).child(
-            v_flex()
-                .min_w_0()
-                .gap(px(3.))
                 .child(
+                    h_flex()
+                        .absolute()
+                        .left(px(9.))
+                        .bottom(px(8.))
+                        .gap(px(5.))
+                        .items_center()
+                        .child(div().size(px(5.)).rounded_full().bg(rgb(status_color)))
+                        .child(
+                            div()
+                                .text_size(px(9.))
+                                .font_medium()
+                                .text_color(rgb(status_color))
+                                .child(if replaced {
+                                    "圧縮版のみ"
+                                } else if duplicate {
+                                    "重複"
+                                } else if compressed {
+                                    "圧縮済"
+                                } else {
+                                    "未圧縮"
+                                }),
+                        ),
+                );
+        }
+        thumb = thumb.when(photo.is_favorite, |this| {
+            this.child(
+                div()
+                    .absolute()
+                    .top(px(9.))
+                    .right(px(9.))
+                    .size(px(7.))
+                    .rounded_full()
+                    .bg(rgb(AMBER))
+                    .shadow(vec![
+                        BoxShadow::new(px(0.), px(0.), rgba(0x00000080).into()).blur_radius(px(3.)),
+                    ]),
+            )
+        });
+
+        let meta_line = card_meta_line(
+            show_date,
+            show_size,
+            &photo.captured_at_local,
+            format_bytes(photo.effective_file_size()),
+        );
+        let mut body = v_flex()
+            .min_w_0()
+            .gap(px(CARD_BODY_GAP))
+            .child(thumb);
+        if show_world || meta_line.is_some() {
+            let mut text = v_flex().min_w_0().gap(px(CARD_TEXT_GAP));
+            if show_world {
+                text = text.child(
                     div()
                         .text_size(px(12.))
                         .font_semibold()
                         .text_color(rgb(TEXT))
                         .truncate()
                         .child(world),
-                )
-                .child(
+                );
+            }
+            if let Some(meta) = meta_line {
+                text = text.child(
                     div()
                         .text_size(px(10.))
                         .text_color(rgb(MUTED_2))
                         .truncate()
-                        .child(format!(
-                            "{} · {}",
-                            short_date(&photo.captured_at_local),
-                            format_bytes(photo.effective_file_size())
-                        )),
-                ),
-        );
+                        .child(meta),
+                );
+            }
+            body = body.child(text);
+        }
 
         let card = v_flex()
             .id(SharedString::from(format!("photo-{id}")))
@@ -8307,6 +8327,15 @@ fn short_date(value: &str) -> String {
         .to_string()
 }
 
+fn card_meta_line(show_date: bool, show_size: bool, date: &str, size: String) -> Option<String> {
+    match (show_date, show_size) {
+        (true, true) => Some(format!("{} · {}", short_date(date), size)),
+        (true, false) => Some(short_date(date)),
+        (false, true) => Some(size),
+        (false, false) => None,
+    }
+}
+
 fn scene_color(world: &str) -> u32 {
     let mut hash = 0u32;
     for byte in world.as_bytes() {
@@ -8572,18 +8601,18 @@ mod tests {
         PhotoIndex, PhotoPageCache, ScanProgressView, Screen, THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT,
         ThumbnailCache, YearBucket, add_photo_root_and_save, alert_summaries, anchor_photo_id,
         apply_library_index, apply_profile_format, autostart_description, average_bgra,
-        build_year_buckets, card_metrics, compression_policy, compression_policy_warning,
-        daemon_liveness, daemon_operation_label, daemon_state_label, daemon_sync_label,
-        decode_thumbnail, demo_thumb_path, ease_motion, first_visible_photo, format_captured_month,
-        format_count, format_timestamp, grid_available_width, grid_columns, grid_columns_for,
-        has_tag_filter, import_issue_counts, ipc_status_label, job_retry_available, job_retry_label,
-        lerp_color, list_scroll_top, lossless_hint, lossless_supported, moved_profile_order,
-        next_focus_index, normalize_note, parse_args, parse_window_size, profile_summary,
-        queue_status_badge, rail_label_hidden_by_pill, rail_row_at, rail_scroll_offset, rail_y,
-        release_confirmation, retryable_sources, scan_progress_label, scan_progress_ratio,
-        search_anchor_after_result, search_available_width, sidebar_reveal_width, sidebar_width,
-        stagger_value, step_index, sync_search_mirror, viewer_details_width, viewer_image_box,
-        visible_year_buckets, with_tag, without_tag,
+        build_year_buckets, card_metrics, card_meta_line, compression_policy,
+        compression_policy_warning, daemon_liveness, daemon_operation_label, daemon_state_label,
+        daemon_sync_label, decode_thumbnail, demo_thumb_path, ease_motion, first_visible_photo,
+        format_captured_month, format_count, format_timestamp, grid_available_width, grid_columns,
+        grid_columns_for, has_tag_filter, import_issue_counts, ipc_status_label, job_retry_available,
+        job_retry_label, lerp_color, list_scroll_top, lossless_hint, lossless_supported,
+        moved_profile_order, next_focus_index, normalize_note, parse_args, parse_window_size,
+        profile_summary, queue_status_badge, rail_label_hidden_by_pill, rail_row_at,
+        rail_scroll_offset, rail_y, release_confirmation, retryable_sources, scan_progress_label,
+        scan_progress_ratio, search_anchor_after_result, search_available_width,
+        sidebar_reveal_width, sidebar_width, stagger_value, step_index, sync_search_mirror,
+        viewer_details_width, viewer_image_box, visible_year_buckets, with_tag, without_tag,
     };
     use gpui_kit::{RenderImage, ScrollStrategy, UniformListScrollHandle, point, px};
     use smallvec::SmallVec;
@@ -9304,6 +9333,25 @@ mod tests {
         ]);
         assert_eq!(anchor_photo_id(&index, 153.0, 2, 152.0), Some(3));
         assert_eq!(rail_scroll_offset(3, 3, 152.0, 10_000.0), -152.0);
+    }
+
+    #[test]
+    fn card_meta_line_joins_only_visible_parts() {
+        let date = "2026-10-25 12:34:56.000";
+        let size = "12.3 MB".to_string();
+        assert_eq!(
+            card_meta_line(true, true, date, size.clone()),
+            Some("10-25 12:34:56 · 12.3 MB".to_string())
+        );
+        assert_eq!(
+            card_meta_line(true, false, date, size.clone()),
+            Some("10-25 12:34:56".to_string())
+        );
+        assert_eq!(
+            card_meta_line(false, true, date, size.clone()),
+            Some("12.3 MB".to_string())
+        );
+        assert_eq!(card_meta_line(false, false, date, size), None);
     }
 
     #[test]
