@@ -69,15 +69,15 @@ vertical space above the library card. Rejected.
 - Not rendered when `sidebar_collapsed` is true.
 - Same width and panel treatment as the library card (`PANEL`, 13 px radius,
   1 px low-contrast border). No new colors or fonts.
-- Fixed compact height (about 116 px) so switching tabs never moves the
+- Fixed compact height (about 134 px) so switching tabs never moves the
   library card.
 - Header: `進行状況` and a 6 px status dot for the selected view.
-- Tabs: three equal-width 22 px segments. Active: `ACCENT_SOFT` background,
+- Tabs: three equal-width 20 px segments. Active: `ACCENT_SOFT` background,
   `BLUE` text, subtle blue border. Inactive: `MUTED_2`, hover `PANEL_2`.
   A 4 px dot at the top-right marks activity: red for failure, amber for
   waiting/unprocessed, blue for running.
 - Body: 13 px tone-colored headline, 10 px `MUTED` detail with truncation,
-  and a 3 px progress bar for import/scan when a ratio is available.
+  and a 2 px progress bar for import/scan when a ratio is available.
 - Footer: one or two `Button::small()` actions, 24 px high, left aligned.
 - Default tab: compression. The selection lives in `App` for the session.
 - No motion beyond existing hover/click feedback; the card must not animate
@@ -95,7 +95,7 @@ vertical space above the library card. Rejected.
 - Detail: `実行中 N · 失敗 N`; when idle, `未実行のジョブはありません`.
 - Footer:
   - Waiting jobs: primary `未実行を開始` -> `request_release_waiting_jobs`.
-  - Failed jobs: ghost `失敗を再試行` -> `retry_all_failed_jobs`; shown
+  - Failed jobs: ghost `再試行` -> `retry_all_failed_jobs`; shown
     alongside the waiting action when both exist.
   - Neither: ghost `キューを開く` -> Dashboard.
 - `実行中` means `active_job_count - waiting_job_count`, clamped at zero.
@@ -107,8 +107,14 @@ vertical space above the library card. Rejected.
   `import_progress_ratio`.
 - Last report with unprocessed sources: `未処理 N` (amber), detail
   `取込 N/total · 失敗 N`.
-- Last report with failures: `失敗 N` (red), detail `取込 N/total`.
-- Last completed report: `完了 N 枚` (green), detail `前回の取り込み`.
+- Last report with failures: `失敗 N` (red), detail `取込 N/total` or
+  `取込 N/total · スキャン失敗 N` when destination indexing failed.
+  Indexing failures (`scan_failures` / `scan_error`) count toward the
+  failure headline and the red activity dot.
+- Last report with only partial moves: `部分移動 N` (amber), detail
+  `取込 N/total · 完了`.
+- Last completed report: `完了 N 枚` (green), detail `前回の取り込み` or
+  `前回の取り込み · 連番 N`.
 - No report: `履歴なし` (muted), detail `取り込み結果がここに残ります`.
 - Footer: `結果を見る` when a report exists (opens Photos, where the report
   panel is mounted), otherwise `写真を開く`.

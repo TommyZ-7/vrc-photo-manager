@@ -1509,6 +1509,41 @@ struct ManualCompressionDialog {
     keep_original: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SidebarStatusTab {
+    Compression,
+    Import,
+    Scan,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StatusTone {
+    Idle,
+    Running,
+    Waiting,
+    Failed,
+    Success,
+}
+
+impl StatusTone {
+    fn color(self) -> u32 {
+        match self {
+            Self::Idle => MUTED_2,
+            Self::Running => BLUE,
+            Self::Waiting => AMBER,
+            Self::Failed => RED,
+            Self::Success => GREEN,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CardStatus {
+    headline: String,
+    detail: String,
+    tone: StatusTone,
+}
+
 type BoundsFrame = (u64, Bounds<Pixels>);
 type CardBoundsMap = Rc<RefCell<HashMap<i64, BoundsFrame>>>;
 type InspectorBounds = Rc<RefCell<Option<BoundsFrame>>>;
@@ -1517,6 +1552,7 @@ pub struct App {
     db: Db,
     screen: Screen,
     sidebar_collapsed: bool,
+    sidebar_status_tab: SidebarStatusTab,
     sidebar_motion_epoch: u64,
     nav_previous: Screen,
     nav_epoch: u64,
@@ -1862,6 +1898,7 @@ impl App {
             db,
             screen: Screen::Photos,
             sidebar_collapsed: initial_settings.ui_sidebar_collapsed,
+            sidebar_status_tab: SidebarStatusTab::Compression,
             sidebar_motion_epoch: 0,
             nav_previous: Screen::Photos,
             nav_epoch: 0,
@@ -4062,6 +4099,7 @@ impl App {
         let photo_count = format_count(self.stats.photo_count);
         let compression_count =
             (self.active_job_count > 0).then(|| format_count(self.active_job_count));
+        let status_card = (!collapsed).then(|| self.sidebar_status_card(cx));
 
         let brand_text = v_flex()
             .min_w_0()
@@ -4166,6 +4204,7 @@ impl App {
                     )),
             )
             .child(div().flex_1())
+            .when_some(status_card, |this, card| this.child(card))
             .when(!collapsed, |this| {
                 this.child(
                     v_flex()
@@ -4263,6 +4302,254 @@ impl App {
             },
         )
         .into_any_element()
+    }
+
+    fn sidebar_status_card(&self, cx: &mut Context<Self>) -> AnyElement {
+        let import_progress = import_running_progress(self.import_dialog.as_ref());
+        let compression = compression_card_status(
+            self.active_job_count,
+            self.waiting_job_count,
+            self.failed_job_count,
+        );
+        let import = import_card_status(import_progress, self.import_report.as_ref());
+        let scan = scan_card_status(
+            self.scan_progress.as_ref(),
+            self.daemon_active,
+            self.daemon_paused,
+        );
+        let compression_attention = compression_attention(
+            self.active_job_count,
+            self.waiting_job_count,
+            self.failed_job_count,
+        );
+        let import_attention = import_attention(import_progress, self.import_report.as_ref());
+        let scan_attention = scan_attention(
+            self.scan_progress.as_ref(),
+            self.daemon_active,
+            self.daemon_paused,
+        );
+        let tab = self.sidebar_status_tab;
+        let (status, ratio) = match tab {
+            SidebarStatusTab::Compression => (&compression, None),
+            SidebarStatusTab::Import => (&import, import_progress.map(import_progress_ratio)),
+            SidebarStatusTab::Scan => (
+                &scan,
+                self.scan_progress
+                    .as_ref()
+                    .map(scan_progress_ratio)
+                    .filter(|ratio| *ratio > 0.0),
+            ),
+        };
+        let import_has_report = self.import_report.is_some();
+
+        let tabs = [
+            (
+                SidebarStatusTab::Compression,
+                "圧縮",
+                "sidebar-status-tab-compression",
+                compression_attention,
+            ),
+            (
+                SidebarStatusTab::Import,
+                "取り込み",
+                "sidebar-status-tab-import",
+                import_attention,
+            ),
+            (
+                SidebarStatusTab::Scan,
+                "スキャン",
+                "sidebar-status-tab-scan",
+                scan_attention,
+            ),
+        ];
+        let tab_row =
+            h_flex()
+                .gap(px(4.))
+                .children(tabs.into_iter().map(|(tab, label, id, attention)| {
+                    let active = self.sidebar_status_tab == tab;
+                    h_flex()
+                        .id(id)
+                        .relative()
+                        .flex_1()
+                        .h(px(20.))
+                        .justify_center()
+                        .items_center()
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(if active {
+                            rgba(0x66b3ff33)
+                        } else {
+                            rgba(0x00000000)
+                        })
+                        .text_size(px(10.))
+                        .font_medium()
+                        .cursor_pointer()
+                        .when(active, |this| {
+                            this.bg(rgb(ACCENT_SOFT)).text_color(rgb(BLUE))
+                        })
+                        .when(!active, |this| {
+                            this.text_color(rgb(MUTED_2))
+                                .hover(|this| this.bg(rgb(PANEL_2)).text_color(rgb(TEXT)))
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.sidebar_status_tab = tab;
+                            cx.notify();
+                        }))
+                        .when_some(attention, |this, tone| {
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .top(px(3.))
+                                    .right(px(4.))
+                                    .size(px(4.))
+                                    .rounded_full()
+                                    .bg(rgb(tone.color())),
+                            )
+                        })
+                        .child(label)
+                }));
+
+        let mut body = v_flex()
+            .h(px(46.))
+            .justify_center()
+            .gap(px(2.))
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .font_semibold()
+                    .text_color(rgb(status.tone.color()))
+                    .child(status.headline.clone()),
+            )
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(rgb(MUTED))
+                    .truncate()
+                    .child(status.detail.clone()),
+            );
+        if let Some(ratio) = ratio {
+            body = body.child(status_progress_bar(ratio));
+        }
+
+        let footer =
+            match tab {
+                SidebarStatusTab::Compression => {
+                    let mut row = h_flex().items_center().h(px(24.)).gap(px(6.));
+                    if self.waiting_job_count > 0 {
+                        row = row.child(
+                            Button::new("sidebar-status-release-waiting")
+                                .label("未実行を開始")
+                                .small()
+                                .primary()
+                                .tooltip("未実行のジョブをすべて圧縮します")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.request_release_waiting_jobs(window, cx)
+                                })),
+                        );
+                    }
+                    if self.failed_job_count > 0 {
+                        row = row.child(
+                            Button::new("sidebar-status-retry-failed")
+                                .label("再試行")
+                                .small()
+                                .ghost()
+                                .tooltip("上限内の失敗ジョブを再試行します")
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.retry_all_failed_jobs(cx)),
+                                ),
+                        );
+                    }
+                    if self.waiting_job_count == 0 && self.failed_job_count == 0 {
+                        row = row.child(
+                            Button::new("sidebar-status-open-queue")
+                                .label("キューを開く")
+                                .small()
+                                .ghost()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.switch_screen(Screen::Dashboard, cx)
+                                })),
+                        );
+                    }
+                    row
+                }
+                SidebarStatusTab::Import => {
+                    h_flex()
+                        .items_center()
+                        .h(px(24.))
+                        .gap(px(6.))
+                        .child(if import_has_report {
+                            Button::new("sidebar-status-import-result")
+                                .label("結果を見る")
+                                .small()
+                                .ghost()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.switch_screen(Screen::Photos, cx)
+                                }))
+                        } else {
+                            Button::new("sidebar-status-photos")
+                                .label("写真を開く")
+                                .small()
+                                .ghost()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.switch_screen(Screen::Photos, cx)
+                                }))
+                        })
+                }
+                SidebarStatusTab::Scan => {
+                    let can_rescan =
+                        self.scan_progress.is_none() && self.daemon_active && !self.daemon_paused;
+                    let button = if can_rescan {
+                        Button::new("sidebar-status-rescan")
+                            .label("再スキャン")
+                            .small()
+                            .ghost()
+                            .tooltip("デーモンに再スキャンを要求します")
+                            .on_click(cx.listener(|this, _, _, cx| this.request_daemon_rescan(cx)))
+                    } else {
+                        Button::new("sidebar-status-dashboard")
+                            .label("ダッシュボード")
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.switch_screen(Screen::Dashboard, cx)
+                            }))
+                    };
+                    h_flex().items_center().h(px(24.)).gap(px(6.)).child(button)
+                }
+            };
+
+        v_flex()
+            .flex_shrink_0()
+            .p(px(9.))
+            .gap(px(4.))
+            .rounded(px(13.))
+            .bg(rgb(PANEL))
+            .border_1()
+            .border_color(rgba(0xffffff0f))
+            .child(
+                h_flex()
+                    .items_center()
+                    .h(px(12.))
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .font_semibold()
+                            .text_color(rgb(MUTED_2))
+                            .child("進行状況"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .size(px(6.))
+                            .rounded_full()
+                            .bg(rgb(status.tone.color())),
+                    ),
+            )
+            .child(tab_row)
+            .child(body)
+            .child(footer)
+            .into_any_element()
     }
 
     fn nav_highlight(&self) -> AnyElement {
@@ -5294,6 +5581,8 @@ impl App {
                 |_, _, _, _| {},
             )
             .absolute()
+            .top_0()
+            .left_0()
             .size_full(),
         );
         if show_status {
@@ -5718,6 +6007,8 @@ impl App {
                 |_, _, _, _| {},
             )
             .absolute()
+            .top_0()
+            .left_0()
             .size_full(),
         );
 
@@ -6468,13 +6759,16 @@ impl App {
         let nav_epoch = self.viewer_nav_epoch;
         let nav_direction = self.viewer_nav_direction;
         let nav_t = if nav_epoch == 0 {
-            0.0
+            1.0
         } else {
-            eased_progress(self.viewer_nav_started_at, MOTION_BASE, Instant::now())
+            viewer_nav_progress(
+                self.viewer_nav_started_at,
+                Instant::now(),
+                cx.reduce_motion(),
+            )
         };
         let previous_preview = self.previous_preview.clone();
         let current_preview = self.preview.clone();
-        let thumbnail = self.thumbnails.get(photo.id);
         let (start_w, start_h) = box_state.size_at(0.0, viewport);
 
         let mut image_frame = div()
@@ -6487,17 +6781,6 @@ impl App {
             .rounded(px(10.))
             .bg(rgb(color))
             .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()));
-
-        // Keep the cached thumbnail behind the preview so a still-uploading
-        // preview never flashes the bare frame color.
-        if let Some(thumbnail) = thumbnail.clone() {
-            image_frame = image_frame.child(
-                gpui_kit::img(thumbnail)
-                    .object_fit(ObjectFit::Contain)
-                    .size_full()
-                    .rounded(px(10.)),
-            );
-        }
 
         if nav_epoch > 0
             && nav_t < 1.0
@@ -6529,7 +6812,7 @@ impl App {
                     .relative()
                     .left(px(current_offset)),
             );
-        } else if thumbnail.is_none() {
+        } else {
             image_frame = image_frame.child(
                 div()
                     .absolute()
@@ -6692,7 +6975,10 @@ impl App {
         let Some(old_image) = old_kind.and_then(image_for) else {
             return div().into_any_element();
         };
-        let new_image = if fade_only {
+        let new_image = if fade_only || (!closing && morph.preview.is_none()) {
+            // Never present the thumbnail as the full-size incoming image.
+            // If the preview is missing, the viewer shows its explicit failure
+            // state after the overlay clears.
             None
         } else {
             new_kind.and_then(image_for)
@@ -6717,16 +7003,7 @@ impl App {
             .size_full()
             .with_animation(("viewer-morph-old", epoch), layer_anim(), move |el, t| {
                 let radius = start_radius + (end_radius - start_radius) * t;
-                let opacity = if fade_only {
-                    1.0
-                } else if closing {
-                    1.0 - t
-                } else {
-                    // Keep a little of the cached image under the incoming
-                    // preview: a still-uploading preview must not expose the
-                    // bare frame color. The opaque preview hides it otherwise.
-                    0.35 + 0.65 * (1.0 - t)
-                };
+                let opacity = if fade_only { 1.0 } else { 1.0 - t };
                 el.opacity(opacity).rounded(px(radius))
             });
         let new_layer = new_image.map(|image| {
@@ -11136,6 +11413,218 @@ fn scan_progress_ratio(progress: &ScanProgressView) -> f32 {
     ratio.clamp(0.0, 1.0)
 }
 
+fn running_job_count(active: i64, waiting: i64) -> i64 {
+    (active - waiting).max(0)
+}
+
+fn compression_card_status(active: i64, waiting: i64, failed: i64) -> CardStatus {
+    let running = running_job_count(active, waiting);
+    if waiting > 0 {
+        CardStatus {
+            headline: format!("未実行 {waiting}"),
+            detail: format!("実行中 {running} · 失敗 {failed}"),
+            tone: StatusTone::Waiting,
+        }
+    } else if running > 0 {
+        CardStatus {
+            headline: format!("実行中 {running}"),
+            detail: format!("未実行 0 · 失敗 {failed}"),
+            tone: StatusTone::Running,
+        }
+    } else if failed > 0 {
+        CardStatus {
+            headline: format!("失敗 {failed}"),
+            detail: "未実行 0 · 実行中 0".to_string(),
+            tone: StatusTone::Failed,
+        }
+    } else {
+        CardStatus {
+            headline: "キューは空です".to_string(),
+            detail: "未実行のジョブはありません".to_string(),
+            tone: StatusTone::Idle,
+        }
+    }
+}
+
+fn import_card_status(
+    progress: Option<&ImportProgress>,
+    report: Option<&ImportReportView>,
+) -> CardStatus {
+    if let Some(progress) = progress {
+        return CardStatus {
+            headline: "取り込み中".to_string(),
+            detail: format!(
+                "{}/{} · 取込 {} · 失敗 {}",
+                progress.processed, progress.total, progress.imported, progress.failed
+            ),
+            tone: StatusTone::Running,
+        };
+    }
+    let Some(report) = report else {
+        return CardStatus {
+            headline: "履歴なし".to_string(),
+            detail: "取り込み結果がここに残ります".to_string(),
+            tone: StatusTone::Idle,
+        };
+    };
+    let (failed, partial) = import_issue_counts(&report.issues);
+    let scan_failed = import_scan_failure_count(report);
+    let failed_total = failed + scan_failed;
+    if !report.remaining.is_empty() {
+        return CardStatus {
+            headline: format!("未処理 {}", report.remaining.len()),
+            detail: format!(
+                "取込 {}/{} · 失敗 {failed_total}",
+                report.imported, report.total
+            ),
+            tone: StatusTone::Waiting,
+        };
+    }
+    if failed_total > 0 {
+        return CardStatus {
+            headline: format!("失敗 {failed_total}"),
+            detail: if scan_failed > 0 {
+                format!(
+                    "取込 {}/{} · スキャン失敗 {scan_failed}",
+                    report.imported, report.total
+                )
+            } else {
+                format!("取込 {}/{}", report.imported, report.total)
+            },
+            tone: StatusTone::Failed,
+        };
+    }
+    if partial > 0 {
+        return CardStatus {
+            headline: format!("部分移動 {partial}"),
+            detail: format!("取込 {}/{} · 完了", report.imported, report.total),
+            tone: StatusTone::Waiting,
+        };
+    }
+    CardStatus {
+        headline: format!("完了 {} 枚", report.imported),
+        detail: if report.renamed.is_empty() {
+            "前回の取り込み".to_string()
+        } else {
+            format!("前回の取り込み · 連番 {}", report.renamed.len())
+        },
+        tone: StatusTone::Success,
+    }
+}
+
+fn import_scan_failure_count(report: &ImportReportView) -> usize {
+    report.scan_failures.len() + usize::from(report.scan_error.is_some())
+}
+
+fn scan_card_status(
+    progress: Option<&ScanProgressView>,
+    daemon_active: bool,
+    daemon_paused: bool,
+) -> CardStatus {
+    if let Some(progress) = progress {
+        let detail = scan_progress_label(progress);
+        let has_total = progress.total.is_some_and(|total| total > 0);
+        let headline = if progress.phase == IpcScanPhase::Indexing && has_total {
+            format!(
+                "{}%",
+                (scan_progress_ratio(progress) * 100.0).round() as i32
+            )
+        } else {
+            "走査中…".to_string()
+        };
+        return CardStatus {
+            headline,
+            detail,
+            tone: StatusTone::Running,
+        };
+    }
+    if !daemon_active {
+        return CardStatus {
+            headline: "停止中".to_string(),
+            detail: "デーモンは接続されていません".to_string(),
+            tone: StatusTone::Idle,
+        };
+    }
+    if daemon_paused {
+        return CardStatus {
+            headline: "一時停止中".to_string(),
+            detail: "監視を再開すると走査します".to_string(),
+            tone: StatusTone::Waiting,
+        };
+    }
+    CardStatus {
+        headline: "待機中".to_string(),
+        detail: "変更を監視しています".to_string(),
+        tone: StatusTone::Idle,
+    }
+}
+
+fn compression_attention(active: i64, waiting: i64, failed: i64) -> Option<StatusTone> {
+    if failed > 0 {
+        Some(StatusTone::Failed)
+    } else if running_job_count(active, waiting) > 0 {
+        Some(StatusTone::Running)
+    } else if waiting > 0 {
+        Some(StatusTone::Waiting)
+    } else {
+        None
+    }
+}
+
+fn import_attention(
+    progress: Option<&ImportProgress>,
+    report: Option<&ImportReportView>,
+) -> Option<StatusTone> {
+    if progress.is_some() {
+        return Some(StatusTone::Running);
+    }
+    let report = report?;
+    let (failed, partial) = import_issue_counts(&report.issues);
+    if failed > 0 || import_scan_failure_count(report) > 0 {
+        Some(StatusTone::Failed)
+    } else if !report.remaining.is_empty() || partial > 0 {
+        Some(StatusTone::Waiting)
+    } else {
+        None
+    }
+}
+
+fn scan_attention(
+    progress: Option<&ScanProgressView>,
+    daemon_active: bool,
+    daemon_paused: bool,
+) -> Option<StatusTone> {
+    if progress.is_some() {
+        Some(StatusTone::Running)
+    } else if daemon_active && daemon_paused {
+        Some(StatusTone::Waiting)
+    } else {
+        None
+    }
+}
+
+fn import_running_progress(dialog: Option<&ImportDialogState>) -> Option<&ImportProgress> {
+    match dialog.map(|dialog| &dialog.phase) {
+        Some(ImportDialogPhase::Running { progress, .. }) => Some(progress),
+        _ => None,
+    }
+}
+
+fn status_progress_bar(ratio: f32) -> Div {
+    div()
+        .h(px(2.))
+        .w_full()
+        .rounded_full()
+        .bg(rgb(PANEL_2))
+        .child(
+            div()
+                .h_full()
+                .w(relative(ratio.clamp(0.0, 1.0)))
+                .rounded_full()
+                .bg(rgb(BLUE)),
+        )
+}
+
 fn daemon_sync_label(
     age_secs: Option<i64>,
     supervisor: Option<&str>,
@@ -11285,6 +11774,14 @@ fn eased_progress(started_at: Instant, duration: Duration, now: Instant) -> f32 
     }
     let elapsed = now.saturating_duration_since(started_at).as_secs_f32();
     ease_motion((elapsed / duration.as_secs_f32()).clamp(0.0, 1.0))
+}
+
+fn viewer_nav_progress(started_at: Instant, now: Instant, reduce_motion: bool) -> f32 {
+    if reduce_motion {
+        1.0
+    } else {
+        eased_progress(started_at, MOTION_BASE, now)
+    }
 }
 
 fn morph_bounds_at(
@@ -11922,6 +12419,11 @@ mod tests {
     // `use super::*` would also import GPUI's `test` attribute macro through
     // `gpui_kit::*`, shadowing the built-in `#[test]` and recursing forever.
     use super::{
+        AMBER, BLUE, GREEN, MUTED_2, RED, StatusTone, compression_attention,
+        compression_card_status, import_attention, import_card_status, import_running_progress,
+        running_job_count, scan_attention, scan_card_status,
+    };
+    use super::{
         CountDebounce, DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH,
         ImportDialogOrigin, ImportDialogPhase, ImportDialogState, ImportReportView, IpcScanPhase,
         MAX_PAGES, MIN_CARD_WIDTH, MOTION_BASE, MOTION_FAST, MOTION_MORPH, MOTION_SLOW,
@@ -11951,7 +12453,7 @@ mod tests {
         search_anchor_after_result, search_available_width, selection_range,
         should_request_preview, sidebar_reveal_width, sidebar_width, stagger_value, step_index,
         sync_search_mirror, toggle_selected_id, viewer_image_box, viewer_image_rect,
-        visible_year_buckets, with_tag, without_tag,
+        viewer_nav_progress, visible_year_buckets, with_tag, without_tag,
     };
     use gpui_kit::{Bounds, RenderImage, ScrollStrategy, UniformListScrollHandle, point, px, size};
     use smallvec::SmallVec;
@@ -11959,6 +12461,7 @@ mod tests {
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
     use std::time::{Duration, Instant};
     use vrc_photo_core::error::CoreError;
     use vrc_photo_core::importer::{
@@ -12268,6 +12771,14 @@ mod tests {
         assert_eq!(morph.current_bounds(start + MOTION_MORPH), to);
         let middle = morph.current_bounds(start + MOTION_MORPH / 2);
         assert!(middle.origin.x > from.origin.x && middle.origin.x < to.origin.x);
+    }
+
+    #[test]
+    fn viewer_nav_progress_respects_reduce_motion() {
+        let start = Instant::now();
+        assert_eq!(viewer_nav_progress(start, start, true), 1.0);
+        assert_eq!(viewer_nav_progress(start, start, false), 0.0);
+        assert_eq!(viewer_nav_progress(start, start + MOTION_BASE, false), 1.0);
     }
 
     #[test]
@@ -14016,5 +14527,307 @@ mod tests {
             import_summary(&report),
             "100 件中 40 枚を取り込みました（1 枚スキップ、失敗 1 件、連番 1 件）。残り 1 件は未処理です"
         );
+    }
+
+    fn indexing_fixture() -> ScanProgressView {
+        ScanProgressView {
+            phase: IpcScanPhase::Indexing,
+            processed: 12,
+            total: Some(20),
+            indexed: 12,
+            root: 1,
+            roots: 1,
+        }
+    }
+
+    #[test]
+    fn running_job_count_clamps_waiting_above_active() {
+        assert_eq!(running_job_count(6, 2), 4);
+        assert_eq!(running_job_count(2, 6), 0);
+        assert_eq!(running_job_count(0, 0), 0);
+    }
+
+    #[test]
+    fn compression_card_status_prioritizes_waiting_running_and_failed() {
+        let waiting = compression_card_status(6, 5, 2);
+        assert_eq!(waiting.headline, "未実行 5");
+        assert_eq!(waiting.detail, "実行中 1 · 失敗 2");
+        assert_eq!(waiting.tone, StatusTone::Waiting);
+
+        let running = compression_card_status(3, 0, 0);
+        assert_eq!(running.headline, "実行中 3");
+        assert_eq!(running.detail, "未実行 0 · 失敗 0");
+        assert_eq!(running.tone, StatusTone::Running);
+
+        let failed = compression_card_status(0, 0, 2);
+        assert_eq!(failed.headline, "失敗 2");
+        assert_eq!(failed.detail, "未実行 0 · 実行中 0");
+        assert_eq!(failed.tone, StatusTone::Failed);
+
+        let idle = compression_card_status(0, 0, 0);
+        assert_eq!(idle.headline, "キューは空です");
+        assert_eq!(idle.detail, "未実行のジョブはありません");
+        assert_eq!(idle.tone, StatusTone::Idle);
+    }
+
+    #[test]
+    fn import_card_status_covers_running_remaining_failed_partial_and_success() {
+        let mut progress = progress_fixture(42, 100);
+        progress.imported = 40;
+        progress.failed = 1;
+        let running = import_card_status(Some(&progress), None);
+        assert_eq!(running.headline, "取り込み中");
+        assert_eq!(running.detail, "42/100 · 取込 40 · 失敗 1");
+        assert_eq!(running.tone, StatusTone::Running);
+
+        let pending = ImportReportView {
+            total: 100,
+            processed: 40,
+            imported: 40,
+            issues: vec![non_retryable_issue("/bad.png")],
+            remaining: vec![PathBuf::from("/next.png")],
+            ..import_report_fixture()
+        };
+        let pending = import_card_status(None, Some(&pending));
+        assert_eq!(pending.headline, "未処理 1");
+        assert_eq!(pending.detail, "取込 40/100 · 失敗 1");
+        assert_eq!(pending.tone, StatusTone::Waiting);
+
+        let failed = ImportReportView {
+            total: 10,
+            processed: 10,
+            imported: 8,
+            issues: vec![non_retryable_issue("/a.png"), non_retryable_issue("/b.png")],
+            ..import_report_fixture()
+        };
+        let failed = import_card_status(None, Some(&failed));
+        assert_eq!(failed.headline, "失敗 2");
+        assert_eq!(failed.detail, "取込 8/10");
+        assert_eq!(failed.tone, StatusTone::Failed);
+
+        let partial = ImportReportView {
+            total: 10,
+            processed: 10,
+            imported: 9,
+            issues: vec![partial_issue("/c.png")],
+            ..import_report_fixture()
+        };
+        let partial = import_card_status(None, Some(&partial));
+        assert_eq!(partial.headline, "部分移動 1");
+        assert_eq!(partial.detail, "取込 9/10 · 完了");
+        assert_eq!(partial.tone, StatusTone::Waiting);
+
+        let success = ImportReportView {
+            total: 10,
+            processed: 10,
+            imported: 10,
+            renamed: vec![rename_fixture("/a.png", "/dest/a-1.png")],
+            ..import_report_fixture()
+        };
+        let success = import_card_status(None, Some(&success));
+        assert_eq!(success.headline, "完了 10 枚");
+        assert_eq!(success.detail, "前回の取り込み · 連番 1");
+        assert_eq!(success.tone, StatusTone::Success);
+
+        let none = import_card_status(None, None);
+        assert_eq!(none.headline, "履歴なし");
+        assert_eq!(none.detail, "取り込み結果がここに残ります");
+        assert_eq!(none.tone, StatusTone::Idle);
+    }
+
+    #[test]
+    fn import_card_status_surfaces_scan_failures_and_unprocessed_priority() {
+        let scan_only = ImportReportView {
+            total: 10,
+            processed: 10,
+            imported: 10,
+            scan_failures: vec![ScanFailure {
+                path: PathBuf::from("/dest"),
+                message: "scan failed".to_string(),
+            }],
+            ..import_report_fixture()
+        };
+        let scan_only_status = import_card_status(None, Some(&scan_only));
+        assert_eq!(scan_only_status.headline, "失敗 1");
+        assert_eq!(scan_only_status.detail, "取込 10/10 · スキャン失敗 1");
+        assert_eq!(scan_only_status.tone, StatusTone::Failed);
+        assert_eq!(
+            import_attention(None, Some(&scan_only)),
+            Some(StatusTone::Failed)
+        );
+
+        let hard_error = ImportReportView {
+            scan_error: Some("cannot index".to_string()),
+            ..import_report_fixture()
+        };
+        let hard_error_status = import_card_status(None, Some(&hard_error));
+        assert_eq!(hard_error_status.headline, "失敗 1");
+        assert_eq!(hard_error_status.detail, "取込 0/0 · スキャン失敗 1");
+        assert_eq!(hard_error_status.tone, StatusTone::Failed);
+
+        let triple = ImportReportView {
+            total: 10,
+            processed: 8,
+            imported: 7,
+            issues: vec![non_retryable_issue("/a.png"), partial_issue("/b.png")],
+            remaining: vec![PathBuf::from("/c.png")],
+            scan_failures: vec![ScanFailure {
+                path: PathBuf::from("/dest"),
+                message: "scan failed".to_string(),
+            }],
+            ..import_report_fixture()
+        };
+        let triple_status = import_card_status(None, Some(&triple));
+        assert_eq!(triple_status.headline, "未処理 1");
+        assert_eq!(triple_status.detail, "取込 7/10 · 失敗 2");
+        assert_eq!(triple_status.tone, StatusTone::Waiting);
+        assert_eq!(
+            import_attention(None, Some(&triple)),
+            Some(StatusTone::Failed)
+        );
+    }
+
+    #[test]
+    fn scan_card_status_handles_percent_walking_paused_and_stopped() {
+        let indexing = ScanProgressView {
+            phase: IpcScanPhase::Indexing,
+            processed: 50,
+            total: Some(100),
+            indexed: 49,
+            root: 2,
+            roots: 3,
+        };
+        let indexing = scan_card_status(Some(&indexing), true, false);
+        assert_eq!(indexing.headline, "50%");
+        assert_eq!(indexing.detail, "フォルダ 2/3 · 索引 50/100");
+        assert_eq!(indexing.tone, StatusTone::Running);
+
+        let walking = ScanProgressView {
+            phase: IpcScanPhase::Walking,
+            processed: 12,
+            total: None,
+            indexed: 0,
+            root: 1,
+            roots: 2,
+        };
+        let walking = scan_card_status(Some(&walking), true, false);
+        assert_eq!(walking.headline, "走査中…");
+        assert_eq!(walking.detail, "フォルダ 1/2 · 検索 12 件");
+        assert_eq!(walking.tone, StatusTone::Running);
+
+        let unknown_total = ScanProgressView {
+            total: None,
+            ..indexing_fixture()
+        };
+        assert_eq!(
+            scan_card_status(Some(&unknown_total), true, false).headline,
+            "走査中…"
+        );
+
+        let zero_total = ScanProgressView {
+            total: Some(0),
+            ..indexing_fixture()
+        };
+        assert_eq!(
+            scan_card_status(Some(&zero_total), true, false).headline,
+            "走査中…"
+        );
+
+        let paused = scan_card_status(None, true, true);
+        assert_eq!(paused.headline, "一時停止中");
+        assert_eq!(paused.detail, "監視を再開すると走査します");
+        assert_eq!(paused.tone, StatusTone::Waiting);
+
+        let stopped = scan_card_status(None, false, false);
+        assert_eq!(stopped.headline, "停止中");
+        assert_eq!(stopped.detail, "デーモンは接続されていません");
+        assert_eq!(stopped.tone, StatusTone::Idle);
+
+        let idle = scan_card_status(None, true, false);
+        assert_eq!(idle.headline, "待機中");
+        assert_eq!(idle.detail, "変更を監視しています");
+        assert_eq!(idle.tone, StatusTone::Idle);
+    }
+
+    #[test]
+    fn attention_dots_prioritize_failures_over_running_and_waiting() {
+        assert_eq!(compression_attention(6, 5, 2), Some(StatusTone::Failed));
+        assert_eq!(compression_attention(4, 1, 0), Some(StatusTone::Running));
+        assert_eq!(compression_attention(2, 2, 0), Some(StatusTone::Waiting));
+        assert_eq!(compression_attention(0, 0, 0), None);
+
+        let progress = progress_fixture(1, 10);
+        assert_eq!(
+            import_attention(Some(&progress), None),
+            Some(StatusTone::Running)
+        );
+
+        let failed = ImportReportView {
+            total: 2,
+            processed: 2,
+            imported: 1,
+            issues: vec![non_retryable_issue("/a.png")],
+            remaining: vec![PathBuf::from("/b.png")],
+            ..import_report_fixture()
+        };
+        assert_eq!(
+            import_attention(None, Some(&failed)),
+            Some(StatusTone::Failed)
+        );
+
+        let pending = ImportReportView {
+            remaining: vec![PathBuf::from("/b.png")],
+            ..import_report_fixture()
+        };
+        assert_eq!(
+            import_attention(None, Some(&pending)),
+            Some(StatusTone::Waiting)
+        );
+
+        assert_eq!(import_attention(None, None), None);
+
+        let scanning = ScanProgressView {
+            phase: IpcScanPhase::Indexing,
+            processed: 1,
+            total: Some(10),
+            indexed: 1,
+            root: 1,
+            roots: 1,
+        };
+        assert_eq!(
+            scan_attention(Some(&scanning), true, false),
+            Some(StatusTone::Running)
+        );
+        assert_eq!(scan_attention(None, true, true), Some(StatusTone::Waiting));
+        assert_eq!(scan_attention(None, true, false), None);
+        assert_eq!(scan_attention(None, false, false), None);
+    }
+
+    #[test]
+    fn import_running_progress_only_reads_the_running_phase() {
+        assert!(import_running_progress(None).is_none());
+
+        let ready = import_dialog_fixture();
+        assert!(import_running_progress(Some(&ready)).is_none());
+
+        let mut running = import_dialog_fixture();
+        running.phase = ImportDialogPhase::Running {
+            progress: progress_fixture(1, 2),
+            cancel: Arc::new(AtomicBool::new(false)),
+            cancel_requested: false,
+        };
+        assert_eq!(
+            import_running_progress(Some(&running)).map(|progress| progress.processed),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn tone_colors_use_the_sidebar_palette() {
+        assert_eq!(StatusTone::Idle.color(), MUTED_2);
+        assert_eq!(StatusTone::Running.color(), BLUE);
+        assert_eq!(StatusTone::Waiting.color(), AMBER);
+        assert_eq!(StatusTone::Failed.color(), RED);
+        assert_eq!(StatusTone::Success.color(), GREEN);
     }
 }
