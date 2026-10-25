@@ -900,6 +900,9 @@ struct YearRail {
 }
 
 impl YearRail {
+    // The rail is assembled from per-grid state and shared cells; splitting
+    // this private constructor would only move the same values into a struct.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         id: &'static str,
         labels: Arc<YearRailLabels>,
