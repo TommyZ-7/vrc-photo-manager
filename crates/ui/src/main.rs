@@ -1455,6 +1455,7 @@ pub struct App {
     db: Db,
     screen: Screen,
     sidebar_collapsed: bool,
+    sidebar_status_tab: SidebarStatusTab,
     sidebar_motion_epoch: u64,
     nav_previous: Screen,
     nav_epoch: u64,
@@ -1797,6 +1798,7 @@ impl App {
             db,
             screen: Screen::Photos,
             sidebar_collapsed: initial_settings.ui_sidebar_collapsed,
+            sidebar_status_tab: SidebarStatusTab::Compression,
             sidebar_motion_epoch: 0,
             nav_previous: Screen::Photos,
             nav_epoch: 0,
@@ -3893,6 +3895,7 @@ impl App {
         let photo_count = format_count(self.stats.photo_count);
         let compression_count =
             (self.active_job_count > 0).then(|| format_count(self.active_job_count));
+        let status_card = (!collapsed).then(|| self.sidebar_status_card(cx));
 
         let brand_text = v_flex()
             .min_w_0()
@@ -3997,6 +4000,7 @@ impl App {
                     )),
             )
             .child(div().flex_1())
+            .when_some(status_card, |this, card| this.child(card))
             .when(!collapsed, |this| {
                 this.child(
                     v_flex()
@@ -4094,6 +4098,254 @@ impl App {
             },
         )
         .into_any_element()
+    }
+
+    fn sidebar_status_card(&self, cx: &mut Context<Self>) -> AnyElement {
+        let import_progress = import_running_progress(self.import_dialog.as_ref());
+        let compression = compression_card_status(
+            self.active_job_count,
+            self.waiting_job_count,
+            self.failed_job_count,
+        );
+        let import = import_card_status(import_progress, self.import_report.as_ref());
+        let scan = scan_card_status(
+            self.scan_progress.as_ref(),
+            self.daemon_active,
+            self.daemon_paused,
+        );
+        let compression_attention = compression_attention(
+            self.active_job_count,
+            self.waiting_job_count,
+            self.failed_job_count,
+        );
+        let import_attention = import_attention(import_progress, self.import_report.as_ref());
+        let scan_attention = scan_attention(
+            self.scan_progress.as_ref(),
+            self.daemon_active,
+            self.daemon_paused,
+        );
+        let tab = self.sidebar_status_tab;
+        let (status, ratio) = match tab {
+            SidebarStatusTab::Compression => (&compression, None),
+            SidebarStatusTab::Import => (&import, import_progress.map(import_progress_ratio)),
+            SidebarStatusTab::Scan => (
+                &scan,
+                self.scan_progress
+                    .as_ref()
+                    .map(scan_progress_ratio)
+                    .filter(|ratio| *ratio > 0.0),
+            ),
+        };
+        let import_has_report = self.import_report.is_some();
+
+        let tabs = [
+            (
+                SidebarStatusTab::Compression,
+                "圧縮",
+                "sidebar-status-tab-compression",
+                compression_attention,
+            ),
+            (
+                SidebarStatusTab::Import,
+                "取り込み",
+                "sidebar-status-tab-import",
+                import_attention,
+            ),
+            (
+                SidebarStatusTab::Scan,
+                "スキャン",
+                "sidebar-status-tab-scan",
+                scan_attention,
+            ),
+        ];
+        let tab_row =
+            h_flex()
+                .gap(px(4.))
+                .children(tabs.into_iter().map(|(tab, label, id, attention)| {
+                    let active = self.sidebar_status_tab == tab;
+                    h_flex()
+                        .id(id)
+                        .relative()
+                        .flex_1()
+                        .h(px(20.))
+                        .justify_center()
+                        .items_center()
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(if active {
+                            rgba(0x66b3ff33)
+                        } else {
+                            rgba(0x00000000)
+                        })
+                        .text_size(px(10.))
+                        .font_medium()
+                        .cursor_pointer()
+                        .when(active, |this| {
+                            this.bg(rgb(ACCENT_SOFT)).text_color(rgb(BLUE))
+                        })
+                        .when(!active, |this| {
+                            this.text_color(rgb(MUTED_2))
+                                .hover(|this| this.bg(rgb(PANEL_2)).text_color(rgb(TEXT)))
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.sidebar_status_tab = tab;
+                            cx.notify();
+                        }))
+                        .when_some(attention, |this, tone| {
+                            this.child(
+                                div()
+                                    .absolute()
+                                    .top(px(3.))
+                                    .right(px(4.))
+                                    .size(px(4.))
+                                    .rounded_full()
+                                    .bg(rgb(tone.color())),
+                            )
+                        })
+                        .child(label)
+                }));
+
+        let mut body = v_flex()
+            .h(px(36.))
+            .justify_center()
+            .gap(px(2.))
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .font_semibold()
+                    .text_color(rgb(status.tone.color()))
+                    .child(status.headline.clone()),
+            )
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(rgb(MUTED))
+                    .truncate()
+                    .child(status.detail.clone()),
+            );
+        if let Some(ratio) = ratio {
+            body = body.child(status_progress_bar(ratio));
+        }
+
+        let footer =
+            match tab {
+                SidebarStatusTab::Compression => {
+                    let mut row = h_flex().items_center().h(px(24.)).gap(px(6.));
+                    if self.waiting_job_count > 0 {
+                        row = row.child(
+                            Button::new("sidebar-status-release-waiting")
+                                .label("未実行を開始")
+                                .small()
+                                .primary()
+                                .tooltip("未実行のジョブをすべて圧縮します")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.request_release_waiting_jobs(window, cx)
+                                })),
+                        );
+                    }
+                    if self.failed_job_count > 0 {
+                        row = row.child(
+                            Button::new("sidebar-status-retry-failed")
+                                .label("失敗を再試行")
+                                .small()
+                                .ghost()
+                                .tooltip("上限内の失敗ジョブを再試行します")
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.retry_all_failed_jobs(cx)),
+                                ),
+                        );
+                    }
+                    if self.waiting_job_count == 0 && self.failed_job_count == 0 {
+                        row = row.child(
+                            Button::new("sidebar-status-open-queue")
+                                .label("キューを開く")
+                                .small()
+                                .ghost()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.switch_screen(Screen::Dashboard, cx)
+                                })),
+                        );
+                    }
+                    row
+                }
+                SidebarStatusTab::Import => {
+                    h_flex()
+                        .items_center()
+                        .h(px(24.))
+                        .gap(px(6.))
+                        .child(if import_has_report {
+                            Button::new("sidebar-status-import-result")
+                                .label("結果を見る")
+                                .small()
+                                .ghost()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.switch_screen(Screen::Photos, cx)
+                                }))
+                        } else {
+                            Button::new("sidebar-status-photos")
+                                .label("写真を開く")
+                                .small()
+                                .ghost()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.switch_screen(Screen::Photos, cx)
+                                }))
+                        })
+                }
+                SidebarStatusTab::Scan => {
+                    let can_rescan =
+                        self.scan_progress.is_none() && self.daemon_active && !self.daemon_paused;
+                    let button = if can_rescan {
+                        Button::new("sidebar-status-rescan")
+                            .label("再スキャン")
+                            .small()
+                            .ghost()
+                            .tooltip("デーモンに再スキャンを要求します")
+                            .on_click(cx.listener(|this, _, _, cx| this.request_daemon_rescan(cx)))
+                    } else {
+                        Button::new("sidebar-status-dashboard")
+                            .label("ダッシュボード")
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.switch_screen(Screen::Dashboard, cx)
+                            }))
+                    };
+                    h_flex().items_center().h(px(24.)).gap(px(6.)).child(button)
+                }
+            };
+
+        v_flex()
+            .flex_shrink_0()
+            .p(px(9.))
+            .gap(px(4.))
+            .rounded(px(13.))
+            .bg(rgb(PANEL))
+            .border_1()
+            .border_color(rgba(0xffffff0f))
+            .child(
+                h_flex()
+                    .items_center()
+                    .h(px(12.))
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .font_semibold()
+                            .text_color(rgb(MUTED_2))
+                            .child("進行状況"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .size(px(6.))
+                            .rounded_full()
+                            .bg(rgb(status.tone.color())),
+                    ),
+            )
+            .child(tab_row)
+            .child(body)
+            .child(footer)
+            .into_any_element()
     }
 
     fn nav_highlight(&self) -> AnyElement {
@@ -11128,6 +11380,21 @@ fn import_running_progress(dialog: Option<&ImportDialogState>) -> Option<&Import
         Some(ImportDialogPhase::Running { progress, .. }) => Some(progress),
         _ => None,
     }
+}
+
+fn status_progress_bar(ratio: f32) -> Div {
+    div()
+        .h(px(2.))
+        .w_full()
+        .rounded_full()
+        .bg(rgb(PANEL_2))
+        .child(
+            div()
+                .h_full()
+                .w(relative(ratio.clamp(0.0, 1.0)))
+                .rounded_full()
+                .bg(rgb(BLUE)),
+        )
 }
 
 fn daemon_sync_label(
