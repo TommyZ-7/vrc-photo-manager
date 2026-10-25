@@ -45,10 +45,9 @@ mod tests {
             to: "0.4.0".to_string(),
             reason: None,
         };
-        assert_eq!(
-            result_notice(&result, "0.4.0").as_deref(),
-            Some("v0.4.0 に更新しました")
-        );
+        let notice = result_notice(&result, "0.4.0").unwrap();
+        assert_eq!(notice.message, "v0.4.0 に更新しました");
+        assert_eq!(notice.status, LastStatus::Success);
         assert!(result_notice(&result, "0.3.0").is_none());
     }
 
@@ -61,9 +60,48 @@ mod tests {
             reason: Some("起動しませんでした".to_string()),
         };
         let notice = result_notice(&result, "0.3.0").unwrap();
-        assert!(notice.contains("v0.3.0 に戻しました"));
-        assert!(notice.contains("起動しませんでした"));
+        assert!(notice.message.contains("v0.3.0 に戻しました"));
+        assert!(notice.message.contains("起動しませんでした"));
+        assert_eq!(notice.status, LastStatus::RolledBack);
         assert!(result_notice(&result, "0.4.0").is_none());
+    }
+
+    #[test]
+    fn labels_only_the_time_for_a_checked_state() {
+        let label = last_checked_label(Some(1_700_000_000));
+        assert!(!label.contains("最終確認"));
+        assert!(label.contains(':'));
+    }
+
+    #[test]
+    fn colors_rollback_and_failure_differently_from_success() {
+        let success = UpdateNotice {
+            message: "ok".into(),
+            status: LastStatus::Success,
+        };
+        let rolled_back = UpdateNotice {
+            message: "back".into(),
+            status: LastStatus::RolledBack,
+        };
+        let failed = UpdateNotice {
+            message: "failed".into(),
+            status: LastStatus::Failed,
+        };
+        assert_eq!(success.color(), GREEN);
+        assert_eq!(rolled_back.color(), AMBER);
+        assert_eq!(failed.color(), RED);
+    }
+
+    #[test]
+    fn auto_check_runs_while_an_update_is_available() {
+        let update = AvailableUpdate {
+            version: Version::new(0, 4, 0),
+            notes_url: None,
+            asset: None,
+            public_keys: Vec::new(),
+        };
+        assert!(phase_allows_auto_check(&UpdatePhase::Available(update)));
+        assert!(!phase_allows_auto_check(&UpdatePhase::Applying));
     }
 
     #[test]
@@ -235,12 +273,39 @@ impl UpdatePhase {
     }
 }
 
+fn phase_allows_auto_check(phase: &UpdatePhase) -> bool {
+    matches!(
+        phase,
+        UpdatePhase::Idle
+            | UpdatePhase::UpToDate
+            | UpdatePhase::Available(_)
+            | UpdatePhase::Error(_)
+    )
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct UpdateNotice {
+    pub(crate) message: String,
+    status: LastStatus,
+}
+
+impl UpdateNotice {
+    pub(crate) fn color(&self) -> u32 {
+        match self.status {
+            LastStatus::Success => GREEN,
+            LastStatus::RolledBack => AMBER,
+            LastStatus::Failed => RED,
+        }
+    }
+}
+
 /// UI state for the signed application updater.
 pub struct UpdateState {
     pub phase: UpdatePhase,
     pub install: InstallKind,
     armed: bool,
-    notice: Option<String>,
+    notice: Option<UpdateNotice>,
+    resume_available: Option<AvailableUpdate>,
     tx: Sender<UpdateMessage>,
     rx: Option<Receiver<UpdateMessage>>,
     health_token: Option<String>,
@@ -279,6 +344,7 @@ impl UpdateState {
             install,
             armed: false,
             notice,
+            resume_available: None,
             tx,
             rx: Some(rx),
             health_token,
@@ -328,8 +394,8 @@ impl UpdateState {
         .then(|| "更新".to_string())
     }
 
-    pub fn notice(&self) -> Option<&str> {
-        self.notice.as_deref()
+    pub(crate) fn notice(&self) -> Option<&UpdateNotice> {
+        self.notice.as_ref()
     }
 
     fn write_health_marker(&self) -> std::result::Result<(), String> {
@@ -423,10 +489,7 @@ impl App {
         if !self.settings.auto_update_check
             || !self.update.install.automatic_check()
             || self.update.busy()
-            || !matches!(
-                self.update.phase,
-                UpdatePhase::Idle | UpdatePhase::UpToDate | UpdatePhase::Error(_)
-            )
+            || !phase_allows_auto_check(&self.update.phase)
         {
             return;
         }
@@ -449,6 +512,10 @@ impl App {
             }
             return;
         }
+        self.update.resume_available = match &self.update.phase {
+            UpdatePhase::Available(update) => Some(update.clone()),
+            _ => None,
+        };
         self.update.in_flight = true;
         self.update.armed = false;
         self.update.phase = UpdatePhase::Checking;
@@ -474,8 +541,11 @@ impl App {
             });
         if let Err(error) = spawned {
             self.update.in_flight = false;
-            self.update.phase =
-                UpdatePhase::Error(format!("更新確認スレッドを開始できません: {error}"));
+            let resume = self.update.resume_available.take();
+            self.update.phase = match (manual, resume) {
+                (false, Some(update)) => UpdatePhase::Available(update),
+                _ => UpdatePhase::Error(format!("更新確認スレッドを開始できません: {error}")),
+            };
             self.message = Some("更新を確認できませんでした".to_string());
             cx.notify();
         }
@@ -739,6 +809,7 @@ impl App {
         match message {
             UpdateMessage::Checked { manual, result } => {
                 self.update.in_flight = false;
+                let resume = self.update.resume_available.take();
                 self.settings.update_last_checked_at = Some(Utc::now().timestamp());
                 if let Err(error) = self.settings.save(&self.db) {
                     tracing::warn!(%error, "cannot save update check time");
@@ -769,7 +840,9 @@ impl App {
                             self.message = Some(message);
                         } else {
                             tracing::warn!(%message, "automatic update check failed");
-                            self.update.phase = UpdatePhase::Idle;
+                            self.update.phase = resume
+                                .map(UpdatePhase::Available)
+                                .unwrap_or(UpdatePhase::Idle);
                         }
                     }
                 }
@@ -857,8 +930,8 @@ impl App {
                     .rounded(px(8.))
                     .bg(rgb(PANEL_2))
                     .text_size(px(11.))
-                    .text_color(rgb(GREEN))
-                    .child(notice.to_string()),
+                    .text_color(rgb(notice.color()))
+                    .child(notice.message.clone()),
             );
         }
 
@@ -1102,27 +1175,28 @@ fn last_checked_label(checked_at: Option<i64>) -> String {
     let Some(timestamp) = DateTime::from_timestamp(checked_at, 0) else {
         return "不明".to_string();
     };
-    format!(
-        "最終確認: {}",
-        timestamp.with_timezone(&Local).format("%Y/%m/%d %H:%M")
-    )
+    timestamp
+        .with_timezone(&Local)
+        .format("%Y/%m/%d %H:%M")
+        .to_string()
 }
 
-fn result_notice(result: &LastResult, current_version: &str) -> Option<String> {
+fn result_notice(result: &LastResult, current_version: &str) -> Option<UpdateNotice> {
     match result.status {
-        LastStatus::Success if result.to == current_version => {
-            Some(format!("v{} に更新しました", result.to))
-        }
+        LastStatus::Success if result.to == current_version => Some(UpdateNotice {
+            message: format!("v{} に更新しました", result.to),
+            status: LastStatus::Success,
+        }),
         LastStatus::RolledBack if result.from == current_version => {
             let reason = result
                 .reason
                 .as_deref()
                 .map(|reason| format!("（{reason}）"))
                 .unwrap_or_default();
-            Some(format!(
-                "更新に失敗したため v{} に戻しました{reason}",
-                result.from
-            ))
+            Some(UpdateNotice {
+                message: format!("更新に失敗したため v{} に戻しました{reason}", result.from),
+                status: LastStatus::RolledBack,
+            })
         }
         LastStatus::Failed if result.from == current_version => {
             let reason = result
@@ -1130,7 +1204,10 @@ fn result_notice(result: &LastResult, current_version: &str) -> Option<String> {
                 .as_deref()
                 .map(|reason| format!("（{reason}）"))
                 .unwrap_or_default();
-            Some(format!("更新に失敗しました{reason}"))
+            Some(UpdateNotice {
+                message: format!("更新に失敗しました{reason}"),
+                status: LastStatus::Failed,
+            })
         }
         _ => None,
     }

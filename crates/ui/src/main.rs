@@ -1345,7 +1345,7 @@ impl App {
             });
         }
         if let Some(notice) = app.update.notice() {
-            message.get_or_insert_with(|| notice.to_string());
+            message.get_or_insert_with(|| notice.message.to_string());
         }
         app.message = message;
         if let Some(id) = app.library.index.entries.first().map(|entry| entry.id) {
