@@ -80,12 +80,16 @@ const CARD_TEXT_GAP: f32 = 3.0;
 const CARD_WORLD_LINE_HEIGHT: f32 = 18.0;
 const CARD_META_LINE_HEIGHT: f32 = 15.0;
 const CARD_ROW_SLACK: f32 = 24.0;
-const RAIL_WIDTH: f32 = 88.0;
+const RAIL_WIDTH: f32 = 20.0;
 const RAIL_TOP_PAD: f32 = 24.0;
-const RAIL_TRACK_INSET: f32 = 12.0;
+const RAIL_TRACK_INSET: f32 = 6.0;
 const RAIL_LABEL_GAP: f32 = 16.0;
 const RAIL_YEAR_HIT_SLOP: f32 = 8.0;
 const RAIL_PILL_HEIGHT: f32 = 18.0;
+const RAIL_PILL_WIDTH: f32 = 80.0;
+const RAIL_PILL_RIGHT_MARGIN: f32 = 4.0;
+const RAIL_MARKER_SIZE: f32 = 10.0;
+const RAIL_HIT_WIDTH: f32 = 12.0;
 
 gpui_kit::actions!(
     ui,
@@ -407,6 +411,81 @@ fn rail_label_hidden_by_pill(label_y: f32, pill_y: f32) -> bool {
     (label_y - pill_y).abs() < RAIL_PILL_HEIGHT / 2.0 + 6.0
 }
 
+/// Hit strip centered on the 2 px rail track.
+fn rail_track_hit_bounds(bounds: Bounds<Pixels>) -> Bounds<Pixels> {
+    let track_x = bounds.right() - px(RAIL_TRACK_INSET);
+    let usable = (f32::from(bounds.size.height) - 2.0 * RAIL_TOP_PAD).max(0.0);
+    Bounds::new(
+        point(
+            track_x - px(RAIL_HIT_WIDTH / 2.0),
+            bounds.top() + px(RAIL_TOP_PAD),
+        ),
+        size(px(RAIL_HIT_WIDTH), px(usable)),
+    )
+}
+
+/// The expanded month pill, right-aligned inside the rail.
+fn rail_pill_bounds(bounds: Bounds<Pixels>, pill_y: f32) -> Bounds<Pixels> {
+    let center_y = bounds.top() + px(pill_y);
+    Bounds::new(
+        point(
+            bounds.right() - px(RAIL_PILL_WIDTH + RAIL_PILL_RIGHT_MARGIN),
+            center_y - px(RAIL_PILL_HEIGHT / 2.0),
+        ),
+        size(px(RAIL_PILL_WIDTH), px(RAIL_PILL_HEIGHT)),
+    )
+}
+
+/// The compact black marker shown at rest, centered on the track.
+fn rail_marker_bounds(bounds: Bounds<Pixels>, pill_y: f32) -> Bounds<Pixels> {
+    let center = point(
+        bounds.right() - px(RAIL_TRACK_INSET),
+        bounds.top() + px(pill_y),
+    );
+    Bounds::new(
+        point(
+            center.x - px(RAIL_MARKER_SIZE / 2.0),
+            center.y - px(RAIL_MARKER_SIZE / 2.0),
+        ),
+        size(px(RAIL_MARKER_SIZE), px(RAIL_MARKER_SIZE)),
+    )
+}
+
+/// A press may start a rail drag only on the track or, while expanded, the pill.
+fn rail_press_hits(
+    position: Point<Pixels>,
+    bounds: Bounds<Pixels>,
+    pill_y: f32,
+    expanded: bool,
+) -> bool {
+    rail_track_hit_bounds(bounds).contains(&position)
+        || (expanded && rail_pill_bounds(bounds, pill_y).contains(&position))
+}
+
+/// A press must be on the narrow track/pill surfaces and one of their
+/// hitboxes must be hovered. The hover gate keeps clicks from passing
+/// through an occluding overlay (Quick Look) into the hidden grid.
+fn rail_press_allowed(
+    interactive_hovered: bool,
+    position: Point<Pixels>,
+    bounds: Bounds<Pixels>,
+    pill_y: f32,
+    expanded: bool,
+) -> bool {
+    interactive_hovered && rail_press_hits(position, bounds, pill_y, expanded)
+}
+
+/// Hover follows the narrow gutter, and while expanded, the pill that
+/// reaches outside it so the pill stays open while the user grabs it.
+fn rail_hover_hits(
+    position: Point<Pixels>,
+    bounds: Bounds<Pixels>,
+    pill_y: f32,
+    expanded: bool,
+) -> bool {
+    bounds.contains(&position) || (expanded && rail_pill_bounds(bounds, pill_y).contains(&position))
+}
+
 /// Scroll distance from the top of a uniform list, in pixels.
 fn list_scroll_top(handle: &UniformListScrollHandle) -> f32 {
     let offset = handle.0.borrow().base_handle.offset().y;
@@ -585,6 +664,8 @@ struct PhotoBrowser {
     /// Shared with the mounted rail so a re-render cannot drop an in-flight
     /// drag or let it outlive the browser.
     rail_drag: Rc<Cell<bool>>,
+    /// Whether the pointer is currently inside the rail gutter.
+    rail_hover: Rc<Cell<bool>>,
 }
 
 impl PhotoBrowser {
@@ -599,6 +680,7 @@ impl PhotoBrowser {
             labels_generation: 0,
             labels: None,
             rail_drag: Rc::new(Cell::new(false)),
+            rail_hover: Rc::new(Cell::new(false)),
         }
     }
 
@@ -608,6 +690,7 @@ impl PhotoBrowser {
         self.pages.clear();
         self.labels = None;
         self.rail_drag.set(false);
+        self.rail_hover.set(false);
     }
 
     /// Drops a photo from this snapshot without notifying the caller.
@@ -813,9 +896,13 @@ struct YearRail {
     columns: usize,
     row_height: f32,
     drag_active: Rc<Cell<bool>>,
+    hovered: Rc<Cell<bool>>,
 }
 
 impl YearRail {
+    // The rail is assembled from per-grid state and shared cells; splitting
+    // this private constructor would only move the same values into a struct.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         id: &'static str,
         labels: Arc<YearRailLabels>,
@@ -824,6 +911,7 @@ impl YearRail {
         columns: usize,
         row_height: f32,
         drag_active: Rc<Cell<bool>>,
+        hovered: Rc<Cell<bool>>,
     ) -> Self {
         Self {
             id,
@@ -833,6 +921,7 @@ impl YearRail {
             columns,
             row_height,
             drag_active,
+            hovered,
         }
     }
 
@@ -877,9 +966,15 @@ impl IntoElement for YearRail {
     }
 }
 
+struct YearRailPrepaint {
+    gutter: Hitbox,
+    track: Hitbox,
+    pill: Option<Hitbox>,
+}
+
 impl Element for YearRail {
     type RequestLayoutState = ();
-    type PrepaintState = Hitbox;
+    type PrepaintState = YearRailPrepaint;
 
     fn id(&self) -> Option<ElementId> {
         Some(ElementId::Name(SharedString::from(self.id)))
@@ -911,9 +1006,30 @@ impl Element for YearRail {
         window: &mut Window,
         _: &mut gpui_kit::App,
     ) -> Self::PrepaintState {
-        // Keep cards under the rail from hovering or receiving clicks while
-        // still letting the wheel scroll the grid through the rail.
-        window.insert_hitbox(bounds, HitboxBehavior::BlockMouseExceptScroll)
+        let total = self.index.total;
+        let height: f32 = bounds.size.height.into();
+        let first_visible = first_visible_photo(
+            list_scroll_top(&self.scroll),
+            self.columns.max(1),
+            self.row_height,
+            total,
+        );
+        let pill_y = rail_y(first_visible, total, height);
+        let expanded = self.hovered.get() || self.drag_active.get();
+
+        // The full gutter keeps cards from hovering underneath and lets the
+        // wheel reach the list behind it. The narrow track/pill hitboxes sit
+        // in front so only those surfaces look and behave interactive.
+        let gutter = window.insert_hitbox(bounds, HitboxBehavior::BlockMouseExceptScroll);
+        let track = window.insert_hitbox(rail_track_hit_bounds(bounds), HitboxBehavior::Normal);
+        let pill = expanded.then(|| {
+            window.insert_hitbox(rail_pill_bounds(bounds, pill_y), HitboxBehavior::Normal)
+        });
+        YearRailPrepaint {
+            gutter,
+            track,
+            pill,
+        }
     }
 
     fn paint(
@@ -922,7 +1038,7 @@ impl Element for YearRail {
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut Self::RequestLayoutState,
-        hitbox: &mut Self::PrepaintState,
+        hitboxes: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut gpui_kit::App,
     ) {
@@ -933,9 +1049,12 @@ impl Element for YearRail {
         let height: f32 = bounds.size.height.into();
         let track_x = bounds.right() - px(RAIL_TRACK_INSET);
         let usable = (height - 2.0 * RAIL_TOP_PAD).max(0.0);
-        let hitbox = hitbox.clone();
+        let expanded = self.hovered.get() || self.drag_active.get();
 
-        window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
+        window.set_cursor_style(CursorStyle::PointingHand, &hitboxes.track);
+        if let Some(pill) = hitboxes.pill.as_ref() {
+            window.set_cursor_style(CursorStyle::PointingHand, pill);
+        }
 
         if usable > 0.0 {
             window.paint_quad(
@@ -1008,41 +1127,69 @@ impl Element for YearRail {
         });
 
         let pill_center = bounds.top() + px(pill_y);
-        let pill_bounds = Bounds::new(
-            point(
-                bounds.right() - px(RAIL_WIDTH) + px(4.),
-                pill_center - px(RAIL_PILL_HEIGHT / 2.0),
-            ),
-            size(px(RAIL_WIDTH - 8.), px(RAIL_PILL_HEIGHT)),
-        );
-        window.paint_quad(fill(pill_bounds, rgba((PANEL_2 << 8) | 0xf0)).corner_radii(px(9.)));
-        if let Some(line) = labels.months.get(&month) {
-            line.paint(
-                point(bounds.right() - px(RAIL_WIDTH - 10.), pill_center - px(6.)),
-                px(12.),
-                TextAlign::Right,
-                Some(px(RAIL_WIDTH - 20.)),
-                window,
-                cx,
-            )
-            .ok();
+        if expanded {
+            let pill_bounds = rail_pill_bounds(bounds, pill_y);
+            window.paint_quad(fill(pill_bounds, rgba((PANEL_2 << 8) | 0xf0)).corner_radii(px(9.)));
+            if let Some(line) = labels.months.get(&month) {
+                line.paint(
+                    point(
+                        bounds.right() - px(RAIL_PILL_WIDTH - 10.),
+                        pill_center - px(6.),
+                    ),
+                    px(12.),
+                    TextAlign::Right,
+                    Some(px(RAIL_PILL_WIDTH - 20.)),
+                    window,
+                    cx,
+                )
+                .ok();
+            }
+        } else {
+            let marker = rail_marker_bounds(bounds, pill_y);
+            let ring = Bounds::new(
+                point(marker.origin.x - px(1.), marker.origin.y - px(1.)),
+                size(marker.size.width + px(2.), marker.size.height + px(2.)),
+            );
+            window.paint_quad(fill(ring, rgba(0xffffff2e)).corner_radii(px(4.)));
+            window.paint_quad(fill(marker, rgba(0x05070af2)).corner_radii(px(3.)));
         }
 
+        let gutter_hitbox = hitboxes.gutter.clone();
+        let pill_hitbox = hitboxes.pill.clone();
         let rail = self.clone();
         window.on_mouse_event({
             let rail = rail.clone();
-            let hitbox = hitbox.clone();
+            let gutter_hitbox = gutter_hitbox.clone();
+            let pill_hitbox = pill_hitbox.clone();
             move |event: &MouseDownEvent, phase, window, cx| {
-                if !phase.bubble()
-                    || event.button != MouseButton::Left
-                    || !hitbox.is_hovered(window)
-                    || !bounds.contains(&event.position)
-                {
+                if !phase.bubble() || event.button != MouseButton::Left {
+                    return;
+                }
+                let first_visible = first_visible_photo(
+                    list_scroll_top(&rail.scroll),
+                    rail.columns.max(1),
+                    rail.row_height,
+                    rail.index.total,
+                );
+                let pill_y = rail_y(first_visible, rail.index.total, height);
+                let expanded = rail.hovered.get() || rail.drag_active.get();
+                let interactive_hovered = gutter_hitbox.is_hovered(window)
+                    || pill_hitbox
+                        .as_ref()
+                        .is_some_and(|pill| pill.is_hovered(window));
+                if !rail_press_allowed(
+                    interactive_hovered,
+                    event.position,
+                    bounds,
+                    pill_y,
+                    expanded,
+                ) {
                     return;
                 }
                 // The rail is painted above the cards; keep the press from
                 // reaching the photo underneath it.
                 cx.stop_propagation();
+                rail.hovered.set(true);
                 rail.drag_active.set(true);
                 rail.jump_to(event.position.y, bounds.top(), height, window);
             }
@@ -1051,28 +1198,70 @@ impl Element for YearRail {
         window.on_mouse_event({
             let rail = rail.clone();
             move |event: &MouseMoveEvent, phase, window, cx| {
-                if !rail.drag_active.get() {
-                    return;
-                }
-                if !event.dragging() {
-                    // Mouse-up can be swallowed by an overlay; stop dragging
-                    // as soon as the left button is no longer held.
-                    rail.drag_active.set(false);
+                if rail.drag_active.get() {
+                    if !event.dragging() {
+                        // Mouse-up can be swallowed by an overlay; stop
+                        // dragging as soon as the left button is no longer
+                        // held.
+                        let first_visible = first_visible_photo(
+                            list_scroll_top(&rail.scroll),
+                            rail.columns.max(1),
+                            rail.row_height,
+                            rail.index.total,
+                        );
+                        let pill_y = rail_y(first_visible, rail.index.total, height);
+                        let expanded = rail.hovered.get() || rail.drag_active.get();
+                        rail.drag_active.set(false);
+                        rail.hovered
+                            .set(rail_hover_hits(event.position, bounds, pill_y, expanded));
+                        window.refresh();
+                        return;
+                    }
+                    if !phase.bubble() {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    rail.jump_to(event.position.y, bounds.top(), height, window);
                     return;
                 }
                 if !phase.bubble() {
                     return;
                 }
-                cx.stop_propagation();
-                rail.jump_to(event.position.y, bounds.top(), height, window);
+                let first_visible = first_visible_photo(
+                    list_scroll_top(&rail.scroll),
+                    rail.columns.max(1),
+                    rail.row_height,
+                    rail.index.total,
+                );
+                let pill_y = rail_y(first_visible, rail.index.total, height);
+                let expanded = rail.hovered.get() || rail.drag_active.get();
+                let hovered = rail_hover_hits(event.position, bounds, pill_y, expanded);
+                if hovered != rail.hovered.get() {
+                    rail.hovered.set(hovered);
+                    window.refresh();
+                }
             }
         });
 
         window.on_mouse_event({
             let rail = rail;
-            move |_: &MouseUpEvent, phase, _, _| {
-                if phase.bubble() {
-                    rail.drag_active.set(false);
+            move |event: &MouseUpEvent, phase, window, _| {
+                if !phase.bubble() {
+                    return;
+                }
+                let first_visible = first_visible_photo(
+                    list_scroll_top(&rail.scroll),
+                    rail.columns.max(1),
+                    rail.row_height,
+                    rail.index.total,
+                );
+                let pill_y = rail_y(first_visible, rail.index.total, height);
+                let expanded = rail.hovered.get() || rail.drag_active.get();
+                let was_dragging = rail.drag_active.replace(false);
+                let hovered = rail_hover_hits(event.position, bounds, pill_y, expanded);
+                let hover_changed = rail.hovered.replace(hovered) != hovered;
+                if was_dragging || hover_changed {
+                    window.refresh();
                 }
             }
         });
@@ -3809,6 +3998,7 @@ impl App {
         let scroll = browser.scroll.clone();
         let generation = browser.generation;
         let rail_drag = browser.rail_drag.clone();
+        let rail_hover = browser.rail_hover.clone();
         let rows = index.total.div_ceil(columns);
 
         if rows == 0 {
@@ -3901,7 +4091,11 @@ impl App {
                         .w_full()
                         .min_w_0()
                         .items_start()
-                        .gap(px(16.));
+                        .gap(px(16.))
+                        // Keep cards out from under the year rail. The list
+                        // itself stays full width so wheel events over the
+                        // gutter still reach its scroll handle.
+                        .pr(px(RAIL_WIDTH));
                     for column in 0..columns {
                         let photo_index = row * columns + column;
                         if photo_index >= list_index.total {
@@ -3952,8 +4146,8 @@ impl App {
         }
         let mut grid = wrapper.child(list);
         if index.total > 0 {
-            // Added after the list so the rail owns input inside its 88 px
-            // column instead of the cards underneath.
+            // Added after the list so the rail owns the reserved gutter
+            // instead of the cards underneath.
             grid = grid.child(
                 div()
                     .absolute()
@@ -3973,6 +4167,7 @@ impl App {
                         columns,
                         metrics.row_height,
                         rail_drag,
+                        rail_hover,
                     )),
             );
         }
@@ -9105,14 +9300,15 @@ fn grid_available_width(
     } else {
         INSPECTOR_WIDTH
     };
-    (window_width - sidebar_width(sidebar_collapsed) - inspector - WORKSPACE_PAD_X).max(0.0)
+    (window_width - sidebar_width(sidebar_collapsed) - inspector - WORKSPACE_PAD_X - RAIL_WIDTH)
+        .max(0.0)
 }
 
 /// Width left for the search grid after the filter panel (290 px + 26 px
-/// margin) and the right column's 26 px padding on both sides. The Search
-/// screen has no inspector column, so none is subtracted.
+/// margin), the right column's 26 px padding on both sides, and the rail
+/// gutter. The Search screen has no inspector column, so none is subtracted.
 fn search_available_width(window_width: f32, sidebar_collapsed: bool) -> f32 {
-    (window_width - sidebar_width(sidebar_collapsed) - 290.0 - 26.0 - 52.0).max(0.0)
+    (window_width - sidebar_width(sidebar_collapsed) - 290.0 - 26.0 - 52.0 - RAIL_WIDTH).max(0.0)
 }
 
 fn viewer_details_width(open: bool, t: f32) -> f32 {
@@ -9575,7 +9771,8 @@ mod tests {
     use super::{
         CountDebounce, DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH,
         IpcScanPhase, MAX_PAGES, MIN_CARD_WIDTH, ManualOutputTarget, PAGE_SIZE, PHOTO_ROW_HEIGHT,
-        PhotoBrowser, PhotoIndex, PhotoPageCache, ScanProgressView, Screen, THUMB_CACHE_ENTRIES,
+        PhotoBrowser, PhotoIndex, PhotoPageCache, RAIL_MARKER_SIZE, RAIL_PILL_WIDTH,
+        RAIL_TRACK_INSET, RAIL_WIDTH, ScanProgressView, Screen, THUMB_CACHE_ENTRIES,
         THUMB_IN_FLIGHT, ThumbnailCache, YearBucket, add_photo_root_and_save, alert_summaries,
         anchor_photo_id, apply_library_index, apply_profile_format, autostart_description,
         average_bgra, build_year_buckets, card_meta_line, card_metrics, card_size_label,
@@ -9586,14 +9783,15 @@ mod tests {
         import_issue_counts, inner_corner_radius, ipc_status_label, job_retry_available,
         job_retry_label, lerp_color, list_scroll_top, lossless_hint, lossless_supported,
         manual_output_available, moved_profile_order, next_focus_index, normalize_note, parse_args,
-        parse_window_size, profile_summary, queue_status_badge, rail_label_hidden_by_pill,
-        rail_row_at, rail_scroll_offset, rail_y, release_confirmation, retryable_sources,
-        scan_progress_label, scan_progress_ratio, search_anchor_after_result,
-        search_available_width, selection_range, sidebar_reveal_width, sidebar_width,
-        stagger_value, step_index, sync_search_mirror, toggle_selected_id, viewer_details_width,
-        viewer_image_box, visible_year_buckets, with_tag, without_tag,
+        parse_window_size, profile_summary, queue_status_badge, rail_hover_hits,
+        rail_label_hidden_by_pill, rail_marker_bounds, rail_pill_bounds, rail_press_allowed,
+        rail_press_hits, rail_row_at, rail_scroll_offset, rail_track_hit_bounds, rail_y,
+        release_confirmation, retryable_sources, scan_progress_label, scan_progress_ratio,
+        search_anchor_after_result, search_available_width, selection_range, sidebar_reveal_width,
+        sidebar_width, stagger_value, step_index, sync_search_mirror, toggle_selected_id,
+        viewer_details_width, viewer_image_box, visible_year_buckets, with_tag, without_tag,
     };
-    use gpui_kit::{RenderImage, ScrollStrategy, UniformListScrollHandle, point, px};
+    use gpui_kit::{Bounds, RenderImage, ScrollStrategy, UniformListScrollHandle, point, px, size};
     use smallvec::SmallVec;
     use std::cell::Cell;
     use std::ffi::OsString;
@@ -9660,6 +9858,8 @@ mod tests {
             4
         );
         assert_eq!(grid_columns(0.0, MIN_CARD_WIDTH), 1);
+        assert_eq!(grid_available_width(1440.0, true, false), 968.0);
+        assert_eq!(search_available_width(1280.0, false), 654.0);
     }
 
     #[test]
@@ -10652,6 +10852,131 @@ mod tests {
         // rather than the real non-negative contract.
         assert_eq!(rail_scroll_offset(600, 3, PHOTO_ROW_HEIGHT, 0.0), 0.0);
         assert_eq!(rail_scroll_offset(600, 3, PHOTO_ROW_HEIGHT, -5.0), 0.0);
+    }
+
+    #[test]
+    fn rail_geometry_limits_presses_to_track_and_expanded_pill() {
+        let bounds = Bounds::new(point(px(10.), px(20.)), size(px(RAIL_WIDTH), px(600.)));
+        let pill_y = 300.0;
+
+        // Track strip: x 18..30, y 44..596 for this 20 px gutter.
+        assert!(rail_press_hits(
+            point(px(24.), px(100.)),
+            bounds,
+            pill_y,
+            false
+        ));
+        // Expanded pill: x -54..26, y 311..329. It deliberately reaches
+        // outside the narrow gutter and over the cards.
+        assert!(rail_press_hits(
+            point(px(0.), px(320.)),
+            bounds,
+            pill_y,
+            true
+        ));
+        // The same point is inert while the pill is collapsed.
+        assert!(!rail_press_hits(
+            point(px(0.), px(320.)),
+            bounds,
+            pill_y,
+            false
+        ));
+        // Left of the track stays inert while the pill is collapsed.
+        assert!(!rail_press_hits(
+            point(px(15.), px(320.)),
+            bounds,
+            pill_y,
+            false
+        ));
+        // Top and bottom padding of the track are outside the interactive strip.
+        assert!(!rail_press_hits(
+            point(px(24.), px(30.)),
+            bounds,
+            pill_y,
+            true
+        ));
+        assert!(!rail_press_hits(
+            point(px(24.), px(610.)),
+            bounds,
+            pill_y,
+            true
+        ));
+    }
+
+    #[test]
+    fn rail_press_requires_a_hovered_gutter() {
+        let bounds = Bounds::new(point(px(10.), px(20.)), size(px(RAIL_WIDTH), px(600.)));
+        let pill_y = 300.0;
+        let track = point(px(24.), px(100.));
+        let pill = point(px(0.), px(320.));
+
+        assert!(!rail_press_allowed(false, track, bounds, pill_y, false));
+        assert!(rail_press_allowed(true, track, bounds, pill_y, false));
+        assert!(!rail_press_allowed(false, pill, bounds, pill_y, true));
+        assert!(rail_press_allowed(true, pill, bounds, pill_y, true));
+        assert!(!rail_press_allowed(
+            true,
+            point(px(15.), px(320.)),
+            bounds,
+            pill_y,
+            false
+        ));
+    }
+
+    #[test]
+    fn rail_hover_stays_on_the_expanded_pill() {
+        let bounds = Bounds::new(point(px(10.), px(20.)), size(px(RAIL_WIDTH), px(600.)));
+        let pill_y = 300.0;
+
+        assert!(rail_hover_hits(
+            point(px(24.), px(100.)),
+            bounds,
+            pill_y,
+            false
+        ));
+        assert!(!rail_hover_hits(
+            point(px(0.), px(320.)),
+            bounds,
+            pill_y,
+            false
+        ));
+        assert!(rail_hover_hits(
+            point(px(0.), px(320.)),
+            bounds,
+            pill_y,
+            true
+        ));
+        assert!(!rail_hover_hits(
+            point(px(0.), px(100.)),
+            bounds,
+            pill_y,
+            true
+        ));
+    }
+
+    #[test]
+    fn rail_track_sits_right_of_the_gutter_center() {
+        let bounds = Bounds::new(point(px(10.), px(20.)), size(px(RAIL_WIDTH), px(600.)));
+        let track = rail_track_hit_bounds(bounds);
+        assert!(track.center().x > bounds.center().x);
+        assert_eq!(
+            f32::from(bounds.right() - track.center().x),
+            RAIL_TRACK_INSET
+        );
+    }
+
+    #[test]
+    fn rail_marker_sits_on_the_track_at_the_pill_center() {
+        let bounds = Bounds::new(point(px(10.), px(20.)), size(px(RAIL_WIDTH), px(600.)));
+        let pill_y = 300.0;
+        let marker = rail_marker_bounds(bounds, pill_y);
+        let pill = rail_pill_bounds(bounds, pill_y);
+
+        assert_eq!(f32::from(marker.size.width), RAIL_MARKER_SIZE);
+        assert_eq!(f32::from(marker.size.height), RAIL_MARKER_SIZE);
+        assert_eq!(f32::from(pill.size.width), RAIL_PILL_WIDTH);
+        assert_eq!(marker.center().y, pill.center().y);
+        assert!(rail_track_hit_bounds(bounds).contains(&marker.center()));
     }
 
     fn test_job(status: QueueStatus, retry_count: i64) -> CompressionJob {
