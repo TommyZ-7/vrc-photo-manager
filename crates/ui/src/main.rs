@@ -1325,6 +1325,8 @@ pub struct App {
     screen: Screen,
     sidebar_collapsed: bool,
     sidebar_motion_epoch: u64,
+    nav_previous: Screen,
+    nav_epoch: u64,
     inspector_collapsed: bool,
     inspector_epoch: u64,
     hovered_nav: Option<Screen>,
@@ -1508,6 +1510,8 @@ impl App {
             screen: Screen::Photos,
             sidebar_collapsed: initial_settings.ui_sidebar_collapsed,
             sidebar_motion_epoch: 0,
+            nav_previous: Screen::Photos,
+            nav_epoch: 0,
             inspector_collapsed: initial_settings.ui_inspector_collapsed,
             inspector_epoch: 0,
             hovered_nav: None,
@@ -2214,6 +2218,10 @@ impl App {
     /// Changes screens without rebuilding the library unless Photos was marked
     /// dirty while another screen was mounted.
     fn switch_screen(&mut self, screen: Screen, cx: &mut Context<Self>) {
+        if self.screen != screen {
+            self.nav_previous = self.screen;
+            self.nav_epoch = self.nav_epoch.wrapping_add(1);
+        }
         // The two photo grids have separate snapshots, so a selection made in
         // one tab cannot stay meaningful in the other. Keep it when visiting
         // Compression/Settings so the manual-compression action can use it.
@@ -3352,35 +3360,42 @@ impl App {
                     .child(brand_text),
             )
             .child(div().h(px(12.)))
-            .child(self.nav_item(
-                "写真",
-                Screen::Photos,
-                IconName::GalleryVerticalEnd,
-                Some(photo_count.clone()),
-                cx,
-            ))
-            .child(self.nav_item("検索", Screen::Search, IconName::Search, None, cx))
-            .child(self.nav_item(
-                "圧縮",
-                Screen::Compression,
-                IconName::Minimize,
-                compression_count,
-                cx,
-            ))
-            .child(self.nav_item(
-                "ダッシュボード",
-                Screen::Dashboard,
-                IconName::LayoutDashboard,
-                None,
-                cx,
-            ))
-            .child(self.nav_item(
-                "設定",
-                Screen::Settings,
-                IconName::Settings,
-                update_badge,
-                cx,
-            ))
+            .child(
+                v_flex()
+                    .relative()
+                    .w_full()
+                    .gap(px(NAV_ITEM_GAP))
+                    .child(self.nav_highlight())
+                    .child(self.nav_item(
+                        "写真",
+                        Screen::Photos,
+                        IconName::GalleryVerticalEnd,
+                        Some(photo_count.clone()),
+                        cx,
+                    ))
+                    .child(self.nav_item("検索", Screen::Search, IconName::Search, None, cx))
+                    .child(self.nav_item(
+                        "圧縮",
+                        Screen::Compression,
+                        IconName::Minimize,
+                        compression_count,
+                        cx,
+                    ))
+                    .child(self.nav_item(
+                        "ダッシュボード",
+                        Screen::Dashboard,
+                        IconName::LayoutDashboard,
+                        None,
+                        cx,
+                    ))
+                    .child(self.nav_item(
+                        "設定",
+                        Screen::Settings,
+                        IconName::Settings,
+                        update_badge,
+                        cx,
+                    )),
+            )
             .child(div().flex_1())
             .when(!collapsed, |this| {
                 this.child(
@@ -3481,6 +3496,78 @@ impl App {
         .into_any_element()
     }
 
+    fn nav_highlight(&self) -> AnyElement {
+        let collapsed = self.sidebar_collapsed;
+        let nav_epoch = self.nav_epoch;
+        let from = nav_item_top(nav_index(self.nav_previous));
+        let to = nav_item_top(nav_index(self.screen));
+        let vertical_duration = if nav_epoch == 0 {
+            Duration::ZERO
+        } else {
+            MOTION_BASE
+        };
+        let vertical_anim = || {
+            Animation::new(vertical_duration)
+                .with_easing(ease_motion)
+                .with_max_fps(MOTION_FPS)
+        };
+
+        let pill = div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .h(px(NAV_ITEM_HEIGHT))
+            .rounded(px(11.))
+            .bg(rgb(ACCENT_SOFT))
+            .with_animation(("nav-pill", nav_epoch), vertical_anim(), move |el, t| {
+                el.top(px(from + (to - from) * t))
+            });
+
+        let sidebar_epoch = self.sidebar_motion_epoch;
+        let from_left = nav_bar_left(!collapsed);
+        let to_left = nav_bar_left(collapsed);
+        let horizontal_anim = Animation::new(if sidebar_epoch == 0 {
+            Duration::ZERO
+        } else {
+            MOTION_SLOW
+        })
+        .with_easing(ease_motion)
+        .with_max_fps(MOTION_FPS);
+        let bar = div()
+            .absolute()
+            .left_0()
+            .w(px(2.))
+            .h(px(18.))
+            .with_animation(("nav-bar-y", nav_epoch), vertical_anim(), move |el, t| {
+                el.top(px(from + 11.0 + (to - from) * t))
+            })
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left(px(from_left))
+                    .w(px(2.))
+                    .h_full()
+                    .rounded_full()
+                    .bg(rgb(BLUE))
+                    .with_animation(
+                        ("nav-bar-x", sidebar_epoch),
+                        horizontal_anim,
+                        move |el, t| el.left(px(from_left + (to_left - from_left) * t)),
+                    ),
+            );
+
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .w_full()
+            .h(px(5.0 * NAV_ITEM_HEIGHT + 4.0 * NAV_ITEM_GAP))
+            .child(pill)
+            .child(bar)
+            .into_any_element()
+    }
+
     fn nav_item(
         &mut self,
         label: &'static str,
@@ -3490,21 +3577,30 @@ impl App {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let active = self.screen == screen;
+        let was_active = self.nav_previous == screen;
         let collapsed = self.sidebar_collapsed;
         let epoch = self.sidebar_motion_epoch;
+        let nav_epoch = self.nav_epoch;
         let reveal_duration = if epoch == 0 {
             Duration::ZERO
         } else {
             Duration::from_millis(320)
         };
-        let icon_color = if active { BLUE } else { MUTED };
-        let icon_element = if active {
-            Icon::new(icon)
-                .with_size(px(17.))
-                .text_color(rgb(icon_color))
-        } else {
-            Icon::new(icon).with_size(px(17.))
+        let color_anim = || {
+            Animation::new(MOTION_FAST)
+                .with_easing(ease_motion)
+                .with_max_fps(MOTION_FPS)
         };
+
+        let icon_element = Icon::new(icon).with_size(px(17.)).with_animation(
+            SharedString::from(format!("nav-icon-{label}-{nav_epoch}")),
+            color_anim(),
+            move |el, t| {
+                let from = if was_active { BLUE } else { MUTED };
+                let to = if active { BLUE } else { MUTED };
+                el.text_color(rgb(lerp_color(from, to, t)))
+            },
+        );
 
         let label_block = h_flex()
             .min_w_0()
@@ -3518,8 +3614,16 @@ impl App {
                     div()
                         .text_size(px(10.))
                         .font_family("monospace")
-                        .text_color(rgb(if active { BLUE } else { MUTED_2 }))
-                        .child(count),
+                        .child(count)
+                        .with_animation(
+                            SharedString::from(format!("nav-count-{label}-{nav_epoch}")),
+                            color_anim(),
+                            move |el, t| {
+                                let from = if was_active { BLUE } else { MUTED_2 };
+                                let to = if active { BLUE } else { MUTED_2 };
+                                el.text_color(rgb(lerp_color(from, to, t)))
+                            },
+                        ),
                 )
             })
             .with_animation(
@@ -3533,22 +3637,43 @@ impl App {
                 },
             );
 
+        let from_pad = if collapsed { 11.0 } else { 18.5 };
+        let to_pad = if collapsed { 18.5 } else { 11.0 };
+        let from_gap = if collapsed { 11.0 } else { 0.0 };
+        let to_gap = if collapsed { 0.0 } else { 11.0 };
+        let pad_anim = Animation::new(if epoch == 0 {
+            Duration::ZERO
+        } else {
+            MOTION_SLOW
+        })
+        .with_easing(ease_motion)
+        .with_max_fps(MOTION_FPS);
+        let content = h_flex()
+            .w_full()
+            .items_center()
+            .with_animation(
+                SharedString::from(format!("nav-pad-{label}-{epoch}")),
+                pad_anim,
+                move |el, t| {
+                    el.pl(px(from_pad + (to_pad - from_pad) * t))
+                        .gap(px(from_gap + (to_gap - from_gap) * t))
+                },
+            )
+            .child(icon_element)
+            .child(label_block);
+
+        let row_from = if was_active { 0xeaf4ff } else { MUTED };
+        let row_to = if active { 0xeaf4ff } else { MUTED };
         h_flex()
             .id(label)
             .relative()
-            .h(px(40.))
+            .h(px(NAV_ITEM_HEIGHT))
             .w_full()
             .rounded(px(11.))
             .cursor_pointer()
             .items_center()
-            .when(collapsed, |this| this.justify_center())
-            .when(!collapsed, |this| this.px(px(11.)).gap(px(11.)))
-            .when(active, |this| {
-                this.bg(rgb(ACCENT_SOFT)).text_color(rgb(0xeaf4ff))
-            })
             .when(!active, |this| {
-                this.text_color(rgb(MUTED))
-                    .hover(|this| this.bg(rgb(0x161d28)).text_color(rgb(TEXT)))
+                this.hover(|this| this.bg(rgb(0x161d28)).text_color(rgb(TEXT)))
             })
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 if !this.sidebar_collapsed {
@@ -3567,20 +3692,12 @@ impl App {
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.switch_screen(screen, cx);
             }))
-            .when(active, |this| {
-                this.child(
-                    div()
-                        .absolute()
-                        .top(px(11.))
-                        .left(px(if collapsed { 5. } else { -1. }))
-                        .w(px(2.))
-                        .h(px(18.))
-                        .rounded_full()
-                        .bg(rgb(BLUE)),
-                )
-            })
-            .child(icon_element)
-            .child(label_block)
+            .child(content)
+            .with_animation(
+                SharedString::from(format!("nav-text-{label}-{nav_epoch}")),
+                color_anim(),
+                move |el, t| el.text_color(rgb(lerp_color(row_from, row_to, t))),
+            )
             .into_any_element()
     }
 
@@ -3588,18 +3705,12 @@ impl App {
         let Some(screen) = self.hovered_nav.filter(|_| self.sidebar_collapsed) else {
             return div().into_any_element();
         };
-        let index = match screen {
-            Screen::Photos => 0,
-            Screen::Search => 1,
-            Screen::Compression => 2,
-            Screen::Dashboard => 3,
-            Screen::Settings => 4,
-        };
+        let index = nav_index(screen);
 
         div()
             .absolute()
             .left(px(86.))
-            .top(px(62. + index as f32 * 43. + 8.))
+            .top(px(70.0 + nav_item_top(index)))
             .px(px(8.))
             .py(px(5.))
             .rounded(px(7.))
@@ -3610,6 +3721,13 @@ impl App {
             .text_color(rgb(TEXT))
             .whitespace_nowrap()
             .child(screen.title())
+            .with_animation(
+                ("nav-tooltip", index),
+                Animation::new(MOTION_FAST)
+                    .with_easing(ease_motion)
+                    .with_max_fps(MOTION_FPS),
+                move |el, t| el.opacity(t).relative().left(px(-4.0 * (1.0 - t))),
+            )
             .into_any_element()
     }
 
@@ -10038,11 +10156,11 @@ mod tests {
         rail_pill_bounds, rail_press_allowed, rail_press_hits, rail_row_at, rail_scroll_offset,
         rail_track_hit_bounds, rail_y, release_confirmation, retryable_sources,
         scan_progress_label, scan_progress_ratio, screen_direction, search_anchor_after_result,
-        search_available_width, selection_range, sidebar_reveal_width, sidebar_width, stagger_value,
-        step_index, sync_search_mirror, toggle_selected_id, viewer_details_width, viewer_image_box,
-        viewer_image_rect, visible_year_buckets, with_tag, without_tag,
+        search_available_width, selection_range, sidebar_reveal_width, sidebar_width,
+        stagger_value, step_index, sync_search_mirror, toggle_selected_id, viewer_details_width,
+        viewer_image_box, viewer_image_rect, visible_year_buckets, with_tag, without_tag,
     };
-    use gpui_kit::{Bounds, RenderImage, ScrollStrategy, Size, UniformListScrollHandle, point, px, size};
+    use gpui_kit::{Bounds, RenderImage, ScrollStrategy, UniformListScrollHandle, point, px, size};
     use smallvec::SmallVec;
     use std::cell::Cell;
     use std::ffi::OsString;
@@ -10325,10 +10443,7 @@ mod tests {
     fn eased_progress_is_clamped_and_eased() {
         let start = Instant::now();
         assert_eq!(eased_progress(start, MOTION_BASE, start), 0.0);
-        assert_eq!(
-            eased_progress(start, MOTION_BASE, start + MOTION_BASE),
-            1.0
-        );
+        assert_eq!(eased_progress(start, MOTION_BASE, start + MOTION_BASE), 1.0);
         let half = eased_progress(start, MOTION_BASE, start + MOTION_BASE / 2);
         assert!(half > 0.5 && half < 1.0);
         assert_eq!(eased_progress(start, Duration::ZERO, start), 1.0);
@@ -10340,10 +10455,7 @@ mod tests {
         let from = Bounds::new(point(px(0.), px(0.)), size(px(10.), px(10.)));
         let to = Bounds::new(point(px(100.), px(200.)), size(px(300.), px(400.)));
         assert_eq!(morph_bounds_at(from, to, start, start), from);
-        assert_eq!(
-            morph_bounds_at(from, to, start, start + MOTION_MORPH),
-            to
-        );
+        assert_eq!(morph_bounds_at(from, to, start, start + MOTION_MORPH), to);
     }
 
     #[test]
@@ -10358,9 +10470,18 @@ mod tests {
     fn preferred_bounds_falls_back_to_the_other_source() {
         let card = Bounds::new(point(px(0.), px(0.)), size(px(10.), px(10.)));
         let inspector = Bounds::new(point(px(20.), px(20.)), size(px(30.), px(30.)));
-        assert_eq!(preferred_bounds(true, Some(card), Some(inspector)), Some(card));
-        assert_eq!(preferred_bounds(true, None, Some(inspector)), Some(inspector));
-        assert_eq!(preferred_bounds(false, Some(card), Some(inspector)), Some(inspector));
+        assert_eq!(
+            preferred_bounds(true, Some(card), Some(inspector)),
+            Some(card)
+        );
+        assert_eq!(
+            preferred_bounds(true, None, Some(inspector)),
+            Some(inspector)
+        );
+        assert_eq!(
+            preferred_bounds(false, Some(card), Some(inspector)),
+            Some(inspector)
+        );
         assert_eq!(preferred_bounds(false, Some(card), None), Some(card));
     }
 
