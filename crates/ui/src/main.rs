@@ -5,10 +5,12 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::Utc;
+use gpui_kit::base::FocusTrapElement as _;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -19,7 +21,9 @@ use gpui_kit::*;
 use smallvec::SmallVec;
 use vrc_photo_core::compressor;
 use vrc_photo_core::db::Db;
-use vrc_photo_core::importer::{self, ImportIssue, ImportIssueKind, ImportMode};
+use vrc_photo_core::importer::{
+    self, ImportIssue, ImportIssueKind, ImportMode, ImportProgress, ImportRename, ImportResult,
+};
 use vrc_photo_core::linker;
 use vrc_photo_core::logging::{DAEMON_LOG_FILE, UI_LOG_FILE, logs_dir};
 use vrc_photo_core::model::{
@@ -1293,11 +1297,99 @@ struct ScanProgressView {
 struct ImportReportView {
     mode: ImportMode,
     dest: PathBuf,
+    total: usize,
+    processed: usize,
     imported: usize,
     skipped: usize,
     issues: Vec<ImportIssue>,
+    renamed: Vec<ImportRename>,
+    remaining: Vec<PathBuf>,
+    cancelled: bool,
     scan_failures: Vec<ScanFailure>,
     scan_error: Option<String>,
+}
+
+#[derive(Clone)]
+enum ImportSource {
+    Files(Vec<PathBuf>),
+    Folder {
+        folder: PathBuf,
+        files: Vec<PathBuf>,
+        issues: Vec<ImportIssue>,
+    },
+}
+
+impl ImportSource {
+    fn files(&self) -> &[PathBuf] {
+        match self {
+            Self::Files(files) => files,
+            Self::Folder { files, .. } => files,
+        }
+    }
+
+    fn issues(&self) -> &[ImportIssue] {
+        match self {
+            Self::Files(_) => &[],
+            Self::Folder { issues, .. } => issues,
+        }
+    }
+
+    fn summary(&self) -> String {
+        match self {
+            Self::Files(files) => format!("{} 件のファイル", files.len()),
+            Self::Folder { folder, files, .. } => {
+                format!("{} · {} 件", folder.display(), files.len())
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+enum ImportDialogOrigin {
+    New,
+    Retry {
+        report: ImportReportView,
+        sources: Vec<PathBuf>,
+    },
+    Resume {
+        report: ImportReportView,
+        sources: Vec<PathBuf>,
+    },
+}
+
+impl ImportDialogOrigin {
+    fn run_summary(&self) -> Option<String> {
+        match self {
+            Self::New => None,
+            Self::Retry { sources, .. } => Some(format!("失敗分 {} 件", sources.len())),
+            Self::Resume { sources, .. } => Some(format!("残り {} 件", sources.len())),
+        }
+    }
+}
+
+#[derive(Clone)]
+enum ImportDialogPhase {
+    Ready,
+    Running {
+        progress: ImportProgress,
+        cancel: Arc<AtomicBool>,
+        cancel_requested: bool,
+    },
+}
+
+#[derive(Clone)]
+struct ImportDialogState {
+    origin: ImportDialogOrigin,
+    mode: ImportMode,
+    dest: PathBuf,
+    source: Option<ImportSource>,
+    error: Option<String>,
+    phase: ImportDialogPhase,
+}
+
+enum ImportRunMessage {
+    Progress(ImportProgress),
+    Finished(Result<ImportResult, String>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1388,6 +1480,7 @@ pub struct App {
     hovered_photo: Option<i64>,
     intro_seen: HashMap<i64, Instant>,
     photo_grid_focus: FocusHandle,
+    import_dialog_focus: FocusHandle,
     quick_look_open: bool,
     quick_look_epoch: u64,
     quick_look_return_focus: Option<FocusHandle>,
@@ -1427,6 +1520,7 @@ pub struct App {
     failed_jobs: Vec<CompressionJob>,
     failed_job_names: HashMap<i64, String>,
     import_report: Option<ImportReportView>,
+    import_dialog: Option<ImportDialogState>,
     monitor_world: Option<String>,
     monitor_instance: Option<String>,
     monitor_players: Vec<String>,
@@ -1651,6 +1745,7 @@ impl App {
             },
         );
         let photo_grid_focus = cx.focus_handle();
+        let import_dialog_focus = cx.focus_handle();
         let quick_look_close_focus = cx.focus_handle();
         let quick_look_prev_focus = cx.focus_handle();
         let quick_look_next_focus = cx.focus_handle();
@@ -1730,6 +1825,7 @@ impl App {
             hovered_photo: None,
             intro_seen: HashMap::new(),
             photo_grid_focus,
+            import_dialog_focus,
             quick_look_open: false,
             quick_look_epoch: 0,
             quick_look_return_focus: None,
@@ -1769,6 +1865,7 @@ impl App {
             failed_jobs: Vec::new(),
             failed_job_names: HashMap::new(),
             import_report: None,
+            import_dialog: None,
             monitor_world: None,
             monitor_instance: None,
             monitor_players: Vec::new(),
@@ -4533,16 +4630,16 @@ impl App {
                 .label("コピー取込")
                 .small()
                 .ghost()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.import_dialog(ImportMode::Copy, cx);
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.open_import_dialog(ImportMode::Copy, window, cx);
                 }))
                 .into_any_element(),
             Button::new("import-move")
                 .label("移動取込")
                 .small()
                 .primary()
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.import_dialog(ImportMode::Move, cx);
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.open_import_dialog(ImportMode::Move, window, cx);
                 }))
                 .into_any_element(),
         ];
@@ -6781,6 +6878,272 @@ impl App {
             .into_any_element()
     }
 
+    fn import_modal_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(dialog) = self.import_dialog.as_ref() else {
+            return div().into_any_element();
+        };
+        let title = match &dialog.origin {
+            ImportDialogOrigin::New => "取り込み",
+            ImportDialogOrigin::Retry { .. } => "取り込み · 再試行",
+            ImportDialogOrigin::Resume { .. } => "取り込み · 再開",
+        };
+        let mode = import_mode_label(dialog.mode);
+        let dest = dialog.dest.to_string_lossy().to_string();
+
+        let mut panel = v_flex()
+            .id("import-dialog-panel")
+            .w(px(560.))
+            .gap(px(16.))
+            .p(px(22.))
+            .rounded(px(18.))
+            .bg(rgb(PANEL))
+            .border_1()
+            .border_color(rgb(BORDER_STRONG))
+            .shadow(vec![
+                BoxShadow::new(px(0.), px(24.), rgba(0x00000099).into()).blur_radius(px(60.)),
+            ])
+            .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
+            .track_focus(&self.import_dialog_focus)
+            .focus_trap("import-dialog", &self.import_dialog_focus)
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .text_size(px(20.))
+                            .font_semibold()
+                            .text_color(rgb(TEXT))
+                            .child(title),
+                    )
+                    .child(self.badge(mode, BLUE, 0x14283d))
+                    .when_some(dialog.origin.run_summary(), |this, summary| {
+                        this.child(self.badge(&summary, MUTED, PANEL_2))
+                    })
+                    .child(div().flex_1()),
+            );
+
+        match &dialog.phase {
+            ImportDialogPhase::Ready => {
+                let source = dialog.source.as_ref();
+                let has_files = source.is_some_and(|source| !source.files().is_empty());
+                let mut body = v_flex()
+                    .gap(px(10.))
+                    .child(self.section_label("取り込み元"))
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                Button::new("import-pick-files")
+                                    .label("ファイルを選択")
+                                    .small()
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.pick_import_files(cx)),
+                                    ),
+                            )
+                            .child(
+                                Button::new("import-pick-folder")
+                                    .label("フォルダを選択")
+                                    .small()
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.pick_import_folder(cx)),
+                                    ),
+                            ),
+                    )
+                    .child(div().text_size(px(10.)).text_color(rgb(MUTED_2)).child(
+                        "フォルダはサブフォルダも対象です。compressed フォルダは除外します。",
+                    ))
+                    .when_some(source.map(|source| source.summary()), |this, summary| {
+                        this.child(
+                            div()
+                                .truncate()
+                                .text_size(px(11.))
+                                .text_color(rgb(MUTED))
+                                .child(summary),
+                        )
+                    })
+                    .when_some(
+                        source.and_then(|source| {
+                            let count = source.issues().len();
+                            (count > 0).then(|| {
+                                format!(
+                                    "{count} 件のフォルダを読み取れませんでした（結果に表示します）"
+                                )
+                            })
+                        }),
+                        |this, warning| {
+                            this.child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(AMBER))
+                                    .child(warning),
+                            )
+                        },
+                    )
+                    .when_some(dialog.error.clone(), |this, error| {
+                        this.child(
+                            div()
+                                .p(px(10.))
+                                .rounded(px(8.))
+                                .bg(rgb(0x2a1414))
+                                .border_1()
+                                .border_color(rgba(0xfb718533))
+                                .text_size(px(10.))
+                                .text_color(rgb(RED))
+                                .child(error),
+                        )
+                    });
+                body = body.child(self.section_label("取り込み先")).child(
+                    v_flex()
+                        .gap(px(4.))
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(11.))
+                                .text_color(rgb(MUTED))
+                                .child(dest.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(MUTED_2))
+                                .child("設定 > ライブラリ > 取り込み先で変更できます。"),
+                        ),
+                );
+                panel = panel.child(body).child(
+                    h_flex()
+                        .justify_end()
+                        .gap(px(8.))
+                        .child(
+                            Button::new("import-cancel")
+                                .label("キャンセル")
+                                .small()
+                                .ghost()
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.cancel_or_close_import(cx)),
+                                ),
+                        )
+                        .child(
+                            Button::new("import-start")
+                                .label("取り込み開始")
+                                .small()
+                                .primary()
+                                .disabled(!has_files)
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.start_import_from_source(cx)),
+                                ),
+                        ),
+                );
+            }
+            ImportDialogPhase::Running {
+                progress,
+                cancel_requested,
+                ..
+            } => {
+                let last_source = progress.last_source.as_ref().map(|path| {
+                    path.file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path.to_string_lossy().to_string())
+                });
+                panel = panel
+                    .child(
+                        v_flex()
+                            .gap(px(10.))
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(MUTED))
+                                    .child(import_progress_label(progress)),
+                            )
+                            .child(
+                                div()
+                                    .h(px(6.))
+                                    .w_full()
+                                    .rounded_full()
+                                    .bg(rgb(PANEL_2))
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .w(relative(import_progress_ratio(progress)))
+                                            .rounded_full()
+                                            .bg(rgb(BLUE)),
+                                    ),
+                            )
+                            .when_some(last_source, |this, file| {
+                                this.child(
+                                    div()
+                                        .truncate()
+                                        .text_size(px(10.))
+                                        .text_color(rgb(MUTED_2))
+                                        .child(file),
+                                )
+                            }),
+                    )
+                    .when_some(
+                        dialog.source.as_ref().map(|source| source.summary()),
+                        |this, summary| {
+                            this.child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(MUTED_2))
+                                    .child(summary),
+                            )
+                        },
+                    )
+                    .child(self.section_label("取り込み先"))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(11.))
+                            .text_color(rgb(MUTED))
+                            .child(dest.clone()),
+                    )
+                    .child(
+                        h_flex().justify_end().child(
+                            Button::new("import-cancel")
+                                .label(if *cancel_requested {
+                                    "キャンセル中…"
+                                } else {
+                                    "キャンセル"
+                                })
+                                .small()
+                                .ghost()
+                                .disabled(*cancel_requested)
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.cancel_or_close_import(cx)),
+                                ),
+                        ),
+                    );
+            }
+        }
+
+        div()
+            .id("import-dialog-scrim")
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .size_full()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x05070acc))
+            .on_click(cx.listener(|this, _, _, cx| this.cancel_or_close_import(cx)))
+            .child(panel)
+            .with_animation(
+                "import-dialog",
+                Animation::new(MOTION_FAST)
+                    .with_easing(ease_motion)
+                    .with_max_fps(MOTION_FPS),
+                |el, t| el.opacity(t),
+            )
+            .into_any_element()
+    }
+
     fn compression_screen(
         &mut self,
         window: &mut Window,
@@ -8074,46 +8437,270 @@ impl App {
             .into_any_element()
     }
 
-    fn import_dialog(&mut self, mode: ImportMode, cx: &mut Context<Self>) {
+    fn open_import_dialog(
+        &mut self,
+        mode: ImportMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let dialog = ImportDialogState {
+            origin: ImportDialogOrigin::New,
+            mode,
+            dest: self.settings.import_dir(),
+            source: None,
+            error: None,
+            phase: ImportDialogPhase::Ready,
+        };
+        if !reserve_import_dialog(&mut self.import_dialog, dialog) {
+            return;
+        }
+        let focus = self.import_dialog_focus.clone();
+        window.defer(cx, move |window, cx| {
+            window.focus(&focus, cx);
+        });
+        cx.notify();
+    }
+
+    fn pick_import_files(&mut self, cx: &mut Context<Self>) {
         let Some(files) = rfd::FileDialog::new()
             .add_filter("画像", &["png", "jpg", "jpeg"])
             .pick_files()
         else {
             return;
         };
-        let dest = self.settings.import_dir();
-        self.run_import(files, mode, dest, cx);
+        if let Some(dialog) = &mut self.import_dialog {
+            dialog.error = None;
+            dialog.source = Some(ImportSource::Files(files));
+        }
+        cx.notify();
     }
 
-    /// Copies or moves the picked files, then indexes the destination.
-    fn run_import(
-        &mut self,
-        files: Vec<PathBuf>,
-        mode: ImportMode,
-        dest: PathBuf,
-        cx: &mut Context<Self>,
-    ) {
-        let result = match importer::import_files(&files, &dest, mode) {
-            Ok(result) => result,
+    fn pick_import_folder(&mut self, cx: &mut Context<Self>) {
+        let Some(folder) = rfd::FileDialog::new().pick_folder() else {
+            return;
+        };
+        let dest = self
+            .import_dialog
+            .as_ref()
+            .map(|dialog| dialog.dest.clone());
+        let scan = match importer::collect_folder_sources(&folder, dest.as_deref()) {
+            Ok(scan) => scan,
             Err(error) => {
-                tracing::warn!(%error, "cannot import photos");
-                self.message = Some(format!("取り込みに失敗: {error}"));
+                tracing::warn!(%error, path = %folder.display(), "cannot scan import folder");
+                if let Some(dialog) = &mut self.import_dialog {
+                    dialog.error = Some(format!("フォルダを読み込めません: {error}"));
+                }
                 cx.notify();
                 return;
             }
         };
-        let mut report = ImportReportView {
-            mode,
-            dest,
-            imported: result.imported.len(),
-            skipped: result.skipped,
-            issues: result.issues,
-            scan_failures: Vec::new(),
-            scan_error: None,
+        if let Some(dialog) = &mut self.import_dialog {
+            dialog.error = scan
+                .files
+                .is_empty()
+                .then(|| "対象画像が見つかりません".to_string());
+            dialog.source = Some(ImportSource::Folder {
+                folder,
+                files: scan.files,
+                issues: scan.issues,
+            });
+        }
+        cx.notify();
+    }
+
+    fn start_import_from_source(&mut self, cx: &mut Context<Self>) {
+        let Some(files) = self
+            .import_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.source.as_ref())
+            .map(|source| source.files().to_vec())
+        else {
+            return;
         };
-        self.index_import_destination(&mut report, cx);
-        self.message = Some(import_summary(&report));
-        self.import_report = Some(report);
+        self.start_import_run(files, cx);
+    }
+
+    fn start_import_run(&mut self, files: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let Some(dialog) = self.import_dialog.as_mut() else {
+            return;
+        };
+        if !matches!(&dialog.phase, ImportDialogPhase::Ready) {
+            return;
+        }
+        if files.is_empty() {
+            return;
+        }
+        let total = files.len();
+        let cancel = Arc::new(AtomicBool::new(false));
+        dialog.error = None;
+        dialog.phase = ImportDialogPhase::Running {
+            progress: ImportProgress {
+                processed: 0,
+                total,
+                imported: 0,
+                skipped: 0,
+                failed: 0,
+                partial: 0,
+                last_source: None,
+            },
+            cancel: cancel.clone(),
+            cancel_requested: false,
+        };
+        let dest = dialog.dest.clone();
+        let mode = dialog.mode;
+        let task_cancel = cancel.clone();
+        let observe_cancel = cancel.clone();
+        let (tx, rx) = async_channel::unbounded();
+        cx.background_executor()
+            .spawn(async move {
+                let mut observe = |progress: ImportProgress| {
+                    if tx.try_send(ImportRunMessage::Progress(progress)).is_err() {
+                        observe_cancel.store(true, Ordering::Relaxed);
+                    }
+                };
+                let result = importer::import_files_observed(
+                    &files,
+                    &dest,
+                    mode,
+                    Some(&task_cancel),
+                    &mut observe,
+                )
+                .map_err(|error| error.to_string());
+                let _ = tx.try_send(ImportRunMessage::Finished(result));
+            })
+            .detach();
+        cx.spawn(async move |this, cx| {
+            while let Ok(message) = rx.recv().await {
+                let done = this
+                    .update(cx, |this, cx| match message {
+                        ImportRunMessage::Progress(progress) => {
+                            this.update_import_progress(progress, cx);
+                            false
+                        }
+                        ImportRunMessage::Finished(result) => {
+                            this.finish_import_run(result, cx);
+                            true
+                        }
+                    })
+                    .unwrap_or(true);
+                if done {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn update_import_progress(&mut self, progress: ImportProgress, cx: &mut Context<Self>) {
+        if let Some(dialog) = &mut self.import_dialog
+            && let ImportDialogPhase::Running {
+                progress: current, ..
+            } = &mut dialog.phase
+        {
+            *current = progress;
+        }
+        cx.notify();
+    }
+
+    fn finish_import_run(&mut self, result: Result<ImportResult, String>, cx: &mut Context<Self>) {
+        let Some(dialog) = self.import_dialog.take() else {
+            return;
+        };
+        match result {
+            Err(error) => match dialog.origin {
+                ImportDialogOrigin::New => {
+                    self.message = Some(format!("取り込みに失敗: {error}"));
+                    self.import_dialog = Some(ImportDialogState {
+                        origin: ImportDialogOrigin::New,
+                        mode: dialog.mode,
+                        dest: dialog.dest,
+                        source: dialog.source,
+                        error: Some(format!("取り込みに失敗: {error}")),
+                        phase: ImportDialogPhase::Ready,
+                    });
+                }
+                ImportDialogOrigin::Retry { .. } => {
+                    self.message = Some(format!("再試行に失敗: {error}"));
+                }
+                ImportDialogOrigin::Resume { .. } => {
+                    self.message = Some(format!("再開に失敗: {error}"));
+                }
+            },
+            Ok(result) => {
+                let imported = result.imported.len();
+                let mut report = match dialog.origin {
+                    ImportDialogOrigin::New => {
+                        let files = dialog
+                            .source
+                            .as_ref()
+                            .map(|source| source.files().to_vec())
+                            .unwrap_or_default();
+                        let mut issues = dialog
+                            .source
+                            .as_ref()
+                            .map(|source| source.issues().to_vec())
+                            .unwrap_or_default();
+                        let remaining = if result.cancelled {
+                            import_remaining(&files, result.processed)
+                        } else {
+                            Vec::new()
+                        };
+                        issues.extend(result.issues);
+                        ImportReportView {
+                            mode: dialog.mode,
+                            dest: dialog.dest.clone(),
+                            total: files.len(),
+                            processed: result.processed,
+                            imported,
+                            skipped: result.skipped,
+                            issues,
+                            renamed: result.renamed,
+                            remaining,
+                            cancelled: result.cancelled,
+                            scan_failures: Vec::new(),
+                            scan_error: None,
+                        }
+                    }
+                    ImportDialogOrigin::Retry { report, sources } => {
+                        merge_retry_report(&report, &sources, result)
+                    }
+                    ImportDialogOrigin::Resume { report, .. } => {
+                        merge_resume_report(&report, result)
+                    }
+                };
+                if import_should_index(imported) {
+                    report.scan_failures.clear();
+                    report.scan_error = None;
+                    self.index_import_destination(&mut report, cx);
+                }
+                self.message = Some(import_summary(&report));
+                self.import_report = Some(report);
+                self.import_dialog = None;
+                cx.notify();
+            }
+        }
+    }
+
+    fn cancel_or_close_import(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.import_dialog.as_mut() else {
+            return;
+        };
+        let close = match &mut dialog.phase {
+            ImportDialogPhase::Ready => true,
+            ImportDialogPhase::Running {
+                cancel,
+                cancel_requested,
+                ..
+            } => {
+                cancel.store(true, Ordering::Relaxed);
+                *cancel_requested = true;
+                false
+            }
+        };
+        if close {
+            self.import_dialog = None;
+        }
         cx.notify();
     }
 
@@ -8174,44 +8761,64 @@ impl App {
         }
     }
 
-    /// Re-imports only the retryable failed sources of the current report with
-    /// the same destination and mode.
-    fn retry_import(&mut self, cx: &mut Context<Self>) {
-        let Some(previous) = self.import_report.clone() else {
+    /// Opens the import modal in retry mode for the retryable failed sources.
+    fn open_retry_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(report) = self.import_report.clone() else {
             return;
         };
-        let sources = retryable_sources(&previous.issues);
+        let sources = retryable_sources(&report.issues);
         if sources.is_empty() {
             return;
         }
-        let result = match importer::import_files(&sources, &previous.dest, previous.mode) {
-            Ok(result) => result,
-            Err(error) => {
-                tracing::warn!(%error, "cannot retry import");
-                self.message = Some(format!("再取り込みに失敗: {error}"));
-                cx.notify();
-                return;
-            }
+        let dialog = ImportDialogState {
+            origin: ImportDialogOrigin::Retry {
+                report: report.clone(),
+                sources: sources.clone(),
+            },
+            mode: report.mode,
+            dest: report.dest.clone(),
+            source: None,
+            error: None,
+            phase: ImportDialogPhase::Ready,
         };
-        let mut report = ImportReportView {
-            mode: previous.mode,
-            dest: previous.dest.clone(),
-            imported: previous.imported + result.imported.len(),
-            skipped: previous.skipped + result.skipped,
-            issues: previous
-                .issues
-                .iter()
-                .filter(|issue| issue.kind != ImportIssueKind::Failed || !issue.retryable)
-                .cloned()
-                .collect(),
-            scan_failures: Vec::new(),
-            scan_error: None,
+        if !reserve_import_dialog(&mut self.import_dialog, dialog) {
+            return;
+        }
+        let focus = self.import_dialog_focus.clone();
+        window.defer(cx, move |window, cx| {
+            window.focus(&focus, cx);
+        });
+        self.start_import_run(sources, cx);
+    }
+
+    /// Opens the import modal in resume mode for the unprocessed sources.
+    fn open_resume_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(report) = self.import_report.clone() else {
+            return;
         };
-        report.issues.extend(result.issues);
-        self.index_import_destination(&mut report, cx);
-        self.message = Some(import_summary(&report));
-        self.import_report = Some(report);
-        cx.notify();
+        let sources = report.remaining.clone();
+        if sources.is_empty() {
+            return;
+        }
+        let dialog = ImportDialogState {
+            origin: ImportDialogOrigin::Resume {
+                report: report.clone(),
+                sources: sources.clone(),
+            },
+            mode: report.mode,
+            dest: report.dest.clone(),
+            source: None,
+            error: None,
+            phase: ImportDialogPhase::Ready,
+        };
+        if !reserve_import_dialog(&mut self.import_dialog, dialog) {
+            return;
+        }
+        let focus = self.import_dialog_focus.clone();
+        window.defer(cx, move |window, cx| {
+            window.focus(&focus, cx);
+        });
+        self.start_import_run(sources, cx);
     }
 
     fn import_report_panel(&self, report: &ImportReportView, cx: &mut Context<Self>) -> AnyElement {
@@ -8265,12 +8872,27 @@ impl App {
                             .child(dest),
                     )
                     .when(!retryable.is_empty(), |this| {
+                        let button = Button::new("import-retry-failed")
+                            .label("失敗分を再試行")
+                            .small();
+                        let button = if report.remaining.is_empty() {
+                            button.primary()
+                        } else {
+                            button.ghost()
+                        };
+                        this.child(button.on_click(
+                            cx.listener(|this, _, window, cx| this.open_retry_dialog(window, cx)),
+                        ))
+                    })
+                    .when(!report.remaining.is_empty(), |this| {
                         this.child(
-                            Button::new("import-retry-failed")
-                                .label("失敗分を再試行")
+                            Button::new("import-resume")
+                                .label(format!("残り {} 件を再開", report.remaining.len()))
                                 .small()
                                 .primary()
-                                .on_click(cx.listener(|this, _, _, cx| this.retry_import(cx))),
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_resume_dialog(window, cx)
+                                })),
                         )
                     })
                     .child(
@@ -8297,6 +8919,20 @@ impl App {
                     })
                     .when(partial > 0, |this| {
                         this.child(self.badge(&format!("部分移動 {partial}"), AMBER, 0x2b2210))
+                    })
+                    .when(!report.renamed.is_empty(), |this| {
+                        this.child(self.badge(
+                            &format!("連番 {}", report.renamed.len()),
+                            BLUE,
+                            0x14283d,
+                        ))
+                    })
+                    .when(!report.remaining.is_empty(), |this| {
+                        this.child(self.badge(
+                            &format!("未処理 {}", report.remaining.len()),
+                            AMBER,
+                            0x2b2210,
+                        ))
                     })
                     .when(scan_failed > 0, |this| {
                         this.child(self.badge(
@@ -8388,6 +9024,45 @@ impl App {
                                     .child(issue.message.clone()),
                             )
                     })),
+            );
+        }
+
+        if !report.renamed.is_empty() {
+            panel = panel.child(
+                v_flex()
+                    .px(px(16.))
+                    .py(px(8.))
+                    .gap(px(6.))
+                    .border_t_1()
+                    .border_color(rgb(BORDER))
+                    .child(self.section_label("連番を付けたファイル"))
+                    .child(
+                        v_flex()
+                            .gap(px(6.))
+                            .max_h(px(150.))
+                            .overflow_y_scrollbar()
+                            .children(report.renamed.iter().map(|rename| {
+                                v_flex()
+                                    .gap(px(2.))
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_size(px(10.))
+                                            .text_color(rgb(MUTED))
+                                            .child(rename.source.to_string_lossy().to_string()),
+                                    )
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_size(px(9.))
+                                            .text_color(rgb(BLUE))
+                                            .child(format!(
+                                                "→ {}",
+                                                rename.target.to_string_lossy()
+                                            )),
+                                    )
+                            })),
+                    ),
             );
         }
 
@@ -9533,6 +10208,11 @@ impl Render for App {
         } else {
             root
         };
+        let root = if self.import_dialog.is_some() {
+            root.child(self.import_modal_overlay(cx))
+        } else {
+            root
+        };
         root.child(self.viewer_morph_overlay())
     }
 }
@@ -10052,6 +10732,79 @@ where
     }
 }
 
+fn import_progress_label(progress: &ImportProgress) -> String {
+    format!(
+        "取り込み {}/{} · 取込 {} · スキップ {} · 失敗 {}",
+        progress.processed, progress.total, progress.imported, progress.skipped, progress.failed
+    )
+}
+
+fn import_progress_ratio(progress: &ImportProgress) -> f32 {
+    if progress.total == 0 {
+        0.0
+    } else {
+        (progress.processed as f32 / progress.total as f32).clamp(0.0, 1.0)
+    }
+}
+
+fn import_remaining(files: &[PathBuf], processed: usize) -> Vec<PathBuf> {
+    files
+        .iter()
+        .skip(processed.min(files.len()))
+        .cloned()
+        .collect()
+}
+
+fn import_should_index(imported: usize) -> bool {
+    imported > 0
+}
+
+/// Claims the single import-dialog slot. A second open request while any run
+/// is active is ignored so concurrent runs cannot target the same destination.
+fn reserve_import_dialog(slot: &mut Option<ImportDialogState>, next: ImportDialogState) -> bool {
+    if slot.is_some() {
+        return false;
+    }
+    *slot = Some(next);
+    true
+}
+
+fn merge_retry_report(
+    previous: &ImportReportView,
+    retry_sources: &[PathBuf],
+    result: ImportResult,
+) -> ImportReportView {
+    let attempted: HashSet<&Path> = retry_sources
+        .iter()
+        .take(result.processed.min(retry_sources.len()))
+        .map(PathBuf::as_path)
+        .collect();
+    let mut merged = previous.clone();
+    merged.imported += result.imported.len();
+    merged.skipped += result.skipped;
+    merged.issues.retain(|issue| {
+        !(issue.kind == ImportIssueKind::Failed
+            && issue.retryable
+            && attempted.contains(issue.source.as_path()))
+    });
+    merged.issues.extend(result.issues);
+    merged.renamed.extend(result.renamed);
+    merged
+}
+
+fn merge_resume_report(previous: &ImportReportView, result: ImportResult) -> ImportReportView {
+    let mut merged = previous.clone();
+    merged.imported += result.imported.len();
+    merged.skipped += result.skipped;
+    merged.processed += result.processed;
+    merged.issues.extend(result.issues);
+    merged.renamed.extend(result.renamed);
+    let consumed = result.processed.min(previous.remaining.len());
+    merged.remaining = previous.remaining.iter().skip(consumed).cloned().collect();
+    merged.cancelled = !merged.remaining.is_empty();
+    merged
+}
+
 fn import_summary(report: &ImportReportView) -> String {
     let (failed, _) = import_issue_counts(&report.issues);
     let mut details = Vec::new();
@@ -10061,9 +10814,18 @@ fn import_summary(report: &ImportReportView) -> String {
     if failed > 0 {
         details.push(format!("失敗 {failed} 件"));
     }
-    let mut summary = format!("{} 枚を取り込みました", report.imported);
+    if !report.renamed.is_empty() {
+        details.push(format!("連番 {} 件", report.renamed.len()));
+    }
+    let mut summary = format!(
+        "{} 件中 {} 枚を取り込みました",
+        report.total, report.imported
+    );
     if !details.is_empty() {
         summary.push_str(&format!("（{}）", details.join("、")));
+    }
+    if !report.remaining.is_empty() {
+        summary.push_str(&format!("。残り {} 件は未処理です", report.remaining.len()));
     }
     summary
 }
@@ -10939,8 +11701,9 @@ mod tests {
     // `gpui_kit::*`, shadowing the built-in `#[test]` and recursing forever.
     use super::{
         CountDebounce, DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH,
-        IpcScanPhase, MAX_PAGES, MIN_CARD_WIDTH, MOTION_BASE, MOTION_FAST, MOTION_MORPH,
-        MOTION_SLOW, ManualOutputTarget, MorphImageKind, NAV_ITEM_GAP, NAV_ITEM_HEIGHT, PAGE_SIZE,
+        ImportDialogOrigin, ImportDialogPhase, ImportDialogState, ImportReportView, IpcScanPhase,
+        MAX_PAGES, MIN_CARD_WIDTH, MOTION_BASE, MOTION_FAST, MOTION_MORPH, MOTION_SLOW,
+        ManualOutputTarget, MorphImageKind, NAV_ITEM_GAP, NAV_ITEM_HEIGHT, PAGE_SIZE,
         PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex, PhotoPageCache, RAIL_MARKER_SIZE,
         RAIL_PILL_WIDTH, RAIL_TRACK_INSET, RAIL_WIDTH, ScanProgressView, Screen,
         THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, VIEWER_DETAILS_WIDTH, ViewerBoxState,
@@ -10952,31 +11715,37 @@ mod tests {
         daemon_state_label, daemon_sync_label, decode_thumbnail, demo_thumb_path, ease_motion,
         eased_progress, first_visible_photo, format_captured_month, format_count, format_timestamp,
         grid_available_width, grid_columns, grid_columns_for, has_tag_filter, import_issue_counts,
-        inner_corner_radius, ipc_status_label, job_retry_available, job_retry_label, lerp_bounds,
-        lerp_color, list_scroll_top, lossless_hint, lossless_supported, manual_output_available,
+        import_progress_label, import_progress_ratio, import_remaining, import_should_index,
+        import_summary, inner_corner_radius, ipc_status_label, job_retry_available,
+        job_retry_label, lerp_bounds, lerp_color, list_scroll_top, lossless_hint,
+        lossless_supported, manual_output_available, merge_resume_report, merge_retry_report,
         morph_bounds_at, morph_image_plan, moved_profile_order, nav_index, nav_item_top,
         next_focus_index, normalize_note, parse_args, parse_window_size, preferred_bounds,
         profile_summary, queue_status_badge, rail_hover_hits, rail_label_hidden_by_pill,
         rail_marker_bounds, rail_pill_bounds, rail_press_allowed, rail_press_hits, rail_row_at,
-        rail_scroll_offset, rail_track_hit_bounds, rail_y, release_confirmation, retryable_sources,
-        scan_progress_label, scan_progress_ratio, screen_direction, search_anchor_after_result,
-        search_available_width, selection_range, sidebar_reveal_width, sidebar_width,
-        stagger_value, step_index, sync_search_mirror, toggle_selected_id, viewer_image_box,
-        viewer_image_rect, visible_year_buckets, with_tag, without_tag,
+        rail_scroll_offset, rail_track_hit_bounds, rail_y, release_confirmation,
+        reserve_import_dialog, retryable_sources, scan_progress_label, scan_progress_ratio,
+        screen_direction, search_anchor_after_result, search_available_width, selection_range,
+        sidebar_reveal_width, sidebar_width, stagger_value, step_index, sync_search_mirror,
+        toggle_selected_id, viewer_image_box, viewer_image_rect, visible_year_buckets, with_tag,
+        without_tag,
     };
     use gpui_kit::{Bounds, RenderImage, ScrollStrategy, UniformListScrollHandle, point, px, size};
     use smallvec::SmallVec;
     use std::cell::Cell;
     use std::ffi::OsString;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use vrc_photo_core::error::CoreError;
-    use vrc_photo_core::importer::{ImportIssue, ImportIssueKind};
+    use vrc_photo_core::importer::{
+        ImportIssue, ImportIssueKind, ImportMode, ImportProgress, ImportRename, ImportResult,
+    };
     use vrc_photo_core::model::{
         CompressionFormat, CompressionJob, CompressionProfile, DaemonOperation, Photo,
         PhotoIndexEntry, PhotoStatus, PhotoTextFilter, QueueStatus,
     };
+    use vrc_photo_core::scanner::ScanFailure;
     use vrc_photo_core::settings::{AppSettings, CardSize};
 
     #[test]
@@ -12585,6 +13354,300 @@ mod tests {
         assert_eq!(
             autostart_description(true, Some("app")),
             "OSログイン時にデーモンを起動"
+        );
+    }
+
+    fn progress_fixture(processed: usize, total: usize) -> ImportProgress {
+        ImportProgress {
+            processed,
+            total,
+            imported: processed.saturating_sub(1),
+            skipped: 0,
+            failed: 0,
+            partial: 0,
+            last_source: None,
+        }
+    }
+
+    fn import_report_fixture() -> ImportReportView {
+        ImportReportView {
+            mode: ImportMode::Copy,
+            dest: PathBuf::from("/dest"),
+            total: 0,
+            processed: 0,
+            imported: 0,
+            skipped: 0,
+            issues: Vec::new(),
+            renamed: Vec::new(),
+            remaining: Vec::new(),
+            cancelled: false,
+            scan_failures: Vec::new(),
+            scan_error: None,
+        }
+    }
+
+    #[test]
+    fn import_progress_label_and_ratio_use_processed_and_total() {
+        let mut progress = progress_fixture(42, 100);
+        progress.imported = 40;
+        progress.skipped = 1;
+        progress.failed = 1;
+
+        assert_eq!(
+            import_progress_label(&progress),
+            "取り込み 42/100 · 取込 40 · スキップ 1 · 失敗 1"
+        );
+        let ratio = import_progress_ratio(&progress);
+        assert!((ratio - 0.42).abs() < 1e-6);
+
+        let empty = progress_fixture(0, 0);
+        assert_eq!(
+            import_progress_label(&empty),
+            "取り込み 0/0 · 取込 0 · スキップ 0 · 失敗 0"
+        );
+        assert_eq!(import_progress_ratio(&empty), 0.0);
+    }
+
+    #[test]
+    fn import_remaining_slices_from_the_processed_prefix() {
+        let files = vec![
+            PathBuf::from("/a.png"),
+            PathBuf::from("/b.png"),
+            PathBuf::from("/c.png"),
+        ];
+        assert_eq!(import_remaining(&files, 0), files);
+        assert_eq!(import_remaining(&files, 2), vec![PathBuf::from("/c.png")]);
+        assert_eq!(import_remaining(&files, 9), Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn import_index_gate_requires_at_least_one_imported_file() {
+        assert!(!import_should_index(0));
+        assert!(import_should_index(1));
+    }
+
+    fn import_dialog_fixture() -> ImportDialogState {
+        ImportDialogState {
+            origin: ImportDialogOrigin::New,
+            mode: ImportMode::Copy,
+            dest: PathBuf::from("/dest"),
+            source: None,
+            error: None,
+            phase: ImportDialogPhase::Ready,
+        }
+    }
+
+    #[test]
+    fn import_dialog_reservation_rejects_a_second_open() {
+        let mut slot = None;
+        assert!(reserve_import_dialog(&mut slot, import_dialog_fixture()));
+        assert!(slot.is_some());
+        assert!(!reserve_import_dialog(&mut slot, import_dialog_fixture()));
+        assert!(slot.is_some());
+    }
+
+    fn retryable_issue(source: &str) -> ImportIssue {
+        ImportIssue {
+            source: PathBuf::from(source),
+            target: None,
+            message: "copy failed".to_string(),
+            kind: ImportIssueKind::Failed,
+            retryable: true,
+        }
+    }
+
+    fn non_retryable_issue(source: &str) -> ImportIssue {
+        ImportIssue {
+            retryable: false,
+            ..retryable_issue(source)
+        }
+    }
+
+    fn partial_issue(source: &str) -> ImportIssue {
+        ImportIssue {
+            kind: ImportIssueKind::PartialMove,
+            ..non_retryable_issue(source)
+        }
+    }
+
+    fn rename_fixture(source: &str, target: &str) -> ImportRename {
+        ImportRename {
+            source: PathBuf::from(source),
+            target: PathBuf::from(target),
+        }
+    }
+
+    #[test]
+    fn retry_merge_drops_attempted_retryable_failures_and_keeps_the_rest() {
+        let previous = ImportReportView {
+            total: 3,
+            processed: 3,
+            imported: 1,
+            issues: vec![
+                retryable_issue("/a.png"),
+                non_retryable_issue("/b.png"),
+                partial_issue("/c.png"),
+            ],
+            renamed: vec![rename_fixture("/old.png", "/dest/old-1.png")],
+            scan_failures: vec![ScanFailure {
+                path: PathBuf::from("/dest"),
+                message: "scan failed".to_string(),
+            }],
+            scan_error: Some("scan error".to_string()),
+            ..import_report_fixture()
+        };
+        let result = ImportResult {
+            processed: 1,
+            imported: vec![PathBuf::from("/dest/a.png")],
+            renamed: vec![rename_fixture("/a.png", "/dest/a-1.png")],
+            ..ImportResult::default()
+        };
+
+        let merged = merge_retry_report(
+            &previous,
+            &[PathBuf::from("/a.png"), PathBuf::from("/d.png")],
+            result,
+        );
+
+        assert_eq!(merged.imported, 2);
+        assert_eq!(merged.processed, 3);
+        assert_eq!(merged.issues.len(), 2);
+        assert!(
+            merged
+                .issues
+                .iter()
+                .any(|issue| issue.source.as_path() == Path::new("/b.png"))
+        );
+        assert!(
+            merged
+                .issues
+                .iter()
+                .any(|issue| issue.source.as_path() == Path::new("/c.png"))
+        );
+        assert!(
+            !merged
+                .issues
+                .iter()
+                .any(|issue| issue.source.as_path() == Path::new("/a.png"))
+        );
+        assert_eq!(merged.renamed.len(), 2);
+        assert!(merged.scan_error.is_some());
+        assert_eq!(merged.scan_failures.len(), 1);
+    }
+
+    #[test]
+    fn cancelled_retry_keeps_unattempted_retryable_failures() {
+        let previous = ImportReportView {
+            issues: vec![retryable_issue("/a.png"), retryable_issue("/d.png")],
+            ..import_report_fixture()
+        };
+        let result = ImportResult {
+            processed: 1,
+            issues: vec![retryable_issue("/a.png")],
+            ..ImportResult::default()
+        };
+
+        let merged = merge_retry_report(
+            &previous,
+            &[PathBuf::from("/a.png"), PathBuf::from("/d.png")],
+            result,
+        );
+
+        assert_eq!(merged.issues.len(), 2);
+        assert!(
+            merged
+                .issues
+                .iter()
+                .any(|issue| issue.source.as_path() == Path::new("/d.png"))
+        );
+        assert_eq!(
+            retryable_sources(&merged.issues),
+            vec![PathBuf::from("/d.png"), PathBuf::from("/a.png")]
+        );
+    }
+
+    #[test]
+    fn resume_merge_advances_progress_and_slices_remaining() {
+        let previous = ImportReportView {
+            total: 5,
+            processed: 2,
+            imported: 2,
+            remaining: vec![
+                PathBuf::from("/c.png"),
+                PathBuf::from("/d.png"),
+                PathBuf::from("/e.png"),
+            ],
+            cancelled: true,
+            ..import_report_fixture()
+        };
+        let result = ImportResult {
+            processed: 2,
+            imported: vec![PathBuf::from("/dest/c.png")],
+            skipped: 1,
+            ..ImportResult::default()
+        };
+
+        let merged = merge_resume_report(&previous, result);
+
+        assert_eq!(merged.processed, 4);
+        assert_eq!(merged.imported, 3);
+        assert_eq!(merged.skipped, 1);
+        assert_eq!(merged.remaining, vec![PathBuf::from("/e.png")]);
+        assert!(merged.cancelled);
+    }
+
+    #[test]
+    fn resume_merge_clears_cancelled_when_all_remaining_sources_ran() {
+        let previous = ImportReportView {
+            total: 2,
+            processed: 1,
+            imported: 1,
+            remaining: vec![PathBuf::from("/b.png")],
+            cancelled: true,
+            ..import_report_fixture()
+        };
+        let result = ImportResult {
+            processed: 1,
+            imported: vec![PathBuf::from("/dest/b.png")],
+            ..ImportResult::default()
+        };
+
+        let merged = merge_resume_report(&previous, result);
+
+        assert_eq!(merged.processed, 2);
+        assert_eq!(merged.imported, 2);
+        assert!(merged.remaining.is_empty());
+        assert!(!merged.cancelled);
+    }
+
+    #[test]
+    fn import_summary_reports_a_completed_run() {
+        let report = ImportReportView {
+            total: 3,
+            imported: 3,
+            ..import_report_fixture()
+        };
+
+        assert_eq!(import_summary(&report), "3 件中 3 枚を取り込みました");
+    }
+
+    #[test]
+    fn import_summary_includes_total_failures_renames_and_remaining() {
+        let report = ImportReportView {
+            total: 100,
+            processed: 40,
+            imported: 40,
+            skipped: 1,
+            issues: vec![non_retryable_issue("/bad.png")],
+            renamed: vec![rename_fixture("/old.png", "/dest/old-1.png")],
+            remaining: vec![PathBuf::from("/next.png")],
+            cancelled: true,
+            ..import_report_fixture()
+        };
+
+        assert_eq!(
+            import_summary(&report),
+            "100 件中 40 枚を取り込みました（1 枚スキップ、失敗 1 件、連番 1 件）。残り 1 件は未処理です"
         );
     }
 }
