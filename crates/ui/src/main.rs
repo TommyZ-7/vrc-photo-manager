@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -1329,6 +1329,9 @@ pub struct App {
     nav_epoch: u64,
     screen_epoch: u64,
     screen_direction: f32,
+    render_epoch: u64,
+    card_image_bounds: Rc<RefCell<HashMap<i64, (u64, Bounds<Pixels>)>>>,
+    inspector_preview_bounds: Rc<RefCell<Option<(u64, Bounds<Pixels>)>>>,
     inspector_collapsed: bool,
     inspector_epoch: u64,
     hovered_nav: Option<Screen>,
@@ -1516,6 +1519,9 @@ impl App {
             nav_epoch: 0,
             screen_epoch: 0,
             screen_direction: 1.0,
+            render_epoch: 0,
+            card_image_bounds: Rc::new(RefCell::new(HashMap::new())),
+            inspector_preview_bounds: Rc::new(RefCell::new(None)),
             inspector_collapsed: initial_settings.ui_inspector_collapsed,
             inspector_epoch: 0,
             hovered_nav: None,
@@ -4492,6 +4498,18 @@ impl App {
                     .rounded(px(inner_corner_radius(14.0, 2.0))),
             );
         }
+        let bounds_map = self.card_image_bounds.clone();
+        let bounds_frame = self.render_epoch;
+        thumb = thumb.child(
+            canvas(
+                move |bounds, _, _| {
+                    bounds_map.borrow_mut().insert(id, (bounds_frame, bounds));
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full(),
+        );
         if show_status {
             let status_color = if replaced {
                 BLUE
@@ -4903,6 +4921,18 @@ impl App {
                     .child("プレビューを読み込めません"),
             );
         }
+        let preview_bounds = self.inspector_preview_bounds.clone();
+        let preview_frame_epoch = self.render_epoch;
+        preview_frame = preview_frame.child(
+            canvas(
+                move |bounds, _, _| {
+                    *preview_bounds.borrow_mut() = Some((preview_frame_epoch, bounds));
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full(),
+        );
 
         let header = h_flex()
             .flex_shrink_0()
@@ -8720,6 +8750,7 @@ impl App {
 
 impl Render for App {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_epoch = self.render_epoch.wrapping_add(1);
         self.guard_viewer_selection(window, cx);
         let workspace = v_flex().flex_1().min_w_0().h_full();
         let root = h_flex()
