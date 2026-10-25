@@ -4204,7 +4204,8 @@ impl App {
             import_failed,
         )
         .into_iter()
-        .map(|(target, message)| {
+        .enumerate()
+        .map(|(index, (target, message))| {
             let (id, action) = match target {
                 Screen::Photos => ("alert-photos", "写真を開く"),
                 Screen::Compression => ("alert-compression", "圧縮を開く"),
@@ -4247,6 +4248,13 @@ impl App {
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.switch_screen(target, cx);
                         })),
+                )
+                .with_animation(
+                    ("global-alert", index),
+                    Animation::new(MOTION_BASE)
+                        .with_easing(ease_motion)
+                        .with_max_fps(MOTION_FPS),
+                    |el, t| el.opacity(t).relative().top(px(-8.0 * (1.0 - t))),
                 )
                 .into_any_element()
         })
@@ -4313,6 +4321,8 @@ impl App {
         let ids = self.selected_ids.clone();
         h_flex()
             .flex_shrink_0()
+            .h(px(36.))
+            .overflow_hidden()
             .items_center()
             .gap(px(10.))
             .px(px(26.))
@@ -4343,6 +4353,13 @@ impl App {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.open_manual_compression(ids.clone(), cx)
                     })),
+            )
+            .with_animation(
+                "selection-bar",
+                Animation::new(MOTION_FAST)
+                    .with_easing(ease_motion)
+                    .with_max_fps(MOTION_FPS),
+                |el, t| el.h(px(36.0 * t)).opacity(t),
             )
             .into_any_element()
     }
@@ -6584,6 +6601,13 @@ impl App {
                     ),
             );
 
+        let panel = panel.with_animation(
+            "manual-compression-panel",
+            Animation::new(MOTION_BASE)
+                .with_easing(ease_motion)
+                .with_max_fps(MOTION_FPS),
+            |el, t| el.relative().top(px(10.0 * (1.0 - t))),
+        );
         div()
             .id("manual-compression-scrim")
             .absolute()
@@ -6599,6 +6623,13 @@ impl App {
             .bg(rgba(0x05070acc))
             .on_click(cx.listener(|this, _, _, cx| this.close_manual_compression(cx)))
             .child(panel)
+            .with_animation(
+                "manual-compression-scrim",
+                Animation::new(MOTION_FAST)
+                    .with_easing(ease_motion)
+                    .with_max_fps(MOTION_FPS),
+                |el, t| el.opacity(t),
+            )
             .into_any_element()
     }
 
@@ -8218,7 +8249,15 @@ impl App {
             );
         }
 
-        panel.into_any_element()
+        panel
+            .with_animation(
+                "import-report",
+                Animation::new(MOTION_BASE)
+                    .with_easing(ease_motion)
+                    .with_max_fps(MOTION_FPS),
+                |el, t| el.opacity(t).relative().top(px(-8.0 * (1.0 - t))),
+            )
+            .into_any_element()
     }
 
     fn preset_button(
