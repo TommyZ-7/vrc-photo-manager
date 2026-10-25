@@ -1320,6 +1320,10 @@ struct ManualCompressionDialog {
     keep_original: bool,
 }
 
+type BoundsFrame = (u64, Bounds<Pixels>);
+type CardBoundsMap = Rc<RefCell<HashMap<i64, BoundsFrame>>>;
+type InspectorBounds = Rc<RefCell<Option<BoundsFrame>>>;
+
 pub struct App {
     db: Db,
     screen: Screen,
@@ -1330,8 +1334,8 @@ pub struct App {
     screen_epoch: u64,
     screen_direction: f32,
     render_epoch: u64,
-    card_image_bounds: Rc<RefCell<HashMap<i64, (u64, Bounds<Pixels>)>>>,
-    inspector_preview_bounds: Rc<RefCell<Option<(u64, Bounds<Pixels>)>>>,
+    card_image_bounds: CardBoundsMap,
+    inspector_preview_bounds: InspectorBounds,
     viewer_morph: Option<ViewerMorph>,
     viewer_morph_epoch: u64,
     viewer_return_source: Option<ViewerOpenSource>,
