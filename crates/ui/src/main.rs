@@ -617,6 +617,8 @@ struct PhotoBrowser {
     /// Shared with the mounted rail so a re-render cannot drop an in-flight
     /// drag or let it outlive the browser.
     rail_drag: Rc<Cell<bool>>,
+    /// Whether the pointer is currently inside the rail gutter.
+    rail_hover: Rc<Cell<bool>>,
 }
 
 impl PhotoBrowser {
@@ -630,6 +632,7 @@ impl PhotoBrowser {
             labels_generation: 0,
             labels: None,
             rail_drag: Rc::new(Cell::new(false)),
+            rail_hover: Rc::new(Cell::new(false)),
         }
     }
 
@@ -639,6 +642,7 @@ impl PhotoBrowser {
         self.pages.clear();
         self.labels = None;
         self.rail_drag.set(false);
+        self.rail_hover.set(false);
     }
 
     /// Drops a photo from this snapshot without notifying the caller.
@@ -843,6 +847,7 @@ struct YearRail {
     scroll: UniformListScrollHandle,
     columns: usize,
     drag_active: Rc<Cell<bool>>,
+    hovered: Rc<Cell<bool>>,
 }
 
 impl YearRail {
@@ -853,6 +858,7 @@ impl YearRail {
         scroll: UniformListScrollHandle,
         columns: usize,
         drag_active: Rc<Cell<bool>>,
+        hovered: Rc<Cell<bool>>,
     ) -> Self {
         Self {
             id,
@@ -861,6 +867,7 @@ impl YearRail {
             scroll,
             columns,
             drag_active,
+            hovered,
         }
     }
 
@@ -905,9 +912,14 @@ impl IntoElement for YearRail {
     }
 }
 
+struct YearRailPrepaint {
+    track: Hitbox,
+    pill: Option<Hitbox>,
+}
+
 impl Element for YearRail {
     type RequestLayoutState = ();
-    type PrepaintState = Hitbox;
+    type PrepaintState = YearRailPrepaint;
 
     fn id(&self) -> Option<ElementId> {
         Some(ElementId::Name(SharedString::from(self.id)))
@@ -939,9 +951,22 @@ impl Element for YearRail {
         window: &mut Window,
         _: &mut gpui_kit::App,
     ) -> Self::PrepaintState {
-        // Keep cards under the rail from hovering or receiving clicks while
-        // still letting the wheel scroll the grid through the rail.
-        window.insert_hitbox(bounds, HitboxBehavior::BlockMouseExceptScroll)
+        let total = self.index.total;
+        let height: f32 = bounds.size.height.into();
+        let first_visible =
+            first_visible_photo(list_scroll_top(&self.scroll), self.columns.max(1), total);
+        let pill_y = rail_y(first_visible, total, height);
+        let expanded = self.hovered.get() || self.drag_active.get();
+
+        // The full gutter keeps cards from hovering underneath and lets the
+        // wheel reach the list behind it. The narrow track/pill hitboxes sit
+        // in front so only those surfaces look and behave interactive.
+        window.insert_hitbox(bounds, HitboxBehavior::BlockMouseExceptScroll);
+        let track = window.insert_hitbox(rail_track_hit_bounds(bounds), HitboxBehavior::Normal);
+        let pill = expanded.then(|| {
+            window.insert_hitbox(rail_pill_bounds(bounds, pill_y), HitboxBehavior::Normal)
+        });
+        YearRailPrepaint { track, pill }
     }
 
     fn paint(
@@ -950,7 +975,7 @@ impl Element for YearRail {
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut Self::RequestLayoutState,
-        hitbox: &mut Self::PrepaintState,
+        hitboxes: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut gpui_kit::App,
     ) {
@@ -961,9 +986,12 @@ impl Element for YearRail {
         let height: f32 = bounds.size.height.into();
         let track_x = bounds.right() - px(RAIL_TRACK_INSET);
         let usable = (height - 2.0 * RAIL_TOP_PAD).max(0.0);
-        let hitbox = hitbox.clone();
+        let expanded = self.hovered.get() || self.drag_active.get();
 
-        window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
+        window.set_cursor_style(CursorStyle::PointingHand, &hitboxes.track);
+        if let Some(pill) = hitboxes.pill.as_ref() {
+            window.set_cursor_style(CursorStyle::PointingHand, pill);
+        }
 
         if usable > 0.0 {
             window.paint_quad(
@@ -1036,41 +1064,57 @@ impl Element for YearRail {
         });
 
         let pill_center = bounds.top() + px(pill_y);
-        let pill_bounds = Bounds::new(
-            point(
-                bounds.right() - px(RAIL_WIDTH) + px(4.),
-                pill_center - px(RAIL_PILL_HEIGHT / 2.0),
-            ),
-            size(px(RAIL_WIDTH - 8.), px(RAIL_PILL_HEIGHT)),
-        );
-        window.paint_quad(fill(pill_bounds, rgba((PANEL_2 << 8) | 0xf0)).corner_radii(px(9.)));
-        if let Some(line) = labels.months.get(&month) {
-            line.paint(
-                point(bounds.right() - px(RAIL_WIDTH - 10.), pill_center - px(6.)),
-                px(12.),
-                TextAlign::Right,
-                Some(px(RAIL_WIDTH - 20.)),
-                window,
-                cx,
-            )
-            .ok();
+        if expanded {
+            let pill_bounds = rail_pill_bounds(bounds, pill_y);
+            window.paint_quad(fill(pill_bounds, rgba((PANEL_2 << 8) | 0xf0)).corner_radii(px(9.)));
+            if let Some(line) = labels.months.get(&month) {
+                line.paint(
+                    point(
+                        bounds.right() - px(RAIL_PILL_WIDTH - 10.),
+                        pill_center - px(6.),
+                    ),
+                    px(12.),
+                    TextAlign::Right,
+                    Some(px(RAIL_PILL_WIDTH - 20.)),
+                    window,
+                    cx,
+                )
+                .ok();
+            }
+        } else {
+            let marker = rail_marker_bounds(bounds, pill_y);
+            let ring = Bounds::new(
+                point(marker.origin.x - px(1.), marker.origin.y - px(1.)),
+                size(marker.size.width + px(2.), marker.size.height + px(2.)),
+            );
+            window.paint_quad(fill(ring, rgba(0xffffff2e)).corner_radii(px(4.)));
+            window.paint_quad(fill(marker, rgba(0x05070af2)).corner_radii(px(3.)));
         }
 
         let rail = self.clone();
         window.on_mouse_event({
             let rail = rail.clone();
-            let hitbox = hitbox.clone();
             move |event: &MouseDownEvent, phase, window, cx| {
                 if !phase.bubble()
                     || event.button != MouseButton::Left
-                    || !hitbox.is_hovered(window)
                     || !bounds.contains(&event.position)
                 {
+                    return;
+                }
+                let first_visible = first_visible_photo(
+                    list_scroll_top(&rail.scroll),
+                    rail.columns.max(1),
+                    rail.index.total,
+                );
+                let pill_y = rail_y(first_visible, rail.index.total, height);
+                let expanded = rail.hovered.get() || rail.drag_active.get();
+                if !rail_press_hits(event.position, bounds, pill_y, expanded) {
                     return;
                 }
                 // The rail is painted above the cards; keep the press from
                 // reaching the photo underneath it.
                 cx.stop_propagation();
+                rail.hovered.set(true);
                 rail.drag_active.set(true);
                 rail.jump_to(event.position.y, bounds.top(), height, window);
             }
@@ -1079,28 +1123,45 @@ impl Element for YearRail {
         window.on_mouse_event({
             let rail = rail.clone();
             move |event: &MouseMoveEvent, phase, window, cx| {
-                if !rail.drag_active.get() {
-                    return;
-                }
-                if !event.dragging() {
-                    // Mouse-up can be swallowed by an overlay; stop dragging
-                    // as soon as the left button is no longer held.
-                    rail.drag_active.set(false);
+                if rail.drag_active.get() {
+                    if !event.dragging() {
+                        // Mouse-up can be swallowed by an overlay; stop
+                        // dragging as soon as the left button is no longer
+                        // held.
+                        rail.drag_active.set(false);
+                        rail.hovered.set(bounds.contains(&event.position));
+                        window.refresh();
+                        return;
+                    }
+                    if !phase.bubble() {
+                        return;
+                    }
+                    cx.stop_propagation();
+                    rail.jump_to(event.position.y, bounds.top(), height, window);
                     return;
                 }
                 if !phase.bubble() {
                     return;
                 }
-                cx.stop_propagation();
-                rail.jump_to(event.position.y, bounds.top(), height, window);
+                let hovered = bounds.contains(&event.position);
+                if hovered != rail.hovered.get() {
+                    rail.hovered.set(hovered);
+                    window.refresh();
+                }
             }
         });
 
         window.on_mouse_event({
             let rail = rail;
-            move |_: &MouseUpEvent, phase, _, _| {
-                if phase.bubble() {
-                    rail.drag_active.set(false);
+            move |event: &MouseUpEvent, phase, window, _| {
+                if !phase.bubble() {
+                    return;
+                }
+                let was_dragging = rail.drag_active.replace(false);
+                let hovered = bounds.contains(&event.position);
+                let hover_changed = rail.hovered.replace(hovered) != hovered;
+                if was_dragging || hover_changed {
+                    window.refresh();
                 }
             }
         });
@@ -3488,6 +3549,7 @@ impl App {
         let scroll = browser.scroll.clone();
         let generation = browser.generation;
         let rail_drag = browser.rail_drag.clone();
+        let rail_hover = browser.rail_hover.clone();
         let rows = index.total.div_ceil(columns);
 
         if rows == 0 {
@@ -3630,8 +3692,8 @@ impl App {
         }
         let mut grid = wrapper.child(list);
         if index.total > 0 {
-            // Added after the list so the rail owns input inside its 88 px
-            // column instead of the cards underneath.
+            // Added after the list so the rail owns the reserved gutter
+            // instead of the cards underneath.
             grid = grid.child(
                 div()
                     .absolute()
@@ -3650,6 +3712,7 @@ impl App {
                         scroll,
                         columns,
                         rail_drag,
+                        rail_hover,
                     )),
             );
         }
@@ -8223,13 +8286,7 @@ fn grid_available_width(
 /// margin), the right column's 26 px padding on both sides, and the rail
 /// gutter. The Search screen has no inspector column, so none is subtracted.
 fn search_available_width(window_width: f32, sidebar_collapsed: bool) -> f32 {
-    (window_width
-        - sidebar_width(sidebar_collapsed)
-        - 290.0
-        - 26.0
-        - 52.0
-        - RAIL_WIDTH)
-        .max(0.0)
+    (window_width - sidebar_width(sidebar_collapsed) - 290.0 - 26.0 - 52.0 - RAIL_WIDTH).max(0.0)
 }
 
 fn viewer_details_width(open: bool, t: f32) -> f32 {
@@ -8566,19 +8623,19 @@ mod tests {
         CountDebounce, DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH,
         IpcScanPhase, MAX_PAGES, PAGE_SIZE, PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex,
         PhotoPageCache, RAIL_MARKER_SIZE, RAIL_PILL_WIDTH, RAIL_WIDTH, ScanProgressView, Screen,
-        THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT,
-        ThumbnailCache, YearBucket, add_photo_root_and_save, alert_summaries, anchor_photo_id,
-        apply_library_index, apply_profile_format, autostart_description, average_bgra,
-        build_year_buckets, compression_policy, compression_policy_warning, daemon_liveness,
-        daemon_operation_label, daemon_state_label, daemon_sync_label, decode_thumbnail,
-        demo_thumb_path, ease_motion, first_visible_photo, format_captured_month, format_count,
-        format_timestamp, grid_available_width, grid_columns, grid_columns_for, has_tag_filter,
-        import_issue_counts, ipc_status_label, job_retry_available, job_retry_label, lerp_color,
-        list_scroll_top, lossless_hint, lossless_supported, moved_profile_order, next_focus_index,
-        normalize_note, parse_args, parse_window_size, profile_summary, queue_status_badge,
-        rail_label_hidden_by_pill, rail_marker_bounds, rail_pill_bounds, rail_press_hits,
-        rail_row_at, rail_scroll_offset, rail_track_hit_bounds, rail_y, release_confirmation,
-        retryable_sources, scan_progress_label, scan_progress_ratio, search_anchor_after_result,
+        THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, YearBucket, add_photo_root_and_save,
+        alert_summaries, anchor_photo_id, apply_library_index, apply_profile_format,
+        autostart_description, average_bgra, build_year_buckets, compression_policy,
+        compression_policy_warning, daemon_liveness, daemon_operation_label, daemon_state_label,
+        daemon_sync_label, decode_thumbnail, demo_thumb_path, ease_motion, first_visible_photo,
+        format_captured_month, format_count, format_timestamp, grid_available_width, grid_columns,
+        grid_columns_for, has_tag_filter, import_issue_counts, ipc_status_label,
+        job_retry_available, job_retry_label, lerp_color, list_scroll_top, lossless_hint,
+        lossless_supported, moved_profile_order, next_focus_index, normalize_note, parse_args,
+        parse_window_size, profile_summary, queue_status_badge, rail_label_hidden_by_pill,
+        rail_marker_bounds, rail_pill_bounds, rail_press_hits, rail_row_at, rail_scroll_offset,
+        rail_track_hit_bounds, rail_y, release_confirmation, retryable_sources,
+        scan_progress_label, scan_progress_ratio, search_anchor_after_result,
         search_available_width, sidebar_reveal_width, sidebar_width, stagger_value, step_index,
         sync_search_mirror, viewer_details_width, viewer_image_box, visible_year_buckets, with_tag,
         without_tag,
