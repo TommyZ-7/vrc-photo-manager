@@ -4938,7 +4938,14 @@ impl App {
                     .text_size(px(11.))
                     .font_semibold()
                     .text_color(rgb(0x071018))
-                    .child("✓"),
+                    .child("✓")
+                    .with_animation(
+                        SharedString::from(format!("card-check-{id}")),
+                        Animation::new(MOTION_FAST)
+                            .with_easing(ease_motion)
+                            .with_max_fps(MOTION_FPS),
+                        |el, t| el.opacity(t).relative().top(px(-3.0 * (1.0 - t))),
+                    ),
             )
         });
         thumb = thumb.when(photo.is_favorite, |this| {
@@ -6818,6 +6825,30 @@ impl App {
                                             .text_color(rgb(if active { MUTED } else { MUTED_2 }))
                                             .child(meta),
                                     )
+                                    .with_animation(
+                                        SharedString::from(format!(
+                                            "profile-card-{}-{active}",
+                                            profile.id
+                                        )),
+                                        Animation::new(MOTION_FAST)
+                                            .with_easing(ease_motion)
+                                            .with_max_fps(MOTION_FPS),
+                                        move |el, t| {
+                                            let (bg_from, bg_to) = if active {
+                                                (PANEL, ACCENT_SOFT)
+                                            } else {
+                                                (ACCENT_SOFT, PANEL)
+                                            };
+                                            let (border_from, border_to) = if active {
+                                                (BORDER, BLUE)
+                                            } else {
+                                                (BLUE, BORDER)
+                                            };
+                                            el.bg(rgb(lerp_color(bg_from, bg_to, t))).border_color(
+                                                rgb(lerp_color(border_from, border_to, t)),
+                                            )
+                                        },
+                                    )
                             }),
                         ))
                         .child(
@@ -6826,7 +6857,22 @@ impl App {
                                 .min_w_0()
                                 .gap(px(24.))
                                 .when_some(profile, |this, profile| {
-                                    this.child(self.profile_editor(&profile, window, cx))
+                                    let profile_index = self.profile_index;
+                                    this.child(
+                                        v_flex()
+                                            .child(self.profile_editor(&profile, window, cx))
+                                            .with_animation(
+                                                ("profile-editor", profile_index),
+                                                Animation::new(MOTION_FAST)
+                                                    .with_easing(ease_motion)
+                                                    .with_max_fps(MOTION_FPS),
+                                                |el, t| {
+                                                    el.opacity(t)
+                                                        .relative()
+                                                        .top(px(4.0 * (1.0 - t)))
+                                                },
+                                            ),
+                                    )
                                 })
                                 .child(
                                     h_flex()
