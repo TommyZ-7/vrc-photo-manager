@@ -5090,6 +5090,8 @@ impl App {
                 |_, _, _, _| {},
             )
             .absolute()
+            .top_0()
+            .left_0()
             .size_full(),
         );
         if show_status {
@@ -5513,6 +5515,8 @@ impl App {
                 |_, _, _, _| {},
             )
             .absolute()
+            .top_0()
+            .left_0()
             .size_full(),
         );
 
