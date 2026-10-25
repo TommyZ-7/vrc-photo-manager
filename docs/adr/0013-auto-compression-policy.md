@@ -1,10 +1,12 @@
 # ADR-0013: 圧縮ポリシーを全体設定にし、自動圧縮にも適用する
 
-- Status: Accepted
+- Status: Superseded in part by [ADR-0014](0014-manual-compression-policy.md)
 - Date: 2026-10-25
 - Supersedes: [ADR-0004](0004-compression-policy.md)
 
-> ADR-0004 の「自動圧縮は元画像を保持固定、手動時のみ都度選択」を置き換える。履歴として残す。
+> ADR-0004 の「自動圧縮は元画像を保持固定、手動時のみ都度選択」を置き換えた。
+> ADR-0014 で手動圧縮だけ実行時ポリシーに戻したが、自動圧縮の設定・
+> `auto_compress_immediate`・`waiting` キューはこの ADR のまま。
 
 ## Context
 

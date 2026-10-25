@@ -54,6 +54,8 @@ pub struct AvailableUpdate {
     pub version: Version,
     pub notes_url: Option<String>,
     pub asset: Option<PlatformAsset>,
+    /// Keys used to verify the manifest that produced this update.
+    pub public_keys: Vec<String>,
 }
 
 impl Manifest {
@@ -141,6 +143,14 @@ impl PlatformAsset {
                 "{platform}: signature is empty"
             )));
         }
+        let signature = crate::verify::decode_signature_base64(&self.signature).map_err(|_| {
+            UpdateError::InvalidManifest(format!("{platform}: signature is not valid base64"))
+        })?;
+        minisign_verify::Signature::decode(&signature).map_err(|_| {
+            UpdateError::InvalidManifest(format!(
+                "{platform}: signature is not a minisign signature"
+            ))
+        })?;
 
         let url = validate_url(&self.url, allow_http, "artifact url")?;
         let file_name = artifact_file_name(&url)?;
@@ -267,7 +277,7 @@ mod tests {
                     "format": "appimage",
                     "size": 1024,
                     "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                    "signature": "untrusted comment: x\nRUQ=\ntrusted comment: x\nAAAA"
+                    "signature": crate::verify::test_signature()
                 }
             }
         })
@@ -426,6 +436,27 @@ mod tests {
     fn rejects_empty_signature() {
         let mut value = valid_manifest();
         value["platforms"]["linux-x86_64"]["signature"] = serde_json::json!("");
+        assert!(matches!(
+            parse(&value, false),
+            Err(UpdateError::InvalidManifest(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_a_signature_that_is_not_base64() {
+        let mut value = valid_manifest();
+        value["platforms"]["linux-x86_64"]["signature"] = serde_json::json!("not base64!");
+        assert!(matches!(
+            parse(&value, false),
+            Err(UpdateError::InvalidManifest(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_a_signature_that_is_not_minisign() {
+        let mut value = valid_manifest();
+        // base64("nope")
+        value["platforms"]["linux-x86_64"]["signature"] = serde_json::json!("bm9wZQ==");
         assert!(matches!(
             parse(&value, false),
             Err(UpdateError::InvalidManifest(_))

@@ -207,12 +207,13 @@ VRChatの1滞在。
 | error | TEXT | |
 | output_path | TEXT | |
 | policy | TEXT | `keep` / `replace` |
+| output_dir | TEXT | 手動圧縮の出力先上書き。`NULL` はプロファイルの `output_dir` を使う |
 | retry_count | INTEGER | ユーザーが実行済みの再試行回数。既定0、上限3 |
 | created_at / started_at / finished_at | TEXT | |
 
 `retry_count` は自動リトライの回数ではない。再試行は `status='failed'` かつ `retry_count < 3` の行だけを対象に、進捗・エラー・開始/終了時刻をリセットし、`retry_count` を1増やして `pending` に戻す。上限到達後は更新しない。写真・プロファイル・方針は変えない。
 
-`waiting` は自動圧縮の即時実行がOFFのときに積まれる未実行状態。ワーカーは取得しない。ダッシュボードの「待機をすべて圧縮」が、全プロファイルの `waiting` を `pending` に一括変更する。
+`waiting` は自動圧縮の即時実行がOFFのときに積まれる未実行状態。ワーカーは取得しない。ダッシュボードの「待機をすべて圧縮」が、全プロファイルの `waiting` を `pending` に一括変更する。手動圧縮のジョブは `output_dir` でプロファイルの出力先を上書きでき、デーモンはこの値をプロファイルより優先する。クリップボード出力はジョブを作らない。
 
 取得は単一SQLで原子的に行う。
 
@@ -292,7 +293,7 @@ UIからデーモンへの再実行要求。FIFOの小さなキュー。
 ```text
 photo_roots, log_dir, managed_dir, language,
 autostart, tray, auto_compress, auto_compress_backlog,
-auto_compress_immediate, compression_keep_original,
+auto_compress_immediate, auto_compress_keep_original,
 estimated_link, thumbnail_cache_mb, compression_workers
 ```
 
@@ -302,7 +303,7 @@ estimated_link, thumbnail_cache_mb, compression_workers
 2. `photos.status='missing'` の写真はUI一覧に出さない。DBからは消さない。`replaced` は圧縮版を表示するため一覧に出す。
 3. `photo_context` は写真ごとに1行。再紐付けはUPSERTで上書きする。
 4. `derivatives.path` は一意。圧縮出力は既存ファイルを上書きしない。
-5. `compression_jobs` は `pending` のものを1件ずつ原子的に取得する。`waiting` は取得せず、明示的な一括解放だけで `pending` に移す。
+5. `compression_jobs` は `pending` のものを1件ずつ原子的に取得する。`waiting` は取得せず、明示的な一括解放だけで `pending` に移す。`output_dir` が非NULLなら、プロファイルの `output_dir` より優先する。
 6. 写真削除はDB削除ではなく `status='missing'` とOSゴミ箱移動。圧縮版が残っている場合は `replaced` として表示を継続する。
 7. 生ログは保存しない。解析済みイベントのみ保存する。
 8. `daemon_errors` は操作（`scan` / `log` / `link`）ごとに1行だけ。解消したら削除する。
@@ -328,6 +329,7 @@ estimated_link, thumbnail_cache_mb, compression_workers
 | 3 | `idx_photos_captured_id` 追加（`captured_at_utc DESC, id DESC`） |
 | 4 | `compression_jobs.retry_count`、`daemon_errors`、`daemon_commands` 追加 |
 | 5 | `photos.display_derivative_id`、表示対象インデックス、移動照合インデックス追加 |
+| 6 | `compression_jobs.output_dir` 追加 |
 
 V4以降は `IMMEDIATE` トランザクションで適用する。UIとデーモンが同時に起動しても、書き込みロックで直列化し、`user_version` と列・テーブルの存在を再確認してから進めるため、中断後の再実行でも安全。
 

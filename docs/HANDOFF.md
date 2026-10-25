@@ -30,7 +30,7 @@
 - XMP補完（撮影者、ワールド名/ID）
 - 256px WebPサムネイル生成
 - JPEG / WebP / AVIF / JPEG XL圧縮
-- 自動・手動・一括圧縮、共有キュー、元画像保持/置換（OSゴミ箱、既定は保持）
+- 自動・手動・一括圧縮、共有キュー、自動圧縮の元画像保持/置換（既定は保持）、手動圧縮の実行時ポリシーと出力先選択
 - コピー/移動の写真取り込み
 - OSゴミ箱への写真移動（2段階確認）
 - トレイ常駐、自動起動
@@ -105,7 +105,7 @@ cargo packager --release
 - GPUI本体は `gpui-kit = "=0.8.0"` が固定する `gpui-pre` 0.3.9。直接 `gpui` クレートを追加しない。
 - 画像表示は `crates/ui/src/main.rs` の `load_render` / `load_preview` に集約。
 - 圧縮ジョブの取得はSQLiteの単一UPDATEで原子的に行う。
-- 圧縮の元画像ポリシーは `AppSettings.compression_keep_original` で統一する（既定は保持）。`replace` はOSゴミ箱のみで、出力検証に成功した場合だけ実行する。
+- 自動圧縮の元画像ポリシーは `AppSettings.auto_compress_keep_original`（既定は保持）。手動圧縮は実行ダイアログの `policy` を使い、`replace` はOSゴミ箱のみで、出力検証に成功した場合だけ実行する。手動の指定フォルダは `compression_jobs.output_dir` で上書きする。
 - 自動圧縮の即時実行がOFFのときの新規写真は `waiting` に積み、ダッシュボードの「待機をすべて圧縮」で `pending` に戻す。
 - 写真削除はOSゴミ箱のみ。完全削除は実装しない。
 - ログの生データは保存しない。解析済みイベントのみDBに保存。

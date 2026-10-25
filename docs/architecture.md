@@ -137,11 +137,11 @@ release-tool ───> update
 ### 4.4 圧縮
 
 1. 自動圧縮は新規写真の索引時に `compression_jobs` へ `pending` で積む。
-2. 手動圧縮はUIが同じテーブルへ積む（`policy=keep` / `replace`）。
+2. 手動圧縮はUIがダイアログで選んだ `policy=keep` / `replace` と同じテーブルへ積む。指定フォルダ出力は `output_dir` でプロファイルの出力先を上書きする。
 3. ワーカーはSQLiteの単一 `UPDATE ... RETURNING` で1件を原子的に `processing` にする。
 4. 圧縮結果を一時ファイルへ書き、サイズ検証後にリネームする。
 5. `derivatives` に生成物を記録し、ジョブを `completed` にする。開始・完了・失敗は `compression_progress` イベントでも配信する。
-6. `replace` の場合、検証後に元画像をOSゴミ箱へ移し、`photos.status='missing'` にする。
+6. `replace` の場合、検証後に元画像をOSゴミ箱へ移し、`photos.status='replaced'` にする。
 
 ### 4.5 サムネイル
 
