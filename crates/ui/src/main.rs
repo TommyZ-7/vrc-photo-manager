@@ -31,6 +31,7 @@ use vrc_photo_core::model::{
     DaemonOperation, Derivative, LibraryStats, MAX_JOB_RETRIES, NewPhoto, Photo, PhotoContext,
     PhotoIndexEntry, PhotoPlayer, PhotoSort, PhotoTextFilter, QueueStatus, ResizeMode,
 };
+use vrc_photo_core::preview;
 use vrc_photo_core::scanner;
 use vrc_photo_core::scanner::ScanFailure;
 use vrc_photo_core::settings::{AppSettings, CardSize};
@@ -218,6 +219,102 @@ where
         }
     }
     options
+}
+
+/// Identifies a cached preview by photo and displayed file variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PreviewKey {
+    photo_id: i64,
+    variant: i64,
+}
+
+fn preview_key(photo: &Photo) -> PreviewKey {
+    PreviewKey {
+        photo_id: photo.id,
+        variant: photo.display_derivative_id.unwrap_or(0),
+    }
+}
+
+/// Keeps one preview decode in flight and remembers the latest request.
+///
+/// A selection change while a decode is running only replaces `wanted`; the
+/// running decode finishes and is dropped by the caller when stale, then the
+/// latest key starts. This bounds background CPU during fast navigation.
+#[derive(Debug, Default)]
+struct PreviewQueue {
+    in_flight: Option<PreviewKey>,
+    wanted: Option<PreviewKey>,
+}
+
+impl PreviewQueue {
+    /// Records `key` as the latest request. Returns true when the caller
+    /// should start a decode immediately.
+    fn want(&mut self, key: PreviewKey) -> bool {
+        if self.in_flight == Some(key) {
+            self.wanted = None;
+            return false;
+        }
+        self.wanted = Some(key);
+        self.in_flight.is_none()
+    }
+
+    /// Takes the queued key and marks it in flight. Returns None while another
+    /// decode is still running.
+    fn begin(&mut self) -> Option<PreviewKey> {
+        if self.in_flight.is_some() {
+            return None;
+        }
+        let key = self.wanted.take()?;
+        self.in_flight = Some(key);
+        Some(key)
+    }
+
+    /// Clears `key` if it is still the in-flight decode.
+    fn finish(&mut self, key: PreviewKey) {
+        if self.in_flight == Some(key) {
+            self.in_flight = None;
+        }
+    }
+
+    fn cancel_wanted(&mut self) {
+        self.wanted = None;
+    }
+
+    fn pending_for(&self, photo_id: i64) -> bool {
+        self.in_flight.is_some_and(|key| key.photo_id == photo_id)
+            || self.wanted.is_some_and(|key| key.photo_id == photo_id)
+    }
+}
+
+/// Whether a live refresh should request `key`.
+///
+/// A key is only requested once: after a failed attempt, `preview_attempt`
+/// suppresses the 3-second retry loop until the user clicks the photo again.
+fn should_request_preview(
+    loaded: Option<PreviewKey>,
+    attempt: Option<PreviewKey>,
+    pending: bool,
+    key: PreviewKey,
+) -> bool {
+    loaded != Some(key) && attempt != Some(key) && !pending
+}
+
+/// Chooses the preview cache directory. Demo mode may only use its own cache;
+/// if the demo assets are unavailable, it must not touch the real data dir.
+fn preview_cache_dir(
+    demo: bool,
+    demo_dir: Option<PathBuf>,
+    real_dir: Option<PathBuf>,
+) -> Option<PathBuf> {
+    if demo { demo_dir } else { real_dir }
+}
+
+fn preview_placeholder_label(pending: bool) -> &'static str {
+    if pending {
+        "プレビューを読み込み中…"
+    } else {
+        "プレビューを読み込めません"
+    }
 }
 
 /// Bounded LRU cache for grid thumbnails.
@@ -1537,6 +1634,9 @@ pub struct App {
     quick_look_note_save_focus: FocusHandle,
     quick_look_note_cancel_focus: FocusHandle,
     preview: Option<Arc<RenderImage>>,
+    preview_key: Option<PreviewKey>,
+    preview_attempt: Option<PreviewKey>,
+    preview_queue: PreviewQueue,
     previous_preview: Option<Arc<RenderImage>>,
     previous_color: Option<u32>,
     profiles: Vec<CompressionProfile>,
@@ -1883,6 +1983,9 @@ impl App {
             quick_look_note_save_focus,
             quick_look_note_cancel_focus,
             preview: None,
+            preview_key: None,
+            preview_attempt: None,
+            preview_queue: PreviewQueue::default(),
             previous_preview: None,
             previous_color: None,
             profiles: Vec::new(),
@@ -2245,6 +2348,7 @@ impl App {
         self.refresh_monitor();
         if let Some(id) = self.selected {
             self.load_selected_meta(id);
+            self.refresh_stale_preview(cx);
         }
 
         // Path rebinds and replacement status changes keep the same photo
@@ -2465,7 +2569,8 @@ impl App {
         cx.set_reduce_motion(self.settings.ui_reduce_motion);
         self.refresh_monitor();
         if let Some(id) = self.selected {
-            self.load_selected(id);
+            self.load_selected_meta(id);
+            self.refresh_stale_preview(cx);
         }
     }
 
@@ -2682,14 +2787,6 @@ impl App {
         }
     }
 
-    fn load_selected(&mut self, id: i64) {
-        self.load_selected_meta(id);
-        self.preview = self
-            .selected_photo
-            .as_ref()
-            .and_then(|photo| load_preview(id, Path::new(photo.effective_path())));
-    }
-
     fn begin_note_edit(
         &mut self,
         id: i64,
@@ -2814,10 +2911,12 @@ impl App {
     }
 
     fn select_photo(&mut self, id: i64, cx: &mut Context<Self>) {
+        let select_start = Instant::now();
         self.selected_ids.clear();
         self.selected_ids.push(id);
         self.selection_anchor = Some(id);
         self.set_primary_photo(id, cx);
+        log_timing("select_photo", select_start);
         cx.notify();
     }
 
@@ -2827,22 +2926,124 @@ impl App {
         if self.delete_armed != Some(id) {
             self.delete_armed = None;
         }
-        if self.selected != Some(id) {
+        let changed = self.selected != Some(id) || self.selected_photo.is_none();
+        if changed {
             let previous_color = self
                 .selected_photo
                 .as_ref()
                 .map(|photo| self.color_for(photo));
             self.previous_preview = self.preview.take();
             self.previous_color = previous_color;
+            self.preview_key = None;
+            self.preview_attempt = None;
             self.selection_epoch = self.selection_epoch.wrapping_add(1);
             self.selection_changed_at = Some(Instant::now());
+            self.load_selected_meta(id);
+            self.request_preview(cx);
+        } else {
+            let current_key = self.selected_photo.as_ref().map(preview_key);
+            let loaded = current_key.is_some() && self.preview_key == current_key;
+            if !loaded && !self.preview_queue.pending_for(id) {
+                // An explicit click retries a failed or dropped preview.
+                self.preview_attempt = None;
+                self.request_preview(cx);
+            }
         }
         self.thumbnails.pin(id);
-        self.load_selected(id);
         if self.thumbnails.get(id).is_none()
             && let Some(photo) = self.selected_photo.clone()
         {
             self.request_thumbnail(&photo, cx);
+        }
+    }
+
+    /// Requests the preview for the current selection, coalescing rapid changes
+    /// so only one background decode runs at a time.
+    fn request_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(photo) = self.selected_photo.as_ref() else {
+            return;
+        };
+        let key = preview_key(photo);
+        if self.preview_key == Some(key) {
+            self.preview_queue.cancel_wanted();
+            return;
+        }
+        if self.preview_queue.want(key) {
+            self.pump_preview(cx);
+        }
+    }
+
+    fn pump_preview(&mut self, cx: &mut Context<Self>) {
+        loop {
+            let Some(key) = self.preview_queue.begin() else {
+                return;
+            };
+            let matches = self
+                .selected_photo
+                .as_ref()
+                .is_some_and(|photo| preview_key(photo) == key);
+            if !matches || self.preview_key == Some(key) {
+                self.preview_queue.finish(key);
+                continue;
+            }
+            let source = PathBuf::from(
+                self.selected_photo
+                    .as_ref()
+                    .expect("selected photo")
+                    .effective_path(),
+            );
+            let cache_dir = preview_cache_dir(
+                self.demo,
+                self.demo_assets
+                    .as_ref()
+                    .map(|assets| assets.preview_dir.clone()),
+                preview::previews_dir(),
+            );
+            self.preview_attempt = Some(key);
+            cx.spawn(async move |this, cx| {
+                let decoded = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let start = Instant::now();
+                        let decoded = match cache_dir {
+                            Some(dir) => {
+                                preview::ensure_preview_in(key.photo_id, key.variant, &source, &dir)
+                            }
+                            None => preview::decode_preview(&source),
+                        };
+                        log_timing("preview decode", start);
+                        decoded
+                    })
+                    .await;
+                this.update(cx, |this, cx| {
+                    this.preview_queue.finish(key);
+                    let current = this
+                        .selected_photo
+                        .as_ref()
+                        .is_some_and(|photo| preview_key(photo) == key);
+                    if current && let Some(rgba) = decoded {
+                        this.preview = Some(preview_render_image(rgba));
+                        this.preview_key = Some(key);
+                    }
+                    this.pump_preview(cx);
+                    this.refresh_stale_preview(cx);
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
+    }
+
+    fn refresh_stale_preview(&mut self, cx: &mut Context<Self>) {
+        let Some(photo) = self.selected_photo.as_ref() else {
+            return;
+        };
+        let key = preview_key(photo);
+        let pending = self.preview_queue.pending_for(photo.id);
+        if should_request_preview(self.preview_key, self.preview_attempt, pending, key) {
+            self.request_preview(cx);
         }
     }
 
@@ -2857,6 +3058,9 @@ impl App {
         self.selected_tags.clear();
         self.selected_derivatives.clear();
         self.preview = None;
+        self.preview_key = None;
+        self.preview_attempt = None;
+        self.preview_queue.cancel_wanted();
         self.previous_preview = None;
         self.previous_color = None;
         self.delete_armed = None;
@@ -5780,6 +5984,7 @@ impl App {
             preview_frame = preview_frame.child(image_layer(preview.clone()));
         }
         if current_preview.is_none() {
+            let label = preview_placeholder_label(self.preview_queue.pending_for(id));
             preview_frame = preview_frame.child(
                 div()
                     .absolute()
@@ -5789,7 +5994,7 @@ impl App {
                     .justify_center()
                     .text_size(px(10.))
                     .text_color(rgb(MUTED_2))
-                    .child("プレビューを読み込めません"),
+                    .child(label),
             );
         }
         let preview_bounds = self.inspector_preview_bounds.clone();
@@ -6617,7 +6822,9 @@ impl App {
                     .justify_center()
                     .text_size(px(11.))
                     .text_color(rgb(MUTED))
-                    .child("プレビューを読み込めません"),
+                    .child(preview_placeholder_label(
+                        self.preview_queue.pending_for(photo.id),
+                    )),
             );
         }
 
@@ -9003,16 +9210,19 @@ impl App {
         match scanner::scan_and_index(&self.db, root_id, &report.dest) {
             Ok(scan) => {
                 report.scan_failures.extend(scan.failures);
+                let mut preview_jobs = Vec::new();
                 for id in &scan.new_ids {
                     let Ok(Some(photo)) = self.db.photo_by_id(*id) else {
                         continue;
                     };
+                    preview_jobs.push((preview_key(&photo), PathBuf::from(photo.effective_path())));
                     if let Err(error) =
                         thumbnail::ensure_thumbnail(*id, Path::new(photo.effective_path()))
                     {
                         tracing::warn!(%error, %id, "cannot generate thumbnail after import");
                     }
                 }
+                self.warm_previews(preview_jobs, cx);
             }
             Err(error) => {
                 tracing::warn!(%error, "cannot scan import destination");
@@ -9036,6 +9246,34 @@ impl App {
                 tracing::warn!(%error, "cannot request rescan for import destination");
             }
         }
+    }
+
+    /// Generates preview cache entries for newly imported photos without
+    /// blocking the import report or the library reload.
+    fn warm_previews(&mut self, jobs: Vec<(PreviewKey, PathBuf)>, cx: &mut Context<Self>) {
+        if jobs.is_empty() {
+            return;
+        }
+        let cache_dir = preview_cache_dir(
+            self.demo,
+            self.demo_assets
+                .as_ref()
+                .map(|assets| assets.preview_dir.clone()),
+            preview::previews_dir(),
+        );
+        let Some(cache_dir) = cache_dir else {
+            return;
+        };
+        cx.background_executor()
+            .spawn(async move {
+                for (key, source) in jobs {
+                    let start = Instant::now();
+                    let _ =
+                        preview::ensure_preview_in(key.photo_id, key.variant, &source, &cache_dir);
+                    log_timing("preview warm", start);
+                }
+            })
+            .detach();
     }
 
     /// Opens the import modal in retry mode for the retryable failed sources.
@@ -10498,6 +10736,7 @@ struct DemoAssets {
     #[allow(dead_code)] // Fixture root, kept for inspection and future previews.
     photo_dir: PathBuf,
     thumb_dir: PathBuf,
+    preview_dir: PathBuf,
 }
 
 fn prepare_demo(reset: bool) -> Result<(Db, DemoAssets), String> {
@@ -10516,8 +10755,10 @@ fn prepare_demo(reset: bool) -> Result<(Db, DemoAssets), String> {
     }
     let photo_dir = root.join("photos");
     let thumb_dir = root.join("thumbnails");
+    let preview_dir = root.join("previews");
     std::fs::create_dir_all(&photo_dir).map_err(|error| error.to_string())?;
     std::fs::create_dir_all(&thumb_dir).map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&preview_dir).map_err(|error| error.to_string())?;
     let db = Db::open(root.join("library.db")).map_err(|error| error.to_string())?;
     if db.count_photos().map_err(|error| error.to_string())? == 0 {
         seed_demo(&db, &photo_dir)?;
@@ -10527,6 +10768,7 @@ fn prepare_demo(reset: bool) -> Result<(Db, DemoAssets), String> {
         DemoAssets {
             photo_dir,
             thumb_dir,
+            preview_dir,
         },
     ))
 }
@@ -10797,32 +11039,12 @@ fn make_render_image(rgba: image::RgbaImage) -> Arc<RenderImage> {
     Arc::new(RenderImage::new(SmallVec::from_elem(frame, 1)))
 }
 
-fn load_preview(id: i64, path: &Path) -> Option<Arc<RenderImage>> {
-    if !path.is_file() {
-        tracing::debug!(
-            photo_id = id,
-            path = %path.display(),
-            "preview source is missing"
-        );
-        return None;
-    }
-    let image = match vrc_photo_core::image_decode::decode_image(path) {
-        Some(image) => image.thumbnail(1200, 1200).to_rgba8(),
-        None => {
-            tracing::warn!(
-                photo_id = id,
-                path = %path.display(),
-                "cannot decode photo preview"
-            );
-            return None;
-        }
-    };
-    let mut buffer = image;
-    for pixel in buffer.pixels_mut() {
+/// Swaps RGBA to the BGRA order GPUI's `RenderImage` expects.
+fn preview_render_image(mut rgba: image::RgbaImage) -> Arc<RenderImage> {
+    for pixel in rgba.pixels_mut() {
         pixel.0.swap(0, 2);
     }
-    let frame = image::Frame::new(buffer);
-    Some(Arc::new(RenderImage::new(SmallVec::from_elem(frame, 1))))
+    make_render_image(rgba)
 }
 
 fn glass_panel() -> Div {
@@ -12206,8 +12428,8 @@ mod tests {
         ImportDialogOrigin, ImportDialogPhase, ImportDialogState, ImportReportView, IpcScanPhase,
         MAX_PAGES, MIN_CARD_WIDTH, MOTION_BASE, MOTION_FAST, MOTION_MORPH, MOTION_SLOW,
         ManualOutputTarget, MorphImageKind, NAV_ITEM_GAP, NAV_ITEM_HEIGHT, PAGE_SIZE,
-        PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex, PhotoPageCache, RAIL_MARKER_SIZE,
-        RAIL_PILL_WIDTH, RAIL_TRACK_INSET, RAIL_WIDTH, ScanProgressView, Screen,
+        PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex, PhotoPageCache, PreviewKey, PreviewQueue,
+        RAIL_MARKER_SIZE, RAIL_PILL_WIDTH, RAIL_TRACK_INSET, RAIL_WIDTH, ScanProgressView, Screen,
         THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, VIEWER_DETAILS_WIDTH, ViewerBoxState,
         ViewerMorph, ViewerOpenSource, ViewerPanelState, YearBucket, add_photo_root_and_save,
         alert_summaries, anchor_photo_id, apply_library_index, apply_profile_format,
@@ -12223,14 +12445,15 @@ mod tests {
         lossless_supported, manual_output_available, merge_resume_report, merge_retry_report,
         morph_bounds_at, morph_image_plan, moved_profile_order, nav_index, nav_item_top,
         next_focus_index, normalize_note, parse_args, parse_window_size, preferred_bounds,
-        profile_summary, queue_status_badge, rail_hover_hits, rail_label_hidden_by_pill,
-        rail_marker_bounds, rail_pill_bounds, rail_press_allowed, rail_press_hits, rail_row_at,
-        rail_scroll_offset, rail_track_hit_bounds, rail_y, release_confirmation,
-        reserve_import_dialog, retryable_sources, scan_progress_label, scan_progress_ratio,
-        screen_direction, search_anchor_after_result, search_available_width, selection_range,
-        sidebar_reveal_width, sidebar_width, stagger_value, step_index, sync_search_mirror,
-        toggle_selected_id, viewer_image_box, viewer_image_rect, viewer_nav_progress,
-        visible_year_buckets, with_tag, without_tag,
+        preview_cache_dir, preview_key, preview_placeholder_label, profile_summary,
+        queue_status_badge, rail_hover_hits, rail_label_hidden_by_pill, rail_marker_bounds,
+        rail_pill_bounds, rail_press_allowed, rail_press_hits, rail_row_at, rail_scroll_offset,
+        rail_track_hit_bounds, rail_y, release_confirmation, reserve_import_dialog,
+        retryable_sources, scan_progress_label, scan_progress_ratio, screen_direction,
+        search_anchor_after_result, search_available_width, selection_range,
+        should_request_preview, sidebar_reveal_width, sidebar_width, stagger_value, step_index,
+        sync_search_mirror, toggle_selected_id, viewer_image_box, viewer_image_rect,
+        viewer_nav_progress, visible_year_buckets, with_tag, without_tag,
     };
     use gpui_kit::{Bounds, RenderImage, ScrollStrategy, UniformListScrollHandle, point, px, size};
     use smallvec::SmallVec;
@@ -12802,6 +13025,7 @@ mod tests {
         let assets = DemoAssets {
             photo_dir: std::path::PathBuf::from("/tmp/vrc-demo/photos"),
             thumb_dir: std::path::PathBuf::from("/tmp/vrc-demo/thumbnails"),
+            preview_dir: std::path::PathBuf::from("/tmp/vrc-demo/previews"),
         };
         let path = demo_thumb_path(&assets, 42);
         assert!(path.ends_with("42.png"));
@@ -12918,6 +13142,149 @@ mod tests {
             confidence: None,
             author: None,
         }
+    }
+
+    #[test]
+    fn preview_queue_runs_one_decode_and_keeps_the_latest_wanted() {
+        let mut queue = PreviewQueue::default();
+        assert!(queue.want(PreviewKey {
+            photo_id: 1,
+            variant: 0
+        }));
+        assert_eq!(
+            queue.begin(),
+            Some(PreviewKey {
+                photo_id: 1,
+                variant: 0
+            })
+        );
+        assert!(!queue.want(PreviewKey {
+            photo_id: 2,
+            variant: 0
+        }));
+        assert_eq!(queue.begin(), None);
+        queue.finish(PreviewKey {
+            photo_id: 1,
+            variant: 0,
+        });
+        assert_eq!(
+            queue.begin(),
+            Some(PreviewKey {
+                photo_id: 2,
+                variant: 0
+            })
+        );
+    }
+
+    #[test]
+    fn preview_queue_re_requesting_the_in_flight_key_drops_the_queued_key() {
+        let mut queue = PreviewQueue::default();
+        assert!(queue.want(PreviewKey {
+            photo_id: 1,
+            variant: 0
+        }));
+        queue.begin();
+        assert!(!queue.want(PreviewKey {
+            photo_id: 2,
+            variant: 0
+        }));
+        assert!(!queue.want(PreviewKey {
+            photo_id: 1,
+            variant: 0
+        }));
+        queue.finish(PreviewKey {
+            photo_id: 1,
+            variant: 0,
+        });
+        assert_eq!(queue.begin(), None);
+    }
+
+    #[test]
+    fn preview_queue_pending_for_covers_queued_and_in_flight() {
+        let mut queue = PreviewQueue::default();
+        queue.want(PreviewKey {
+            photo_id: 1,
+            variant: 0,
+        });
+        assert!(queue.pending_for(1));
+        queue.begin();
+        assert!(queue.pending_for(1));
+        queue.finish(PreviewKey {
+            photo_id: 1,
+            variant: 0,
+        });
+        assert!(!queue.pending_for(1));
+    }
+
+    #[test]
+    fn preview_key_uses_the_display_derivative() {
+        let mut photo = test_photo(7);
+        assert_eq!(
+            preview_key(&photo),
+            PreviewKey {
+                photo_id: 7,
+                variant: 0
+            }
+        );
+        photo.display_derivative_id = Some(42);
+        assert_eq!(
+            preview_key(&photo),
+            PreviewKey {
+                photo_id: 7,
+                variant: 42
+            }
+        );
+    }
+
+    #[test]
+    fn stale_refresh_requests_a_new_variant_once() {
+        let loaded_old = PreviewKey {
+            photo_id: 7,
+            variant: 0,
+        };
+        let wanted = PreviewKey {
+            photo_id: 7,
+            variant: 42,
+        };
+        assert!(!should_request_preview(Some(wanted), None, false, wanted));
+        assert!(should_request_preview(
+            Some(loaded_old),
+            None,
+            false,
+            wanted
+        ));
+        assert!(!should_request_preview(
+            Some(loaded_old),
+            Some(wanted),
+            false,
+            wanted
+        ));
+        assert!(!should_request_preview(None, None, true, wanted));
+        assert!(should_request_preview(None, None, false, wanted));
+    }
+
+    #[test]
+    fn preview_cache_dir_never_uses_the_real_cache_in_demo() {
+        let demo_dir = PathBuf::from("/demo/previews");
+        let real_dir = PathBuf::from("/real/previews");
+        assert_eq!(
+            preview_cache_dir(true, Some(demo_dir.clone()), Some(real_dir.clone())),
+            Some(demo_dir)
+        );
+        assert_eq!(preview_cache_dir(true, None, Some(real_dir.clone())), None);
+        assert_eq!(
+            preview_cache_dir(false, None, Some(real_dir.clone())),
+            Some(real_dir)
+        );
+    }
+
+    #[test]
+    fn preview_placeholder_label_distinguishes_loading_from_failure() {
+        assert_eq!(preview_placeholder_label(true), "プレビューを読み込み中…");
+        assert_eq!(
+            preview_placeholder_label(false),
+            "プレビューを読み込めません"
+        );
     }
 
     #[test]
