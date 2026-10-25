@@ -4321,7 +4321,10 @@ impl App {
             thumb = thumb.child(
                 gpui_kit::img(image)
                     .object_fit(ObjectFit::Cover)
-                    .size_full(),
+                    .size_full()
+                    // GPUI clips overflow to a rectangle, so the image has to
+                    // carry the rounded silhouette itself.
+                    .rounded(px(inner_corner_radius(14.0, 2.0))),
             );
         }
         if show_status {
@@ -4342,6 +4345,7 @@ impl App {
                         .right_0()
                         .bottom_0()
                         .h(px(56.))
+                        .rounded_b(px(inner_corner_radius(14.0, 2.0)))
                         .bg(linear_gradient(
                             180.,
                             linear_color_stop(rgba(0x07090d00), 0.),
@@ -4640,7 +4644,11 @@ impl App {
         // 1. Solid tint, lerped from the previous photo's average color only
         // while the selection is fresh; a remount renders the current tint
         // statically so the old color cannot flash back.
-        let tint_layer = div().absolute().size_full().bg(rgb(current_color));
+        let tint_layer = div()
+            .absolute()
+            .size_full()
+            .rounded(px(inner_corner_radius(18.0, 1.0)))
+            .bg(rgb(current_color));
         card = card.child(if transitioning {
             tint_layer
                 .with_animation(("inspector-tint", selection_epoch), fade(), move |el, t| {
@@ -4652,35 +4660,38 @@ impl App {
         });
 
         // 2. The selected 256 px thumbnail, upscaled and softened by opacity.
+        //    The layer matches the card bounds so its rounded corners can be
+        //    clipped by the image itself (GPUI overflow clipping is rectangular).
         if let Some(thumbnail) = thumbnail {
             card = card.child(
-                div()
-                    .absolute()
-                    .top(px(-24.))
-                    .left(px(-24.))
-                    .right(px(-24.))
-                    .bottom(px(-24.))
-                    .opacity(0.45)
-                    .child(
-                        gpui_kit::img(thumbnail)
-                            .object_fit(ObjectFit::Cover)
-                            .size_full(),
-                    ),
+                div().absolute().size_full().opacity(0.45).child(
+                    gpui_kit::img(thumbnail)
+                        .object_fit(ObjectFit::Cover)
+                        .size_full()
+                        .rounded(px(inner_corner_radius(18.0, 1.0))),
+                ),
             );
         }
 
         // 3. Scrim so the metadata stays legible over bright photos.
-        card = card.child(div().absolute().size_full().bg(linear_gradient(
-            180.,
-            linear_color_stop(rgba(0x090d13cc), 0.),
-            linear_color_stop(rgba(0x090d13f7), 1.),
-        )));
+        card = card.child(
+            div()
+                .absolute()
+                .size_full()
+                .rounded(px(inner_corner_radius(18.0, 1.0)))
+                .bg(linear_gradient(
+                    180.,
+                    linear_color_stop(rgba(0x090d13cc), 0.),
+                    linear_color_stop(rgba(0x090d13f7), 1.),
+                )),
+        );
 
         let image_layer = |image: Arc<RenderImage>| {
             div().absolute().size_full().child(
                 gpui_kit::img(image)
                     .object_fit(ObjectFit::Cover)
-                    .size_full(),
+                    .size_full()
+                    .rounded(px(inner_corner_radius(12.0, 1.0))),
             )
         };
         let mut preview_frame = div()
@@ -5488,7 +5499,8 @@ impl App {
                 .child(
                     gpui_kit::img(preview)
                         .object_fit(ObjectFit::Contain)
-                        .size_full(),
+                        .size_full()
+                        .rounded(px(10.)),
                 )
         } else {
             div()
@@ -9404,6 +9416,15 @@ fn grid_placeholder(image_height: f32) -> AnyElement {
         .into_any_element()
 }
 
+/// Radius for an image or full-bleed layer inside a rounded, bordered
+/// container. GPUI's `overflow_hidden` only clips to a rectangle, so the
+/// child has to paint the rounded silhouette itself. The child's bounds are
+/// inset by the border, so its radius is the container radius minus the
+/// border width.
+fn inner_corner_radius(radius: f32, border_width: f32) -> f32 {
+    (radius - border_width).max(0.0)
+}
+
 fn short_date(value: &str) -> String {
     value
         .split('.')
@@ -9759,16 +9780,16 @@ mod tests {
         daemon_operation_label, daemon_state_label, daemon_sync_label, decode_thumbnail,
         demo_thumb_path, ease_motion, first_visible_photo, format_captured_month, format_count,
         format_timestamp, grid_available_width, grid_columns, grid_columns_for, has_tag_filter,
-        import_issue_counts, ipc_status_label, job_retry_available, job_retry_label, lerp_color,
-        list_scroll_top, lossless_hint, lossless_supported, manual_output_available,
-        moved_profile_order, next_focus_index, normalize_note, parse_args, parse_window_size,
-        profile_summary, queue_status_badge, rail_hover_hits, rail_label_hidden_by_pill,
-        rail_marker_bounds, rail_pill_bounds, rail_press_allowed, rail_press_hits, rail_row_at,
-        rail_scroll_offset, rail_track_hit_bounds, rail_y, release_confirmation, retryable_sources,
-        scan_progress_label, scan_progress_ratio, search_anchor_after_result,
-        search_available_width, selection_range, sidebar_reveal_width, sidebar_width,
-        stagger_value, step_index, sync_search_mirror, toggle_selected_id, viewer_details_width,
-        viewer_image_box, visible_year_buckets, with_tag, without_tag,
+        import_issue_counts, inner_corner_radius, ipc_status_label, job_retry_available,
+        job_retry_label, lerp_color, list_scroll_top, lossless_hint, lossless_supported,
+        manual_output_available, moved_profile_order, next_focus_index, normalize_note, parse_args,
+        parse_window_size, profile_summary, queue_status_badge, rail_hover_hits,
+        rail_label_hidden_by_pill, rail_marker_bounds, rail_pill_bounds, rail_press_allowed,
+        rail_press_hits, rail_row_at, rail_scroll_offset, rail_track_hit_bounds, rail_y,
+        release_confirmation, retryable_sources, scan_progress_label, scan_progress_ratio,
+        search_anchor_after_result, search_available_width, selection_range, sidebar_reveal_width,
+        sidebar_width, stagger_value, step_index, sync_search_mirror, toggle_selected_id,
+        viewer_details_width, viewer_image_box, visible_year_buckets, with_tag, without_tag,
     };
     use gpui_kit::{Bounds, RenderImage, ScrollStrategy, UniformListScrollHandle, point, px, size};
     use smallvec::SmallVec;
@@ -10426,6 +10447,14 @@ mod tests {
     #[test]
     fn grid_row_height_matches_the_card_height() {
         assert_eq!(PHOTO_ROW_HEIGHT, 196.0);
+    }
+
+    #[test]
+    fn image_corner_radius_matches_the_inset_border_curve() {
+        assert_eq!(inner_corner_radius(14.0, 2.0), 12.0);
+        assert_eq!(inner_corner_radius(18.0, 1.0), 17.0);
+        assert_eq!(inner_corner_radius(12.0, 1.0), 11.0);
+        assert_eq!(inner_corner_radius(2.0, 4.0), 0.0);
     }
 
     #[test]
