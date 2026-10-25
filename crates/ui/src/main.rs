@@ -77,7 +77,7 @@ const MAX_PAGES: usize = 24;
 const PHOTO_ROW_HEIGHT: f32 = 196.0;
 const RAIL_WIDTH: f32 = 20.0;
 const RAIL_TOP_PAD: f32 = 24.0;
-const RAIL_TRACK_INSET: f32 = 12.0;
+const RAIL_TRACK_INSET: f32 = 10.0;
 const RAIL_LABEL_GAP: f32 = 16.0;
 const RAIL_YEAR_HIT_SLOP: f32 = 8.0;
 const RAIL_PILL_HEIGHT: f32 = 18.0;
@@ -10364,7 +10364,7 @@ mod tests {
         let bounds = Bounds::new(point(px(10.), px(20.)), size(px(RAIL_WIDTH), px(600.)));
         let pill_y = 300.0;
 
-        // Track strip: x 12..24, y 44..596 for this 20 px gutter.
+        // Track strip: x 14..26, y 44..596 for this 20 px gutter.
         assert!(rail_press_hits(
             point(px(18.), px(100.)),
             bounds,
@@ -10457,6 +10457,12 @@ mod tests {
             pill_y,
             true
         ));
+    }
+
+    #[test]
+    fn rail_track_is_centered_in_the_gutter() {
+        let bounds = Bounds::new(point(px(10.), px(20.)), size(px(RAIL_WIDTH), px(600.)));
+        assert_eq!(rail_track_hit_bounds(bounds).center().x, bounds.center().x);
     }
 
     #[test]
