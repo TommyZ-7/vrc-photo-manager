@@ -6889,7 +6889,6 @@ impl App {
         let mut panel = v_flex()
             .id("import-dialog-panel")
             .w(px(560.))
-            .max_h(px(720.))
             .gap(px(16.))
             .p(px(22.))
             .rounded(px(18.))
@@ -6900,7 +6899,6 @@ impl App {
                 BoxShadow::new(px(0.), px(24.), rgba(0x00000099).into()).blur_radius(px(60.)),
             ])
             .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
-            .overflow_y_scrollbar()
             .child(
                 h_flex()
                     .items_center()
