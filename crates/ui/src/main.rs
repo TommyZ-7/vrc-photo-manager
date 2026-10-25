@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
@@ -167,17 +168,25 @@ fn process_start() -> Instant {
     *START.get_or_init(Instant::now)
 }
 
-fn parse_args(args: impl IntoIterator<Item = String>) -> LaunchOptions {
+fn parse_args<I, S>(args: I) -> LaunchOptions
+where
+    I: IntoIterator<Item = S>,
+    S: Into<OsString>,
+{
     let mut options = LaunchOptions::default();
-    let mut args = args.into_iter();
+    let mut args = args.into_iter().map(Into::into);
     while let Some(arg) = args.next() {
-        match arg.as_str() {
+        let Some(flag) = arg.to_str() else {
+            continue;
+        };
+        match flag {
             "--background" => options.background = true,
             "--demo" => options.demo = true,
             "--demo-reset" => options.demo_reset = true,
             "--window-size" => {
                 if let Some(value) = args.next()
-                    && let Some(size) = parse_window_size(&value)
+                    && let Some(value) = value.to_str()
+                    && let Some(size) = parse_window_size(value)
                 {
                     options.window_size = size;
                 }
@@ -8445,7 +8454,7 @@ fn main() {
     if timing_enabled() {
         process_start();
     }
-    let options = parse_args(std::env::args());
+    let options = parse_args(std::env::args_os());
     if options.background {
         if let Err(error) = run_background_supervisor() {
             tracing::error!(%error, "background supervisor failed");
@@ -8519,6 +8528,7 @@ mod tests {
     use gpui_kit::{RenderImage, ScrollStrategy, UniformListScrollHandle, point, px};
     use smallvec::SmallVec;
     use std::cell::Cell;
+    use std::ffi::OsString;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
@@ -8793,6 +8803,20 @@ mod tests {
             "--unexpected".to_string(),
             "--window-size".to_string(),
             "1280x820".to_string(),
+        ]);
+        assert!(options.demo);
+        assert_eq!(options.window_size, (1280.0, 820.0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launch_options_ignore_non_utf8_arguments() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let options = parse_args(vec![
+            OsString::from("app"),
+            OsString::from_vec(vec![0x80]),
+            OsString::from("--demo"),
         ]);
         assert!(options.demo);
         assert_eq!(options.window_size, (1280.0, 820.0));

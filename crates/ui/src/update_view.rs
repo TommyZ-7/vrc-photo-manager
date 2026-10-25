@@ -105,6 +105,38 @@ mod tests {
     }
 
     #[test]
+    fn automatic_check_failure_restores_an_available_update() {
+        let update = AvailableUpdate {
+            version: Version::new(0, 4, 0),
+            notes_url: None,
+            asset: None,
+            public_keys: Vec::new(),
+        };
+        let failure: std::result::Result<Option<AvailableUpdate>, String> =
+            Err("offline".to_string());
+
+        let restored = resolve_checked_phase(false, &failure, Some(update.clone()));
+        assert!(matches!(
+            restored,
+            UpdatePhase::Available(ref available) if available.version == update.version
+        ));
+        assert!(matches!(
+            resolve_checked_phase(true, &failure, Some(update.clone())),
+            UpdatePhase::Error(_)
+        ));
+        assert!(matches!(
+            resolve_checked_phase(false, &failure, None),
+            UpdatePhase::Idle
+        ));
+
+        let up_to_date: std::result::Result<Option<AvailableUpdate>, String> = Ok(None);
+        assert!(matches!(
+            resolve_checked_phase(false, &up_to_date, Some(update)),
+            UpdatePhase::UpToDate
+        ));
+    }
+
+    #[test]
     fn only_self_update_capable_installs_with_assets_can_apply() {
         assert!(!can_apply(
             &InstallKind::SystemPackage {
@@ -281,6 +313,21 @@ fn phase_allows_auto_check(phase: &UpdatePhase) -> bool {
             | UpdatePhase::Available(_)
             | UpdatePhase::Error(_)
     )
+}
+
+fn resolve_checked_phase(
+    manual: bool,
+    result: &std::result::Result<Option<AvailableUpdate>, String>,
+    resume: Option<AvailableUpdate>,
+) -> UpdatePhase {
+    match result {
+        Ok(Some(update)) => UpdatePhase::Available(update.clone()),
+        Ok(None) => UpdatePhase::UpToDate,
+        Err(message) if manual => UpdatePhase::Error(message.clone()),
+        Err(_) => resume
+            .map(UpdatePhase::Available)
+            .unwrap_or(UpdatePhase::Idle),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -814,7 +861,7 @@ impl App {
                 if let Err(error) = self.settings.save(&self.db) {
                     tracing::warn!(%error, "cannot save update check time");
                 }
-                match result {
+                match &result {
                     Ok(Some(update)) => {
                         if !manual {
                             self.message.get_or_insert_with(|| {
@@ -826,26 +873,21 @@ impl App {
                         } else {
                             self.message = Some(format!("v{} が利用可能です", update.version));
                         }
-                        self.update.phase = UpdatePhase::Available(update);
                     }
                     Ok(None) => {
-                        self.update.phase = UpdatePhase::UpToDate;
                         if manual {
                             self.message = Some("最新のバージョンです".to_string());
                         }
                     }
                     Err(message) => {
                         if manual {
-                            self.update.phase = UpdatePhase::Error(message.clone());
-                            self.message = Some(message);
+                            self.message = Some(message.clone());
                         } else {
                             tracing::warn!(%message, "automatic update check failed");
-                            self.update.phase = resume
-                                .map(UpdatePhase::Available)
-                                .unwrap_or(UpdatePhase::Idle);
                         }
                     }
                 }
+                self.update.phase = resolve_checked_phase(manual, &result, resume);
                 cx.notify();
             }
             UpdateMessage::DownloadProgress { received, total } => {
