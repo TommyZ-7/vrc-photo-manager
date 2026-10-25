@@ -1105,6 +1105,11 @@ pub struct App {
     library_error: Option<String>,
     count_debounce: CountDebounce,
     selected: Option<i64>,
+    /// Multi-selection in the current photo tab. `selected` is the primary
+    /// item used by the inspector and viewer. An empty list means nothing is
+    /// selected; otherwise the primary is always included.
+    selected_ids: Vec<i64>,
+    selection_anchor: Option<i64>,
     selection_epoch: u64,
     selection_changed_at: Option<Instant>,
     selected_photo: Option<Photo>,
@@ -1259,6 +1264,8 @@ impl App {
             library_error: None,
             count_debounce: CountDebounce::default(),
             selected: None,
+            selected_ids: Vec::new(),
+            selection_anchor: None,
             selection_epoch: 0,
             selection_changed_at: None,
             selected_photo: None,
@@ -1939,6 +1946,15 @@ impl App {
     /// Changes screens without rebuilding the library unless Photos was marked
     /// dirty while another screen was mounted.
     fn switch_screen(&mut self, screen: Screen, cx: &mut Context<Self>) {
+        // The two photo grids have separate snapshots, so a selection made in
+        // one tab cannot stay meaningful in the other. Keep it when visiting
+        // Compression/Settings so the manual-compression action can use it.
+        if self.screen != screen
+            && matches!(self.screen, Screen::Photos | Screen::Search)
+            && matches!(screen, Screen::Photos | Screen::Search)
+        {
+            self.clear_selection(cx);
+        }
         self.screen = screen;
         if screen == Screen::Photos && self.library_dirty {
             self.reload_library(true, cx);
@@ -2198,6 +2214,16 @@ impl App {
     }
 
     fn select_photo(&mut self, id: i64, cx: &mut Context<Self>) {
+        self.selected_ids.clear();
+        self.selected_ids.push(id);
+        self.selection_anchor = Some(id);
+        self.set_primary_photo(id, cx);
+        cx.notify();
+    }
+
+    /// Makes `id` the inspector/viewer photo without changing the selection
+    /// list. Multi-selection toggles call this when the primary changes.
+    fn set_primary_photo(&mut self, id: i64, cx: &mut Context<Self>) {
         if self.delete_armed != Some(id) {
             self.delete_armed = None;
         }
@@ -2218,7 +2244,87 @@ impl App {
         {
             self.request_thumbnail(&photo, cx);
         }
+    }
+
+    fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        if let Some(id) = self.selected.take() {
+            self.thumbnails.unpin(id);
+        }
+        self.selected_ids.clear();
+        self.selection_anchor = None;
+        self.selected_photo = None;
+        self.selected_players.clear();
+        self.selected_tags.clear();
+        self.selected_derivatives.clear();
+        self.preview = None;
+        self.previous_preview = None;
+        self.previous_color = None;
+        self.delete_armed = None;
+        self.note_edit_id = None;
         cx.notify();
+    }
+
+    fn toggle_photo_selection(&mut self, id: i64, cx: &mut Context<Self>) {
+        if toggle_selected_id(&mut self.selected_ids, id) {
+            self.selection_anchor = Some(id);
+            self.set_primary_photo(id, cx);
+        } else if self.selected == Some(id) {
+            if let Some(next) = self.selected_ids.last().copied() {
+                self.set_primary_photo(next, cx);
+            } else {
+                self.clear_selection(cx);
+                return;
+            }
+        }
+        cx.notify();
+    }
+
+    fn photo_browser(&self) -> &PhotoBrowser {
+        if self.screen == Screen::Search {
+            &self.search_view
+        } else {
+            &self.library
+        }
+    }
+
+    fn select_photo_range(&mut self, id: i64, add: bool, cx: &mut Context<Self>) {
+        let ids: Vec<i64> = self
+            .photo_browser()
+            .index
+            .entries
+            .iter()
+            .map(|entry| entry.id)
+            .collect();
+        let Some(anchor) = self.selection_anchor else {
+            self.select_photo(id, cx);
+            return;
+        };
+        let Some(range) = selection_range(&ids, anchor, id) else {
+            self.select_photo(id, cx);
+            return;
+        };
+        if add {
+            for selected in range {
+                if !self.selected_ids.contains(&selected) {
+                    self.selected_ids.push(selected);
+                }
+            }
+        } else {
+            self.selected_ids = range;
+        }
+        self.set_primary_photo(id, cx);
+        cx.notify();
+    }
+
+    fn handle_photo_click(&mut self, id: i64, event: &ClickEvent, cx: &mut Context<Self>) {
+        let modifiers = event.modifiers();
+        if modifiers.shift {
+            self.select_photo_range(id, modifiers.secondary(), cx);
+        } else if modifiers.secondary() {
+            self.toggle_photo_selection(id, cx);
+        } else {
+            self.select_photo(id, cx);
+        }
     }
 
     fn open_quick_look(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2282,6 +2388,8 @@ impl App {
         if let Some(id) = self.selected.take() {
             self.thumbnails.unpin(id);
         }
+        self.selected_ids.clear();
+        self.selection_anchor = None;
         self.quick_look_photo_ids.clear();
         self.quick_look_index = 0;
         self.preview = None;
@@ -2473,6 +2581,8 @@ impl App {
                     self.search_view.remove_photo(id);
                     self.thumbnails.unpin(id);
                     self.selected = None;
+                    self.selected_ids.clear();
+                    self.selection_anchor = None;
                     self.selected_photo = None;
                     self.selected_players.clear();
                     self.selected_tags.clear();
@@ -3691,7 +3801,8 @@ impl App {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = photo.id;
-        let selected = self.selected == Some(id);
+        let selected = self.selected_ids.contains(&id);
+        let primary = self.selected == Some(id);
         let compressed = self.compressed_ids.contains(&id);
         let duplicate = self.duplicate_ids.contains(&id);
         let replaced = photo.is_replaced();
@@ -3722,7 +3833,13 @@ impl App {
             .overflow_hidden()
             .bg(rgb(color))
             .border_2()
-            .border_color(if selected { rgb(BLUE) } else { rgb(BORDER) });
+            .border_color(if primary {
+                rgb(BLUE)
+            } else if selected {
+                rgb(0x9fcaff)
+            } else {
+                rgb(BORDER)
+            });
         if selected {
             thumb = thumb.shadow(vec![
                 BoxShadow::new(px(0.), px(8.), rgba(0x66b3ff4d).into()).blur_radius(px(24.)),
@@ -3782,6 +3899,26 @@ impl App {
                             }),
                     ),
             )
+            .when(selected, |this| {
+                this.child(
+                    div()
+                        .absolute()
+                        .top(px(9.))
+                        .left(px(9.))
+                        .size(px(19.))
+                        .rounded_full()
+                        .bg(rgb(BLUE))
+                        .border_2()
+                        .border_color(rgb(0x07090d))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(11.))
+                        .font_semibold()
+                        .text_color(rgb(0x071018))
+                        .child("✓"),
+                )
+            })
             .when(photo.is_favorite, |this| {
                 this.child(
                     div()
@@ -3842,7 +3979,7 @@ impl App {
                 }
             }))
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                this.select_photo(id, cx);
+                this.handle_photo_click(id, event, cx);
                 if this.screen == Screen::Photos {
                     window.focus(&this.photo_grid_focus, cx);
                 } else {
@@ -3853,6 +3990,7 @@ impl App {
                 }
                 if let ClickEvent::Mouse(click) = event
                     && click.down.click_count >= 2
+                    && !event.modifiers().modified()
                 {
                     this.open_quick_look(window, cx);
                 }
@@ -8106,6 +8244,31 @@ fn step_index(current: usize, len: usize, delta: isize) -> usize {
     (base.saturating_add(delta)).clamp(0, len as isize - 1) as usize
 }
 
+/// IDs between `anchor` and `target` in index order, inclusive. The anchor
+/// and target must both still exist in the current snapshot.
+fn selection_range(ids: &[i64], anchor: i64, target: i64) -> Option<Vec<i64>> {
+    let anchor = ids.iter().position(|id| *id == anchor)?;
+    let target = ids.iter().position(|id| *id == target)?;
+    let (start, end) = if anchor <= target {
+        (anchor, target)
+    } else {
+        (target, anchor)
+    };
+    Some(ids[start..=end].to_vec())
+}
+
+/// Adds `id` to the selection or removes it, returning whether it is selected
+/// afterwards.
+fn toggle_selected_id(ids: &mut Vec<i64>, id: i64) -> bool {
+    if let Some(index) = ids.iter().position(|selected| *selected == id) {
+        ids.remove(index);
+        false
+    } else {
+        ids.push(id);
+        true
+    }
+}
+
 fn moved_profile_order(ids: &[String], index: usize, delta: isize) -> Option<Vec<String>> {
     if index >= ids.len() {
         return None;
@@ -8504,9 +8667,9 @@ mod tests {
         normalize_note, parse_args, parse_window_size, profile_summary, queue_status_badge,
         rail_label_hidden_by_pill, rail_row_at, rail_scroll_offset, rail_y, release_confirmation,
         retryable_sources, scan_progress_label, scan_progress_ratio, search_anchor_after_result,
-        search_available_width, sidebar_reveal_width, sidebar_width, stagger_value, step_index,
-        sync_search_mirror, viewer_details_width, viewer_image_box, visible_year_buckets, with_tag,
-        without_tag,
+        search_available_width, selection_range, sidebar_reveal_width, sidebar_width,
+        stagger_value, step_index, sync_search_mirror, toggle_selected_id, viewer_details_width,
+        viewer_image_box, visible_year_buckets, with_tag, without_tag,
     };
     use gpui_kit::{RenderImage, ScrollStrategy, UniformListScrollHandle, point, px};
     use smallvec::SmallVec;
@@ -9370,6 +9533,7 @@ mod tests {
             error: Some("boom".to_string()),
             output_path: None,
             policy: "keep".to_string(),
+            output_dir: None,
             created_at: "now".to_string(),
             started_at: None,
             finished_at: None,
@@ -9394,6 +9558,25 @@ mod tests {
         assert_eq!(queue_status_badge(&QueueStatus::Completed).0, "完了");
         assert_eq!(queue_status_badge(&QueueStatus::Failed).0, "失敗");
         assert_eq!(queue_status_badge(&QueueStatus::Cancelled).0, "取消");
+    }
+
+    #[test]
+    fn selection_range_includes_both_ends_in_index_order() {
+        let ids = [10, 20, 30, 40];
+        assert_eq!(selection_range(&ids, 20, 40), Some(vec![20, 30, 40]));
+        assert_eq!(selection_range(&ids, 40, 20), Some(vec![20, 30, 40]));
+        assert_eq!(selection_range(&ids, 30, 30), Some(vec![30]));
+        assert_eq!(selection_range(&ids, 99, 20), None);
+        assert_eq!(selection_range(&ids, 20, 99), None);
+    }
+
+    #[test]
+    fn toggle_selected_id_adds_once_and_removes() {
+        let mut ids = Vec::new();
+        assert!(toggle_selected_id(&mut ids, 7));
+        assert_eq!(ids, vec![7]);
+        assert!(!toggle_selected_id(&mut ids, 7));
+        assert!(ids.is_empty());
     }
 
     #[test]
