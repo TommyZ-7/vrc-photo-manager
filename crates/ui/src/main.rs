@@ -286,6 +286,37 @@ impl PreviewQueue {
     }
 }
 
+/// Whether a live refresh should request `key`.
+///
+/// A key is only requested once: after a failed attempt, `preview_attempt`
+/// suppresses the 3-second retry loop until the user clicks the photo again.
+fn should_request_preview(
+    loaded: Option<PreviewKey>,
+    attempt: Option<PreviewKey>,
+    pending: bool,
+    key: PreviewKey,
+) -> bool {
+    loaded != Some(key) && attempt != Some(key) && !pending
+}
+
+/// Chooses the preview cache directory. Demo mode may only use its own cache;
+/// if the demo assets are unavailable, it must not touch the real data dir.
+fn preview_cache_dir(
+    demo: bool,
+    demo_dir: Option<PathBuf>,
+    real_dir: Option<PathBuf>,
+) -> Option<PathBuf> {
+    if demo { demo_dir } else { real_dir }
+}
+
+fn preview_placeholder_label(pending: bool) -> &'static str {
+    if pending {
+        "プレビューを読み込み中…"
+    } else {
+        "プレビューを読み込めません"
+    }
+}
+
 /// Bounded LRU cache for grid thumbnails.
 ///
 /// Decoding runs on the background executor; the UI thread only turns the
@@ -1568,6 +1599,7 @@ pub struct App {
     quick_look_note_cancel_focus: FocusHandle,
     preview: Option<Arc<RenderImage>>,
     preview_key: Option<PreviewKey>,
+    preview_attempt: Option<PreviewKey>,
     preview_queue: PreviewQueue,
     previous_preview: Option<Arc<RenderImage>>,
     previous_color: Option<u32>,
@@ -1915,6 +1947,7 @@ impl App {
             quick_look_note_cancel_focus,
             preview: None,
             preview_key: None,
+            preview_attempt: None,
             preview_queue: PreviewQueue::default(),
             previous_preview: None,
             previous_color: None,
@@ -2865,13 +2898,19 @@ impl App {
             self.previous_preview = self.preview.take();
             self.previous_color = previous_color;
             self.preview_key = None;
+            self.preview_attempt = None;
             self.selection_epoch = self.selection_epoch.wrapping_add(1);
             self.selection_changed_at = Some(Instant::now());
             self.load_selected_meta(id);
             self.request_preview(cx);
-        } else if self.preview_key.is_none() && !self.preview_queue.pending_for(id) {
-            // A previous decode failed; a fresh click retries it.
-            self.request_preview(cx);
+        } else {
+            let current_key = self.selected_photo.as_ref().map(preview_key);
+            let loaded = current_key.is_some() && self.preview_key == current_key;
+            if !loaded && !self.preview_queue.pending_for(id) {
+                // An explicit click retries a failed or dropped preview.
+                self.preview_attempt = None;
+                self.request_preview(cx);
+            }
         }
         self.thumbnails.pin(id);
         if self.thumbnails.get(id).is_none()
@@ -2916,11 +2955,14 @@ impl App {
                     .expect("selected photo")
                     .effective_path(),
             );
-            let cache_dir = self
-                .demo_assets
-                .as_ref()
-                .map(|assets| assets.preview_dir.clone())
-                .or_else(preview::previews_dir);
+            let cache_dir = preview_cache_dir(
+                self.demo,
+                self.demo_assets
+                    .as_ref()
+                    .map(|assets| assets.preview_dir.clone()),
+                preview::previews_dir(),
+            );
+            self.preview_attempt = Some(key);
             cx.spawn(async move |this, cx| {
                 let decoded = cx
                     .background_executor()
@@ -2947,6 +2989,7 @@ impl App {
                         this.preview_key = Some(key);
                     }
                     this.pump_preview(cx);
+                    this.refresh_stale_preview(cx);
                     cx.notify();
                 })
                 .ok();
@@ -2961,7 +3004,8 @@ impl App {
             return;
         };
         let key = preview_key(photo);
-        if self.preview_key.is_some_and(|loaded| loaded != key) {
+        let pending = self.preview_queue.pending_for(photo.id);
+        if should_request_preview(self.preview_key, self.preview_attempt, pending, key) {
             self.request_preview(cx);
         }
     }
@@ -2978,6 +3022,7 @@ impl App {
         self.selected_derivatives.clear();
         self.preview = None;
         self.preview_key = None;
+        self.preview_attempt = None;
         self.preview_queue.cancel_wanted();
         self.previous_preview = None;
         self.previous_color = None;
@@ -5650,11 +5695,7 @@ impl App {
             preview_frame = preview_frame.child(image_layer(preview.clone()));
         }
         if current_preview.is_none() {
-            let label = if self.preview_queue.pending_for(id) {
-                "プレビューを読み込み中…"
-            } else {
-                "プレビューを読み込めません"
-            };
+            let label = preview_placeholder_label(self.preview_queue.pending_for(id));
             preview_frame = preview_frame.child(
                 div()
                     .absolute()
@@ -6498,7 +6539,9 @@ impl App {
                     .justify_center()
                     .text_size(px(11.))
                     .text_color(rgb(MUTED))
-                    .child("プレビューを読み込めません"),
+                    .child(preview_placeholder_label(
+                        self.preview_queue.pending_for(photo.id),
+                    )),
             );
         }
 
@@ -8934,11 +8977,13 @@ impl App {
         if jobs.is_empty() {
             return;
         }
-        let cache_dir = self
-            .demo_assets
-            .as_ref()
-            .map(|assets| assets.preview_dir.clone())
-            .or_else(preview::previews_dir);
+        let cache_dir = preview_cache_dir(
+            self.demo,
+            self.demo_assets
+                .as_ref()
+                .map(|assets| assets.preview_dir.clone()),
+            preview::previews_dir(),
+        );
         let Some(cache_dir) = cache_dir else {
             return;
         };
@@ -11898,12 +11943,13 @@ mod tests {
         lossless_supported, manual_output_available, merge_resume_report, merge_retry_report,
         morph_bounds_at, morph_image_plan, moved_profile_order, nav_index, nav_item_top,
         next_focus_index, normalize_note, parse_args, parse_window_size, preferred_bounds,
-        preview_key, profile_summary, queue_status_badge, rail_hover_hits,
-        rail_label_hidden_by_pill, rail_marker_bounds, rail_pill_bounds, rail_press_allowed,
-        rail_press_hits, rail_row_at, rail_scroll_offset, rail_track_hit_bounds, rail_y,
-        release_confirmation, reserve_import_dialog, retryable_sources, scan_progress_label,
-        scan_progress_ratio, screen_direction, search_anchor_after_result, search_available_width,
-        selection_range, sidebar_reveal_width, sidebar_width, stagger_value, step_index,
+        preview_cache_dir, preview_key, preview_placeholder_label, profile_summary,
+        queue_status_badge, rail_hover_hits, rail_label_hidden_by_pill, rail_marker_bounds,
+        rail_pill_bounds, rail_press_allowed, rail_press_hits, rail_row_at, rail_scroll_offset,
+        rail_track_hit_bounds, rail_y, release_confirmation, reserve_import_dialog,
+        retryable_sources, scan_progress_label, scan_progress_ratio, screen_direction,
+        search_anchor_after_result, search_available_width, selection_range,
+        should_request_preview, sidebar_reveal_width, sidebar_width, stagger_value, step_index,
         sync_search_mirror, toggle_selected_id, viewer_image_box, viewer_image_rect,
         visible_year_buckets, with_tag, without_tag,
     };
@@ -12676,6 +12722,57 @@ mod tests {
                 photo_id: 7,
                 variant: 42
             }
+        );
+    }
+
+    #[test]
+    fn stale_refresh_requests_a_new_variant_once() {
+        let loaded_old = PreviewKey {
+            photo_id: 7,
+            variant: 0,
+        };
+        let wanted = PreviewKey {
+            photo_id: 7,
+            variant: 42,
+        };
+        assert!(!should_request_preview(Some(wanted), None, false, wanted));
+        assert!(should_request_preview(
+            Some(loaded_old),
+            None,
+            false,
+            wanted
+        ));
+        assert!(!should_request_preview(
+            Some(loaded_old),
+            Some(wanted),
+            false,
+            wanted
+        ));
+        assert!(!should_request_preview(None, None, true, wanted));
+        assert!(should_request_preview(None, None, false, wanted));
+    }
+
+    #[test]
+    fn preview_cache_dir_never_uses_the_real_cache_in_demo() {
+        let demo_dir = PathBuf::from("/demo/previews");
+        let real_dir = PathBuf::from("/real/previews");
+        assert_eq!(
+            preview_cache_dir(true, Some(demo_dir.clone()), Some(real_dir.clone())),
+            Some(demo_dir)
+        );
+        assert_eq!(preview_cache_dir(true, None, Some(real_dir.clone())), None);
+        assert_eq!(
+            preview_cache_dir(false, None, Some(real_dir.clone())),
+            Some(real_dir)
+        );
+    }
+
+    #[test]
+    fn preview_placeholder_label_distinguishes_loading_from_failure() {
+        assert_eq!(preview_placeholder_label(true), "プレビューを読み込み中…");
+        assert_eq!(
+            preview_placeholder_label(false),
+            "プレビューを読み込めません"
         );
     }
 
