@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -90,6 +90,15 @@ const RAIL_PILL_WIDTH: f32 = 80.0;
 const RAIL_PILL_RIGHT_MARGIN: f32 = 4.0;
 const RAIL_MARKER_SIZE: f32 = 10.0;
 const RAIL_HIT_WIDTH: f32 = 12.0;
+const MOTION_FAST: Duration = Duration::from_millis(160);
+const MOTION_BASE: Duration = Duration::from_millis(220);
+const MOTION_SLOW: Duration = Duration::from_millis(300);
+const MOTION_MORPH: Duration = Duration::from_millis(340);
+const MOTION_FPS: f32 = 60.0;
+const SCREEN_SLIDE: f32 = 14.0;
+const VIEWER_NAV_SLIDE: f32 = 28.0;
+const NAV_ITEM_HEIGHT: f32 = 40.0;
+const NAV_ITEM_GAP: f32 = 3.0;
 
 gpui_kit::actions!(
     ui,
@@ -1311,11 +1320,31 @@ struct ManualCompressionDialog {
     keep_original: bool,
 }
 
+type BoundsFrame = (u64, Bounds<Pixels>);
+type CardBoundsMap = Rc<RefCell<HashMap<i64, BoundsFrame>>>;
+type InspectorBounds = Rc<RefCell<Option<BoundsFrame>>>;
+
 pub struct App {
     db: Db,
     screen: Screen,
     sidebar_collapsed: bool,
     sidebar_motion_epoch: u64,
+    nav_previous: Screen,
+    nav_epoch: u64,
+    screen_epoch: u64,
+    screen_direction: f32,
+    render_epoch: u64,
+    card_image_bounds: CardBoundsMap,
+    inspector_preview_bounds: InspectorBounds,
+    viewer_morph: Option<ViewerMorph>,
+    viewer_morph_epoch: u64,
+    viewer_return_source: Option<ViewerOpenSource>,
+    viewer_nav_epoch: u64,
+    viewer_nav_direction: f32,
+    viewer_nav_started_at: Instant,
+    viewer_open_started_at: Instant,
+    viewer_box: ViewerBoxState,
+    viewer_panel: ViewerPanelState,
     inspector_collapsed: bool,
     inspector_epoch: u64,
     hovered_nav: Option<Screen>,
@@ -1428,6 +1457,146 @@ pub struct App {
     demo_assets: Option<DemoAssets>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ViewerOpenSource {
+    Card,
+    Inspector,
+    Auto,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MorphImageKind {
+    Thumbnail,
+    Preview,
+}
+
+/// Chooses the old/new image kinds and the corner-radius sweep for one morph.
+fn morph_image_plan(
+    closing: bool,
+    source: ViewerOpenSource,
+    has_thumbnail: bool,
+    has_preview: bool,
+) -> (Option<MorphImageKind>, Option<MorphImageKind>, f32, f32) {
+    let viewer = if has_preview {
+        Some(MorphImageKind::Preview)
+    } else if has_thumbnail {
+        Some(MorphImageKind::Thumbnail)
+    } else {
+        None
+    };
+    let Some(viewer) = viewer else {
+        return (None, None, 10.0, 10.0);
+    };
+    let card = if has_thumbnail {
+        Some(MorphImageKind::Thumbnail)
+    } else if has_preview {
+        Some(MorphImageKind::Preview)
+    } else {
+        None
+    };
+    let inspector = if has_preview {
+        Some(MorphImageKind::Preview)
+    } else if has_thumbnail {
+        Some(MorphImageKind::Thumbnail)
+    } else {
+        None
+    };
+    let inspector_source = source == ViewerOpenSource::Inspector;
+    if closing {
+        (
+            Some(viewer),
+            if inspector_source { inspector } else { card },
+            10.0,
+            if inspector_source { 11.0 } else { 12.0 },
+        )
+    } else {
+        (
+            if inspector_source { inspector } else { card },
+            Some(viewer),
+            if inspector_source { 11.0 } else { 12.0 },
+            10.0,
+        )
+    }
+}
+
+struct ViewerMorph {
+    epoch: u64,
+    started_at: Instant,
+    from: Bounds<Pixels>,
+    to: Bounds<Pixels>,
+    thumbnail: Option<Arc<RenderImage>>,
+    preview: Option<Arc<RenderImage>>,
+    color: u32,
+    source: ViewerOpenSource,
+    closing: bool,
+    fade_only: bool,
+    backdrop_from: f32,
+}
+
+impl ViewerMorph {
+    fn current_bounds(&self, now: Instant) -> Bounds<Pixels> {
+        if self.fade_only {
+            return self.from;
+        }
+        morph_bounds_at(self.from, self.to, self.started_at, now)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ViewerBoxState {
+    epoch: u64,
+    started_at: Instant,
+    from_size: (f32, f32),
+    to_aspect: f32,
+    to_details_width: f32,
+    duration: Duration,
+}
+
+impl ViewerBoxState {
+    fn size_at(&self, t: f32, viewport: gpui_kit::Size<Pixels>) -> (f32, f32) {
+        let t = t.clamp(0.0, 1.0);
+        let to = viewer_image_box_with_details_width(
+            viewport.width.into(),
+            viewport.height.into(),
+            self.to_details_width,
+            self.to_aspect,
+        );
+        (
+            self.from_size.0 + (to.0 - self.from_size.0) * t,
+            self.from_size.1 + (to.1 - self.from_size.1) * t,
+        )
+    }
+
+    fn current_size(&self, viewport: gpui_kit::Size<Pixels>) -> (f32, f32) {
+        let t = eased_progress(self.started_at, self.duration, Instant::now());
+        self.size_at(t, viewport)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ViewerPanelState {
+    epoch: u64,
+    started_at: Instant,
+    from_width: f32,
+    to_width: f32,
+    duration: Duration,
+}
+
+impl ViewerPanelState {
+    fn width_at(&self, t: f32) -> f32 {
+        let t = t.clamp(0.0, 1.0);
+        self.from_width + (self.to_width - self.from_width) * t
+    }
+
+    fn current_width(&self) -> f32 {
+        self.current_width_at(Instant::now())
+    }
+
+    fn current_width_at(&self, now: Instant) -> f32 {
+        self.width_at(eased_progress(self.started_at, self.duration, now))
+    }
+}
+
 type ViewerActivate = Rc<dyn Fn(&mut App, &mut Window, &mut Context<App>)>;
 
 impl App {
@@ -1499,6 +1668,35 @@ impl App {
             screen: Screen::Photos,
             sidebar_collapsed: initial_settings.ui_sidebar_collapsed,
             sidebar_motion_epoch: 0,
+            nav_previous: Screen::Photos,
+            nav_epoch: 0,
+            screen_epoch: 0,
+            screen_direction: 1.0,
+            render_epoch: 0,
+            card_image_bounds: Rc::new(RefCell::new(HashMap::new())),
+            inspector_preview_bounds: Rc::new(RefCell::new(None)),
+            viewer_morph: None,
+            viewer_morph_epoch: 0,
+            viewer_return_source: None,
+            viewer_nav_epoch: 0,
+            viewer_nav_direction: 1.0,
+            viewer_nav_started_at: Instant::now(),
+            viewer_open_started_at: Instant::now(),
+            viewer_box: ViewerBoxState {
+                epoch: 0,
+                started_at: Instant::now(),
+                from_size: (0.0, 0.0),
+                to_aspect: 16.0 / 10.0,
+                to_details_width: 0.0,
+                duration: Duration::ZERO,
+            },
+            viewer_panel: ViewerPanelState {
+                epoch: 0,
+                started_at: Instant::now(),
+                from_width: 0.0,
+                to_width: 0.0,
+                duration: Duration::ZERO,
+            },
             inspector_collapsed: initial_settings.ui_inspector_collapsed,
             inspector_epoch: 0,
             hovered_nav: None,
@@ -2205,6 +2403,12 @@ impl App {
     /// Changes screens without rebuilding the library unless Photos was marked
     /// dirty while another screen was mounted.
     fn switch_screen(&mut self, screen: Screen, cx: &mut Context<Self>) {
+        if self.screen != screen {
+            self.nav_previous = self.screen;
+            self.nav_epoch = self.nav_epoch.wrapping_add(1);
+            self.screen_direction = screen_direction(self.screen, screen);
+            self.screen_epoch = self.screen_epoch.wrapping_add(1);
+        }
         // The two photo grids have separate snapshots, so a selection made in
         // one tab cannot stay meaningful in the other. Keep it when visiting
         // Compression/Settings so the manual-compression action can use it.
@@ -2263,6 +2467,9 @@ impl App {
             return;
         }
         self.sidebar_collapsed = !self.sidebar_collapsed;
+        // The width animation recreates the nav subtree, so its animations must
+        // render at the current tab instead of replaying the last tab change.
+        self.nav_previous = self.screen;
         self.sidebar_motion_epoch = self.sidebar_motion_epoch.wrapping_add(1);
         self.hovered_nav = None;
         self.settings.ui_sidebar_collapsed = self.sidebar_collapsed;
@@ -2589,9 +2796,42 @@ impl App {
         }
     }
 
-    fn open_quick_look(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn actual_source(
+        &self,
+        id: i64,
+        source: ViewerOpenSource,
+    ) -> Option<(ViewerOpenSource, Bounds<Pixels>)> {
+        let card = current_tagged_bounds(
+            self.card_image_bounds.borrow().get(&id).copied(),
+            self.render_epoch,
+        );
+        let inspector =
+            current_tagged_bounds(*self.inspector_preview_bounds.borrow(), self.render_epoch);
+        let prefer_card = source != ViewerOpenSource::Inspector;
+        let chosen = preferred_bounds(prefer_card, card, inspector)?;
+        if card == Some(chosen) {
+            Some((ViewerOpenSource::Card, chosen))
+        } else {
+            Some((ViewerOpenSource::Inspector, chosen))
+        }
+    }
+
+    fn open_quick_look(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        source: ViewerOpenSource,
+    ) {
         if self.quick_look_open || self.selected_photo.is_none() {
             return;
+        }
+        if self
+            .viewer_morph
+            .as_ref()
+            .is_some_and(|morph| morph.closing)
+        {
+            self.viewer_morph = None;
+            self.viewer_morph_epoch = self.viewer_morph_epoch.wrapping_add(1);
         }
         self.message = None;
         self.delete_armed = None;
@@ -2603,6 +2843,97 @@ impl App {
             .iter()
             .position(|id| Some(*id) == self.selected)
             .unwrap_or(0);
+        let id = self.selected.expect("selected photo");
+        let aspect = self
+            .selected_photo
+            .as_ref()
+            .map(|photo| {
+                let (width, height) = photo.effective_dimensions();
+                if height > 0 {
+                    width as f32 / height as f32
+                } else {
+                    16.0 / 9.0
+                }
+            })
+            .unwrap_or(16.0 / 9.0);
+        let viewport = window.viewport_size();
+        let to = viewer_image_rect(viewport, self.quick_look_details_open, aspect);
+        let now = Instant::now();
+        self.viewer_nav_epoch = 0;
+        self.viewer_nav_direction = 1.0;
+        self.viewer_nav_started_at = now;
+        self.viewer_open_started_at = now;
+        let details_width = if self.quick_look_details_open {
+            VIEWER_DETAILS_WIDTH
+        } else {
+            0.0
+        };
+        let from_size = (f32::from(to.size.width), f32::from(to.size.height));
+        self.viewer_box = ViewerBoxState {
+            epoch: self.viewer_box.epoch.wrapping_add(1),
+            started_at: now,
+            from_size,
+            to_aspect: aspect,
+            to_details_width: details_width,
+            duration: Duration::ZERO,
+        };
+        self.viewer_panel = ViewerPanelState {
+            epoch: self.viewer_panel.epoch.wrapping_add(1),
+            started_at: now,
+            from_width: details_width,
+            to_width: details_width,
+            duration: Duration::ZERO,
+        };
+        let resolved = self.actual_source(id, source);
+        if let Some((actual_source, _)) = resolved {
+            self.viewer_return_source = Some(actual_source);
+        }
+        if !cx.reduce_motion()
+            && let Some((actual_source, from)) = resolved
+        {
+            let thumbnail = self.thumbnails.get(id);
+            let preview = self.preview.clone();
+            if thumbnail.is_some() || preview.is_some() {
+                self.viewer_morph_epoch = self.viewer_morph_epoch.wrapping_add(1);
+                let epoch = self.viewer_morph_epoch;
+                let color = self
+                    .selected_photo
+                    .as_ref()
+                    .map(|photo| self.color_for(photo))
+                    .unwrap_or(0);
+                self.viewer_morph = Some(ViewerMorph {
+                    epoch,
+                    started_at: Instant::now(),
+                    from,
+                    to,
+                    thumbnail,
+                    preview,
+                    color,
+                    source: actual_source,
+                    closing: false,
+                    fade_only: false,
+                    backdrop_from: 1.0,
+                });
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(MOTION_MORPH + Duration::from_millis(60))
+                        .await;
+                    this.update(cx, |this, cx| {
+                        if this.viewer_morph_epoch == epoch
+                            && this
+                                .viewer_morph
+                                .as_ref()
+                                .is_some_and(|morph| !morph.closing)
+                        {
+                            this.viewer_morph = None;
+                            cx.notify();
+                        }
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
         self.quick_look_open = true;
         self.quick_look_epoch = self.quick_look_epoch.wrapping_add(1);
         self.quick_look_focus_index = 0;
@@ -2627,6 +2958,80 @@ impl App {
         if !self.quick_look_open {
             return;
         }
+        let opening = self
+            .viewer_morph
+            .as_ref()
+            .filter(|morph| !morph.closing)
+            .map(|morph| (morph.current_bounds(Instant::now()), morph.source));
+        let viewer_rect = if let Some((bounds, _)) = opening {
+            bounds
+        } else {
+            let viewport = window.viewport_size();
+            let (width, height) = self.viewer_box.current_size(viewport);
+            centered_viewer_rect(viewport, self.viewer_panel.current_width(), width, height)
+        };
+        let from = viewer_rect;
+        let source = opening
+            .map(|(_, source)| source)
+            .or(self.viewer_return_source)
+            .unwrap_or(ViewerOpenSource::Auto);
+        let id = self.selected.unwrap_or_default();
+        let target = self.actual_source(id, source);
+        let (to, target_kind, fade_only) = match target {
+            Some((kind, bounds)) => (bounds, kind, false),
+            None => (from, source, true),
+        };
+        let backdrop_from = eased_progress(
+            self.viewer_open_started_at,
+            Duration::from_millis(240),
+            Instant::now(),
+        );
+        let thumbnail = self.thumbnails.get(id);
+        let preview = self.preview.clone();
+        let color = self
+            .selected_photo
+            .as_ref()
+            .map(|photo| self.color_for(photo))
+            .unwrap_or(0);
+
+        if !cx.reduce_motion() && (thumbnail.is_some() || preview.is_some()) {
+            self.viewer_morph_epoch = self.viewer_morph_epoch.wrapping_add(1);
+            let epoch = self.viewer_morph_epoch;
+            self.viewer_morph = Some(ViewerMorph {
+                epoch,
+                started_at: Instant::now(),
+                from,
+                to,
+                thumbnail,
+                preview,
+                color,
+                source: target_kind,
+                closing: true,
+                fade_only,
+                backdrop_from,
+            });
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(MOTION_MORPH + Duration::from_millis(60))
+                    .await;
+                this.update(cx, |this, cx| {
+                    if this.viewer_morph_epoch == epoch
+                        && this
+                            .viewer_morph
+                            .as_ref()
+                            .is_some_and(|morph| morph.closing)
+                    {
+                        this.viewer_morph = None;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        } else {
+            self.viewer_morph = None;
+        }
+        self.viewer_return_source = None;
         self.quick_look_open = false;
         self.delete_armed = None;
         self.note_edit_id = None;
@@ -2647,6 +3052,9 @@ impl App {
         self.quick_look_open = false;
         self.delete_armed = None;
         self.note_edit_id = None;
+        self.viewer_morph = None;
+        self.viewer_morph_epoch = self.viewer_morph_epoch.wrapping_add(1);
+        self.viewer_return_source = None;
         if let Some(id) = self.selected.take() {
             self.thumbnails.unpin(id);
         }
@@ -2686,6 +3094,13 @@ impl App {
         if !self.quick_look_open || self.quick_look_photo_ids.is_empty() {
             return;
         }
+        if self
+            .viewer_morph
+            .as_ref()
+            .is_some_and(|morph| !morph.closing)
+        {
+            self.viewer_morph = None;
+        }
         let next = step_index(
             self.quick_look_index,
             self.quick_look_photo_ids.len(),
@@ -2705,15 +3120,85 @@ impl App {
         }
         // Keep the top-bar navigation focused; only the library selection and
         // the displayed photo change behind the overlay.
+        let viewport = window.viewport_size();
+        let from_size = self.viewer_box.current_size(viewport);
+        let target_details_width = self.viewer_panel.to_width;
         self.select_photo(self.quick_look_photo_ids[next], cx);
+        let new_aspect = self
+            .selected_photo
+            .as_ref()
+            .map(|photo| {
+                let (width, height) = photo.effective_dimensions();
+                if height > 0 {
+                    width as f32 / height as f32
+                } else {
+                    16.0 / 10.0
+                }
+            })
+            .unwrap_or(16.0 / 10.0);
+        let now = Instant::now();
+        self.viewer_nav_epoch = self.viewer_nav_epoch.wrapping_add(1);
+        self.viewer_nav_direction = if delta > 0 { 1.0 } else { -1.0 };
+        self.viewer_nav_started_at = now;
+        self.viewer_box = ViewerBoxState {
+            epoch: self.viewer_box.epoch.wrapping_add(1),
+            started_at: now,
+            from_size,
+            to_aspect: new_aspect,
+            to_details_width: target_details_width,
+            duration: MOTION_BASE,
+        };
         cx.notify();
     }
 
     fn toggle_quick_look_details(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .viewer_morph
+            .as_ref()
+            .is_some_and(|morph| !morph.closing)
+        {
+            self.viewer_morph = None;
+        }
+        let current_width = self.viewer_panel.current_width();
+        let viewport = window.viewport_size();
+        let from_size = self.viewer_box.current_size(viewport);
         self.quick_look_details_open = !self.quick_look_details_open;
         if !self.quick_look_details_open {
             self.note_edit_id = None;
         }
+        let target_width = if self.quick_look_details_open {
+            VIEWER_DETAILS_WIDTH
+        } else {
+            0.0
+        };
+        let aspect = self
+            .selected_photo
+            .as_ref()
+            .map(|photo| {
+                let (width, height) = photo.effective_dimensions();
+                if height > 0 {
+                    width as f32 / height as f32
+                } else {
+                    16.0 / 10.0
+                }
+            })
+            .unwrap_or(16.0 / 10.0);
+        let now = Instant::now();
+        self.viewer_panel = ViewerPanelState {
+            epoch: self.viewer_panel.epoch.wrapping_add(1),
+            started_at: now,
+            from_width: current_width,
+            to_width: target_width,
+            duration: MOTION_SLOW,
+        };
+        self.viewer_box = ViewerBoxState {
+            epoch: self.viewer_box.epoch.wrapping_add(1),
+            started_at: now,
+            from_size,
+            to_aspect: aspect,
+            to_details_width: target_width,
+            duration: MOTION_SLOW,
+        };
         self.quick_look_details_epoch = self.quick_look_details_epoch.wrapping_add(1);
         let index = self
             .quick_look_focus_order(cx)
@@ -3343,35 +3828,42 @@ impl App {
                     .child(brand_text),
             )
             .child(div().h(px(12.)))
-            .child(self.nav_item(
-                "写真",
-                Screen::Photos,
-                IconName::GalleryVerticalEnd,
-                Some(photo_count.clone()),
-                cx,
-            ))
-            .child(self.nav_item("検索", Screen::Search, IconName::Search, None, cx))
-            .child(self.nav_item(
-                "圧縮",
-                Screen::Compression,
-                IconName::Minimize,
-                compression_count,
-                cx,
-            ))
-            .child(self.nav_item(
-                "ダッシュボード",
-                Screen::Dashboard,
-                IconName::LayoutDashboard,
-                None,
-                cx,
-            ))
-            .child(self.nav_item(
-                "設定",
-                Screen::Settings,
-                IconName::Settings,
-                update_badge,
-                cx,
-            ))
+            .child(
+                v_flex()
+                    .relative()
+                    .w_full()
+                    .gap(px(NAV_ITEM_GAP))
+                    .child(self.nav_highlight())
+                    .child(self.nav_item(
+                        "写真",
+                        Screen::Photos,
+                        IconName::GalleryVerticalEnd,
+                        Some(photo_count.clone()),
+                        cx,
+                    ))
+                    .child(self.nav_item("検索", Screen::Search, IconName::Search, None, cx))
+                    .child(self.nav_item(
+                        "圧縮",
+                        Screen::Compression,
+                        IconName::Minimize,
+                        compression_count,
+                        cx,
+                    ))
+                    .child(self.nav_item(
+                        "ダッシュボード",
+                        Screen::Dashboard,
+                        IconName::LayoutDashboard,
+                        None,
+                        cx,
+                    ))
+                    .child(self.nav_item(
+                        "設定",
+                        Screen::Settings,
+                        IconName::Settings,
+                        update_badge,
+                        cx,
+                    )),
+            )
             .child(div().flex_1())
             .when(!collapsed, |this| {
                 this.child(
@@ -3472,6 +3964,79 @@ impl App {
         .into_any_element()
     }
 
+    fn nav_highlight(&self) -> AnyElement {
+        let collapsed = self.sidebar_collapsed;
+        let nav_epoch = self.nav_epoch;
+        let from = nav_item_top(nav_index(self.nav_previous));
+        let to = nav_item_top(nav_index(self.screen));
+        let vertical_duration = if nav_epoch == 0 {
+            Duration::ZERO
+        } else {
+            MOTION_BASE
+        };
+        let vertical_anim = || {
+            Animation::new(vertical_duration)
+                .with_easing(ease_motion)
+                .with_max_fps(MOTION_FPS)
+        };
+
+        let pill = div()
+            .absolute()
+            .left_0()
+            .right_0()
+            .h(px(NAV_ITEM_HEIGHT))
+            .rounded(px(11.))
+            .bg(rgb(ACCENT_SOFT))
+            .with_animation(("nav-pill", nav_epoch), vertical_anim(), move |el, t| {
+                el.top(px(from + (to - from) * t))
+            });
+
+        let sidebar_epoch = self.sidebar_motion_epoch;
+        let from_left = nav_bar_left(!collapsed);
+        let to_left = nav_bar_left(collapsed);
+        let horizontal_anim = Animation::new(if sidebar_epoch == 0 {
+            Duration::ZERO
+        } else {
+            MOTION_SLOW
+        })
+        .with_easing(ease_motion)
+        .with_max_fps(MOTION_FPS);
+        let bar = div()
+            .absolute()
+            .left_0()
+            .top_0()
+            .w(px(2.))
+            .h_full()
+            .with_animation(
+                ("nav-bar-x", sidebar_epoch),
+                horizontal_anim,
+                move |el, t| el.left(px(from_left + (to_left - from_left) * t)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .top(px(from + 11.0))
+                    .left_0()
+                    .w(px(2.))
+                    .h(px(18.))
+                    .rounded_full()
+                    .bg(rgb(BLUE))
+                    .with_animation(("nav-bar-y", nav_epoch), vertical_anim(), move |el, t| {
+                        el.top(px(from + 11.0 + (to - from) * t))
+                    }),
+            );
+
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .w_full()
+            .h(px(5.0 * NAV_ITEM_HEIGHT + 4.0 * NAV_ITEM_GAP))
+            .child(pill)
+            .child(bar)
+            .into_any_element()
+    }
+
     fn nav_item(
         &mut self,
         label: &'static str,
@@ -3481,36 +4046,72 @@ impl App {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let active = self.screen == screen;
+        let was_active = self.nav_previous == screen;
+        let hovered = self.hovered_nav == Some(screen);
         let collapsed = self.sidebar_collapsed;
         let epoch = self.sidebar_motion_epoch;
+        let nav_epoch = self.nav_epoch;
         let reveal_duration = if epoch == 0 {
             Duration::ZERO
         } else {
             Duration::from_millis(320)
         };
-        let icon_color = if active { BLUE } else { MUTED };
-        let icon_element = if active {
-            Icon::new(icon)
-                .with_size(px(17.))
-                .text_color(rgb(icon_color))
-        } else {
-            Icon::new(icon).with_size(px(17.))
+        let color_anim = || {
+            Animation::new(MOTION_FAST)
+                .with_easing(ease_motion)
+                .with_max_fps(MOTION_FPS)
         };
 
+        let icon_element = Icon::new(icon).with_size(px(17.)).with_animation(
+            SharedString::from(format!("nav-icon-{label}-{nav_epoch}")),
+            color_anim(),
+            move |el, t| {
+                if hovered && !active {
+                    return el.text_color(rgb(TEXT));
+                }
+                let from = if was_active { BLUE } else { MUTED };
+                let to = if active { BLUE } else { MUTED };
+                el.text_color(rgb(lerp_color(from, to, t)))
+            },
+        );
+
+        let label_from = if was_active { 0xeaf4ff } else { MUTED };
+        let label_to = if active {
+            0xeaf4ff
+        } else if hovered {
+            TEXT
+        } else {
+            MUTED
+        };
         let label_block = h_flex()
             .min_w_0()
             .items_center()
             .justify_between()
             .overflow_hidden()
             .whitespace_nowrap()
-            .child(div().text_size(px(12.)).child(label))
+            .child(div().text_size(px(12.)).child(label).with_animation(
+                SharedString::from(format!("nav-label-{label}-{nav_epoch}")),
+                color_anim(),
+                move |el, t| el.text_color(rgb(lerp_color(label_from, label_to, t))),
+            ))
             .when_some(count, |this, count| {
                 this.child(
                     div()
                         .text_size(px(10.))
                         .font_family("monospace")
-                        .text_color(rgb(if active { BLUE } else { MUTED_2 }))
-                        .child(count),
+                        .child(count)
+                        .with_animation(
+                            SharedString::from(format!("nav-count-{label}-{nav_epoch}")),
+                            color_anim(),
+                            move |el, t| {
+                                if hovered && !active {
+                                    return el.text_color(rgb(TEXT));
+                                }
+                                let from = if was_active { BLUE } else { MUTED_2 };
+                                let to = if active { BLUE } else { MUTED_2 };
+                                el.text_color(rgb(lerp_color(from, to, t)))
+                            },
+                        ),
                 )
             })
             .with_animation(
@@ -3524,54 +4125,59 @@ impl App {
                 },
             );
 
+        let from_pad = if collapsed { 11.0 } else { 18.5 };
+        let to_pad = if collapsed { 18.5 } else { 11.0 };
+        let from_gap = if collapsed { 11.0 } else { 0.0 };
+        let to_gap = if collapsed { 0.0 } else { 11.0 };
+        let pad_anim = Animation::new(if epoch == 0 {
+            Duration::ZERO
+        } else {
+            MOTION_SLOW
+        })
+        .with_easing(ease_motion)
+        .with_max_fps(MOTION_FPS);
+        let content = h_flex()
+            .w_full()
+            .items_center()
+            .with_animation(
+                SharedString::from(format!("nav-pad-{label}-{epoch}")),
+                pad_anim,
+                move |el, t| {
+                    el.pl(px(from_pad + (to_pad - from_pad) * t))
+                        .gap(px(from_gap + (to_gap - from_gap) * t))
+                },
+            )
+            .child(icon_element)
+            .child(label_block);
+
         h_flex()
             .id(label)
             .relative()
-            .h(px(40.))
+            .h(px(NAV_ITEM_HEIGHT))
             .w_full()
             .rounded(px(11.))
             .cursor_pointer()
             .items_center()
-            .when(collapsed, |this| this.justify_center())
-            .when(!collapsed, |this| this.px(px(11.)).gap(px(11.)))
-            .when(active, |this| {
-                this.bg(rgb(ACCENT_SOFT)).text_color(rgb(0xeaf4ff))
-            })
             .when(!active, |this| {
-                this.text_color(rgb(MUTED))
-                    .hover(|this| this.bg(rgb(0x161d28)).text_color(rgb(TEXT)))
+                this.hover(|this| this.bg(rgb(0x161d28)).text_color(rgb(TEXT)))
             })
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                if !this.sidebar_collapsed {
-                    if this.hovered_nav.is_some() {
-                        this.hovered_nav = None;
+                // Hover listeners fire in reverse paint order. Let the entering
+                // row win instead of letting the leaving row clear it.
+                if *hovered {
+                    if this.hovered_nav != Some(screen) {
+                        this.hovered_nav = Some(screen);
                         cx.notify();
                     }
-                    return;
-                }
-                let next = hovered.then_some(screen);
-                if this.hovered_nav != next {
-                    this.hovered_nav = next;
+                } else if this.hovered_nav == Some(screen) {
+                    this.hovered_nav = None;
                     cx.notify();
                 }
             }))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.switch_screen(screen, cx);
             }))
-            .when(active, |this| {
-                this.child(
-                    div()
-                        .absolute()
-                        .top(px(11.))
-                        .left(px(if collapsed { 5. } else { -1. }))
-                        .w(px(2.))
-                        .h(px(18.))
-                        .rounded_full()
-                        .bg(rgb(BLUE)),
-                )
-            })
-            .child(icon_element)
-            .child(label_block)
+            .child(content)
             .into_any_element()
     }
 
@@ -3579,18 +4185,12 @@ impl App {
         let Some(screen) = self.hovered_nav.filter(|_| self.sidebar_collapsed) else {
             return div().into_any_element();
         };
-        let index = match screen {
-            Screen::Photos => 0,
-            Screen::Search => 1,
-            Screen::Compression => 2,
-            Screen::Dashboard => 3,
-            Screen::Settings => 4,
-        };
+        let index = nav_index(screen);
 
         div()
             .absolute()
             .left(px(86.))
-            .top(px(62. + index as f32 * 43. + 8.))
+            .top(px(70.0 + nav_item_top(index)))
             .px(px(8.))
             .py(px(5.))
             .rounded(px(7.))
@@ -3601,6 +4201,13 @@ impl App {
             .text_color(rgb(TEXT))
             .whitespace_nowrap()
             .child(screen.title())
+            .with_animation(
+                ("nav-tooltip", index),
+                Animation::new(MOTION_FAST)
+                    .with_easing(ease_motion)
+                    .with_max_fps(MOTION_FPS),
+                move |el, t| el.opacity(t).relative().left(px(-4.0 * (1.0 - t))),
+            )
             .into_any_element()
     }
 
@@ -3721,7 +4328,8 @@ impl App {
             import_failed,
         )
         .into_iter()
-        .map(|(target, message)| {
+        .enumerate()
+        .map(|(index, (target, message))| {
             let (id, action) = match target {
                 Screen::Photos => ("alert-photos", "写真を開く"),
                 Screen::Compression => ("alert-compression", "圧縮を開く"),
@@ -3765,6 +4373,13 @@ impl App {
                             this.switch_screen(target, cx);
                         })),
                 )
+                .with_animation(
+                    ("global-alert", index),
+                    Animation::new(MOTION_BASE)
+                        .with_easing(ease_motion)
+                        .with_max_fps(MOTION_FPS),
+                    |el, t| el.opacity(t).relative().top(px(-8.0 * (1.0 - t))),
+                )
                 .into_any_element()
         })
         .collect()
@@ -3778,6 +4393,23 @@ impl App {
             Screen::Dashboard => self.dashboard_screen(cx).into_any_element(),
             Screen::Settings => self.settings_screen(cx).into_any_element(),
         };
+        let enter = Animation::new(if self.screen_epoch == 0 {
+            Duration::ZERO
+        } else {
+            MOTION_BASE
+        })
+        .with_easing(ease_motion)
+        .with_max_fps(MOTION_FPS);
+        let direction = self.screen_direction;
+        let screen = v_flex().flex_1().min_h_0().child(screen).with_animation(
+            ("screen-enter", self.screen_epoch),
+            enter,
+            move |el, t| {
+                el.relative()
+                    .left(px(direction * SCREEN_SLIDE * (1.0 - t)))
+                    .opacity(t)
+            },
+        );
         v_flex()
             .flex_1()
             .min_h_0()
@@ -3813,6 +4445,8 @@ impl App {
         let ids = self.selected_ids.clone();
         h_flex()
             .flex_shrink_0()
+            .h(px(36.))
+            .overflow_hidden()
             .items_center()
             .gap(px(10.))
             .px(px(26.))
@@ -3843,6 +4477,13 @@ impl App {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.open_manual_compression(ids.clone(), cx)
                     })),
+            )
+            .with_animation(
+                "selection-bar",
+                Animation::new(MOTION_FAST)
+                    .with_easing(ease_motion)
+                    .with_max_fps(MOTION_FPS),
+                |el, t| el.h(px(36.0 * t)).opacity(t),
             )
             .into_any_element()
     }
@@ -4342,6 +4983,18 @@ impl App {
                     .rounded(px(inner_corner_radius(14.0, 2.0))),
             );
         }
+        let bounds_map = self.card_image_bounds.clone();
+        let bounds_frame = self.render_epoch;
+        thumb = thumb.child(
+            canvas(
+                move |bounds, _, _| {
+                    bounds_map.borrow_mut().insert(id, (bounds_frame, bounds));
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full(),
+        );
         if show_status {
             let status_color = if replaced {
                 BLUE
@@ -4490,7 +5143,7 @@ impl App {
                     && click.down.click_count >= 2
                     && !event.modifiers().modified()
                 {
-                    this.open_quick_look(window, cx);
+                    this.open_quick_look(window, cx, ViewerOpenSource::Card);
                 }
             }))
             .child(body)
@@ -4753,6 +5406,18 @@ impl App {
                     .child("プレビューを読み込めません"),
             );
         }
+        let preview_bounds = self.inspector_preview_bounds.clone();
+        let preview_frame_epoch = self.render_epoch;
+        preview_frame = preview_frame.child(
+            canvas(
+                move |bounds, _, _| {
+                    *preview_bounds.borrow_mut() = Some((preview_frame_epoch, bounds));
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full(),
+        );
 
         let header = h_flex()
             .flex_shrink_0()
@@ -4876,7 +5541,7 @@ impl App {
                     .w_full()
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.load_selected_meta(id);
-                        this.open_quick_look(window, cx);
+                        this.open_quick_look(window, cx, ViewerOpenSource::Inspector);
                     })),
             )
             .child({
@@ -5487,63 +6152,121 @@ impl App {
                     .text_color(rgb(MUTED))
                     .child(photo.file_name.clone()),
             )
-            .child(details_button);
+            .child(details_button)
+            .with_animation(
+                ("viewer-topbar", self.quick_look_epoch),
+                Animation::new(MOTION_BASE)
+                    .with_easing(ease_motion)
+                    .with_max_fps(MOTION_FPS),
+                |el, t| el.relative().top(px(-8.0 * (1.0 - t))),
+            );
 
-        let (photo_width, photo_height) = photo.effective_dimensions();
-        let aspect = if photo_height > 0 {
-            photo_width as f32 / photo_height as f32
-        } else {
-            16.0 / 9.0
-        };
         let viewport = window.viewport_size();
-        let (image_w, image_h) = viewer_image_box(
-            viewport.width.into(),
-            viewport.height.into(),
-            details_open,
-            aspect,
-        );
-        let image = if let Some(preview) = self.preview.clone() {
-            div()
-                .id("viewer-image")
-                .relative()
-                .w(px(image_w))
-                .h(px(image_h))
-                .overflow_hidden()
-                .rounded(px(10.))
-                .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
-                .child(
-                    gpui_kit::img(preview)
-                        .object_fit(ObjectFit::Contain)
-                        .size_full()
-                        .rounded(px(10.)),
-                )
+        let box_state = self.viewer_box;
+        let nav_epoch = self.viewer_nav_epoch;
+        let nav_direction = self.viewer_nav_direction;
+        let nav_t = if nav_epoch == 0 {
+            0.0
         } else {
-            div()
-                .id("viewer-image")
-                .relative()
-                .w(px(image_w))
-                .h(px(image_h))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(10.))
-                .bg(rgba((color << 8) | 0x30))
-                .border_1()
-                .border_color(rgba(0xffffff14))
-                .text_size(px(11.))
-                .text_color(rgb(MUTED))
-                .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
-                .child("プレビューを読み込めません")
+            eased_progress(self.viewer_nav_started_at, MOTION_BASE, Instant::now())
         };
-        let image = image.with_animation(
-            SharedString::from(format!(
-                "viewer-photo-{}-{}",
-                photo.id, self.quick_look_epoch
-            )),
-            Animation::new(Duration::from_millis(220)).with_easing(ease_motion),
-            |el, t| el.opacity(t),
+        let previous_preview = self.previous_preview.clone();
+        let current_preview = self.preview.clone();
+        let thumbnail = self.thumbnails.get(photo.id);
+        let (start_w, start_h) = box_state.size_at(0.0, viewport);
+
+        let mut image_frame = div()
+            .id("viewer-image")
+            .relative()
+            .flex_shrink_0()
+            .w(px(start_w))
+            .h(px(start_h))
+            .overflow_hidden()
+            .rounded(px(10.))
+            .bg(rgb(color))
+            .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()));
+
+        // Keep the cached thumbnail behind the preview so a still-uploading
+        // preview never flashes the bare frame color.
+        if let Some(thumbnail) = thumbnail.clone() {
+            image_frame = image_frame.child(
+                gpui_kit::img(thumbnail)
+                    .object_fit(ObjectFit::Contain)
+                    .size_full()
+                    .rounded(px(10.)),
+            );
+        }
+
+        if nav_epoch > 0
+            && nav_t < 1.0
+            && let Some(previous) = previous_preview
+        {
+            image_frame = image_frame.child(
+                gpui_kit::img(previous)
+                    .object_fit(ObjectFit::Contain)
+                    .size_full()
+                    .rounded(px(10.))
+                    .opacity(1.0 - nav_t)
+                    .relative()
+                    .left(px(-nav_direction * VIEWER_NAV_SLIDE * nav_t)),
+            );
+        }
+
+        let current_offset = if nav_epoch == 0 {
+            0.0
+        } else {
+            nav_direction * VIEWER_NAV_SLIDE * (1.0 - nav_t)
+        };
+        if let Some(preview) = current_preview {
+            image_frame = image_frame.child(
+                gpui_kit::img(preview)
+                    .object_fit(ObjectFit::Contain)
+                    .size_full()
+                    .rounded(px(10.))
+                    .opacity(if nav_epoch == 0 { 1.0 } else { nav_t })
+                    .relative()
+                    .left(px(current_offset)),
+            );
+        } else if thumbnail.is_none() {
+            image_frame = image_frame.child(
+                div()
+                    .absolute()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(11.))
+                    .text_color(rgb(MUTED))
+                    .child("プレビューを読み込めません"),
+            );
+        }
+
+        let image_frame = image_frame.with_animation(
+            ("viewer-box", box_state.epoch),
+            Animation::new(box_state.duration)
+                .with_easing(ease_motion)
+                .with_max_fps(MOTION_FPS),
+            move |el, t| {
+                let (width, height) = box_state.size_at(t, viewport);
+                el.w(px(width)).h(px(height))
+            },
         );
 
+        let opening_morph = self
+            .viewer_morph
+            .as_ref()
+            .is_some_and(|morph| !morph.closing);
+        let nav_driver = div().size(px(0.)).with_animation(
+            ("viewer-nav-driver", nav_epoch),
+            Animation::new(if nav_epoch == 0 {
+                Duration::ZERO
+            } else {
+                MOTION_BASE
+            })
+            .with_easing(ease_motion)
+            .with_max_fps(MOTION_FPS),
+            |el, _| el,
+        );
         let image_area = div()
             .id("viewer-image-area")
             .relative()
@@ -5555,8 +6278,10 @@ impl App {
             .justify_center()
             .overflow_hidden()
             .p(px(VIEWER_PAD))
+            .opacity(if opening_morph { 0.0 } else { 1.0 })
             .on_click(cx.listener(|this, _, window, cx| this.close_quick_look(window, cx)))
-            .child(image);
+            .child(nav_driver)
+            .child(image_frame);
 
         let message = self.message.clone();
         let mut details_panel = v_flex()
@@ -5590,20 +6315,26 @@ impl App {
                         .child("もう一度押すとOSゴミ箱へ移動します。"),
                 );
             }
-            details_panel = details_panel.child(body.child(self.detail_body(&photo, cx)));
+            let body = body.child(self.detail_body(&photo, cx)).with_animation(
+                ("viewer-details-body", self.quick_look_details_epoch),
+                Animation::new(if self.quick_look_details_epoch == 0 {
+                    Duration::ZERO
+                } else {
+                    MOTION_FAST
+                })
+                .with_easing(ease_motion)
+                .with_max_fps(MOTION_FPS),
+                |el, t| el.opacity(t).relative().top(px(6.0 * (1.0 - t))),
+            );
+            details_panel = details_panel.child(body);
         }
+        let panel_state = self.viewer_panel;
         let details_panel = details_panel.with_animation(
-            ("viewer-details", self.quick_look_details_epoch),
-            Animation::new(if self.quick_look_details_epoch == 0 {
-                Duration::ZERO
-            } else {
-                Duration::from_millis(300)
-            })
-            .with_easing(ease_motion),
-            move |el, t| {
-                el.w(px(viewer_details_width(details_open, t)))
-                    .overflow_hidden()
-            },
+            ("viewer-panel", panel_state.epoch),
+            Animation::new(panel_state.duration)
+                .with_easing(ease_motion)
+                .with_max_fps(MOTION_FPS),
+            move |el, t| el.w(px(panel_state.width_at(t))).overflow_hidden(),
         );
 
         let content = h_flex()
@@ -5630,6 +6361,132 @@ impl App {
                 Animation::new(Duration::from_millis(240)).with_easing(ease_motion),
                 |el, t| el.opacity(t),
             )
+            .into_any_element()
+    }
+
+    fn viewer_morph_overlay(&self) -> AnyElement {
+        let Some(morph) = self.viewer_morph.as_ref() else {
+            return div().into_any_element();
+        };
+        let from = morph.from;
+        let to = morph.to;
+        let epoch = morph.epoch;
+        let color = morph.color;
+        let closing = morph.closing;
+        let fade_only = morph.fade_only;
+        let backdrop_from = morph.backdrop_from;
+        let (old_kind, new_kind, start_radius, end_radius) = morph_image_plan(
+            closing,
+            morph.source,
+            morph.thumbnail.is_some(),
+            morph.preview.is_some(),
+        );
+        let image_for = |kind: MorphImageKind| match kind {
+            MorphImageKind::Thumbnail => morph.thumbnail.clone(),
+            MorphImageKind::Preview => morph.preview.clone(),
+        };
+        let Some(old_image) = old_kind.and_then(image_for) else {
+            return div().into_any_element();
+        };
+        let new_image = if fade_only {
+            None
+        } else {
+            new_kind.and_then(image_for)
+        };
+        let old_fit = if closing {
+            ObjectFit::Contain
+        } else {
+            ObjectFit::Cover
+        };
+        let new_fit = if closing {
+            ObjectFit::Cover
+        } else {
+            ObjectFit::Contain
+        };
+        let layer_anim = || {
+            Animation::new(MOTION_MORPH)
+                .with_easing(ease_motion)
+                .with_max_fps(MOTION_FPS)
+        };
+        let old_layer = gpui_kit::img(old_image)
+            .object_fit(old_fit)
+            .size_full()
+            .with_animation(("viewer-morph-old", epoch), layer_anim(), move |el, t| {
+                let radius = start_radius + (end_radius - start_radius) * t;
+                let opacity = if fade_only {
+                    1.0
+                } else if closing {
+                    1.0 - t
+                } else {
+                    // Keep a little of the cached image under the incoming
+                    // preview: a still-uploading preview must not expose the
+                    // bare frame color. The opaque preview hides it otherwise.
+                    0.35 + 0.65 * (1.0 - t)
+                };
+                el.opacity(opacity).rounded(px(radius))
+            });
+        let new_layer = new_image.map(|image| {
+            gpui_kit::img(image)
+                .object_fit(new_fit)
+                .size_full()
+                .with_animation(("viewer-morph-new", epoch), layer_anim(), move |el, t| {
+                    let radius = start_radius + (end_radius - start_radius) * t;
+                    el.opacity(t).rounded(px(radius))
+                })
+        });
+        let frame = div()
+            .absolute()
+            .overflow_hidden()
+            .bg(rgb(color))
+            .child(old_layer)
+            .when(!fade_only, |this| {
+                this.when_some(new_layer, |this, layer| this.child(layer))
+            })
+            .with_animation(
+                ("viewer-morph-frame", epoch),
+                Animation::new(MOTION_MORPH)
+                    .with_easing(ease_motion)
+                    .with_max_fps(MOTION_FPS),
+                move |el, t| {
+                    let bounds = lerp_bounds(from, to, t);
+                    let radius = start_radius + (end_radius - start_radius) * t;
+                    el.opacity(if fade_only { 1.0 - t } else { 1.0 })
+                        .left(bounds.origin.x)
+                        .top(bounds.origin.y)
+                        .w(bounds.size.width)
+                        .h(bounds.size.height)
+                        .rounded(px(radius))
+                },
+            );
+
+        let backdrop = closing.then(|| {
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .size_full()
+                .bg(rgb(0x05070a))
+                .child(div().absolute().size_full().bg(rgba((color << 8) | 0x22)))
+                .with_animation(
+                    ("viewer-morph-backdrop", epoch),
+                    Animation::new(MOTION_MORPH)
+                        .with_easing(ease_motion)
+                        .with_max_fps(MOTION_FPS),
+                    move |el, t| el.opacity(backdrop_from * (1.0 - t)),
+                )
+        });
+
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .size_full()
+            .when_some(backdrop, |this, backdrop| this.child(backdrop))
+            .child(frame)
             .into_any_element()
     }
 
@@ -5892,6 +6749,13 @@ impl App {
                     ),
             );
 
+        let panel = panel.with_animation(
+            "manual-compression-panel",
+            Animation::new(MOTION_BASE)
+                .with_easing(ease_motion)
+                .with_max_fps(MOTION_FPS),
+            |el, t| el.relative().top(px(10.0 * (1.0 - t))),
+        );
         div()
             .id("manual-compression-scrim")
             .absolute()
@@ -5907,6 +6771,13 @@ impl App {
             .bg(rgba(0x05070acc))
             .on_click(cx.listener(|this, _, _, cx| this.close_manual_compression(cx)))
             .child(panel)
+            .with_animation(
+                "manual-compression-scrim",
+                Animation::new(MOTION_FAST)
+                    .with_easing(ease_motion)
+                    .with_max_fps(MOTION_FPS),
+                |el, t| el.opacity(t),
+            )
             .into_any_element()
     }
 
@@ -6095,6 +6966,30 @@ impl App {
                                             .text_color(rgb(if active { MUTED } else { MUTED_2 }))
                                             .child(meta),
                                     )
+                                    .with_animation(
+                                        SharedString::from(format!(
+                                            "profile-card-{}-{active}",
+                                            profile.id
+                                        )),
+                                        Animation::new(MOTION_FAST)
+                                            .with_easing(ease_motion)
+                                            .with_max_fps(MOTION_FPS),
+                                        move |el, t| {
+                                            let (bg_from, bg_to) = if active {
+                                                (PANEL, ACCENT_SOFT)
+                                            } else {
+                                                (ACCENT_SOFT, PANEL)
+                                            };
+                                            let (border_from, border_to) = if active {
+                                                (BORDER, BLUE)
+                                            } else {
+                                                (BLUE, BORDER)
+                                            };
+                                            el.bg(rgb(lerp_color(bg_from, bg_to, t))).border_color(
+                                                rgb(lerp_color(border_from, border_to, t)),
+                                            )
+                                        },
+                                    )
                             }),
                         ))
                         .child(
@@ -6103,7 +6998,22 @@ impl App {
                                 .min_w_0()
                                 .gap(px(24.))
                                 .when_some(profile, |this, profile| {
-                                    this.child(self.profile_editor(&profile, window, cx))
+                                    let profile_index = self.profile_index;
+                                    this.child(
+                                        v_flex()
+                                            .child(self.profile_editor(&profile, window, cx))
+                                            .with_animation(
+                                                ("profile-editor", profile_index),
+                                                Animation::new(MOTION_FAST)
+                                                    .with_easing(ease_motion)
+                                                    .with_max_fps(MOTION_FPS),
+                                                |el, t| {
+                                                    el.opacity(t)
+                                                        .relative()
+                                                        .top(px(4.0 * (1.0 - t)))
+                                                },
+                                            ),
+                                    )
                                 })
                                 .child(
                                     h_flex()
@@ -7526,7 +8436,15 @@ impl App {
             );
         }
 
-        panel.into_any_element()
+        panel
+            .with_animation(
+                "import-report",
+                Animation::new(MOTION_BASE)
+                    .with_easing(ease_motion)
+                    .with_max_fps(MOTION_FPS),
+                |el, t| el.opacity(t).relative().top(px(-8.0 * (1.0 - t))),
+            )
+            .into_any_element()
     }
 
     fn preset_button(
@@ -8570,6 +9488,7 @@ impl App {
 
 impl Render for App {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_epoch = self.render_epoch.wrapping_add(1);
         self.guard_viewer_selection(window, cx);
         let workspace = v_flex().flex_1().min_w_0().h_full();
         let root = h_flex()
@@ -8582,9 +9501,9 @@ impl Render for App {
             .on_action(
                 cx.listener(|this, _: &FocusSearch, window, cx| this.focus_search(window, cx)),
             )
-            .on_action(
-                cx.listener(|this, _: &OpenQuickLook, window, cx| this.open_quick_look(window, cx)),
-            )
+            .on_action(cx.listener(|this, _: &OpenQuickLook, window, cx| {
+                this.open_quick_look(window, cx, ViewerOpenSource::Auto)
+            }))
             .on_action(cx.listener(|this, _: &CloseQuickLook, window, cx| {
                 this.handle_viewer_escape(window, cx)
             }))
@@ -8609,11 +9528,12 @@ impl Render for App {
         } else {
             root
         };
-        if self.manual_compress.is_some() {
+        let root = if self.manual_compress.is_some() {
             root.child(self.manual_compression_overlay(cx))
         } else {
             root
-        }
+        };
+        root.child(self.viewer_morph_overlay())
     }
 }
 
@@ -9338,6 +10258,100 @@ fn ease_motion(t: f32) -> f32 {
     cubic_bezier(guess, 0.8, 1.0).clamp(0.0, 1.0) as f32
 }
 
+fn nav_index(screen: Screen) -> usize {
+    match screen {
+        Screen::Photos => 0,
+        Screen::Search => 1,
+        Screen::Compression => 2,
+        Screen::Dashboard => 3,
+        Screen::Settings => 4,
+    }
+}
+
+fn nav_item_top(index: usize) -> f32 {
+    index as f32 * (NAV_ITEM_HEIGHT + NAV_ITEM_GAP)
+}
+
+fn nav_bar_left(collapsed: bool) -> f32 {
+    if collapsed { 5.0 } else { -1.0 }
+}
+
+fn screen_direction(from: Screen, to: Screen) -> f32 {
+    if nav_index(to) >= nav_index(from) {
+        1.0
+    } else {
+        -1.0
+    }
+}
+
+fn lerp_bounds(from: Bounds<Pixels>, to: Bounds<Pixels>, t: f32) -> Bounds<Pixels> {
+    let t = t.clamp(0.0, 1.0);
+    let x = f32::from(from.origin.x) + (f32::from(to.origin.x) - f32::from(from.origin.x)) * t;
+    let y = f32::from(from.origin.y) + (f32::from(to.origin.y) - f32::from(from.origin.y)) * t;
+    let width =
+        f32::from(from.size.width) + (f32::from(to.size.width) - f32::from(from.size.width)) * t;
+    let height =
+        f32::from(from.size.height) + (f32::from(to.size.height) - f32::from(from.size.height)) * t;
+    Bounds::new(point(px(x), px(y)), size(px(width), px(height)))
+}
+
+fn eased_progress(started_at: Instant, duration: Duration, now: Instant) -> f32 {
+    if duration.is_zero() {
+        return 1.0;
+    }
+    let elapsed = now.saturating_duration_since(started_at).as_secs_f32();
+    ease_motion((elapsed / duration.as_secs_f32()).clamp(0.0, 1.0))
+}
+
+fn morph_bounds_at(
+    from: Bounds<Pixels>,
+    to: Bounds<Pixels>,
+    started_at: Instant,
+    now: Instant,
+) -> Bounds<Pixels> {
+    lerp_bounds(from, to, eased_progress(started_at, MOTION_MORPH, now))
+}
+
+fn viewer_image_rect(
+    viewport: gpui_kit::Size<Pixels>,
+    details_open: bool,
+    aspect: f32,
+) -> Bounds<Pixels> {
+    let details_width = if details_open {
+        VIEWER_DETAILS_WIDTH
+    } else {
+        0.0
+    };
+    let (width, height) = viewer_image_box_with_details_width(
+        viewport.width.into(),
+        viewport.height.into(),
+        details_width,
+        aspect,
+    );
+    centered_viewer_rect(viewport, details_width, width, height)
+}
+
+fn current_tagged_bounds(
+    entry: Option<(u64, Bounds<Pixels>)>,
+    current_epoch: u64,
+) -> Option<Bounds<Pixels>> {
+    entry
+        .filter(|(epoch, _)| *epoch == current_epoch)
+        .map(|(_, bounds)| bounds)
+}
+
+fn preferred_bounds(
+    prefer_card: bool,
+    card: Option<Bounds<Pixels>>,
+    inspector: Option<Bounds<Pixels>>,
+) -> Option<Bounds<Pixels>> {
+    if prefer_card {
+        card.or(inspector)
+    } else {
+        inspector.or(card)
+    }
+}
+
 fn stagger_value(elapsed: f32, index: usize) -> f32 {
     let delay = index.min(CARD_STAGGER_MAX) as f32 * CARD_STAGGER_SECS;
     let total = CARD_INTRO_SECS + delay;
@@ -9451,31 +10465,46 @@ fn search_available_width(window_width: f32, sidebar_collapsed: bool) -> f32 {
     (window_width - sidebar_width(sidebar_collapsed) - 290.0 - 26.0 - 52.0 - RAIL_WIDTH).max(0.0)
 }
 
-fn viewer_details_width(open: bool, t: f32) -> f32 {
-    let (from, to) = if open {
-        (0.0, VIEWER_DETAILS_WIDTH)
-    } else {
-        (VIEWER_DETAILS_WIDTH, 0.0)
-    };
-    from + (to - from) * t
+fn viewer_image_box_with_details_width(
+    viewport_w: f32,
+    viewport_h: f32,
+    details_width: f32,
+    aspect: f32,
+) -> (f32, f32) {
+    let avail_w = (viewport_w - details_width - VIEWER_PAD * 2.0).max(1.0);
+    let avail_h = (viewport_h - VIEWER_TOP_BAR - VIEWER_PAD * 2.0).max(1.0);
+    let ratio = aspect.max(0.05);
+    let width = avail_w.min(avail_h * ratio);
+    (width, width / ratio)
 }
 
+#[cfg(test)]
 fn viewer_image_box(
     viewport_w: f32,
     viewport_h: f32,
     details_open: bool,
     aspect: f32,
 ) -> (f32, f32) {
-    let details = if details_open {
+    let details_width = if details_open {
         VIEWER_DETAILS_WIDTH
     } else {
         0.0
     };
-    let avail_w = (viewport_w - details - VIEWER_PAD * 2.0).max(1.0);
-    let avail_h = (viewport_h - VIEWER_TOP_BAR - VIEWER_PAD * 2.0).max(1.0);
-    let ratio = aspect.max(0.05);
-    let width = avail_w.min(avail_h * ratio);
-    (width, width / ratio)
+    viewer_image_box_with_details_width(viewport_w, viewport_h, details_width, aspect)
+}
+
+fn centered_viewer_rect(
+    viewport: gpui_kit::Size<Pixels>,
+    details_width: f32,
+    width: f32,
+    height: f32,
+) -> Bounds<Pixels> {
+    let center_x = (f32::from(viewport.width) - details_width) / 2.0;
+    let center_y = VIEWER_TOP_BAR + (f32::from(viewport.height) - VIEWER_TOP_BAR) / 2.0;
+    Bounds::new(
+        point(px(center_x - width / 2.0), px(center_y - height / 2.0)),
+        size(px(width), px(height)),
+    )
 }
 
 /// Presentation metrics for one photo card and the uniform grid row it sits in.
@@ -9910,26 +10939,30 @@ mod tests {
     // `gpui_kit::*`, shadowing the built-in `#[test]` and recursing forever.
     use super::{
         CountDebounce, DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH,
-        IpcScanPhase, MAX_PAGES, MIN_CARD_WIDTH, ManualOutputTarget, PAGE_SIZE, PHOTO_ROW_HEIGHT,
-        PhotoBrowser, PhotoIndex, PhotoPageCache, RAIL_MARKER_SIZE, RAIL_PILL_WIDTH,
-        RAIL_TRACK_INSET, RAIL_WIDTH, ScanProgressView, Screen, THUMB_CACHE_ENTRIES,
-        THUMB_IN_FLIGHT, ThumbnailCache, YearBucket, add_photo_root_and_save, alert_summaries,
-        anchor_photo_id, apply_library_index, apply_profile_format, autostart_description,
-        average_bgra, build_year_buckets, card_meta_line, card_metrics, card_size_label,
-        card_size_options, compression_policy, compression_policy_warning, daemon_liveness,
-        daemon_operation_label, daemon_state_label, daemon_sync_label, decode_thumbnail,
-        demo_thumb_path, ease_motion, first_visible_photo, format_captured_month, format_count,
-        format_timestamp, grid_available_width, grid_columns, grid_columns_for, has_tag_filter,
-        import_issue_counts, inner_corner_radius, ipc_status_label, job_retry_available,
-        job_retry_label, lerp_color, list_scroll_top, lossless_hint, lossless_supported,
-        manual_output_available, moved_profile_order, next_focus_index, normalize_note, parse_args,
-        parse_window_size, profile_summary, queue_status_badge, rail_hover_hits,
-        rail_label_hidden_by_pill, rail_marker_bounds, rail_pill_bounds, rail_press_allowed,
-        rail_press_hits, rail_row_at, rail_scroll_offset, rail_track_hit_bounds, rail_y,
-        release_confirmation, retryable_sources, scan_progress_label, scan_progress_ratio,
-        search_anchor_after_result, search_available_width, selection_range, sidebar_reveal_width,
-        sidebar_width, stagger_value, step_index, sync_search_mirror, toggle_selected_id,
-        viewer_details_width, viewer_image_box, visible_year_buckets, with_tag, without_tag,
+        IpcScanPhase, MAX_PAGES, MIN_CARD_WIDTH, MOTION_BASE, MOTION_FAST, MOTION_MORPH,
+        MOTION_SLOW, ManualOutputTarget, MorphImageKind, NAV_ITEM_GAP, NAV_ITEM_HEIGHT, PAGE_SIZE,
+        PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex, PhotoPageCache, RAIL_MARKER_SIZE,
+        RAIL_PILL_WIDTH, RAIL_TRACK_INSET, RAIL_WIDTH, ScanProgressView, Screen,
+        THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, VIEWER_DETAILS_WIDTH, ViewerBoxState,
+        ViewerMorph, ViewerOpenSource, ViewerPanelState, YearBucket, add_photo_root_and_save,
+        alert_summaries, anchor_photo_id, apply_library_index, apply_profile_format,
+        autostart_description, average_bgra, build_year_buckets, card_meta_line, card_metrics,
+        card_size_label, card_size_options, centered_viewer_rect, compression_policy,
+        compression_policy_warning, current_tagged_bounds, daemon_liveness, daemon_operation_label,
+        daemon_state_label, daemon_sync_label, decode_thumbnail, demo_thumb_path, ease_motion,
+        eased_progress, first_visible_photo, format_captured_month, format_count, format_timestamp,
+        grid_available_width, grid_columns, grid_columns_for, has_tag_filter, import_issue_counts,
+        inner_corner_radius, ipc_status_label, job_retry_available, job_retry_label, lerp_bounds,
+        lerp_color, list_scroll_top, lossless_hint, lossless_supported, manual_output_available,
+        morph_bounds_at, morph_image_plan, moved_profile_order, nav_index, nav_item_top,
+        next_focus_index, normalize_note, parse_args, parse_window_size, preferred_bounds,
+        profile_summary, queue_status_badge, rail_hover_hits, rail_label_hidden_by_pill,
+        rail_marker_bounds, rail_pill_bounds, rail_press_allowed, rail_press_hits, rail_row_at,
+        rail_scroll_offset, rail_track_hit_bounds, rail_y, release_confirmation, retryable_sources,
+        scan_progress_label, scan_progress_ratio, screen_direction, search_anchor_after_result,
+        search_available_width, selection_range, sidebar_reveal_width, sidebar_width,
+        stagger_value, step_index, sync_search_mirror, toggle_selected_id, viewer_image_box,
+        viewer_image_rect, visible_year_buckets, with_tag, without_tag,
     };
     use gpui_kit::{Bounds, RenderImage, ScrollStrategy, UniformListScrollHandle, point, px, size};
     use smallvec::SmallVec;
@@ -10000,14 +11033,6 @@ mod tests {
         assert_eq!(grid_columns(0.0, MIN_CARD_WIDTH), 1);
         assert_eq!(grid_available_width(1440.0, true, false), 968.0);
         assert_eq!(search_available_width(1280.0, false), 654.0);
-    }
-
-    #[test]
-    fn viewer_details_width_opens_and_closes() {
-        assert_eq!(viewer_details_width(false, 0.0), 380.0);
-        assert_eq!(viewer_details_width(false, 1.0), 0.0);
-        assert_eq!(viewer_details_width(true, 0.0), 0.0);
-        assert_eq!(viewer_details_width(true, 1.0), 380.0);
     }
 
     #[test]
@@ -10160,6 +11185,244 @@ mod tests {
             previous = value;
         }
         assert!(ease_motion(0.5) > 0.5);
+    }
+
+    #[test]
+    fn nav_index_matches_sidebar_order() {
+        assert_eq!(nav_index(Screen::Photos), 0);
+        assert_eq!(nav_index(Screen::Search), 1);
+        assert_eq!(nav_index(Screen::Compression), 2);
+        assert_eq!(nav_index(Screen::Dashboard), 3);
+        assert_eq!(nav_index(Screen::Settings), 4);
+    }
+
+    #[test]
+    fn nav_item_top_uses_item_height_and_gap() {
+        assert_eq!(nav_item_top(0), 0.0);
+        assert_eq!(nav_item_top(1), NAV_ITEM_HEIGHT + NAV_ITEM_GAP);
+        assert_eq!(nav_item_top(4), 4.0 * (NAV_ITEM_HEIGHT + NAV_ITEM_GAP));
+    }
+
+    #[test]
+    fn screen_direction_follows_sidebar_order() {
+        assert_eq!(screen_direction(Screen::Photos, Screen::Settings), 1.0);
+        assert_eq!(screen_direction(Screen::Settings, Screen::Photos), -1.0);
+        assert_eq!(screen_direction(Screen::Search, Screen::Search), 1.0);
+    }
+
+    #[test]
+    fn lerp_bounds_hits_endpoints_and_midpoint() {
+        let from = Bounds::new(point(px(10.), px(20.)), size(px(100.), px(50.)));
+        let to = Bounds::new(point(px(30.), px(60.)), size(px(200.), px(150.)));
+        assert_eq!(lerp_bounds(from, to, 0.0), from);
+        assert_eq!(lerp_bounds(from, to, 1.0), to);
+        let middle = lerp_bounds(from, to, 0.5);
+        assert_eq!(f32::from(middle.origin.x), 20.0);
+        assert_eq!(f32::from(middle.origin.y), 40.0);
+        assert_eq!(f32::from(middle.size.width), 150.0);
+        assert_eq!(f32::from(middle.size.height), 100.0);
+    }
+
+    #[test]
+    fn viewer_image_rect_centers_the_box_and_respects_details() {
+        let viewport = size(px(1200.), px(800.));
+        let closed = viewer_image_rect(viewport, false, 16.0 / 10.0);
+        let open = viewer_image_rect(viewport, true, 16.0 / 10.0);
+        assert!((f32::from(closed.center().x) - 600.0).abs() < 0.01);
+        assert!((f32::from(closed.center().y) - 428.0).abs() < 0.01);
+        assert!((f32::from(open.center().x) - 410.0).abs() < 0.01);
+        assert!((f32::from(open.center().y) - 428.0).abs() < 0.01);
+        assert!(closed.size.width > open.size.width);
+    }
+
+    #[test]
+    fn eased_progress_is_clamped_and_eased() {
+        let start = Instant::now();
+        assert_eq!(eased_progress(start, MOTION_BASE, start), 0.0);
+        assert_eq!(eased_progress(start, MOTION_BASE, start + MOTION_BASE), 1.0);
+        let half = eased_progress(start, MOTION_BASE, start + MOTION_BASE / 2);
+        assert!(half > 0.5 && half < 1.0);
+        assert_eq!(eased_progress(start, Duration::ZERO, start), 1.0);
+    }
+
+    #[test]
+    fn morph_bounds_at_hits_both_ends() {
+        let start = Instant::now();
+        let from = Bounds::new(point(px(0.), px(0.)), size(px(10.), px(10.)));
+        let to = Bounds::new(point(px(100.), px(200.)), size(px(300.), px(400.)));
+        assert_eq!(morph_bounds_at(from, to, start, start), from);
+        assert_eq!(morph_bounds_at(from, to, start, start + MOTION_MORPH), to);
+    }
+
+    #[test]
+    fn viewer_morph_current_bounds_follows_the_timeline() {
+        let from = Bounds::new(point(px(10.), px(20.)), size(px(100.), px(80.)));
+        let to = Bounds::new(point(px(200.), px(100.)), size(px(400.), px(300.)));
+        let start = Instant::now();
+        let morph = ViewerMorph {
+            epoch: 1,
+            started_at: start,
+            from,
+            to,
+            thumbnail: None,
+            preview: None,
+            color: 0,
+            source: ViewerOpenSource::Card,
+            closing: false,
+            fade_only: false,
+            backdrop_from: 1.0,
+        };
+        assert_eq!(morph.current_bounds(start), from);
+        assert_eq!(morph.current_bounds(start + MOTION_MORPH), to);
+        let middle = morph.current_bounds(start + MOTION_MORPH / 2);
+        assert!(middle.origin.x > from.origin.x && middle.origin.x < to.origin.x);
+    }
+
+    #[test]
+    fn viewer_box_state_interpolates_from_the_visible_size() {
+        let viewport = size(px(1200.), px(800.));
+        let from_size = (800.0, 500.0);
+        let state = ViewerBoxState {
+            epoch: 1,
+            started_at: Instant::now(),
+            from_size,
+            to_aspect: 2.0,
+            to_details_width: 0.0,
+            duration: MOTION_BASE,
+        };
+        let (w0, h0) = state.size_at(0.0, viewport);
+        let (w1, h1) = state.size_at(1.0, viewport);
+        let (wm, hm) = state.size_at(0.5, viewport);
+        assert_eq!((w0, h0), from_size);
+        assert_eq!(w1, 1152.0);
+        assert_eq!(h1, 576.0);
+        assert!(wm > w0 && wm < w1);
+        assert!(hm > h0 && hm < h1);
+    }
+
+    #[test]
+    fn viewer_box_state_hits_both_details_ends() {
+        let viewport = size(px(1200.), px(800.));
+        let state = ViewerBoxState {
+            epoch: 2,
+            started_at: Instant::now(),
+            from_size: (900.0, 560.0),
+            to_aspect: 16.0 / 10.0,
+            to_details_width: VIEWER_DETAILS_WIDTH,
+            duration: MOTION_SLOW,
+        };
+        let (closed, _) = state.size_at(0.0, viewport);
+        let (open, _) = state.size_at(1.0, viewport);
+        assert!(closed > open);
+    }
+
+    #[test]
+    fn viewer_panel_state_retargets_from_the_current_width() {
+        let start = Instant::now();
+        let state = ViewerPanelState {
+            epoch: 1,
+            started_at: start,
+            from_width: 120.0,
+            to_width: 0.0,
+            duration: MOTION_SLOW,
+        };
+        assert_eq!(state.width_at(0.0), 120.0);
+        assert_eq!(state.width_at(1.0), 0.0);
+        let middle = state.width_at(0.5);
+        assert!(middle > 0.0 && middle < 120.0);
+        assert_eq!(state.current_width_at(start + MOTION_SLOW), 0.0);
+    }
+
+    #[test]
+    fn centered_viewer_rect_uses_the_current_details_width() {
+        let viewport = size(px(1200.), px(800.));
+        let closed = centered_viewer_rect(viewport, 0.0, 1000.0, 600.0);
+        let half = centered_viewer_rect(viewport, 190.0, 1000.0, 600.0);
+        let open = centered_viewer_rect(viewport, 380.0, 1000.0, 600.0);
+        assert!((f32::from(closed.center().x) - 600.0).abs() < 0.01);
+        assert!((f32::from(half.center().x) - 505.0).abs() < 0.01);
+        assert!((f32::from(open.center().x) - 410.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn morph_image_plan_covers_card_and_inspector_paths() {
+        use MorphImageKind::*;
+        assert_eq!(
+            morph_image_plan(false, ViewerOpenSource::Card, true, true),
+            (Some(Thumbnail), Some(Preview), 12.0, 10.0)
+        );
+        assert_eq!(
+            morph_image_plan(false, ViewerOpenSource::Inspector, true, true),
+            (Some(Preview), Some(Preview), 11.0, 10.0)
+        );
+        assert_eq!(
+            morph_image_plan(true, ViewerOpenSource::Card, true, true),
+            (Some(Preview), Some(Thumbnail), 10.0, 12.0)
+        );
+        assert_eq!(
+            morph_image_plan(true, ViewerOpenSource::Inspector, true, true),
+            (Some(Preview), Some(Preview), 10.0, 11.0)
+        );
+        assert_eq!(
+            morph_image_plan(false, ViewerOpenSource::Card, false, true),
+            (Some(Preview), Some(Preview), 12.0, 10.0)
+        );
+        assert_eq!(
+            morph_image_plan(true, ViewerOpenSource::Inspector, true, false),
+            (Some(Thumbnail), Some(Thumbnail), 10.0, 11.0)
+        );
+        assert_eq!(
+            morph_image_plan(false, ViewerOpenSource::Card, false, false),
+            (None, None, 10.0, 10.0)
+        );
+    }
+
+    #[test]
+    fn current_tagged_bounds_rejects_stale_frames() {
+        let bounds = Bounds::new(point(px(1.), px(2.)), size(px(3.), px(4.)));
+        assert_eq!(current_tagged_bounds(Some((7, bounds)), 7), Some(bounds));
+        assert_eq!(current_tagged_bounds(Some((7, bounds)), 8), None);
+        assert_eq!(current_tagged_bounds(None, 7), None);
+    }
+
+    #[test]
+    fn preferred_bounds_falls_back_to_the_other_source() {
+        let card = Bounds::new(point(px(0.), px(0.)), size(px(10.), px(10.)));
+        let inspector = Bounds::new(point(px(20.), px(20.)), size(px(30.), px(30.)));
+        assert_eq!(
+            preferred_bounds(true, Some(card), Some(inspector)),
+            Some(card)
+        );
+        assert_eq!(
+            preferred_bounds(true, None, Some(inspector)),
+            Some(inspector)
+        );
+        assert_eq!(
+            preferred_bounds(false, Some(card), Some(inspector)),
+            Some(inspector)
+        );
+        assert_eq!(preferred_bounds(false, Some(card), None), Some(card));
+    }
+
+    #[test]
+    fn closing_prefers_the_original_source() {
+        let card = Bounds::new(point(px(0.), px(0.)), size(px(10.), px(10.)));
+        let inspector = Bounds::new(point(px(20.), px(20.)), size(px(30.), px(30.)));
+        assert_eq!(
+            preferred_bounds(true, Some(card), Some(inspector)),
+            Some(card)
+        );
+        assert_eq!(
+            preferred_bounds(false, Some(card), Some(inspector)),
+            Some(inspector)
+        );
+    }
+
+    #[test]
+    fn motion_durations_are_ordered() {
+        assert!(MOTION_FAST < MOTION_BASE);
+        assert!(MOTION_BASE < MOTION_SLOW);
+        assert!(MOTION_SLOW < MOTION_MORPH);
     }
 
     #[test]
