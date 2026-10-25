@@ -673,9 +673,7 @@ mod tests {
     #[test]
     fn collisions_are_reported_as_renames() {
         let dir = tempdir().unwrap();
-        let source = dir
-            .path()
-            .join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        let source = dir.path().join("VRChat_2026-10-21_21-14-03.221_4x3.png");
         write_png(&source);
         let dest = dir.path().join("dest");
         fs::create_dir_all(&dest).unwrap();
@@ -779,7 +777,9 @@ mod tests {
         assert!(!scan.issues[0].retryable);
         assert_eq!(scan.issues[0].kind, ImportIssueKind::Failed);
         assert!(
-            scan.issues[0].message.contains("フォルダを読み取れませんでした"),
+            scan.issues[0]
+                .message
+                .contains("フォルダを読み取れませんでした"),
             "unexpected message: {}",
             scan.issues[0].message
         );

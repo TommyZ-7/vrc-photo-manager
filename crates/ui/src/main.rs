@@ -19,7 +19,9 @@ use gpui_kit::*;
 use smallvec::SmallVec;
 use vrc_photo_core::compressor;
 use vrc_photo_core::db::Db;
-use vrc_photo_core::importer::{self, ImportIssue, ImportIssueKind, ImportMode};
+use vrc_photo_core::importer::{
+    self, ImportIssue, ImportIssueKind, ImportMode, ImportProgress, ImportRename, ImportResult,
+};
 use vrc_photo_core::linker;
 use vrc_photo_core::logging::{DAEMON_LOG_FILE, UI_LOG_FILE, logs_dir};
 use vrc_photo_core::model::{
@@ -1293,9 +1295,14 @@ struct ScanProgressView {
 struct ImportReportView {
     mode: ImportMode,
     dest: PathBuf,
+    total: usize,
+    processed: usize,
     imported: usize,
     skipped: usize,
     issues: Vec<ImportIssue>,
+    renamed: Vec<ImportRename>,
+    remaining: Vec<PathBuf>,
+    cancelled: bool,
     scan_failures: Vec<ScanFailure>,
     scan_error: Option<String>,
 }
@@ -8105,9 +8112,14 @@ impl App {
         let mut report = ImportReportView {
             mode,
             dest,
+            total: files.len(),
+            processed: result.processed,
             imported: result.imported.len(),
             skipped: result.skipped,
             issues: result.issues,
+            renamed: result.renamed,
+            remaining: Vec::new(),
+            cancelled: result.cancelled,
             scan_failures: Vec::new(),
             scan_error: None,
         };
@@ -8196,6 +8208,8 @@ impl App {
         let mut report = ImportReportView {
             mode: previous.mode,
             dest: previous.dest.clone(),
+            total: previous.total,
+            processed: result.processed,
             imported: previous.imported + result.imported.len(),
             skipped: previous.skipped + result.skipped,
             issues: previous
@@ -8204,6 +8218,9 @@ impl App {
                 .filter(|issue| issue.kind != ImportIssueKind::Failed || !issue.retryable)
                 .cloned()
                 .collect(),
+            renamed: result.renamed,
+            remaining: Vec::new(),
+            cancelled: result.cancelled,
             scan_failures: Vec::new(),
             scan_error: None,
         };
@@ -10052,6 +10069,69 @@ where
     }
 }
 
+fn import_progress_label(progress: &ImportProgress) -> String {
+    format!(
+        "取り込み {}/{} · 取込 {} · スキップ {} · 失敗 {}",
+        progress.processed, progress.total, progress.imported, progress.skipped, progress.failed
+    )
+}
+
+fn import_progress_ratio(progress: &ImportProgress) -> f32 {
+    if progress.total == 0 {
+        0.0
+    } else {
+        (progress.processed as f32 / progress.total as f32).clamp(0.0, 1.0)
+    }
+}
+
+fn import_remaining(files: &[PathBuf], processed: usize) -> Vec<PathBuf> {
+    files
+        .iter()
+        .skip(processed.min(files.len()))
+        .cloned()
+        .collect()
+}
+
+fn import_should_index(imported: usize) -> bool {
+    imported > 0
+}
+
+fn merge_retry_report(
+    previous: &ImportReportView,
+    retry_sources: &[PathBuf],
+    result: ImportResult,
+) -> ImportReportView {
+    let attempted: HashSet<&Path> = retry_sources
+        .iter()
+        .take(result.processed.min(retry_sources.len()))
+        .map(PathBuf::as_path)
+        .collect();
+    let mut merged = previous.clone();
+    merged.imported += result.imported.len();
+    merged.skipped += result.skipped;
+    merged.issues.retain(|issue| {
+        !(issue.kind == ImportIssueKind::Failed
+            && issue.retryable
+            && attempted.contains(issue.source.as_path()))
+    });
+    merged.issues.extend(result.issues);
+    merged.renamed.extend(result.renamed);
+    merged
+}
+
+fn merge_resume_report(previous: &ImportReportView, result: ImportResult) -> ImportReportView {
+    let mut merged = previous.clone();
+    merged.imported += result.imported.len();
+    merged.skipped += result.skipped;
+    merged.processed += result.processed;
+    merged.issues.extend(result.issues);
+    merged.renamed.extend(result.renamed);
+    let consumed = result.processed.min(previous.remaining.len());
+    merged.remaining = previous.remaining.iter().skip(consumed).cloned().collect();
+    merged.cancelled = !merged.remaining.is_empty();
+    merged
+}
+
 fn import_summary(report: &ImportReportView) -> String {
     let (failed, _) = import_issue_counts(&report.issues);
     let mut details = Vec::new();
@@ -10061,9 +10141,18 @@ fn import_summary(report: &ImportReportView) -> String {
     if failed > 0 {
         details.push(format!("失敗 {failed} 件"));
     }
-    let mut summary = format!("{} 枚を取り込みました", report.imported);
+    if !report.renamed.is_empty() {
+        details.push(format!("連番 {} 件", report.renamed.len()));
+    }
+    let mut summary = format!(
+        "{} 件中 {} 枚を取り込みました",
+        report.total, report.imported
+    );
     if !details.is_empty() {
         summary.push_str(&format!("（{}）", details.join("、")));
+    }
+    if !report.remaining.is_empty() {
+        summary.push_str(&format!("。残り {} 件は未処理です", report.remaining.len()));
     }
     summary
 }
@@ -10939,10 +11028,10 @@ mod tests {
     // `gpui_kit::*`, shadowing the built-in `#[test]` and recursing forever.
     use super::{
         CountDebounce, DemoAssets, INSPECTOR_CARD_WIDTH, INSPECTOR_MARGIN, INSPECTOR_WIDTH,
-        IpcScanPhase, MAX_PAGES, MIN_CARD_WIDTH, MOTION_BASE, MOTION_FAST, MOTION_MORPH,
-        MOTION_SLOW, ManualOutputTarget, MorphImageKind, NAV_ITEM_GAP, NAV_ITEM_HEIGHT, PAGE_SIZE,
-        PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex, PhotoPageCache, RAIL_MARKER_SIZE,
-        RAIL_PILL_WIDTH, RAIL_TRACK_INSET, RAIL_WIDTH, ScanProgressView, Screen,
+        ImportReportView, IpcScanPhase, MAX_PAGES, MIN_CARD_WIDTH, MOTION_BASE, MOTION_FAST,
+        MOTION_MORPH, MOTION_SLOW, ManualOutputTarget, MorphImageKind, NAV_ITEM_GAP,
+        NAV_ITEM_HEIGHT, PAGE_SIZE, PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex, PhotoPageCache,
+        RAIL_MARKER_SIZE, RAIL_PILL_WIDTH, RAIL_TRACK_INSET, RAIL_WIDTH, ScanProgressView, Screen,
         THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, VIEWER_DETAILS_WIDTH, ViewerBoxState,
         ViewerMorph, ViewerOpenSource, ViewerPanelState, YearBucket, add_photo_root_and_save,
         alert_summaries, anchor_photo_id, apply_library_index, apply_profile_format,
@@ -10952,8 +11041,10 @@ mod tests {
         daemon_state_label, daemon_sync_label, decode_thumbnail, demo_thumb_path, ease_motion,
         eased_progress, first_visible_photo, format_captured_month, format_count, format_timestamp,
         grid_available_width, grid_columns, grid_columns_for, has_tag_filter, import_issue_counts,
-        inner_corner_radius, ipc_status_label, job_retry_available, job_retry_label, lerp_bounds,
-        lerp_color, list_scroll_top, lossless_hint, lossless_supported, manual_output_available,
+        import_progress_label, import_progress_ratio, import_remaining, import_should_index,
+        import_summary, inner_corner_radius, ipc_status_label, job_retry_available,
+        job_retry_label, lerp_bounds, lerp_color, list_scroll_top, lossless_hint,
+        lossless_supported, manual_output_available, merge_resume_report, merge_retry_report,
         morph_bounds_at, morph_image_plan, moved_profile_order, nav_index, nav_item_top,
         next_focus_index, normalize_note, parse_args, parse_window_size, preferred_bounds,
         profile_summary, queue_status_badge, rail_hover_hits, rail_label_hidden_by_pill,
@@ -10972,11 +11063,14 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use vrc_photo_core::error::CoreError;
-    use vrc_photo_core::importer::{ImportIssue, ImportIssueKind};
+    use vrc_photo_core::importer::{
+        ImportIssue, ImportIssueKind, ImportMode, ImportProgress, ImportRename, ImportResult,
+    };
     use vrc_photo_core::model::{
         CompressionFormat, CompressionJob, CompressionProfile, DaemonOperation, Photo,
         PhotoIndexEntry, PhotoStatus, PhotoTextFilter, QueueStatus,
     };
+    use vrc_photo_core::scanner::ScanFailure;
     use vrc_photo_core::settings::{AppSettings, CardSize};
 
     #[test]
@@ -12585,6 +12679,239 @@ mod tests {
         assert_eq!(
             autostart_description(true, Some("app")),
             "OSログイン時にデーモンを起動"
+        );
+    }
+
+    fn progress_fixture(processed: usize, total: usize) -> ImportProgress {
+        ImportProgress {
+            processed,
+            total,
+            imported: processed.saturating_sub(1),
+            skipped: 0,
+            failed: 0,
+            partial: 0,
+            last_source: None,
+        }
+    }
+
+    fn import_report_fixture() -> ImportReportView {
+        ImportReportView {
+            mode: ImportMode::Copy,
+            dest: PathBuf::from("/dest"),
+            total: 0,
+            processed: 0,
+            imported: 0,
+            skipped: 0,
+            issues: Vec::new(),
+            renamed: Vec::new(),
+            remaining: Vec::new(),
+            cancelled: false,
+            scan_failures: Vec::new(),
+            scan_error: None,
+        }
+    }
+
+    #[test]
+    fn import_progress_label_and_ratio_use_processed_and_total() {
+        let mut progress = progress_fixture(42, 100);
+        progress.imported = 40;
+        progress.skipped = 1;
+        progress.failed = 1;
+
+        assert_eq!(
+            import_progress_label(&progress),
+            "取り込み 42/100 · 取込 40 · スキップ 1 · 失敗 1"
+        );
+        let ratio = import_progress_ratio(&progress);
+        assert!((ratio - 0.42).abs() < 1e-6);
+
+        let empty = progress_fixture(0, 0);
+        assert_eq!(
+            import_progress_label(&empty),
+            "取り込み 0/0 · 取込 0 · スキップ 0 · 失敗 0"
+        );
+        assert_eq!(import_progress_ratio(&empty), 0.0);
+    }
+
+    #[test]
+    fn import_remaining_slices_from_the_processed_prefix() {
+        let files = vec![
+            PathBuf::from("/a.png"),
+            PathBuf::from("/b.png"),
+            PathBuf::from("/c.png"),
+        ];
+        assert_eq!(import_remaining(&files, 0), files);
+        assert_eq!(import_remaining(&files, 2), vec![PathBuf::from("/c.png")]);
+        assert_eq!(import_remaining(&files, 9), Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn import_index_gate_requires_at_least_one_imported_file() {
+        assert!(!import_should_index(0));
+        assert!(import_should_index(1));
+    }
+
+    fn retryable_issue(source: &str) -> ImportIssue {
+        ImportIssue {
+            source: PathBuf::from(source),
+            target: None,
+            message: "copy failed".to_string(),
+            kind: ImportIssueKind::Failed,
+            retryable: true,
+        }
+    }
+
+    fn non_retryable_issue(source: &str) -> ImportIssue {
+        ImportIssue {
+            retryable: false,
+            ..retryable_issue(source)
+        }
+    }
+
+    fn partial_issue(source: &str) -> ImportIssue {
+        ImportIssue {
+            kind: ImportIssueKind::PartialMove,
+            ..non_retryable_issue(source)
+        }
+    }
+
+    fn rename_fixture(source: &str, target: &str) -> ImportRename {
+        ImportRename {
+            source: PathBuf::from(source),
+            target: PathBuf::from(target),
+        }
+    }
+
+    #[test]
+    fn retry_merge_drops_attempted_retryable_failures_and_keeps_the_rest() {
+        let previous = ImportReportView {
+            total: 3,
+            processed: 3,
+            imported: 1,
+            issues: vec![
+                retryable_issue("/a.png"),
+                non_retryable_issue("/b.png"),
+                partial_issue("/c.png"),
+            ],
+            renamed: vec![rename_fixture("/old.png", "/dest/old-1.png")],
+            scan_failures: vec![ScanFailure {
+                path: PathBuf::from("/dest"),
+                message: "scan failed".to_string(),
+            }],
+            scan_error: Some("scan error".to_string()),
+            ..import_report_fixture()
+        };
+        let mut result = ImportResult::default();
+        result.processed = 1;
+        result.imported = vec![PathBuf::from("/dest/a.png")];
+        result.renamed = vec![rename_fixture("/a.png", "/dest/a-1.png")];
+
+        let merged = merge_retry_report(
+            &previous,
+            &[PathBuf::from("/a.png"), PathBuf::from("/d.png")],
+            result,
+        );
+
+        assert_eq!(merged.imported, 2);
+        assert_eq!(merged.processed, 3);
+        assert_eq!(merged.issues.len(), 2);
+        assert!(
+            merged
+                .issues
+                .iter()
+                .any(|issue| issue.source == PathBuf::from("/b.png"))
+        );
+        assert!(
+            merged
+                .issues
+                .iter()
+                .any(|issue| issue.source == PathBuf::from("/c.png"))
+        );
+        assert!(
+            !merged
+                .issues
+                .iter()
+                .any(|issue| issue.source == PathBuf::from("/a.png"))
+        );
+        assert_eq!(merged.renamed.len(), 2);
+        assert!(merged.scan_error.is_some());
+        assert_eq!(merged.scan_failures.len(), 1);
+    }
+
+    #[test]
+    fn cancelled_retry_keeps_unattempted_retryable_failures() {
+        let previous = ImportReportView {
+            issues: vec![retryable_issue("/a.png"), retryable_issue("/d.png")],
+            ..import_report_fixture()
+        };
+        let mut result = ImportResult::default();
+        result.processed = 1;
+        result.issues = vec![retryable_issue("/a.png")];
+
+        let merged = merge_retry_report(
+            &previous,
+            &[PathBuf::from("/a.png"), PathBuf::from("/d.png")],
+            result,
+        );
+
+        assert_eq!(merged.issues.len(), 2);
+        assert!(
+            merged
+                .issues
+                .iter()
+                .any(|issue| issue.source == PathBuf::from("/d.png"))
+        );
+        assert_eq!(
+            retryable_sources(&merged.issues),
+            vec![PathBuf::from("/d.png"), PathBuf::from("/a.png")]
+        );
+    }
+
+    #[test]
+    fn resume_merge_advances_progress_and_slices_remaining() {
+        let previous = ImportReportView {
+            total: 5,
+            processed: 2,
+            imported: 2,
+            remaining: vec![
+                PathBuf::from("/c.png"),
+                PathBuf::from("/d.png"),
+                PathBuf::from("/e.png"),
+            ],
+            cancelled: true,
+            ..import_report_fixture()
+        };
+        let mut result = ImportResult::default();
+        result.processed = 2;
+        result.imported = vec![PathBuf::from("/dest/c.png")];
+        result.skipped = 1;
+
+        let merged = merge_resume_report(&previous, result);
+
+        assert_eq!(merged.processed, 4);
+        assert_eq!(merged.imported, 3);
+        assert_eq!(merged.skipped, 1);
+        assert_eq!(merged.remaining, vec![PathBuf::from("/e.png")]);
+        assert!(merged.cancelled);
+    }
+
+    #[test]
+    fn import_summary_includes_total_failures_renames_and_remaining() {
+        let report = ImportReportView {
+            total: 100,
+            processed: 40,
+            imported: 40,
+            skipped: 1,
+            issues: vec![non_retryable_issue("/bad.png")],
+            renamed: vec![rename_fixture("/old.png", "/dest/old-1.png")],
+            remaining: vec![PathBuf::from("/next.png")],
+            cancelled: true,
+            ..import_report_fixture()
+        };
+
+        assert_eq!(
+            import_summary(&report),
+            "100 件中 40 枚を取り込みました（1 枚スキップ、失敗 1 件、連番 1 件）。残り 1 件は未処理です"
         );
     }
 }
