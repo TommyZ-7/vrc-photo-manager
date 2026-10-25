@@ -724,7 +724,7 @@ impl Daemon {
                 enqueue_auto_jobs(
                     &db,
                     &new_ids,
-                    self.settings.compression_keep_original,
+                    self.settings.auto_compress_keep_original,
                     self.settings.auto_compress_immediate,
                 )?;
                 self.jobs.notify();
@@ -899,7 +899,7 @@ impl Daemon {
                 enqueue_auto_jobs(
                     &db,
                     &report.new_ids,
-                    self.settings.compression_keep_original,
+                    self.settings.auto_compress_keep_original,
                     self.settings.auto_compress_immediate,
                 )?;
                 self.jobs.notify();
@@ -1226,7 +1226,7 @@ impl Daemon {
         self.settings.auto_compress = settings.auto_compress;
         self.settings.auto_compress_backlog = settings.auto_compress_backlog;
         self.settings.auto_compress_immediate = settings.auto_compress_immediate;
-        self.settings.compression_keep_original = settings.compression_keep_original;
+        self.settings.auto_compress_keep_original = settings.auto_compress_keep_original;
     }
 
     fn apply_autostart(&self, enabled: bool) {
@@ -2758,7 +2758,7 @@ mod tests {
             let mut settings = AppSettings::load(&db).unwrap_or_default();
             settings.auto_compress = true;
             settings.auto_compress_immediate = false;
-            settings.compression_keep_original = false;
+            settings.auto_compress_keep_original = false;
             settings.save(&db).unwrap();
         }
         let second = photo_dir.join("VRChat_2026-10-21_21-25-00.000_4x3.png");
@@ -2767,7 +2767,7 @@ mod tests {
         daemon.index_dirty_paths().unwrap();
 
         assert!(!daemon.settings.auto_compress_immediate);
-        assert!(!daemon.settings.compression_keep_original);
+        assert!(!daemon.settings.auto_compress_keep_original);
         let db = Db::open(&db_path).unwrap();
         let job = db.list_jobs(1).unwrap().remove(0);
         assert_eq!(job.status, QueueStatus::Waiting);
@@ -2826,7 +2826,7 @@ mod tests {
         daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
         save_daemon_settings(&daemon, |settings| {
             settings.auto_compress_backlog = true;
-            settings.compression_keep_original = false;
+            settings.auto_compress_keep_original = false;
         });
         daemon.run_once().unwrap();
         daemon.compress_pending().unwrap();

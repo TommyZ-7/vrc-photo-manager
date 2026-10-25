@@ -1769,7 +1769,7 @@ impl App {
 
     fn request_release_waiting_jobs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(description) = release_confirmation(
-            self.settings.compression_keep_original,
+            self.settings.auto_compress_keep_original,
             self.waiting_job_count,
         ) else {
             self.release_waiting_jobs(cx);
@@ -1794,7 +1794,7 @@ impl App {
     }
 
     fn release_waiting_jobs(&mut self, cx: &mut Context<Self>) {
-        let policy = compression_policy(self.settings.compression_keep_original);
+        let policy = compression_policy(self.settings.auto_compress_keep_original);
         match self.db.release_waiting_jobs(policy) {
             Ok(0) => self.message = Some("未実行のジョブはありません".to_string()),
             Ok(count) => {
@@ -2509,7 +2509,7 @@ impl App {
             cx.notify();
             return;
         };
-        let policy = compression_policy(self.settings.compression_keep_original).to_string();
+        let policy = compression_policy(self.settings.auto_compress_keep_original).to_string();
         match self.db.enqueue_job(photo.id, &profile.id, &policy) {
             Ok(_) => {
                 self.message = Some(if policy == "replace" {
@@ -5671,10 +5671,10 @@ impl App {
                         ))
                     })
                     .when(self.waiting_job_count > 0, |this| {
-                        this.child(if self.settings.compression_keep_original {
-                            self.badge("元画像: 保持", GREEN, 0x112a22)
+                        this.child(if self.settings.auto_compress_keep_original {
+                            self.badge("自動: 元画像を保持", GREEN, 0x112a22)
                         } else {
-                            self.badge("元画像: 置換", RED, 0x2a1414)
+                            self.badge("自動: 元画像を置換", RED, 0x2a1414)
                         })
                     })
                     .when(self.failed_job_count > 0, |this| {
@@ -7116,15 +7116,15 @@ impl App {
                                 ))
                             })
                             .child(self.setting_switch(
-                                "圧縮後に元画像を保持",
-                                "OFFにすると圧縮成功後、元画像をOSゴミ箱へ移動します",
-                                self.settings.compression_keep_original,
+                                "自動圧縮後に元画像を保持",
+                                "OFFにすると自動圧縮の成功後、元画像をOSゴミ箱へ移動します。手動圧縮では実行時に選べます",
+                                self.settings.auto_compress_keep_original,
                                 cx,
-                                |settings, value| settings.compression_keep_original = value,
+                                |settings, value| settings.auto_compress_keep_original = value,
                             ))
                             .when_some(
                                 compression_policy_warning(
-                                    self.settings.compression_keep_original,
+                                    self.settings.auto_compress_keep_original,
                                     self.settings.auto_compress,
                                 ),
                                 |this, warning| {
@@ -8263,23 +8263,16 @@ fn compression_policy(keep_original: bool) -> &'static str {
 }
 
 fn compression_policy_warning(keep_original: bool, auto_compress: bool) -> Option<&'static str> {
-    if keep_original {
-        return None;
-    }
-    if auto_compress {
-        Some(
-            "自動圧縮でも、圧縮に成功すると元画像をOSゴミ箱へ移動します。取り消すにはゴミ箱から復元してください。",
-        )
-    } else {
-        Some(
-            "圧縮に成功すると元画像をOSゴミ箱へ移動します。取り消すにはゴミ箱から復元してください。",
-        )
-    }
+    (auto_compress && !keep_original).then_some(
+        "自動圧縮で圧縮に成功すると元画像をOSゴミ箱へ移動します。取り消すにはゴミ箱から復元してください。",
+    )
 }
 
 fn release_confirmation(keep_original: bool, count: i64) -> Option<String> {
     (!keep_original).then(|| {
-        format!("{count} 件を圧縮し、成功した元画像をOSゴミ箱へ移動します。取り消すにはゴミ箱から復元してください。")
+        format!(
+            "待機中の自動圧縮 {count} 件を実行し、成功した元画像をOSゴミ箱へ移動します。取り消すにはゴミ箱から復元してください。"
+        )
     })
 }
 
@@ -9410,17 +9403,14 @@ mod tests {
     }
 
     #[test]
-    fn compression_policy_warning_mentions_automatic_trash_only_when_enabled() {
+    fn compression_policy_warning_is_limited_to_automatic_compression() {
         assert!(compression_policy_warning(true, true).is_none());
         assert!(compression_policy_warning(true, false).is_none());
+        assert!(compression_policy_warning(false, false).is_none());
 
         let automatic = compression_policy_warning(false, true).unwrap();
         assert!(automatic.contains("自動圧縮"));
         assert!(automatic.contains("OSゴミ箱"));
-
-        let manual = compression_policy_warning(false, false).unwrap();
-        assert!(!manual.contains("自動圧縮"));
-        assert!(manual.contains("OSゴミ箱"));
     }
 
     #[test]
