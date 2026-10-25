@@ -161,7 +161,25 @@ pub fn collect_folder_sources(folder: &Path, exclude: Option<&Path>) -> Result<F
         )));
     }
     let root = fs::canonicalize(folder)?;
-    let exclude = exclude.and_then(|path| fs::canonicalize(path).ok());
+    // A selected root that cannot be read is a hard selection error; only
+    // nested directories degrade to per-folder issues.
+    if let Err(error) = fs::read_dir(&root) {
+        return Err(CoreError::Io(error));
+    }
+    let exclude = match exclude {
+        Some(path) => match fs::canonicalize(path) {
+            Ok(path) => Some(path),
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "cannot resolve import exclusion; continuing without it"
+                );
+                None
+            }
+        },
+        None => None,
+    };
     let mut scan = FolderScan::default();
     walk_folder(&root, exclude.as_deref(), &mut scan);
     scan.files.sort();
@@ -721,10 +739,11 @@ mod tests {
     #[test]
     fn folder_scan_is_recursive_and_filters_compressed_symlinks_and_destination() {
         let dir = tempdir().unwrap();
-        let root = dir.path().join("photos");
-        fs::create_dir_all(root.join("nested")).unwrap();
-        fs::create_dir_all(root.join("compressed")).unwrap();
-        fs::create_dir_all(root.join("imported")).unwrap();
+        let raw_root = dir.path().join("photos");
+        fs::create_dir_all(raw_root.join("nested")).unwrap();
+        fs::create_dir_all(raw_root.join("compressed")).unwrap();
+        fs::create_dir_all(raw_root.join("imported")).unwrap();
+        let root = fs::canonicalize(&raw_root).unwrap();
         let top = root.join("VRChat_2026-10-21_21-14-03.221_4x3.png");
         let nested = root.join("nested/VRChat_2026-10-21_21-14-04.221_4x3.png");
         let compressed = root.join("compressed/VRChat_2026-10-21_21-14-05.221_4x3.png");
@@ -758,9 +777,11 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let dir = tempdir().unwrap();
-        let root = dir.path().join("photos");
+        let raw_root = dir.path().join("photos");
+        let raw_locked = raw_root.join("locked");
+        fs::create_dir_all(&raw_locked).unwrap();
+        let root = fs::canonicalize(&raw_root).unwrap();
         let locked = root.join("locked");
-        fs::create_dir_all(&locked).unwrap();
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
         let probe = fs::read_dir(&locked);
         let scan = collect_folder_sources(&root, None).unwrap();
@@ -783,5 +804,74 @@ mod tests {
             "unexpected message: {}",
             scan.issues[0].message
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn folder_scan_rejects_an_unreadable_root() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("photos");
+        fs::create_dir_all(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o000)).unwrap();
+        let probe = fs::read_dir(&root);
+        let result = collect_folder_sources(&root, None);
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+
+        if probe.is_ok() {
+            eprintln!("skipping unreadable-root assertions: running with elevated permissions");
+            return;
+        }
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn progress_counts_a_failed_source_and_completes() {
+        let dir = tempdir().unwrap();
+        let source_dir = dir.path().join("source");
+        fs::create_dir_all(&source_dir).unwrap();
+        let blocked = source_dir.join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        let good = source_dir.join("VRChat_2026-10-21_21-14-04.221_4x3.png");
+        write_png(&blocked);
+        write_png(&good);
+        let dest = dir.path().join("dest");
+        fs::create_dir_all(&dest).unwrap();
+        fs::create_dir_all(dest.join(format!(
+            "{}.tmp",
+            blocked.file_name().unwrap().to_string_lossy()
+        )))
+        .unwrap();
+
+        let mut events = Vec::new();
+        let result = import_files_observed(
+            &[blocked, good],
+            &dest,
+            ImportMode::Copy,
+            None,
+            |progress| events.push(progress),
+        )
+        .unwrap();
+
+        let last = events.last().unwrap();
+        assert_eq!(last.processed, 2);
+        assert_eq!(last.total, 2);
+        assert_eq!(last.imported, 1);
+        assert_eq!(last.failed, 1);
+        assert_eq!(result.processed, 2);
+        assert!(!result.cancelled);
+    }
+
+    #[test]
+    fn unique_names_are_not_reported_as_renames() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        write_png(&source);
+        let dest = dir.path().join("dest");
+
+        let result = import_files(std::slice::from_ref(&source), &dest, ImportMode::Copy).unwrap();
+
+        assert_eq!(result.imported.len(), 1);
+        assert!(result.renamed.is_empty());
     }
 }
