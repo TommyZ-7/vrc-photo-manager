@@ -5,6 +5,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -1307,6 +1308,89 @@ struct ImportReportView {
     scan_error: Option<String>,
 }
 
+#[derive(Clone)]
+enum ImportSource {
+    Files(Vec<PathBuf>),
+    Folder {
+        folder: PathBuf,
+        files: Vec<PathBuf>,
+        issues: Vec<ImportIssue>,
+    },
+}
+
+impl ImportSource {
+    fn files(&self) -> &[PathBuf] {
+        match self {
+            Self::Files(files) => files,
+            Self::Folder { files, .. } => files,
+        }
+    }
+
+    fn issues(&self) -> &[ImportIssue] {
+        match self {
+            Self::Files(_) => &[],
+            Self::Folder { issues, .. } => issues,
+        }
+    }
+
+    fn summary(&self) -> String {
+        match self {
+            Self::Files(files) => format!("{} 件のファイル", files.len()),
+            Self::Folder { folder, files, .. } => {
+                format!("{} · {} 件", folder.display(), files.len())
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+enum ImportDialogOrigin {
+    New,
+    Retry {
+        report: ImportReportView,
+        sources: Vec<PathBuf>,
+    },
+    Resume {
+        report: ImportReportView,
+        sources: Vec<PathBuf>,
+    },
+}
+
+impl ImportDialogOrigin {
+    fn run_summary(&self) -> Option<String> {
+        match self {
+            Self::New => None,
+            Self::Retry { sources, .. } => Some(format!("失敗分 {} 件", sources.len())),
+            Self::Resume { sources, .. } => Some(format!("残り {} 件", sources.len())),
+        }
+    }
+}
+
+#[derive(Clone)]
+enum ImportDialogPhase {
+    Ready,
+    Running {
+        progress: ImportProgress,
+        cancel: Arc<AtomicBool>,
+        cancel_requested: bool,
+    },
+}
+
+#[derive(Clone)]
+struct ImportDialogState {
+    origin: ImportDialogOrigin,
+    mode: ImportMode,
+    dest: PathBuf,
+    source: Option<ImportSource>,
+    error: Option<String>,
+    phase: ImportDialogPhase,
+}
+
+enum ImportRunMessage {
+    Progress(ImportProgress),
+    Finished(Result<ImportResult, String>),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ManualOutputTarget {
     Folder,
@@ -1434,6 +1518,7 @@ pub struct App {
     failed_jobs: Vec<CompressionJob>,
     failed_job_names: HashMap<i64, String>,
     import_report: Option<ImportReportView>,
+    import_dialog: Option<ImportDialogState>,
     monitor_world: Option<String>,
     monitor_instance: Option<String>,
     monitor_players: Vec<String>,
@@ -1776,6 +1861,7 @@ impl App {
             failed_jobs: Vec::new(),
             failed_job_names: HashMap::new(),
             import_report: None,
+            import_dialog: None,
             monitor_world: None,
             monitor_instance: None,
             monitor_players: Vec::new(),
@@ -4541,7 +4627,7 @@ impl App {
                 .small()
                 .ghost()
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.import_dialog(ImportMode::Copy, cx);
+                    this.open_import_dialog(ImportMode::Copy, cx);
                 }))
                 .into_any_element(),
             Button::new("import-move")
@@ -4549,7 +4635,7 @@ impl App {
                 .small()
                 .primary()
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.import_dialog(ImportMode::Move, cx);
+                    this.open_import_dialog(ImportMode::Move, cx);
                 }))
                 .into_any_element(),
         ];
@@ -6788,6 +6874,259 @@ impl App {
             .into_any_element()
     }
 
+    fn import_modal_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(dialog) = self.import_dialog.clone() else {
+            return div().into_any_element();
+        };
+        let title = match &dialog.origin {
+            ImportDialogOrigin::New => "取り込み",
+            ImportDialogOrigin::Retry { .. } => "取り込み · 再試行",
+            ImportDialogOrigin::Resume { .. } => "取り込み · 再開",
+        };
+        let mode = import_mode_label(dialog.mode);
+        let dest = dialog.dest.to_string_lossy().to_string();
+
+        let mut panel = v_flex()
+            .id("import-dialog-panel")
+            .w(px(560.))
+            .max_h(px(720.))
+            .gap(px(16.))
+            .p(px(22.))
+            .rounded(px(18.))
+            .bg(rgb(PANEL))
+            .border_1()
+            .border_color(rgb(BORDER_STRONG))
+            .shadow(vec![
+                BoxShadow::new(px(0.), px(24.), rgba(0x00000099).into()).blur_radius(px(60.)),
+            ])
+            .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
+            .overflow_y_scrollbar()
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .text_size(px(20.))
+                            .font_semibold()
+                            .text_color(rgb(TEXT))
+                            .child(title),
+                    )
+                    .child(self.badge(mode, BLUE, 0x14283d))
+                    .when_some(dialog.origin.run_summary(), |this, summary| {
+                        this.child(self.badge(&summary, MUTED, PANEL_2))
+                    })
+                    .child(div().flex_1()),
+            );
+
+        match &dialog.phase {
+            ImportDialogPhase::Ready => {
+                let source = dialog.source.as_ref();
+                let has_files = source.is_some_and(|source| !source.files().is_empty());
+                let mut body = v_flex()
+                    .gap(px(10.))
+                    .child(self.section_label("取り込み元"))
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                Button::new("import-pick-files")
+                                    .label("ファイルを選択")
+                                    .small()
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.pick_import_files(cx)),
+                                    ),
+                            )
+                            .child(
+                                Button::new("import-pick-folder")
+                                    .label("フォルダを選択")
+                                    .small()
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.pick_import_folder(cx)),
+                                    ),
+                            ),
+                    )
+                    .child(div().text_size(px(10.)).text_color(rgb(MUTED_2)).child(
+                        "フォルダはサブフォルダも対象です。compressed フォルダは除外します。",
+                    ))
+                    .when_some(source.map(|source| source.summary()), |this, summary| {
+                        this.child(
+                            div()
+                                .truncate()
+                                .text_size(px(11.))
+                                .text_color(rgb(MUTED))
+                                .child(summary),
+                        )
+                    })
+                    .when_some(
+                        source.and_then(|source| {
+                            let count = source.issues().len();
+                            (count > 0).then(|| {
+                                format!(
+                                    "{count} 件のフォルダを読み取れませんでした（結果に表示します）"
+                                )
+                            })
+                        }),
+                        |this, warning| {
+                            this.child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(AMBER))
+                                    .child(warning),
+                            )
+                        },
+                    )
+                    .when_some(dialog.error.clone(), |this, error| {
+                        this.child(
+                            div()
+                                .p(px(10.))
+                                .rounded(px(8.))
+                                .bg(rgb(0x2a1414))
+                                .border_1()
+                                .border_color(rgba(0xfb718533))
+                                .text_size(px(10.))
+                                .text_color(rgb(RED))
+                                .child(error),
+                        )
+                    });
+                body = body.child(self.section_label("取り込み先")).child(
+                    v_flex()
+                        .gap(px(4.))
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(11.))
+                                .text_color(rgb(MUTED))
+                                .child(dest.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(MUTED_2))
+                                .child("設定 > ライブラリ > 取り込み先で変更できます。"),
+                        ),
+                );
+                panel = panel.child(body).child(
+                    h_flex()
+                        .justify_end()
+                        .gap(px(8.))
+                        .child(
+                            Button::new("import-cancel")
+                                .label("キャンセル")
+                                .small()
+                                .ghost()
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.cancel_or_close_import(cx)),
+                                ),
+                        )
+                        .child(
+                            Button::new("import-start")
+                                .label("取り込み開始")
+                                .small()
+                                .primary()
+                                .disabled(!has_files)
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.start_import_from_source(cx)),
+                                ),
+                        ),
+                );
+            }
+            ImportDialogPhase::Running {
+                progress,
+                cancel_requested,
+                ..
+            } => {
+                let last_source = progress
+                    .last_source
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().to_string());
+                panel = panel
+                    .child(
+                        v_flex()
+                            .gap(px(10.))
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(MUTED))
+                                    .child(import_progress_label(progress)),
+                            )
+                            .child(
+                                div()
+                                    .h(px(6.))
+                                    .w_full()
+                                    .rounded_full()
+                                    .bg(rgb(PANEL_2))
+                                    .child(
+                                        div()
+                                            .h_full()
+                                            .w(relative(import_progress_ratio(progress)))
+                                            .rounded_full()
+                                            .bg(rgb(BLUE)),
+                                    ),
+                            )
+                            .when_some(last_source, |this, file| {
+                                this.child(
+                                    div()
+                                        .truncate()
+                                        .text_size(px(10.))
+                                        .text_color(rgb(MUTED_2))
+                                        .child(file),
+                                )
+                            }),
+                    )
+                    .child(self.section_label("取り込み先"))
+                    .child(
+                        div()
+                            .truncate()
+                            .text_size(px(11.))
+                            .text_color(rgb(MUTED))
+                            .child(dest.clone()),
+                    )
+                    .child(
+                        h_flex().justify_end().child(
+                            Button::new("import-cancel")
+                                .label(if *cancel_requested {
+                                    "キャンセル中…"
+                                } else {
+                                    "キャンセル"
+                                })
+                                .small()
+                                .ghost()
+                                .disabled(*cancel_requested)
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.cancel_or_close_import(cx)),
+                                ),
+                        ),
+                    );
+            }
+        }
+
+        div()
+            .id("import-dialog-scrim")
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .size_full()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(rgba(0x05070acc))
+            .on_click(cx.listener(|this, _, _, cx| this.cancel_or_close_import(cx)))
+            .child(panel)
+            .with_animation(
+                "import-dialog",
+                Animation::new(MOTION_FAST)
+                    .with_easing(ease_motion)
+                    .with_max_fps(MOTION_FPS),
+                |el, t| el.opacity(t),
+            )
+            .into_any_element()
+    }
+
     fn compression_screen(
         &mut self,
         window: &mut Window,
@@ -8081,51 +8420,252 @@ impl App {
             .into_any_element()
     }
 
-    fn import_dialog(&mut self, mode: ImportMode, cx: &mut Context<Self>) {
+    fn open_import_dialog(&mut self, mode: ImportMode, cx: &mut Context<Self>) {
+        self.import_dialog = Some(ImportDialogState {
+            origin: ImportDialogOrigin::New,
+            mode,
+            dest: self.settings.import_dir(),
+            source: None,
+            error: None,
+            phase: ImportDialogPhase::Ready,
+        });
+        cx.notify();
+    }
+
+    fn pick_import_files(&mut self, cx: &mut Context<Self>) {
         let Some(files) = rfd::FileDialog::new()
             .add_filter("画像", &["png", "jpg", "jpeg"])
             .pick_files()
         else {
             return;
         };
-        let dest = self.settings.import_dir();
-        self.run_import(files, mode, dest, cx);
+        if let Some(dialog) = &mut self.import_dialog {
+            dialog.error = None;
+            dialog.source = Some(ImportSource::Files(files));
+        }
+        cx.notify();
     }
 
-    /// Copies or moves the picked files, then indexes the destination.
-    fn run_import(
-        &mut self,
-        files: Vec<PathBuf>,
-        mode: ImportMode,
-        dest: PathBuf,
-        cx: &mut Context<Self>,
-    ) {
-        let result = match importer::import_files(&files, &dest, mode) {
-            Ok(result) => result,
+    fn pick_import_folder(&mut self, cx: &mut Context<Self>) {
+        let Some(folder) = rfd::FileDialog::new().pick_folder() else {
+            return;
+        };
+        let dest = self
+            .import_dialog
+            .as_ref()
+            .map(|dialog| dialog.dest.clone());
+        let scan = match importer::collect_folder_sources(&folder, dest.as_deref()) {
+            Ok(scan) => scan,
             Err(error) => {
-                tracing::warn!(%error, "cannot import photos");
-                self.message = Some(format!("取り込みに失敗: {error}"));
+                tracing::warn!(%error, path = %folder.display(), "cannot scan import folder");
+                if let Some(dialog) = &mut self.import_dialog {
+                    dialog.error = Some(format!("フォルダを読み込めません: {error}"));
+                }
                 cx.notify();
                 return;
             }
         };
-        let mut report = ImportReportView {
-            mode,
-            dest,
-            total: files.len(),
-            processed: result.processed,
-            imported: result.imported.len(),
-            skipped: result.skipped,
-            issues: result.issues,
-            renamed: result.renamed,
-            remaining: Vec::new(),
-            cancelled: result.cancelled,
-            scan_failures: Vec::new(),
-            scan_error: None,
+        if let Some(dialog) = &mut self.import_dialog {
+            dialog.error = scan
+                .files
+                .is_empty()
+                .then(|| "対象画像が見つかりません".to_string());
+            dialog.source = Some(ImportSource::Folder {
+                folder,
+                files: scan.files,
+                issues: scan.issues,
+            });
+        }
+        cx.notify();
+    }
+
+    fn start_import_from_source(&mut self, cx: &mut Context<Self>) {
+        let Some(files) = self
+            .import_dialog
+            .as_ref()
+            .and_then(|dialog| dialog.source.as_ref())
+            .map(|source| source.files().to_vec())
+        else {
+            return;
         };
-        self.index_import_destination(&mut report, cx);
-        self.message = Some(import_summary(&report));
-        self.import_report = Some(report);
+        self.start_import_run(files, cx);
+    }
+
+    fn start_import_run(&mut self, files: Vec<PathBuf>, cx: &mut Context<Self>) {
+        let Some(dialog) = self.import_dialog.as_mut() else {
+            return;
+        };
+        if files.is_empty() {
+            return;
+        }
+        let total = files.len();
+        let cancel = Arc::new(AtomicBool::new(false));
+        dialog.error = None;
+        dialog.phase = ImportDialogPhase::Running {
+            progress: ImportProgress {
+                processed: 0,
+                total,
+                imported: 0,
+                skipped: 0,
+                failed: 0,
+                partial: 0,
+                last_source: None,
+            },
+            cancel: cancel.clone(),
+            cancel_requested: false,
+        };
+        let dest = dialog.dest.clone();
+        let mode = dialog.mode;
+        let task_cancel = cancel.clone();
+        let (tx, rx) = async_channel::unbounded();
+        cx.background_executor()
+            .spawn(async move {
+                let mut observe = |progress: ImportProgress| {
+                    let _ = tx.try_send(ImportRunMessage::Progress(progress));
+                };
+                let result = importer::import_files_observed(
+                    &files,
+                    &dest,
+                    mode,
+                    Some(&task_cancel),
+                    &mut observe,
+                )
+                .map_err(|error| error.to_string());
+                let _ = tx.try_send(ImportRunMessage::Finished(result));
+            })
+            .detach();
+        cx.spawn(async move |this, cx| {
+            while let Ok(message) = rx.recv().await {
+                let done = this
+                    .update(cx, |this, cx| match message {
+                        ImportRunMessage::Progress(progress) => {
+                            this.update_import_progress(progress, cx);
+                            false
+                        }
+                        ImportRunMessage::Finished(result) => {
+                            this.finish_import_run(result, cx);
+                            true
+                        }
+                    })
+                    .unwrap_or(true);
+                if done {
+                    break;
+                }
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn update_import_progress(&mut self, progress: ImportProgress, cx: &mut Context<Self>) {
+        if let Some(dialog) = &mut self.import_dialog
+            && let ImportDialogPhase::Running {
+                progress: current, ..
+            } = &mut dialog.phase
+        {
+            *current = progress;
+        }
+        cx.notify();
+    }
+
+    fn finish_import_run(&mut self, result: Result<ImportResult, String>, cx: &mut Context<Self>) {
+        let Some(dialog) = self.import_dialog.take() else {
+            return;
+        };
+        match result {
+            Err(error) => match dialog.origin {
+                ImportDialogOrigin::New => {
+                    self.message = Some(format!("取り込みに失敗: {error}"));
+                    self.import_dialog = Some(ImportDialogState {
+                        origin: ImportDialogOrigin::New,
+                        mode: dialog.mode,
+                        dest: dialog.dest,
+                        source: dialog.source,
+                        error: Some(format!("取り込みに失敗: {error}")),
+                        phase: ImportDialogPhase::Ready,
+                    });
+                }
+                ImportDialogOrigin::Retry { .. } => {
+                    self.message = Some(format!("再試行に失敗: {error}"));
+                }
+                ImportDialogOrigin::Resume { .. } => {
+                    self.message = Some(format!("再開に失敗: {error}"));
+                }
+            },
+            Ok(result) => {
+                let imported = result.imported.len();
+                let mut report = match dialog.origin {
+                    ImportDialogOrigin::New => {
+                        let files = dialog
+                            .source
+                            .as_ref()
+                            .map(|source| source.files().to_vec())
+                            .unwrap_or_default();
+                        let mut issues = dialog
+                            .source
+                            .as_ref()
+                            .map(|source| source.issues().to_vec())
+                            .unwrap_or_default();
+                        let remaining = if result.cancelled {
+                            import_remaining(&files, result.processed)
+                        } else {
+                            Vec::new()
+                        };
+                        issues.extend(result.issues);
+                        ImportReportView {
+                            mode: dialog.mode,
+                            dest: dialog.dest.clone(),
+                            total: files.len(),
+                            processed: result.processed,
+                            imported,
+                            skipped: result.skipped,
+                            issues,
+                            renamed: result.renamed,
+                            remaining,
+                            cancelled: result.cancelled,
+                            scan_failures: Vec::new(),
+                            scan_error: None,
+                        }
+                    }
+                    ImportDialogOrigin::Retry { report, sources } => {
+                        merge_retry_report(&report, &sources, result)
+                    }
+                    ImportDialogOrigin::Resume { report, .. } => {
+                        merge_resume_report(&report, result)
+                    }
+                };
+                if import_should_index(imported) {
+                    report.scan_failures.clear();
+                    report.scan_error = None;
+                    self.index_import_destination(&mut report, cx);
+                }
+                self.message = Some(import_summary(&report));
+                self.import_report = Some(report);
+                self.import_dialog = None;
+                cx.notify();
+            }
+        }
+    }
+
+    fn cancel_or_close_import(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.import_dialog.as_mut() else {
+            return;
+        };
+        let close = match &mut dialog.phase {
+            ImportDialogPhase::Ready => true,
+            ImportDialogPhase::Running {
+                cancel,
+                cancel_requested,
+                ..
+            } => {
+                cancel.store(true, Ordering::Relaxed);
+                *cancel_requested = true;
+                false
+            }
+        };
+        if close {
+            self.import_dialog = None;
+        }
         cx.notify();
     }
 
@@ -9547,6 +10087,11 @@ impl Render for App {
         };
         let root = if self.manual_compress.is_some() {
             root.child(self.manual_compression_overlay(cx))
+        } else {
+            root
+        };
+        let root = if self.import_dialog.is_some() {
+            root.child(self.import_modal_overlay(cx))
         } else {
             root
         };
