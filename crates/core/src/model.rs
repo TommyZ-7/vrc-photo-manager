@@ -70,6 +70,25 @@ impl std::fmt::Display for CompressionFormat {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ResizeMode {
+    /// Resize to the profile bounds even when the source already fits.
+    Always,
+    /// Resize only when the source exceeds the profile bounds.
+    #[default]
+    DownscaleOnly,
+}
+
+impl ResizeMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Always => "always",
+            Self::DownscaleOnly => "downscale_only",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompressionProfile {
     pub id: String,
@@ -80,6 +99,8 @@ pub struct CompressionProfile {
     pub quality: u8,
     pub lossless: bool,
     pub resize_enabled: bool,
+    #[serde(default)]
+    pub resize_mode: ResizeMode,
     pub width: u32,
     pub height: u32,
     pub maintain_aspect: bool,
@@ -100,6 +121,7 @@ impl Default for CompressionProfile {
             quality: 82,
             lossless: false,
             resize_enabled: false,
+            resize_mode: ResizeMode::DownscaleOnly,
             width: 3840,
             height: 2160,
             maintain_aspect: true,
@@ -477,5 +499,42 @@ mod tests {
         assert!(!QueueStatus::Completed.is_active());
         assert!(!QueueStatus::Failed.is_active());
         assert!(!QueueStatus::Cancelled.is_active());
+    }
+
+    #[test]
+    fn legacy_profile_json_defaults_to_downscale_only() {
+        let json = r#"{
+            "id": "legacy",
+            "name": "Legacy",
+            "enabled": true,
+            "auto_enabled": true,
+            "format": "webp",
+            "quality": 82,
+            "lossless": false,
+            "resize_enabled": true,
+            "width": 1920,
+            "height": 1080,
+            "maintain_aspect": true,
+            "output_dir": null,
+            "suffix": "_webp",
+            "encode_speed": 6
+        }"#;
+
+        let profile: CompressionProfile = serde_json::from_str(json).unwrap();
+
+        assert_eq!(profile.resize_mode, ResizeMode::DownscaleOnly);
+    }
+
+    #[test]
+    fn resize_mode_round_trips() {
+        let profile = CompressionProfile {
+            resize_mode: ResizeMode::Always,
+            ..CompressionProfile::default()
+        };
+
+        let json = serde_json::to_string(&profile).unwrap();
+        let decoded: CompressionProfile = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.resize_mode, ResizeMode::Always);
     }
 }

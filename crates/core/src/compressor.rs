@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use image::DynamicImage;
 
 use crate::error::{CoreError, Result};
-use crate::model::{CompressionFormat, CompressionProfile};
+use crate::model::{CompressionFormat, CompressionProfile, ResizeMode};
 
 #[derive(Debug, Clone)]
 pub struct CompressionResult {
@@ -53,22 +53,27 @@ pub fn compress_decoded(
 }
 
 fn resize_for_profile(image: DynamicImage, profile: &CompressionProfile) -> DynamicImage {
-    if profile.resize_enabled && profile.width > 0 && profile.height > 0 {
-        if profile.maintain_aspect {
-            image.resize(
-                profile.width,
-                profile.height,
-                image::imageops::FilterType::Lanczos3,
-            )
-        } else {
-            image.resize_exact(
-                profile.width,
-                profile.height,
-                image::imageops::FilterType::Lanczos3,
-            )
-        }
+    if !profile.resize_enabled || profile.width == 0 || profile.height == 0 {
+        return image;
+    }
+    if profile.resize_mode == ResizeMode::DownscaleOnly
+        && image.width() <= profile.width
+        && image.height() <= profile.height
+    {
+        return image;
+    }
+    if profile.maintain_aspect {
+        image.resize(
+            profile.width,
+            profile.height,
+            image::imageops::FilterType::Lanczos3,
+        )
     } else {
-        image
+        image.resize_exact(
+            profile.width,
+            profile.height,
+            image::imageops::FilterType::Lanczos3,
+        )
     }
 }
 
@@ -90,6 +95,24 @@ pub fn render_clipboard_png(source: &Path, profile: &CompressionProfile) -> Resu
     Ok(bytes)
 }
 
+/// Removes characters that would change the output path or are invalid in
+/// Windows file names. An editable suffix must never escape the output folder.
+fn sanitize_suffix(suffix: &str) -> String {
+    suffix
+        .chars()
+        .map(|ch| {
+            if ch.is_control() || matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+            {
+                '_'
+            } else {
+                ch
+            }
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
 /// Chooses a non-conflicting output path.
 pub fn determine_output_path(source: &Path, profile: &CompressionProfile) -> Result<PathBuf> {
     let stem = source
@@ -97,7 +120,7 @@ pub fn determine_output_path(source: &Path, profile: &CompressionProfile) -> Res
         .and_then(|stem| stem.to_str())
         .ok_or_else(|| CoreError::Invalid("source has no file stem".to_string()))?;
     let extension = profile.format.extension();
-    let suffix = profile.suffix.trim();
+    let suffix = sanitize_suffix(&profile.suffix);
     let output_dir = match profile
         .output_dir
         .as_deref()
@@ -318,6 +341,62 @@ mod tests {
         profile.height = 8;
         let result = compress_image(&source, &profile).unwrap();
         assert_eq!((result.width, result.height), (8, 5));
+    }
+
+    #[test]
+    fn downscale_only_keeps_images_that_already_fit() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("VRChat_2026-10-21_21-14-03.221_16x10.png");
+        sample(&source);
+        let mut profile = profile(CompressionFormat::Webp);
+        profile.resize_enabled = true;
+        profile.resize_mode = ResizeMode::DownscaleOnly;
+        profile.width = 32;
+        profile.height = 32;
+
+        let result = compress_image(&source, &profile).unwrap();
+
+        assert_eq!((result.width, result.height), (16, 10));
+    }
+
+    #[test]
+    fn always_resizes_images_that_already_fit() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("VRChat_2026-10-21_21-14-03.221_16x10.png");
+        sample(&source);
+        let mut profile = profile(CompressionFormat::Webp);
+        profile.resize_enabled = true;
+        profile.resize_mode = ResizeMode::Always;
+        profile.width = 32;
+        profile.height = 32;
+
+        let result = compress_image(&source, &profile).unwrap();
+
+        assert_eq!((result.width, result.height), (32, 20));
+    }
+
+    #[test]
+    fn suffix_cannot_escape_the_output_directory() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("VRChat_2026-10-21_21-14-03.221_16x10.png");
+        sample(&source);
+        let mut profile = profile(CompressionFormat::Webp);
+        profile.suffix = "/bad:name*".to_string();
+
+        let result = compress_image(&source, &profile).unwrap();
+
+        assert_eq!(
+            result.output_path.parent(),
+            Some(dir.path().join("compressed").as_path())
+        );
+        assert!(
+            result
+                .output_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with("_bad_name_.webp")
+        );
     }
 
     #[test]
