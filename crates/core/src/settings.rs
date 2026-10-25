@@ -21,8 +21,10 @@ pub struct AppSettings {
     pub tray: bool,
     pub auto_compress: bool,
     pub auto_compress_backlog: bool,
-    #[serde(default = "default_true")]
-    pub compression_keep_original: bool,
+    /// Whether automatic compression keeps the original after a successful
+    /// encode. Manual compression chooses this per run and never reads it.
+    #[serde(default = "default_true", alias = "compression_keep_original")]
+    pub auto_compress_keep_original: bool,
     #[serde(default = "default_true")]
     pub auto_compress_immediate: bool,
     pub estimated_link: bool,
@@ -59,7 +61,7 @@ impl Default for AppSettings {
             tray: true,
             auto_compress: true,
             auto_compress_backlog: false,
-            compression_keep_original: true,
+            auto_compress_keep_original: true,
             auto_compress_immediate: true,
             estimated_link: true,
             thumbnail_cache_mb: 2048,
@@ -243,21 +245,42 @@ mod tests {
             "compression_workers": 1
         }"#;
         let settings: AppSettings = serde_json::from_str(json).unwrap();
-        assert!(settings.compression_keep_original);
+        assert!(settings.auto_compress_keep_original);
         assert!(settings.auto_compress_immediate);
     }
 
     #[test]
-    fn compression_policy_settings_roundtrip() {
+    fn legacy_compression_policy_loads_as_the_automatic_setting() {
+        let json = r#"{
+            "photo_roots": [],
+            "log_dir": null,
+            "managed_dir": null,
+            "language": "ja",
+            "autostart": true,
+            "tray": true,
+            "auto_compress": true,
+            "auto_compress_backlog": false,
+            "compression_keep_original": false,
+            "auto_compress_immediate": true,
+            "estimated_link": true,
+            "thumbnail_cache_mb": 2048,
+            "compression_workers": 1
+        }"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+        assert!(!settings.auto_compress_keep_original);
+    }
+
+    #[test]
+    fn auto_compression_policy_settings_roundtrip() {
         let db = Db::open_in_memory().unwrap();
         let settings = AppSettings {
-            compression_keep_original: false,
+            auto_compress_keep_original: false,
             auto_compress_immediate: false,
             ..Default::default()
         };
         settings.save(&db).unwrap();
         let loaded = AppSettings::load(&db).unwrap();
-        assert!(!loaded.compression_keep_original);
+        assert!(!loaded.auto_compress_keep_original);
         assert!(!loaded.auto_compress_immediate);
     }
 
