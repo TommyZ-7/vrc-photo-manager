@@ -7619,7 +7619,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vrc-photo-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "blake3",
  "chrono",
@@ -7645,7 +7645,7 @@ dependencies = [
 
 [[package]]
 name = "vrc-photo-daemon"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "auto-launch",
@@ -7667,7 +7667,7 @@ dependencies = [
 
 [[package]]
 name = "vrc-photo-ipc"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "interprocess",
  "serde",
@@ -7679,7 +7679,7 @@ dependencies = [
 
 [[package]]
 name = "vrc-photo-release-tool"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -7697,7 +7697,7 @@ dependencies = [
 
 [[package]]
 name = "vrc-photo-ui"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -7718,7 +7718,7 @@ dependencies = [
 
 [[package]]
 name = "vrc-photo-update"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
