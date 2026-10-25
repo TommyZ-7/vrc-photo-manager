@@ -9,7 +9,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use semver::Version;
 use vrc_photo_update::{
     ApplyJob, ApplyKind, AvailableUpdate, FeedConfig, InstallKind, IoOperation, LastResult,
-    LastStatus, UpdateError, UpdatePaths, UreqClient, check, download, start_apply,
+    LastStatus, NativeString, UpdateError, UpdatePaths, UreqClient, check, download, start_apply,
 };
 
 use super::App;
@@ -247,12 +247,18 @@ pub struct UpdateState {
     database_ok: bool,
     demo: bool,
     data_dir: Option<PathBuf>,
+    db_path: Option<PathBuf>,
     in_flight: bool,
     cancel: Arc<AtomicBool>,
 }
 
 impl UpdateState {
-    pub fn new(health_token: Option<String>, database_ok: bool, demo: bool) -> Self {
+    pub fn new(
+        health_token: Option<String>,
+        database_ok: bool,
+        demo: bool,
+        db_path: Option<PathBuf>,
+    ) -> Self {
         let install = if demo {
             InstallKind::Development
         } else {
@@ -279,6 +285,7 @@ impl UpdateState {
             database_ok,
             demo,
             data_dir,
+            db_path,
             in_flight: false,
             cancel: Arc::new(AtomicBool::new(false)),
         }
@@ -343,6 +350,7 @@ impl UpdateState {
             &paths,
             token,
             vrc_photo_update::CURRENT_VERSION,
+            self.db_path.as_deref(),
         )
         .map_err(|error| error.to_string())
     }
@@ -627,6 +635,18 @@ impl App {
             cx.notify();
             return;
         };
+        let working_dir = match std::env::current_dir() {
+            Ok(dir) => dir,
+            Err(error) => {
+                let message = format!("現在の作業ディレクトリを特定できません: {error}");
+                self.update.phase = UpdatePhase::Error(message.clone());
+                self.message = Some(message);
+                cx.notify();
+                return;
+            }
+        };
+        let restart_args: Vec<NativeString> =
+            std::env::args_os().skip(1).map(NativeString::new).collect();
         let (kind, target) = match &self.update.install {
             InstallKind::AppImage { path } => (ApplyKind::AppImage, path.clone()),
             InstallKind::WindowsCurrentUser { .. } => (ApplyKind::Windows, current_exe.clone()),
@@ -647,7 +667,13 @@ impl App {
             sha256: asset.sha256,
             ui_pid: std::process::id(),
             daemon_pid: self.daemon_pid,
-            restart_args: std::env::args().skip(1).collect(),
+            restart_args,
+            working_dir,
+            database: self
+                .update
+                .db_path
+                .as_ref()
+                .map(|path| NativeString::new(path.as_os_str())),
             health_token: ApplyJob::new_health_token(),
             data_dir,
             created_at: Utc::now().to_rfc3339(),

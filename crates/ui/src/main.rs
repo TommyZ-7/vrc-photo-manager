@@ -1187,6 +1187,7 @@ type ViewerActivate = Rc<dyn Fn(&mut App, &mut Window, &mut Context<App>)>;
 impl App {
     fn new(window: &mut Window, cx: &mut Context<Self>, options: &LaunchOptions) -> Self {
         let (db, demo, database_ok, mut message, demo_assets) = open_database(options);
+        let db_path = db.path().and_then(|path| std::fs::canonicalize(path).ok());
         let health_token = std::env::var("VRC_PHOTO_HEALTH_TOKEN").ok();
         let updating = health_token.is_some();
         let initial_settings = AppSettings::load(&db).unwrap_or_default();
@@ -1298,7 +1299,7 @@ impl App {
             profile_index: 0,
             stats: LibraryStats::default(),
             settings: AppSettings::default(),
-            update: update_view::UpdateState::new(health_token, database_ok, demo),
+            update: update_view::UpdateState::new(health_token, database_ok, demo, db_path),
             jobs: Vec::new(),
             waiting_jobs: Vec::new(),
             active_job_count: 0,

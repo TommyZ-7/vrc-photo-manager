@@ -10,6 +10,7 @@ pub mod fetch;
 pub mod helper;
 pub mod install;
 pub mod manifest;
+pub mod native;
 pub mod verify;
 
 pub use check::{FeedConfig, check};
@@ -27,6 +28,7 @@ pub use manifest::{
     AvailableUpdate, MANIFEST_SCHEMA, MAX_ARTIFACT_BYTES, MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES,
     Manifest, PlatformAsset, UpdateFormat,
 };
+pub use native::NativeString;
 pub use verify::{
     decode_signature_base64, effective_public_keys, embedded_public_keys, verify_bytes, verify_file,
 };

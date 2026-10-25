@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::error::{IoOperation, Result, UpdateError};
 use crate::helper::write_atomic;
+use crate::native::NativeString;
 
 pub const APPLY_SCHEMA: u32 = 1;
 
@@ -273,7 +274,9 @@ pub struct ApplyJob {
     pub sha256: String,
     pub ui_pid: u32,
     pub daemon_pid: Option<u32>,
-    pub restart_args: Vec<String>,
+    pub restart_args: Vec<NativeString>,
+    pub working_dir: PathBuf,
+    pub database: Option<NativeString>,
     pub health_token: String,
     pub data_dir: PathBuf,
     pub created_at: String,
@@ -297,12 +300,20 @@ impl ApplyJob {
             ("target", &self.target),
             ("staged", &self.staged),
             ("data_dir", &self.data_dir),
+            ("working_dir", &self.working_dir),
         ] {
             if !path.is_absolute() {
                 return Err(UpdateError::InvalidJob(format!(
                     "{label} must be an absolute path"
                 )));
             }
+        }
+        if let Some(database) = &self.database
+            && !database.as_path().is_absolute()
+        {
+            return Err(UpdateError::InvalidJob(
+                "database must be an absolute path".to_string(),
+            ));
         }
         if self.target == self.staged {
             return Err(UpdateError::InvalidJob(
@@ -332,11 +343,7 @@ impl ApplyJob {
                 "sha256 must be 64 lowercase hex characters".to_string(),
             ));
         }
-        if self
-            .restart_args
-            .iter()
-            .any(|argument| argument.contains('\0'))
-        {
+        if self.restart_args.iter().any(NativeString::contains_nul) {
             return Err(UpdateError::InvalidJob(
                 "restart arguments contain a NUL".to_string(),
             ));
@@ -652,6 +659,8 @@ mod tests {
             ui_pid: 1,
             daemon_pid: Some(2),
             restart_args: Vec::new(),
+            working_dir: dir.to_path_buf(),
+            database: None,
             health_token: "abc-123".to_string(),
             data_dir: dir.to_path_buf(),
             created_at: "2026-10-24T12:00:00Z".to_string(),
@@ -689,6 +698,26 @@ mod tests {
         let mut bad_schema = job.clone();
         bad_schema.schema = 2;
         assert!(bad_schema.validate().is_err());
+
+        let mut relative_working_dir = job.clone();
+        relative_working_dir.working_dir = "relative".into();
+        assert!(relative_working_dir.validate().is_err());
+
+        let mut relative_database = job.clone();
+        relative_database.database = Some(NativeString::new("relative.db"));
+        assert!(relative_database.validate().is_err());
+
+        #[cfg(unix)]
+        {
+            use std::ffi::OsString;
+            use std::os::unix::ffi::OsStringExt;
+            let mut non_utf8 = job.clone();
+            non_utf8.restart_args = vec![NativeString::from(OsString::from_vec(vec![b'x', 0x80]))];
+            let json = serde_json::to_string(&non_utf8).unwrap();
+            let decoded: ApplyJob = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded.restart_args, non_utf8.restart_args);
+            decoded.validate().unwrap();
+        }
     }
 
     #[test]

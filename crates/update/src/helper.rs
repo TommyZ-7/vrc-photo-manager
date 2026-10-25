@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{IoOperation, Result, UpdateError};
 use crate::install::{ApplyJob, ApplyKind, UpdatePaths};
+use crate::native::NativeString;
 use crate::verify::{decode_signature_base64, effective_public_keys, verify_file};
 
 /// Timeouts for the helper. Tests may skip the signature check to exercise
@@ -159,7 +160,12 @@ pub fn run_helper_with_options(job_path: &Path, options: HelperOptions) -> Resul
         },
     );
 
-    let mut child = match launch(&job.target, &job.restart_args, Some(&job.health_token)) {
+    let mut child = match launch(
+        &job.target,
+        &job.restart_args,
+        Some(&job.health_token),
+        &job.working_dir,
+    ) {
         Ok(child) => child,
         Err(error) => {
             log(&paths, &format!("cannot launch the new version: {error}"));
@@ -171,6 +177,7 @@ pub fn run_helper_with_options(job_path: &Path, options: HelperOptions) -> Resul
         &paths,
         &job.health_token,
         &job.to_version,
+        job.database.as_ref().map(NativeString::as_path),
         &mut child,
         options.health_timeout,
     ) {
@@ -442,10 +449,16 @@ fn wait_for_exit(child: &mut Child, timeout: Duration) -> Result<std::process::E
     }
 }
 
-fn launch(target: &Path, args: &[String], health_token: Option<&str>) -> Result<Child> {
+fn launch_command(
+    target: &Path,
+    args: &[NativeString],
+    health_token: Option<&str>,
+    working_dir: &Path,
+) -> Command {
     let mut command = Command::new(target);
     command
-        .args(args)
+        .args(args.iter().map(NativeString::as_os_str))
+        .current_dir(working_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -453,12 +466,21 @@ fn launch(target: &Path, args: &[String], health_token: Option<&str>) -> Result<
         command.env("VRC_PHOTO_HEALTH_TOKEN", token);
     }
     command
+}
+
+fn launch(
+    target: &Path,
+    args: &[NativeString],
+    health_token: Option<&str>,
+    working_dir: &Path,
+) -> Result<Child> {
+    launch_command(target, args, health_token, working_dir)
         .spawn()
         .map_err(|error| UpdateError::io_at(IoOperation::Spawn, target, error))
 }
 
 fn relaunch_old(paths: &UpdatePaths, job: &ApplyJob) {
-    if let Err(error) = launch(&job.target, &job.restart_args, None) {
+    if let Err(error) = launch(&job.target, &job.restart_args, None, &job.working_dir) {
         log(
             paths,
             &format!("cannot relaunch the previous version: {error}"),
@@ -495,6 +517,7 @@ pub fn wait_for_health(
     paths: &UpdatePaths,
     token: &str,
     expected: &str,
+    expected_database: Option<&Path>,
     child: &mut Child,
     timeout: Duration,
 ) -> Result<()> {
@@ -517,6 +540,14 @@ pub fn wait_for_health(
 
         match read_health_marker(paths, token)? {
             Some(marker) if marker.version == expected && marker.mode == "normal" => {
+                let database_matches = expected_database.is_none_or(|expected| {
+                    marker.database.as_ref().map(NativeString::as_path) == Some(expected)
+                });
+                if !database_matches {
+                    return Err(UpdateError::Other(
+                        "health marker was written for a different database".to_string(),
+                    ));
+                }
                 if !marker_seen {
                     marker_seen = true;
                     marker_since = Instant::now();
@@ -641,12 +672,20 @@ impl LastResult {
 pub struct HealthMarker {
     pub version: String,
     pub mode: String,
+    #[serde(default)]
+    pub database: Option<NativeString>,
 }
 
-pub fn write_health_marker(paths: &UpdatePaths, token: &str, version: &str) -> Result<()> {
+pub fn write_health_marker(
+    paths: &UpdatePaths,
+    token: &str,
+    version: &str,
+    database: Option<&Path>,
+) -> Result<()> {
     let marker = HealthMarker {
         version: version.to_string(),
         mode: "normal".to_string(),
+        database: database.map(|path| NativeString::new(path.as_os_str())),
     };
     let bytes = serde_json::to_vec_pretty(&marker)
         .map_err(|error| UpdateError::Other(format!("cannot serialize health marker: {error}")))?;
@@ -971,10 +1010,14 @@ mod tests {
     fn health_marker_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths(dir.path());
-        write_health_marker(&paths, "token-1", "0.4.0").unwrap();
+        write_health_marker(&paths, "token-1", "0.4.0", Some(dir.path())).unwrap();
         let marker = read_health_marker(&paths, "token-1").unwrap().unwrap();
         assert_eq!(marker.version, "0.4.0");
         assert_eq!(marker.mode, "normal");
+        assert_eq!(
+            marker.database.as_ref().map(NativeString::as_path),
+            Some(dir.path())
+        );
         assert!(read_health_marker(&paths, "other").unwrap().is_none());
     }
 
@@ -1024,6 +1067,75 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn launch_uses_the_working_directory_and_native_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = vec![NativeString::new("--demo")];
+        let command = launch_command(Path::new("/bin/true"), &args, Some("token"), dir.path());
+        assert_eq!(command.get_current_dir(), Some(dir.path()));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![std::ffi::OsStr::new("--demo")]
+        );
+        assert!(command.get_envs().any(|(key, value)| {
+            key == std::ffi::OsStr::new("VRC_PHOTO_HEALTH_TOKEN")
+                && value == Some(std::ffi::OsStr::new("token"))
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn health_marker_must_match_the_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        let db = dir.path().join("app.db");
+        let other = dir.path().join("other.db");
+        std::fs::write(&db, b"db").unwrap();
+        std::fs::write(&other, b"db").unwrap();
+        write_health_marker(&paths, "db-token", "9.9.9", Some(&db)).unwrap();
+        let marker = read_health_marker(&paths, "db-token").unwrap().unwrap();
+        assert_eq!(
+            marker.database.as_ref().map(NativeString::as_path),
+            Some(db.as_path())
+        );
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("2")
+            .spawn()
+            .unwrap();
+        assert!(
+            wait_for_health(
+                &paths,
+                "db-token",
+                "9.9.9",
+                Some(&other),
+                &mut child,
+                Duration::from_millis(100)
+            )
+            .is_err()
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("2")
+            .spawn()
+            .unwrap();
+        assert!(
+            wait_for_health(
+                &paths,
+                "db-token",
+                "9.9.9",
+                Some(&db),
+                &mut child,
+                Duration::from_millis(100)
+            )
+            .is_ok()
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
     #[cfg(unix)]
     #[test]
     fn health_marker_must_match_the_expected_version() {
@@ -1034,20 +1146,36 @@ mod tests {
             .spawn()
             .unwrap();
 
-        write_health_marker(&paths, "token", "9.9.9").unwrap();
+        write_health_marker(&paths, "token", "9.9.9", None).unwrap();
         assert!(
-            wait_for_health(&paths, "token", "9.9.9", &mut child, Duration::from_secs(1)).is_ok()
+            wait_for_health(
+                &paths,
+                "token",
+                "9.9.9",
+                None,
+                &mut child,
+                Duration::from_secs(1)
+            )
+            .is_ok()
         );
         let _ = child.kill();
         let _ = child.wait();
 
-        write_health_marker(&paths, "wrong", "8.8.8").unwrap();
+        write_health_marker(&paths, "wrong", "8.8.8", None).unwrap();
         let mut child = std::process::Command::new("sleep")
             .arg("2")
             .spawn()
             .unwrap();
         assert!(
-            wait_for_health(&paths, "wrong", "9.9.9", &mut child, Duration::from_secs(1)).is_err()
+            wait_for_health(
+                &paths,
+                "wrong",
+                "9.9.9",
+                None,
+                &mut child,
+                Duration::from_secs(1)
+            )
+            .is_err()
         );
         let _ = child.kill();
         let _ = child.wait();
@@ -1061,6 +1189,7 @@ mod tests {
                 &paths,
                 "missing",
                 "9.9.9",
+                None,
                 &mut child,
                 Duration::from_millis(100)
             )
@@ -1207,6 +1336,8 @@ mod tests {
             ui_pid: dead_pid(),
             daemon_pid: None,
             restart_args: Vec::new(),
+            working_dir: dir.to_path_buf(),
+            database: None,
             health_token: token.to_string(),
             data_dir: dir.to_path_buf(),
             created_at: "2026-10-24T12:00:00Z".to_string(),
@@ -1281,6 +1412,8 @@ mod tests {
             ui_pid: 0,
             daemon_pid: None,
             restart_args: Vec::new(),
+            working_dir: dir.path().to_path_buf(),
+            database: None,
             health_token: "token-apply-failure".to_string(),
             data_dir: dir.path().to_path_buf(),
             created_at: "2026-10-24T12:00:00Z".to_string(),
@@ -1326,6 +1459,8 @@ mod tests {
             ui_pid: 0,
             daemon_pid: None,
             restart_args: Vec::new(),
+            working_dir: dir.path().to_path_buf(),
+            database: None,
             health_token: "token".to_string(),
             data_dir: dir.path().to_path_buf(),
             created_at: "2026-10-24T12:00:00Z".to_string(),
