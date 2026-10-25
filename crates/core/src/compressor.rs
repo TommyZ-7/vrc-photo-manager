@@ -30,23 +30,7 @@ pub fn compress_decoded(
     source: &Path,
     profile: &CompressionProfile,
 ) -> Result<CompressionResult> {
-    let image = if profile.resize_enabled && profile.width > 0 && profile.height > 0 {
-        if profile.maintain_aspect {
-            image.resize(
-                profile.width,
-                profile.height,
-                image::imageops::FilterType::Lanczos3,
-            )
-        } else {
-            image.resize_exact(
-                profile.width,
-                profile.height,
-                image::imageops::FilterType::Lanczos3,
-            )
-        }
-    } else {
-        image
-    };
+    let image = resize_for_profile(image, profile);
 
     let width = image.width();
     let height = image.height();
@@ -66,6 +50,41 @@ pub fn compress_decoded(
         height,
         compressed_size,
     })
+}
+
+fn resize_for_profile(image: DynamicImage, profile: &CompressionProfile) -> DynamicImage {
+    if profile.resize_enabled && profile.width > 0 && profile.height > 0 {
+        if profile.maintain_aspect {
+            image.resize(
+                profile.width,
+                profile.height,
+                image::imageops::FilterType::Lanczos3,
+            )
+        } else {
+            image.resize_exact(
+                profile.width,
+                profile.height,
+                image::imageops::FilterType::Lanczos3,
+            )
+        }
+    } else {
+        image
+    }
+}
+
+/// Renders the profile's resize result as PNG bytes for the system clipboard.
+///
+/// Clipboard image consumers expect PNG regardless of the profile's output
+/// format, so the encoder format and quality do not apply here.
+pub fn render_clipboard_png(source: &Path, profile: &CompressionProfile) -> Result<Vec<u8>> {
+    let image = crate::image_decode::decode_image(source)
+        .ok_or_else(|| CoreError::Invalid(format!("cannot decode {}", source.display())))?;
+    let image = resize_for_profile(image, profile);
+    let mut bytes = Vec::new();
+    image
+        .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .map_err(|error| CoreError::Invalid(format!("cannot encode clipboard PNG: {error}")))?;
+    Ok(bytes)
 }
 
 /// Chooses a non-conflicting output path.
@@ -230,7 +249,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{Rgba, RgbaImage};
+    use image::{GenericImageView as _, Rgba, RgbaImage};
     use tempfile::tempdir;
 
     fn sample(path: &Path) {
@@ -296,5 +315,22 @@ mod tests {
         profile.height = 8;
         let result = compress_image(&source, &profile).unwrap();
         assert_eq!((result.width, result.height), (8, 5));
+    }
+
+    #[test]
+    fn renders_png_for_the_clipboard_with_profile_resize() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("VRChat_2026-10-21_21-14-03.221_16x10.png");
+        sample(&source);
+        let mut profile = profile(CompressionFormat::Webp);
+        profile.resize_enabled = true;
+        profile.width = 8;
+        profile.height = 8;
+
+        let bytes = render_clipboard_png(&source, &profile).unwrap();
+
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+        let decoded = image::load_from_memory(&bytes).unwrap();
+        assert_eq!(decoded.dimensions(), (8, 5));
     }
 }
