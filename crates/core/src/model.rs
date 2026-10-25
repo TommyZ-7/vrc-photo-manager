@@ -337,6 +337,9 @@ pub struct CompressionJob {
     pub error: Option<String>,
     pub output_path: Option<String>,
     pub policy: String,
+    /// Per-job output directory override. `None` uses the compression
+    /// profile's configured directory (automatic jobs always do this).
+    pub output_dir: Option<String>,
     /// Number of user retries already performed for this job.
     pub retry_count: i64,
     pub created_at: String,
