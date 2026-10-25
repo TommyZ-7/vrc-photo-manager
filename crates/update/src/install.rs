@@ -5,8 +5,9 @@ use semver::Version;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::error::{Result, UpdateError};
+use crate::error::{IoOperation, Result, UpdateError};
 use crate::helper::write_atomic;
+use crate::native::NativeString;
 
 pub const APPLY_SCHEMA: u32 = 1;
 
@@ -273,7 +274,9 @@ pub struct ApplyJob {
     pub sha256: String,
     pub ui_pid: u32,
     pub daemon_pid: Option<u32>,
-    pub restart_args: Vec<String>,
+    pub restart_args: Vec<NativeString>,
+    pub working_dir: PathBuf,
+    pub database: Option<NativeString>,
     pub health_token: String,
     pub data_dir: PathBuf,
     pub created_at: String,
@@ -297,12 +300,20 @@ impl ApplyJob {
             ("target", &self.target),
             ("staged", &self.staged),
             ("data_dir", &self.data_dir),
+            ("working_dir", &self.working_dir),
         ] {
             if !path.is_absolute() {
                 return Err(UpdateError::InvalidJob(format!(
                     "{label} must be an absolute path"
                 )));
             }
+        }
+        if let Some(database) = &self.database
+            && !database.as_path().is_absolute()
+        {
+            return Err(UpdateError::InvalidJob(
+                "database must be an absolute path".to_string(),
+            ));
         }
         if self.target == self.staged {
             return Err(UpdateError::InvalidJob(
@@ -332,11 +343,7 @@ impl ApplyJob {
                 "sha256 must be 64 lowercase hex characters".to_string(),
             ));
         }
-        if self
-            .restart_args
-            .iter()
-            .any(|argument| argument.contains('\0'))
-        {
+        if self.restart_args.iter().any(NativeString::contains_nul) {
             return Err(UpdateError::InvalidJob(
                 "restart arguments contain a NUL".to_string(),
             ));
@@ -374,25 +381,24 @@ pub fn prepare_apply(job: &ApplyJob, current_exe: &Path, data_dir: &Path) -> Res
         .ok_or_else(|| UpdateError::InvalidJob("current executable has no parent".to_string()))?
         .join(helper_name);
     if !source.is_file() {
-        return Err(UpdateError::io(
-            &source,
-            std::io::ErrorKind::NotFound.into(),
-        ));
+        return Err(UpdateError::HelperMissing);
     }
 
     let helper = paths.bin_dir().join(helper_name);
     let _ = std::fs::remove_file(&helper);
-    std::fs::copy(&source, &helper).map_err(|error| UpdateError::io(&helper, error))?;
+    std::fs::copy(&source, &helper)
+        .map_err(|error| UpdateError::io_at(IoOperation::Helper, &helper, error))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700))
-            .map_err(|error| UpdateError::io(&helper, error))?;
+            .map_err(|error| UpdateError::io_at(IoOperation::Helper, &helper, error))?;
     }
 
     let bytes = serde_json::to_vec_pretty(job)
         .map_err(|error| UpdateError::Other(format!("cannot serialize apply job: {error}")))?;
-    write_atomic(&paths.job_file(), &bytes, 0o600)?;
+    write_atomic(&paths.job_file(), &bytes, 0o600)
+        .map_err(|error| error.with_io_operation(IoOperation::Job))?;
     Ok(helper)
 }
 
@@ -405,10 +411,10 @@ pub fn start_apply(job: &ApplyJob, current_exe: &Path, data_dir: &Path) -> Resul
         .create(true)
         .append(true)
         .open(paths.log_file())
-        .map_err(|error| UpdateError::io(paths.log_file(), error))?;
+        .map_err(|error| UpdateError::io_at(IoOperation::Job, paths.log_file(), error))?;
     let stderr = log
         .try_clone()
-        .map_err(|error| UpdateError::io(paths.log_file(), error))?;
+        .map_err(|error| UpdateError::io_at(IoOperation::Job, paths.log_file(), error))?;
     Command::new(&helper)
         .arg("--apply")
         .arg(paths.job_file())
@@ -417,7 +423,7 @@ pub fn start_apply(job: &ApplyJob, current_exe: &Path, data_dir: &Path) -> Resul
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(stderr))
         .spawn()
-        .map_err(|error| UpdateError::io(&helper, error))?;
+        .map_err(|error| UpdateError::io_at(IoOperation::Spawn, &helper, error))?;
     Ok(())
 }
 
@@ -557,7 +563,7 @@ mod tests {
 
     #[test]
     fn selects_the_asset_for_the_install_kind() {
-        let bytes = br#"{
+        let json = br#"{
           "schema": 1,
           "version": "0.4.0",
           "platforms": {
@@ -566,18 +572,20 @@ mod tests {
               "format": "appimage",
               "size": 10,
               "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-              "signature": "sig"
+              "signature": "__SIGNATURE__"
             },
             "windows-x86_64": {
               "url": "https://example.com/vrc-photo-manager_0.4.0_x64-setup.exe",
               "format": "nsis",
               "size": 10,
               "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-              "signature": "sig"
+              "signature": "__SIGNATURE__"
             }
           }
         }"#;
-        let (manifest, _) = Manifest::parse_and_validate(bytes, false).unwrap();
+        let json = String::from_utf8_lossy(json)
+            .replace("__SIGNATURE__", &crate::verify::test_signature());
+        let (manifest, _) = Manifest::parse_and_validate(json.as_bytes(), false).unwrap();
 
         let appimage = InstallKind::AppImage {
             path: "/tmp/VRC.AppImage".into(),
@@ -651,6 +659,8 @@ mod tests {
             ui_pid: 1,
             daemon_pid: Some(2),
             restart_args: Vec::new(),
+            working_dir: dir.to_path_buf(),
+            database: None,
             health_token: "abc-123".to_string(),
             data_dir: dir.to_path_buf(),
             created_at: "2026-10-24T12:00:00Z".to_string(),
@@ -688,6 +698,26 @@ mod tests {
         let mut bad_schema = job.clone();
         bad_schema.schema = 2;
         assert!(bad_schema.validate().is_err());
+
+        let mut relative_working_dir = job.clone();
+        relative_working_dir.working_dir = "relative".into();
+        assert!(relative_working_dir.validate().is_err());
+
+        let mut relative_database = job.clone();
+        relative_database.database = Some(NativeString::new("relative.db"));
+        assert!(relative_database.validate().is_err());
+
+        #[cfg(unix)]
+        {
+            use std::ffi::OsString;
+            use std::os::unix::ffi::OsStringExt;
+            let mut non_utf8 = job.clone();
+            non_utf8.restart_args = vec![NativeString::from(OsString::from_vec(vec![b'x', 0x80]))];
+            let json = serde_json::to_string(&non_utf8).unwrap();
+            let decoded: ApplyJob = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded.restart_args, non_utf8.restart_args);
+            decoded.validate().unwrap();
+        }
     }
 
     #[test]
