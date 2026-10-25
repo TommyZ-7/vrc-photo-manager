@@ -8890,16 +8890,19 @@ impl App {
         match scanner::scan_and_index(&self.db, root_id, &report.dest) {
             Ok(scan) => {
                 report.scan_failures.extend(scan.failures);
+                let mut preview_jobs = Vec::new();
                 for id in &scan.new_ids {
                     let Ok(Some(photo)) = self.db.photo_by_id(*id) else {
                         continue;
                     };
+                    preview_jobs.push((preview_key(&photo), PathBuf::from(photo.effective_path())));
                     if let Err(error) =
                         thumbnail::ensure_thumbnail(*id, Path::new(photo.effective_path()))
                     {
                         tracing::warn!(%error, %id, "cannot generate thumbnail after import");
                     }
                 }
+                self.warm_previews(preview_jobs, cx);
             }
             Err(error) => {
                 tracing::warn!(%error, "cannot scan import destination");
@@ -8923,6 +8926,32 @@ impl App {
                 tracing::warn!(%error, "cannot request rescan for import destination");
             }
         }
+    }
+
+    /// Generates preview cache entries for newly imported photos without
+    /// blocking the import report or the library reload.
+    fn warm_previews(&mut self, jobs: Vec<(PreviewKey, PathBuf)>, cx: &mut Context<Self>) {
+        if jobs.is_empty() {
+            return;
+        }
+        let cache_dir = self
+            .demo_assets
+            .as_ref()
+            .map(|assets| assets.preview_dir.clone())
+            .or_else(preview::previews_dir);
+        let Some(cache_dir) = cache_dir else {
+            return;
+        };
+        cx.background_executor()
+            .spawn(async move {
+                for (key, source) in jobs {
+                    let start = Instant::now();
+                    let _ =
+                        preview::ensure_preview_in(key.photo_id, key.variant, &source, &cache_dir);
+                    log_timing("preview warm", start);
+                }
+            })
+            .detach();
     }
 
     /// Opens the import modal in retry mode for the retryable failed sources.
