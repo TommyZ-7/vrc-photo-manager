@@ -4206,7 +4206,7 @@ impl App {
                 }));
 
         let mut body = v_flex()
-            .h(px(36.))
+            .h(px(46.))
             .justify_center()
             .gap(px(2.))
             .child(
@@ -11256,17 +11256,29 @@ fn import_card_status(
         };
     };
     let (failed, partial) = import_issue_counts(&report.issues);
+    let scan_failed = import_scan_failure_count(report);
+    let failed_total = failed + scan_failed;
     if !report.remaining.is_empty() {
         return CardStatus {
             headline: format!("未処理 {}", report.remaining.len()),
-            detail: format!("取込 {}/{} · 失敗 {failed}", report.imported, report.total),
+            detail: format!(
+                "取込 {}/{} · 失敗 {failed_total}",
+                report.imported, report.total
+            ),
             tone: StatusTone::Waiting,
         };
     }
-    if failed > 0 {
+    if failed_total > 0 {
         return CardStatus {
-            headline: format!("失敗 {failed}"),
-            detail: format!("取込 {}/{}", report.imported, report.total),
+            headline: format!("失敗 {failed_total}"),
+            detail: if scan_failed > 0 {
+                format!(
+                    "取込 {}/{} · スキャン失敗 {scan_failed}",
+                    report.imported, report.total
+                )
+            } else {
+                format!("取込 {}/{}", report.imported, report.total)
+            },
             tone: StatusTone::Failed,
         };
     }
@@ -11286,6 +11298,10 @@ fn import_card_status(
         },
         tone: StatusTone::Success,
     }
+}
+
+fn import_scan_failure_count(report: &ImportReportView) -> usize {
+    report.scan_failures.len() + usize::from(report.scan_error.is_some())
 }
 
 fn scan_card_status(
@@ -11352,7 +11368,7 @@ fn import_attention(
     }
     let report = report?;
     let (failed, partial) = import_issue_counts(&report.issues);
-    if failed > 0 {
+    if failed > 0 || import_scan_failure_count(report) > 0 {
         Some(StatusTone::Failed)
     } else if !report.remaining.is_empty() || partial > 0 {
         Some(StatusTone::Waiting)
@@ -14244,6 +14260,58 @@ mod tests {
         assert_eq!(none.headline, "履歴なし");
         assert_eq!(none.detail, "取り込み結果がここに残ります");
         assert_eq!(none.tone, StatusTone::Idle);
+    }
+
+    #[test]
+    fn import_card_status_surfaces_scan_failures_and_unprocessed_priority() {
+        let scan_only = ImportReportView {
+            total: 10,
+            processed: 10,
+            imported: 10,
+            scan_failures: vec![ScanFailure {
+                path: PathBuf::from("/dest"),
+                message: "scan failed".to_string(),
+            }],
+            ..import_report_fixture()
+        };
+        let scan_only_status = import_card_status(None, Some(&scan_only));
+        assert_eq!(scan_only_status.headline, "失敗 1");
+        assert_eq!(scan_only_status.detail, "取込 10/10 · スキャン失敗 1");
+        assert_eq!(scan_only_status.tone, StatusTone::Failed);
+        assert_eq!(
+            import_attention(None, Some(&scan_only)),
+            Some(StatusTone::Failed)
+        );
+
+        let hard_error = ImportReportView {
+            scan_error: Some("cannot index".to_string()),
+            ..import_report_fixture()
+        };
+        let hard_error_status = import_card_status(None, Some(&hard_error));
+        assert_eq!(hard_error_status.headline, "失敗 1");
+        assert_eq!(hard_error_status.detail, "取込 0/0 · スキャン失敗 1");
+        assert_eq!(hard_error_status.tone, StatusTone::Failed);
+
+        let triple = ImportReportView {
+            total: 10,
+            processed: 8,
+            imported: 7,
+            issues: vec![non_retryable_issue("/a.png"), partial_issue("/b.png")],
+            remaining: vec![PathBuf::from("/c.png")],
+            scan_failures: vec![ScanFailure {
+                path: PathBuf::from("/dest"),
+                message: "scan failed".to_string(),
+            }],
+            ..import_report_fixture()
+        };
+        let triple_status = import_card_status(None, Some(&triple));
+        assert_eq!(triple_status.headline, "未処理 1");
+        assert_eq!(triple_status.detail, "取込 7/10 · 失敗 2");
+        assert_eq!(triple_status.tone, StatusTone::Waiting);
+        assert_eq!(
+            import_attention(None, Some(&triple)),
+            Some(StatusTone::Failed)
+        );
     }
 
     #[test]
