@@ -2278,6 +2278,7 @@ impl App {
         self.refresh_monitor();
         if let Some(id) = self.selected {
             self.load_selected_meta(id);
+            self.refresh_stale_preview(cx);
         }
 
         // Path rebinds and replacement status changes keep the same photo
@@ -5649,6 +5650,11 @@ impl App {
             preview_frame = preview_frame.child(image_layer(preview.clone()));
         }
         if current_preview.is_none() {
+            let label = if self.preview_queue.pending_for(id) {
+                "プレビューを読み込み中…"
+            } else {
+                "プレビューを読み込めません"
+            };
             preview_frame = preview_frame.child(
                 div()
                     .absolute()
@@ -5658,7 +5664,7 @@ impl App {
                     .justify_center()
                     .text_size(px(10.))
                     .text_color(rgb(MUTED_2))
-                    .child("プレビューを読み込めません"),
+                    .child(label),
             );
         }
         let preview_bounds = self.inspector_preview_bounds.clone();
