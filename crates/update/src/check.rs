@@ -85,6 +85,7 @@ pub fn check(
         version,
         notes_url: manifest.notes_url,
         asset,
+        public_keys: feed.public_keys.clone(),
     }))
 }
 
@@ -93,10 +94,13 @@ mod tests {
     use std::collections::HashMap;
     use std::io::{Cursor, Read, Write};
     use std::net::TcpListener;
+    use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
 
+    use base64::Engine as _;
     use minisign::KeyPair;
     use semver::Version;
+    use sha2::Digest as _;
 
     use super::*;
     use crate::fetch::{HttpClient, UreqClient};
@@ -105,6 +109,7 @@ mod tests {
 
     struct FakeHttpClient {
         responses: HashMap<String, crate::Result<Vec<u8>>>,
+        artifact: Vec<u8>,
         requests: Arc<Mutex<Vec<String>>>,
     }
 
@@ -112,8 +117,14 @@ mod tests {
         fn new(responses: HashMap<String, crate::Result<Vec<u8>>>) -> Self {
             Self {
                 responses,
+                artifact: Vec::new(),
                 requests: Arc::new(Mutex::new(Vec::new())),
             }
+        }
+
+        fn with_artifact(mut self, artifact: Vec<u8>) -> Self {
+            self.artifact = artifact;
+            self
         }
     }
 
@@ -132,9 +143,12 @@ mod tests {
             &self,
             _url: &str,
             _max_bytes: u64,
-            _on_chunk: &mut dyn FnMut(&[u8]) -> crate::Result<()>,
+            on_chunk: &mut dyn FnMut(&[u8]) -> crate::Result<()>,
         ) -> crate::Result<()> {
-            Err(UpdateError::Other("not implemented in fake".to_string()))
+            for chunk in self.artifact.chunks(4) {
+                on_chunk(chunk)?;
+            }
+            Ok(())
         }
     }
 
@@ -146,9 +160,8 @@ mod tests {
         signature: String,
     }
 
-    fn fixture(version: &str, platforms: serde_json::Value) -> Fixture {
-        let keypair = KeyPair::generate_unencrypted_keypair().unwrap();
-        let public_key = keypair
+    fn public_key(keypair: &KeyPair) -> String {
+        keypair
             .pk
             .to_box()
             .unwrap()
@@ -156,7 +169,15 @@ mod tests {
             .lines()
             .find(|line| line.starts_with("RW"))
             .unwrap()
-            .to_string();
+            .to_string()
+    }
+
+    fn fixture_with_keypair(
+        keypair: &KeyPair,
+        version: &str,
+        platforms: serde_json::Value,
+    ) -> Fixture {
+        let public_key = public_key(keypair);
         let manifest = serde_json::to_vec(&serde_json::json!({
             "schema": 1,
             "version": version,
@@ -182,6 +203,11 @@ mod tests {
         }
     }
 
+    fn fixture(version: &str, platforms: serde_json::Value) -> Fixture {
+        let keypair = KeyPair::generate_unencrypted_keypair().unwrap();
+        fixture_with_keypair(&keypair, version, platforms)
+    }
+
     fn linux_platform() -> serde_json::Value {
         serde_json::json!({
             "linux-x86_64": {
@@ -189,7 +215,7 @@ mod tests {
                 "format": "appimage",
                 "size": 1024,
                 "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                "signature": "sig"
+                "signature": crate::verify::test_signature()
             }
         })
     }
@@ -219,11 +245,74 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(update.version, Version::new(0, 4, 0));
+        assert_eq!(update.public_keys, feed.public_keys);
         assert_eq!(update.asset.unwrap().format, UpdateFormat::AppImage);
         assert_eq!(
             client.requests.lock().unwrap().as_slice(),
             &[fixture.manifest_url, fixture.signature_url]
         );
+    }
+
+    #[test]
+    fn custom_feed_keys_are_used_for_check_and_download() {
+        let keypair = KeyPair::generate_unencrypted_keypair().unwrap();
+        let body = b"artifact bytes";
+        let artifact_signature = minisign::sign(None, &keypair.sk, Cursor::new(body), None, None)
+            .unwrap()
+            .into_string();
+        let platforms = serde_json::json!({
+            "linux-x86_64": {
+                "url": "https://example.com/vrc-photo-manager_0.4.0_x86_64.AppImage",
+                "format": "appimage",
+                "size": body.len(),
+                "sha256": hex::encode(sha2::Sha256::digest(body)),
+                "signature": base64::engine::general_purpose::STANDARD.encode(artifact_signature.as_bytes())
+            }
+        });
+        let fixture = fixture_with_keypair(&keypair, "0.4.0", platforms);
+        let client = FakeHttpClient::new(HashMap::from([
+            (fixture.manifest_url.clone(), Ok(fixture.manifest.clone())),
+            (
+                fixture.signature_url.clone(),
+                Ok(fixture.signature.clone().into_bytes()),
+            ),
+        ]))
+        .with_artifact(body.to_vec());
+        let feed = FeedConfig::for_tests(
+            fixture.manifest_url.clone(),
+            vec![fixture.public_key.clone()],
+            false,
+        );
+
+        let update = check(&client, &feed, &Version::new(0, 3, 0), &appimage())
+            .unwrap()
+            .unwrap();
+        assert_eq!(update.public_keys, feed.public_keys);
+
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("artifact.AppImage");
+        crate::download::download(
+            &client,
+            &update,
+            &dest,
+            &mut |_, _| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), body);
+
+        let other = KeyPair::generate_unencrypted_keypair().unwrap();
+        let mut wrong = update;
+        wrong.public_keys = vec![public_key(&other)];
+        let error = crate::download::download(
+            &client,
+            &wrong,
+            &dir.path().join("wrong.AppImage"),
+            &mut |_, _| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
+        assert!(matches!(error, UpdateError::Signature));
     }
 
     #[test]
@@ -361,7 +450,7 @@ mod tests {
                     "format": "nsis",
                     "size": 1024,
                     "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                    "signature": "sig"
+                    "signature": crate::verify::test_signature()
                 }
             }),
         );

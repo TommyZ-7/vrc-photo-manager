@@ -167,11 +167,12 @@ mod tests {
     fn write_artifact(dist: &Path, name: &str, content: &[u8]) -> PathBuf {
         let path = dist.join(name);
         std::fs::write(&path, content).unwrap();
-        std::fs::write(
-            dist.join(format!("{name}.minisig")),
-            "untrusted comment: test\nRUQ=\ntrusted comment: test\nAAAA",
-        )
-        .unwrap();
+        let keypair = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+        let signature =
+            minisign::sign(None, &keypair.sk, std::io::Cursor::new(content), None, None)
+                .unwrap()
+                .into_string();
+        std::fs::write(dist.join(format!("{name}.minisig")), signature).unwrap();
         path
     }
 

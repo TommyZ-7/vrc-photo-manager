@@ -9,8 +9,9 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::error::{Result, UpdateError};
+use crate::error::{IoOperation, Result, UpdateError};
 use crate::install::{ApplyJob, ApplyKind, UpdatePaths};
+use crate::native::NativeString;
 use crate::verify::{decode_signature_base64, effective_public_keys, verify_file};
 
 /// Timeouts for the helper. Tests may skip the signature check to exercise
@@ -47,7 +48,8 @@ pub fn run_helper(job_path: &Path) -> Result<()> {
 /// Reads the job, waits for the old processes, applies the update, verifies
 /// the new UI's health marker, and rolls back on failure.
 pub fn run_helper_with_options(job_path: &Path, options: HelperOptions) -> Result<()> {
-    let bytes = std::fs::read(job_path).map_err(|error| UpdateError::io(job_path, error))?;
+    let bytes = std::fs::read(job_path)
+        .map_err(|error| UpdateError::io_at(IoOperation::Job, job_path, error))?;
     let job: ApplyJob = serde_json::from_slice(&bytes)
         .map_err(|error| UpdateError::InvalidJob(format!("cannot parse apply job: {error}")))?;
     job.validate()?;
@@ -158,7 +160,12 @@ pub fn run_helper_with_options(job_path: &Path, options: HelperOptions) -> Resul
         },
     );
 
-    let mut child = match launch(&job.target, &job.restart_args, Some(&job.health_token)) {
+    let mut child = match launch(
+        &job.target,
+        &job.restart_args,
+        Some(&job.health_token),
+        &job.working_dir,
+    ) {
         Ok(child) => child,
         Err(error) => {
             log(&paths, &format!("cannot launch the new version: {error}"));
@@ -170,6 +177,7 @@ pub fn run_helper_with_options(job_path: &Path, options: HelperOptions) -> Resul
         &paths,
         &job.health_token,
         &job.to_version,
+        job.database.as_ref().map(NativeString::as_path),
         &mut child,
         options.health_timeout,
     ) {
@@ -261,7 +269,8 @@ fn abort_before_apply(
 
 fn verify_staged(job: &ApplyJob, options: &HelperOptions) -> Result<()> {
     if !job.staged.is_file() {
-        return Err(UpdateError::io(
+        return Err(UpdateError::io_at(
+            IoOperation::Apply,
             &job.staged,
             std::io::ErrorKind::NotFound.into(),
         ));
@@ -292,13 +301,14 @@ fn verify_staged(job: &ApplyJob, options: &HelperOptions) -> Result<()> {
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
-    let mut file = File::open(path).map_err(|error| UpdateError::io(path, error))?;
+    let mut file =
+        File::open(path).map_err(|error| UpdateError::io_at(IoOperation::Apply, path, error))?;
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
     loop {
         let read = file
             .read(&mut buffer)
-            .map_err(|error| UpdateError::io(path, error))?;
+            .map_err(|error| UpdateError::io_at(IoOperation::Apply, path, error))?;
         if read == 0 {
             break;
         }
@@ -361,12 +371,13 @@ fn apply_windows(paths: &UpdatePaths, job: &ApplyJob) -> Result<PathBuf> {
         .parent()
         .ok_or_else(|| UpdateError::InvalidJob("Windows target has no parent".to_string()))?;
     let backup = paths.backup_dir(&job.from_version);
-    std::fs::create_dir_all(&backup).map_err(|error| UpdateError::io(&backup, error))?;
+    std::fs::create_dir_all(&backup)
+        .map_err(|error| UpdateError::io_at(IoOperation::Apply, &backup, error))?;
     for name in ["vrc-photo-manager.exe", "vrc-photo-daemon.exe"] {
         let source = install_dir.join(name);
         if source.is_file() {
             std::fs::copy(&source, backup.join(name))
-                .map_err(|error| UpdateError::io(&source, error))?;
+                .map_err(|error| UpdateError::io_at(IoOperation::Apply, &source, error))?;
         }
     }
 
@@ -376,7 +387,7 @@ fn apply_windows(paths: &UpdatePaths, job: &ApplyJob) -> Result<PathBuf> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|error| UpdateError::io(&job.staged, error))?;
+        .map_err(|error| UpdateError::io_at(IoOperation::Apply, &job.staged, error))?;
     let status = match wait_for_exit(&mut child, Duration::from_secs(10 * 60)) {
         Ok(status) => status,
         Err(error) => {
@@ -410,7 +421,8 @@ fn restore_windows(backup: &Path, install_dir: &Path) -> Result<()> {
         let source = backup.join(name);
         if source.is_file() {
             let target = install_dir.join(name);
-            std::fs::copy(&source, &target).map_err(|error| UpdateError::io(&target, error))?;
+            std::fs::copy(&source, &target)
+                .map_err(|error| UpdateError::io_at(IoOperation::Apply, &target, error))?;
         }
     }
     Ok(())
@@ -437,10 +449,16 @@ fn wait_for_exit(child: &mut Child, timeout: Duration) -> Result<std::process::E
     }
 }
 
-fn launch(target: &Path, args: &[String], health_token: Option<&str>) -> Result<Child> {
+fn launch_command(
+    target: &Path,
+    args: &[NativeString],
+    health_token: Option<&str>,
+    working_dir: &Path,
+) -> Command {
     let mut command = Command::new(target);
     command
-        .args(args)
+        .args(args.iter().map(NativeString::as_os_str))
+        .current_dir(working_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -448,12 +466,21 @@ fn launch(target: &Path, args: &[String], health_token: Option<&str>) -> Result<
         command.env("VRC_PHOTO_HEALTH_TOKEN", token);
     }
     command
+}
+
+fn launch(
+    target: &Path,
+    args: &[NativeString],
+    health_token: Option<&str>,
+    working_dir: &Path,
+) -> Result<Child> {
+    launch_command(target, args, health_token, working_dir)
         .spawn()
-        .map_err(|error| UpdateError::io(target, error))
+        .map_err(|error| UpdateError::io_at(IoOperation::Spawn, target, error))
 }
 
 fn relaunch_old(paths: &UpdatePaths, job: &ApplyJob) {
-    if let Err(error) = launch(&job.target, &job.restart_args, None) {
+    if let Err(error) = launch(&job.target, &job.restart_args, None, &job.working_dir) {
         log(
             paths,
             &format!("cannot relaunch the previous version: {error}"),
@@ -490,6 +517,7 @@ pub fn wait_for_health(
     paths: &UpdatePaths,
     token: &str,
     expected: &str,
+    expected_database: Option<&Path>,
     child: &mut Child,
     timeout: Duration,
 ) -> Result<()> {
@@ -512,6 +540,14 @@ pub fn wait_for_health(
 
         match read_health_marker(paths, token)? {
             Some(marker) if marker.version == expected && marker.mode == "normal" => {
+                let database_matches = expected_database.is_none_or(|expected| {
+                    marker.database.as_ref().map(NativeString::as_path) == Some(expected)
+                });
+                if !database_matches {
+                    return Err(UpdateError::Other(
+                        "health marker was written for a different database".to_string(),
+                    ));
+                }
                 if !marker_seen {
                     marker_seen = true;
                     marker_since = Instant::now();
@@ -636,12 +672,20 @@ impl LastResult {
 pub struct HealthMarker {
     pub version: String,
     pub mode: String,
+    #[serde(default)]
+    pub database: Option<NativeString>,
 }
 
-pub fn write_health_marker(paths: &UpdatePaths, token: &str, version: &str) -> Result<()> {
+pub fn write_health_marker(
+    paths: &UpdatePaths,
+    token: &str,
+    version: &str,
+    database: Option<&Path>,
+) -> Result<()> {
     let marker = HealthMarker {
         version: version.to_string(),
         mode: "normal".to_string(),
+        database: database.map(|path| NativeString::new(path.as_os_str())),
     };
     let bytes = serde_json::to_vec_pretty(&marker)
         .map_err(|error| UpdateError::Other(format!("cannot serialize health marker: {error}")))?;
@@ -662,42 +706,66 @@ pub fn read_health_marker(paths: &UpdatePaths, token: &str) -> Result<Option<Hea
 /// Atomically replaces `target` with `staged`, keeping the old file as
 /// `<target>.previous`.
 pub fn replace_appimage(target: &Path, staged: &Path) -> Result<PathBuf> {
+    replace_appimage_impl(target, staged, &sync_parent_directory)
+}
+
+fn replace_appimage_impl(
+    target: &Path,
+    staged: &Path,
+    sync_parent: &dyn Fn(&Path) -> Result<()>,
+) -> Result<PathBuf> {
     if !target.is_file() {
-        return Err(UpdateError::io(target, std::io::ErrorKind::NotFound.into()));
+        return Err(UpdateError::io_at(
+            IoOperation::Apply,
+            target,
+            std::io::ErrorKind::NotFound.into(),
+        ));
     }
     if !staged.is_file() {
-        return Err(UpdateError::io(staged, std::io::ErrorKind::NotFound.into()));
+        return Err(UpdateError::io_at(
+            IoOperation::Apply,
+            staged,
+            std::io::ErrorKind::NotFound.into(),
+        ));
     }
     let file_name = target
         .file_name()
         .ok_or_else(|| UpdateError::InvalidJob("target has no file name".to_string()))?;
     let backup = target.with_file_name(format!("{}.previous", file_name.to_string_lossy()));
     #[cfg(unix)]
-    let metadata = std::fs::metadata(target).map_err(|error| UpdateError::io(target, error))?;
+    let metadata = std::fs::metadata(target)
+        .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))?;
 
     if backup.exists() {
-        std::fs::remove_file(&backup).map_err(|error| UpdateError::io(&backup, error))?;
+        std::fs::remove_file(&backup)
+            .map_err(|error| UpdateError::io_at(IoOperation::Apply, &backup, error))?;
     }
-    std::fs::rename(target, &backup).map_err(|error| UpdateError::io(target, error))?;
+    std::fs::rename(target, &backup)
+        .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))?;
 
     let result = (|| -> Result<()> {
-        std::fs::copy(staged, target).map_err(|error| UpdateError::io(target, error))?;
+        std::fs::copy(staged, target)
+            .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mut permissions = metadata.permissions();
             permissions.set_mode((permissions.mode() & 0o777) | 0o111);
             std::fs::set_permissions(target, permissions)
-                .map_err(|error| UpdateError::io(target, error))?;
+                .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))?;
         }
         // Windows requires write access for FlushFileBuffers (sync_all).
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .open(target)
-            .map_err(|error| UpdateError::io(target, error))?;
+            .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))?;
         file.sync_all()
-            .map_err(|error| UpdateError::io(target, error))?;
+            .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))?;
+        let parent = target
+            .parent()
+            .ok_or_else(|| UpdateError::InvalidJob("target has no parent".to_string()))?;
+        sync_parent(parent)?;
         Ok(())
     })();
 
@@ -709,14 +777,33 @@ pub fn replace_appimage(target: &Path, staged: &Path) -> Result<PathBuf> {
     Ok(backup)
 }
 
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> Result<()> {
+    let dir =
+        File::open(path).map_err(|error| UpdateError::io_at(IoOperation::Apply, path, error))?;
+    dir.sync_all()
+        .map_err(|error| UpdateError::io_at(IoOperation::Apply, path, error))
+}
+
+#[cfg(not(unix))]
+fn sync_parent_directory(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
 pub fn restore_appimage(target: &Path, backup: &Path) -> Result<()> {
     if !backup.is_file() {
-        return Err(UpdateError::io(backup, std::io::ErrorKind::NotFound.into()));
+        return Err(UpdateError::io_at(
+            IoOperation::Apply,
+            backup,
+            std::io::ErrorKind::NotFound.into(),
+        ));
     }
     if target.exists() {
-        std::fs::remove_file(target).map_err(|error| UpdateError::io(target, error))?;
+        std::fs::remove_file(target)
+            .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))?;
     }
-    std::fs::rename(backup, target).map_err(|error| UpdateError::io(target, error))
+    std::fs::rename(backup, target)
+        .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))
 }
 
 /// Whether a live helper holds the apply lock. A stale lock is removed.
@@ -849,6 +936,37 @@ mod tests {
     }
 
     #[test]
+    fn a_parent_directory_sync_failure_restores_the_previous_appimage() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("app.AppImage");
+        let staged = dir.path().join("new.AppImage");
+        std::fs::write(&target, b"old").unwrap();
+        std::fs::write(&staged, b"new").unwrap();
+
+        let error = replace_appimage_impl(&target, &staged, &|path| {
+            Err(UpdateError::io_at(
+                crate::error::IoOperation::Apply,
+                path,
+                std::io::Error::other("sync failed"),
+            ))
+        })
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            UpdateError::Io {
+                operation: crate::error::IoOperation::Apply,
+                ..
+            }
+        ));
+        assert_eq!(std::fs::read(&target).unwrap(), b"old");
+        assert!(
+            !dir.path().join("app.AppImage.previous").exists(),
+            "the rollback renames .previous back to the target"
+        );
+    }
+
+    #[test]
     fn missing_staged_file_leaves_the_target_untouched() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("app.AppImage");
@@ -892,10 +1010,14 @@ mod tests {
     fn health_marker_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths(dir.path());
-        write_health_marker(&paths, "token-1", "0.4.0").unwrap();
+        write_health_marker(&paths, "token-1", "0.4.0", Some(dir.path())).unwrap();
         let marker = read_health_marker(&paths, "token-1").unwrap().unwrap();
         assert_eq!(marker.version, "0.4.0");
         assert_eq!(marker.mode, "normal");
+        assert_eq!(
+            marker.database.as_ref().map(NativeString::as_path),
+            Some(dir.path())
+        );
         assert!(read_health_marker(&paths, "other").unwrap().is_none());
     }
 
@@ -945,6 +1067,75 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn launch_uses_the_working_directory_and_native_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = vec![NativeString::new("--demo")];
+        let command = launch_command(Path::new("/bin/true"), &args, Some("token"), dir.path());
+        assert_eq!(command.get_current_dir(), Some(dir.path()));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![std::ffi::OsStr::new("--demo")]
+        );
+        assert!(command.get_envs().any(|(key, value)| {
+            key == std::ffi::OsStr::new("VRC_PHOTO_HEALTH_TOKEN")
+                && value == Some(std::ffi::OsStr::new("token"))
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn health_marker_must_match_the_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        let db = dir.path().join("app.db");
+        let other = dir.path().join("other.db");
+        std::fs::write(&db, b"db").unwrap();
+        std::fs::write(&other, b"db").unwrap();
+        write_health_marker(&paths, "db-token", "9.9.9", Some(&db)).unwrap();
+        let marker = read_health_marker(&paths, "db-token").unwrap().unwrap();
+        assert_eq!(
+            marker.database.as_ref().map(NativeString::as_path),
+            Some(db.as_path())
+        );
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("2")
+            .spawn()
+            .unwrap();
+        assert!(
+            wait_for_health(
+                &paths,
+                "db-token",
+                "9.9.9",
+                Some(&other),
+                &mut child,
+                Duration::from_millis(100)
+            )
+            .is_err()
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let mut child = std::process::Command::new("sleep")
+            .arg("2")
+            .spawn()
+            .unwrap();
+        assert!(
+            wait_for_health(
+                &paths,
+                "db-token",
+                "9.9.9",
+                Some(&db),
+                &mut child,
+                Duration::from_millis(100)
+            )
+            .is_ok()
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
     #[cfg(unix)]
     #[test]
     fn health_marker_must_match_the_expected_version() {
@@ -955,20 +1146,36 @@ mod tests {
             .spawn()
             .unwrap();
 
-        write_health_marker(&paths, "token", "9.9.9").unwrap();
+        write_health_marker(&paths, "token", "9.9.9", None).unwrap();
         assert!(
-            wait_for_health(&paths, "token", "9.9.9", &mut child, Duration::from_secs(1)).is_ok()
+            wait_for_health(
+                &paths,
+                "token",
+                "9.9.9",
+                None,
+                &mut child,
+                Duration::from_secs(1)
+            )
+            .is_ok()
         );
         let _ = child.kill();
         let _ = child.wait();
 
-        write_health_marker(&paths, "wrong", "8.8.8").unwrap();
+        write_health_marker(&paths, "wrong", "8.8.8", None).unwrap();
         let mut child = std::process::Command::new("sleep")
             .arg("2")
             .spawn()
             .unwrap();
         assert!(
-            wait_for_health(&paths, "wrong", "9.9.9", &mut child, Duration::from_secs(1)).is_err()
+            wait_for_health(
+                &paths,
+                "wrong",
+                "9.9.9",
+                None,
+                &mut child,
+                Duration::from_secs(1)
+            )
+            .is_err()
         );
         let _ = child.kill();
         let _ = child.wait();
@@ -982,6 +1189,7 @@ mod tests {
                 &paths,
                 "missing",
                 "9.9.9",
+                None,
                 &mut child,
                 Duration::from_millis(100)
             )
@@ -1128,6 +1336,8 @@ mod tests {
             ui_pid: dead_pid(),
             daemon_pid: None,
             restart_args: Vec::new(),
+            working_dir: dir.to_path_buf(),
+            database: None,
             health_token: token.to_string(),
             data_dir: dir.to_path_buf(),
             created_at: "2026-10-24T12:00:00Z".to_string(),
@@ -1202,6 +1412,8 @@ mod tests {
             ui_pid: 0,
             daemon_pid: None,
             restart_args: Vec::new(),
+            working_dir: dir.path().to_path_buf(),
+            database: None,
             health_token: "token-apply-failure".to_string(),
             data_dir: dir.path().to_path_buf(),
             created_at: "2026-10-24T12:00:00Z".to_string(),
@@ -1247,6 +1459,8 @@ mod tests {
             ui_pid: 0,
             daemon_pid: None,
             restart_args: Vec::new(),
+            working_dir: dir.path().to_path_buf(),
+            database: None,
             health_token: "token".to_string(),
             data_dir: dir.path().to_path_buf(),
             created_at: "2026-10-24T12:00:00Z".to_string(),

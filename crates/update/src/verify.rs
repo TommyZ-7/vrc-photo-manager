@@ -92,6 +92,16 @@ fn verify_reader<R: Read>(reader: &mut R, signature_text: &str, keys: &[String])
 }
 
 #[cfg(test)]
+pub(crate) fn test_signature() -> String {
+    use base64::Engine as _;
+    use std::io::Cursor;
+
+    let keypair = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
+    let signature = minisign::sign(None, &keypair.sk, Cursor::new(b"test"), None, None).unwrap();
+    base64::engine::general_purpose::STANDARD.encode(signature.into_string().as_bytes())
+}
+
+#[cfg(test)]
 mod tests {
     use std::io::Cursor;
 

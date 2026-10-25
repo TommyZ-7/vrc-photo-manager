@@ -32,4 +32,5 @@
 | [0010](0010-systemd-user-service.md) | deb/pacmanはsystemdユーザーサービスを任意提供する | Accepted |
 | [0011](0011-daemon-ipc.md) | UIとデーモンはローカルIPCで即時コマンドとイベントを補完する | Accepted |
 | [0012](0012-auto-update.md) | 自動アップデートは署名付きマニフェストと専用ヘルパーで行う | Accepted |
-| [0013](0013-auto-compression-policy.md) | 圧縮ポリシーを全体設定にし、自動圧縮にも適用する | Accepted（ADR-0004を置き換え） |
+| [0013](0013-auto-compression-policy.md) | 圧縮ポリシーを全体設定にし、自動圧縮にも適用する | Superseded in part by ADR-0014（ADR-0004を置き換え） |
+| [0014](0014-manual-compression-policy.md) | 手動圧縮は実行時ポリシー、自動圧縮は設定ポリシー | Accepted |
