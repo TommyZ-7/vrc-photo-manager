@@ -2780,6 +2780,84 @@ impl App {
         if !self.quick_look_open {
             return;
         }
+        let photo_aspect = self
+            .selected_photo
+            .as_ref()
+            .map(|photo| {
+                let (width, height) = photo.effective_dimensions();
+                if height > 0 {
+                    width as f32 / height as f32
+                } else {
+                    16.0 / 9.0
+                }
+            })
+            .unwrap_or(16.0 / 9.0);
+        let viewer_rect = viewer_image_rect(
+            window.viewport_size(),
+            self.quick_look_details_open,
+            photo_aspect,
+        );
+        let opening = self
+            .viewer_morph
+            .as_ref()
+            .filter(|morph| !morph.closing)
+            .map(|morph| (morph.current_bounds(Instant::now()), morph.source));
+        let from = opening.map(|(bounds, _)| bounds).unwrap_or(viewer_rect);
+        let source = opening
+            .map(|(_, source)| source)
+            .or(self.viewer_return_source)
+            .unwrap_or(ViewerOpenSource::Auto);
+        let id = self.selected.unwrap_or_default();
+        let target = self.actual_source(id, source).map(|(_, bounds)| bounds);
+        let (to, fade_only) = match target {
+            Some(bounds) => (bounds, false),
+            None => (from, true),
+        };
+        let thumbnail = self.thumbnails.get(id);
+        let preview = self.preview.clone();
+        let color = self
+            .selected_photo
+            .as_ref()
+            .map(|photo| self.color_for(photo))
+            .unwrap_or(0);
+
+        if !cx.reduce_motion() && (thumbnail.is_some() || preview.is_some()) {
+            self.viewer_morph_epoch = self.viewer_morph_epoch.wrapping_add(1);
+            let epoch = self.viewer_morph_epoch;
+            self.viewer_morph = Some(ViewerMorph {
+                epoch,
+                started_at: Instant::now(),
+                from,
+                to,
+                thumbnail,
+                preview,
+                color,
+                source,
+                closing: true,
+                fade_only,
+            });
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(MOTION_MORPH + Duration::from_millis(60))
+                    .await;
+                this.update(cx, |this, cx| {
+                    if this.viewer_morph_epoch == epoch
+                        && this
+                            .viewer_morph
+                            .as_ref()
+                            .is_some_and(|morph| morph.closing)
+                    {
+                        this.viewer_morph = None;
+                        cx.notify();
+                    }
+                })
+                .ok();
+            })
+            .detach();
+        } else {
+            self.viewer_morph = None;
+        }
+        self.viewer_return_source = None;
         self.quick_look_open = false;
         self.delete_armed = None;
         self.note_edit_id = None;
@@ -2839,6 +2917,13 @@ impl App {
         if !self.quick_look_open || self.quick_look_photo_ids.is_empty() {
             return;
         }
+        if self
+            .viewer_morph
+            .as_ref()
+            .is_some_and(|morph| !morph.closing)
+        {
+            self.viewer_morph = None;
+        }
         let next = step_index(
             self.quick_look_index,
             self.quick_look_photo_ids.len(),
@@ -2863,6 +2948,13 @@ impl App {
     }
 
     fn toggle_quick_look_details(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .viewer_morph
+            .as_ref()
+            .is_some_and(|morph| !morph.closing)
+        {
+            self.viewer_morph = None;
+        }
         self.quick_look_details_open = !self.quick_look_details_open;
         if !self.quick_look_details_open {
             self.note_edit_id = None;
@@ -3714,6 +3806,7 @@ impl App {
     ) -> AnyElement {
         let active = self.screen == screen;
         let was_active = self.nav_previous == screen;
+        let hovered = self.hovered_nav == Some(screen);
         let collapsed = self.sidebar_collapsed;
         let epoch = self.sidebar_motion_epoch;
         let nav_epoch = self.nav_epoch;
@@ -3732,19 +3825,34 @@ impl App {
             SharedString::from(format!("nav-icon-{label}-{nav_epoch}")),
             color_anim(),
             move |el, t| {
+                if hovered && !active {
+                    return el.text_color(rgb(TEXT));
+                }
                 let from = if was_active { BLUE } else { MUTED };
                 let to = if active { BLUE } else { MUTED };
                 el.text_color(rgb(lerp_color(from, to, t)))
             },
         );
 
+        let label_from = if was_active { 0xeaf4ff } else { MUTED };
+        let label_to = if active {
+            0xeaf4ff
+        } else if hovered {
+            TEXT
+        } else {
+            MUTED
+        };
         let label_block = h_flex()
             .min_w_0()
             .items_center()
             .justify_between()
             .overflow_hidden()
             .whitespace_nowrap()
-            .child(div().text_size(px(12.)).child(label))
+            .child(div().text_size(px(12.)).child(label).with_animation(
+                SharedString::from(format!("nav-label-{label}-{nav_epoch}")),
+                color_anim(),
+                move |el, t| el.text_color(rgb(lerp_color(label_from, label_to, t))),
+            ))
             .when_some(count, |this, count| {
                 this.child(
                     div()
@@ -3755,6 +3863,9 @@ impl App {
                             SharedString::from(format!("nav-count-{label}-{nav_epoch}")),
                             color_anim(),
                             move |el, t| {
+                                if hovered && !active {
+                                    return el.text_color(rgb(TEXT));
+                                }
                                 let from = if was_active { BLUE } else { MUTED_2 };
                                 let to = if active { BLUE } else { MUTED_2 };
                                 el.text_color(rgb(lerp_color(from, to, t)))
@@ -3798,8 +3909,6 @@ impl App {
             .child(icon_element)
             .child(label_block);
 
-        let row_from = if was_active { 0xeaf4ff } else { MUTED };
-        let row_to = if active { 0xeaf4ff } else { MUTED };
         h_flex()
             .id(label)
             .relative()
@@ -3812,16 +3921,15 @@ impl App {
                 this.hover(|this| this.bg(rgb(0x161d28)).text_color(rgb(TEXT)))
             })
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                if !this.sidebar_collapsed {
-                    if this.hovered_nav.is_some() {
-                        this.hovered_nav = None;
+                // Hover listeners fire in reverse paint order. Let the entering
+                // row win instead of letting the leaving row clear it.
+                if *hovered {
+                    if this.hovered_nav != Some(screen) {
+                        this.hovered_nav = Some(screen);
                         cx.notify();
                     }
-                    return;
-                }
-                let next = hovered.then_some(screen);
-                if this.hovered_nav != next {
-                    this.hovered_nav = next;
+                } else if this.hovered_nav == Some(screen) {
+                    this.hovered_nav = None;
                     cx.notify();
                 }
             }))
@@ -3829,11 +3937,6 @@ impl App {
                 this.switch_screen(screen, cx);
             }))
             .child(content)
-            .with_animation(
-                SharedString::from(format!("nav-text-{label}-{nav_epoch}")),
-                color_anim(),
-                move |el, t| el.text_color(rgb(lerp_color(row_from, row_to, t))),
-            )
             .into_any_element()
     }
 
@@ -6011,6 +6114,25 @@ impl App {
                 },
             );
 
+        let backdrop = closing.then(|| {
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .size_full()
+                .bg(rgb(0x05070a))
+                .child(div().absolute().size_full().bg(rgba((color << 8) | 0x22)))
+                .with_animation(
+                    ("viewer-morph-backdrop", epoch),
+                    Animation::new(MOTION_MORPH)
+                        .with_easing(ease_motion)
+                        .with_max_fps(MOTION_FPS),
+                    |el, t| el.opacity(1.0 - t),
+                )
+        });
+
         div()
             .absolute()
             .top_0()
@@ -6018,6 +6140,7 @@ impl App {
             .right_0()
             .bottom_0()
             .size_full()
+            .when_some(backdrop, |this, backdrop| this.child(backdrop))
             .child(frame)
             .into_any_element()
     }
@@ -10770,6 +10893,20 @@ mod tests {
             Some(inspector)
         );
         assert_eq!(preferred_bounds(false, Some(card), None), Some(card));
+    }
+
+    #[test]
+    fn closing_prefers_the_original_source() {
+        let card = Bounds::new(point(px(0.), px(0.)), size(px(10.), px(10.)));
+        let inspector = Bounds::new(point(px(20.), px(20.)), size(px(30.), px(30.)));
+        assert_eq!(
+            preferred_bounds(true, Some(card), Some(inspector)),
+            Some(card)
+        );
+        assert_eq!(
+            preferred_bounds(false, Some(card), Some(inspector)),
+            Some(inspector)
+        );
     }
 
     #[test]
