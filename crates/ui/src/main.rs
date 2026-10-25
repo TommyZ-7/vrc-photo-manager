@@ -1335,6 +1335,9 @@ pub struct App {
     viewer_morph: Option<ViewerMorph>,
     viewer_morph_epoch: u64,
     viewer_return_source: Option<ViewerOpenSource>,
+    viewer_nav_epoch: u64,
+    viewer_nav_direction: f32,
+    viewer_box: ViewerBoxState,
     inspector_collapsed: bool,
     inspector_epoch: u64,
     hovered_nav: Option<Screen>,
@@ -1476,6 +1479,41 @@ impl ViewerMorph {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ViewerBoxState {
+    epoch: u64,
+    started_at: Instant,
+    from_aspect: f32,
+    to_aspect: f32,
+    from_details: bool,
+    to_details: bool,
+    duration: Duration,
+}
+
+impl ViewerBoxState {
+    fn size_at(&self, t: f32, viewport: gpui_kit::Size<Pixels>) -> (f32, f32) {
+        let t = t.clamp(0.0, 1.0);
+        let from = viewer_image_box(
+            viewport.width.into(),
+            viewport.height.into(),
+            self.from_details,
+            self.from_aspect,
+        );
+        let to = viewer_image_box(
+            viewport.width.into(),
+            viewport.height.into(),
+            self.to_details,
+            self.to_aspect,
+        );
+        (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t)
+    }
+
+    fn current_size(&self, viewport: gpui_kit::Size<Pixels>) -> (f32, f32) {
+        let t = eased_progress(self.started_at, self.duration, Instant::now());
+        self.size_at(t, viewport)
+    }
+}
+
 type ViewerActivate = Rc<dyn Fn(&mut App, &mut Window, &mut Context<App>)>;
 
 impl App {
@@ -1557,6 +1595,17 @@ impl App {
             viewer_morph: None,
             viewer_morph_epoch: 0,
             viewer_return_source: None,
+            viewer_nav_epoch: 0,
+            viewer_nav_direction: 1.0,
+            viewer_box: ViewerBoxState {
+                epoch: 0,
+                started_at: Instant::now(),
+                from_aspect: 16.0 / 10.0,
+                to_aspect: 16.0 / 10.0,
+                from_details: false,
+                to_details: false,
+                duration: Duration::ZERO,
+            },
             inspector_collapsed: initial_settings.ui_inspector_collapsed,
             inspector_epoch: 0,
             hovered_nav: None,
@@ -2664,13 +2713,12 @@ impl App {
         );
         let inspector =
             current_tagged_bounds(*self.inspector_preview_bounds.borrow(), self.render_epoch);
-        if source == ViewerOpenSource::Inspector {
-            inspector
-                .map(|bounds| (ViewerOpenSource::Inspector, bounds))
-                .or_else(|| card.map(|bounds| (ViewerOpenSource::Card, bounds)))
+        let prefer_card = source != ViewerOpenSource::Inspector;
+        let chosen = preferred_bounds(prefer_card, card, inspector)?;
+        if card == Some(chosen) {
+            Some((ViewerOpenSource::Card, chosen))
         } else {
-            card.map(|bounds| (ViewerOpenSource::Card, bounds))
-                .or_else(|| inspector.map(|bounds| (ViewerOpenSource::Inspector, bounds)))
+            Some((ViewerOpenSource::Inspector, chosen))
         }
     }
 
@@ -2707,6 +2755,17 @@ impl App {
             })
             .unwrap_or(16.0 / 9.0);
         let to = viewer_image_rect(window.viewport_size(), self.quick_look_details_open, aspect);
+        self.viewer_nav_epoch = 0;
+        self.viewer_nav_direction = 1.0;
+        self.viewer_box = ViewerBoxState {
+            epoch: self.viewer_box.epoch.wrapping_add(1),
+            started_at: Instant::now(),
+            from_aspect: aspect,
+            to_aspect: aspect,
+            from_details: self.quick_look_details_open,
+            to_details: self.quick_look_details_open,
+            duration: Duration::ZERO,
+        };
         let resolved = self.actual_source(id, source);
         if let Some((actual_source, _)) = resolved {
             self.viewer_return_source = Some(actual_source);
@@ -2780,29 +2839,29 @@ impl App {
         if !self.quick_look_open {
             return;
         }
-        let photo_aspect = self
-            .selected_photo
-            .as_ref()
-            .map(|photo| {
-                let (width, height) = photo.effective_dimensions();
-                if height > 0 {
-                    width as f32 / height as f32
-                } else {
-                    16.0 / 9.0
-                }
-            })
-            .unwrap_or(16.0 / 9.0);
-        let viewer_rect = viewer_image_rect(
-            window.viewport_size(),
-            self.quick_look_details_open,
-            photo_aspect,
-        );
         let opening = self
             .viewer_morph
             .as_ref()
             .filter(|morph| !morph.closing)
             .map(|morph| (morph.current_bounds(Instant::now()), morph.source));
-        let from = opening.map(|(bounds, _)| bounds).unwrap_or(viewer_rect);
+        let viewer_rect = if let Some((bounds, _)) = opening {
+            bounds
+        } else {
+            let viewport = window.viewport_size();
+            let (width, height) = self.viewer_box.current_size(viewport);
+            let details = if self.quick_look_details_open {
+                VIEWER_DETAILS_WIDTH
+            } else {
+                0.0
+            };
+            let center_x = (f32::from(viewport.width) - details) / 2.0;
+            let center_y = VIEWER_TOP_BAR + (f32::from(viewport.height) - VIEWER_TOP_BAR) / 2.0;
+            Bounds::new(
+                point(px(center_x - width / 2.0), px(center_y - height / 2.0)),
+                size(px(width), px(height)),
+            )
+        };
+        let from = viewer_rect;
         let source = opening
             .map(|(_, source)| source)
             .or(self.viewer_return_source)
@@ -2924,6 +2983,19 @@ impl App {
         {
             self.viewer_morph = None;
         }
+        let old_aspect = self
+            .selected_photo
+            .as_ref()
+            .map(|photo| {
+                let (width, height) = photo.effective_dimensions();
+                if height > 0 {
+                    width as f32 / height as f32
+                } else {
+                    16.0 / 10.0
+                }
+            })
+            .unwrap_or(16.0 / 10.0);
+        let old_details = self.quick_look_details_open;
         let next = step_index(
             self.quick_look_index,
             self.quick_look_photo_ids.len(),
@@ -2944,6 +3016,29 @@ impl App {
         // Keep the top-bar navigation focused; only the library selection and
         // the displayed photo change behind the overlay.
         self.select_photo(self.quick_look_photo_ids[next], cx);
+        let new_aspect = self
+            .selected_photo
+            .as_ref()
+            .map(|photo| {
+                let (width, height) = photo.effective_dimensions();
+                if height > 0 {
+                    width as f32 / height as f32
+                } else {
+                    old_aspect
+                }
+            })
+            .unwrap_or(old_aspect);
+        self.viewer_nav_epoch = self.viewer_nav_epoch.wrapping_add(1);
+        self.viewer_nav_direction = if delta > 0 { 1.0 } else { -1.0 };
+        self.viewer_box = ViewerBoxState {
+            epoch: self.viewer_box.epoch.wrapping_add(1),
+            started_at: Instant::now(),
+            from_aspect: old_aspect,
+            to_aspect: new_aspect,
+            from_details: old_details,
+            to_details: old_details,
+            duration: MOTION_BASE,
+        };
         cx.notify();
     }
 
@@ -2955,10 +3050,32 @@ impl App {
         {
             self.viewer_morph = None;
         }
+        let old_details = self.quick_look_details_open;
         self.quick_look_details_open = !self.quick_look_details_open;
         if !self.quick_look_details_open {
             self.note_edit_id = None;
         }
+        let aspect = self
+            .selected_photo
+            .as_ref()
+            .map(|photo| {
+                let (width, height) = photo.effective_dimensions();
+                if height > 0 {
+                    width as f32 / height as f32
+                } else {
+                    16.0 / 10.0
+                }
+            })
+            .unwrap_or(16.0 / 10.0);
+        self.viewer_box = ViewerBoxState {
+            epoch: self.viewer_box.epoch.wrapping_add(1),
+            started_at: Instant::now(),
+            from_aspect: aspect,
+            to_aspect: aspect,
+            from_details: old_details,
+            to_details: self.quick_look_details_open,
+            duration: MOTION_SLOW,
+        };
         self.quick_look_details_epoch = self.quick_look_details_epoch.wrapping_add(1);
         let index = self
             .quick_look_focus_order(cx)
@@ -5894,61 +6011,113 @@ impl App {
                     .text_color(rgb(MUTED))
                     .child(photo.file_name.clone()),
             )
-            .child(details_button);
+            .child(details_button)
+            .with_animation(
+                ("viewer-topbar", self.quick_look_epoch),
+                Animation::new(MOTION_BASE)
+                    .with_easing(ease_motion)
+                    .with_max_fps(MOTION_FPS),
+                |el, t| el.relative().top(px(-8.0 * (1.0 - t))),
+            );
 
-        let (photo_width, photo_height) = photo.effective_dimensions();
-        let aspect = if photo_height > 0 {
-            photo_width as f32 / photo_height as f32
-        } else {
-            16.0 / 9.0
-        };
         let viewport = window.viewport_size();
-        let (image_w, image_h) = viewer_image_box(
-            viewport.width.into(),
-            viewport.height.into(),
-            details_open,
-            aspect,
-        );
-        let image = if let Some(preview) = self.preview.clone() {
-            div()
-                .id("viewer-image")
-                .relative()
-                .w(px(image_w))
-                .h(px(image_h))
-                .overflow_hidden()
-                .rounded(px(10.))
-                .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
-                .child(
-                    gpui_kit::img(preview)
-                        .object_fit(ObjectFit::Contain)
-                        .size_full()
-                        .rounded(px(10.)),
-                )
-        } else {
-            div()
-                .id("viewer-image")
-                .relative()
-                .w(px(image_w))
-                .h(px(image_h))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(10.))
-                .bg(rgba((color << 8) | 0x30))
-                .border_1()
-                .border_color(rgba(0xffffff14))
-                .text_size(px(11.))
-                .text_color(rgb(MUTED))
-                .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
-                .child("プレビューを読み込めません")
-        };
-        let image = image.with_animation(
-            SharedString::from(format!(
-                "viewer-photo-{}-{}",
-                photo.id, self.quick_look_epoch
-            )),
-            Animation::new(Duration::from_millis(220)).with_easing(ease_motion),
-            |el, t| el.opacity(t),
+        let box_state = self.viewer_box;
+        let nav_epoch = self.viewer_nav_epoch;
+        let nav_direction = self.viewer_nav_direction;
+        let previous_preview = self.previous_preview.clone();
+        let current_preview = self.preview.clone();
+        let thumbnail = self.thumbnails.get(photo.id);
+        let (start_w, start_h) = box_state.size_at(0.0, viewport);
+
+        let mut image_frame = div()
+            .id("viewer-image")
+            .relative()
+            .flex_shrink_0()
+            .w(px(start_w))
+            .h(px(start_h))
+            .overflow_hidden()
+            .rounded(px(10.))
+            .bg(rgb(color))
+            .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()));
+
+        // Keep the cached thumbnail behind the preview so a still-uploading
+        // preview never flashes the bare frame color.
+        if let Some(thumbnail) = thumbnail.clone() {
+            image_frame = image_frame.child(
+                gpui_kit::img(thumbnail)
+                    .object_fit(ObjectFit::Contain)
+                    .size_full()
+                    .rounded(px(10.)),
+            );
+        }
+
+        if nav_epoch > 0
+            && let Some(previous) = previous_preview
+        {
+            image_frame = image_frame.child(
+                gpui_kit::img(previous)
+                    .object_fit(ObjectFit::Contain)
+                    .size_full()
+                    .rounded(px(10.))
+                    .with_animation(
+                        ("viewer-prev", nav_epoch),
+                        Animation::new(MOTION_BASE)
+                            .with_easing(ease_motion)
+                            .with_max_fps(MOTION_FPS),
+                        move |el, t| {
+                            el.opacity(1.0 - t)
+                                .relative()
+                                .left(px(-nav_direction * VIEWER_NAV_SLIDE * t))
+                        },
+                    ),
+            );
+        }
+
+        if let Some(preview) = current_preview {
+            let current_anim = if nav_epoch == 0 {
+                Animation::new(Duration::ZERO)
+            } else {
+                Animation::new(MOTION_BASE)
+                    .with_easing(ease_motion)
+                    .with_max_fps(MOTION_FPS)
+            };
+            image_frame = image_frame.child(
+                gpui_kit::img(preview)
+                    .object_fit(ObjectFit::Contain)
+                    .size_full()
+                    .rounded(px(10.))
+                    .with_animation(("viewer-current", nav_epoch), current_anim, move |el, t| {
+                        if nav_epoch == 0 {
+                            return el;
+                        }
+                        el.opacity(t)
+                            .relative()
+                            .left(px(nav_direction * VIEWER_NAV_SLIDE * (1.0 - t)))
+                    }),
+            );
+        } else if thumbnail.is_none() {
+            image_frame = image_frame.child(
+                div()
+                    .absolute()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(11.))
+                    .text_color(rgb(MUTED))
+                    .child("プレビューを読み込めません"),
+            );
+        }
+
+        let image_frame = image_frame.with_animation(
+            ("viewer-box", box_state.epoch),
+            Animation::new(box_state.duration)
+                .with_easing(ease_motion)
+                .with_max_fps(MOTION_FPS),
+            move |el, t| {
+                let (width, height) = box_state.size_at(t, viewport);
+                el.w(px(width)).h(px(height))
+            },
         );
 
         let opening_morph = self
@@ -5968,7 +6137,7 @@ impl App {
             .p(px(VIEWER_PAD))
             .opacity(if opening_morph { 0.0 } else { 1.0 })
             .on_click(cx.listener(|this, _, window, cx| this.close_quick_look(window, cx)))
-            .child(image);
+            .child(image_frame);
 
         let message = self.message.clone();
         let mut details_panel = v_flex()
@@ -6002,7 +6171,18 @@ impl App {
                         .child("もう一度押すとOSゴミ箱へ移動します。"),
                 );
             }
-            details_panel = details_panel.child(body.child(self.detail_body(&photo, cx)));
+            let body = body.child(self.detail_body(&photo, cx)).with_animation(
+                ("viewer-details-body", self.quick_look_details_epoch),
+                Animation::new(if self.quick_look_details_epoch == 0 {
+                    Duration::ZERO
+                } else {
+                    MOTION_FAST
+                })
+                .with_easing(ease_motion)
+                .with_max_fps(MOTION_FPS),
+                |el, t| el.opacity(t).relative().top(px(6.0 * (1.0 - t))),
+            );
+            details_panel = details_panel.child(body);
         }
         let details_panel = details_panel.with_animation(
             ("viewer-details", self.quick_look_details_epoch),
@@ -10527,25 +10707,26 @@ mod tests {
         MOTION_SLOW, ManualOutputTarget, NAV_ITEM_GAP, NAV_ITEM_HEIGHT, PAGE_SIZE,
         PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex, PhotoPageCache, RAIL_MARKER_SIZE,
         RAIL_PILL_WIDTH, RAIL_TRACK_INSET, RAIL_WIDTH, ScanProgressView, Screen,
-        THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, ViewerMorph, ViewerOpenSource,
-        YearBucket, add_photo_root_and_save, alert_summaries, anchor_photo_id, apply_library_index,
-        apply_profile_format, autostart_description, average_bgra, build_year_buckets,
-        card_meta_line, card_metrics, card_size_label, card_size_options, compression_policy,
-        compression_policy_warning, current_tagged_bounds, daemon_liveness, daemon_operation_label,
-        daemon_state_label, daemon_sync_label, decode_thumbnail, demo_thumb_path, ease_motion,
-        eased_progress, first_visible_photo, format_captured_month, format_count, format_timestamp,
-        grid_available_width, grid_columns, grid_columns_for, has_tag_filter, import_issue_counts,
-        inner_corner_radius, ipc_status_label, job_retry_available, job_retry_label, lerp_bounds,
-        lerp_color, list_scroll_top, lossless_hint, lossless_supported, manual_output_available,
-        morph_bounds_at, moved_profile_order, nav_index, nav_item_top, next_focus_index,
-        normalize_note, parse_args, parse_window_size, preferred_bounds, profile_summary,
-        queue_status_badge, rail_hover_hits, rail_label_hidden_by_pill, rail_marker_bounds,
-        rail_pill_bounds, rail_press_allowed, rail_press_hits, rail_row_at, rail_scroll_offset,
-        rail_track_hit_bounds, rail_y, release_confirmation, retryable_sources,
-        scan_progress_label, scan_progress_ratio, screen_direction, search_anchor_after_result,
-        search_available_width, selection_range, sidebar_reveal_width, sidebar_width,
-        stagger_value, step_index, sync_search_mirror, toggle_selected_id, viewer_details_width,
-        viewer_image_box, viewer_image_rect, visible_year_buckets, with_tag, without_tag,
+        THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, ViewerBoxState, ViewerMorph,
+        ViewerOpenSource, YearBucket, add_photo_root_and_save, alert_summaries, anchor_photo_id,
+        apply_library_index, apply_profile_format, autostart_description, average_bgra,
+        build_year_buckets, card_meta_line, card_metrics, card_size_label, card_size_options,
+        compression_policy, compression_policy_warning, current_tagged_bounds, daemon_liveness,
+        daemon_operation_label, daemon_state_label, daemon_sync_label, decode_thumbnail,
+        demo_thumb_path, ease_motion, eased_progress, first_visible_photo, format_captured_month,
+        format_count, format_timestamp, grid_available_width, grid_columns, grid_columns_for,
+        has_tag_filter, import_issue_counts, inner_corner_radius, ipc_status_label,
+        job_retry_available, job_retry_label, lerp_bounds, lerp_color, list_scroll_top,
+        lossless_hint, lossless_supported, manual_output_available, morph_bounds_at,
+        moved_profile_order, nav_index, nav_item_top, next_focus_index, normalize_note, parse_args,
+        parse_window_size, preferred_bounds, profile_summary, queue_status_badge, rail_hover_hits,
+        rail_label_hidden_by_pill, rail_marker_bounds, rail_pill_bounds, rail_press_allowed,
+        rail_press_hits, rail_row_at, rail_scroll_offset, rail_track_hit_bounds, rail_y,
+        release_confirmation, retryable_sources, scan_progress_label, scan_progress_ratio,
+        screen_direction, search_anchor_after_result, search_available_width, selection_range,
+        sidebar_reveal_width, sidebar_width, stagger_value, step_index, sync_search_mirror,
+        toggle_selected_id, viewer_details_width, viewer_image_box, viewer_image_rect,
+        visible_year_buckets, with_tag, without_tag,
     };
     use gpui_kit::{Bounds, RenderImage, ScrollStrategy, UniformListScrollHandle, point, px, size};
     use smallvec::SmallVec;
@@ -10866,6 +11047,44 @@ mod tests {
         assert_eq!(morph.current_bounds(start + MOTION_MORPH), to);
         let middle = morph.current_bounds(start + MOTION_MORPH / 2);
         assert!(middle.origin.x > from.origin.x && middle.origin.x < to.origin.x);
+    }
+
+    #[test]
+    fn viewer_box_state_interpolates_mixed_aspects() {
+        let viewport = size(px(1200.), px(800.));
+        let state = ViewerBoxState {
+            epoch: 1,
+            started_at: Instant::now(),
+            from_aspect: 0.5,
+            to_aspect: 2.0,
+            from_details: false,
+            to_details: false,
+            duration: MOTION_BASE,
+        };
+        let (w0, h0) = state.size_at(0.0, viewport);
+        let (w1, h1) = state.size_at(1.0, viewport);
+        let (wm, hm) = state.size_at(0.5, viewport);
+        assert!(w0 < w1);
+        assert!(h0 > h1);
+        assert!(wm > w0 && wm < w1);
+        assert!(hm < h0 && hm > h1);
+    }
+
+    #[test]
+    fn viewer_box_state_hits_both_details_ends() {
+        let viewport = size(px(1200.), px(800.));
+        let state = ViewerBoxState {
+            epoch: 2,
+            started_at: Instant::now(),
+            from_aspect: 16.0 / 10.0,
+            to_aspect: 16.0 / 10.0,
+            from_details: false,
+            to_details: true,
+            duration: MOTION_SLOW,
+        };
+        let (closed, _) = state.size_at(0.0, viewport);
+        let (open, _) = state.size_at(1.0, viewport);
+        assert!(closed > open);
     }
 
     #[test]
