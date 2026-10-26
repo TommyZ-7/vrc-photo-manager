@@ -1,7 +1,8 @@
 //! Pure year-rail maths: year buckets, rail geometry, and hit testing.
 //!
-//! The GPUI `YearRail` element and its `YearRailLabels` paint cache stay in
-//! the UI layer; this module owns only the values and helpers they share.
+//! The GPUI `YearRail` element and its `YearRailLabels` paint cache live in
+//! [`crate::ui::year_rail`]; this module owns only the values and helpers they
+//! share.
 
 use std::collections::HashMap;
 
@@ -11,7 +12,6 @@ use vrc_photo_core::model::PhotoIndexEntry;
 pub(crate) const RAIL_TOP_PAD: f32 = 24.0;
 pub(crate) const RAIL_TRACK_INSET: f32 = 6.0;
 pub(crate) const RAIL_LABEL_GAP: f32 = 16.0;
-pub(crate) const RAIL_YEAR_HIT_SLOP: f32 = 8.0;
 pub(crate) const RAIL_PILL_HEIGHT: f32 = 18.0;
 pub(crate) const RAIL_PILL_WIDTH: f32 = 80.0;
 pub(crate) const RAIL_PILL_RIGHT_MARGIN: f32 = 4.0;

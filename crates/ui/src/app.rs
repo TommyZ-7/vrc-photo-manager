@@ -1,4 +1,5 @@
 pub(crate) mod cli;
+pub(crate) mod photos;
 
 pub(crate) use cli::LaunchOptions;
 
