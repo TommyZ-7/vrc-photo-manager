@@ -1082,7 +1082,8 @@
   .photo-layout.inspector-hidden { grid-template-columns: minmax(0, 1fr); }
   .photo-layout.inspector-hidden .inspector { display: none; }
 
-  .gallery { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  /* The gallery is the containing block for the absolutely positioned year rail. */
+  .gallery { position: relative; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
   .gallery-head {
     display: flex;
     align-items: center;
@@ -1274,7 +1275,7 @@
 
   .year-rail {
     position: absolute;
-    top: 38px;
+    top: 42px;
     right: 0;
     bottom: 0;
     z-index: 5;
