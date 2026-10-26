@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>VRC Photo Manager — Glass Ribbon UI Mock</title>
+<title>VRC Photo Manager — Glass Backdrop Ribbon UI Mock</title>
 <style>
   /* ==========================================================================
      Tokens
@@ -29,13 +29,17 @@
     --line-strong: rgba(255, 255, 255, 0.17);
     --line-soft: rgba(255, 255, 255, 0.065);
 
+    /* Glass is a window-background effect only. Every card/panel below is opaque. */
     --glass-window: rgba(10, 16, 28, 0.40);
-    --glass-card: rgba(255, 255, 255, 0.062);
-    --glass-card-strong: rgba(255, 255, 255, 0.085);
-    --glass-inner: rgba(4, 8, 16, 0.26);
-    --glass-inner-strong: rgba(3, 6, 12, 0.38);
+    --panel-sidebar: #0b111b;
+    --panel-sidebar-deep: #080d15;
+    --panel-header: #101725;
+    --panel-card: #0d1420;
+    --panel-inner: #111927;
+    --panel-inner-deep: #0c1320;
+    --panel-deep: #0a1019;
+    --panel-raised: #172132;
     --blur-window: 42px;
-    --blur-card: 22px;
 
     --r-window: 28px;
     --r-card: 22px;
@@ -44,18 +48,12 @@
   }
 
   html[data-glass="soft"] {
-    --glass-card: rgba(255, 255, 255, 0.042);
-    --glass-card-strong: rgba(255, 255, 255, 0.06);
-    --glass-inner: rgba(4, 8, 16, 0.18);
+    --glass-window: rgba(10, 16, 28, 0.32);
     --blur-window: 30px;
-    --blur-card: 16px;
   }
   html[data-glass="strong"] {
-    --glass-card: rgba(255, 255, 255, 0.092);
-    --glass-card-strong: rgba(255, 255, 255, 0.12);
-    --glass-inner: rgba(4, 8, 16, 0.34);
+    --glass-window: rgba(10, 16, 28, 0.48);
     --blur-window: 54px;
-    --blur-card: 30px;
   }
 
   * { box-sizing: border-box; }
@@ -185,7 +183,7 @@
   .star-d { left: 34%; top: 72%; opacity: 0.4; }
 
   /* ==========================================================================
-     App shell — one glass window, cards floating on top
+     App shell — glass backdrop only; all cards are opaque panels
      ========================================================================== */
   .app-window {
     position: relative;
@@ -236,14 +234,10 @@
   .card {
     position: relative;
     border: 1px solid var(--line);
-    background:
-      linear-gradient(160deg, rgba(255, 255, 255, 0.065), rgba(255, 255, 255, 0.018) 58%),
-      var(--glass-card);
+    background: linear-gradient(180deg, var(--panel-header), var(--panel-card));
     box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.105),
-      0 18px 44px rgba(0, 0, 0, 0.18);
-    backdrop-filter: blur(var(--blur-card)) saturate(130%);
-    -webkit-backdrop-filter: blur(var(--blur-card)) saturate(130%);
+      inset 0 1px 0 rgba(255, 255, 255, 0.065),
+      0 18px 44px rgba(0, 0, 0, 0.28);
   }
 
   .main-column {
@@ -267,9 +261,8 @@
     padding: 16px 12px 12px;
     overflow: hidden;
     border-radius: var(--r-card);
-    background:
-      linear-gradient(170deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.018) 45%),
-      rgba(8, 13, 24, 0.33);
+    background: linear-gradient(180deg, var(--panel-sidebar), var(--panel-sidebar-deep));
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.055), 0 18px 44px rgba(0, 0, 0, 0.28);
     transition: width 0.36s var(--ease), flex-basis 0.36s var(--ease), padding 0.36s var(--ease);
   }
 
@@ -400,8 +393,8 @@
     padding: 11px;
     border: 1px solid var(--line-soft);
     border-radius: 15px;
-    background: rgba(3, 7, 14, 0.25);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+    background: var(--panel-deep);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
   }
   .status-head {
     display: flex;
@@ -574,9 +567,8 @@
     flex-direction: column;
     overflow: hidden;
     border-radius: var(--r-card);
-    background:
-      linear-gradient(180deg, rgba(255, 255, 255, 0.082), rgba(255, 255, 255, 0.022) 62%),
-      rgba(10, 15, 26, 0.22);
+    background: linear-gradient(180deg, var(--panel-header), var(--panel-card));
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.055), 0 18px 44px rgba(0, 0, 0, 0.28);
   }
 
   .titlebar {
@@ -1068,16 +1060,12 @@
   .sort-chip:hover { border-color: var(--line-soft); background: rgba(255, 255, 255, 0.035); color: var(--muted); }
   .sort-chip .icon { width: 11px; height: 11px; }
 
-  /* Inner glass cards */
+  /* Inner panels (opaque) */
   .card-sub {
     border: 1px solid var(--line-soft);
     border-radius: var(--r-inner);
-    background:
-      linear-gradient(155deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.014) 62%),
-      var(--glass-inner);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.055), 0 10px 26px rgba(0, 0, 0, 0.12);
-    backdrop-filter: blur(10px) saturate(120%);
-    -webkit-backdrop-filter: blur(10px) saturate(120%);
+    background: linear-gradient(160deg, var(--panel-inner), var(--panel-inner-deep));
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05), 0 10px 26px rgba(0, 0, 0, 0.18);
   }
 
   /* ==========================================================================
@@ -1162,10 +1150,10 @@
     overflow: hidden;
     border: 1px solid rgba(255, 255, 255, 0.085);
     border-radius: 13px;
-    background: rgba(255, 255, 255, 0.032);
+    background: var(--panel-deep);
     color: inherit;
     text-align: left;
-    box-shadow: 0 5px 14px rgba(0, 0, 0, 0.12);
+    box-shadow: 0 5px 14px rgba(0, 0, 0, 0.18);
     transition: transform 0.22s var(--ease), border-color 0.22s ease, box-shadow 0.22s ease;
   }
   .photo-card:hover {
@@ -1237,9 +1225,8 @@
     width: 18px;
     height: 18px;
     border-radius: 50%;
-    background: rgba(4, 8, 15, 0.32);
+    background: rgba(4, 8, 15, 0.82);
     color: var(--amber);
-    backdrop-filter: blur(4px);
   }
   .photo-fav .icon { width: 10px; height: 10px; }
   .photo-format {
@@ -1250,19 +1237,18 @@
     padding: 2px 5px;
     border: 1px solid rgba(255, 255, 255, 0.12);
     border-radius: 4px;
-    background: rgba(4, 8, 15, 0.36);
+    background: rgba(4, 8, 15, 0.82);
     color: rgba(255, 255, 255, 0.72);
     font-family: var(--mono);
     font-size: 6.5px;
     letter-spacing: 0.05em;
-    backdrop-filter: blur(4px);
   }
   .photo-info {
     display: flex;
     flex-direction: column;
     gap: 2px;
     padding: 7px 8px 8px;
-    background: rgba(5, 9, 16, 0.28);
+    background: var(--panel-deep);
   }
   .photo-title {
     overflow: hidden;
@@ -1330,13 +1316,12 @@
     padding: 2px 4px;
     border: 1px solid rgba(255, 255, 255, 0.11);
     border-radius: 4px;
-    background: rgba(13, 20, 34, 0.8);
+    background: var(--panel-card);
     color: var(--text);
     font-family: var(--mono);
     font-size: 6.5px;
     white-space: nowrap;
-    backdrop-filter: blur(8px);
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.24);
   }
 
   /* Inspector */
@@ -1381,10 +1366,9 @@
     padding: 0 7px;
     border: 1px solid rgba(255, 255, 255, 0.15);
     border-radius: 5px;
-    background: rgba(4, 8, 15, 0.36);
+    background: rgba(4, 8, 15, 0.84);
     color: rgba(255, 255, 255, 0.84);
     font-size: 7.5px;
-    backdrop-filter: blur(8px);
   }
   .preview-open:hover { background: rgba(4, 8, 15, 0.58); color: #fff; }
   .preview-open .icon { width: 10px; height: 10px; }
@@ -2372,12 +2356,8 @@
     overflow: hidden;
     border: 1px solid rgba(255, 255, 255, 0.18);
     border-radius: 20px;
-    background:
-      linear-gradient(155deg, rgba(255, 255, 255, 0.115), rgba(255, 255, 255, 0.035) 58%),
-      rgba(12, 18, 31, 0.80);
-    box-shadow: 0 34px 100px rgba(0, 0, 0, 0.58), inset 0 1px 0 rgba(255, 255, 255, 0.18);
-    backdrop-filter: blur(34px) saturate(150%);
-    -webkit-backdrop-filter: blur(34px) saturate(150%);
+    background: linear-gradient(180deg, var(--panel-header), var(--panel-card));
+    box-shadow: 0 34px 100px rgba(0, 0, 0, 0.58), inset 0 1px 0 rgba(255, 255, 255, 0.10);
     animation: modal-in 0.28s var(--ease) both;
   }
   @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
@@ -2465,8 +2445,7 @@
     flex: 0 0 56px;
     padding: 0 16px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.075);
-    background: rgba(8, 12, 20, 0.35);
-    backdrop-filter: blur(18px);
+    background: var(--panel-header);
   }
   .viewer-top .viewer-file { min-width: 0; }
   .viewer-top .viewer-file b { display: block; overflow: hidden; color: var(--text); font-size: 10.5px; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
@@ -2495,9 +2474,8 @@
     overflow: hidden;
     border: 1px solid var(--line);
     border-radius: var(--r-inner);
-    background: rgba(10, 16, 28, 0.54);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
-    backdrop-filter: blur(22px);
+    background: var(--panel-card);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
   }
   .viewer-details-head { display: flex; align-items: center; justify-content: space-between; height: 39px; flex: 0 0 39px; padding: 0 12px; border-bottom: 1px solid var(--line-soft); color: var(--dim); font-family: var(--mono); font-size: 7px; letter-spacing: 0.12em; text-transform: uppercase; }
   .viewer-details-scroll { flex: 1; min-height: 0; padding: 13px; overflow: auto; }
@@ -2525,11 +2503,10 @@
     padding: 8px 12px;
     border: 1px solid rgba(255, 255, 255, 0.16);
     border-radius: 9px;
-    background: rgba(12, 18, 30, 0.82);
+    background: #101725;
     color: var(--muted);
     font-size: 9px;
-    box-shadow: 0 14px 40px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.1);
-    backdrop-filter: blur(18px);
+    box-shadow: 0 14px 40px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.08);
     opacity: 0;
     pointer-events: none;
     transform: translate(-50%, 8px);
@@ -3584,11 +3561,11 @@
             <section class="settings-card card-sub" data-settings-panel="appearance">
               <div class="settings-card-head">
                 <span class="settings-icon"><svg class="icon"><use href="#i-palette"/></svg></span>
-                <div><h3>表示</h3><p>ガラス強度とモーション</p></div>
+                <div><h3>表示</h3><p>背景のガラスとモーション</p></div>
               </div>
               <div class="settings-list">
                 <div class="setting-row">
-                  <div><label>ガラス強度</label><p>ウィンドウとカードの透明度</p></div>
+                  <div><label>背景のガラス</label><p>ウィンドウ背景のぼかしと透過</p></div>
                   <div class="glass-options">
                     <button class="glass-option" data-glass-set="soft">控えめ</button>
                     <button class="glass-option active" data-glass-set="standard">標準</button>
@@ -4182,7 +4159,7 @@
     const glassEl = event.target.closest("[data-glass-set]");
     if (glassEl) {
       setGlass(glassEl.dataset.glassSet);
-      showToast("ガラス強度: " + ({ soft: "控えめ", standard: "標準", strong: "濃い" }[glassEl.dataset.glassSet]));
+      showToast("背景のガラス: " + ({ soft: "控えめ", standard: "標準", strong: "濃い" }[glassEl.dataset.glassSet]));
       return;
     }
 

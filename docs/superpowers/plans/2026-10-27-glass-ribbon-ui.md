@@ -1,8 +1,8 @@
-# ガラス調リボンUI + UIモジュール分割 Implementation Plan
+# ガラス背景リボンUI + UIモジュール分割 Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** `crates/ui/src/main.rs`（14,833行・134テスト）を責務単位へ分割し、その上でガラス調シェル、カスタムタイトルバー、3タブのコンパクトリボン、見出しのないカード主体の画面へ刷新する。
+**Goal:** `crates/ui/src/main.rs`（14,833行・134テスト）を責務単位へ分割し、その上で**ガラス調の背景だけ**を持つシェル、カスタムタイトルバー、3タブのコンパクトリボン、不透明カード主体の見出しなし画面へ刷新する。
 
 **Architecture:** 2段階。PR1は**見た目を変えない**モジュール分割（`App`、状態、テーマ、共通部品、画面、ビューア、ダイアログ、CLI/demoを分離）。PR2/PR3で `TitleBar` とウィンドウ背景を使ったシェル、リボン、画面再配置を実装する。データ/DB/IPC/画像処理の意味は変えない。
 
@@ -16,9 +16,10 @@
 ## Global Constraints
 
 - `gpui-kit = "=0.8.0"` を固定。`gpui` を直接依存に追加しない。依存追加なし。
+- **ガラスはウィンドウ背景のみ**。サイドバー、ヘッダー、本コンテンツ、内部カード、モーダル、ビューアのパネルは不透明色（`PANEL_*`）で描く。カードに要素ブラー/半透明ガラスを適用しない。
 - UIのDBスキーマ・IPCプロトコル・画像デコード経路を増やさない。
 - 新しい設定は `ui_ribbon_collapsed: bool` の1つだけ。`#[serde(default)]` を付け、既存JSONを壊さない。
-- ライブラリ内インライン検索、リスト表示、実フィルタリング、新しいソート、ガラス強度設定、年レール表示設定は**今回の対象外**。モックとの差分は設計書 §6.1 に従う。
+- ライブラリ内インライン検索、リスト表示、実フィルタリング、新しいソート、背景のガラス強度設定、年レール表示設定は**今回の対象外**。モックとの差分は設計書 §6.1 に従う。
 - PR1（分割）では見た目・文言・余白・アニメーション・フォーカス順を変えない。既存134テストを減らさない。
 - PR1とUI変更を同じPRに混ぜない。`docs/ui.md` / `docs/architecture.md` の更新は最後のdocs-only PRに分ける。
 - すべての作業は `main` から切ったworktreeで行う。`main` へ直接pushしない。
@@ -30,7 +31,7 @@
 
 1. **分割の無変化性**: PR1で画面・文言・余白・動作が変わらない。134テストが減らず、`--demo` の1280/1440スクリーンショットが分割前と一致する。Task 1, 12。
 2. **タイトルバーのフォールバック**: Linuxでクライアント装飾が拒否されてもネイティブタイトルバーとアプリ内タブが二重破綻しない。タブクリック・ドラッグ・ダブルクリック最大化・ウィンドウ操作が動く。Task 13。
-3. **ブラー非対応環境**: `Blurred` が効かなくてもアンビエント＋半透明カードで読める。壁紙が見えることを前提にしない。Task 13。
+3. **ブラー非対応環境**: `Blurred` が効かなくても背景のアンビエント＋不透明カードで読める。カードの可読性を背景ブラーに依存させず、壁紙が見えることを前提にしない。Task 13。
 4. **見出し削除で失う情報**: グローバルアラート、`message`、取り込み結果、複数選択バー、ライブラリ索引エラー、再試行導線が消えない。Task 15。
 5. **リボンの状態**: 画面切替と手動タブ選択、折りたたみ、写真画面だけの詳細コマンド、設定コマンドの排除が一貫する。Task 14。
 6. **設定JSON互換**: `ui_ribbon_collapsed` 追加後も、既存JSONの他設定がリセットされない。Task 14。
@@ -263,7 +264,7 @@ git commit -m "refactor(ui): extract year rail and viewer state"
 
 **Interfaces:**
 - Produces `ButtonTone`, `ButtonState`, `glass_panel`, `chip`, `focusable_text_button`, `base_text_button`, `tag_chip`, `preset_button`, `filter_field`, `setting_switch`, `card_size_button`, `manual_option_row`, `status_progress_bar`, `stat_card`, `meta_row`, `section_label`, `badge`.
-- `glass_panel` remains a neutral helper in PR1; PR2 changes its fill.
+- `glass_panel` remains a neutral helper in PR1; PR2 keeps the existing name for compatibility but makes it return an **opaque panel surface**. Only the window background is glass.
 
 - [ ] **Step 1: Move button/card/chip components**
 
@@ -487,7 +488,7 @@ Wait for CI green, then merge. This plan's PR1 ends here.
 
 Branch: `feat/ui-glass-ribbon`（PR1 merge後の `main` からworktree）。
 
-## Task 13: Window options, ambient backdrop, glass theme
+## Task 13: Window options, ambient backdrop, background glass, opaque panels
 
 **Files:**
 - Modify: `crates/ui/src/main.rs` (window options)
@@ -496,7 +497,7 @@ Branch: `feat/ui-glass-ribbon`（PR1 merge後の `main` からworktree）。
 
 **Interfaces:**
 - Consumes: `gpui_kit::component::TitleBar`, `WindowOptions`, `WindowDecorations`, `WindowBackgroundAppearance`.
-- Produces `ambient_background() -> impl IntoElement` and updated glass token constants.
+- Produces `ambient_background() -> impl IntoElement` and updated background-glass/opaque-panel token constants.
 
 - [ ] **Step 1: Set the window options**
 
@@ -518,9 +519,9 @@ Keep `window.set_window_title("VRC Photo Manager")`. If `TitleBar` styling canno
 
 In `ui/shell.rs`, render an absolute background behind the cards: a dark linear gradient plus 2-3 large low-opacity glows using rounded divs/shadows. It must be readable without OS blur. Root fill should be translucent, not opaque `BG`.
 
-- [ ] **Step 3: Update glass tokens and `glass_panel`**
+- [ ] **Step 3: Update background-glass tokens and make panel surfaces opaque**
 
-Add the glass alpha colors from the design spec. Keep existing constant names; update `glass_panel` to use the new translucent fill/border/shadow. Do not add element-level blur.
+Add only `GLASS_WINDOW`/ambient colors for the background. Add `PANEL_SIDEBAR`, `PANEL_HEADER`, `PANEL_CARD`, `PANEL_INNER`, `PANEL_DEEP` as opaque surfaces. Keep `glass_panel` for compatibility but return an opaque panel (solid fill, 1px border, inset highlight, weak shadow). Do not add element-level blur or translucent card fills.
 
 - [ ] **Step 4: Verify and commit**
 
@@ -529,7 +530,7 @@ cargo fmt --all -- --check
 cargo test -p vrc-photo-ui
 cargo run -p vrc-photo-ui -- --demo --window-size 1280x820
 git add crates/ui/src
-git commit -m "feat(ui): add glass window shell"
+git commit -m "feat(ui): add glass background and opaque panels"
 ```
 
 ## Task 14: Titlebar tabs, compact ribbon, and persisted collapse
@@ -678,7 +679,7 @@ Remove the page header. Keep stats/queue/daemon/session cards; stretch the queue
 
 - [ ] **Step 4: Settings**
 
-Remove the page header. Keep the existing settings cards and controls; add the nav reload if needed. Do not add glass intensity or year-rail settings.
+Remove the page header. Keep the existing settings cards and controls; add the nav reload if needed. Do not add background-glass intensity or year-rail settings.
 
 - [ ] **Step 5: Verify and commit**
 
@@ -690,7 +691,7 @@ git add crates/ui/src
 git commit -m "feat(ui): reflow search, compression, dashboard, and settings"
 ```
 
-## Task 18: Viewer/modal glass, focus, responsive, and reduced motion
+## Task 18: Viewer/modal panels, focus, responsive, and reduced motion
 
 **Files:**
 - Modify: `crates/ui/src/ui/viewer.rs`, `crates/ui/src/ui/import.rs`, `crates/ui/src/ui/dialogs.rs`, `crates/ui/src/ui/shell.rs`, `crates/ui/src/ui/theme.rs`
@@ -698,7 +699,7 @@ git commit -m "feat(ui): reflow search, compression, dashboard, and settings"
 
 - [ ] **Step 1: Restyle overlays**
 
-Apply the glass surface/scrim/radius tokens to the full-screen viewer, import modal, manual compression, and confirmation overlays. Do not change their behavior or focus order.
+Apply the opaque panel colors, background scrim, and radius tokens to the full-screen viewer, import modal, manual compression, and confirmation overlays. The scrim/backdrop may dim or blur the background; the foreground cards must be opaque. Do not change their behavior or focus order.
 
 - [ ] **Step 2: Responsive rules**
 
