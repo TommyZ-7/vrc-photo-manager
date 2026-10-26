@@ -1,0 +1,4320 @@
+<!doctype html>
+<html lang="ja" data-glass="standard">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VRC Photo Manager — Glass Ribbon UI Mock</title>
+<style>
+  /* ==========================================================================
+     Tokens
+     ========================================================================== */
+  :root {
+    color-scheme: dark;
+    --font: "Inter", "Noto Sans JP", "Hiragino Sans", "Yu Gothic UI", system-ui, -apple-system, sans-serif;
+    --mono: "SFMono-Regular", "Cascadia Code", "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+
+    --text: #eef4ff;
+    --muted: #a8b4ca;
+    --dim: #7f8ba3;
+    --faint: #5e6a81;
+
+    --accent: #8bcbff;
+    --accent-2: #7f92ff;
+    --accent-3: #70e4d2;
+    --amber: #f4c878;
+    --rose: #ff94a8;
+    --green: #7ee2b8;
+
+    --line: rgba(255, 255, 255, 0.105);
+    --line-strong: rgba(255, 255, 255, 0.17);
+    --line-soft: rgba(255, 255, 255, 0.065);
+
+    --glass-window: rgba(10, 16, 28, 0.40);
+    --glass-card: rgba(255, 255, 255, 0.062);
+    --glass-card-strong: rgba(255, 255, 255, 0.085);
+    --glass-inner: rgba(4, 8, 16, 0.26);
+    --glass-inner-strong: rgba(3, 6, 12, 0.38);
+    --blur-window: 42px;
+    --blur-card: 22px;
+
+    --r-window: 28px;
+    --r-card: 22px;
+    --r-inner: 17px;
+    --ease: cubic-bezier(0.22, 0.8, 0.24, 1);
+  }
+
+  html[data-glass="soft"] {
+    --glass-card: rgba(255, 255, 255, 0.042);
+    --glass-card-strong: rgba(255, 255, 255, 0.06);
+    --glass-inner: rgba(4, 8, 16, 0.18);
+    --blur-window: 30px;
+    --blur-card: 16px;
+  }
+  html[data-glass="strong"] {
+    --glass-card: rgba(255, 255, 255, 0.092);
+    --glass-card-strong: rgba(255, 255, 255, 0.12);
+    --glass-inner: rgba(4, 8, 16, 0.34);
+    --blur-window: 54px;
+    --blur-card: 30px;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  html { overflow: hidden; }
+  body {
+    display: flow-root;
+    margin: 0;
+    min-width: 320px;
+    background: #05070d;
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 12px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow: hidden;
+  }
+
+  button, input, select, textarea { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  button, a { -webkit-tap-highlight-color: transparent; }
+  a { color: inherit; }
+  ::selection { background: rgba(139, 203, 255, 0.28); }
+
+  .icon {
+    width: 18px;
+    height: 18px;
+    flex: 0 0 auto;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .icon-sm { width: 14px; height: 14px; }
+  .icon-xs { width: 11px; height: 11px; }
+  .icon-filled { fill: currentColor; stroke: none; }
+
+  kbd {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 17px;
+    height: 17px;
+    padding: 0 4px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.035);
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 8px;
+    line-height: 1;
+    white-space: nowrap;
+  }
+
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    border: 2px solid transparent;
+    border-radius: 99px;
+    background: rgba(255, 255, 255, 0.14);
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.24); background-clip: padding-box; }
+
+  :focus-visible { outline: 2px solid rgba(139, 203, 255, 0.75); outline-offset: 2px; }
+
+  /* ==========================================================================
+     Desktop backdrop
+     ========================================================================== */
+  .wallpaper {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    overflow: hidden;
+    background:
+      radial-gradient(ellipse 62% 58% at 12% 8%, rgba(54, 107, 255, 0.38), transparent 64%),
+      radial-gradient(ellipse 48% 58% at 90% 12%, rgba(255, 86, 181, 0.17), transparent 66%),
+      radial-gradient(ellipse 56% 54% at 62% 108%, rgba(30, 202, 178, 0.16), transparent 66%),
+      linear-gradient(140deg, #04060c 0%, #0a0f1e 44%, #060811 100%);
+  }
+
+  .wallpaper::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    opacity: 0.035;
+    pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.55'/%3E%3C/svg%3E");
+    mix-blend-mode: overlay;
+  }
+
+  .wall-orb {
+    position: absolute;
+    display: block;
+    border-radius: 999px;
+    filter: blur(70px);
+    opacity: 0.55;
+    pointer-events: none;
+  }
+  .orb-a { width: 540px; height: 540px; left: -140px; top: -180px; background: radial-gradient(circle, rgba(83, 140, 255, 0.65), transparent 70%); }
+  .orb-b { width: 460px; height: 460px; right: -130px; top: 60px; background: radial-gradient(circle, rgba(255, 99, 196, 0.42), transparent 70%); }
+  .orb-c { width: 620px; height: 620px; right: 12%; bottom: -380px; background: radial-gradient(circle, rgba(38, 220, 194, 0.34), transparent 70%); }
+  .orb-d { width: 240px; height: 240px; left: 42%; top: 36%; background: radial-gradient(circle, rgba(255, 184, 102, 0.18), transparent 70%); }
+
+  .wall-ring {
+    position: absolute;
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    border-radius: 50%;
+    pointer-events: none;
+  }
+  .ring-a { width: 900px; height: 900px; right: -240px; top: -390px; }
+  .ring-b { width: 540px; height: 540px; left: 6%; bottom: -320px; border-color: rgba(139, 203, 255, 0.06); }
+
+  .wall-star {
+    position: absolute;
+    width: 2px; height: 2px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.55);
+    box-shadow: 0 0 10px rgba(255, 255, 255, 0.5);
+    pointer-events: none;
+  }
+  .star-a { left: 18%; top: 12%; }
+  .star-b { left: 74%; top: 8%; opacity: 0.55; }
+  .star-c { left: 86%; top: 48%; opacity: 0.35; }
+  .star-d { left: 34%; top: 72%; opacity: 0.4; }
+
+  /* ==========================================================================
+     App shell — one glass window, cards floating on top
+     ========================================================================== */
+  .app-window {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    gap: 14px;
+    width: calc(100vw - 32px);
+    max-width: 1780px;
+    height: calc(100dvh - 32px);
+    margin: 16px auto;
+    padding: 14px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: var(--r-window);
+    background:
+      linear-gradient(145deg, rgba(255, 255, 255, 0.105), rgba(255, 255, 255, 0.035) 36%, rgba(255, 255, 255, 0.02)),
+      var(--glass-window);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.20),
+      inset 0 -1px 0 rgba(0, 0, 0, 0.28),
+      0 42px 120px rgba(0, 0, 0, 0.62),
+      0 4px 24px rgba(0, 0, 0, 0.35);
+    backdrop-filter: blur(var(--blur-window)) saturate(150%);
+    -webkit-backdrop-filter: blur(var(--blur-window)) saturate(150%);
+    transition: width 0.3s var(--ease), height 0.3s var(--ease), margin 0.3s var(--ease), border-radius 0.3s var(--ease), padding 0.3s var(--ease);
+  }
+
+  .app-window.maximized {
+    width: 100vw;
+    max-width: none;
+    height: 100dvh;
+    margin: 0;
+    padding: 10px;
+    border-radius: 0;
+    border-color: rgba(255, 255, 255, 0.08);
+  }
+
+  .app-window::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 9;
+    border-radius: inherit;
+    pointer-events: none;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.035);
+  }
+
+  .card {
+    position: relative;
+    border: 1px solid var(--line);
+    background:
+      linear-gradient(160deg, rgba(255, 255, 255, 0.065), rgba(255, 255, 255, 0.018) 58%),
+      var(--glass-card);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.105),
+      0 18px 44px rgba(0, 0, 0, 0.18);
+    backdrop-filter: blur(var(--blur-card)) saturate(130%);
+    -webkit-backdrop-filter: blur(var(--blur-card)) saturate(130%);
+  }
+
+  .main-column {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: 14px;
+    min-width: 0;
+    min-height: 0;
+  }
+
+  /* ==========================================================================
+     Sidebar
+     ========================================================================== */
+  .sidebar {
+    display: flex;
+    flex: 0 0 248px;
+    flex-direction: column;
+    width: 248px;
+    min-height: 0;
+    padding: 16px 12px 12px;
+    overflow: hidden;
+    border-radius: var(--r-card);
+    background:
+      linear-gradient(170deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.018) 45%),
+      rgba(8, 13, 24, 0.33);
+    transition: width 0.36s var(--ease), flex-basis 0.36s var(--ease), padding 0.36s var(--ease);
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    min-width: 0;
+    padding: 3px 6px 18px;
+  }
+  .brand-mark {
+    position: relative;
+    display: grid;
+    place-items: center;
+    width: 38px;
+    height: 38px;
+    flex: 0 0 38px;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.23);
+    border-radius: 12px;
+    background:
+      radial-gradient(circle at 72% 18%, rgba(255, 255, 255, 0.65), transparent 25%),
+      linear-gradient(145deg, #6cc3ff, #6c7dff 54%, #c47aff);
+    color: #f8fcff;
+    box-shadow: 0 8px 22px rgba(86, 139, 255, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  }
+  .brand-mark .icon { width: 21px; height: 21px; filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.25)); }
+  .brand-copy { display: flex; flex-direction: column; min-width: 0; line-height: 1.1; }
+  .brand-copy strong {
+    overflow: hidden;
+    font-size: 12.5px;
+    font-weight: 650;
+    letter-spacing: -0.02em;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .brand-copy span {
+    margin-top: 3px;
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 7.5px;
+    letter-spacing: 0.21em;
+  }
+  .brand-badge {
+    margin-left: auto;
+    padding: 3px 5px;
+    border: 1px solid rgba(112, 228, 210, 0.18);
+    border-radius: 5px;
+    background: rgba(112, 228, 210, 0.07);
+    color: #8be9d8;
+    font-family: var(--mono);
+    font-size: 7px;
+    letter-spacing: 0.1em;
+  }
+
+  .nav { display: flex; flex-direction: column; gap: 3px; }
+  .nav-label {
+    margin: 16px 9px 5px;
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 7.5px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+  }
+  .nav-label:first-child { margin-top: 2px; }
+
+  .nav-item {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    height: 38px;
+    padding: 0 10px;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 11px;
+    text-align: left;
+    transition: background 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+  }
+  .nav-item .icon { width: 17px; height: 17px; color: var(--dim); transition: color 0.16s ease; }
+  .nav-item:hover { background: rgba(255, 255, 255, 0.045); color: var(--text); }
+  .nav-item:hover .icon { color: var(--muted); }
+  .nav-item.active {
+    border-color: rgba(139, 203, 255, 0.13);
+    background: linear-gradient(90deg, rgba(139, 203, 255, 0.17), rgba(139, 203, 255, 0.025));
+    color: #f5fbff;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  }
+  .nav-item.active::before {
+    content: "";
+    position: absolute;
+    left: -1px;
+    top: 9px;
+    bottom: 9px;
+    width: 2px;
+    border-radius: 2px;
+    background: linear-gradient(180deg, #b4e2ff, #6d8dff);
+    box-shadow: 0 0 12px rgba(139, 203, 255, 0.75);
+  }
+  .nav-item.active .icon { color: var(--accent); }
+  .nav-count {
+    margin-left: auto;
+    padding: 2px 5px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.05);
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 8px;
+  }
+  .nav-item.active .nav-count { background: rgba(139, 203, 255, 0.12); color: #bfe7ff; }
+  .nav-status {
+    width: 5px; height: 5px;
+    margin-left: auto;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 8px rgba(126, 226, 184, 0.75);
+  }
+  .nav-status.offline { background: var(--rose); box-shadow: 0 0 8px rgba(255, 148, 168, 0.7); }
+
+  .sidebar-spacer { flex: 1; min-height: 10px; }
+
+  .status-card,
+  .storage-card {
+    margin-top: 10px;
+    padding: 11px;
+    border: 1px solid var(--line-soft);
+    border-radius: 15px;
+    background: rgba(3, 7, 14, 0.25);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+  }
+  .status-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+    color: var(--muted);
+    font-size: 9.5px;
+    font-weight: 550;
+  }
+  .status-head .icon-btn { width: 20px; height: 20px; }
+  .status-tabs {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 2px;
+    padding: 2px;
+    border: 1px solid var(--line-soft);
+    border-radius: 7px;
+    background: rgba(255, 255, 255, 0.025);
+  }
+  .status-tab {
+    position: relative;
+    height: 22px;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--faint);
+    font-size: 8.5px;
+  }
+  .status-tab:hover { color: var(--muted); }
+  .status-tab.active {
+    background: rgba(255, 255, 255, 0.09);
+    color: var(--text);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 2px 8px rgba(0, 0, 0, 0.16);
+  }
+  .status-tab .tab-dot {
+    position: absolute;
+    top: 3px;
+    right: 3px;
+    width: 3px; height: 3px;
+    border-radius: 50%;
+    background: var(--amber);
+  }
+  .status-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-top: 10px;
+    color: var(--muted);
+    font-size: 9.5px;
+  }
+  .status-row b { color: var(--text); font-size: 10.5px; font-weight: 600; }
+  .status-row .accent { color: var(--accent); }
+  .progress {
+    height: 5px;
+    margin: 6px 0 5px;
+    overflow: hidden;
+    border-radius: 99px;
+    background: rgba(255, 255, 255, 0.075);
+  }
+  .progress i {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, #6ec8ff, #7b8dff);
+    box-shadow: 0 0 14px rgba(110, 200, 255, 0.55);
+  }
+  .progress.thin { height: 3px; margin: 7px 0 5px; }
+  .status-note {
+    margin: 0;
+    color: var(--faint);
+    font-size: 8.5px;
+    line-height: 1.5;
+  }
+  .mini-btn {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    height: 26px;
+    margin-top: 8px;
+    padding: 0 8px;
+    border: 1px solid var(--line-soft);
+    border-radius: 7px;
+    background: rgba(255, 255, 255, 0.035);
+    color: var(--muted);
+    font-size: 8.5px;
+    transition: background 0.16s ease, color 0.16s ease;
+  }
+  .mini-btn:hover { background: rgba(255, 255, 255, 0.075); color: var(--text); }
+  .mini-btn .icon { width: 11px; height: 11px; }
+
+  .storage-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    color: var(--muted);
+    font-size: 9.5px;
+  }
+  .storage-head span:last-child { color: var(--faint); font-family: var(--mono); font-size: 8px; }
+  .storage-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 7.5px;
+  }
+
+  .sidebar-foot {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 32px;
+    padding: 8px 4px 0;
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 7.5px;
+  }
+  .daemon-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 6px;
+    border: 1px solid rgba(126, 226, 184, 0.16);
+    border-radius: 99px;
+    background: rgba(126, 226, 184, 0.06);
+    color: #9aefd1;
+    font-family: var(--font);
+    font-size: 8px;
+  }
+  .daemon-pill i {
+    width: 4px; height: 4px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 6px rgba(126, 226, 184, 0.8);
+  }
+  .version { margin-left: auto; opacity: 0.7; }
+  .sidebar-foot .icon-btn { width: 24px; height: 24px; margin-left: 2px; }
+
+  /* Collapsed sidebar */
+  .app-window.sidebar-collapsed .sidebar {
+    flex-basis: 78px;
+    width: 78px;
+    padding-right: 9px;
+    padding-left: 9px;
+  }
+  .app-window.sidebar-collapsed .brand { justify-content: center; padding-right: 0; padding-left: 0; }
+  .app-window.sidebar-collapsed .brand-copy,
+  .app-window.sidebar-collapsed .brand-badge,
+  .app-window.sidebar-collapsed .nav-label,
+  .app-window.sidebar-collapsed .nav-count,
+  .app-window.sidebar-collapsed .status-card,
+  .app-window.sidebar-collapsed .storage-card,
+  .app-window.sidebar-collapsed .version,
+  .app-window.sidebar-collapsed .daemon-pill { display: none; }
+  .app-window.sidebar-collapsed .nav-item { justify-content: center; padding: 0; }
+  .app-window.sidebar-collapsed .nav-item > span:not(.nav-status) { display: none; }
+  .app-window.sidebar-collapsed .nav-item .icon { width: 18px; height: 18px; }
+  .app-window.sidebar-collapsed .nav-status { position: absolute; right: 8px; bottom: 8px; margin: 0; }
+  .app-window.sidebar-collapsed .sidebar-foot { justify-content: center; padding-top: 6px; }
+  .app-window.sidebar-collapsed .sidebar-foot .icon-btn { margin: 0; transform: rotate(180deg); }
+
+  /* ==========================================================================
+     Header card — custom titlebar + ribbon
+     ========================================================================== */
+  .chrome {
+    display: flex;
+    flex: 0 0 auto;
+    flex-direction: column;
+    overflow: hidden;
+    border-radius: var(--r-card);
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.082), rgba(255, 255, 255, 0.022) 62%),
+      rgba(10, 15, 26, 0.22);
+  }
+
+  .titlebar {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    height: 46px;
+    flex: 0 0 46px;
+    padding: 0 8px 0 14px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.055);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.038), rgba(255, 255, 255, 0));
+    user-select: none;
+  }
+  .tb-left { display: flex; flex: 0 1 auto; align-items: center; gap: 9px; min-width: 0; overflow: hidden; }
+  .app-glyph {
+    display: grid;
+    place-items: center;
+    width: 22px; height: 22px;
+    flex: 0 0 22px;
+    border: 1px solid rgba(255, 255, 255, 0.19);
+    border-radius: 7px;
+    background: linear-gradient(145deg, #74c8ff, #7b82ff 60%, #c684ff);
+    color: #fff;
+    box-shadow: 0 3px 9px rgba(96, 140, 255, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.4);
+  }
+  .app-glyph .icon { width: 12px; height: 12px; }
+  .tb-app { color: var(--muted); font-size: 10.5px; font-weight: 550; white-space: nowrap; }
+  .tb-sep { width: 1px; height: 14px; background: var(--line); }
+  .tb-crumb { color: var(--text); font-size: 10.5px; font-weight: 600; white-space: nowrap; }
+  .tb-tag {
+    padding: 2px 5px;
+    border: 1px solid var(--line-soft);
+    border-radius: 4px;
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 6.5px;
+    letter-spacing: 0.14em;
+  }
+  .tb-right { display: flex; flex: 0 0 auto; align-items: center; gap: 7px; margin-left: auto; }
+  .live-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 22px;
+    padding: 0 8px;
+    border: 1px solid rgba(126, 226, 184, 0.16);
+    border-radius: 99px;
+    background: rgba(126, 226, 184, 0.055);
+    color: #9aefd1;
+    font-size: 8.5px;
+    white-space: nowrap;
+  }
+  .live-pill i {
+    width: 4px; height: 4px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 7px rgba(126, 226, 184, 0.8);
+    animation: pulse 2.8s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(126, 226, 184, 0.32); }
+    50% { box-shadow: 0 0 0 4px rgba(126, 226, 184, 0); }
+  }
+  .tb-sync {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 7.5px;
+    white-space: nowrap;
+  }
+  .tb-sync .icon { width: 11px; height: 11px; }
+  .tb-icon { position: relative; width: 26px; height: 24px; border-radius: 6px; }
+  .tb-icon .notif-dot {
+    position: absolute;
+    top: 5px; right: 5px;
+    width: 4px; height: 4px;
+    border-radius: 50%;
+    background: var(--amber);
+    box-shadow: 0 0 6px rgba(244, 200, 120, 0.8);
+  }
+
+  .window-controls { display: flex; align-items: center; gap: 1px; margin-left: 3px; padding-left: 7px; border-left: 1px solid var(--line-soft); }
+  .win-btn {
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 24px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--dim);
+  }
+  .win-btn:hover { background: rgba(255, 255, 255, 0.06); color: var(--text); }
+  .win-btn.close:hover { background: rgba(255, 99, 122, 0.17); color: #ffd8df; }
+  .win-btn .icon { width: 11px; height: 11px; }
+
+  /* Ribbon tabs live on the titlebar line */
+  .ribbon-tablist {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 2px;
+    min-width: 0;
+    margin-left: 7px;
+    padding-left: 9px;
+    border-left: 1px solid var(--line-soft);
+    overflow: hidden;
+  }
+  .ribbon-tab {
+    height: 27px;
+    padding: 0 10px;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--dim);
+    font-size: 10px;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
+    transition: color 0.16s ease, background 0.16s ease, border-color 0.16s ease;
+  }
+  .ribbon-tab:hover { background: rgba(255, 255, 255, 0.04); color: var(--text); }
+  .ribbon-tab.active {
+    border-color: rgba(139, 203, 255, 0.16);
+    background: rgba(139, 203, 255, 0.10);
+    color: var(--text);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  }
+  .ribbon-tab.active::after { display: none; }
+  .tb-right .collapse-ribbon { width: 26px; height: 26px; }
+
+  /* Compact ribbon body */
+  .ribbon-body {
+    display: flex;
+    height: 68px;
+    flex: 0 0 68px;
+    overflow: hidden;
+    transition: height 0.28s var(--ease), flex-basis 0.28s var(--ease), opacity 0.2s ease;
+  }
+  .app-window.ribbon-collapsed .ribbon-body {
+    height: 0;
+    flex-basis: 0;
+    opacity: 0;
+    pointer-events: none;
+  }
+  .app-window.ribbon-collapsed #collapseRibbon .icon { transform: rotate(180deg); }
+  .ribbon-page { display: none; width: 100%; align-items: stretch; }
+  .ribbon-page.active { display: flex; }
+
+  .rb-group {
+    display: flex;
+    flex: 0 0 auto;
+    flex-direction: column;
+    min-width: 0;
+    padding: 5px 10px 4px;
+    border-right: 1px solid var(--line-soft);
+  }
+  .rb-group:last-child { border-right: 0; }
+  .rb-group.grow { flex: 1 1 auto; }
+  .rb-items { display: flex; flex: 1; align-items: center; gap: 3px; min-width: 0; }
+  .rb-label {
+    padding-left: 2px;
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 7px;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+  }
+  .rb-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    min-width: 50px;
+    height: 44px;
+    padding: 2px 6px;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 8.5px;
+    line-height: 1.15;
+    white-space: nowrap;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.15s ease;
+  }
+  .rb-btn:hover { border-color: var(--line-soft); background: rgba(255, 255, 255, 0.055); color: var(--text); }
+  .rb-btn:active { transform: translateY(1px); }
+  .rb-btn .icon { width: 18px; height: 18px; color: var(--accent); opacity: 0.88; }
+  .rb-btn .rb-hint { display: none; }
+  .rb-btn.primary {
+    border-color: rgba(139, 203, 255, 0.22);
+    background: linear-gradient(180deg, rgba(129, 190, 255, 0.22), rgba(101, 118, 255, 0.10));
+    color: #f8fcff;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.15), 0 4px 14px rgba(80, 120, 255, 0.1);
+  }
+  .rb-btn.primary .icon { color: #c9eaff; opacity: 1; }
+  .rb-stack { display: flex; flex-direction: column; justify-content: center; gap: 2px; }
+  .rb-btn.small {
+    flex-direction: row;
+    justify-content: flex-start;
+    gap: 5px;
+    min-width: 110px;
+    height: 21px;
+    padding: 0 7px;
+    border-radius: 6px;
+    font-size: 8.5px;
+  }
+  .rb-btn.small .icon { width: 12px; height: 12px; color: var(--dim); opacity: 1; }
+  .rb-btn.small:hover .icon { color: var(--muted); }
+  .rb-btn.small.on { background: rgba(139, 203, 255, 0.09); color: var(--text); }
+  .rb-btn.small.on .icon { color: var(--accent); }
+  .rb-btn.on { border-color: rgba(139, 203, 255, 0.18); background: rgba(139, 203, 255, 0.10); color: var(--text); }
+  .rb-btn.on .icon { color: var(--accent); opacity: 1; }
+  .rb-btn .chev { margin-left: auto; color: var(--faint); }
+  .rb-glass { display: flex; align-items: center; gap: 3px; }
+  .rb-glass .rb-btn {
+    flex-direction: row;
+    gap: 5px;
+    min-width: 58px;
+    height: 31px;
+    padding: 0 7px;
+    border: 1px solid var(--line-soft);
+    border-radius: 7px;
+    font-size: 8.5px;
+  }
+  .rb-glass .rb-btn .icon { width: 13px; height: 13px; }
+  .rb-glass .rb-btn.on { border-color: rgba(139, 203, 255, 0.25); background: rgba(139, 203, 255, 0.10); color: var(--text); }
+  .rb-glass .rb-btn.on .icon { color: var(--accent); }
+
+  .rb-search {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 6px;
+    width: 240px;
+    max-width: 270px;
+    padding-right: 4px;
+  }
+  .search-box {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    height: 30px;
+    padding: 0 8px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: rgba(3, 7, 14, 0.30);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  }
+  .search-box:focus-within { border-color: rgba(139, 203, 255, 0.45); box-shadow: 0 0 0 3px rgba(139, 203, 255, 0.07); }
+  .search-box .icon { width: 13px; height: 13px; color: var(--dim); }
+  .search-box input {
+    width: 100%;
+    min-width: 0;
+    border: 0;
+    outline: 0;
+    background: transparent;
+    color: var(--text);
+    font-size: 9.5px;
+  }
+  .search-box input::placeholder { color: var(--faint); }
+  .search-box kbd { height: 16px; min-width: 16px; font-size: 7px; }
+  .quick-chips { display: flex; gap: 4px; }
+  .quick-chip {
+    height: 19px;
+    padding: 0 6px;
+    border: 1px solid var(--line-soft);
+    border-radius: 5px;
+    background: rgba(255, 255, 255, 0.025);
+    color: var(--faint);
+    font-size: 8px;
+  }
+  .quick-chip:hover { border-color: var(--line); color: var(--muted); }
+
+  .rb-separator { width: 1px; align-self: stretch; margin: 5px 3px; background: var(--line-soft); }
+  .rb-right-note {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+    padding: 0 6px;
+    color: var(--faint);
+    font-size: 8px;
+    white-space: nowrap;
+  }
+  .rb-right-note .icon { width: 13px; height: 13px; color: var(--accent); opacity: 0.7; }
+
+  /* ==========================================================================
+     Content card + shared screen chrome
+     ========================================================================== */
+  .content {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+    background: transparent;
+  }
+
+  .screen {
+    display: none;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+    padding: 12px 14px 14px;
+  }
+  .screen.active { display: flex; }
+
+  .view-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+    flex: 0 0 auto;
+    padding: 1px 2px 12px;
+  }
+  .eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 7.5px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    opacity: 0.86;
+  }
+  .eyebrow::before { content: ""; width: 14px; height: 1px; background: linear-gradient(90deg, var(--accent), transparent); }
+  .view-title-row { display: flex; align-items: baseline; gap: 9px; margin-top: 4px; }
+  .view-head h1 {
+    margin: 0;
+    color: var(--text);
+    font-size: 22px;
+    font-weight: 650;
+    line-height: 1.1;
+    letter-spacing: -0.035em;
+  }
+  .count-pill {
+    display: inline-flex;
+    align-items: center;
+    height: 17px;
+    padding: 0 6px;
+    border: 1px solid rgba(139, 203, 255, 0.15);
+    border-radius: 99px;
+    background: rgba(139, 203, 255, 0.075);
+    color: #bde5ff;
+    font-family: var(--mono);
+    font-size: 7.5px;
+    white-space: nowrap;
+  }
+  .view-sub { margin: 3px 0 0; color: var(--dim); font-size: 9px; }
+  .view-sub b { color: var(--muted); font-weight: 550; }
+
+  .view-actions { display: flex; align-items: center; gap: 5px; margin-left: auto; padding-top: 4px; }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    height: 29px;
+    padding: 0 10px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.042);
+    color: var(--muted);
+    font-size: 9.5px;
+    font-weight: 520;
+    white-space: nowrap;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.15s ease;
+  }
+  .btn:hover { border-color: var(--line-strong); background: rgba(255, 255, 255, 0.075); color: var(--text); }
+  .btn:active { transform: translateY(1px); }
+  .btn .icon { width: 14px; height: 14px; }
+  .btn.primary {
+    border-color: rgba(158, 214, 255, 0.33);
+    background: linear-gradient(180deg, #7dc3ff, #5b83ff);
+    color: #fff;
+    box-shadow: 0 5px 16px rgba(78, 124, 255, 0.24), inset 0 1px 0 rgba(255, 255, 255, 0.32);
+  }
+  .btn.primary:hover { background: linear-gradient(180deg, #8ccdff, #688eff); }
+  .btn.ghost { border-color: transparent; background: transparent; color: var(--dim); }
+  .btn.ghost:hover { border-color: var(--line-soft); background: rgba(255, 255, 255, 0.045); color: var(--text); }
+  .btn.sm { height: 27px; padding: 0 8px; font-size: 9px; }
+  .btn .kbd-hint { margin-left: 2px; color: var(--faint); font-family: var(--mono); font-size: 7px; }
+
+  .icon-btn {
+    display: inline-grid;
+    place-items: center;
+    width: 29px;
+    height: 29px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--dim);
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  }
+  .icon-btn:hover { border-color: var(--line-soft); background: rgba(255, 255, 255, 0.05); color: var(--text); }
+  .icon-btn .icon { width: 15px; height: 15px; }
+
+  .segmented {
+    display: flex;
+    gap: 1px;
+    padding: 2px;
+    border: 1px solid var(--line-soft);
+    border-radius: 8px;
+    background: rgba(3, 7, 14, 0.22);
+  }
+  .segmented button {
+    display: grid;
+    place-items: center;
+    width: 25px;
+    height: 23px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--faint);
+  }
+  .segmented button:hover { color: var(--muted); }
+  .segmented button.active {
+    background: rgba(255, 255, 255, 0.10);
+    color: var(--text);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 2px 8px rgba(0, 0, 0, 0.15);
+  }
+  .segmented .icon { width: 13px; height: 13px; }
+
+  .filter-row {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex: 0 0 auto;
+    min-height: 30px;
+    padding: 0 2px 11px;
+  }
+  .filter-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 27px;
+    padding: 0 8px;
+    border: 1px solid var(--line-soft);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.027);
+    color: var(--muted);
+    font-size: 8.5px;
+    white-space: nowrap;
+  }
+  .filter-chip span { color: var(--faint); }
+  .filter-chip:hover { border-color: var(--line); background: rgba(255, 255, 255, 0.055); color: var(--text); }
+  .filter-chip.active {
+    border-color: rgba(139, 203, 255, 0.22);
+    background: rgba(139, 203, 255, 0.085);
+    color: #d1edff;
+  }
+  .filter-chip.active span { color: #a1dcff; }
+  .filter-chip .icon { width: 11px; height: 11px; color: var(--dim); }
+  .filter-spacer { flex: 1; }
+
+  .search-inline {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 176px;
+    height: 27px;
+    padding: 0 8px;
+    border: 1px solid var(--line-soft);
+    border-radius: 8px;
+    background: rgba(3, 7, 14, 0.24);
+  }
+  .search-inline:focus-within { border-color: rgba(139, 203, 255, 0.42); }
+  .search-inline .icon { width: 12px; height: 12px; color: var(--faint); }
+  .search-inline input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 8.5px; }
+  .search-inline input::placeholder { color: var(--faint); }
+  .sort-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 27px;
+    padding: 0 7px;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--dim);
+    font-size: 8.5px;
+    white-space: nowrap;
+  }
+  .sort-chip:hover { border-color: var(--line-soft); background: rgba(255, 255, 255, 0.035); color: var(--muted); }
+  .sort-chip .icon { width: 11px; height: 11px; }
+
+  /* Inner glass cards */
+  .card-sub {
+    border: 1px solid var(--line-soft);
+    border-radius: var(--r-inner);
+    background:
+      linear-gradient(155deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.014) 62%),
+      var(--glass-inner);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.055), 0 10px 26px rgba(0, 0, 0, 0.12);
+    backdrop-filter: blur(10px) saturate(120%);
+    -webkit-backdrop-filter: blur(10px) saturate(120%);
+  }
+
+  /* ==========================================================================
+     Photo library screen
+     ========================================================================== */
+  .photo-layout {
+    display: grid;
+    flex: 1;
+    grid-template-columns: minmax(0, 1fr) 298px;
+    gap: 12px;
+    min-height: 0;
+    transition: grid-template-columns 0.28s var(--ease);
+  }
+  .photo-layout.inspector-hidden { grid-template-columns: minmax(0, 1fr); }
+  .photo-layout.inspector-hidden .inspector { display: none; }
+
+  .gallery { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  .gallery-head {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    height: 42px;
+    flex: 0 0 42px;
+    padding: 0 9px 0 12px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .gallery-month { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+  .gallery-month strong { color: var(--text); font-size: 11px; font-weight: 600; white-space: nowrap; }
+  .gallery-month span { color: var(--faint); font-family: var(--mono); font-size: 7.5px; white-space: nowrap; }
+  .gallery-tools { display: flex; align-items: center; gap: 4px; margin-left: auto; min-width: 0; }
+  .gallery-tools .icon-btn { width: 24px; height: 24px; border-radius: 6px; }
+  .gallery-tools .icon-btn .icon { width: 13px; height: 13px; }
+  .gallery-filter { height: 26px; padding: 0 7px; font-size: 8.5px; }
+  .gallery-filter .icon { width: 11px; height: 11px; }
+  .gallery-filter-count {
+    display: inline-grid;
+    place-items: center;
+    min-width: 14px;
+    height: 14px;
+    margin-left: 2px;
+    border-radius: 4px;
+    background: rgba(139, 203, 255, 0.15);
+    color: #bfe7ff;
+    font-family: var(--mono);
+    font-size: 6.5px;
+  }
+  .gallery-search {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    width: 150px;
+    height: 26px;
+    padding: 0 7px;
+    border: 1px solid var(--line-soft);
+    border-radius: 7px;
+    background: rgba(3, 7, 14, 0.22);
+  }
+  .gallery-search:focus-within { border-color: rgba(139, 203, 255, 0.42); }
+  .gallery-search .icon { width: 11px; height: 11px; color: var(--faint); }
+  .gallery-search input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 8px; }
+  .gallery-search input::placeholder { color: var(--faint); }
+  .gallery-tools .sort-chip { height: 26px; font-size: 8.5px; }
+  .gallery-head-actions { display: flex; align-items: center; gap: 1px; margin-left: auto; }
+  .gallery-head-actions .icon-btn { width: 24px; height: 24px; border-radius: 6px; }
+  .gallery-head-actions .icon-btn .icon { width: 13px; height: 13px; }
+
+  .gallery-scroll {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    padding: 10px 49px 12px 12px;
+    overflow: auto;
+  }
+  .photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 9px; align-content: start; }
+
+  .photo-card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    padding: 0;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.085);
+    border-radius: 13px;
+    background: rgba(255, 255, 255, 0.032);
+    color: inherit;
+    text-align: left;
+    box-shadow: 0 5px 14px rgba(0, 0, 0, 0.12);
+    transition: transform 0.22s var(--ease), border-color 0.22s ease, box-shadow 0.22s ease;
+  }
+  .photo-card:hover {
+    z-index: 1;
+    border-color: rgba(255, 255, 255, 0.19);
+    transform: translateY(-3px);
+    box-shadow: 0 15px 30px rgba(0, 0, 0, 0.34);
+  }
+  .photo-card.selected {
+    border-color: rgba(139, 203, 255, 0.70);
+    box-shadow: 0 0 0 2px rgba(139, 203, 255, 0.18), 0 12px 28px rgba(0, 0, 0, 0.3);
+  }
+  .photo-visual {
+    position: relative;
+    aspect-ratio: 3 / 2;
+    overflow: hidden;
+    background: #0a0e18;
+  }
+  .photo-visual::after,
+  .inspector-preview::after,
+  .viewer-frame::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 2;
+    pointer-events: none;
+    background:
+      linear-gradient(180deg, rgba(3, 5, 10, 0) 42%, rgba(3, 5, 10, 0.48) 100%),
+      url("data:image/svg+xml,%3Csvg viewBox='0 0 220 220' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.92' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23g)' opacity='0.35'/%3E%3C/svg%3E");
+    background-size: auto, 220px 220px;
+    opacity: 1;
+    mix-blend-mode: normal;
+  }
+  .photo-visual::before,
+  .inspector-preview::before,
+  .viewer-frame::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 3;
+    pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 220 220' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.72' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.4'/%3E%3C/svg%3E");
+    opacity: 0.16;
+    mix-blend-mode: overlay;
+  }
+  .photo-check {
+    position: absolute;
+    top: 7px;
+    left: 7px;
+    z-index: 4;
+    display: none;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--accent);
+    color: #06101e;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  }
+  .photo-check .icon { width: 11px; height: 11px; stroke-width: 2.6; }
+  .photo-card.selected .photo-check { display: grid; }
+  .photo-fav {
+    position: absolute;
+    top: 7px;
+    right: 7px;
+    z-index: 4;
+    display: grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: rgba(4, 8, 15, 0.32);
+    color: var(--amber);
+    backdrop-filter: blur(4px);
+  }
+  .photo-fav .icon { width: 10px; height: 10px; }
+  .photo-format {
+    position: absolute;
+    right: 7px;
+    bottom: 7px;
+    z-index: 4;
+    padding: 2px 5px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 4px;
+    background: rgba(4, 8, 15, 0.36);
+    color: rgba(255, 255, 255, 0.72);
+    font-family: var(--mono);
+    font-size: 6.5px;
+    letter-spacing: 0.05em;
+    backdrop-filter: blur(4px);
+  }
+  .photo-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 7px 8px 8px;
+    background: rgba(5, 9, 16, 0.28);
+  }
+  .photo-title {
+    overflow: hidden;
+    color: var(--text);
+    font-size: 10px;
+    font-weight: 550;
+    letter-spacing: -0.01em;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .photo-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 7px;
+  }
+  .photo-meta .meta-left { display: inline-flex; align-items: center; gap: 4px; min-width: 0; }
+  .photo-meta .meta-dot { width: 3px; height: 3px; border-radius: 50%; background: var(--green); box-shadow: 0 0 4px rgba(126, 226, 184, 0.6); }
+  .photo-meta .meta-dot.pending { background: var(--amber); box-shadow: 0 0 4px rgba(244, 200, 120, 0.6); }
+
+  .year-rail {
+    position: absolute;
+    top: 38px;
+    right: 0;
+    bottom: 0;
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: space-between;
+    width: 44px;
+    padding: 18px 0 18px;
+    background: linear-gradient(90deg, transparent, rgba(4, 8, 16, 0.66) 40%);
+    pointer-events: none;
+  }
+  .year-rail::before {
+    content: "";
+    position: absolute;
+    top: 18px;
+    bottom: 18px;
+    left: 50%;
+    width: 1px;
+    background: rgba(255, 255, 255, 0.08);
+  }
+  .year-label {
+    position: relative;
+    z-index: 1;
+    padding: 2px 4px;
+    border-radius: 4px;
+    background: rgba(4, 8, 16, 0.5);
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 6.5px;
+    letter-spacing: 0.03em;
+  }
+  .year-label.active { color: var(--accent); background: rgba(139, 203, 255, 0.10); }
+  .year-pill {
+    position: absolute;
+    top: 20%;
+    right: 4px;
+    z-index: 2;
+    padding: 2px 4px;
+    border: 1px solid rgba(255, 255, 255, 0.11);
+    border-radius: 4px;
+    background: rgba(13, 20, 34, 0.8);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 6.5px;
+    white-space: nowrap;
+    backdrop-filter: blur(8px);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  }
+
+  /* Inspector */
+  .inspector { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  .inspector-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 38px;
+    flex: 0 0 38px;
+    padding: 0 9px 0 12px;
+    border-bottom: 1px solid var(--line-soft);
+    color: var(--dim);
+    font-family: var(--mono);
+    font-size: 7px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+  .inspector-head .inspector-actions-mini { display: flex; gap: 1px; }
+  .inspector-head .icon-btn { width: 23px; height: 23px; border-radius: 6px; }
+  .inspector-head .icon-btn .icon { width: 12px; height: 12px; }
+  .inspector-scroll { flex: 1; min-height: 0; overflow: auto; }
+  .inspector-preview {
+    position: relative;
+    height: 168px;
+    margin: 10px 10px 0;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.11);
+    border-radius: 13px;
+    background: #0a0e18;
+    box-shadow: 0 8px 20px rgba(0, 0, 0, 0.18);
+  }
+  .preview-open {
+    position: absolute;
+    right: 7px;
+    bottom: 7px;
+    z-index: 5;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    height: 22px;
+    padding: 0 7px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 5px;
+    background: rgba(4, 8, 15, 0.36);
+    color: rgba(255, 255, 255, 0.84);
+    font-size: 7.5px;
+    backdrop-filter: blur(8px);
+  }
+  .preview-open:hover { background: rgba(4, 8, 15, 0.58); color: #fff; }
+  .preview-open .icon { width: 10px; height: 10px; }
+  .preview-count {
+    position: absolute;
+    left: 8px;
+    bottom: 9px;
+    z-index: 5;
+    color: rgba(255, 255, 255, 0.58);
+    font-family: var(--mono);
+    font-size: 7px;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  }
+  .inspector-body { padding: 12px; }
+  .inspector-title-row { display: flex; align-items: center; gap: 8px; }
+  .inspector-title-row h2 {
+    overflow: hidden;
+    margin: 0;
+    color: var(--text);
+    font-size: 13px;
+    font-weight: 620;
+    letter-spacing: -0.02em;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .inspector-title-row .icon-btn { width: 24px; height: 24px; margin-left: auto; }
+  .inspector-title-row .icon-btn .icon { width: 13px; height: 13px; }
+  .inspector-title-row .icon-btn.fav-active { color: var(--amber); }
+  .inspector-date { margin: 3px 0 8px; color: var(--dim); font-family: var(--mono); font-size: 7.5px; }
+  .badge-row { display: flex; flex-wrap: wrap; gap: 4px; }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 5px;
+    border: 1px solid var(--line-soft);
+    border-radius: 5px;
+    background: rgba(255, 255, 255, 0.035);
+    color: var(--muted);
+    font-size: 7.5px;
+    white-space: nowrap;
+  }
+  .badge.green { border-color: rgba(126, 226, 184, 0.18); background: rgba(126, 226, 184, 0.075); color: #a9f2d8; }
+  .badge.amber { border-color: rgba(244, 200, 120, 0.18); background: rgba(244, 200, 120, 0.075); color: #f9dfab; }
+  .badge .dot { width: 3px; height: 3px; border-radius: 50%; background: currentColor; }
+
+  .meta-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px 10px;
+    margin-top: 11px;
+    padding: 9px;
+    border: 1px solid var(--line-soft);
+    border-radius: 9px;
+    background: rgba(3, 7, 14, 0.20);
+  }
+  .meta-grid label { display: block; color: var(--faint); font-family: var(--mono); font-size: 6.5px; letter-spacing: 0.08em; text-transform: uppercase; }
+  .meta-grid b { display: block; overflow: hidden; margin-top: 2px; color: var(--muted); font-size: 8.5px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+  .section-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 13px;
+    color: var(--dim);
+    font-family: var(--mono);
+    font-size: 7px;
+    letter-spacing: 0.10em;
+    text-transform: uppercase;
+  }
+  .section-head .count { color: var(--faint); font-size: 6.5px; letter-spacing: 0; }
+  .section-head .icon-btn { width: 20px; height: 20px; border-radius: 5px; }
+  .section-head .icon-btn .icon { width: 11px; height: 11px; }
+  .player-row { display: flex; align-items: center; gap: 5px; margin-top: 7px; }
+  .player {
+    display: grid;
+    place-items: center;
+    width: 25px;
+    height: 25px;
+    border: 1px solid rgba(255, 255, 255, 0.17);
+    border-radius: 50%;
+    color: #f4fbff;
+    font-size: 7.5px;
+    font-weight: 650;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25);
+  }
+  .player:nth-child(1) { background: linear-gradient(145deg, #4a9eff, #6a5bff); }
+  .player:nth-child(2) { background: linear-gradient(145deg, #ff8c68, #d45078); }
+  .player:nth-child(3) { background: linear-gradient(145deg, #4ddbb4, #2f8b9c); }
+  .player:nth-child(4) { background: linear-gradient(145deg, #c37aff, #695bd8); }
+  .player:nth-child(5) { background: linear-gradient(145deg, #ffce6a, #d78338); }
+  .player.more { border-style: dashed; background: rgba(255, 255, 255, 0.045); color: var(--dim); text-shadow: none; }
+  .tag-row { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
+  .tag {
+    display: inline-flex;
+    align-items: center;
+    height: 19px;
+    padding: 0 6px;
+    border: 1px solid var(--line-soft);
+    border-radius: 5px;
+    background: rgba(255, 255, 255, 0.035);
+    color: var(--muted);
+    font-size: 7.5px;
+  }
+  .tag.add { border-style: dashed; color: var(--faint); }
+  .note-card {
+    margin-top: 13px;
+    padding: 8px 9px;
+    border: 1px solid var(--line-soft);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.025);
+  }
+  .note-card span { display: block; color: var(--faint); font-family: var(--mono); font-size: 6.5px; letter-spacing: 0.09em; text-transform: uppercase; }
+  .note-card p { margin: 4px 0 0; color: var(--dim); font-size: 8.5px; line-height: 1.55; }
+  .inspector-foot {
+    display: flex;
+    gap: 5px;
+    flex: 0 0 auto;
+    padding: 9px 10px;
+    border-top: 1px solid var(--line-soft);
+    background: rgba(4, 8, 16, 0.17);
+  }
+  .inspector-foot .btn { flex: 1; }
+  .inspector-foot .btn:first-child { flex: 0 0 auto; }
+
+  /* ==========================================================================
+     Scene art — CSS-only VRChat-ish thumbnails
+     ========================================================================== */
+  .scene { position: absolute; inset: 0; overflow: hidden; background: #0a0e18; }
+
+  .scene-neon-city {
+    background:
+      radial-gradient(circle at 74% 27%, rgba(255, 160, 231, 0.95) 0 3%, rgba(255, 160, 231, 0) 11%),
+      radial-gradient(ellipse at 72% 70%, rgba(255, 90, 190, 0.52), transparent 43%),
+      radial-gradient(ellipse at 20% 80%, rgba(74, 140, 255, 0.40), transparent 40%),
+      linear-gradient(180deg, #08091f 0%, #221344 42%, #4c205d 68%, #130a22 100%);
+  }
+  .scene-neon-city::before {
+    content: "";
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    height: 48%;
+    background:
+      linear-gradient(#040610, #040610) 3% 100% / 9% 39% no-repeat,
+      linear-gradient(#040610, #040610) 15% 100% / 7% 56% no-repeat,
+      linear-gradient(#040610, #040610) 25% 100% / 11% 31% no-repeat,
+      linear-gradient(#040610, #040610) 39% 100% / 8% 63% no-repeat,
+      linear-gradient(#040610, #040610) 50% 100% / 13% 44% no-repeat,
+      linear-gradient(#040610, #040610) 66% 100% / 9% 73% no-repeat,
+      linear-gradient(#040610, #040610) 78% 100% / 12% 40% no-repeat,
+      linear-gradient(#040610, #040610) 93% 100% / 7% 55% no-repeat;
+  }
+  .scene-neon-city::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    opacity: 0.72;
+    background:
+      radial-gradient(circle at 15% 59%, rgba(131, 218, 255, 0.9) 0 1px, transparent 2px),
+      radial-gradient(circle at 22% 63%, rgba(131, 218, 255, 0.55) 0 1px, transparent 2px),
+      radial-gradient(circle at 64% 56%, rgba(255, 185, 245, 0.85) 0 1px, transparent 2px),
+      radial-gradient(circle at 84% 61%, rgba(255, 185, 245, 0.65) 0 1px, transparent 2px),
+      radial-gradient(circle at 54% 72%, rgba(131, 218, 255, 0.55) 0 1px, transparent 2px),
+      radial-gradient(circle at 72% 80%, rgba(255, 210, 140, 0.7) 0 1px, transparent 2px);
+    background-size: 59px 71px, 43px 53px, 73px 61px, 47px 83px, 67px 49px, 89px 57px;
+  }
+
+  .scene-shrine {
+    background:
+      radial-gradient(circle at 77% 28%, rgba(255, 223, 160, 0.95) 0 5%, rgba(255, 180, 110, 0) 19%),
+      linear-gradient(180deg, #26142f 0%, #612747 35%, #ce6c5f 63%, #3a1b2a 100%);
+  }
+  .scene-shrine::before {
+    content: "";
+    position: absolute;
+    right: 27%;
+    bottom: 17%;
+    left: 31%;
+    height: 39%;
+    background:
+      linear-gradient(#180b14, #180b14) 0 0 / 100% 8% no-repeat,
+      linear-gradient(#180b14, #180b14) 8% 22% / 84% 6% no-repeat,
+      linear-gradient(#180b14, #180b14) 12% 22% / 10% 78% no-repeat,
+      linear-gradient(#180b14, #180b14) 78% 22% / 10% 78% no-repeat;
+    filter: drop-shadow(0 4px 8px rgba(33, 8, 17, 0.5));
+  }
+  .scene-shrine::after {
+    content: "";
+    position: absolute;
+    right: -5%;
+    bottom: -7%;
+    left: -5%;
+    height: 27%;
+    background: linear-gradient(180deg, rgba(22, 11, 22, 0.06), #160b16 68%);
+    clip-path: polygon(0 63%, 9% 35%, 18% 55%, 28% 27%, 39% 50%, 51% 22%, 62% 51%, 76% 32%, 88% 58%, 100% 38%, 100% 100%, 0 100%);
+    opacity: 0.7;
+  }
+
+  .scene-alley {
+    background:
+      radial-gradient(ellipse at 50% 31%, rgba(74, 236, 255, 0.52), transparent 32%),
+      radial-gradient(ellipse at 82% 52%, rgba(255, 72, 171, 0.35), transparent 27%),
+      linear-gradient(180deg, #04101a 0%, #092231 44%, #07131e 100%);
+  }
+  .scene-alley::before {
+    content: "";
+    position: absolute;
+    top: 18%;
+    left: 13%;
+    width: 74%;
+    height: 45%;
+    background:
+      linear-gradient(90deg, rgba(76, 239, 255, 0.72), rgba(76, 239, 255, 0.08)) 0 0 / 18% 45% no-repeat,
+      linear-gradient(90deg, rgba(255, 77, 173, 0.68), rgba(255, 77, 173, 0.06)) 24% 21% / 11% 62% no-repeat,
+      linear-gradient(90deg, rgba(255, 203, 92, 0.62), rgba(255, 203, 92, 0.05)) 70% 5% / 15% 38% no-repeat,
+      linear-gradient(90deg, rgba(150, 118, 255, 0.55), rgba(150, 118, 255, 0.04)) 94% 39% / 7% 49% no-repeat;
+    filter: blur(0.4px) drop-shadow(0 0 12px rgba(65, 232, 255, 0.18));
+  }
+  .scene-alley::after {
+    content: "";
+    position: absolute;
+    right: -5%;
+    bottom: -2%;
+    left: -5%;
+    height: 41%;
+    background:
+      linear-gradient(180deg, rgba(28, 199, 226, 0.18), transparent 72%),
+      linear-gradient(90deg, transparent 13%, rgba(78, 237, 255, 0.28) 13% 20%, transparent 20% 69%, rgba(255, 76, 173, 0.20) 69% 77%, transparent 77%);
+    filter: blur(5px);
+    transform: perspective(100px) rotateX(36deg);
+    transform-origin: bottom;
+  }
+
+  .scene-beach {
+    background:
+      radial-gradient(circle at 72% 48%, rgba(255, 223, 158, 0.95) 0 4%, rgba(255, 166, 111, 0) 17%),
+      linear-gradient(180deg, #1b1838 0%, #5b315f 37%, #d27772 62%, #173b45 63%, #09202c 100%);
+  }
+  .scene-beach::before {
+    content: "";
+    position: absolute;
+    right: 0;
+    bottom: 31%;
+    left: 0;
+    height: 3px;
+    background: linear-gradient(90deg, transparent, rgba(255, 219, 170, 0.55), transparent);
+    filter: blur(1px);
+  }
+  .scene-beach::after {
+    content: "";
+    position: absolute;
+    right: 8%;
+    bottom: 3%;
+    left: 8%;
+    height: 31%;
+    background:
+      repeating-linear-gradient(180deg, rgba(255, 202, 160, 0.22) 0 1px, transparent 1px 7px),
+      radial-gradient(ellipse at 72% 0%, rgba(255, 195, 145, 0.33), transparent 48%);
+    transform: perspective(120px) rotateX(22deg);
+    transform-origin: top;
+    opacity: 0.8;
+  }
+
+  .scene-bar {
+    background:
+      radial-gradient(ellipse at 28% 27%, rgba(255, 202, 122, 0.52), transparent 27%),
+      radial-gradient(ellipse at 71% 40%, rgba(255, 119, 105, 0.34), transparent 28%),
+      radial-gradient(ellipse at 48% 70%, rgba(255, 176, 93, 0.17), transparent 36%),
+      linear-gradient(180deg, #190e0f 0%, #2f1917 56%, #080405 100%);
+  }
+  .scene-bar::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(circle at 18% 21%, rgba(255, 223, 154, 0.8) 0 1px, transparent 2px),
+      radial-gradient(circle at 38% 17%, rgba(255, 202, 122, 0.5) 0 1px, transparent 2px),
+      radial-gradient(circle at 72% 26%, rgba(255, 194, 137, 0.7) 0 2px, transparent 3px),
+      radial-gradient(circle at 84% 18%, rgba(255, 132, 108, 0.45) 0 1px, transparent 2px),
+      radial-gradient(circle at 58% 36%, rgba(255, 214, 156, 0.4) 0 1px, transparent 2px);
+    background-size: 39px 47px, 31px 37px, 53px 43px, 43px 61px, 61px 47px;
+    filter: blur(0.4px);
+  }
+  .scene-bar::after {
+    content: "";
+    position: absolute;
+    right: -4%;
+    bottom: -2%;
+    left: -4%;
+    height: 29%;
+    background: linear-gradient(180deg, rgba(86, 44, 32, 0.25), #0a0507 72%);
+    clip-path: polygon(0 30%, 14% 20%, 29% 33%, 44% 18%, 58% 29%, 74% 16%, 89% 31%, 100% 20%, 100% 100%, 0 100%);
+  }
+
+  .scene-snow {
+    background:
+      radial-gradient(circle at 76% 21%, rgba(196, 228, 255, 0.7) 0 2%, transparent 7%),
+      linear-gradient(180deg, #061321 0%, #142e45 44%, #415b70 67%, #0a1722 100%);
+  }
+  .scene-snow::before {
+    content: "";
+    position: absolute;
+    right: -5%;
+    bottom: 29%;
+    left: -5%;
+    height: 43%;
+    background: linear-gradient(180deg, rgba(172, 204, 226, 0.7), rgba(35, 57, 76, 0.9));
+    clip-path: polygon(0 100%, 7% 52%, 17% 70%, 30% 24%, 43% 61%, 55% 42%, 69% 66%, 82% 29%, 100% 61%, 100% 100%);
+    opacity: 0.8;
+  }
+  .scene-snow::after {
+    content: "";
+    position: absolute;
+    right: 18%;
+    bottom: 14%;
+    width: 21%;
+    height: 17%;
+    background:
+      linear-gradient(180deg, #162431 0 27%, transparent 27%),
+      linear-gradient(90deg, transparent 18%, rgba(255, 205, 116, 0.95) 18% 34%, transparent 34% 66%, rgba(255, 205, 116, 0.78) 66% 82%, transparent 82%);
+    box-shadow: 0 0 18px rgba(255, 198, 108, 0.35);
+    clip-path: polygon(50% 0, 100% 34%, 100% 100%, 0 100%, 0 34%);
+  }
+
+  .scene-space {
+    background:
+      radial-gradient(ellipse at 74% 29%, rgba(86, 147, 255, 0.38), transparent 31%),
+      radial-gradient(ellipse at 23% 17%, rgba(175, 101, 255, 0.20), transparent 30%),
+      linear-gradient(180deg, #02040c 0%, #081227 55%, #040711 100%);
+  }
+  .scene-space::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(circle at 14% 24%, #fff 0 1px, transparent 2px),
+      radial-gradient(circle at 27% 12%, rgba(255, 255, 255, 0.8) 0 1px, transparent 2px),
+      radial-gradient(circle at 47% 29%, rgba(174, 217, 255, 0.9) 0 1px, transparent 2px),
+      radial-gradient(circle at 63% 13%, rgba(255, 255, 255, 0.7) 0 1px, transparent 2px),
+      radial-gradient(circle at 84% 21%, rgba(210, 187, 255, 0.8) 0 1px, transparent 2px),
+      radial-gradient(circle at 73% 44%, rgba(255, 255, 255, 0.5) 0 1px, transparent 2px),
+      radial-gradient(circle at 38% 52%, rgba(144, 200, 255, 0.6) 0 1px, transparent 2px);
+    background-size: 71px 83px, 57px 59px, 97px 79px, 83px 67px, 61px 73px, 47px 53px, 89px 71px;
+  }
+  .scene-space::after {
+    content: "";
+    position: absolute;
+    right: -10%;
+    bottom: -37%;
+    width: 75%;
+    height: 83%;
+    border-radius: 50%;
+    background:
+      radial-gradient(circle at 37% 29%, rgba(121, 174, 255, 0.9), rgba(24, 61, 128, 0.8) 39%, #071125 69%);
+    box-shadow: 0 0 42px rgba(74, 130, 255, 0.25), inset 12px 9px 28px rgba(153, 204, 255, 0.25);
+  }
+
+  .scene-forest {
+    background:
+      radial-gradient(ellipse at 50% 12%, rgba(99, 220, 196, 0.22), transparent 38%),
+      linear-gradient(180deg, #03100d 0%, #0a2820 49%, #06140f 100%);
+  }
+  .scene-forest::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+      linear-gradient(93deg, transparent 6%, rgba(5, 17, 13, 0.94) 6% 12%, transparent 12% 23%, rgba(5, 17, 13, 0.92) 23% 30%, transparent 30% 44%, rgba(5, 17, 13, 0.95) 44% 51%, transparent 51% 67%, rgba(5, 17, 13, 0.92) 67% 74%, transparent 74% 88%, rgba(5, 17, 13, 0.94) 88% 94%, transparent 94%);
+    clip-path: polygon(0 100%, 3% 27%, 9% 43%, 14% 14%, 20% 38%, 27% 8%, 33% 42%, 40% 18%, 47% 37%, 55% 6%, 62% 40%, 69% 20%, 76% 45%, 84% 10%, 91% 38%, 98% 22%, 100% 100%);
+    opacity: 0.75;
+  }
+  .scene-forest::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(circle at 12% 26%, rgba(255, 219, 137, 0.95) 0 1px, transparent 2px),
+      radial-gradient(circle at 24% 32%, rgba(255, 219, 137, 0.75) 0 1px, transparent 2px),
+      radial-gradient(circle at 38% 25%, rgba(255, 219, 137, 0.85) 0 1px, transparent 2px),
+      radial-gradient(circle at 52% 30%, rgba(255, 219, 137, 0.65) 0 1px, transparent 2px),
+      radial-gradient(circle at 69% 24%, rgba(255, 219, 137, 0.9) 0 1px, transparent 2px),
+      radial-gradient(circle at 83% 33%, rgba(255, 219, 137, 0.6) 0 1px, transparent 2px),
+      radial-gradient(circle at 92% 26%, rgba(255, 219, 137, 0.8) 0 1px, transparent 2px);
+    filter: drop-shadow(0 0 4px rgba(255, 196, 96, 0.7));
+  }
+
+  .scene-aquarium {
+    background:
+      radial-gradient(ellipse at 50% -8%, rgba(102, 242, 255, 0.56), transparent 46%),
+      linear-gradient(180deg, #04222b 0%, #094252 51%, #03151d 100%);
+  }
+  .scene-aquarium::before {
+    content: "";
+    position: absolute;
+    inset: -20% -10% 0;
+    background: repeating-linear-gradient(103deg, rgba(154, 255, 255, 0.15) 0 9px, transparent 9px 31px);
+    filter: blur(1px);
+    opacity: 0.65;
+  }
+  .scene-aquarium::after {
+    content: "";
+    position: absolute;
+    right: 8%;
+    bottom: 15%;
+    width: 23%;
+    height: 7%;
+    border-radius: 52% 48% 46% 54%;
+    background: rgba(3, 18, 24, 0.7);
+    box-shadow:
+      -38px 16px 0 -2px rgba(3, 18, 24, 0.55),
+      -77px -9px 0 -3px rgba(3, 18, 24, 0.45),
+      31px -18px 0 -3px rgba(3, 18, 24, 0.38);
+    filter: blur(0.5px);
+  }
+
+  /* ==========================================================================
+     Search
+     ========================================================================== */
+  .search-layout { display: grid; flex: 1; grid-template-columns: 276px minmax(0, 1fr); gap: 12px; min-height: 0; }
+  .filter-panel { display: flex; flex-direction: column; min-height: 0; padding: 13px; overflow: auto; }
+  .panel-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+    color: var(--text);
+    font-size: 11px;
+    font-weight: 620;
+    letter-spacing: -0.01em;
+  }
+  .panel-title .icon-btn { width: 23px; height: 23px; }
+  .panel-title .icon-btn .icon { width: 12px; height: 12px; }
+  .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 10px; }
+  .field label { color: var(--faint); font-family: var(--mono); font-size: 6.5px; letter-spacing: 0.10em; text-transform: uppercase; }
+  .field-input {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 30px;
+    padding: 0 8px;
+    border: 1px solid var(--line-soft);
+    border-radius: 8px;
+    background: rgba(3, 7, 14, 0.22);
+  }
+  .field-input:focus-within { border-color: rgba(139, 203, 255, 0.42); }
+  .field-input .icon { width: 12px; height: 12px; color: var(--faint); }
+  .field-input input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 9px; }
+  .field-input input::placeholder { color: var(--faint); }
+  .date-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 12px; }
+  .date-chip {
+    height: 24px;
+    padding: 0 8px;
+    border: 1px solid var(--line-soft);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--dim);
+    font-size: 8px;
+  }
+  .date-chip.active { border-color: rgba(139, 203, 255, 0.24); background: rgba(139, 203, 255, 0.10); color: #c7ebff; }
+  .switch-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 8px 0;
+    border-top: 1px solid var(--line-soft);
+    color: var(--muted);
+    font-size: 9px;
+  }
+  .switch-row + .switch-row { border-top: 0; padding-top: 0; }
+  .switch {
+    position: relative;
+    width: 30px;
+    height: 17px;
+    flex: 0 0 30px;
+    padding: 0;
+    border: 1px solid var(--line);
+    border-radius: 99px;
+    background: rgba(255, 255, 255, 0.055);
+    transition: background 0.18s ease, border-color 0.18s ease;
+  }
+  .switch::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background: var(--dim);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+    transition: transform 0.18s var(--ease), background 0.18s ease;
+  }
+  .switch.on { border-color: rgba(139, 203, 255, 0.3); background: rgba(139, 203, 255, 0.22); }
+  .switch.on::after { background: #e9f7ff; transform: translateX(13px); }
+  .filter-actions { display: flex; gap: 5px; margin-top: auto; padding-top: 13px; }
+  .filter-actions .btn { flex: 1; }
+  .filter-actions .btn.primary { flex: 1.25; }
+
+  .results { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  .results-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 38px;
+    flex: 0 0 38px;
+    padding: 0 11px 0 13px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .results-head strong { font-size: 11px; font-weight: 600; }
+  .results-head .result-count { color: var(--faint); font-family: var(--mono); font-size: 7.5px; }
+  .results-head .sort-chip { margin-left: auto; }
+  .results-scroll { flex: 1; min-height: 0; padding: 10px 12px 12px; overflow: auto; }
+  .results-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 9px; align-content: start; }
+  .query-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 21px;
+    padding: 0 7px;
+    border: 1px solid var(--line-soft);
+    border-radius: 5px;
+    background: rgba(255, 255, 255, 0.03);
+    color: var(--dim);
+    font-size: 8px;
+  }
+  .query-pill b { color: var(--muted); font-weight: 500; }
+  .query-pill .icon { width: 10px; height: 10px; }
+
+  /* ==========================================================================
+     Compression
+     ========================================================================== */
+  .compression-layout { display: grid; flex: 1; grid-template-columns: 286px minmax(0, 1fr); gap: 12px; min-height: 0; }
+  .profile-list { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  .profile-list-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    height: 38px;
+    flex: 0 0 38px;
+    padding: 0 9px 0 13px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .profile-list-head strong { font-size: 11px; font-weight: 600; }
+  .profile-list-head .icon-btn { margin-left: auto; width: 24px; height: 24px; }
+  .profile-list-head .icon-btn .icon { width: 13px; height: 13px; }
+  .profile-items { flex: 1; min-height: 0; padding: 8px; overflow: auto; }
+  .profile {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    margin-bottom: 5px;
+    padding: 9px 10px;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.018);
+    transition: background 0.15s ease, border-color 0.15s ease;
+  }
+  .profile:hover { background: rgba(255, 255, 255, 0.045); }
+  .profile.active {
+    border-color: rgba(139, 203, 255, 0.20);
+    background: linear-gradient(100deg, rgba(139, 203, 255, 0.13), rgba(139, 203, 255, 0.02));
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  }
+  .profile-top { display: flex; align-items: center; gap: 6px; }
+  .profile-top strong { overflow: hidden; font-size: 10px; font-weight: 580; text-overflow: ellipsis; white-space: nowrap; }
+  .profile-top .badge { margin-left: auto; }
+  .profile-meta { display: flex; align-items: center; gap: 6px; color: var(--faint); font-family: var(--mono); font-size: 7px; }
+  .profile-meter { height: 3px; margin-top: 2px; overflow: hidden; border-radius: 99px; background: rgba(255, 255, 255, 0.06); }
+  .profile-meter i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--accent), var(--accent-2)); opacity: 0.8; }
+  .profile-foot { display: flex; align-items: center; gap: 4px; margin-top: 1px; color: var(--faint); font-family: var(--mono); font-size: 6.5px; }
+  .profile-foot .dot { width: 3px; height: 3px; border-radius: 50%; background: var(--green); }
+  .profile-summary {
+    flex: 0 0 auto;
+    margin: 8px;
+    padding: 9px 10px;
+    border: 1px dashed rgba(255, 255, 255, 0.10);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.018);
+  }
+  .profile-summary .summary-head { display: flex; align-items: baseline; justify-content: space-between; color: var(--faint); font-family: var(--mono); font-size: 7px; }
+  .profile-summary .summary-head b { color: var(--accent); font-family: var(--font); font-size: 10px; font-weight: 600; }
+  .profile-summary p { margin: 4px 0 6px; color: var(--faint); font-size: 8px; }
+  .profile-summary .progress { margin: 0; height: 3px; }
+
+  .editor { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  .editor-head {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    min-height: 55px;
+    flex: 0 0 auto;
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .editor-title { min-width: 0; }
+  .editor-title h2 { margin: 0; font-size: 13px; font-weight: 620; letter-spacing: -0.02em; }
+  .editor-title p { margin: 2px 0 0; color: var(--faint); font-family: var(--mono); font-size: 7px; }
+  .editor-head .switch-row { margin-left: auto; padding: 0; border: 0; white-space: nowrap; }
+  .editor-head .switch-row span { color: var(--dim); font-size: 8px; }
+  .editor-scroll { flex: 1; min-height: 0; padding: 13px 14px 14px; overflow: auto; }
+  .editor-stats {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 11px;
+    padding: 8px 10px;
+    border: 1px solid var(--line-soft);
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.022);
+  }
+  .editor-stat { display: flex; flex-direction: column; gap: 1px; flex: 1; }
+  .editor-stat span { color: var(--faint); font-family: var(--mono); font-size: 6.5px; letter-spacing: 0.06em; text-transform: uppercase; }
+  .editor-stat b { color: var(--muted); font-size: 10px; font-weight: 550; }
+  .editor-stat b em { color: var(--accent); font-style: normal; font-size: 8px; }
+
+  .form-section { margin-bottom: 14px; }
+  .form-section:last-child { margin-bottom: 0; }
+  .form-section-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 7px;
+    color: var(--dim);
+    font-family: var(--mono);
+    font-size: 7px;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+  }
+  .form-section-title .hint { color: var(--faint); font-family: var(--font); font-size: 7.5px; letter-spacing: 0; text-transform: none; }
+  .format-options { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; }
+  .format-option {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    min-height: 43px;
+    padding: 7px 8px;
+    border: 1px solid var(--line-soft);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.025);
+    text-align: left;
+  }
+  .format-option b { color: var(--muted); font-size: 9px; font-weight: 550; }
+  .format-option span { color: var(--faint); font-size: 7px; }
+  .format-option:hover { border-color: var(--line); background: rgba(255, 255, 255, 0.045); }
+  .format-option.active { border-color: rgba(139, 203, 255, 0.27); background: rgba(139, 203, 255, 0.10); }
+  .format-option.active b { color: #d7f0ff; }
+  .format-option.active span { color: #9ddcff; }
+
+  .slider-row { display: flex; align-items: center; gap: 9px; }
+  .slider-row input[type="range"] {
+    flex: 1;
+    height: 18px;
+    margin: 0;
+    accent-color: var(--accent);
+  }
+  .slider-value {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 37px;
+    height: 23px;
+    border: 1px solid var(--line-soft);
+    border-radius: 5px;
+    background: rgba(255, 255, 255, 0.035);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 8px;
+  }
+  .range-labels { display: flex; justify-content: space-between; margin-top: -1px; color: var(--faint); font-family: var(--mono); font-size: 6.5px; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .form-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    min-height: 31px;
+    padding: 5px 0;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .form-row:last-child { border-bottom: 0; }
+  .form-row label { color: var(--muted); font-size: 8.5px; }
+  .form-row .form-control { display: flex; align-items: center; gap: 4px; }
+  .number-input {
+    width: 48px;
+    height: 25px;
+    padding: 0 6px;
+    border: 1px solid var(--line-soft);
+    border-radius: 6px;
+    background: rgba(3, 7, 14, 0.24);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 8px;
+    text-align: right;
+  }
+  .unit { color: var(--faint); font-family: var(--mono); font-size: 7px; }
+  .select-like {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 25px;
+    padding: 0 7px;
+    border: 1px solid var(--line-soft);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.028);
+    color: var(--muted);
+    font-size: 8px;
+  }
+  .select-like .icon { width: 10px; height: 10px; color: var(--faint); }
+  .path-box {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 30px;
+    padding: 0 8px;
+    border: 1px solid var(--line-soft);
+    border-radius: 7px;
+    background: rgba(3, 7, 14, 0.22);
+    color: var(--dim);
+    font-family: var(--mono);
+    font-size: 7.5px;
+  }
+  .path-box .icon { width: 11px; height: 11px; color: var(--faint); }
+  .path-box span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .path-box .btn { margin-left: auto; height: 23px; padding: 0 7px; font-size: 7.5px; }
+  .editor-foot {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex: 0 0 auto;
+    padding: 9px 14px;
+    border-top: 1px solid var(--line-soft);
+    background: rgba(4, 8, 16, 0.16);
+  }
+  .editor-foot .save-state { display: inline-flex; align-items: center; gap: 4px; color: var(--faint); font-family: var(--mono); font-size: 7px; }
+  .editor-foot .save-state .icon { width: 10px; height: 10px; color: var(--green); }
+  .editor-foot .btn { margin-left: auto; }
+  .compression-preview { margin-top: 12px; padding-top: 11px; border-top: 1px solid var(--line-soft); }
+  .compression-samples { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+  .compression-sample {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+    padding: 6px;
+    border: 1px solid var(--line-soft);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.022);
+  }
+  .sample-thumb { position: relative; width: 38px; height: 30px; flex: 0 0 38px; overflow: hidden; border-radius: 5px; background: #0a0e18; }
+  .sample-copy { min-width: 0; }
+  .sample-copy b { display: block; overflow: hidden; color: var(--muted); font-size: 8px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+  .sample-copy span { display: block; margin-top: 2px; color: var(--faint); font-family: var(--mono); font-size: 6.5px; white-space: nowrap; }
+  .sample-copy em { color: var(--green); font-style: normal; }
+  .mini-segmented { display: flex; gap: 2px; padding: 2px; border: 1px solid var(--line-soft); border-radius: 6px; background: rgba(3, 7, 14, 0.20); }
+  .mini-segmented button { height: 21px; padding: 0 7px; border: 0; border-radius: 4px; background: transparent; color: var(--faint); font-size: 7.5px; }
+  .mini-segmented button.active { background: rgba(255, 255, 255, 0.10); color: var(--text); }
+
+  /* ==========================================================================
+     Dashboard
+     ========================================================================== */
+  .dashboard-scroll { display: flex; flex: 1; flex-direction: column; min-height: 0; overflow: auto; padding-right: 2px; }
+  .stat-grid { display: grid; flex: 0 0 auto; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; }
+  .stat-card { position: relative; min-height: 76px; padding: 10px 11px; overflow: hidden; }
+  .stat-card::after {
+    content: "";
+    position: absolute;
+    right: -20px;
+    bottom: -32px;
+    width: 100px;
+    height: 100px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(139, 203, 255, 0.16), transparent 68%);
+    pointer-events: none;
+  }
+  .stat-top { display: flex; align-items: center; gap: 5px; color: var(--dim); font-size: 8.5px; }
+  .stat-top .icon { width: 12px; height: 12px; color: var(--accent); opacity: 0.8; }
+  .stat-value { margin-top: 6px; color: var(--text); font-size: 20px; font-weight: 620; letter-spacing: -0.04em; line-height: 1; }
+  .stat-value small { margin-left: 3px; color: var(--faint); font-family: var(--mono); font-size: 7px; font-weight: 400; letter-spacing: 0; }
+  .stat-sub { display: flex; align-items: center; gap: 4px; margin-top: 5px; color: var(--faint); font-family: var(--mono); font-size: 6.5px; }
+  .stat-sub .up { color: var(--green); }
+  .stat-sub .warn { color: var(--amber); }
+
+  .dash-grid { display: grid; flex: 1; grid-template-columns: minmax(0, 1.6fr) minmax(280px, 0.9fr); gap: 12px; min-height: 0; margin-top: 10px; }
+  .queue-card, .daemon-card, .session-card { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  .queue-card { height: 100%; }
+  .card-head {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-height: 39px;
+    flex: 0 0 auto;
+    padding: 0 11px 0 13px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .card-head strong { font-size: 10.5px; font-weight: 600; }
+  .card-head .badge { margin-left: 4px; }
+  .card-head .spacer { flex: 1; }
+  .card-head .icon-btn { width: 23px; height: 23px; }
+  .card-head .icon-btn .icon { width: 12px; height: 12px; }
+  .queue-list { flex: 1; min-height: 0; padding: 4px 6px 7px; overflow: auto; }
+  .queue-row {
+    display: grid;
+    grid-template-columns: 21px minmax(0, 1fr) 76px 75px;
+    align-items: center;
+    gap: 7px;
+    min-height: 38px;
+    padding: 5px 6px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.045);
+  }
+  .queue-row:last-child { border-bottom: 0; }
+  .queue-state { display: grid; place-items: center; width: 18px; height: 18px; border-radius: 5px; background: rgba(255, 255, 255, 0.045); color: var(--dim); }
+  .queue-state .icon { width: 10px; height: 10px; }
+  .queue-state.running { background: rgba(139, 203, 255, 0.12); color: var(--accent); }
+  .queue-state.failed { background: rgba(255, 148, 168, 0.11); color: var(--rose); }
+  .queue-state.done { background: rgba(126, 226, 184, 0.11); color: var(--green); }
+  .queue-name { min-width: 0; }
+  .queue-name b { display: block; overflow: hidden; color: var(--muted); font-size: 8.5px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+  .queue-name span { display: block; margin-top: 1px; color: var(--faint); font-family: var(--mono); font-size: 6.5px; }
+  .queue-progress { display: flex; flex-direction: column; gap: 3px; }
+  .queue-progress span { color: var(--faint); font-family: var(--mono); font-size: 6px; }
+  .queue-progress .progress { height: 3px; margin: 0; }
+  .queue-progress .progress i { background: linear-gradient(90deg, #70caff, #7f92ff); }
+  .queue-time { color: var(--faint); font-family: var(--mono); font-size: 6.5px; text-align: right; }
+  .queue-time.failed { color: var(--rose); }
+
+  .dash-side { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+  .daemon-card { flex: 0 0 auto; }
+  .daemon-body { padding: 10px 12px 11px; }
+  .daemon-status { display: flex; align-items: center; gap: 7px; margin-bottom: 8px; }
+  .daemon-orb {
+    display: grid;
+    place-items: center;
+    width: 27px; height: 27px;
+    border-radius: 9px;
+    background: rgba(126, 226, 184, 0.09);
+    color: var(--green);
+    box-shadow: inset 0 0 0 1px rgba(126, 226, 184, 0.13);
+  }
+  .daemon-orb .icon { width: 14px; height: 14px; }
+  .daemon-status b { display: block; color: var(--text); font-size: 9.5px; font-weight: 550; }
+  .daemon-status span { display: block; color: var(--faint); font-family: var(--mono); font-size: 6.5px; }
+  .daemon-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 5px 8px; padding: 7px 0; border-top: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); }
+  .daemon-meta span { display: block; color: var(--faint); font-family: var(--mono); font-size: 6.5px; }
+  .daemon-meta b { display: block; margin-top: 1px; color: var(--muted); font-family: var(--mono); font-size: 7.5px; font-weight: 400; }
+  .daemon-actions { display: flex; gap: 4px; margin-top: 8px; }
+  .daemon-actions .btn { flex: 1; height: 25px; padding: 0 6px; font-size: 7.5px; }
+  .session-card { flex: 1; min-height: 108px; }
+  .session-body { padding: 10px 12px; }
+  .session-world { display: flex; align-items: center; gap: 6px; color: var(--text); font-size: 9.5px; font-weight: 550; }
+  .session-world .live-dot { width: 4px; height: 4px; border-radius: 50%; background: var(--green); box-shadow: 0 0 6px rgba(126, 226, 184, 0.7); }
+  .session-body p { margin: 4px 0 0; color: var(--faint); font-family: var(--mono); font-size: 6.5px; }
+  .session-avatars { display: flex; margin-top: 8px; padding-left: 4px; }
+  .session-avatar {
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    margin-left: -4px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 50%;
+    background: linear-gradient(145deg, #4c91ff, #6c62e0);
+    color: #fff;
+    font-size: 6.5px;
+    font-weight: 600;
+  }
+  .session-avatar:nth-child(2) { background: linear-gradient(145deg, #ff9d75, #c75a82); }
+  .session-avatar:nth-child(3) { background: linear-gradient(145deg, #60d6b8, #328b9d); }
+  .session-avatar:nth-child(4) { background: linear-gradient(145deg, #ba8cff, #6c60d7); }
+
+  /* ==========================================================================
+     Settings
+     ========================================================================== */
+  .settings-layout { display: grid; flex: 1; grid-template-columns: 190px minmax(0, 1fr); gap: 12px; min-height: 0; }
+  .settings-nav { padding: 8px; overflow: auto; }
+  .settings-nav-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 4px 8px; margin-bottom: 6px; border-bottom: 1px solid var(--line-soft); }
+  .settings-nav-head strong { color: var(--text); font-size: 10px; font-weight: 600; }
+  .settings-nav-head .icon-btn { width: 24px; height: 24px; border-radius: 6px; }
+  .settings-nav-label { margin: 8px 7px 5px; color: var(--faint); font-family: var(--mono); font-size: 6.5px; letter-spacing: 0.14em; text-transform: uppercase; }
+  .settings-nav-label:first-child { margin-top: 2px; }
+  .settings-nav > button {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    width: 100%;
+    height: 30px;
+    padding: 0 8px;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--dim);
+    font-size: 8.5px;
+    text-align: left;
+  }
+  .settings-nav > button .icon { width: 13px; height: 13px; color: var(--faint); }
+  .settings-nav > button:hover { background: rgba(255, 255, 255, 0.04); color: var(--muted); }
+  .settings-nav > button.active { border-color: rgba(139, 203, 255, 0.14); background: rgba(139, 203, 255, 0.09); color: var(--text); }
+  .settings-nav > button.active .icon { color: var(--accent); }
+  .settings-panels { display: flex; flex-direction: column; gap: 10px; min-height: 0; padding-right: 2px; overflow: auto; }
+  .settings-card { padding: 13px 14px; }
+  .settings-card-head { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 10px; }
+  .settings-card-head .settings-icon {
+    display: grid;
+    place-items: center;
+    width: 25px; height: 25px;
+    border-radius: 7px;
+    background: rgba(139, 203, 255, 0.09);
+    color: var(--accent);
+  }
+  .settings-card-head .settings-icon .icon { width: 13px; height: 13px; }
+  .settings-card-head h3 { margin: 0; font-size: 10.5px; font-weight: 600; }
+  .settings-card-head p { margin: 2px 0 0; color: var(--faint); font-size: 7.5px; }
+  .settings-card-head .badge { margin-left: auto; }
+  .settings-list { display: flex; flex-direction: column; }
+  .setting-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    min-height: 34px;
+    padding: 5px 0;
+    border-top: 1px solid var(--line-soft);
+  }
+  .setting-row:first-child { border-top: 0; }
+  .setting-row label { color: var(--muted); font-size: 8.5px; }
+  .setting-row p { margin: 2px 0 0; color: var(--faint); font-size: 7px; }
+  .setting-row .value { color: var(--dim); font-family: var(--mono); font-size: 7.5px; }
+  .settings-path {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    height: 29px;
+    padding: 0 8px;
+    border: 1px solid var(--line-soft);
+    border-radius: 7px;
+    background: rgba(3, 7, 14, 0.20);
+    color: var(--dim);
+    font-family: var(--mono);
+    font-size: 7px;
+  }
+  .settings-path .icon { width: 11px; height: 11px; color: var(--faint); }
+  .settings-path span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .settings-path .btn { margin-left: auto; height: 22px; padding: 0 6px; font-size: 7px; }
+  .glass-options { display: flex; gap: 4px; }
+  .glass-option {
+    height: 24px;
+    padding: 0 8px;
+    border: 1px solid var(--line-soft);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.025);
+    color: var(--dim);
+    font-size: 7.5px;
+  }
+  .glass-option.active { border-color: rgba(139, 203, 255, 0.25); background: rgba(139, 203, 255, 0.10); color: #cdeeff; }
+  .settings-foot { display: flex; align-items: center; gap: 8px; margin-top: 2px; padding: 0 2px; }
+  .settings-foot .save-state { color: var(--faint); font-family: var(--mono); font-size: 6.5px; }
+  .settings-foot .btn { margin-left: auto; }
+
+  /* ==========================================================================
+     Import modal
+     ========================================================================== */
+  .modal-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+    display: none;
+    place-items: center;
+    padding: 24px;
+  }
+  .modal-layer.open { display: grid; }
+  .modal-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(2, 5, 10, 0.48);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    animation: fade-in 0.2s ease both;
+  }
+  .modal-card {
+    position: relative;
+    z-index: 1;
+    width: min(540px, 100%);
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 20px;
+    background:
+      linear-gradient(155deg, rgba(255, 255, 255, 0.115), rgba(255, 255, 255, 0.035) 58%),
+      rgba(12, 18, 31, 0.80);
+    box-shadow: 0 34px 100px rgba(0, 0, 0, 0.58), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+    backdrop-filter: blur(34px) saturate(150%);
+    -webkit-backdrop-filter: blur(34px) saturate(150%);
+    animation: modal-in 0.28s var(--ease) both;
+  }
+  @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+  @keyframes modal-in { from { opacity: 0; transform: translateY(12px) scale(0.985); } to { opacity: 1; transform: none; } }
+  .modal-head { display: flex; align-items: flex-start; gap: 10px; padding: 17px 18px 13px; border-bottom: 1px solid var(--line-soft); }
+  .modal-icon {
+    display: grid;
+    place-items: center;
+    width: 34px; height: 34px;
+    flex: 0 0 34px;
+    border-radius: 10px;
+    background: linear-gradient(145deg, rgba(139, 203, 255, 0.22), rgba(127, 146, 255, 0.10));
+    color: #c9eaff;
+    box-shadow: inset 0 0 0 1px rgba(139, 203, 255, 0.14);
+  }
+  .modal-icon .icon { width: 17px; height: 17px; }
+  .modal-head h2 { margin: 0; font-size: 14px; font-weight: 620; letter-spacing: -0.02em; }
+  .modal-head p { margin: 3px 0 0; color: var(--dim); font-size: 8.5px; }
+  .modal-head .icon-btn { margin-left: auto; }
+  .modal-body { display: flex; flex-direction: column; gap: 12px; padding: 15px 18px; }
+  .dropzone {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    min-height: 104px;
+    border: 1px dashed rgba(139, 203, 255, 0.27);
+    border-radius: 12px;
+    background: rgba(139, 203, 255, 0.045);
+    color: var(--dim);
+    text-align: center;
+  }
+  .dropzone:hover { border-color: rgba(139, 203, 255, 0.48); background: rgba(139, 203, 255, 0.075); }
+  .dropzone .icon { width: 25px; height: 25px; color: var(--accent); opacity: 0.8; }
+  .dropzone b { color: var(--muted); font-size: 9.5px; font-weight: 550; }
+  .dropzone span { color: var(--faint); font-size: 7.5px; }
+  .modal-section { display: flex; flex-direction: column; gap: 6px; }
+  .modal-label { color: var(--faint); font-family: var(--mono); font-size: 6.5px; letter-spacing: 0.11em; text-transform: uppercase; }
+  .mode-toggle { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 3px; border: 1px solid var(--line-soft); border-radius: 8px; background: rgba(3, 7, 14, 0.20); }
+  .mode-toggle button { height: 29px; border: 0; border-radius: 6px; background: transparent; color: var(--dim); font-size: 8.5px; }
+  .mode-toggle button.active { background: rgba(255, 255, 255, 0.10); color: var(--text); box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.09); }
+  .destination {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    height: 34px;
+    padding: 0 9px;
+    border: 1px solid var(--line-soft);
+    border-radius: 8px;
+    background: rgba(3, 7, 14, 0.22);
+    color: var(--dim);
+    font-family: var(--mono);
+    font-size: 7.5px;
+  }
+  .destination .icon { width: 13px; height: 13px; color: var(--faint); }
+  .destination span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .destination .btn { margin-left: auto; height: 23px; padding: 0 7px; font-size: 7.5px; }
+  .modal-foot { display: flex; align-items: center; gap: 6px; padding: 12px 18px 16px; border-top: 1px solid var(--line-soft); }
+  .modal-foot .note { color: var(--faint); font-size: 7.5px; }
+  .modal-foot .btn { margin-left: auto; }
+  .modal-foot .btn + .btn { margin-left: 0; }
+
+  /* ==========================================================================
+     Fullscreen viewer
+     ========================================================================== */
+  .viewer-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 80;
+    display: none;
+    flex-direction: column;
+    background:
+      radial-gradient(ellipse at 50% 20%, rgba(35, 60, 110, 0.22), transparent 60%),
+      rgba(3, 5, 9, 0.72);
+    backdrop-filter: blur(18px) saturate(120%);
+    -webkit-backdrop-filter: blur(18px) saturate(120%);
+  }
+  .viewer-layer.open { display: flex; animation: fade-in 0.22s ease both; }
+  .viewer-top {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 56px;
+    flex: 0 0 56px;
+    padding: 0 16px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.075);
+    background: rgba(8, 12, 20, 0.35);
+    backdrop-filter: blur(18px);
+  }
+  .viewer-top .viewer-file { min-width: 0; }
+  .viewer-top .viewer-file b { display: block; overflow: hidden; color: var(--text); font-size: 10.5px; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
+  .viewer-top .viewer-file span { display: block; margin-top: 2px; color: var(--faint); font-family: var(--mono); font-size: 7px; }
+  .viewer-nav { display: flex; gap: 3px; }
+  .viewer-top .btn { margin-left: auto; }
+  .viewer-body { display: flex; flex: 1; min-height: 0; gap: 14px; padding: 15px; }
+  .viewer-stage { display: flex; flex: 1; align-items: center; justify-content: center; min-width: 0; min-height: 0; }
+  .viewer-frame {
+    position: relative;
+    width: min(100%, 1180px);
+    aspect-ratio: 16 / 10;
+    max-height: 100%;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.13);
+    border-radius: 17px;
+    background: #0a0e18;
+    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+  }
+  .viewer-details {
+    display: flex;
+    flex-direction: column;
+    width: 292px;
+    flex: 0 0 292px;
+    min-height: 0;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: var(--r-inner);
+    background: rgba(10, 16, 28, 0.54);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    backdrop-filter: blur(22px);
+  }
+  .viewer-details-head { display: flex; align-items: center; justify-content: space-between; height: 39px; flex: 0 0 39px; padding: 0 12px; border-bottom: 1px solid var(--line-soft); color: var(--dim); font-family: var(--mono); font-size: 7px; letter-spacing: 0.12em; text-transform: uppercase; }
+  .viewer-details-scroll { flex: 1; min-height: 0; padding: 13px; overflow: auto; }
+  .viewer-details h2 { margin: 0; font-size: 15px; font-weight: 620; letter-spacing: -0.025em; }
+  .viewer-details .viewer-date { margin: 4px 0 9px; color: var(--dim); font-family: var(--mono); font-size: 7.5px; }
+  .viewer-details .meta-grid { margin-top: 12px; }
+  .viewer-details .section-head { margin-top: 15px; }
+  .viewer-details .inspector-foot { border-radius: 0 0 var(--r-inner) var(--r-inner); }
+  .viewer-count { color: var(--faint); font-family: var(--mono); font-size: 7px; }
+  .viewer-close-hint { color: var(--faint); font-size: 7.5px; }
+  .viewer-top .icon-btn { width: 29px; height: 29px; }
+
+  /* ==========================================================================
+     Toast
+     ========================================================================== */
+  .toast {
+    position: fixed;
+    left: 50%;
+    bottom: 28px;
+    z-index: 120;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    max-width: min(420px, calc(100vw - 40px));
+    padding: 8px 12px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 9px;
+    background: rgba(12, 18, 30, 0.82);
+    color: var(--muted);
+    font-size: 9px;
+    box-shadow: 0 14px 40px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+    backdrop-filter: blur(18px);
+    opacity: 0;
+    pointer-events: none;
+    transform: translate(-50%, 8px);
+    transition: opacity 0.2s ease, transform 0.24s var(--ease);
+  }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+  .toast .icon { width: 13px; height: 13px; color: var(--accent); }
+
+  /* ==========================================================================
+     Typography refinement — keep dense desktop chrome legible
+     ========================================================================== */
+  .nav-label { font-size: 8px; }
+  .nav-item { font-size: 11.5px; }
+  .status-row { font-size: 10px; }
+  .status-row b { font-size: 11px; }
+  .status-note { font-size: 9px; }
+  .mini-btn { font-size: 9px; }
+  .storage-head { font-size: 10px; }
+  .storage-meta { font-size: 8px; }
+  .tb-app, .tb-crumb { font-size: 11px; }
+  .live-pill { font-size: 9px; }
+  .ribbon-tab { font-size: 10.5px; }
+  .rb-label { font-size: 7.5px; }
+  .rb-btn { font-size: 9.5px; }
+  .rb-btn .rb-hint { font-size: 7px; }
+  .rb-btn.small { font-size: 9.5px; }
+  .view-sub { font-size: 9.5px; }
+  .filter-chip { font-size: 9px; }
+  .sort-chip { font-size: 9px; }
+  .photo-title { font-size: 10.5px; }
+  .photo-meta { font-size: 7.5px; }
+  .inspector-head { font-size: 7.5px; }
+  .inspector-date { font-size: 8px; }
+  .badge { font-size: 8px; }
+  .meta-grid label { font-size: 7px; }
+  .meta-grid b { font-size: 9px; }
+  .section-head { font-size: 7.5px; }
+  .tag { font-size: 8px; }
+  .form-row label { font-size: 9px; }
+  .format-option b { font-size: 9.5px; }
+  .format-option span { font-size: 7.5px; }
+  .profile-top strong { font-size: 10.5px; }
+  .queue-name b { font-size: 9px; }
+  .queue-name span { font-size: 7px; }
+  .settings-card-head h3 { font-size: 11px; }
+  .setting-row label { font-size: 9px; }
+  .settings-nav > button { font-size: 9px; }
+
+  /* ==========================================================================
+     Responsive
+     ========================================================================== */
+  @media (max-width: 1320px) {
+    .sidebar { flex-basis: 228px; width: 228px; }
+    .photo-layout { grid-template-columns: minmax(0, 1fr) 276px; }
+    .rb-group.tight { display: none; }
+    .search-inline { width: 148px; }
+  }
+
+  @media (max-width: 1180px) {
+    .sidebar { flex-basis: 214px; width: 214px; }
+    .photo-layout { grid-template-columns: minmax(0, 1fr) 254px; }
+    .view-actions .btn .kbd-hint { display: none; }
+    .filter-chip.optional { display: none; }
+    .rb-right-note { display: none; }
+    .rb-status-group { display: none; }
+    .dash-grid { grid-template-columns: minmax(0, 1.4fr) minmax(240px, 0.9fr); }
+    .search-layout { grid-template-columns: 244px minmax(0, 1fr); }
+    .compression-layout { grid-template-columns: 250px minmax(0, 1fr); }
+    .settings-layout { grid-template-columns: 170px minmax(0, 1fr); }
+    .gallery-search { display: none; }
+  }
+
+  @media (max-width: 1060px) {
+    .app-window { width: calc(100vw - 20px); height: calc(100dvh - 20px); margin: 10px auto; padding: 10px; }
+    .sidebar { flex-basis: 78px; width: 78px; padding-right: 9px; padding-left: 9px; }
+    .brand { justify-content: center; padding-right: 0; padding-left: 0; }
+    .brand-copy, .brand-badge, .nav-label, .nav-count, .status-card, .storage-card, .version, .daemon-pill { display: none; }
+    .nav-item { justify-content: center; padding: 0; }
+    .sidebar-foot { justify-content: center; }
+    .photo-layout { grid-template-columns: minmax(0, 1fr); }
+    .inspector { display: none; }
+    .stat-grid { grid-template-columns: repeat(2, 1fr); }
+    .dash-grid { grid-template-columns: 1fr; }
+    .dash-side { flex-direction: row; }
+    .daemon-card, .session-card { flex: 1; }
+    .settings-layout { grid-template-columns: 150px minmax(0, 1fr); }
+  }
+
+  @media (max-height: 760px) {
+    .status-card { display: none; }
+    .sidebar-spacer { min-height: 4px; }
+    .app-window .ribbon-body { height: 62px; flex-basis: 62px; }
+    .rb-btn { height: 38px; font-size: 9px; }
+    .rb-btn.small { height: 19px; }
+    .inspector-head { height: 32px; flex-basis: 32px; }
+    .inspector-preview { height: 118px; }
+    .inspector-body { padding: 8px 10px; }
+    .meta-grid { padding: 5px; gap: 4px 8px; }
+    .section-head { margin-top: 6px; }
+    .player { width: 20px; height: 20px; }
+    .tag { height: 16px; }
+    .inspector-foot { padding: 6px 8px; }
+    .screen { padding-top: 10px; padding-bottom: 10px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      scroll-behavior: auto !important;
+      transition-duration: 0.001ms !important;
+    }
+  }
+</style>
+</head>
+<body>
+
+<!-- Icon sprite -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-aperture" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M14.6 21 12 12l-4.2 7.3M21 8.5h-8.4L17 3.5M3 8.5l4.2 7.3L9.6 3M14.6 21H6.9M3 15.5h8.4"/></symbol>
+    <symbol id="i-images" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="1.6"/><path d="m21 15-4.5-4.5L7 21"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 6h10M18 6h2M4 12h2M10 12h10M4 18h7M15 18h5"/><circle cx="16" cy="6" r="2"/><circle cx="8" cy="12" r="2"/><circle cx="13" cy="18" r="2"/></symbol>
+    <symbol id="i-dashboard" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="4" rx="1.5"/><rect x="14" y="10" width="7" height="11" rx="1.5"/><rect x="3" y="13" width="7" height="8" rx="1.5"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 1.56V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 9 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.56-1H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-1.56V3a2 2 0 1 1 4 0v.09A1.7 1.7 0 0 0 15 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.4 9c.14.62.66 1.06 1.3 1.08H21a2 2 0 1 1 0 4h-.09A1.7 1.7 0 0 0 19.4 15Z"/></symbol>
+    <symbol id="i-folder-plus" viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.6-.8L9.2 3.5A2 2 0 0 0 7.6 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="M12 10v6M9 13h6"/></symbol>
+    <symbol id="i-folder-move" viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.6-.8L9.2 3.5A2 2 0 0 0 7.6 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="m14 13-3 3 3 3M11 16h7"/></symbol>
+    <symbol id="i-folder-open" viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.6-.8L9.2 3.5A2 2 0 0 0 7.6 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="m3 12 2.4-3.2A2 2 0 0 1 7 8h14l-3 8H4Z"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.6 9A7.5 7.5 0 0 1 19 7l1 5M4 12l1 5a7.5 7.5 0 0 0 13.4-2"/></symbol>
+    <symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/></symbol>
+    <symbol id="i-select-all" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="m7 12 3 3 7-7"/></symbol>
+    <symbol id="i-select-none" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="m8 8 8 8M16 8l-8 8"/></symbol>
+    <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M15 4v16"/></symbol>
+    <symbol id="i-wand" viewBox="0 0 24 24"><path d="m15 4 5 5M13 6l5 5M4 20 17 7M5 4v3M3.5 5.5h3M19 16v3M17.5 17.5h3"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l13-7.5Z"/></symbol>
+    <symbol id="i-queue" viewBox="0 0 24 24"><path d="M4 6h16M4 12h11M4 18h7"/><path d="m17 16 3 2-3 2Z"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.4"/><rect x="14" y="3" width="7" height="7" rx="1.4"/><rect x="3" y="14" width="7" height="7" rx="1.4"/><rect x="14" y="14" width="7" height="7" rx="1.4"/></symbol>
+    <symbol id="i-list" viewBox="0 0 24 24"><path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></symbol>
+    <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-3-5.6 3 1.1-6.2L3 9.6l6.2-.9Z"/></symbol>
+    <symbol id="i-tag" viewBox="0 0 24 24"><path d="M20.6 13.4 11 3H4v7l9.6 9.6a2 2 0 0 0 2.8 0l4.2-4.2a2 2 0 0 0 0-2Z"/><circle cx="7.5" cy="6.5" r="1"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M6 6l1 15h10l1-15M10 11v6M14 11v6"/></symbol>
+    <symbol id="i-maximize" viewBox="0 0 24 24"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5"/></symbol>
+    <symbol id="i-minimize" viewBox="0 0 24 24"><path d="M4 12h16"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-restore" viewBox="0 0 24 24"><rect x="4" y="8" width="12" height="12" rx="2"/><path d="M8 8V6a2 2 0 0 1 2-2h10v10a2 2 0 0 1-2 2h-2"/></symbol>
+    <symbol id="i-bell" viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-chevron-up" viewBox="0 0 24 24"><path d="m6 15 6-6 6 6"/></symbol>
+    <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="i-chevron-left" viewBox="0 0 24 24"><path d="m15 6-6 6 6 6"/></symbol>
+    <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+    <symbol id="i-arrow-right" viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></symbol>
+    <symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></symbol>
+    <symbol id="i-calendar" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2.5"/><path d="M16 3v4M8 3v4M3 10h18"/></symbol>
+    <symbol id="i-hard-drive" viewBox="0 0 24 24"><path d="M4 4h16l2 10v4a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-4Z"/><path d="M2 14h20M7 17h.01M11 17h.01"/></symbol>
+    <symbol id="i-activity" viewBox="0 0 24 24"><path d="M3 12h4l2.5-7 5 14 2.5-7h4"/></symbol>
+    <symbol id="i-server" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M11 6.5h5M11 17.5h5"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 4.5 6v6c0 4.5 3 7.3 7.5 9 4.5-1.7 7.5-4.5 7.5-9V6Z"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="i-keyboard" viewBox="0 0 24 24"><rect x="2" y="5" width="20" height="14" rx="2.5"/><path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01M6 13h.01M10 13h.01M14 13h.01M18 13h.01M7 17h10"/></symbol>
+    <symbol id="i-palette" viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 0 18h1.5a2 2 0 0 0 0-4H12a2 2 0 0 1 0-4h4.5A4.5 4.5 0 0 0 21 8.5C21 5.5 17 3 12 3Z"/><circle cx="7.5" cy="10" r="1"/><circle cx="10" cy="6.5" r="1"/><circle cx="15" cy="6.5" r="1"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z"/><path d="M14 3v6h6M8 13h8M8 17h6"/></symbol>
+    <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/></symbol>
+    <symbol id="i-rotate" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.3 4.2 2.6 18a2 2 0 0 0 1.8 3h15.2a2 2 0 0 0 1.8-3L13.7 4.2a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4M12 17h.01"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 20h16"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5M4 20h16"/></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2.5"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></symbol>
+    <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></symbol>
+    <symbol id="i-zap" viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7Z"/></symbol>
+    <symbol id="i-filter" viewBox="0 0 24 24"><path d="M4 5h16l-6 7v6l-4 2v-8Z"/></symbol>
+    <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 15.5A8.5 8.5 0 0 1 8.5 4 8.5 8.5 0 1 0 20 15.5Z"/></symbol>
+    <symbol id="i-command" viewBox="0 0 24 24"><path d="M9 6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3Z"/></symbol>
+    <symbol id="i-layers" viewBox="0 0 24 24"><path d="m12 3 9 5-9 5-9-5Z"/><path d="m3 12 9 5 9-5M3 16l9 5 9-5"/></symbol>
+    <symbol id="i-pin" viewBox="0 0 24 24"><path d="M12 17v5M7 3h10l-1 6 3 3v2H5v-2l3-3Z"/></symbol>
+  </defs>
+</svg>
+
+<div class="wallpaper" aria-hidden="true">
+  <span class="wall-orb orb-a"></span>
+  <span class="wall-orb orb-b"></span>
+  <span class="wall-orb orb-c"></span>
+  <span class="wall-orb orb-d"></span>
+  <span class="wall-ring ring-a"></span>
+  <span class="wall-ring ring-b"></span>
+  <span class="wall-star star-a"></span>
+  <span class="wall-star star-b"></span>
+  <span class="wall-star star-c"></span>
+  <span class="wall-star star-d"></span>
+</div>
+
+<div class="app-window" id="appWindow">
+
+  <!-- ================= Sidebar card ================= -->
+  <aside class="sidebar card" aria-label="メインナビゲーション">
+    <div class="brand">
+      <div class="brand-mark"><svg class="icon"><use href="#i-aperture"/></svg></div>
+      <div class="brand-copy">
+        <strong>VRC Photo</strong>
+        <span>MANAGER</span>
+      </div>
+      <span class="brand-badge">LOCAL</span>
+    </div>
+
+    <nav class="nav">
+      <p class="nav-label">コレクション</p>
+      <button class="nav-item active" data-nav="photos">
+        <svg class="icon"><use href="#i-images"/></svg>
+        <span>写真</span>
+        <span class="nav-count">2,418</span>
+      </button>
+      <button class="nav-item" data-nav="search">
+        <svg class="icon"><use href="#i-search"/></svg>
+        <span>検索</span>
+      </button>
+
+      <p class="nav-label">ワークフロー</p>
+      <button class="nav-item" data-nav="compression">
+        <svg class="icon"><use href="#i-sliders"/></svg>
+        <span>圧縮</span>
+        <span class="nav-count">7</span>
+      </button>
+      <button class="nav-item" data-nav="dashboard">
+        <svg class="icon"><use href="#i-dashboard"/></svg>
+        <span>ダッシュボード</span>
+        <span class="nav-status" title="デーモン稼働中"></span>
+      </button>
+
+      <p class="nav-label">システム</p>
+      <button class="nav-item" data-nav="settings">
+        <svg class="icon"><use href="#i-settings"/></svg>
+        <span>設定</span>
+      </button>
+    </nav>
+
+    <div class="sidebar-spacer"></div>
+
+    <section class="status-card" aria-label="進行状況">
+      <div class="status-head">
+        <span>進行状況</span>
+        <button class="icon-btn" data-action="status-more" title="進行状況の詳細"><svg class="icon"><use href="#i-more"/></svg></button>
+      </div>
+      <div class="status-tabs" role="tablist" aria-label="進行状況の種類">
+        <button class="status-tab active" data-status-tab="compress" role="tab" aria-selected="true">圧縮</button>
+        <button class="status-tab" data-status-tab="import" role="tab" aria-selected="false">取込</button>
+        <button class="status-tab" data-status-tab="scan" role="tab" aria-selected="false">スキャン<i class="tab-dot"></i></button>
+      </div>
+      <div class="status-row"><span id="statusLabel">圧縮キュー</span><b><span class="accent" id="statusValue">12 / 18</span></b></div>
+      <div class="progress"><i id="statusBar" style="width:66%"></i></div>
+      <p class="status-note" id="statusNote">残り 6 件 · 約 2 分</p>
+      <button class="mini-btn" id="statusAction" data-action="open-queue">キューを開く <svg class="icon"><use href="#i-arrow-right"/></svg></button>
+    </section>
+
+    <section class="storage-card" aria-label="ライブラリ容量">
+      <div class="storage-head"><span>ライブラリ</span><span>38.6 GB</span></div>
+      <div class="progress thin"><i style="width:61%"></i></div>
+      <div class="storage-meta"><span>2,418 枚</span><span>空き 24.4 GB</span></div>
+    </section>
+
+    <footer class="sidebar-foot">
+      <span class="daemon-pill"><i></i>監視中</span>
+      <span class="version">v0.8.0-dev</span>
+      <button class="icon-btn" id="collapseSidebar" title="サイドバーを最小化 (Ctrl+B)"><svg class="icon"><use href="#i-chevron-left"/></svg></button>
+    </footer>
+  </aside>
+
+  <!-- ================= Main column ================= -->
+  <div class="main-column">
+
+    <!-- Header card: custom titlebar + ribbon -->
+    <header class="chrome card">
+      <div class="titlebar">
+        <div class="tb-left">
+          <span class="app-glyph"><svg class="icon"><use href="#i-aperture"/></svg></span>
+          <span class="tb-app">VRC Photo Manager</span>
+          <span class="tb-sep"></span>
+          <span class="tb-crumb" id="titlebarCrumb">ライブラリ</span>
+          <div class="ribbon-tablist" role="tablist" aria-label="リボン">
+            <button class="ribbon-tab active" data-ribbon-tab="home" role="tab" aria-selected="true">ホーム</button>
+            <button class="ribbon-tab" data-ribbon-tab="photo" role="tab" aria-selected="false">写真</button>
+            <button class="ribbon-tab" data-ribbon-tab="compression" role="tab" aria-selected="false">圧縮</button>
+          </div>
+        </div>
+        <div class="tb-right">
+          <span class="live-pill"><i></i>デーモン稼働中</span>
+          <span class="tb-sync"><svg class="icon"><use href="#i-clock"/></svg>12:42</span>
+          <button class="icon-btn collapse-ribbon" id="collapseRibbon" title="リボンを折りたたむ"><svg class="icon"><use href="#i-chevron-up"/></svg></button>
+          <button class="icon-btn tb-icon" data-action="notifications" title="通知">
+            <svg class="icon"><use href="#i-bell"/></svg>
+            <span class="notif-dot"></span>
+          </button>
+          <div class="window-controls">
+            <button class="win-btn" data-win="min" title="最小化"><svg class="icon"><use href="#i-minimize"/></svg></button>
+            <button class="win-btn" data-win="max" title="最大化"><svg class="icon"><use href="#i-maximize"/></svg></button>
+            <button class="win-btn close" data-win="close" title="閉じる"><svg class="icon"><use href="#i-close"/></svg></button>
+          </div>
+        </div>
+      </div>
+
+      <div class="ribbon-body">
+        <!-- Home: frequent, non-settings commands -->
+        <div class="ribbon-page active" data-ribbon-page="home">
+          <div class="rb-group">
+            <div class="rb-items">
+              <button class="rb-btn" data-action="import-copy">
+                <svg class="icon"><use href="#i-folder-plus"/></svg>
+                <span>コピー取込</span>
+              </button>
+              <button class="rb-btn" data-action="import-move">
+                <svg class="icon"><use href="#i-folder-move"/></svg>
+                <span>移動取込</span>
+              </button>
+            </div>
+            <small class="rb-label">取り込み</small>
+          </div>
+          <div class="rb-group">
+            <div class="rb-items">
+              <button class="rb-btn" data-action="reload">
+                <svg class="icon"><use href="#i-refresh"/></svg>
+                <span>再読込</span>
+              </button>
+              <div class="rb-stack">
+                <button class="rb-btn small" data-action="open-folder"><svg class="icon"><use href="#i-folder-open"/></svg>フォルダを開く</button>
+                <button class="rb-btn small" data-action="rebuild-index"><svg class="icon"><use href="#i-database"/></svg>索引を再構築</button>
+              </div>
+            </div>
+            <small class="rb-label">ライブラリ</small>
+          </div>
+          <div class="rb-group rb-photo-only">
+            <div class="rb-items">
+              <button class="rb-btn on" data-action="toggle-inspector">
+                <svg class="icon"><use href="#i-panel"/></svg>
+                <span>詳細パネル</span>
+              </button>
+            </div>
+            <small class="rb-label">表示</small>
+          </div>
+          <div class="rb-group grow rb-status-group">
+            <div class="rb-items">
+              <div class="rb-right-note"><svg class="icon"><use href="#i-layers"/></svg>選択中 1 枚 · 2,418 枚 / 38.6 GB</div>
+            </div>
+            <small class="rb-label">現在の状態</small>
+          </div>
+        </div>
+
+        <!-- Photo: selection and photo actions -->
+        <div class="ribbon-page" data-ribbon-page="photo">
+          <div class="rb-group">
+            <div class="rb-items">
+              <button class="rb-btn on" data-action="view-grid">
+                <svg class="icon"><use href="#i-grid"/></svg>
+                <span>グリッド</span>
+              </button>
+              <button class="rb-btn" data-action="view-list">
+                <svg class="icon"><use href="#i-list"/></svg>
+                <span>リスト</span>
+              </button>
+            </div>
+            <small class="rb-label">表示形式</small>
+          </div>
+          <div class="rb-group">
+            <div class="rb-items">
+              <button class="rb-btn" data-action="select-all">
+                <svg class="icon"><use href="#i-select-all"/></svg>
+                <span>すべて選択</span>
+              </button>
+              <button class="rb-btn" data-action="clear-selection">
+                <svg class="icon"><use href="#i-select-none"/></svg>
+                <span>選択解除</span>
+              </button>
+              <button class="rb-btn" data-action="favorite">
+                <svg class="icon"><use href="#i-star"/></svg>
+                <span>お気に入り</span>
+              </button>
+            </div>
+            <small class="rb-label">選択</small>
+          </div>
+          <div class="rb-group">
+            <div class="rb-items">
+              <button class="rb-btn" data-action="fullscreen-view">
+                <svg class="icon"><use href="#i-maximize"/></svg>
+                <span>全画面</span>
+              </button>
+              <button class="rb-btn" data-action="edit-tags">
+                <svg class="icon"><use href="#i-tag"/></svg>
+                <span>タグ</span>
+              </button>
+              <button class="rb-btn" data-action="note">
+                <svg class="icon"><use href="#i-file"/></svg>
+                <span>メモ</span>
+              </button>
+            </div>
+            <small class="rb-label">詳細</small>
+          </div>
+          <div class="rb-group">
+            <div class="rb-items">
+              <button class="rb-btn" data-action="trash">
+                <svg class="icon"><use href="#i-trash"/></svg>
+                <span>ゴミ箱へ</span>
+              </button>
+              <button class="rb-btn" data-action="manual-compress">
+                <svg class="icon"><use href="#i-wand"/></svg>
+                <span>圧縮</span>
+              </button>
+            </div>
+            <small class="rb-label">整理</small>
+          </div>
+          <div class="rb-group grow rb-status-group">
+            <div class="rb-items">
+              <div class="rb-right-note"><svg class="icon"><use href="#i-keyboard"/></svg>ダブルクリックで全画面 · Space</div>
+            </div>
+            <small class="rb-label">ヒント</small>
+          </div>
+        </div>
+
+        <!-- Compression: execution and queue -->
+        <div class="ribbon-page" data-ribbon-page="compression">
+          <div class="rb-group">
+            <div class="rb-items">
+              <button class="rb-btn primary" data-action="manual-compress">
+                <svg class="icon"><use href="#i-wand"/></svg>
+                <span>手動圧縮</span>
+              </button>
+              <button class="rb-btn" data-action="release-waiting">
+                <svg class="icon"><use href="#i-play"/></svg>
+                <span>待機を圧縮</span>
+              </button>
+              <button class="rb-btn" data-action="retry-failed">
+                <svg class="icon"><use href="#i-rotate"/></svg>
+                <span>失敗を再試行</span>
+              </button>
+            </div>
+            <small class="rb-label">実行</small>
+          </div>
+          <div class="rb-group">
+            <div class="rb-items">
+              <button class="rb-btn" data-action="open-queue">
+                <svg class="icon"><use href="#i-queue"/></svg>
+                <span>キュー</span>
+              </button>
+              <button class="rb-btn" data-action="open-dashboard">
+                <svg class="icon"><use href="#i-dashboard"/></svg>
+                <span>状態</span>
+              </button>
+            </div>
+            <small class="rb-label">キュー</small>
+          </div>
+          <div class="rb-group grow rb-status-group">
+            <div class="rb-items">
+              <div class="rb-right-note"><svg class="icon"><use href="#i-shield"/></svg>自動適用: 高画質 WebP · 元画像を保持</div>
+            </div>
+            <small class="rb-label">現在の設定</small>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- ================= Content area: inner cards only ================= -->
+    <main class="content" id="contentArea">
+
+      <!-- Photos -->
+      <section class="screen active" data-screen="photos" aria-label="ライブラリ">
+        <div class="photo-layout" id="photoLayout">
+          <div class="gallery card-sub">
+            <div class="gallery-head">
+              <div class="gallery-month"><strong>2026年10月</strong><span>9 枚 / 2,418</span></div>
+              <div class="gallery-tools">
+                <button class="filter-chip gallery-filter" data-action="filter-world">
+                  <svg class="icon"><use href="#i-filter"/></svg>フィルター<span class="gallery-filter-count">2</span>
+                </button>
+                <div class="gallery-search">
+                  <svg class="icon"><use href="#i-search"/></svg>
+                  <input type="search" placeholder="ライブラリを検索" aria-label="ライブラリを検索">
+                </div>
+                <button class="sort-chip" data-action="sort-menu">新しい順 <svg class="icon"><use href="#i-chevron-down"/></svg></button>
+                <button class="icon-btn" data-action="gallery-more" title="その他"><svg class="icon"><use href="#i-more"/></svg></button>
+              </div>
+            </div>
+            <div class="gallery-scroll">
+              <div class="photo-grid" id="photoGrid">
+                <button class="photo-card selected" data-photo="1" data-scene="neon-city" data-title="Midnight Rooftop" data-date="2026年10月24日 23:41" data-world="Midnight Rooftop" data-size="3.8 MB" data-players="Luna|Kaito|Mio|Ash" data-tags="夜景|屋上|フレンズ" data-fav="true">
+                  <div class="photo-visual">
+                    <div class="scene scene-neon-city"></div>
+                    <span class="photo-check"><svg class="icon"><use href="#i-check"/></svg></span>
+                    <span class="photo-fav"><svg class="icon icon-filled"><use href="#i-star"/></svg></span>
+                    <span class="photo-format">WEBP 82</span>
+                  </div>
+                  <div class="photo-info">
+                    <span class="photo-title">Midnight Rooftop</span>
+                    <span class="photo-meta"><span class="meta-left"><i class="meta-dot"></i>10/24 · 23:41</span><span>3.8 MB</span></span>
+                  </div>
+                </button>
+
+                <button class="photo-card" data-photo="2" data-scene="shrine" data-title="千本鳥居の夕暮れ" data-date="2026年10月22日 17:08" data-world="千本鳥居" data-size="5.1 MB" data-players="Hina|Ren|Sora" data-tags="和風|夕焼け|観光" data-fav="true">
+                  <div class="photo-visual">
+                    <div class="scene scene-shrine"></div>
+                    <span class="photo-check"><svg class="icon"><use href="#i-check"/></svg></span>
+                    <span class="photo-fav"><svg class="icon icon-filled"><use href="#i-star"/></svg></span>
+                    <span class="photo-format">WEBP 84</span>
+                  </div>
+                  <div class="photo-info">
+                    <span class="photo-title">千本鳥居の夕暮れ</span>
+                    <span class="photo-meta"><span class="meta-left"><i class="meta-dot"></i>10/22 · 17:08</span><span>5.1 MB</span></span>
+                  </div>
+                </button>
+
+                <button class="photo-card" data-photo="3" data-scene="alley" data-title="Neon Alley 03" data-date="2026年10月20日 01:12" data-world="Neon Alley" data-size="2.9 MB" data-players="Kaito|Nox|Eri" data-tags="サイバー|夜|撮影会" data-fav="false">
+                  <div class="photo-visual">
+                    <div class="scene scene-alley"></div>
+                    <span class="photo-check"><svg class="icon"><use href="#i-check"/></svg></span>
+                    <span class="photo-format">RAW · 未圧縮</span>
+                  </div>
+                  <div class="photo-info">
+                    <span class="photo-title">Neon Alley 03</span>
+                    <span class="photo-meta"><span class="meta-left"><i class="meta-dot pending"></i>10/20 · 01:12</span><span>2.9 MB</span></span>
+                  </div>
+                </button>
+
+                <button class="photo-card" data-photo="4" data-scene="beach" data-title="Last Light Beach" data-date="2026年10月18日 18:34" data-world="Last Light Beach" data-size="4.2 MB" data-players="Mio|Ash|Haru|Yuki" data-tags="海|夕日|リラックス" data-fav="false">
+                  <div class="photo-visual">
+                    <div class="scene scene-beach"></div>
+                    <span class="photo-check"><svg class="icon"><use href="#i-check"/></svg></span>
+                    <span class="photo-format">WEBP 82</span>
+                  </div>
+                  <div class="photo-info">
+                    <span class="photo-title">Last Light Beach</span>
+                    <span class="photo-meta"><span class="meta-left"><i class="meta-dot"></i>10/18 · 18:34</span><span>4.2 MB</span></span>
+                  </div>
+                </button>
+
+                <button class="photo-card" data-photo="5" data-scene="bar" data-title="Amber Lounge" data-date="2026年10月17日 22:05" data-world="Amber Lounge" data-size="3.1 MB" data-players="Luna|Ren|Nox" data-tags="バー|室内|アフター" data-fav="true">
+                  <div class="photo-visual">
+                    <div class="scene scene-bar"></div>
+                    <span class="photo-check"><svg class="icon"><use href="#i-check"/></svg></span>
+                    <span class="photo-fav"><svg class="icon icon-filled"><use href="#i-star"/></svg></span>
+                    <span class="photo-format">WEBP 80</span>
+                  </div>
+                  <div class="photo-info">
+                    <span class="photo-title">Amber Lounge</span>
+                    <span class="photo-meta"><span class="meta-left"><i class="meta-dot"></i>10/17 · 22:05</span><span>3.1 MB</span></span>
+                  </div>
+                </button>
+
+                <button class="photo-card" data-photo="6" data-scene="snow" data-title="Snowbound Cabin" data-date="2026年10月12日 09:20" data-world="Snowbound Cabin" data-size="6.4 MB" data-players="Yuki|Haru|Sora" data-tags="雪|冬|山" data-fav="false">
+                  <div class="photo-visual">
+                    <div class="scene scene-snow"></div>
+                    <span class="photo-check"><svg class="icon"><use href="#i-check"/></svg></span>
+                    <span class="photo-format">RAW · 未圧縮</span>
+                  </div>
+                  <div class="photo-info">
+                    <span class="photo-title">Snowbound Cabin</span>
+                    <span class="photo-meta"><span class="meta-left"><i class="meta-dot pending"></i>10/12 · 09:20</span><span>6.4 MB</span></span>
+                  </div>
+                </button>
+
+                <button class="photo-card" data-photo="7" data-scene="space" data-title="Orbital Window" data-date="2026年10月08日 20:57" data-world="Orbital Window" data-size="3.6 MB" data-players="Nox|Eri|Kaito|Mio" data-tags="SF|宇宙|夜景" data-fav="false">
+                  <div class="photo-visual">
+                    <div class="scene scene-space"></div>
+                    <span class="photo-check"><svg class="icon"><use href="#i-check"/></svg></span>
+                    <span class="photo-format">WEBP 82</span>
+                  </div>
+                  <div class="photo-info">
+                    <span class="photo-title">Orbital Window</span>
+                    <span class="photo-meta"><span class="meta-left"><i class="meta-dot"></i>10/08 · 20:57</span><span>3.6 MB</span></span>
+                  </div>
+                </button>
+
+                <button class="photo-card" data-photo="8" data-scene="forest" data-title="Lantern Forest" data-date="2026年10月03日 19:44" data-world="Lantern Forest" data-size="4.8 MB" data-players="Hina|Mio|Luna" data-tags="森|ランタン|イベント" data-fav="true">
+                  <div class="photo-visual">
+                    <div class="scene scene-forest"></div>
+                    <span class="photo-check"><svg class="icon"><use href="#i-check"/></svg></span>
+                    <span class="photo-fav"><svg class="icon icon-filled"><use href="#i-star"/></svg></span>
+                    <span class="photo-format">WEBP 84</span>
+                  </div>
+                  <div class="photo-info">
+                    <span class="photo-title">Lantern Forest</span>
+                    <span class="photo-meta"><span class="meta-left"><i class="meta-dot"></i>10/03 · 19:44</span><span>4.8 MB</span></span>
+                  </div>
+                </button>
+
+                <button class="photo-card" data-photo="9" data-scene="aquarium" data-title="Deep Blue Tunnel" data-date="2026年10月01日 15:16" data-world="Deep Blue Tunnel" data-size="2.7 MB" data-players="Ash|Yuki|Ren" data-tags="水族館|青|散歩" data-fav="false">
+                  <div class="photo-visual">
+                    <div class="scene scene-aquarium"></div>
+                    <span class="photo-check"><svg class="icon"><use href="#i-check"/></svg></span>
+                    <span class="photo-format">WEBP 80</span>
+                  </div>
+                  <div class="photo-info">
+                    <span class="photo-title">Deep Blue Tunnel</span>
+                    <span class="photo-meta"><span class="meta-left"><i class="meta-dot"></i>10/01 · 15:16</span><span>2.7 MB</span></span>
+                  </div>
+                </button>
+              </div>
+            </div>
+            <div class="year-rail" aria-hidden="true">
+              <span class="year-label active">2026</span>
+              <span class="year-pill">10月</span>
+              <span class="year-label">2025</span>
+              <span class="year-label">2024</span>
+              <span class="year-label">2023</span>
+            </div>
+          </div>
+
+          <aside class="inspector card-sub" id="inspector" aria-label="写真の詳細">
+            <div class="inspector-head">
+              <span>Selected / <span id="inspectorIndex">01</span></span>
+              <div class="inspector-actions-mini">
+                <button class="icon-btn" data-action="selected-more" title="その他"><svg class="icon"><use href="#i-more"/></svg></button>
+              </div>
+            </div>
+            <div class="inspector-scroll">
+              <div class="inspector-preview" id="inspectorPreview">
+                <div class="scene scene-neon-city" id="inspectorScene"></div>
+                <button class="preview-open" data-action="fullscreen-view"><svg class="icon"><use href="#i-maximize"/></svg>全画面</button>
+                <span class="preview-count" id="previewCount">1 / 2,418</span>
+              </div>
+              <div class="inspector-body">
+                <div class="inspector-title-row">
+                  <h2 id="inspectorTitle">Midnight Rooftop</h2>
+                  <button class="icon-btn fav-active" id="inspectorFav" data-action="favorite" title="お気に入り"><svg class="icon icon-filled"><use href="#i-star"/></svg></button>
+                </div>
+                <p class="inspector-date" id="inspectorDate">2026年10月24日 23:41</p>
+                <div class="badge-row">
+                  <span class="badge green" id="inspectorCompressionBadge"><i class="dot"></i>圧縮済み</span>
+                  <span class="badge" id="inspectorFormatBadge">WebP · 82%</span>
+                  <span class="badge" id="inspectorPlayerBadge">4 プレイヤー</span>
+                </div>
+                <div class="meta-grid">
+                  <div><label>ワールド</label><b id="inspectorWorld">Midnight Rooftop</b></div>
+                  <div><label>インスタンス</label><b>Friends+ · 12人</b></div>
+                  <div><label>撮影者</label><b>Tommy</b></div>
+                  <div><label>サイズ</label><b id="inspectorSize">3.8 MB</b></div>
+                </div>
+                <div class="section-head"><span>同接プレイヤー</span><span class="count" id="inspectorPlayerCount">4人</span></div>
+                <div class="player-row" id="inspectorPlayers">
+                  <span class="player" title="Luna">L</span>
+                  <span class="player" title="Kaito">K</span>
+                  <span class="player" title="Mio">M</span>
+                  <span class="player" title="Ash">A</span>
+                </div>
+                <div class="section-head"><span>タグ</span><button class="icon-btn" data-action="edit-tags" title="タグを追加"><svg class="icon"><use href="#i-plus"/></svg></button></div>
+                <div class="tag-row" id="inspectorTags">
+                  <span class="tag">夜景</span><span class="tag">屋上</span><span class="tag">フレンズ</span>
+                </div>
+                <div class="note-card">
+                  <span>メモ</span>
+                  <p id="inspectorNote">屋上から見下ろす夜景がきれいだった。フレンドと記念に一枚。</p>
+                </div>
+              </div>
+            </div>
+            <div class="inspector-foot">
+              <button class="btn" data-action="manual-compress"><svg class="icon"><use href="#i-wand"/></svg>変換</button>
+              <button class="btn primary" data-action="manual-compress"><svg class="icon"><use href="#i-zap"/></svg>圧縮</button>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <!-- Search -->
+      <section class="screen" data-screen="search" aria-label="検索">
+        <div class="search-layout">
+          <div class="filter-panel card-sub">
+            <div class="panel-title">絞り込み <button class="icon-btn" data-action="reset-filters" title="リセット"><svg class="icon"><use href="#i-rotate"/></svg></button></div>
+            <div class="field">
+              <label for="searchWorld">ワールド</label>
+              <div class="field-input"><svg class="icon"><use href="#i-globe"/></svg><input id="searchWorld" type="text" value="Sunset" placeholder="ワールド名またはID"></div>
+            </div>
+            <div class="field">
+              <label for="searchPlayer">プレイヤー</label>
+              <div class="field-input"><svg class="icon"><use href="#i-users"/></svg><input id="searchPlayer" type="text" placeholder="表示名で検索"></div>
+            </div>
+            <div class="field">
+              <label for="searchTag">タグ</label>
+              <div class="field-input"><svg class="icon"><use href="#i-tag"/></svg><input id="searchTag" type="text" placeholder="例: 夜景, フレンズ"></div>
+            </div>
+            <div class="field">
+              <label>日時</label>
+              <div class="date-chips">
+                <button class="date-chip" data-action="date-today">今日</button>
+                <button class="date-chip" data-action="date-week">7日</button>
+                <button class="date-chip active" data-action="date-month">30日</button>
+                <button class="date-chip" data-action="date-all">すべて</button>
+              </div>
+            </div>
+            <div class="switch-row"><span>お気に入りのみ</span><button class="switch" role="switch" aria-checked="false" data-toggle="switch"></button></div>
+            <div class="switch-row"><span>未圧縮のみ</span><button class="switch" role="switch" aria-checked="false" data-toggle="switch"></button></div>
+            <div class="filter-actions">
+              <button class="btn" data-action="save-filter"><svg class="icon"><use href="#i-pin"/></svg>保存</button>
+              <button class="btn primary" data-action="run-search"><svg class="icon"><use href="#i-search"/></svg>この条件で検索</button>
+            </div>
+          </div>
+
+          <div class="results card-sub">
+            <div class="results-head">
+              <strong>検索結果</strong>
+              <span class="result-count">1,284 枚</span>
+              <span class="query-pill"><svg class="icon"><use href="#i-globe"/></svg>ワールド: <b>Sunset</b></span>
+              <span class="query-pill"><svg class="icon"><use href="#i-calendar"/></svg>過去 <b>30日</b></span>
+              <button class="sort-chip" data-action="sort-menu">並び: 新しい順 <svg class="icon"><use href="#i-chevron-down"/></svg></button>
+            </div>
+            <div class="results-scroll">
+              <div class="results-grid">
+                <button class="photo-card" data-viewer-result data-scene="beach" data-title="Sunset Pier — 01" data-date="2026年10月24日 18:02" data-world="Sunset Pier" data-size="4.0 MB" data-players="Mio|Ash|Haru" data-tags="海|夕日|検索結果">
+                  <div class="photo-visual"><div class="scene scene-beach"></div><span class="photo-format">WEBP 82</span></div>
+                  <div class="photo-info"><span class="photo-title">Sunset Pier — 01</span><span class="photo-meta"><span class="meta-left"><i class="meta-dot"></i>10/24 · 18:02</span><span>4.0 MB</span></span></div>
+                </button>
+                <button class="photo-card" data-viewer-result data-scene="bar" data-title="Sunset Bar — 02" data-date="2026年10月23日 21:14" data-world="Sunset Bar" data-size="3.4 MB" data-players="Luna|Ren" data-tags="バー|夕日|検索結果">
+                  <div class="photo-visual"><div class="scene scene-bar"></div><span class="photo-format">WEBP 80</span></div>
+                  <div class="photo-info"><span class="photo-title">Sunset Bar — 02</span><span class="photo-meta"><span class="meta-left"><i class="meta-dot"></i>10/23 · 21:14</span><span>3.4 MB</span></span></div>
+                </button>
+                <button class="photo-card" data-viewer-result data-scene="shrine" data-title="Sunset Shrine — 03" data-date="2026年10月22日 17:08" data-world="Sunset Shrine" data-size="5.1 MB" data-players="Hina|Sora" data-tags="和風|夕焼け|検索結果">
+                  <div class="photo-visual"><div class="scene scene-shrine"></div><span class="photo-format">WEBP 84</span></div>
+                  <div class="photo-info"><span class="photo-title">Sunset Shrine — 03</span><span class="photo-meta"><span class="meta-left"><i class="meta-dot"></i>10/22 · 17:08</span><span>5.1 MB</span></span></div>
+                </button>
+                <button class="photo-card" data-viewer-result data-scene="neon-city" data-title="Sunset Rooftop — 04" data-date="2026年10月20日 19:33" data-world="Sunset Rooftop" data-size="3.8 MB" data-players="Kaito|Nox|Eri" data-tags="夜景|屋上|検索結果">
+                  <div class="photo-visual"><div class="scene scene-neon-city"></div><span class="photo-format">WEBP 82</span></div>
+                  <div class="photo-info"><span class="photo-title">Sunset Rooftop — 04</span><span class="photo-meta"><span class="meta-left"><i class="meta-dot"></i>10/20 · 19:33</span><span>3.8 MB</span></span></div>
+                </button>
+                <button class="photo-card" data-viewer-result data-scene="forest" data-title="Sunset Forest — 05" data-date="2026年10月18日 18:46" data-world="Sunset Forest" data-size="4.8 MB" data-players="Hina|Mio|Luna" data-tags="森|ランタン|検索結果">
+                  <div class="photo-visual"><div class="scene scene-forest"></div><span class="photo-format">WEBP 84</span></div>
+                  <div class="photo-info"><span class="photo-title">Sunset Forest — 05</span><span class="photo-meta"><span class="meta-left"><i class="meta-dot"></i>10/18 · 18:46</span><span>4.8 MB</span></span></div>
+                </button>
+                <button class="photo-card" data-viewer-result data-scene="snow" data-title="Sunset Cabin — 06" data-date="2026年10月16日 16:21" data-world="Sunset Cabin" data-size="6.4 MB" data-players="Yuki|Haru|Sora" data-tags="雪|冬|検索結果">
+                  <div class="photo-visual"><div class="scene scene-snow"></div><span class="photo-format">RAW · 未圧縮</span></div>
+                  <div class="photo-info"><span class="photo-title">Sunset Cabin — 06</span><span class="photo-meta"><span class="meta-left"><i class="meta-dot pending"></i>10/16 · 16:21</span><span>6.4 MB</span></span></div>
+                </button>
+                <button class="photo-card" data-viewer-result data-scene="aquarium" data-title="Sunset Aquarium — 07" data-date="2026年10月15日 15:44" data-world="Sunset Aquarium" data-size="2.7 MB" data-players="Ash|Yuki" data-tags="水族館|青|検索結果">
+                  <div class="photo-visual"><div class="scene scene-aquarium"></div><span class="photo-format">WEBP 80</span></div>
+                  <div class="photo-info"><span class="photo-title">Sunset Aquarium — 07</span><span class="photo-meta"><span class="meta-left"><i class="meta-dot"></i>10/15 · 15:44</span><span>2.7 MB</span></span></div>
+                </button>
+                <button class="photo-card" data-viewer-result data-scene="space" data-title="Sunset Station — 08" data-date="2026年10月14日 20:10" data-world="Sunset Station" data-size="3.6 MB" data-players="Nox|Eri|Kaito" data-tags="SF|宇宙|検索結果">
+                  <div class="photo-visual"><div class="scene scene-space"></div><span class="photo-format">WEBP 82</span></div>
+                  <div class="photo-info"><span class="photo-title">Sunset Station — 08</span><span class="photo-meta"><span class="meta-left"><i class="meta-dot"></i>10/14 · 20:10</span><span>3.6 MB</span></span></div>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Compression -->
+      <section class="screen" data-screen="compression" aria-label="圧縮設定">
+        <div class="compression-layout">
+          <div class="profile-list card-sub">
+            <div class="profile-list-head">
+              <strong>プロファイル</strong>
+              <span class="badge">自動適用 1</span>
+              <button class="icon-btn" data-action="new-profile" title="追加"><svg class="icon"><use href="#i-plus"/></svg></button>
+            </div>
+            <div class="profile-items">
+              <div class="profile active">
+                <div class="profile-top"><strong>高画質 WebP</strong><span class="badge green">自動</span></div>
+                <div class="profile-meta"><span>WebP</span><span>·</span><span>品質 82</span><span>·</span><span>元画像を保持</span></div>
+                <div class="profile-meter"><i style="width:82%"></i></div>
+                <div class="profile-foot"><i class="dot"></i>1,402 枚 · 18.2 GB</div>
+              </div>
+              <div class="profile">
+                <div class="profile-top"><strong>AVIF 省容量</strong><span class="badge">手動</span></div>
+                <div class="profile-meta"><span>AVIF</span><span>·</span><span>品質 65</span><span>·</span><span>置換</span></div>
+                <div class="profile-meter"><i style="width:65%"></i></div>
+                <div class="profile-foot"><i class="dot"></i>312 枚 · 4.1 GB</div>
+              </div>
+              <div class="profile">
+                <div class="profile-top"><strong>JPEG 互換</strong><span class="badge">手動</span></div>
+                <div class="profile-meta"><span>JPEG</span><span>·</span><span>品質 90</span><span>·</span><span>元画像を保持</span></div>
+                <div class="profile-meter"><i style="width:90%"></i></div>
+                <div class="profile-foot"><i class="dot"></i>128 枚 · 2.4 GB</div>
+              </div>
+            </div>
+            <div class="profile-summary">
+              <div class="summary-head"><span>合計削減</span><b>24.7 GB</b></div>
+              <div class="progress"><i style="width:76%"></i></div>
+              <p>1,842 / 2,418 枚 · 76% 完了</p>
+            </div>
+          </div>
+
+          <div class="editor card-sub">
+            <div class="editor-head">
+              <div class="editor-title">
+                <h2>高画質 WebP</h2>
+                <p>自動圧縮 · 新規写真に適用 · 最終更新 10/24 23:41</p>
+              </div>
+              <div class="switch-row"><span>自動適用</span><button class="switch on" role="switch" aria-checked="true" data-toggle="switch"></button></div>
+            </div>
+            <div class="editor-scroll">
+              <div class="editor-stats">
+                <div class="editor-stat"><span>圧縮済み</span><b>1,402 枚 <em>+18%</em></b></div>
+                <div class="editor-stat"><span>削減容量</span><b>18.2 GB</b></div>
+                <div class="editor-stat"><span>平均品質</span><b>82 / 100</b></div>
+                <div class="editor-stat"><span>最終実行</span><b>今日 12:38</b></div>
+              </div>
+              <div class="form-section">
+                <div class="form-section-title"><span>形式と画質</span><span class="hint">WebP は α を保持します</span></div>
+                <div class="format-options">
+                  <button class="format-option active"><b>WebP</b><span>推奨 · α対応</span></button>
+                  <button class="format-option"><b>AVIF</b><span>省容量 · 近似</span></button>
+                  <button class="format-option"><b>JPEG XL</b><span>高圧縮 · αなし</span></button>
+                  <button class="format-option"><b>JPEG</b><span>互換 · 非可逆</span></button>
+                </div>
+              </div>
+              <div class="form-section">
+                <div class="form-section-title"><span>品質</span><span class="hint">ロスレスは品質指定を使用しません</span></div>
+                <div class="slider-row">
+                  <input type="range" min="1" max="100" value="82" aria-label="品質">
+                  <span class="slider-value">82</span>
+                </div>
+                <div class="range-labels"><span>小さいファイル</span><span>高画質</span></div>
+              </div>
+              <div class="two-col">
+                <div class="form-section">
+                  <div class="form-section-title"><span>リサイズ</span><span class="hint">最大 3840px</span></div>
+                  <div class="form-row"><label>有効</label><button class="switch on" role="switch" aria-checked="true" data-toggle="switch"></button></div>
+                  <div class="form-row"><label>幅</label><div class="form-control"><input class="number-input" value="3840"><span class="unit">px</span></div></div>
+                  <div class="form-row"><label>高さ</label><div class="form-control"><input class="number-input" value="2160"><span class="unit">px</span></div></div>
+                  <div class="form-row"><label>方法</label><button class="select-like">大きい場合のみ <svg class="icon"><use href="#i-chevron-down"/></svg></button></div>
+                </div>
+                <div class="form-section">
+                  <div class="form-section-title"><span>出力</span><span class="hint">元画像の隣</span></div>
+                  <div class="path-box"><svg class="icon"><use href="#i-folder-open"/></svg><span>Pictures/VRChat/compressed</span><button class="btn" data-action="choose-folder">選択</button></div>
+                  <div class="form-row" style="margin-top: 7px;"><label>サフィックス</label><div class="form-control"><input class="number-input" style="width: 64px; text-align:left;" value="_vpm"></div></div>
+                  <div class="form-row"><label>メタデータ</label><button class="switch on" role="switch" aria-checked="true" data-toggle="switch"></button></div>
+                </div>
+              </div>
+              <div class="compression-preview">
+                <div class="form-section-title"><span>出力プレビュー</span><span class="hint">推定 3.8 MB · 元画像から 68% 削減</span></div>
+                <div class="compression-samples">
+                  <div class="compression-sample">
+                    <div class="sample-thumb"><div class="scene scene-neon-city"></div></div>
+                    <div class="sample-copy"><b>Midnight Rooftop</b><span>12.4 MB → <em>3.8 MB</em></span></div>
+                  </div>
+                  <div class="compression-sample">
+                    <div class="sample-thumb"><div class="scene scene-shrine"></div></div>
+                    <div class="sample-copy"><b>千本鳥居の夕暮れ</b><span>14.8 MB → <em>5.1 MB</em></span></div>
+                  </div>
+                  <div class="compression-sample">
+                    <div class="sample-thumb"><div class="scene scene-bar"></div></div>
+                    <div class="sample-copy"><b>Amber Lounge</b><span>9.6 MB → <em>3.1 MB</em></span></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="editor-foot">
+              <span class="save-state"><svg class="icon"><use href="#i-check"/></svg>変更は自動保存されます</span>
+              <button class="btn" data-action="reset-profile">既定に戻す</button>
+              <button class="btn primary" data-action="save-profile"><svg class="icon"><use href="#i-check"/></svg>保存</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Dashboard -->
+      <section class="screen" data-screen="dashboard" aria-label="ダッシュボード">
+        <div class="dashboard-scroll">
+          <div class="stat-grid">
+            <div class="stat-card card-sub">
+              <div class="stat-top"><svg class="icon"><use href="#i-images"/></svg>写真</div>
+              <div class="stat-value">2,418<small>枚</small></div>
+              <div class="stat-sub"><span class="up">+24</span> 今週 · 38.6 GB</div>
+            </div>
+            <div class="stat-card card-sub">
+              <div class="stat-top"><svg class="icon"><use href="#i-activity"/></svg>未完了ジョブ</div>
+              <div class="stat-value">7<small>件</small></div>
+              <div class="stat-sub"><span class="warn">2 実行中</span> · 5 待機</div>
+            </div>
+            <div class="stat-card card-sub">
+              <div class="stat-top"><svg class="icon"><use href="#i-play"/></svg>未実行</div>
+              <div class="stat-value">3<small>件</small></div>
+              <div class="stat-sub">「待機を圧縮」で開始</div>
+            </div>
+            <div class="stat-card card-sub">
+              <div class="stat-top"><svg class="icon"><use href="#i-server"/></svg>デーモン</div>
+              <div class="stat-value">稼働中</div>
+              <div class="stat-sub"><span class="up">● 3 秒前</span> ハートビート</div>
+            </div>
+          </div>
+
+          <div class="dash-grid">
+            <div class="queue-card card-sub">
+              <div class="card-head">
+                <strong>共有圧縮キュー</strong>
+                <span class="badge green">未完了 7</span>
+                <span class="badge">未実行 3</span>
+                <span class="badge amber">失敗 1</span>
+                <span class="spacer"></span>
+                <button class="btn sm" data-action="release-waiting"><svg class="icon"><use href="#i-play"/></svg>待機を圧縮</button>
+                <button class="icon-btn" data-action="open-queue" title="キューを開く"><svg class="icon"><use href="#i-external"/></svg></button>
+              </div>
+              <div class="queue-list">
+                <div class="queue-row">
+                  <span class="queue-state running"><svg class="icon"><use href="#i-activity"/></svg></span>
+                  <div class="queue-name"><b>Midnight Rooftop</b><span>高画質 WebP · photo #1421</span></div>
+                  <div class="queue-progress"><span>68%</span><div class="progress"><i style="width:68%"></i></div></div>
+                  <span class="queue-time">残り 12秒</span>
+                </div>
+                <div class="queue-row">
+                  <span class="queue-state running"><svg class="icon"><use href="#i-activity"/></svg></span>
+                  <div class="queue-name"><b>Snowbound Cabin</b><span>AVIF 省容量 · photo #1420</span></div>
+                  <div class="queue-progress"><span>31%</span><div class="progress"><i style="width:31%"></i></div></div>
+                  <span class="queue-time">残り 28秒</span>
+                </div>
+                <div class="queue-row">
+                  <span class="queue-state"><svg class="icon"><use href="#i-clock"/></svg></span>
+                  <div class="queue-name"><b>Lantern Forest</b><span>高画質 WebP · 待機中</span></div>
+                  <div class="queue-progress"><span>—</span><div class="progress"><i style="width:0"></i></div></div>
+                  <span class="queue-time">12:44</span>
+                </div>
+                <div class="queue-row">
+                  <span class="queue-state"><svg class="icon"><use href="#i-clock"/></svg></span>
+                  <div class="queue-name"><b>Deep Blue Tunnel</b><span>高画質 WebP · 待機中</span></div>
+                  <div class="queue-progress"><span>—</span><div class="progress"><i style="width:0"></i></div></div>
+                  <span class="queue-time">12:44</span>
+                </div>
+                <div class="queue-row">
+                  <span class="queue-state failed"><svg class="icon"><use href="#i-alert"/></svg></span>
+                  <div class="queue-name"><b>Amber Lounge</b><span>JPEG 互換 · 出力先が見つかりません</span></div>
+                  <div class="queue-progress"><span>失敗</span><div class="progress"><i style="width:0; background: var(--rose)"></i></div></div>
+                  <span class="queue-time failed">再試行 1/3</span>
+                </div>
+                <div class="queue-row">
+                  <span class="queue-state done"><svg class="icon"><use href="#i-check"/></svg></span>
+                  <div class="queue-name"><b>Last Light Beach</b><span>高画質 WebP · 完了</span></div>
+                  <div class="queue-progress"><span>100%</span><div class="progress"><i style="width:100%"></i></div></div>
+                  <span class="queue-time">12:39</span>
+                </div>
+              </div>
+            </div>
+
+            <div class="dash-side">
+              <div class="daemon-card card-sub">
+                <div class="card-head"><strong>デーモン</strong><span class="badge green">接続中</span><span class="spacer"></span><button class="icon-btn" data-action="daemon-more" title="詳細"><svg class="icon"><use href="#i-more"/></svg></button></div>
+                <div class="daemon-body">
+                  <div class="daemon-status">
+                    <span class="daemon-orb"><svg class="icon"><use href="#i-server"/></svg></span>
+                    <div><b>VRC Photo Daemon</b><span>PID 1842 · 最終同期 12:42</span></div>
+                  </div>
+                  <div class="daemon-meta">
+                    <div><span>IPC</span><b>接続中</b></div>
+                    <div><span>監視</span><b>稼働中</b></div>
+                    <div><span>写真フォルダ</span><b>Pictures/VRChat</b></div>
+                    <div><span>ログ</span><b>VRChat</b></div>
+                  </div>
+                  <div class="daemon-actions">
+                    <button class="btn" data-action="rescan"><svg class="icon"><use href="#i-refresh"/></svg>再スキャン</button>
+                    <button class="btn" data-action="toggle-pause"><svg class="icon"><use href="#i-pause"/></svg>一時停止</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="session-card card-sub">
+                <div class="card-head"><strong>現在のセッション</strong><span class="badge green"><i class="dot"></i>LIVE</span><span class="spacer"></span><button class="icon-btn" data-action="session-more" title="詳細"><svg class="icon"><use href="#i-more"/></svg></button></div>
+                <div class="session-body">
+                  <div class="session-world"><i class="live-dot"></i>Midnight Rooftop</div>
+                  <p>Friends+ · instance 9421 · 23:41 開始</p>
+                  <div class="session-avatars">
+                    <span class="session-avatar">T</span>
+                    <span class="session-avatar">L</span>
+                    <span class="session-avatar">K</span>
+                    <span class="session-avatar">M</span>
+                    <span class="session-avatar">+8</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Settings -->
+      <section class="screen" data-screen="settings" aria-label="設定">
+        <div class="settings-layout">
+          <div class="settings-nav card-sub">
+            <div class="settings-nav-head">
+              <strong>設定</strong>
+              <button class="icon-btn" data-action="reload-settings" title="設定を再読込"><svg class="icon"><use href="#i-refresh"/></svg></button>
+            </div>
+            <p class="settings-nav-label">ライブラリ</p>
+            <button class="active" data-settings-nav="library"><svg class="icon"><use href="#i-folder-open"/></svg>保存場所</button>
+            <button data-settings-nav="import"><svg class="icon"><use href="#i-download"/></svg>取り込み</button>
+            <p class="settings-nav-label">動作</p>
+            <button data-settings-nav="automation"><svg class="icon"><use href="#i-zap"/></svg>自動化</button>
+            <button data-settings-nav="appearance"><svg class="icon"><use href="#i-palette"/></svg>表示</button>
+            <button data-settings-nav="logs"><svg class="icon"><use href="#i-file"/></svg>ログ</button>
+            <p class="settings-nav-label">アプリ</p>
+            <button data-settings-nav="about"><svg class="icon"><use href="#i-shield"/></svg>バージョン情報</button>
+          </div>
+          <div class="settings-panels">
+            <section class="settings-card card-sub" data-settings-panel="library">
+              <div class="settings-card-head">
+                <span class="settings-icon"><svg class="icon"><use href="#i-folder-open"/></svg></span>
+                <div><h3>ライブラリと保存場所</h3><p>写真フォルダ・ログフォルダ・取り込み先</p></div>
+                <span class="badge green">同期済み</span>
+              </div>
+              <div class="settings-list">
+                <div class="setting-row">
+                  <div><label>写真フォルダ</label><p>VRChat の写真を監視します</p></div>
+                  <div class="settings-path" style="width: 260px"><svg class="icon"><use href="#i-folder-open"/></svg><span>~/Pictures/VRChat</span><button class="btn" data-action="choose-folder">変更</button></div>
+                </div>
+                <div class="setting-row">
+                  <div><label>ログフォルダ</label><p>ワールドとプレイヤーの紐付けに使用</p></div>
+                  <div class="settings-path" style="width: 260px"><svg class="icon"><use href="#i-file"/></svg><span>~/VRChat/logs</span><button class="btn" data-action="choose-folder">変更</button></div>
+                </div>
+                <div class="setting-row">
+                  <div><label>取り込み先</label><p>コピー / 移動取込の既定の保存先</p></div>
+                  <div class="settings-path" style="width: 260px"><svg class="icon"><use href="#i-download"/></svg><span>~/Pictures/VRChat/imported</span><button class="btn" data-action="choose-folder">変更</button></div>
+                </div>
+              </div>
+            </section>
+
+            <section class="settings-card card-sub" data-settings-panel="import">
+              <div class="settings-card-head">
+                <span class="settings-icon"><svg class="icon"><use href="#i-download"/></svg></span>
+                <div><h3>取り込み</h3><p>コピー / 移動と重複ファイルの扱い</p></div>
+                <span class="badge">既定</span>
+              </div>
+              <div class="settings-list">
+                <div class="setting-row">
+                  <div><label>取り込み方法</label><p>写真を追加するときの既定の動作</p></div>
+                  <div class="mini-segmented" role="group" aria-label="取り込み方法">
+                    <button class="active">コピー</button>
+                    <button>移動</button>
+                  </div>
+                </div>
+                <div class="setting-row">
+                  <div><label>重複ファイル</label><p>同じファイル名がある場合の処理</p></div>
+                  <button class="select-like">連番を付ける <svg class="icon"><use href="#i-chevron-down"/></svg></button>
+                </div>
+                <div class="setting-row"><div><label>取り込み後に索引を作成</label><p>XMP と VRChat ログからメタデータを紐付け</p></div><button class="switch on" role="switch" aria-checked="true" data-toggle="switch"></button></div>
+                <div class="setting-row"><div><label>隠しファイルを含める</label><p>ドットファイルも走査対象にします</p></div><button class="switch" role="switch" aria-checked="false" data-toggle="switch"></button></div>
+              </div>
+            </section>
+
+            <section class="settings-card card-sub" data-settings-panel="automation">
+              <div class="settings-card-head">
+                <span class="settings-icon"><svg class="icon"><use href="#i-zap"/></svg></span>
+                <div><h3>自動化</h3><p>起動・トレイ・自動圧縮の既定動作</p></div>
+                <span class="badge">2 秒で反映</span>
+              </div>
+              <div class="settings-list">
+                <div class="setting-row"><div><label>自動起動</label><p>ログイン時にデーモンを起動</p></div><button class="switch on" role="switch" aria-checked="true" data-toggle="switch"></button></div>
+                <div class="setting-row"><div><label>トレイ常駐</label><p>ウィンドウを閉じてもバックグラウンドで監視</p></div><button class="switch on" role="switch" aria-checked="true" data-toggle="switch"></button></div>
+                <div class="setting-row"><div><label>自動圧縮</label><p>新規写真を自動でキューに追加</p></div><button class="switch on" role="switch" aria-checked="true" data-toggle="switch"></button></div>
+                <div class="setting-row"><div><label>元画像を保持</label><p>圧縮後に元画像を OS ゴミ箱へ移動しない</p></div><button class="switch on" role="switch" aria-checked="true" data-toggle="switch"></button></div>
+              </div>
+            </section>
+
+            <section class="settings-card card-sub" data-settings-panel="appearance">
+              <div class="settings-card-head">
+                <span class="settings-icon"><svg class="icon"><use href="#i-palette"/></svg></span>
+                <div><h3>表示</h3><p>ガラス強度とモーション</p></div>
+              </div>
+              <div class="settings-list">
+                <div class="setting-row">
+                  <div><label>ガラス強度</label><p>ウィンドウとカードの透明度</p></div>
+                  <div class="glass-options">
+                    <button class="glass-option" data-glass-set="soft">控えめ</button>
+                    <button class="glass-option active" data-glass-set="standard">標準</button>
+                    <button class="glass-option" data-glass-set="strong">濃い</button>
+                  </div>
+                </div>
+                <div class="setting-row"><div><label>モーションを減らす</label><p>画面遷移とホバーアニメーションを抑制</p></div><button class="switch" role="switch" aria-checked="false" data-toggle="switch"></button></div>
+                <div class="setting-row"><div><label>年レール</label><p>グリッド右端に年ジャンプを表示</p></div><button class="switch on" role="switch" aria-checked="true" data-toggle="switch"></button></div>
+              </div>
+            </section>
+
+            <section class="settings-card card-sub" data-settings-panel="logs">
+              <div class="settings-card-head">
+                <span class="settings-icon"><svg class="icon"><use href="#i-file"/></svg></span>
+                <div><h3>ログ</h3><p>vrc-photo-manager.log / vrc-photo-daemon.log</p></div>
+                <button class="badge" data-action="open-logs">ログフォルダを開く</button>
+              </div>
+              <div class="settings-list">
+                <div class="setting-row"><div><label>UI ログ</label><p>~/.local/share/vrc-photo-manager/logs</p></div><span class="value">vrc-photo-manager.log</span></div>
+                <div class="setting-row"><div><label>デーモンログ</label><p>~/.local/share/vrc-photo-manager/logs</p></div><span class="value">vrc-photo-daemon.log</span></div>
+                <div class="setting-row"><div><label>VRChat ログ保持</label><p>VRChat 本体は 24 時間で削除します</p></div><span class="badge amber">注意</span></div>
+              </div>
+            </section>
+
+            <section class="settings-card card-sub" data-settings-panel="about">
+              <div class="settings-card-head">
+                <span class="settings-icon"><svg class="icon"><use href="#i-shield"/></svg></span>
+                <div><h3>VRC Photo Manager</h3><p>ローカルファースト · 写真とログは外部送信しません</p></div>
+                <span class="badge">v0.8.0-dev</span>
+              </div>
+              <div class="settings-list">
+                <div class="setting-row"><div><label>データベース</label><p>~/.local/share/vrc-photo-manager/library.db</p></div><span class="value">38.6 GB</span></div>
+                <div class="setting-row"><div><label>サムネイルキャッシュ</label><p>256px WebP · LRU 192</p></div><span class="value">1.2 GB</span></div>
+                <div class="setting-row"><div><label>ショートカット</label><p>サイドバー / 詳細 / 検索</p></div><span class="value">Ctrl+B · I · K</span></div>
+                <div class="setting-row"><div><label>アップデート</label><p>署名付き GitHub Releases を確認</p></div><button class="btn" data-action="check-update"><svg class="icon"><use href="#i-download"/></svg>確認</button></div>
+              </div>
+            </section>
+
+            <div class="settings-foot">
+              <span class="save-state">最終保存 12:42 · 変更は自動保存</span>
+              <button class="btn primary sm" data-action="save-settings"><svg class="icon"><use href="#i-check"/></svg>保存</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+</div>
+
+<!-- Import modal -->
+<div class="modal-layer" id="importModal" aria-hidden="true">
+  <div class="modal-backdrop" data-close-modal></div>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="importTitle">
+    <div class="modal-head">
+      <span class="modal-icon"><svg class="icon"><use href="#i-folder-plus"/></svg></span>
+      <div>
+        <h2 id="importTitle">写真を取り込む</h2>
+        <p>ファイルまたはフォルダを選択してライブラリに追加します</p>
+      </div>
+      <button class="icon-btn" data-close-modal title="閉じる"><svg class="icon"><use href="#i-close"/></svg></button>
+    </div>
+    <div class="modal-body">
+      <button class="dropzone" data-action="pick-files">
+        <svg class="icon"><use href="#i-upload"/></svg>
+        <b>ここに写真をドロップ</b>
+        <span>またはクリックしてファイル / フォルダを選択</span>
+      </button>
+      <div class="modal-section">
+        <span class="modal-label">取り込み方法</span>
+        <div class="mode-toggle" role="group" aria-label="取り込み方法">
+          <button class="active" data-import-mode="copy">コピーして取り込む</button>
+          <button data-import-mode="move">移動して取り込む</button>
+        </div>
+      </div>
+      <div class="modal-section">
+        <span class="modal-label">取り込み先</span>
+        <div class="destination">
+          <svg class="icon"><use href="#i-folder-open"/></svg>
+          <span>~/Pictures/VRChat/imported</span>
+          <button class="btn" data-action="choose-import-folder">変更</button>
+        </div>
+      </div>
+      <div class="setting-row" style="border-top: 0; padding: 0;"><div><label>取り込み後に索引を作成</label><p>XMP とログからワールド・プレイヤーを紐付け</p></div><button class="switch on" role="switch" aria-checked="true" data-toggle="switch"></button></div>
+    </div>
+    <div class="modal-foot">
+      <span class="note">対象: 24 ファイル · 推定 86 MB</span>
+      <button class="btn" data-close-modal>キャンセル</button>
+      <button class="btn primary" data-action="start-import"><svg class="icon"><use href="#i-upload"/></svg>取り込みを開始</button>
+    </div>
+  </div>
+</div>
+
+<!-- Fullscreen viewer -->
+<div class="viewer-layer" id="viewer" aria-hidden="true">
+  <div class="viewer-top">
+    <button class="icon-btn" data-viewer-close title="閉じる (Esc)"><svg class="icon"><use href="#i-close"/></svg></button>
+    <div class="viewer-nav">
+      <button class="icon-btn" data-viewer-prev title="前の写真"><svg class="icon"><use href="#i-chevron-left"/></svg></button>
+      <button class="icon-btn" data-viewer-next title="次の写真"><svg class="icon"><use href="#i-chevron-right"/></svg></button>
+    </div>
+    <div class="viewer-file">
+      <b id="viewerTitle">Midnight Rooftop</b>
+      <span id="viewerMeta">2026年10月24日 23:41 · 3.8 MB</span>
+    </div>
+    <span class="viewer-count" id="viewerCount">1 / 9</span>
+    <button class="btn" data-action="viewer-details"><svg class="icon"><use href="#i-panel"/></svg>詳細</button>
+    <span class="viewer-close-hint">Esc で閉じる</span>
+  </div>
+  <div class="viewer-body">
+    <div class="viewer-stage">
+      <div class="viewer-frame" id="viewerFrame">
+        <div class="scene scene-neon-city" id="viewerScene"></div>
+      </div>
+    </div>
+    <aside class="viewer-details" id="viewerDetails">
+      <div class="viewer-details-head"><span>Photo details</span><button class="icon-btn" data-action="viewer-details" title="詳細を閉じる"><svg class="icon"><use href="#i-close"/></svg></button></div>
+      <div class="viewer-details-scroll">
+        <h2 id="viewerDetailTitle">Midnight Rooftop</h2>
+        <p class="viewer-date" id="viewerDetailDate">2026年10月24日 23:41</p>
+        <div class="badge-row">
+          <span class="badge green" id="viewerCompressionBadge"><i class="dot"></i>圧縮済み</span>
+          <span class="badge" id="viewerFormatBadge">WebP · 82%</span>
+          <span class="badge" id="viewerFavBadge">お気に入り</span>
+        </div>
+        <div class="meta-grid">
+          <div><label>ワールド</label><b id="viewerWorld">Midnight Rooftop</b></div>
+          <div><label>インスタンス</label><b>Friends+ · 12人</b></div>
+          <div><label>撮影者</label><b>Tommy</b></div>
+          <div><label>サイズ</label><b id="viewerSize">3.8 MB</b></div>
+        </div>
+        <div class="section-head"><span>同接プレイヤー</span><span class="count" id="viewerPlayerCount">4人</span></div>
+        <div class="player-row" id="viewerPlayers">
+          <span class="player" title="Luna">L</span>
+          <span class="player" title="Kaito">K</span>
+          <span class="player" title="Mio">M</span>
+          <span class="player" title="Ash">A</span>
+        </div>
+        <div class="section-head"><span>タグ</span><button class="icon-btn" data-action="edit-tags" title="タグを追加"><svg class="icon"><use href="#i-plus"/></svg></button></div>
+        <div class="tag-row" id="viewerTags">
+          <span class="tag">夜景</span><span class="tag">屋上</span><span class="tag">フレンズ</span>
+        </div>
+        <div class="note-card">
+          <span>メモ</span>
+          <p id="viewerNote">屋上から見下ろす夜景がきれいだった。フレンドと記念に一枚。</p>
+        </div>
+      </div>
+      <div class="inspector-foot">
+        <button class="btn" data-action="favorite"><svg class="icon"><use href="#i-star"/></svg>お気に入り</button>
+        <button class="btn primary" data-action="manual-compress"><svg class="icon"><use href="#i-zap"/></svg>圧縮</button>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite">
+  <svg class="icon"><use href="#i-check"/></svg>
+  <span id="toastText">操作しました</span>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  const appWindow = document.getElementById("appWindow");
+  const titlebarCrumb = document.getElementById("titlebarCrumb");
+  const screens = [...document.querySelectorAll(".screen")];
+  const navItems = [...document.querySelectorAll("[data-nav]")];
+  const ribbonTabs = [...document.querySelectorAll("[data-ribbon-tab]")];
+  const ribbonPages = [...document.querySelectorAll("[data-ribbon-page]")];
+  const photoLayout = document.getElementById("photoLayout");
+  const inspector = document.getElementById("inspector");
+  const inspectorScene = document.getElementById("inspectorScene");
+  const inspectorTitle = document.getElementById("inspectorTitle");
+  const inspectorDate = document.getElementById("inspectorDate");
+  const inspectorWorld = document.getElementById("inspectorWorld");
+  const inspectorSize = document.getElementById("inspectorSize");
+  const inspectorPlayers = document.getElementById("inspectorPlayers");
+  const inspectorPlayerCount = document.getElementById("inspectorPlayerCount");
+  const inspectorTags = document.getElementById("inspectorTags");
+  const inspectorFav = document.getElementById("inspectorFav");
+  const inspectorIndex = document.getElementById("inspectorIndex");
+  const inspectorCompressionBadge = document.getElementById("inspectorCompressionBadge");
+  const inspectorFormatBadge = document.getElementById("inspectorFormatBadge");
+  const inspectorPlayerBadge = document.getElementById("inspectorPlayerBadge");
+  const inspectorNote = document.getElementById("inspectorNote");
+  const previewCount = document.getElementById("previewCount");
+  const libraryCards = [...document.querySelectorAll("#photoGrid .photo-card")];
+  const viewerResultCards = [...document.querySelectorAll("[data-viewer-result]")];
+  const importModal = document.getElementById("importModal");
+  const viewer = document.getElementById("viewer");
+  const viewerScene = document.getElementById("viewerScene");
+  const viewerTitle = document.getElementById("viewerTitle");
+  const viewerMeta = document.getElementById("viewerMeta");
+  const viewerCount = document.getElementById("viewerCount");
+  const viewerDetailTitle = document.getElementById("viewerDetailTitle");
+  const viewerDetailDate = document.getElementById("viewerDetailDate");
+  const viewerWorld = document.getElementById("viewerWorld");
+  const viewerSize = document.getElementById("viewerSize");
+  const viewerPlayers = document.getElementById("viewerPlayers");
+  const viewerPlayerCount = document.getElementById("viewerPlayerCount");
+  const viewerTags = document.getElementById("viewerTags");
+  const viewerDetails = document.getElementById("viewerDetails");
+  const viewerFavBadge = document.getElementById("viewerFavBadge");
+  const viewerCompressionBadge = document.getElementById("viewerCompressionBadge");
+  const viewerFormatBadge = document.getElementById("viewerFormatBadge");
+  const viewerNote = document.getElementById("viewerNote");
+  const toast = document.getElementById("toast");
+  const toastText = document.getElementById("toastText");
+  const importTitle = document.getElementById("importTitle");
+  const statusLabel = document.getElementById("statusLabel");
+  const statusValue = document.getElementById("statusValue");
+  const statusBar = document.getElementById("statusBar");
+  const statusNote = document.getElementById("statusNote");
+  const statusAction = document.getElementById("statusAction");
+
+  const screenLabels = {
+    photos: "ライブラリ",
+    search: "検索",
+    compression: "圧縮設定",
+    dashboard: "ダッシュボード",
+    settings: "設定"
+  };
+
+  let selectedCard = libraryCards[0] || null;
+  let activeViewerCard = null;
+  let viewerSource = libraryCards;
+  let viewerIndex = 0;
+  let toastTimer = 0;
+
+  const statusViews = {
+    compress: { label: "圧縮キュー", value: "12 / 18", width: "66%", note: "残り 6 件 · 約 2 分", action: "open-queue", button: "キューを開く" },
+    import: { label: "取り込み", value: "24 / 24", width: "100%", note: "完了 · 2 件スキップ", action: "import-result", button: "結果を見る" },
+    scan: { label: "索引", value: "1,842 / 2,418", width: "76%", note: "写真フォルダ 2 / 3", action: "open-dashboard", button: "ダッシュボード" }
+  };
+
+  function showToast(message) {
+    toastText.textContent = message;
+    toast.classList.add("show");
+    window.clearTimeout(toastTimer);
+    toastTimer = window.setTimeout(() => toast.classList.remove("show"), 2200);
+  }
+
+  function splitList(value) {
+    return (value || "").split("|").map(v => v.trim()).filter(Boolean);
+  }
+
+  function renderPlayers(container, players, limit = 5) {
+    container.innerHTML = "";
+    players.slice(0, limit).forEach((name, index) => {
+      const el = document.createElement("span");
+      el.className = "player";
+      el.title = name;
+      el.textContent = name.slice(0, 1).toUpperCase();
+      container.appendChild(el);
+    });
+    if (players.length > limit) {
+      const more = document.createElement("span");
+      more.className = "player more";
+      more.textContent = "+" + (players.length - limit);
+      container.appendChild(more);
+    }
+  }
+
+  function renderTags(container, tags) {
+    container.innerHTML = "";
+    tags.forEach(tag => {
+      const el = document.createElement("span");
+      el.className = "tag";
+      el.textContent = tag;
+      container.appendChild(el);
+    });
+    const add = document.createElement("button");
+    add.className = "tag add";
+    add.dataset.action = "edit-tags";
+    add.textContent = "+ 追加";
+    container.appendChild(add);
+  }
+
+  function cardData(card) {
+    const players = splitList(card.dataset.players);
+    const world = card.dataset.world || card.dataset.title || "";
+    const formatEl = card.querySelector(".photo-format");
+    const rawFormat = formatEl ? formatEl.textContent.trim() : "";
+    const compressed = !rawFormat.includes("未圧縮");
+    const format = compressed
+      ? rawFormat.replace(/^WEBP\s+(\d+)$/i, "WebP · $1%")
+      : "元画像 · RAW";
+    return {
+      scene: card.dataset.scene || "neon-city",
+      title: card.dataset.title || "Untitled",
+      date: card.dataset.date || "",
+      world,
+      size: card.dataset.size || "",
+      players,
+      tags: splitList(card.dataset.tags),
+      fav: card.dataset.fav === "true",
+      compressed,
+      format,
+      note: card.dataset.note || (world ? "「" + world + "」で撮影した一枚。フレンドと一緒に記念撮影。" : "メモはまだありません。")
+    };
+  }
+
+  function updateCompressionBadge(element, data) {
+    element.className = "badge " + (data.compressed ? "green" : "amber");
+    element.innerHTML = '<i class="dot"></i>' + (data.compressed ? "圧縮済み" : "未圧縮");
+  }
+
+  function updateInspector(card) {
+    if (!card) return;
+    const data = cardData(card);
+    const index = libraryCards.indexOf(card);
+    selectedCard = card;
+    libraryCards.forEach(c => c.classList.toggle("selected", c === card));
+    inspectorScene.className = "scene scene-" + data.scene;
+    inspectorTitle.textContent = data.title;
+    inspectorDate.textContent = data.date;
+    inspectorWorld.textContent = data.world;
+    inspectorSize.textContent = data.size;
+    inspectorIndex.textContent = String((index >= 0 ? index : 0) + 1).padStart(2, "0");
+    previewCount.textContent = (index >= 0 ? index + 1 : 1) + " / 2,418";
+    inspectorPlayerCount.textContent = data.players.length + "人";
+    inspectorPlayerBadge.textContent = data.players.length + " プレイヤー";
+    updateCompressionBadge(inspectorCompressionBadge, data);
+    inspectorFormatBadge.textContent = data.format;
+    inspectorNote.textContent = data.note;
+    renderPlayers(inspectorPlayers, data.players);
+    renderTags(inspectorTags, data.tags);
+    inspectorFav.classList.toggle("fav-active", data.fav);
+  }
+
+  function updateViewer(card) {
+    if (!card) return;
+    const data = cardData(card);
+    viewerScene.className = "scene scene-" + data.scene;
+    viewerTitle.textContent = data.title;
+    viewerMeta.textContent = data.date + " · " + data.size;
+    viewerDetailTitle.textContent = data.title;
+    viewerDetailDate.textContent = data.date;
+    viewerWorld.textContent = data.world;
+    viewerSize.textContent = data.size;
+    viewerPlayerCount.textContent = data.players.length + "人";
+    updateCompressionBadge(viewerCompressionBadge, data);
+    viewerFormatBadge.textContent = data.format;
+    viewerNote.textContent = data.note;
+    renderPlayers(viewerPlayers, data.players);
+    renderTags(viewerTags, data.tags);
+    viewerFavBadge.style.display = data.fav ? "" : "none";
+    activeViewerCard = card;
+    const n = viewerSource.indexOf(card);
+    viewerIndex = n >= 0 ? n : 0;
+    viewerCount.textContent = (viewerIndex + 1) + " / " + viewerSource.length;
+  }
+
+  function openViewer(card, source = libraryCards) {
+    if (!card) return;
+    viewerSource = source;
+    updateViewer(card);
+    viewer.classList.add("open");
+    viewer.setAttribute("aria-hidden", "false");
+    document.getElementById("viewerFrame").focus?.();
+  }
+
+  function closeViewer() {
+    viewer.classList.remove("open");
+    viewer.setAttribute("aria-hidden", "true");
+    activeViewerCard = null;
+  }
+
+  function stepViewer(delta) {
+    if (!viewerSource.length) return;
+    viewerIndex = (viewerIndex + delta + viewerSource.length) % viewerSource.length;
+    const card = viewerSource[viewerIndex];
+    updateViewer(card);
+    if (viewerSource === libraryCards) updateInspector(card);
+  }
+
+  function setScreen(name) {
+    const valid = screens.some(s => s.dataset.screen === name);
+    if (!valid) return;
+    screens.forEach(s => s.classList.toggle("active", s.dataset.screen === name));
+    navItems.forEach(item => item.classList.toggle("active", item.dataset.nav === name));
+    document.querySelectorAll(".rb-photo-only").forEach(el => { el.style.display = name === "photos" ? "" : "none"; });
+    titlebarCrumb.textContent = screenLabels[name] || name;
+    const contextRibbon = name === "compression" ? "compression" : "home";
+    setRibbon(contextRibbon);
+  }
+
+  function setRibbon(name) {
+    if (appWindow.classList.contains("ribbon-collapsed")) appWindow.classList.remove("ribbon-collapsed");
+    ribbonTabs.forEach(tab => {
+      const active = tab.dataset.ribbonTab === name;
+      tab.classList.toggle("active", active);
+      tab.setAttribute("aria-selected", String(active));
+    });
+    ribbonPages.forEach(page => page.classList.toggle("active", page.dataset.ribbonPage === name));
+  }
+
+  function setImportMode(mode) {
+    document.querySelectorAll("[data-import-mode]").forEach(btn => {
+      btn.classList.toggle("active", btn.dataset.importMode === mode);
+    });
+    importTitle.textContent = mode === "move" ? "写真を移動して取り込む" : "写真を取り込む";
+  }
+
+  function openImport(mode = "copy") {
+    setImportMode(mode);
+    importModal.classList.add("open");
+    importModal.setAttribute("aria-hidden", "false");
+  }
+
+  function closeImport() {
+    importModal.classList.remove("open");
+    importModal.setAttribute("aria-hidden", "true");
+  }
+
+  function toggleInspector() {
+    photoLayout.classList.toggle("inspector-hidden");
+    const visible = !photoLayout.classList.contains("inspector-hidden");
+    document.querySelectorAll('[data-action="toggle-inspector"]').forEach(btn => btn.classList.toggle("on", visible));
+    showToast(visible ? "詳細パネルを表示しました" : "詳細パネルを非表示にしました");
+  }
+
+  function toggleSidebar() {
+    appWindow.classList.toggle("sidebar-collapsed");
+    showToast(appWindow.classList.contains("sidebar-collapsed") ? "サイドバーを最小化しました" : "サイドバーを展開しました");
+  }
+
+  function toggleRibbon() {
+    appWindow.classList.toggle("ribbon-collapsed");
+  }
+
+  function setGlass(value) {
+    document.documentElement.dataset.glass = value;
+    document.querySelectorAll("[data-glass-set]").forEach(btn => {
+      const active = btn.dataset.glassSet === value;
+      btn.classList.toggle("active", active);
+      btn.classList.toggle("on", active);
+    });
+  }
+
+  function setStatusTab(name) {
+    const view = statusViews[name];
+    if (!view) return;
+    document.querySelectorAll("[data-status-tab]").forEach(tab => {
+      const active = tab.dataset.statusTab === name;
+      tab.classList.toggle("active", active);
+      tab.setAttribute("aria-selected", String(active));
+    });
+    statusLabel.textContent = view.label;
+    statusValue.textContent = view.value;
+    statusBar.style.width = view.width;
+    statusNote.textContent = view.note;
+    statusAction.dataset.action = view.action;
+    statusAction.innerHTML = view.button + ' <svg class="icon"><use href="#i-arrow-right"/></svg>';
+  }
+
+  function runAction(action, sourceEl) {
+    const actions = {
+      "import-copy": () => openImport("copy"),
+      "import-move": () => openImport("move"),
+      "reload": () => showToast("ライブラリを再読み込みしました"),
+      "reload-settings": () => showToast("設定を再読み込みしました"),
+      "open-folder": () => showToast("写真フォルダを開きました"),
+      "rebuild-index": () => showToast("索引を再構築しています…"),
+      "select-all": () => showToast("表示中の 9 枚を選択しました（モック）"),
+      "clear-selection": () => showToast("選択を解除しました"),
+      "toggle-inspector": (el) => { if (!el?.closest(".editor-head")) toggleInspector(); },
+      "toggle-sidebar": toggleSidebar,
+      "toggle-ribbon": toggleRibbon,
+      "toggle-year-rail": () => showToast("年レールの表示を切り替えました（モック）"),
+      "manual-compress": () => showToast("手動圧縮ダイアログは次のイテレーションで追加します"),
+      "release-waiting": () => showToast("待機中の 3 件を圧縮キューに投入しました（モック）"),
+      "open-queue": () => setScreen("dashboard"),
+      "open-dashboard": () => setScreen("dashboard"),
+      "open-settings": () => setScreen("settings"),
+      "retry-failed": () => showToast("失敗ジョブを再試行しました（モック）"),
+      "focus-search": () => { setScreen("search"); window.setTimeout(() => document.getElementById("searchWorld")?.focus(), 60); },
+      "quick-today": () => showToast("今日の写真に絞り込みました（モック）"),
+      "quick-favorite": () => showToast("お気に入りのみ表示しました（モック）"),
+      "quick-tags": () => showToast("タグフィルターを開きました（モック）"),
+      "view-grid": () => {
+        document.querySelectorAll('[data-action="view-grid"], [data-action="view-list"]').forEach(btn => btn.classList.toggle("on", btn.dataset.action === "view-grid"));
+        showToast("グリッド表示");
+      },
+      "view-list": () => {
+        document.querySelectorAll('[data-action="view-grid"], [data-action="view-list"]').forEach(btn => btn.classList.toggle("on", btn.dataset.action === "view-list"));
+        showToast("リスト表示は検討中です");
+      },
+      "fullscreen-view": () => openViewer(selectedCard),
+      "favorite": () => {
+        const card = (viewer.classList.contains("open") && activeViewerCard) ? activeViewerCard : selectedCard;
+        if (!card) return;
+        const data = cardData(card);
+        card.dataset.fav = String(!data.fav);
+        if (card === selectedCard) updateInspector(card);
+        if (viewer.classList.contains("open")) updateViewer(card);
+        showToast(!data.fav ? "お気に入りに追加しました" : "お気に入りから外しました");
+      },
+      "edit-tags": () => showToast("タグ編集パネルは次のイテレーションで追加します"),
+      "note": () => showToast("メモ編集は詳細パネルから行えます"),
+      "trash": () => showToast("ゴミ箱へ移動するには確認が必要です"),
+      "sort-new": () => showToast("新しい順に並べ替えました"),
+      "sort-old": () => showToast("古い順に並べ替えました"),
+      "sort-size": () => showToast("サイズ順に並べ替えました"),
+      "sort-menu": () => showToast("並べ替えメニュー（モック）"),
+      "new-profile": () => showToast("新しいプロファイルを作成しました（モック）"),
+      "duplicate-profile": () => showToast("プロファイルを複製しました（モック）"),
+      "rename-profile": () => showToast("名前変更（モック）"),
+      "auto-compress": () => showToast("自動適用を切り替えました（モック）"),
+      "reset-profile": () => showToast("既定値に戻しました（モック）"),
+      "save-profile": () => showToast("プロファイルを保存しました"),
+      "save-settings": () => showToast("設定を保存しました"),
+      "choose-folder": () => showToast("フォルダ選択ダイアログ（モック）"),
+      "choose-import-folder": () => showToast("取り込み先を選択（モック）"),
+      "pick-files": () => showToast("ファイル選択ダイアログ（モック）"),
+      "start-import": () => { closeImport(); showToast("24 ファイルの取り込みを開始しました（モック）"); },
+      "rescan": () => showToast("写真フォルダの再スキャンを開始しました"),
+      "toggle-pause": () => showToast("監視の一時停止 / 再開（モック）"),
+      "open-logs": () => showToast("ログフォルダを開きました"),
+      "view-log": () => showToast("ログビューアは次のイテレーションで追加します"),
+      "check-update": () => showToast("最新バージョンです（モック）"),
+      "shortcuts": () => showToast("Ctrl+B / Ctrl+I / Ctrl+K / Esc が使えます"),
+      "about": () => showToast("VRC Photo Manager v0.8.0-dev · MIT"),
+      "reduce-motion": () => showToast("モーション設定を切り替えました（モック）"),
+      "theme": () => showToast("テーマ切り替えは次のイテレーションで追加します"),
+      "import-result": () => showToast("直近の取り込み結果: 完了 22 · スキップ 2"),
+      "run-search": () => showToast("条件に一致する 1,284 枚を表示中（モック）"),
+      "clear-search": () => showToast("検索条件をクリアしました"),
+      "reset-filters": () => showToast("フィルターをリセットしました"),
+      "save-filter": () => showToast("検索条件を保存しました（モック）"),
+      "date-today": () => showToast("今日に絞り込み（モック）"),
+      "date-week": () => showToast("7日に絞り込み（モック）"),
+      "date-month": () => showToast("30日に絞り込み（モック）"),
+      "date-all": () => showToast("すべての期間（モック）"),
+      "notifications": () => showToast("未読の通知はありません"),
+      "status-more": () => showToast("進行状況の詳細（モック）"),
+      "filter-world": () => showToast("ワールドフィルター（モック）"),
+      "filter-player": () => showToast("プレイヤーフィルター（モック）"),
+      "filter-date": () => showToast("日時フィルター（モック）"),
+      "filter-tag": () => showToast("タグフィルター（モック）"),
+      "filter-favorite": () => showToast("お気に入りフィルター（モック）"),
+      "filter-compressed": () => showToast("圧縮状態フィルター（モック）"),
+      "gallery-sort": () => showToast("並べ替え（モック）"),
+      "gallery-more": () => showToast("ギャラリー操作（モック）"),
+      "more-photos": () => showToast("その他の操作（モック）"),
+      "compression-more": () => showToast("圧縮設定の操作（モック）"),
+      "dashboard-more": () => showToast("ダッシュボード操作（モック）"),
+      "session-more": () => showToast("セッション詳細（モック）"),
+      "selected-more": () => showToast("選択項目の操作（モック）"),
+      "search-more": () => showToast("検索の操作（モック）"),
+      "settings-more": () => showToast("設定の操作（モック）"),
+      "daemon-more": () => showToast("デーモン詳細（モック）"),
+      "viewer-details": () => {
+        viewerDetails.style.display = viewerDetails.style.display === "none" ? "flex" : "none";
+      }
+    };
+    const fn = actions[action];
+    if (fn) fn(sourceEl);
+    else showToast("モック: この操作はこれから実装します");
+  }
+
+  /* Navigation */
+  navItems.forEach(item => {
+    item.addEventListener("click", () => setScreen(item.dataset.nav));
+  });
+
+  ribbonTabs.forEach(tab => {
+    tab.addEventListener("click", () => setRibbon(tab.dataset.ribbonTab));
+  });
+
+  /* Photo selection */
+  libraryCards.forEach(card => {
+    card.addEventListener("click", () => updateInspector(card));
+    card.addEventListener("dblclick", () => openViewer(card, libraryCards));
+  });
+
+  viewerResultCards.forEach(card => {
+    card.addEventListener("click", () => openViewer(card, viewerResultCards));
+  });
+
+  /* Global action handler */
+  document.addEventListener("click", event => {
+    const actionEl = event.target.closest("[data-action]");
+    if (actionEl) {
+      event.preventDefault();
+      runAction(actionEl.dataset.action, actionEl);
+      return;
+    }
+
+    const glassEl = event.target.closest("[data-glass-set]");
+    if (glassEl) {
+      setGlass(glassEl.dataset.glassSet);
+      showToast("ガラス強度: " + ({ soft: "控えめ", standard: "標準", strong: "濃い" }[glassEl.dataset.glassSet]));
+      return;
+    }
+
+    const importModeEl = event.target.closest("[data-import-mode]");
+    if (importModeEl) {
+      setImportMode(importModeEl.dataset.importMode);
+      return;
+    }
+
+    const toggle = event.target.closest("[data-toggle='switch']");
+    if (toggle) {
+      const on = !toggle.classList.contains("on");
+      toggle.classList.toggle("on", on);
+      toggle.setAttribute("aria-checked", String(on));
+      return;
+    }
+
+    const closeModal = event.target.closest("[data-close-modal]");
+    if (closeModal) {
+      closeImport();
+      return;
+    }
+
+    if (event.target.closest("[data-viewer-close]")) {
+      closeViewer();
+      return;
+    }
+
+    if (event.target.closest("[data-viewer-prev]")) {
+      stepViewer(-1);
+      return;
+    }
+
+    if (event.target.closest("[data-viewer-next]")) {
+      stepViewer(1);
+      return;
+    }
+
+    const statusTab = event.target.closest("[data-status-tab]");
+    if (statusTab) {
+      setStatusTab(statusTab.dataset.statusTab);
+      return;
+    }
+
+    const settingsNav = event.target.closest("[data-settings-nav]");
+    if (settingsNav) {
+      document.querySelectorAll("[data-settings-nav]").forEach(b => b.classList.toggle("active", b === settingsNav));
+      const panel = document.querySelector('[data-settings-panel="' + settingsNav.dataset.settingsNav + '"]');
+      panel?.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+
+    const winBtn = event.target.closest("[data-win]");
+    if (winBtn) {
+      const kind = winBtn.dataset.win;
+      if (kind === "max") {
+        appWindow.classList.toggle("maximized");
+        showToast(appWindow.classList.contains("maximized") ? "ウィンドウを最大化しました（モック）" : "ウィンドウを元のサイズに戻しました");
+      } else if (kind === "min") {
+        showToast("モックでは最小化できません");
+      } else {
+        showToast("モックでは閉じません。右上の × でタブを閉じられます");
+      }
+      return;
+    }
+
+    const segmentedBtn = event.target.closest(".segmented [data-action]");
+    if (segmentedBtn) {
+      const group = segmentedBtn.parentElement;
+      [...group.querySelectorAll("[data-action]")].forEach(b => b.classList.toggle("active", b === segmentedBtn));
+      return;
+    }
+  });
+
+  /* Sidebar / ribbon collapse */
+  document.getElementById("collapseSidebar").addEventListener("click", toggleSidebar);
+  document.getElementById("collapseRibbon").addEventListener("click", toggleRibbon);
+
+  /* Viewer close */
+  viewer.addEventListener("click", event => {
+    if (event.target === viewer) closeViewer();
+  });
+  importModal.addEventListener("click", event => {
+    if (event.target === importModal) closeImport();
+  });
+
+  /* Keyboard */
+  document.addEventListener("keydown", event => {
+    const meta = event.ctrlKey || event.metaKey;
+    const blockingLayer = viewer.classList.contains("open") || importModal.classList.contains("open");
+    if (blockingLayer && meta) return;
+    if (meta && event.key.toLowerCase() === "b") {
+      event.preventDefault();
+      toggleSidebar();
+      return;
+    }
+    if (meta && event.key.toLowerCase() === "i") {
+      event.preventDefault();
+      if (document.querySelector(".screen.active")?.dataset.screen === "photos") toggleInspector();
+      return;
+    }
+    if (meta && event.key.toLowerCase() === "k") {
+      event.preventDefault();
+      setScreen("search");
+      document.getElementById("searchWorld")?.focus();
+      return;
+    }
+    if (event.key === "Escape") {
+      if (importModal.classList.contains("open")) { closeImport(); return; }
+      if (viewer.classList.contains("open")) { closeViewer(); return; }
+    }
+    if (viewer.classList.contains("open")) {
+      if (event.key === "ArrowLeft") { stepViewer(-1); return; }
+      if (event.key === "ArrowRight") { stepViewer(1); return; }
+      if (event.key === " " ) { event.preventDefault(); stepViewer(1); return; }
+    }
+    if (!meta && !event.altKey && event.key === "Enter") {
+      const active = document.activeElement;
+      if (active && active.classList.contains("photo-card")) {
+        event.preventDefault();
+        openViewer(active, active.hasAttribute("data-viewer-result") ? viewerResultCards : libraryCards);
+      }
+    }
+  });
+
+  /* Initialize */
+  updateInspector(selectedCard);
+  setStatusTab("compress");
+  setRibbon("home");
+  setScreen("photos");
+  setGlass("standard");
+})();
+</script>
+</body>
+</html>
