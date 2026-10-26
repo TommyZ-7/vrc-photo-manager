@@ -1,12 +1,11 @@
 use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::Utc;
@@ -27,9 +26,9 @@ use vrc_photo_core::importer::{
 use vrc_photo_core::linker;
 use vrc_photo_core::logging::{DAEMON_LOG_FILE, UI_LOG_FILE, logs_dir};
 use vrc_photo_core::model::{
-    CompressionFormat, CompressionJob, CompressionProfile, DaemonCommand, DaemonError,
-    DaemonOperation, Derivative, LibraryStats, MAX_JOB_RETRIES, NewPhoto, Photo, PhotoContext,
-    PhotoIndexEntry, PhotoPlayer, PhotoSort, PhotoTextFilter, QueueStatus, ResizeMode,
+    CompressionFormat, CompressionJob, CompressionProfile, DaemonCommand, DaemonOperation,
+    LibraryStats, MAX_JOB_RETRIES, NewPhoto, Photo, PhotoContext, PhotoIndexEntry, PhotoPlayer,
+    PhotoSort, PhotoTextFilter, QueueStatus, ResizeMode,
 };
 use vrc_photo_core::preview;
 use vrc_photo_core::scanner;
@@ -41,8 +40,14 @@ use vrc_photo_ipc::{
     Endpoint, Event as IpcEvent, Request as IpcRequest, ScanPhase as IpcScanPhase, StatusSnapshot,
 };
 
+use crate::app::cli::{log_timing, parse_args, process_start, timing_enabled};
+use crate::app::{App, LaunchOptions, Screen};
+
+mod app;
 mod ipc_bridge;
 mod logging;
+mod state;
+mod ui;
 mod update_view;
 
 const BG: u32 = 0x07090d;
@@ -131,94 +136,6 @@ enum ButtonTone {
 struct ButtonState {
     tone: ButtonTone,
     enabled: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Screen {
-    Photos,
-    Compression,
-    Search,
-    Dashboard,
-    Settings,
-}
-
-impl Screen {
-    fn title(self) -> &'static str {
-        match self {
-            Self::Photos => "写真",
-            Self::Compression => "圧縮設定",
-            Self::Search => "検索",
-            Self::Dashboard => "ダッシュボード",
-            Self::Settings => "設定",
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-struct LaunchOptions {
-    background: bool,
-    demo: bool,
-    demo_reset: bool,
-    window_size: (f32, f32),
-}
-
-impl Default for LaunchOptions {
-    fn default() -> Self {
-        Self {
-            background: false,
-            demo: false,
-            demo_reset: false,
-            window_size: (1280.0, 820.0),
-        }
-    }
-}
-
-/// Timing probes stay silent unless `VRC_PHOTO_TIMING` is set.
-fn timing_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("VRC_PHOTO_TIMING").is_some())
-}
-
-fn log_timing(label: &str, start: Instant) {
-    if timing_enabled() {
-        eprintln!("[timing] {label}: {:?}", start.elapsed());
-    }
-}
-
-/// Process start, captured once so the first-frame probe can report launch
-/// latency. Only initialized when timing is enabled.
-fn process_start() -> Instant {
-    static START: OnceLock<Instant> = OnceLock::new();
-    *START.get_or_init(Instant::now)
-}
-
-fn parse_args<I, S>(args: I) -> LaunchOptions
-where
-    I: IntoIterator<Item = S>,
-    S: Into<OsString>,
-{
-    let mut options = LaunchOptions::default();
-    let mut args = args.into_iter().map(Into::into);
-    while let Some(arg) = args.next() {
-        let Some(flag) = arg.to_str() else {
-            continue;
-        };
-        match flag {
-            "--background" => options.background = true,
-            "--demo" => options.demo = true,
-            "--demo-reset" => options.demo_reset = true,
-            "--window-size" => {
-                if let Some(value) = args.next()
-                    && let Some(value) = value.to_str()
-                    && let Some(size) = parse_window_size(value)
-                {
-                    options.window_size = size;
-                }
-            }
-            _ => {}
-        }
-    }
-    options
 }
 
 /// Identifies a cached preview by photo and displayed file variant.
@@ -1547,145 +1464,6 @@ struct CardStatus {
 type BoundsFrame = (u64, Bounds<Pixels>);
 type CardBoundsMap = Rc<RefCell<HashMap<i64, BoundsFrame>>>;
 type InspectorBounds = Rc<RefCell<Option<BoundsFrame>>>;
-
-pub struct App {
-    db: Db,
-    screen: Screen,
-    sidebar_collapsed: bool,
-    sidebar_status_tab: SidebarStatusTab,
-    sidebar_motion_epoch: u64,
-    nav_previous: Screen,
-    nav_epoch: u64,
-    screen_epoch: u64,
-    screen_direction: f32,
-    render_epoch: u64,
-    card_image_bounds: CardBoundsMap,
-    inspector_preview_bounds: InspectorBounds,
-    viewer_morph: Option<ViewerMorph>,
-    viewer_morph_epoch: u64,
-    viewer_return_source: Option<ViewerOpenSource>,
-    viewer_nav_epoch: u64,
-    viewer_nav_direction: f32,
-    viewer_nav_started_at: Instant,
-    viewer_open_started_at: Instant,
-    viewer_box: ViewerBoxState,
-    viewer_panel: ViewerPanelState,
-    inspector_collapsed: bool,
-    inspector_epoch: u64,
-    hovered_nav: Option<Screen>,
-    daemon_age_secs: Option<i64>,
-    daemon_supervisor: Option<String>,
-    daemon_pid: Option<u32>,
-    ipc_endpoint: Option<Endpoint>,
-    ipc_connected: bool,
-    ipc_error: Option<String>,
-    daemon_paused: bool,
-    scan_progress: Option<ScanProgressView>,
-    /// Last daemon-side library revision observed by the UI. Path changes and
-    /// replacement status changes do not alter the photo count, so the count
-    /// alone cannot tell the grid to rebuild.
-    last_library_revision: i64,
-    library: PhotoBrowser,
-    search_view: PhotoBrowser,
-    /// The library index changed while another screen was mounted; the next
-    /// visit to Photos rebuilds it.
-    library_dirty: bool,
-    /// A failed index/page query kept the previous snapshot mounted; retry from
-    /// the Photos header.
-    library_error: Option<String>,
-    count_debounce: CountDebounce,
-    selected: Option<i64>,
-    /// Multi-selection in the current photo tab. `selected` is the primary
-    /// item used by the inspector and viewer. An empty list means nothing is
-    /// selected; otherwise the primary is always included.
-    selected_ids: Vec<i64>,
-    selection_anchor: Option<i64>,
-    selection_epoch: u64,
-    selection_changed_at: Option<Instant>,
-    selected_photo: Option<Photo>,
-    selected_players: Vec<PhotoPlayer>,
-    selected_tags: Vec<String>,
-    selected_derivatives: Vec<Derivative>,
-    compressed_ids: HashSet<i64>,
-    duplicate_ids: HashSet<i64>,
-    thumbnails: ThumbnailCache,
-    grid_epoch: u64,
-    hovered_photo: Option<i64>,
-    intro_seen: HashMap<i64, Instant>,
-    photo_grid_focus: FocusHandle,
-    import_dialog_focus: FocusHandle,
-    quick_look_open: bool,
-    quick_look_epoch: u64,
-    quick_look_return_focus: Option<FocusHandle>,
-    quick_look_focus_index: usize,
-    quick_look_details_open: bool,
-    quick_look_details_epoch: u64,
-    quick_look_photo_ids: Vec<i64>,
-    quick_look_index: usize,
-    quick_look_close_focus: FocusHandle,
-    quick_look_prev_focus: FocusHandle,
-    quick_look_next_focus: FocusHandle,
-    quick_look_details_focus: FocusHandle,
-    quick_look_favorite_focus: FocusHandle,
-    quick_look_compress_focus: FocusHandle,
-    quick_look_trash_focus: FocusHandle,
-    quick_look_add_tag_focus: FocusHandle,
-    quick_look_note_edit_focus: FocusHandle,
-    quick_look_note_save_focus: FocusHandle,
-    quick_look_note_cancel_focus: FocusHandle,
-    preview: Option<Arc<RenderImage>>,
-    preview_key: Option<PreviewKey>,
-    preview_attempt: Option<PreviewKey>,
-    preview_queue: PreviewQueue,
-    previous_preview: Option<Arc<RenderImage>>,
-    previous_color: Option<u32>,
-    profiles: Vec<CompressionProfile>,
-    profile_index: usize,
-    profile_suffix_input: Entity<InputState>,
-    _profile_suffix_subscription: Subscription,
-    manual_compress: Option<ManualCompressionDialog>,
-    stats: LibraryStats,
-    settings: AppSettings,
-    update: update_view::UpdateState,
-    jobs: Vec<CompressionJob>,
-    waiting_jobs: Vec<CompressionJob>,
-    active_job_count: i64,
-    waiting_job_count: i64,
-    daemon_errors: Vec<DaemonError>,
-    failed_job_count: i64,
-    failed_jobs: Vec<CompressionJob>,
-    failed_job_names: HashMap<i64, String>,
-    import_report: Option<ImportReportView>,
-    import_dialog: Option<ImportDialogState>,
-    monitor_world: Option<String>,
-    monitor_instance: Option<String>,
-    monitor_players: Vec<String>,
-    daemon_active: bool,
-    world_input: Entity<InputState>,
-    player_input: Entity<InputState>,
-    tag_input: Entity<InputState>,
-    tag_edit_input: Entity<InputState>,
-    note_edit_input: Entity<TextareaState>,
-    note_edit_id: Option<i64>,
-    photo_root_input: Entity<InputState>,
-    log_dir_input: Entity<InputState>,
-    import_dir_input: Entity<InputState>,
-    search_active: bool,
-    searching: bool,
-    search_request: u64,
-    applied_search: Option<PhotoTextFilter>,
-    pending_search_anchor: Option<i64>,
-    pending_layout_anchor_library: Option<i64>,
-    pending_layout_anchor_search: Option<i64>,
-    search_refresh_pending: bool,
-    search_favorite: bool,
-    search_days: Option<i64>,
-    delete_armed: Option<i64>,
-    daemon_shutdown_armed: bool,
-    message: Option<String>,
-    demo: bool,
-    demo_assets: Option<DemoAssets>,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ViewerOpenSource {
@@ -11898,16 +11676,6 @@ fn moved_profile_order(ids: &[String], index: usize, delta: isize) -> Option<Vec
     Some(order)
 }
 
-fn parse_window_size(value: &str) -> Option<(f32, f32)> {
-    let (width, height) = value.split_once(['x', 'X'])?;
-    let width: f32 = width.trim().parse().ok()?;
-    let height: f32 = height.trim().parse().ok()?;
-    if !width.is_finite() || !height.is_finite() || width < 320.0 || height < 240.0 {
-        return None;
-    }
-    Some((width, height))
-}
-
 fn sidebar_width(collapsed: bool) -> f32 {
     if collapsed {
         SIDEBAR_COLLAPSED
@@ -12444,21 +12212,19 @@ mod tests {
         job_retry_label, lerp_bounds, lerp_color, list_scroll_top, lossless_hint,
         lossless_supported, manual_output_available, merge_resume_report, merge_retry_report,
         morph_bounds_at, morph_image_plan, moved_profile_order, nav_index, nav_item_top,
-        next_focus_index, normalize_note, parse_args, parse_window_size, preferred_bounds,
-        preview_cache_dir, preview_key, preview_placeholder_label, profile_summary,
-        queue_status_badge, rail_hover_hits, rail_label_hidden_by_pill, rail_marker_bounds,
-        rail_pill_bounds, rail_press_allowed, rail_press_hits, rail_row_at, rail_scroll_offset,
-        rail_track_hit_bounds, rail_y, release_confirmation, reserve_import_dialog,
-        retryable_sources, scan_progress_label, scan_progress_ratio, screen_direction,
-        search_anchor_after_result, search_available_width, selection_range,
-        should_request_preview, sidebar_reveal_width, sidebar_width, stagger_value, step_index,
-        sync_search_mirror, toggle_selected_id, viewer_image_box, viewer_image_rect,
-        viewer_nav_progress, visible_year_buckets, with_tag, without_tag,
+        next_focus_index, normalize_note, preferred_bounds, preview_cache_dir, preview_key,
+        preview_placeholder_label, profile_summary, queue_status_badge, rail_hover_hits,
+        rail_label_hidden_by_pill, rail_marker_bounds, rail_pill_bounds, rail_press_allowed,
+        rail_press_hits, rail_row_at, rail_scroll_offset, rail_track_hit_bounds, rail_y,
+        release_confirmation, reserve_import_dialog, retryable_sources, scan_progress_label,
+        scan_progress_ratio, screen_direction, search_anchor_after_result, search_available_width,
+        selection_range, should_request_preview, sidebar_reveal_width, sidebar_width,
+        stagger_value, step_index, sync_search_mirror, toggle_selected_id, viewer_image_box,
+        viewer_image_rect, viewer_nav_progress, visible_year_buckets, with_tag, without_tag,
     };
     use gpui_kit::{Bounds, RenderImage, ScrollStrategy, UniformListScrollHandle, point, px, size};
     use smallvec::SmallVec;
     use std::cell::Cell;
-    use std::ffi::OsString;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
@@ -12970,54 +12736,6 @@ mod tests {
         assert_eq!(moved_profile_order(&ids, 0, -1), None);
         assert_eq!(moved_profile_order(&ids, 2, 1), None);
         assert_eq!(moved_profile_order(&[], 0, 1), None);
-    }
-
-    #[test]
-    fn window_size_parser_accepts_wxh() {
-        assert_eq!(parse_window_size("1440x900"), Some((1440.0, 900.0)));
-        assert_eq!(parse_window_size("1440X900"), Some((1440.0, 900.0)));
-        assert_eq!(parse_window_size("0x900"), None);
-        assert_eq!(parse_window_size("1440,900"), None);
-        assert_eq!(parse_window_size("1440x"), None);
-    }
-
-    #[test]
-    fn launch_options_parse_demo_and_size() {
-        let options = parse_args([
-            "app".to_string(),
-            "--demo".to_string(),
-            "--window-size".to_string(),
-            "1440x900".to_string(),
-        ]);
-        assert!(options.demo);
-        assert_eq!(options.window_size, (1440.0, 900.0));
-    }
-
-    #[test]
-    fn launch_options_ignore_unknown_flags() {
-        let options = parse_args([
-            "app".to_string(),
-            "--demo".to_string(),
-            "--unexpected".to_string(),
-            "--window-size".to_string(),
-            "1280x820".to_string(),
-        ]);
-        assert!(options.demo);
-        assert_eq!(options.window_size, (1280.0, 820.0));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn launch_options_ignore_non_utf8_arguments() {
-        use std::os::unix::ffi::OsStringExt;
-
-        let options = parse_args(vec![
-            OsString::from("app"),
-            OsString::from_vec(vec![0x80]),
-            OsString::from("--demo"),
-        ]);
-        assert!(options.demo);
-        assert_eq!(options.window_size, (1280.0, 820.0));
     }
 
     #[test]
