@@ -1,5 +1,7 @@
 pub(crate) mod cli;
+pub(crate) mod compression;
 pub(crate) mod photos;
+pub(crate) mod search;
 
 pub(crate) use cli::LaunchOptions;
 

@@ -1,0 +1,334 @@
+//! App-side compression profile state: profile ordering, duplication, deletion,
+//! and manual-compression queueing.
+//!
+//! Rendering stays in `ui::compression`; these methods only touch App fields and
+//! the compression queue.
+
+use std::path::PathBuf;
+
+use gpui_kit::component::WindowExt;
+use gpui_kit::component::button::ButtonVariant;
+use gpui_kit::*;
+use vrc_photo_core::compressor;
+use vrc_photo_core::model::CompressionProfile;
+
+use crate::app::App;
+use crate::ui::theme::{moved_profile_order, step_index};
+use crate::{
+    ManualCompressionDialog, ManualOutputTarget, compression_policy, manual_output_available,
+};
+
+impl App {
+    pub(crate) fn open_manual_compression(&mut self, photo_ids: Vec<i64>, cx: &mut Context<Self>) {
+        let mut ids = Vec::new();
+        for id in photo_ids {
+            if ids.contains(&id) {
+                continue;
+            }
+            if self.db.photo_by_id(id).ok().flatten().is_some() {
+                ids.push(id);
+            }
+        }
+        if ids.is_empty() {
+            self.message = Some("先に写真を選択してください".to_string());
+            cx.notify();
+            return;
+        }
+        let Some(profile) = self
+            .profiles
+            .get(self.profile_index)
+            .or_else(|| self.profiles.first())
+        else {
+            self.message = Some("圧縮プロファイルがありません".to_string());
+            cx.notify();
+            return;
+        };
+        self.manual_compress = Some(ManualCompressionDialog {
+            photo_ids: ids,
+            profile_id: profile.id.clone(),
+            output: ManualOutputTarget::Profile,
+            folder: None,
+            keep_original: true,
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn close_manual_compression(&mut self, cx: &mut Context<Self>) {
+        self.manual_compress = None;
+        cx.notify();
+    }
+
+    pub(crate) fn choose_manual_folder(&mut self, cx: &mut Context<Self>) {
+        let current = self
+            .manual_compress
+            .as_ref()
+            .and_then(|dialog| dialog.folder.clone());
+        let mut picker = rfd::FileDialog::new();
+        if let Some(dir) = current {
+            picker = picker.set_directory(dir);
+        }
+        if let Some(dir) = picker.pick_folder()
+            && let Some(dialog) = &mut self.manual_compress
+        {
+            dialog.folder = Some(dir.to_string_lossy().to_string());
+            dialog.output = ManualOutputTarget::Folder;
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn confirm_manual_compression(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.manual_compress.clone() else {
+            return;
+        };
+        let Some(profile) = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == dialog.profile_id)
+            .cloned()
+        else {
+            self.message = Some("選択したプロファイルが見つかりません".to_string());
+            cx.notify();
+            return;
+        };
+        if !manual_output_available(dialog.photo_ids.len(), dialog.output) {
+            self.message = Some("クリップボード出力は1枚選択時のみ使えます".to_string());
+            cx.notify();
+            return;
+        }
+
+        if dialog.output == ManualOutputTarget::Clipboard {
+            let photo_id = dialog.photo_ids[0];
+            let Some(photo) = self.db.photo_by_id(photo_id).ok().flatten() else {
+                self.manual_compress = None;
+                self.message = Some("写真が見つかりません".to_string());
+                cx.notify();
+                return;
+            };
+            let source = PathBuf::from(photo.effective_path());
+            self.manual_compress = None;
+            self.message = Some("クリップボードへコピーしています…".to_string());
+            cx.notify();
+            cx.spawn(async move |this, cx| {
+                let bytes = cx
+                    .background_executor()
+                    .spawn(async move { compressor::render_clipboard_png(&source, &profile) })
+                    .await;
+                this.update(cx, |this, cx| {
+                    match bytes {
+                        Ok(bytes) => {
+                            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_image(
+                                &gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, bytes),
+                            ));
+                            this.message =
+                                Some("圧縮画像をクリップボードへコピーしました".to_string());
+                        }
+                        Err(error) => {
+                            this.message =
+                                Some(format!("クリップボードへコピーできません: {error}"));
+                        }
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
+
+        let output_dir = if dialog.output == ManualOutputTarget::Folder {
+            let Some(folder) = dialog.folder.as_deref() else {
+                self.message = Some("出力フォルダを選択してください".to_string());
+                cx.notify();
+                return;
+            };
+            Some(folder)
+        } else {
+            None
+        };
+        let policy = compression_policy(dialog.keep_original);
+        let mut enqueued = 0usize;
+        let mut failed = 0usize;
+        for photo_id in &dialog.photo_ids {
+            match self.db.enqueue_job_for_existing_profile_with_output_dir(
+                *photo_id,
+                &profile.id,
+                policy,
+                output_dir,
+            ) {
+                Ok(true) => enqueued += 1,
+                Ok(false) => failed += 1,
+                Err(error) => {
+                    failed += 1;
+                    tracing::warn!(%error, photo_id, "cannot enqueue manual compression");
+                }
+            }
+        }
+        self.manual_compress = None;
+        if enqueued > 0 {
+            let policy_note = if dialog.keep_original {
+                "元画像を保持"
+            } else {
+                "成功後に元画像をゴミ箱へ移動"
+            };
+            let failure_note = if failed > 0 {
+                format!("（{failed} 件は追加できませんでした）")
+            } else {
+                String::new()
+            };
+            self.message = Some(format!(
+                "{enqueued} 件を圧縮キューに追加しました（{policy_note}）{failure_note}"
+            ));
+            self.reload_aux(cx);
+            self.send_wake_jobs(cx);
+        } else {
+            self.message = Some("圧縮ジョブを追加できませんでした".to_string());
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn edit_profile(
+        &mut self,
+        edit: impl FnOnce(&mut CompressionProfile),
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(profile) = self.profiles.get_mut(self.profile_index) {
+            edit(profile);
+            let profile = profile.clone();
+            if let Err(error) = self.db.save_profile(&profile) {
+                tracing::warn!(%error, profile = %profile.id, "cannot save compression profile");
+                self.message = Some(format!("プロファイルを保存できません: {error}"));
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn move_profile(&mut self, index: usize, delta: isize, cx: &mut Context<Self>) {
+        let ids: Vec<String> = self.profiles.iter().map(|p| p.id.clone()).collect();
+        let Some(order) = moved_profile_order(&ids, index, delta) else {
+            return;
+        };
+        let target = step_index(index, ids.len(), delta);
+        match self.db.reorder_profiles(&order) {
+            Ok(()) => {
+                self.profiles.swap(index, target);
+                if self.profile_index == index {
+                    self.profile_index = target;
+                } else if self.profile_index == target {
+                    self.profile_index = index;
+                }
+            }
+            Err(error) => self.message = Some(format!("並び替えを保存できません: {error}")),
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn duplicate_profile(&mut self, cx: &mut Context<Self>) {
+        let Some(profile) = self.profiles.get(self.profile_index) else {
+            return;
+        };
+        let id = profile.id.clone();
+        match self.db.duplicate_profile(&id) {
+            Ok(copy) => {
+                self.profiles = self.db.list_profiles().unwrap_or_default();
+                self.profile_index = self
+                    .profiles
+                    .iter()
+                    .position(|profile| profile.id == copy.id)
+                    .unwrap_or(0);
+                self.message = Some(format!("「{}」を複製しました（自動適用はOFF）", copy.name));
+            }
+            Err(error) => self.message = Some(format!("複製に失敗: {error}")),
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn request_delete_profile(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(profile) = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .cloned()
+        else {
+            return;
+        };
+        if self.profiles.len() <= 1 {
+            self.message = Some("最後のプロファイルは削除できません".to_string());
+            cx.notify();
+            return;
+        }
+        match self.db.active_job_count_for_profile(id) {
+            Ok(0) => {
+                let entity = cx.entity();
+                let id = id.to_string();
+                let name = profile.name.clone();
+                window.open_alert_dialog(cx, move |alert, _, _| {
+                    let entity = entity.clone();
+                    let id = id.clone();
+                    alert
+                        .title("プロファイルを削除")
+                        .description(format!(
+                            "「{name}」を削除します。この操作は元に戻せません。"
+                        ))
+                        .confirm()
+                        .ok_text("削除")
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text("キャンセル")
+                        .on_ok(move |_, _, cx| {
+                            entity.update(cx, |this, cx| this.delete_profile(&id, cx));
+                            true
+                        })
+                });
+            }
+            Ok(count) => {
+                self.message = Some(format!(
+                    "「{}」は未完了のジョブが{}件あるため削除できません",
+                    profile.name, count
+                ));
+                cx.notify();
+            }
+            Err(error) => {
+                self.message = Some(format!("削除前の確認に失敗: {error}"));
+                cx.notify();
+            }
+        }
+    }
+
+    pub(crate) fn delete_profile(&mut self, id: &str, cx: &mut Context<Self>) {
+        let removed_index = self
+            .profiles
+            .iter()
+            .position(|profile| profile.id == id)
+            .unwrap_or(self.profile_index);
+        let name = self
+            .profiles
+            .iter()
+            .find(|profile| profile.id == id)
+            .map(|profile| profile.name.clone())
+            .unwrap_or_else(|| id.to_string());
+        match self.db.delete_profile(id) {
+            Ok(()) => {
+                self.profiles = self.db.list_profiles().unwrap_or_default();
+                self.profile_index = removed_index.min(self.profiles.len().saturating_sub(1));
+                self.message = Some("プロファイルを削除しました".to_string());
+            }
+            Err(error) => {
+                let message = match self.db.active_job_count_for_profile(id) {
+                    Ok(count) if count > 0 => {
+                        format!("「{name}」は未完了のジョブが{count}件あるため削除できません")
+                    }
+                    _ if self.profiles.len() <= 1 => {
+                        "最後のプロファイルは削除できません".to_string()
+                    }
+                    _ => format!("プロファイルを削除できません: {error}"),
+                };
+                self.message = Some(message);
+            }
+        }
+        cx.notify();
+    }
+}
