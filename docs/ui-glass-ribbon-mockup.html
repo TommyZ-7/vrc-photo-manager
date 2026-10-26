@@ -582,15 +582,15 @@
   .titlebar {
     display: flex;
     align-items: center;
-    gap: 10px;
-    height: 42px;
-    flex: 0 0 42px;
+    gap: 9px;
+    height: 46px;
+    flex: 0 0 46px;
     padding: 0 8px 0 14px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.055);
     background: linear-gradient(180deg, rgba(255, 255, 255, 0.038), rgba(255, 255, 255, 0));
     user-select: none;
   }
-  .tb-left { display: flex; align-items: center; gap: 9px; min-width: 0; }
+  .tb-left { display: flex; flex: 0 1 auto; align-items: center; gap: 9px; min-width: 0; overflow: hidden; }
   .app-glyph {
     display: grid;
     place-items: center;
@@ -615,7 +615,7 @@
     font-size: 6.5px;
     letter-spacing: 0.14em;
   }
-  .tb-right { display: flex; align-items: center; gap: 7px; margin-left: auto; }
+  .tb-right { display: flex; flex: 0 0 auto; align-items: center; gap: 7px; margin-left: auto; }
   .live-pill {
     display: inline-flex;
     align-items: center;
@@ -675,61 +675,45 @@
   .win-btn.close:hover { background: rgba(255, 99, 122, 0.17); color: #ffd8df; }
   .win-btn .icon { width: 11px; height: 11px; }
 
-  /* Ribbon tabs */
-  .ribbon-tabs {
+  /* Ribbon tabs live on the titlebar line */
+  .ribbon-tablist {
     display: flex;
-    align-items: stretch;
-    height: 33px;
-    flex: 0 0 33px;
-    padding: 0 10px;
-    border-bottom: 1px solid var(--line-soft);
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 2px;
+    min-width: 0;
+    margin-left: 7px;
+    padding-left: 9px;
+    border-left: 1px solid var(--line-soft);
+    overflow: hidden;
   }
-  .ribbon-tablist { display: flex; align-items: stretch; gap: 1px; }
   .ribbon-tab {
-    position: relative;
-    padding: 0 13px;
-    border: 0;
+    height: 27px;
+    padding: 0 10px;
+    border: 1px solid transparent;
+    border-radius: 7px;
     background: transparent;
     color: var(--dim);
     font-size: 10px;
     letter-spacing: 0.01em;
-    transition: color 0.16s ease;
+    white-space: nowrap;
+    transition: color 0.16s ease, background 0.16s ease, border-color 0.16s ease;
   }
-  .ribbon-tab:hover { color: var(--text); }
-  .ribbon-tab.active { color: var(--text); }
-  .ribbon-tab.active::after {
-    content: "";
-    position: absolute;
-    right: 10px;
-    bottom: 0;
-    left: 10px;
-    height: 2px;
-    border-radius: 2px 2px 0 0;
-    background: linear-gradient(90deg, var(--accent), var(--accent-2));
-    box-shadow: 0 0 14px rgba(139, 203, 255, 0.55);
+  .ribbon-tab:hover { background: rgba(255, 255, 255, 0.04); color: var(--text); }
+  .ribbon-tab.active {
+    border-color: rgba(139, 203, 255, 0.16);
+    background: rgba(139, 203, 255, 0.10);
+    color: var(--text);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07);
   }
-  .ribbon-utils { display: flex; align-items: center; gap: 7px; margin-left: auto; padding-left: 10px; }
-  .search-hint {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    height: 22px;
-    padding: 0 6px;
-    border: 1px solid transparent;
-    border-radius: 6px;
-    background: transparent;
-    color: var(--faint);
-    font-size: 8px;
-  }
-  .search-hint:hover { border-color: var(--line-soft); background: rgba(255, 255, 255, 0.035); color: var(--muted); }
-  .search-hint kbd { height: 15px; min-width: 15px; font-size: 7px; }
-  .ribbon-utils .icon-btn { width: 24px; height: 24px; }
+  .ribbon-tab.active::after { display: none; }
+  .tb-right .collapse-ribbon { width: 26px; height: 26px; }
 
-  /* Ribbon body */
+  /* Compact ribbon body */
   .ribbon-body {
     display: flex;
-    height: 88px;
-    flex: 0 0 88px;
+    height: 68px;
+    flex: 0 0 68px;
     overflow: hidden;
     transition: height 0.28s var(--ease), flex-basis 0.28s var(--ease), opacity 0.2s ease;
   }
@@ -739,7 +723,7 @@
     opacity: 0;
     pointer-events: none;
   }
-  .app-window.ribbon-collapsed .ribbon-utils .collapse-ribbon .icon { transform: rotate(180deg); }
+  .app-window.ribbon-collapsed #collapseRibbon .icon { transform: rotate(180deg); }
   .ribbon-page { display: none; width: 100%; align-items: stretch; }
   .ribbon-page.active { display: flex; }
 
@@ -748,7 +732,7 @@
     flex: 0 0 auto;
     flex-direction: column;
     min-width: 0;
-    padding: 7px 11px 5px;
+    padding: 5px 10px 4px;
     border-right: 1px solid var(--line-soft);
   }
   .rb-group:last-child { border-right: 0; }
@@ -767,28 +751,23 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 4px;
-    min-width: 56px;
-    height: 56px;
-    padding: 3px 7px;
+    gap: 2px;
+    min-width: 50px;
+    height: 44px;
+    padding: 2px 6px;
     border: 1px solid transparent;
-    border-radius: 9px;
+    border-radius: 7px;
     background: transparent;
     color: var(--muted);
-    font-size: 9px;
+    font-size: 8.5px;
     line-height: 1.15;
     white-space: nowrap;
     transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.15s ease;
   }
   .rb-btn:hover { border-color: var(--line-soft); background: rgba(255, 255, 255, 0.055); color: var(--text); }
   .rb-btn:active { transform: translateY(1px); }
-  .rb-btn .icon { width: 21px; height: 21px; color: var(--accent); opacity: 0.88; }
-  .rb-btn .rb-hint {
-    color: var(--faint);
-    font-family: var(--mono);
-    font-size: 6.5px;
-    letter-spacing: 0.02em;
-  }
+  .rb-btn .icon { width: 18px; height: 18px; color: var(--accent); opacity: 0.88; }
+  .rb-btn .rb-hint { display: none; }
   .rb-btn.primary {
     border-color: rgba(139, 203, 255, 0.22);
     background: linear-gradient(180deg, rgba(129, 190, 255, 0.22), rgba(101, 118, 255, 0.10));
@@ -796,21 +775,23 @@
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.15), 0 4px 14px rgba(80, 120, 255, 0.1);
   }
   .rb-btn.primary .icon { color: #c9eaff; opacity: 1; }
-  .rb-stack { display: flex; flex-direction: column; justify-content: center; gap: 1px; }
+  .rb-stack { display: flex; flex-direction: column; justify-content: center; gap: 2px; }
   .rb-btn.small {
     flex-direction: row;
     justify-content: flex-start;
-    gap: 7px;
-    min-width: 124px;
-    height: 25px;
-    padding: 0 8px;
+    gap: 5px;
+    min-width: 110px;
+    height: 21px;
+    padding: 0 7px;
     border-radius: 6px;
-    font-size: 9px;
+    font-size: 8.5px;
   }
-  .rb-btn.small .icon { width: 13px; height: 13px; color: var(--dim); opacity: 1; }
+  .rb-btn.small .icon { width: 12px; height: 12px; color: var(--dim); opacity: 1; }
   .rb-btn.small:hover .icon { color: var(--muted); }
   .rb-btn.small.on { background: rgba(139, 203, 255, 0.09); color: var(--text); }
   .rb-btn.small.on .icon { color: var(--accent); }
+  .rb-btn.on { border-color: rgba(139, 203, 255, 0.18); background: rgba(139, 203, 255, 0.10); color: var(--text); }
+  .rb-btn.on .icon { color: var(--accent); opacity: 1; }
   .rb-btn .chev { margin-left: auto; color: var(--faint); }
   .rb-glass { display: flex; align-items: center; gap: 3px; }
   .rb-glass .rb-btn {
@@ -902,7 +883,7 @@
     flex: 1;
     flex-direction: column;
     min-height: 0;
-    padding: 15px 17px 16px;
+    padding: 12px 14px 14px;
   }
   .screen.active { display: flex; }
 
@@ -1117,15 +1098,48 @@
   .gallery-head {
     display: flex;
     align-items: center;
-    gap: 8px;
-    height: 38px;
-    flex: 0 0 38px;
-    padding: 0 11px 0 13px;
+    gap: 7px;
+    height: 42px;
+    flex: 0 0 42px;
+    padding: 0 9px 0 12px;
     border-bottom: 1px solid var(--line-soft);
   }
-  .gallery-month { display: flex; align-items: baseline; gap: 7px; }
-  .gallery-month strong { color: var(--text); font-size: 11px; font-weight: 600; }
-  .gallery-month span { color: var(--faint); font-family: var(--mono); font-size: 7.5px; }
+  .gallery-month { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+  .gallery-month strong { color: var(--text); font-size: 11px; font-weight: 600; white-space: nowrap; }
+  .gallery-month span { color: var(--faint); font-family: var(--mono); font-size: 7.5px; white-space: nowrap; }
+  .gallery-tools { display: flex; align-items: center; gap: 4px; margin-left: auto; min-width: 0; }
+  .gallery-tools .icon-btn { width: 24px; height: 24px; border-radius: 6px; }
+  .gallery-tools .icon-btn .icon { width: 13px; height: 13px; }
+  .gallery-filter { height: 26px; padding: 0 7px; font-size: 8.5px; }
+  .gallery-filter .icon { width: 11px; height: 11px; }
+  .gallery-filter-count {
+    display: inline-grid;
+    place-items: center;
+    min-width: 14px;
+    height: 14px;
+    margin-left: 2px;
+    border-radius: 4px;
+    background: rgba(139, 203, 255, 0.15);
+    color: #bfe7ff;
+    font-family: var(--mono);
+    font-size: 6.5px;
+  }
+  .gallery-search {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    width: 150px;
+    height: 26px;
+    padding: 0 7px;
+    border: 1px solid var(--line-soft);
+    border-radius: 7px;
+    background: rgba(3, 7, 14, 0.22);
+  }
+  .gallery-search:focus-within { border-color: rgba(139, 203, 255, 0.42); }
+  .gallery-search .icon { width: 11px; height: 11px; color: var(--faint); }
+  .gallery-search input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 8px; }
+  .gallery-search input::placeholder { color: var(--faint); }
+  .gallery-tools .sort-chip { height: 26px; font-size: 8.5px; }
   .gallery-head-actions { display: flex; align-items: center; gap: 1px; margin-left: auto; }
   .gallery-head-actions .icon-btn { width: 24px; height: 24px; border-radius: 6px; }
   .gallery-head-actions .icon-btn .icon { width: 13px; height: 13px; }
@@ -1137,7 +1151,7 @@
     padding: 10px 49px 12px 12px;
     overflow: auto;
   }
-  .photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(154px, 1fr)); gap: 9px; align-content: start; }
+  .photo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 9px; align-content: start; }
 
   .photo-card {
     position: relative;
@@ -1166,7 +1180,7 @@
   }
   .photo-visual {
     position: relative;
-    aspect-ratio: 4 / 3;
+    aspect-ratio: 3 / 2;
     overflow: hidden;
     background: #0a0e18;
   }
@@ -1347,7 +1361,7 @@
   .inspector-scroll { flex: 1; min-height: 0; overflow: auto; }
   .inspector-preview {
     position: relative;
-    height: 152px;
+    height: 168px;
     margin: 10px 10px 0;
     overflow: hidden;
     border: 1px solid rgba(255, 255, 255, 0.11);
@@ -2134,8 +2148,8 @@
   /* ==========================================================================
      Dashboard
      ========================================================================== */
-  .dashboard-scroll { flex: 1; min-height: 0; overflow: auto; padding-right: 2px; }
-  .stat-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; }
+  .dashboard-scroll { display: flex; flex: 1; flex-direction: column; min-height: 0; overflow: auto; padding-right: 2px; }
+  .stat-grid { display: grid; flex: 0 0 auto; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; }
   .stat-card { position: relative; min-height: 76px; padding: 10px 11px; overflow: hidden; }
   .stat-card::after {
     content: "";
@@ -2156,8 +2170,9 @@
   .stat-sub .up { color: var(--green); }
   .stat-sub .warn { color: var(--amber); }
 
-  .dash-grid { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(280px, 0.9fr); gap: 12px; margin-top: 10px; }
+  .dash-grid { display: grid; flex: 1; grid-template-columns: minmax(0, 1.6fr) minmax(280px, 0.9fr); gap: 12px; min-height: 0; margin-top: 10px; }
   .queue-card, .daemon-card, .session-card { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  .queue-card { height: 100%; }
   .card-head {
     display: flex;
     align-items: center;
@@ -2172,7 +2187,7 @@
   .card-head .spacer { flex: 1; }
   .card-head .icon-btn { width: 23px; height: 23px; }
   .card-head .icon-btn .icon { width: 12px; height: 12px; }
-  .queue-list { padding: 4px 6px 7px; overflow: auto; }
+  .queue-list { flex: 1; min-height: 0; padding: 4px 6px 7px; overflow: auto; }
   .queue-row {
     display: grid;
     grid-template-columns: 21px minmax(0, 1fr) 76px 75px;
@@ -2247,9 +2262,12 @@
      ========================================================================== */
   .settings-layout { display: grid; flex: 1; grid-template-columns: 190px minmax(0, 1fr); gap: 12px; min-height: 0; }
   .settings-nav { padding: 8px; overflow: auto; }
+  .settings-nav-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 4px 8px; margin-bottom: 6px; border-bottom: 1px solid var(--line-soft); }
+  .settings-nav-head strong { color: var(--text); font-size: 10px; font-weight: 600; }
+  .settings-nav-head .icon-btn { width: 24px; height: 24px; border-radius: 6px; }
   .settings-nav-label { margin: 8px 7px 5px; color: var(--faint); font-family: var(--mono); font-size: 6.5px; letter-spacing: 0.14em; text-transform: uppercase; }
   .settings-nav-label:first-child { margin-top: 2px; }
-  .settings-nav button {
+  .settings-nav > button {
     display: flex;
     align-items: center;
     gap: 7px;
@@ -2263,10 +2281,10 @@
     font-size: 8.5px;
     text-align: left;
   }
-  .settings-nav button .icon { width: 13px; height: 13px; color: var(--faint); }
-  .settings-nav button:hover { background: rgba(255, 255, 255, 0.04); color: var(--muted); }
-  .settings-nav button.active { border-color: rgba(139, 203, 255, 0.14); background: rgba(139, 203, 255, 0.09); color: var(--text); }
-  .settings-nav button.active .icon { color: var(--accent); }
+  .settings-nav > button .icon { width: 13px; height: 13px; color: var(--faint); }
+  .settings-nav > button:hover { background: rgba(255, 255, 255, 0.04); color: var(--muted); }
+  .settings-nav > button.active { border-color: rgba(139, 203, 255, 0.14); background: rgba(139, 203, 255, 0.09); color: var(--text); }
+  .settings-nav > button.active .icon { color: var(--accent); }
   .settings-panels { display: flex; flex-direction: column; gap: 10px; min-height: 0; padding-right: 2px; overflow: auto; }
   .settings-card { padding: 13px 14px; }
   .settings-card-head { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 10px; }
@@ -2558,7 +2576,7 @@
   .queue-name span { font-size: 7px; }
   .settings-card-head h3 { font-size: 11px; }
   .setting-row label { font-size: 9px; }
-  .settings-nav button { font-size: 9px; }
+  .settings-nav > button { font-size: 9px; }
 
   /* ==========================================================================
      Responsive
@@ -2576,14 +2594,12 @@
     .view-actions .btn .kbd-hint { display: none; }
     .filter-chip.optional { display: none; }
     .rb-right-note { display: none; }
+    .rb-status-group { display: none; }
     .dash-grid { grid-template-columns: minmax(0, 1.4fr) minmax(240px, 0.9fr); }
     .search-layout { grid-template-columns: 244px minmax(0, 1fr); }
     .compression-layout { grid-template-columns: 250px minmax(0, 1fr); }
     .settings-layout { grid-template-columns: 170px minmax(0, 1fr); }
-  }
-
-  @media (max-width: 1120px) {
-    .rb-group.library-group { display: none; }
+    .gallery-search { display: none; }
   }
 
   @media (max-width: 1060px) {
@@ -2602,38 +2618,21 @@
     .settings-layout { grid-template-columns: 150px minmax(0, 1fr); }
   }
 
-  @media (max-height: 920px) {
-    .inspector-preview { height: 122px; }
-    .inspector-body { padding: 9px 11px 10px; }
-    .inspector .note-card { display: none; }
-    .meta-grid { margin-top: 8px; padding: 7px; gap: 6px 8px; }
-    .section-head { margin-top: 8px; }
-    .player { width: 22px; height: 22px; }
-    .tag { height: 18px; }
-    .view-head { padding-bottom: 9px; }
-    .filter-row { padding-bottom: 9px; }
-  }
-
-  @media (max-height: 860px) {
+  @media (max-height: 760px) {
+    .status-card { display: none; }
+    .sidebar-spacer { min-height: 4px; }
+    .app-window .ribbon-body { height: 62px; flex-basis: 62px; }
+    .rb-btn { height: 38px; font-size: 9px; }
+    .rb-btn.small { height: 19px; }
     .inspector-head { height: 32px; flex-basis: 32px; }
-    .inspector-preview { height: 100px; }
+    .inspector-preview { height: 118px; }
     .inspector-body { padding: 8px 10px; }
     .meta-grid { padding: 5px; gap: 4px 8px; }
     .section-head { margin-top: 6px; }
     .player { width: 20px; height: 20px; }
     .tag { height: 16px; }
     .inspector-foot { padding: 6px 8px; }
-  }
-
-  @media (max-height: 760px) {
-    .status-card { display: none; }
-    .sidebar-spacer { min-height: 4px; }
-    .app-window .ribbon-body { height: 78px; flex-basis: 78px; }
-    .rb-btn { height: 48px; }
-    .rb-btn .rb-hint { display: none; }
-    .inspector-preview { height: 94px; }
-    .view-head h1 { font-size: 20px; }
-    .screen { padding-top: 12px; padding-bottom: 12px; }
+    .screen { padding-top: 10px; padding-bottom: 10px; }
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -2815,11 +2814,16 @@
           <span class="tb-app">VRC Photo Manager</span>
           <span class="tb-sep"></span>
           <span class="tb-crumb" id="titlebarCrumb">ライブラリ</span>
-          <span class="tb-tag">LOCAL</span>
+          <div class="ribbon-tablist" role="tablist" aria-label="リボン">
+            <button class="ribbon-tab active" data-ribbon-tab="home" role="tab" aria-selected="true">ホーム</button>
+            <button class="ribbon-tab" data-ribbon-tab="photo" role="tab" aria-selected="false">写真</button>
+            <button class="ribbon-tab" data-ribbon-tab="compression" role="tab" aria-selected="false">圧縮</button>
+          </div>
         </div>
         <div class="tb-right">
           <span class="live-pill"><i></i>デーモン稼働中</span>
           <span class="tb-sync"><svg class="icon"><use href="#i-clock"/></svg>12:42</span>
+          <button class="icon-btn collapse-ribbon" id="collapseRibbon" title="リボンを折りたたむ"><svg class="icon"><use href="#i-chevron-up"/></svg></button>
           <button class="icon-btn tb-icon" data-action="notifications" title="通知">
             <svg class="icon"><use href="#i-bell"/></svg>
             <span class="notif-dot"></span>
@@ -2832,44 +2836,27 @@
         </div>
       </div>
 
-      <div class="ribbon-tabs">
-        <div class="ribbon-tablist" role="tablist" aria-label="リボン">
-          <button class="ribbon-tab active" data-ribbon-tab="home" role="tab" aria-selected="true">ホーム</button>
-          <button class="ribbon-tab" data-ribbon-tab="photo" role="tab" aria-selected="false">写真</button>
-          <button class="ribbon-tab" data-ribbon-tab="compression" role="tab" aria-selected="false">圧縮</button>
-          <button class="ribbon-tab" data-ribbon-tab="view" role="tab" aria-selected="false">表示</button>
-          <button class="ribbon-tab" data-ribbon-tab="tools" role="tab" aria-selected="false">ツール</button>
-        </div>
-        <div class="ribbon-utils">
-          <button class="search-hint" data-action="focus-search"><kbd>Ctrl</kbd><kbd>K</kbd> 検索</button>
-          <button class="icon-btn collapse-ribbon" id="collapseRibbon" title="リボンを折りたたむ"><svg class="icon"><use href="#i-chevron-up"/></svg></button>
-        </div>
-      </div>
-
       <div class="ribbon-body">
-        <!-- Home -->
+        <!-- Home: frequent, non-settings commands -->
         <div class="ribbon-page active" data-ribbon-page="home">
           <div class="rb-group">
             <div class="rb-items">
               <button class="rb-btn" data-action="import-copy">
                 <svg class="icon"><use href="#i-folder-plus"/></svg>
                 <span>コピー取込</span>
-                <span class="rb-hint">写真を追加</span>
               </button>
               <button class="rb-btn" data-action="import-move">
                 <svg class="icon"><use href="#i-folder-move"/></svg>
                 <span>移動取込</span>
-                <span class="rb-hint">元を整理</span>
               </button>
             </div>
             <small class="rb-label">取り込み</small>
           </div>
-          <div class="rb-group library-group">
+          <div class="rb-group">
             <div class="rb-items">
               <button class="rb-btn" data-action="reload">
                 <svg class="icon"><use href="#i-refresh"/></svg>
                 <span>再読込</span>
-                <span class="rb-hint">同期</span>
               </button>
               <div class="rb-stack">
                 <button class="rb-btn small" data-action="open-folder"><svg class="icon"><use href="#i-folder-open"/></svg>フォルダを開く</button>
@@ -2878,215 +2865,130 @@
             </div>
             <small class="rb-label">ライブラリ</small>
           </div>
-          <div class="rb-group tight">
+          <div class="rb-group rb-photo-only">
             <div class="rb-items">
-              <div class="rb-stack">
-                <button class="rb-btn small" data-action="select-all"><svg class="icon"><use href="#i-select-all"/></svg>すべて選択</button>
-                <button class="rb-btn small" data-action="clear-selection"><svg class="icon"><use href="#i-select-none"/></svg>選択解除</button>
-                <button class="rb-btn small on" data-action="toggle-inspector"><svg class="icon"><use href="#i-panel"/></svg>詳細パネル</button>
-              </div>
-            </div>
-            <small class="rb-label">選択と表示</small>
-          </div>
-          <div class="rb-group">
-            <div class="rb-items">
-              <button class="rb-btn primary" data-action="manual-compress">
-                <svg class="icon"><use href="#i-wand"/></svg>
-                <span>手動圧縮</span>
-                <span class="rb-hint">選択した写真</span>
+              <button class="rb-btn on" data-action="toggle-inspector">
+                <svg class="icon"><use href="#i-panel"/></svg>
+                <span>詳細パネル</span>
               </button>
-              <div class="rb-stack">
-                <button class="rb-btn small" data-action="release-waiting"><svg class="icon"><use href="#i-play"/></svg>待機を圧縮</button>
-                <button class="rb-btn small" data-action="open-queue"><svg class="icon"><use href="#i-queue"/></svg>キューを開く</button>
-              </div>
             </div>
-            <small class="rb-label">圧縮</small>
+            <small class="rb-label">表示</small>
           </div>
-          <div class="rb-group grow">
+          <div class="rb-group grow rb-status-group">
             <div class="rb-items">
-              <div class="rb-search">
-                <div class="search-box">
-                  <svg class="icon"><use href="#i-search"/></svg>
-                  <input id="ribbonSearch" type="search" placeholder="ワールド・プレイヤー・タグを検索" aria-label="検索">
-                  <kbd>Ctrl K</kbd>
-                </div>
-                <div class="quick-chips">
-                  <button class="quick-chip" data-action="quick-today">今日</button>
-                  <button class="quick-chip" data-action="quick-favorite">お気に入り</button>
-                  <button class="quick-chip" data-action="quick-tags">タグ</button>
-                </div>
-              </div>
+              <div class="rb-right-note"><svg class="icon"><use href="#i-layers"/></svg>選択中 1 枚 · 2,418 枚 / 38.6 GB</div>
             </div>
-            <small class="rb-label">検索</small>
+            <small class="rb-label">現在の状態</small>
           </div>
         </div>
 
-        <!-- Photo tab -->
+        <!-- Photo: selection and photo actions -->
         <div class="ribbon-page" data-ribbon-page="photo">
           <div class="rb-group">
             <div class="rb-items">
-              <button class="rb-btn" data-action="view-grid"><svg class="icon"><use href="#i-grid"/></svg><span>グリッド</span><span class="rb-hint">標準</span></button>
-              <button class="rb-btn" data-action="view-list"><svg class="icon"><use href="#i-list"/></svg><span>リスト</span><span class="rb-hint">一覧</span></button>
-              <button class="rb-btn small on" data-action="toggle-year-rail"><svg class="icon"><use href="#i-layers"/></svg>年レール</button>
+              <button class="rb-btn on" data-action="view-grid">
+                <svg class="icon"><use href="#i-grid"/></svg>
+                <span>グリッド</span>
+              </button>
+              <button class="rb-btn" data-action="view-list">
+                <svg class="icon"><use href="#i-list"/></svg>
+                <span>リスト</span>
+              </button>
             </div>
             <small class="rb-label">表示形式</small>
           </div>
           <div class="rb-group">
             <div class="rb-items">
-              <div class="rb-stack">
-                <button class="rb-btn small" data-action="select-all"><svg class="icon"><use href="#i-select-all"/></svg>すべて選択</button>
-                <button class="rb-btn small" data-action="clear-selection"><svg class="icon"><use href="#i-select-none"/></svg>選択解除</button>
-                <button class="rb-btn small" data-action="favorite"><svg class="icon"><use href="#i-star"/></svg>お気に入りに追加</button>
-              </div>
+              <button class="rb-btn" data-action="select-all">
+                <svg class="icon"><use href="#i-select-all"/></svg>
+                <span>すべて選択</span>
+              </button>
+              <button class="rb-btn" data-action="clear-selection">
+                <svg class="icon"><use href="#i-select-none"/></svg>
+                <span>選択解除</span>
+              </button>
+              <button class="rb-btn" data-action="favorite">
+                <svg class="icon"><use href="#i-star"/></svg>
+                <span>お気に入り</span>
+              </button>
             </div>
             <small class="rb-label">選択</small>
           </div>
           <div class="rb-group">
             <div class="rb-items">
-              <button class="rb-btn" data-action="fullscreen-view"><svg class="icon"><use href="#i-maximize"/></svg><span>全画面</span><span class="rb-hint">Space</span></button>
-              <div class="rb-stack">
-                <button class="rb-btn small on" data-action="toggle-inspector"><svg class="icon"><use href="#i-panel"/></svg>詳細パネル</button>
-                <button class="rb-btn small" data-action="edit-tags"><svg class="icon"><use href="#i-tag"/></svg>タグを編集</button>
-                <button class="rb-btn small" data-action="note"><svg class="icon"><use href="#i-file"/></svg>メモ</button>
-              </div>
+              <button class="rb-btn" data-action="fullscreen-view">
+                <svg class="icon"><use href="#i-maximize"/></svg>
+                <span>全画面</span>
+              </button>
+              <button class="rb-btn" data-action="edit-tags">
+                <svg class="icon"><use href="#i-tag"/></svg>
+                <span>タグ</span>
+              </button>
+              <button class="rb-btn" data-action="note">
+                <svg class="icon"><use href="#i-file"/></svg>
+                <span>メモ</span>
+              </button>
             </div>
             <small class="rb-label">詳細</small>
           </div>
           <div class="rb-group">
             <div class="rb-items">
-              <button class="rb-btn" data-action="trash"><svg class="icon"><use href="#i-trash"/></svg><span>ゴミ箱へ</span><span class="rb-hint">2段階確認</span></button>
-              <button class="rb-btn" data-action="manual-compress"><svg class="icon"><use href="#i-wand"/></svg><span>圧縮</span><span class="rb-hint">選択した写真</span></button>
+              <button class="rb-btn" data-action="trash">
+                <svg class="icon"><use href="#i-trash"/></svg>
+                <span>ゴミ箱へ</span>
+              </button>
+              <button class="rb-btn" data-action="manual-compress">
+                <svg class="icon"><use href="#i-wand"/></svg>
+                <span>圧縮</span>
+              </button>
             </div>
             <small class="rb-label">整理</small>
           </div>
-          <div class="rb-group grow">
+          <div class="rb-group grow rb-status-group">
             <div class="rb-items">
-              <div class="rb-stack">
-                <button class="rb-btn small" data-action="sort-new"><svg class="icon"><use href="#i-clock"/></svg>新しい順</button>
-                <button class="rb-btn small" data-action="sort-old"><svg class="icon"><use href="#i-clock"/></svg>古い順</button>
-                <button class="rb-btn small" data-action="sort-size"><svg class="icon"><use href="#i-hard-drive"/></svg>サイズ順</button>
-              </div>
-            </div>
-            <small class="rb-label">並べ替え</small>
-          </div>
-          <div class="rb-group">
-            <div class="rb-items">
-              <div class="rb-right-note"><svg class="icon"><use href="#i-keyboard"/></svg>ダブルクリックで全画面</div>
+              <div class="rb-right-note"><svg class="icon"><use href="#i-keyboard"/></svg>ダブルクリックで全画面 · Space</div>
             </div>
             <small class="rb-label">ヒント</small>
           </div>
         </div>
 
-        <!-- Compression tab -->
+        <!-- Compression: execution and queue -->
         <div class="ribbon-page" data-ribbon-page="compression">
           <div class="rb-group">
             <div class="rb-items">
-              <button class="rb-btn" data-action="new-profile"><svg class="icon"><use href="#i-plus"/></svg><span>新規</span><span class="rb-hint">プロファイル</span></button>
-              <div class="rb-stack">
-                <button class="rb-btn small" data-action="duplicate-profile"><svg class="icon"><use href="#i-images"/></svg>複製</button>
-                <button class="rb-btn small" data-action="rename-profile"><svg class="icon"><use href="#i-file"/></svg>名前を変更</button>
-              </div>
-            </div>
-            <small class="rb-label">プロファイル</small>
-          </div>
-          <div class="rb-group">
-            <div class="rb-items">
-              <button class="rb-btn primary" data-action="manual-compress"><svg class="icon"><use href="#i-wand"/></svg><span>手動圧縮</span><span class="rb-hint">この設定で実行</span></button>
-              <button class="rb-btn" data-action="release-waiting"><svg class="icon"><use href="#i-play"/></svg><span>待機を圧縮</span><span class="rb-hint">全件</span></button>
+              <button class="rb-btn primary" data-action="manual-compress">
+                <svg class="icon"><use href="#i-wand"/></svg>
+                <span>手動圧縮</span>
+              </button>
+              <button class="rb-btn" data-action="release-waiting">
+                <svg class="icon"><use href="#i-play"/></svg>
+                <span>待機を圧縮</span>
+              </button>
+              <button class="rb-btn" data-action="retry-failed">
+                <svg class="icon"><use href="#i-rotate"/></svg>
+                <span>失敗を再試行</span>
+              </button>
             </div>
             <small class="rb-label">実行</small>
           </div>
           <div class="rb-group">
             <div class="rb-items">
-              <div class="rb-stack">
-                <button class="rb-btn small" data-action="retry-failed"><svg class="icon"><use href="#i-rotate"/></svg>失敗を再試行</button>
-                <button class="rb-btn small" data-action="open-queue"><svg class="icon"><use href="#i-queue"/></svg>共有キュー</button>
-                <button class="rb-btn small" data-action="open-dashboard"><svg class="icon"><use href="#i-dashboard"/></svg>ダッシュボード</button>
-              </div>
+              <button class="rb-btn" data-action="open-queue">
+                <svg class="icon"><use href="#i-queue"/></svg>
+                <span>キュー</span>
+              </button>
+              <button class="rb-btn" data-action="open-dashboard">
+                <svg class="icon"><use href="#i-dashboard"/></svg>
+                <span>状態</span>
+              </button>
             </div>
             <small class="rb-label">キュー</small>
           </div>
-          <div class="rb-group grow">
+          <div class="rb-group grow rb-status-group">
             <div class="rb-items">
-              <button class="rb-btn" data-action="auto-compress"><svg class="icon"><use href="#i-zap"/></svg><span>自動適用</span><span class="rb-hint">新規写真へ</span></button>
-              <div class="rb-right-note"><svg class="icon"><use href="#i-shield"/></svg>元画像は実行時に選択</div>
+              <div class="rb-right-note"><svg class="icon"><use href="#i-shield"/></svg>自動適用: 高画質 WebP · 元画像を保持</div>
             </div>
-            <small class="rb-label">ポリシー</small>
-          </div>
-        </div>
-
-        <!-- View tab -->
-        <div class="ribbon-page" data-ribbon-page="view">
-          <div class="rb-group">
-            <div class="rb-items">
-              <button class="rb-btn" data-action="toggle-sidebar"><svg class="icon"><use href="#i-panel"/></svg><span>サイドバー</span><span class="rb-hint">Ctrl B</span></button>
-              <button class="rb-btn" data-action="toggle-inspector"><svg class="icon"><use href="#i-eye"/></svg><span>詳細パネル</span><span class="rb-hint">Ctrl I</span></button>
-              <button class="rb-btn" data-action="toggle-ribbon"><svg class="icon"><use href="#i-chevron-up"/></svg><span>リボン</span><span class="rb-hint">折りたたみ</span></button>
-            </div>
-            <small class="rb-label">レイアウト</small>
-          </div>
-          <div class="rb-group">
-            <div class="rb-items">
-              <div class="rb-glass">
-                <button class="rb-btn glass-choice" data-glass-set="soft"><svg class="icon"><use href="#i-moon"/></svg>控えめ</button>
-                <button class="rb-btn glass-choice on" data-glass-set="standard"><svg class="icon"><use href="#i-layers"/></svg>標準</button>
-                <button class="rb-btn glass-choice" data-glass-set="strong"><svg class="icon"><use href="#i-sun"/></svg>濃い</button>
-              </div>
-            </div>
-            <small class="rb-label">ガラス</small>
-          </div>
-          <div class="rb-group">
-            <div class="rb-items">
-              <div class="rb-stack">
-                <button class="rb-btn small" data-action="reduce-motion"><svg class="icon"><use href="#i-activity"/></svg>モーションを減らす</button>
-                <button class="rb-btn small" data-action="theme"><svg class="icon"><use href="#i-palette"/></svg>テーマ</button>
-              </div>
-            </div>
-            <small class="rb-label">アクセシビリティ</small>
-          </div>
-          <div class="rb-group grow">
-            <div class="rb-items">
-              <div class="rb-right-note"><svg class="icon"><use href="#i-monitor"/></svg>1280 × 820 · 最小 1080 × 700</div>
-            </div>
-            <small class="rb-label">ウィンドウ</small>
-          </div>
-        </div>
-
-        <!-- Tools tab -->
-        <div class="ribbon-page" data-ribbon-page="tools">
-          <div class="rb-group">
-            <div class="rb-items">
-              <button class="rb-btn" data-action="rescan"><svg class="icon"><use href="#i-refresh"/></svg><span>再スキャン</span><span class="rb-hint">写真フォルダ</span></button>
-              <button class="rb-btn" data-action="toggle-pause"><svg class="icon"><use href="#i-pause"/></svg><span>一時停止</span><span class="rb-hint">監視</span></button>
-              <button class="rb-btn" data-action="open-dashboard"><svg class="icon"><use href="#i-dashboard"/></svg><span>ダッシュボード</span><span class="rb-hint">状態</span></button>
-            </div>
-            <small class="rb-label">デーモン</small>
-          </div>
-          <div class="rb-group">
-            <div class="rb-items">
-              <div class="rb-stack">
-                <button class="rb-btn small" data-action="open-logs"><svg class="icon"><use href="#i-folder-open"/></svg>ログフォルダ</button>
-                <button class="rb-btn small" data-action="view-log"><svg class="icon"><use href="#i-file"/></svg>ログを見る</button>
-                <button class="rb-btn small" data-action="open-settings"><svg class="icon"><use href="#i-settings"/></svg>設定を開く</button>
-              </div>
-            </div>
-            <small class="rb-label">システム</small>
-          </div>
-          <div class="rb-group">
-            <div class="rb-items">
-              <button class="rb-btn" data-action="check-update"><svg class="icon"><use href="#i-download"/></svg><span>更新を確認</span><span class="rb-hint">v0.8.0-dev</span></button>
-              <div class="rb-stack">
-                <button class="rb-btn small" data-action="shortcuts"><svg class="icon"><use href="#i-keyboard"/></svg>ショートカット</button>
-                <button class="rb-btn small" data-action="about"><svg class="icon"><use href="#i-shield"/></svg>バージョン情報</button>
-              </div>
-            </div>
-            <small class="rb-label">アプリ</small>
-          </div>
-          <div class="rb-group grow">
-            <div class="rb-items">
-              <div class="rb-right-note"><svg class="icon"><use href="#i-hard-drive"/></svg>DB 38.6 GB · サムネイル 1.2 GB</div>
-            </div>
-            <small class="rb-label">ストレージ</small>
+            <small class="rb-label">現在の設定</small>
           </div>
         </div>
       </div>
@@ -3097,49 +2999,19 @@
 
       <!-- Photos -->
       <section class="screen active" data-screen="photos" aria-label="ライブラリ">
-        <div class="view-head">
-          <div class="view-title">
-            <span class="eyebrow">Library · All photos</span>
-            <div class="view-title-row">
-              <h1>ライブラリ</h1>
-              <span class="count-pill">2,418 枚</span>
-            </div>
-            <p class="view-sub"><b>38.6 GB</b> · 最終同期 12:42 · 12 ワールド · 4 人のプレイヤー</p>
-          </div>
-          <div class="view-actions">
-            <div class="segmented" aria-label="表示形式">
-              <button class="active" data-action="view-grid" title="グリッド"><svg class="icon"><use href="#i-grid"/></svg></button>
-              <button data-action="view-list" title="リスト"><svg class="icon"><use href="#i-list"/></svg></button>
-            </div>
-            <button class="btn ghost" id="toggleInspector" data-action="toggle-inspector">
-              <svg class="icon"><use href="#i-panel"/></svg>詳細 <span class="kbd-hint">Ctrl I</span>
-            </button>
-            <button class="btn primary sm" data-action="import-copy"><svg class="icon"><use href="#i-plus"/></svg>取り込み</button>
-            <button class="icon-btn" data-action="more-photos" title="その他"><svg class="icon"><use href="#i-more"/></svg></button>
-          </div>
-        </div>
-
-        <div class="filter-row">
-          <button class="filter-chip" data-action="filter-world">ワールド <span>すべて</span> <svg class="icon"><use href="#i-chevron-down"/></svg></button>
-          <button class="filter-chip" data-action="filter-player">プレイヤー <span>すべて</span> <svg class="icon"><use href="#i-chevron-down"/></svg></button>
-          <button class="filter-chip optional" data-action="filter-date">日時 <span>2026年</span> <svg class="icon"><use href="#i-chevron-down"/></svg></button>
-          <button class="filter-chip optional" data-action="filter-tag">タグ <span>すべて</span> <svg class="icon"><use href="#i-chevron-down"/></svg></button>
-          <button class="filter-chip" data-action="filter-favorite"><svg class="icon"><use href="#i-star"/></svg>お気に入り</button>
-          <button class="filter-chip active" data-action="filter-compressed"><span>圧縮済み</span> <svg class="icon"><use href="#i-chevron-down"/></svg></button>
-          <div class="filter-spacer"></div>
-          <div class="search-inline">
-            <svg class="icon"><use href="#i-search"/></svg>
-            <input type="search" placeholder="このライブラリを検索" aria-label="ライブラリ内を検索">
-          </div>
-          <button class="sort-chip" data-action="sort-menu">並び: 新しい順 <svg class="icon"><use href="#i-chevron-down"/></svg></button>
-        </div>
-
         <div class="photo-layout" id="photoLayout">
           <div class="gallery card-sub">
             <div class="gallery-head">
-              <div class="gallery-month"><strong>2026年10月</strong><span>9 枚</span></div>
-              <div class="gallery-head-actions">
-                <button class="icon-btn" data-action="gallery-sort" title="並べ替え"><svg class="icon"><use href="#i-filter"/></svg></button>
+              <div class="gallery-month"><strong>2026年10月</strong><span>9 枚 / 2,418</span></div>
+              <div class="gallery-tools">
+                <button class="filter-chip gallery-filter" data-action="filter-world">
+                  <svg class="icon"><use href="#i-filter"/></svg>フィルター<span class="gallery-filter-count">2</span>
+                </button>
+                <div class="gallery-search">
+                  <svg class="icon"><use href="#i-search"/></svg>
+                  <input type="search" placeholder="ライブラリを検索" aria-label="ライブラリを検索">
+                </div>
+                <button class="sort-chip" data-action="sort-menu">新しい順 <svg class="icon"><use href="#i-chevron-down"/></svg></button>
                 <button class="icon-btn" data-action="gallery-more" title="その他"><svg class="icon"><use href="#i-more"/></svg></button>
               </div>
             </div>
@@ -3324,21 +3196,6 @@
 
       <!-- Search -->
       <section class="screen" data-screen="search" aria-label="検索">
-        <div class="view-head">
-          <div class="view-title">
-            <span class="eyebrow">Search · Query</span>
-            <div class="view-title-row">
-              <h1>検索</h1>
-              <span class="count-pill">1,284 件</span>
-            </div>
-            <p class="view-sub">ワールド・プレイヤー・タグを横断 · 結果は全件スクロール</p>
-          </div>
-          <div class="view-actions">
-            <button class="btn ghost" data-action="clear-search"><svg class="icon"><use href="#i-select-none"/></svg>クリア</button>
-            <button class="btn primary sm" data-action="run-search"><svg class="icon"><use href="#i-search"/></svg>検索</button>
-            <button class="icon-btn" data-action="search-more" title="その他"><svg class="icon"><use href="#i-more"/></svg></button>
-          </div>
-        </div>
         <div class="search-layout">
           <div class="filter-panel card-sub">
             <div class="panel-title">絞り込み <button class="icon-btn" data-action="reset-filters" title="リセット"><svg class="icon"><use href="#i-rotate"/></svg></button></div>
@@ -3405,6 +3262,14 @@
                   <div class="photo-visual"><div class="scene scene-snow"></div><span class="photo-format">RAW · 未圧縮</span></div>
                   <div class="photo-info"><span class="photo-title">Sunset Cabin — 06</span><span class="photo-meta"><span class="meta-left"><i class="meta-dot pending"></i>10/16 · 16:21</span><span>6.4 MB</span></span></div>
                 </button>
+                <button class="photo-card" data-viewer-result data-scene="aquarium" data-title="Sunset Aquarium — 07" data-date="2026年10月15日 15:44" data-world="Sunset Aquarium" data-size="2.7 MB" data-players="Ash|Yuki" data-tags="水族館|青|検索結果">
+                  <div class="photo-visual"><div class="scene scene-aquarium"></div><span class="photo-format">WEBP 80</span></div>
+                  <div class="photo-info"><span class="photo-title">Sunset Aquarium — 07</span><span class="photo-meta"><span class="meta-left"><i class="meta-dot"></i>10/15 · 15:44</span><span>2.7 MB</span></span></div>
+                </button>
+                <button class="photo-card" data-viewer-result data-scene="space" data-title="Sunset Station — 08" data-date="2026年10月14日 20:10" data-world="Sunset Station" data-size="3.6 MB" data-players="Nox|Eri|Kaito" data-tags="SF|宇宙|検索結果">
+                  <div class="photo-visual"><div class="scene scene-space"></div><span class="photo-format">WEBP 82</span></div>
+                  <div class="photo-info"><span class="photo-title">Sunset Station — 08</span><span class="photo-meta"><span class="meta-left"><i class="meta-dot"></i>10/14 · 20:10</span><span>3.6 MB</span></span></div>
+                </button>
               </div>
             </div>
           </div>
@@ -3413,21 +3278,6 @@
 
       <!-- Compression -->
       <section class="screen" data-screen="compression" aria-label="圧縮設定">
-        <div class="view-head">
-          <div class="view-title">
-            <span class="eyebrow">Workflow · Compression</span>
-            <div class="view-title-row">
-              <h1>圧縮設定</h1>
-              <span class="count-pill">3 プロファイル</span>
-            </div>
-            <p class="view-sub"><b>1,842</b> / 2,418 枚を圧縮済み · 合計 24.7 GB 削減</p>
-          </div>
-          <div class="view-actions">
-            <button class="btn ghost" data-action="new-profile"><svg class="icon"><use href="#i-plus"/></svg>新規プロファイル</button>
-            <button class="btn primary sm" data-action="manual-compress"><svg class="icon"><use href="#i-wand"/></svg>手動圧縮</button>
-            <button class="icon-btn" data-action="compression-more" title="その他"><svg class="icon"><use href="#i-more"/></svg></button>
-          </div>
-        </div>
         <div class="compression-layout">
           <div class="profile-list card-sub">
             <div class="profile-list-head">
@@ -3538,21 +3388,6 @@
 
       <!-- Dashboard -->
       <section class="screen" data-screen="dashboard" aria-label="ダッシュボード">
-        <div class="view-head">
-          <div class="view-title">
-            <span class="eyebrow">System · Live</span>
-            <div class="view-title-row">
-              <h1>ダッシュボード</h1>
-              <span class="count-pill">LIVE</span>
-            </div>
-            <p class="view-sub">最終同期 12:42 · IPC 接続中 · デーモン v0.8.0-dev</p>
-          </div>
-          <div class="view-actions">
-            <button class="btn ghost" data-action="toggle-pause"><svg class="icon"><use href="#i-pause"/></svg>監視を一時停止</button>
-            <button class="btn sm" data-action="rescan"><svg class="icon"><use href="#i-refresh"/></svg>再スキャン</button>
-            <button class="icon-btn" data-action="dashboard-more" title="その他"><svg class="icon"><use href="#i-more"/></svg></button>
-          </div>
-        </div>
         <div class="dashboard-scroll">
           <div class="stat-grid">
             <div class="stat-card card-sub">
@@ -3670,23 +3505,12 @@
 
       <!-- Settings -->
       <section class="screen" data-screen="settings" aria-label="設定">
-        <div class="view-head">
-          <div class="view-title">
-            <span class="eyebrow">Preferences</span>
-            <div class="view-title-row">
-              <h1>設定</h1>
-              <span class="count-pill">LOCAL</span>
-            </div>
-            <p class="view-sub">変更は即時保存 · デーモンは 2 秒以内に設定を再読込</p>
-          </div>
-          <div class="view-actions">
-            <button class="btn ghost" data-action="reload-settings"><svg class="icon"><use href="#i-rotate"/></svg>再読込</button>
-            <button class="btn primary sm" data-action="save-settings"><svg class="icon"><use href="#i-check"/></svg>保存</button>
-            <button class="icon-btn" data-action="settings-more" title="その他"><svg class="icon"><use href="#i-more"/></svg></button>
-          </div>
-        </div>
         <div class="settings-layout">
           <div class="settings-nav card-sub">
+            <div class="settings-nav-head">
+              <strong>設定</strong>
+              <button class="icon-btn" data-action="reload-settings" title="設定を再読込"><svg class="icon"><use href="#i-refresh"/></svg></button>
+            </div>
             <p class="settings-nav-label">ライブラリ</p>
             <button class="active" data-settings-nav="library"><svg class="icon"><use href="#i-folder-open"/></svg>保存場所</button>
             <button data-settings-nav="import"><svg class="icon"><use href="#i-download"/></svg>取り込み</button>
@@ -3798,6 +3622,7 @@
               <div class="settings-list">
                 <div class="setting-row"><div><label>データベース</label><p>~/.local/share/vrc-photo-manager/library.db</p></div><span class="value">38.6 GB</span></div>
                 <div class="setting-row"><div><label>サムネイルキャッシュ</label><p>256px WebP · LRU 192</p></div><span class="value">1.2 GB</span></div>
+                <div class="setting-row"><div><label>ショートカット</label><p>サイドバー / 詳細 / 検索</p></div><span class="value">Ctrl+B · I · K</span></div>
                 <div class="setting-row"><div><label>アップデート</label><p>署名付き GitHub Releases を確認</p></div><button class="btn" data-action="check-update"><svg class="icon"><use href="#i-download"/></svg>確認</button></div>
               </div>
             </section>
@@ -4146,8 +3971,9 @@
     if (!valid) return;
     screens.forEach(s => s.classList.toggle("active", s.dataset.screen === name));
     navItems.forEach(item => item.classList.toggle("active", item.dataset.nav === name));
+    document.querySelectorAll(".rb-photo-only").forEach(el => { el.style.display = name === "photos" ? "" : "none"; });
     titlebarCrumb.textContent = screenLabels[name] || name;
-    const contextRibbon = name === "compression" ? "compression" : (name === "dashboard" || name === "settings" ? "tools" : "home");
+    const contextRibbon = name === "compression" ? "compression" : "home";
     setRibbon(contextRibbon);
   }
 
@@ -4220,7 +4046,7 @@
     statusAction.innerHTML = view.button + ' <svg class="icon"><use href="#i-arrow-right"/></svg>';
   }
 
-  function runAction(action) {
+  function runAction(action, sourceEl) {
     const actions = {
       "import-copy": () => openImport("copy"),
       "import-move": () => openImport("move"),
@@ -4230,7 +4056,7 @@
       "rebuild-index": () => showToast("索引を再構築しています…"),
       "select-all": () => showToast("表示中の 9 枚を選択しました（モック）"),
       "clear-selection": () => showToast("選択を解除しました"),
-      "toggle-inspector": (el) => { if (!el.closest(".editor-head")) toggleInspector(); },
+      "toggle-inspector": (el) => { if (!el?.closest(".editor-head")) toggleInspector(); },
       "toggle-sidebar": toggleSidebar,
       "toggle-ribbon": toggleRibbon,
       "toggle-year-rail": () => showToast("年レールの表示を切り替えました（モック）"),
@@ -4244,8 +4070,14 @@
       "quick-today": () => showToast("今日の写真に絞り込みました（モック）"),
       "quick-favorite": () => showToast("お気に入りのみ表示しました（モック）"),
       "quick-tags": () => showToast("タグフィルターを開きました（モック）"),
-      "view-grid": () => showToast("グリッド表示"),
-      "view-list": () => showToast("リスト表示は検討中です"),
+      "view-grid": () => {
+        document.querySelectorAll('[data-action="view-grid"], [data-action="view-list"]').forEach(btn => btn.classList.toggle("on", btn.dataset.action === "view-grid"));
+        showToast("グリッド表示");
+      },
+      "view-list": () => {
+        document.querySelectorAll('[data-action="view-grid"], [data-action="view-list"]').forEach(btn => btn.classList.toggle("on", btn.dataset.action === "view-list"));
+        showToast("リスト表示は検討中です");
+      },
       "fullscreen-view": () => openViewer(selectedCard),
       "favorite": () => {
         const card = (viewer.classList.contains("open") && activeViewerCard) ? activeViewerCard : selectedCard;
@@ -4315,7 +4147,7 @@
       }
     };
     const fn = actions[action];
-    if (fn) fn();
+    if (fn) fn(sourceEl);
     else showToast("モック: この操作はこれから実装します");
   }
 
