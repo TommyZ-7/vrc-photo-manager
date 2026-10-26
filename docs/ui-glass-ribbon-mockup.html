@@ -894,10 +894,7 @@
     flex-direction: column;
     min-height: 0;
     overflow: hidden;
-    border-radius: var(--r-card);
-    background:
-      linear-gradient(160deg, rgba(255, 255, 255, 0.052), rgba(255, 255, 255, 0.014) 48%),
-      rgba(7, 12, 22, 0.24);
+    background: transparent;
   }
 
   .screen {
@@ -3095,8 +3092,8 @@
       </div>
     </header>
 
-    <!-- ================= Content card ================= -->
-    <main class="content card" id="contentCard">
+    <!-- ================= Content area: inner cards only ================= -->
+    <main class="content" id="contentArea">
 
       <!-- Photos -->
       <section class="screen active" data-screen="photos" aria-label="ライブラリ">
