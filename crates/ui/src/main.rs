@@ -17,7 +17,6 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use smallvec::SmallVec;
 use vrc_photo_core::compressor;
 use vrc_photo_core::db::Db;
 use vrc_photo_core::importer::{
@@ -42,6 +41,13 @@ use vrc_photo_ipc::{
 
 use crate::app::cli::{log_timing, parse_args, process_start, timing_enabled};
 use crate::app::{App, LaunchOptions, Screen};
+use crate::state::preview::{
+    PreviewKey, PreviewQueue, preview_cache_dir, preview_key, preview_placeholder_label,
+    should_request_preview,
+};
+use crate::state::thumbnail::{
+    ThumbnailCache, decode_thumbnail, make_render_image, preview_render_image,
+};
 use crate::ui::theme::*;
 
 mod app;
@@ -51,8 +57,6 @@ mod state;
 mod ui;
 mod update_view;
 
-const THUMB_CACHE_ENTRIES: usize = 192;
-const THUMB_IN_FLIGHT: usize = 4;
 const PAGE_SIZE: usize = 256;
 const MAX_PAGES: usize = 24;
 const PHOTO_ROW_HEIGHT: f32 = 196.0;
@@ -99,194 +103,6 @@ enum ButtonTone {
 struct ButtonState {
     tone: ButtonTone,
     enabled: bool,
-}
-
-/// Identifies a cached preview by photo and displayed file variant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct PreviewKey {
-    photo_id: i64,
-    variant: i64,
-}
-
-fn preview_key(photo: &Photo) -> PreviewKey {
-    PreviewKey {
-        photo_id: photo.id,
-        variant: photo.display_derivative_id.unwrap_or(0),
-    }
-}
-
-/// Keeps one preview decode in flight and remembers the latest request.
-///
-/// A selection change while a decode is running only replaces `wanted`; the
-/// running decode finishes and is dropped by the caller when stale, then the
-/// latest key starts. This bounds background CPU during fast navigation.
-#[derive(Debug, Default)]
-struct PreviewQueue {
-    in_flight: Option<PreviewKey>,
-    wanted: Option<PreviewKey>,
-}
-
-impl PreviewQueue {
-    /// Records `key` as the latest request. Returns true when the caller
-    /// should start a decode immediately.
-    fn want(&mut self, key: PreviewKey) -> bool {
-        if self.in_flight == Some(key) {
-            self.wanted = None;
-            return false;
-        }
-        self.wanted = Some(key);
-        self.in_flight.is_none()
-    }
-
-    /// Takes the queued key and marks it in flight. Returns None while another
-    /// decode is still running.
-    fn begin(&mut self) -> Option<PreviewKey> {
-        if self.in_flight.is_some() {
-            return None;
-        }
-        let key = self.wanted.take()?;
-        self.in_flight = Some(key);
-        Some(key)
-    }
-
-    /// Clears `key` if it is still the in-flight decode.
-    fn finish(&mut self, key: PreviewKey) {
-        if self.in_flight == Some(key) {
-            self.in_flight = None;
-        }
-    }
-
-    fn cancel_wanted(&mut self) {
-        self.wanted = None;
-    }
-
-    fn pending_for(&self, photo_id: i64) -> bool {
-        self.in_flight.is_some_and(|key| key.photo_id == photo_id)
-            || self.wanted.is_some_and(|key| key.photo_id == photo_id)
-    }
-}
-
-/// Whether a live refresh should request `key`.
-///
-/// A key is only requested once: after a failed attempt, `preview_attempt`
-/// suppresses the 3-second retry loop until the user clicks the photo again.
-fn should_request_preview(
-    loaded: Option<PreviewKey>,
-    attempt: Option<PreviewKey>,
-    pending: bool,
-    key: PreviewKey,
-) -> bool {
-    loaded != Some(key) && attempt != Some(key) && !pending
-}
-
-/// Chooses the preview cache directory. Demo mode may only use its own cache;
-/// if the demo assets are unavailable, it must not touch the real data dir.
-fn preview_cache_dir(
-    demo: bool,
-    demo_dir: Option<PathBuf>,
-    real_dir: Option<PathBuf>,
-) -> Option<PathBuf> {
-    if demo { demo_dir } else { real_dir }
-}
-
-fn preview_placeholder_label(pending: bool) -> &'static str {
-    if pending {
-        "プレビューを読み込み中…"
-    } else {
-        "プレビューを読み込めません"
-    }
-}
-
-/// Bounded LRU cache for grid thumbnails.
-///
-/// Decoding runs on the background executor; the UI thread only turns the
-/// decoded RGBA buffer into a `RenderImage`. `pending` and `failed` keep a
-/// photo from being requested more than once while it is on screen.
-#[derive(Default)]
-struct ThumbnailCache {
-    images: HashMap<i64, Arc<RenderImage>>,
-    colors: HashMap<i64, u32>,
-    lru: VecDeque<i64>,
-    pending: HashSet<i64>,
-    failed: HashSet<i64>,
-    pinned: Option<i64>,
-    in_flight: usize,
-}
-
-impl ThumbnailCache {
-    fn get(&mut self, id: i64) -> Option<Arc<RenderImage>> {
-        let image = self.images.get(&id)?.clone();
-        self.touch(id);
-        Some(image)
-    }
-
-    fn color(&self, id: i64) -> Option<u32> {
-        self.colors.get(&id).copied()
-    }
-
-    fn begin(&mut self, id: i64) -> bool {
-        if self.images.contains_key(&id)
-            || self.pending.contains(&id)
-            || self.failed.contains(&id)
-            || self.in_flight >= THUMB_IN_FLIGHT
-        {
-            return false;
-        }
-        self.pending.insert(id);
-        self.in_flight += 1;
-        true
-    }
-
-    fn insert(&mut self, id: i64, image: Arc<RenderImage>, color: u32) {
-        if self.pending.remove(&id) {
-            self.in_flight = self.in_flight.saturating_sub(1);
-        }
-        self.images.insert(id, image);
-        self.colors.insert(id, color);
-        self.touch(id);
-        self.evict();
-    }
-
-    fn fail(&mut self, id: i64) {
-        if self.pending.remove(&id) {
-            self.in_flight = self.in_flight.saturating_sub(1);
-        }
-        self.failed.insert(id);
-    }
-
-    fn pin(&mut self, id: i64) {
-        self.pinned = Some(id);
-    }
-
-    /// Drops the pin when the selected photo is deleted or deselected.
-    fn unpin(&mut self, id: i64) {
-        if self.pinned == Some(id) {
-            self.pinned = None;
-        }
-    }
-
-    fn touch(&mut self, id: i64) {
-        if let Some(index) = self.lru.iter().position(|entry| *entry == id) {
-            self.lru.remove(index);
-        }
-        self.lru.push_back(id);
-    }
-
-    fn evict(&mut self) {
-        while self.images.len() > THUMB_CACHE_ENTRIES {
-            let Some(id) = self.lru.pop_front() else {
-                break;
-            };
-            // Rotate the pinned entry instead of dropping it. All cached
-            // images own an LRU slot, so this always terminates.
-            if Some(id) == self.pinned {
-                self.lru.push_back(id);
-                continue;
-            }
-            self.images.remove(&id);
-            self.colors.remove(&id);
-        }
-    }
 }
 
 /// Contiguous run of photos that share a local capture year.
@@ -10718,76 +10534,6 @@ fn seed_demo(db: &Db, photo_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Decodes a thumbnail on a background thread. Returns the average color in
-/// RGB and the RGBA buffer with channels already swapped to BGRA.
-fn decode_thumbnail(id: i64, cache_path: &Path, source: &Path) -> Option<(u32, image::RgbaImage)> {
-    let cached = cache_path.is_file()
-        && std::fs::metadata(cache_path)
-            .map(|meta| meta.len() > 0)
-            .unwrap_or_else(|error| {
-                tracing::debug!(
-                    %error,
-                    path = %cache_path.display(),
-                    "cannot read thumbnail cache metadata"
-                );
-                false
-            });
-    let path = if cached {
-        cache_path.to_path_buf()
-    } else {
-        match thumbnail::ensure_thumbnail(id, source) {
-            Ok(Some(path)) => path,
-            Ok(None) => {
-                tracing::debug!(
-                    photo_id = id,
-                    path = %source.display(),
-                    "thumbnail source is missing or cannot be decoded"
-                );
-                return None;
-            }
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    photo_id = id,
-                    path = %source.display(),
-                    "cannot generate thumbnail"
-                );
-                return None;
-            }
-        }
-    };
-    let mut buffer = match vrc_photo_core::image_decode::decode_image(&path) {
-        Some(image) => image.to_rgba8(),
-        None => {
-            tracing::warn!(
-                photo_id = id,
-                path = %path.display(),
-                "cannot decode thumbnail"
-            );
-            return None;
-        }
-    };
-    for pixel in buffer.pixels_mut() {
-        pixel.0.swap(0, 2);
-    }
-    let color = average_bgra(buffer.as_raw());
-    Some((color, buffer))
-}
-
-/// Builds a GPUI image from a decoded buffer. Must run on the UI thread.
-fn make_render_image(rgba: image::RgbaImage) -> Arc<RenderImage> {
-    let frame = image::Frame::new(rgba);
-    Arc::new(RenderImage::new(SmallVec::from_elem(frame, 1)))
-}
-
-/// Swaps RGBA to the BGRA order GPUI's `RenderImage` expects.
-fn preview_render_image(mut rgba: image::RgbaImage) -> Arc<RenderImage> {
-    for pixel in rgba.pixels_mut() {
-        pixel.0.swap(0, 2);
-    }
-    make_render_image(rgba)
-}
-
 fn glass_panel() -> Div {
     div()
         .rounded(px(18.))
@@ -11772,29 +11518,26 @@ mod tests {
         CountDebounce, DemoAssets, ImportDialogOrigin, ImportDialogPhase, ImportDialogState,
         ImportReportView, IpcScanPhase, MAX_PAGES, MIN_CARD_WIDTH, MOTION_BASE, MOTION_MORPH,
         MOTION_SLOW, ManualOutputTarget, MorphImageKind, NAV_ITEM_GAP, NAV_ITEM_HEIGHT, PAGE_SIZE,
-        PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex, PhotoPageCache, PreviewKey, PreviewQueue,
-        RAIL_MARKER_SIZE, RAIL_PILL_WIDTH, RAIL_TRACK_INSET, RAIL_WIDTH, ScanProgressView, Screen,
-        THUMB_CACHE_ENTRIES, THUMB_IN_FLIGHT, ThumbnailCache, VIEWER_DETAILS_WIDTH, ViewerBoxState,
-        ViewerMorph, ViewerOpenSource, ViewerPanelState, YearBucket, add_photo_root_and_save,
-        alert_summaries, anchor_photo_id, apply_library_index, autostart_description,
-        build_year_buckets, card_metrics, compression_policy_warning, current_tagged_bounds,
-        daemon_liveness, daemon_operation_label, daemon_state_label, daemon_sync_label,
-        decode_thumbnail, demo_thumb_path, first_visible_photo, format_captured_month,
+        PHOTO_ROW_HEIGHT, PhotoBrowser, PhotoIndex, PhotoPageCache, RAIL_MARKER_SIZE,
+        RAIL_PILL_WIDTH, RAIL_TRACK_INSET, RAIL_WIDTH, ScanProgressView, Screen,
+        VIEWER_DETAILS_WIDTH, ViewerBoxState, ViewerMorph, ViewerOpenSource, ViewerPanelState,
+        YearBucket, add_photo_root_and_save, alert_summaries, anchor_photo_id, apply_library_index,
+        autostart_description, build_year_buckets, card_metrics, compression_policy_warning,
+        current_tagged_bounds, daemon_liveness, daemon_operation_label, daemon_state_label,
+        daemon_sync_label, demo_thumb_path, first_visible_photo, format_captured_month,
         format_timestamp, has_tag_filter, import_issue_counts, import_progress_label,
         import_progress_ratio, import_remaining, import_should_index, import_summary,
         ipc_status_label, job_retry_available, job_retry_label, list_scroll_top,
         manual_output_available, merge_resume_report, merge_retry_report, morph_bounds_at,
         morph_image_plan, nav_index, nav_item_top, normalize_note, preferred_bounds,
-        preview_cache_dir, preview_key, preview_placeholder_label, queue_status_badge,
-        rail_hover_hits, rail_label_hidden_by_pill, rail_marker_bounds, rail_pill_bounds,
-        rail_press_allowed, rail_press_hits, rail_row_at, rail_scroll_offset,
+        queue_status_badge, rail_hover_hits, rail_label_hidden_by_pill, rail_marker_bounds,
+        rail_pill_bounds, rail_press_allowed, rail_press_hits, rail_row_at, rail_scroll_offset,
         rail_track_hit_bounds, rail_y, release_confirmation, reserve_import_dialog,
         retryable_sources, scan_progress_label, scan_progress_ratio, screen_direction,
-        search_anchor_after_result, should_request_preview, sync_search_mirror, viewer_image_rect,
-        visible_year_buckets, with_tag, without_tag,
+        search_anchor_after_result, sync_search_mirror, viewer_image_rect, visible_year_buckets,
+        with_tag, without_tag,
     };
-    use gpui_kit::{Bounds, RenderImage, ScrollStrategy, UniformListScrollHandle, point, px, size};
-    use smallvec::SmallVec;
+    use gpui_kit::{Bounds, ScrollStrategy, UniformListScrollHandle, point, px, size};
     use std::cell::Cell;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -12115,86 +11858,6 @@ mod tests {
         assert_eq!(path.parent(), Some(assets.thumb_dir.as_path()));
     }
 
-    fn test_render_image() -> Arc<RenderImage> {
-        let frame = image::Frame::new(image::RgbaImage::new(1, 1));
-        Arc::new(RenderImage::new(SmallVec::from_elem(frame, 1)))
-    }
-
-    #[test]
-    fn thumbnail_cache_limits_in_flight_requests() {
-        let mut cache = ThumbnailCache::default();
-        for id in 0..THUMB_IN_FLIGHT as i64 {
-            assert!(cache.begin(id));
-        }
-        assert!(!cache.begin(999));
-    }
-
-    #[test]
-    fn thumbnail_cache_evicts_least_recently_used_but_keeps_pinned() {
-        let mut cache = ThumbnailCache::default();
-        cache.pin(1);
-        for id in 1..=THUMB_CACHE_ENTRIES as i64 {
-            assert!(cache.begin(id));
-            cache.insert(id, test_render_image(), 0x112233);
-        }
-        // Do not touch id 1: it is the least recently used entry, so only the
-        // pin can keep it alive when the next insert overflows the cache.
-        assert!(cache.begin(999));
-        cache.insert(999, test_render_image(), 0x445566);
-        assert!(cache.get(1).is_some());
-        assert!(cache.get(2).is_none());
-    }
-
-    #[test]
-    fn thumbnail_cache_unpins_a_deleted_selection() {
-        let mut cache = ThumbnailCache::default();
-        cache.pin(7);
-        cache.unpin(7);
-        assert_eq!(cache.pinned, None);
-
-        cache.pin(8);
-        cache.unpin(7);
-        assert_eq!(cache.pinned, Some(8));
-    }
-
-    #[test]
-    fn thumbnail_cache_frees_a_slot_for_a_pinned_retry() {
-        let mut cache = ThumbnailCache::default();
-        for id in 0..THUMB_IN_FLIGHT as i64 {
-            assert!(cache.begin(id));
-        }
-        cache.pin(99);
-        // The selected thumbnail is refused while every slot is busy.
-        assert!(!cache.begin(99));
-        // A completed decode frees a slot; the pinned retry can now start.
-        cache.insert(0, test_render_image(), 0);
-        assert!(cache.begin(99));
-    }
-
-    #[test]
-    fn thumbnail_cache_does_not_retry_failed_or_pending_ids() {
-        let mut cache = ThumbnailCache::default();
-        assert!(cache.begin(1));
-        assert!(!cache.begin(1));
-        cache.fail(1);
-        assert!(!cache.begin(1));
-    }
-
-    #[test]
-    fn decode_thumbnail_uses_the_cached_file_and_swaps_channels() {
-        let dir = std::env::temp_dir().join(format!("vrc-photo-ui-decode-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let cache_path = dir.join("thumb.png");
-        image::RgbaImage::from_pixel(2, 2, image::Rgba([10, 20, 30, 255]))
-            .save(&cache_path)
-            .unwrap();
-        let (color, rgba) =
-            decode_thumbnail(7, &cache_path, &dir.join("missing-source.png")).unwrap();
-        assert_eq!(color, 0x0a141e);
-        assert_eq!(&rgba.as_raw()[..4], &[30, 20, 10, 255]);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     fn test_photo(id: i64) -> Photo {
         Photo {
             id,
@@ -12225,149 +11888,6 @@ mod tests {
             confidence: None,
             author: None,
         }
-    }
-
-    #[test]
-    fn preview_queue_runs_one_decode_and_keeps_the_latest_wanted() {
-        let mut queue = PreviewQueue::default();
-        assert!(queue.want(PreviewKey {
-            photo_id: 1,
-            variant: 0
-        }));
-        assert_eq!(
-            queue.begin(),
-            Some(PreviewKey {
-                photo_id: 1,
-                variant: 0
-            })
-        );
-        assert!(!queue.want(PreviewKey {
-            photo_id: 2,
-            variant: 0
-        }));
-        assert_eq!(queue.begin(), None);
-        queue.finish(PreviewKey {
-            photo_id: 1,
-            variant: 0,
-        });
-        assert_eq!(
-            queue.begin(),
-            Some(PreviewKey {
-                photo_id: 2,
-                variant: 0
-            })
-        );
-    }
-
-    #[test]
-    fn preview_queue_re_requesting_the_in_flight_key_drops_the_queued_key() {
-        let mut queue = PreviewQueue::default();
-        assert!(queue.want(PreviewKey {
-            photo_id: 1,
-            variant: 0
-        }));
-        queue.begin();
-        assert!(!queue.want(PreviewKey {
-            photo_id: 2,
-            variant: 0
-        }));
-        assert!(!queue.want(PreviewKey {
-            photo_id: 1,
-            variant: 0
-        }));
-        queue.finish(PreviewKey {
-            photo_id: 1,
-            variant: 0,
-        });
-        assert_eq!(queue.begin(), None);
-    }
-
-    #[test]
-    fn preview_queue_pending_for_covers_queued_and_in_flight() {
-        let mut queue = PreviewQueue::default();
-        queue.want(PreviewKey {
-            photo_id: 1,
-            variant: 0,
-        });
-        assert!(queue.pending_for(1));
-        queue.begin();
-        assert!(queue.pending_for(1));
-        queue.finish(PreviewKey {
-            photo_id: 1,
-            variant: 0,
-        });
-        assert!(!queue.pending_for(1));
-    }
-
-    #[test]
-    fn preview_key_uses_the_display_derivative() {
-        let mut photo = test_photo(7);
-        assert_eq!(
-            preview_key(&photo),
-            PreviewKey {
-                photo_id: 7,
-                variant: 0
-            }
-        );
-        photo.display_derivative_id = Some(42);
-        assert_eq!(
-            preview_key(&photo),
-            PreviewKey {
-                photo_id: 7,
-                variant: 42
-            }
-        );
-    }
-
-    #[test]
-    fn stale_refresh_requests_a_new_variant_once() {
-        let loaded_old = PreviewKey {
-            photo_id: 7,
-            variant: 0,
-        };
-        let wanted = PreviewKey {
-            photo_id: 7,
-            variant: 42,
-        };
-        assert!(!should_request_preview(Some(wanted), None, false, wanted));
-        assert!(should_request_preview(
-            Some(loaded_old),
-            None,
-            false,
-            wanted
-        ));
-        assert!(!should_request_preview(
-            Some(loaded_old),
-            Some(wanted),
-            false,
-            wanted
-        ));
-        assert!(!should_request_preview(None, None, true, wanted));
-        assert!(should_request_preview(None, None, false, wanted));
-    }
-
-    #[test]
-    fn preview_cache_dir_never_uses_the_real_cache_in_demo() {
-        let demo_dir = PathBuf::from("/demo/previews");
-        let real_dir = PathBuf::from("/real/previews");
-        assert_eq!(
-            preview_cache_dir(true, Some(demo_dir.clone()), Some(real_dir.clone())),
-            Some(demo_dir)
-        );
-        assert_eq!(preview_cache_dir(true, None, Some(real_dir.clone())), None);
-        assert_eq!(
-            preview_cache_dir(false, None, Some(real_dir.clone())),
-            Some(real_dir)
-        );
-    }
-
-    #[test]
-    fn preview_placeholder_label_distinguishes_loading_from_failure() {
-        assert_eq!(preview_placeholder_label(true), "プレビューを読み込み中…");
-        assert_eq!(
-            preview_placeholder_label(false),
-            "プレビューを読み込めません"
-        );
     }
 
     #[test]
