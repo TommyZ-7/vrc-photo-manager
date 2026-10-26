@@ -13,10 +13,12 @@ use std::time::{Duration, Instant};
 use gpui_kit::{ScrollStrategy, UniformListScrollHandle};
 use vrc_photo_core::model::{Photo, PhotoIndexEntry};
 
-// `YearBucket`, `build_year_buckets`, `YearRailLabels`, and `PHOTO_ROW_HEIGHT`
-// still live at the crate root (later tasks move or replace them), so this
-// module borrows them temporarily instead of duplicating their values.
-use crate::{PHOTO_ROW_HEIGHT, YearBucket, YearRailLabels, build_year_buckets};
+// `YearRailLabels` and `PHOTO_ROW_HEIGHT` still live at the crate root (later
+// tasks move them), so this module borrows them temporarily instead of
+// duplicating their values.
+use crate::PHOTO_ROW_HEIGHT;
+use crate::YearRailLabels;
+use crate::state::year_rail::{YearBucket, build_year_buckets};
 
 pub(crate) const PAGE_SIZE: usize = 256;
 pub(crate) const MAX_PAGES: usize = 24;
