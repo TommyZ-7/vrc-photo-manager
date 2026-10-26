@@ -247,9 +247,10 @@ mod tests {
 
 use super::ipc_bridge;
 use super::{
-    ACCENT_SOFT, AMBER, BLUE, GREEN, MUTED, MUTED_2, PANEL, PANEL_2, RED, TEXT, glass_panel,
-    open_path, spawn_daemon_process,
+    ACCENT_SOFT, AMBER, BLUE, GREEN, MUTED, MUTED_2, PANEL, PANEL_2, RED, TEXT, open_path,
+    spawn_daemon_process,
 };
+use crate::ui::components::glass_panel;
 use gpui_kit::base::{Disableable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::component::Sizable as _;
 use gpui_kit::prelude::FluentBuilder as _;
