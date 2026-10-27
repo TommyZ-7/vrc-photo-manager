@@ -663,6 +663,13 @@ impl App {
         let grid_epoch = self.grid_epoch;
         let card_radius = 13.0;
         let image_radius = inner_corner_radius(card_radius, 1.0);
+        let meta_line = card_meta_line(
+            show_date,
+            show_size,
+            &photo.captured_at_local,
+            format_bytes(photo.effective_file_size()),
+        );
+        let has_info = show_world || meta_line.is_some();
 
         let mut thumb = div()
             .relative()
@@ -671,17 +678,24 @@ impl App {
             .overflow_hidden()
             .bg(rgb(color))
             .rounded_tl(px(image_radius))
-            .rounded_tr(px(image_radius));
+            .rounded_tr(px(image_radius))
+            .when(!has_info, |this| {
+                this.rounded_bl(px(image_radius))
+                    .rounded_br(px(image_radius))
+            });
         if let Some(image) = thumbnail {
-            thumb = thumb.child(
-                gpui_kit::img(image)
-                    .object_fit(ObjectFit::Cover)
-                    .size_full()
-                    // GPUI clips overflow to a rectangle, so the image has to
-                    // carry the rounded silhouette itself.
-                    .rounded_tl(px(image_radius))
-                    .rounded_tr(px(image_radius)),
-            );
+            let image = gpui_kit::img(image)
+                .object_fit(ObjectFit::Cover)
+                .size_full()
+                // GPUI clips overflow to a rectangle, so the image has to
+                // carry the rounded silhouette itself.
+                .rounded_tl(px(image_radius))
+                .rounded_tr(px(image_radius))
+                .when(!has_info, |this| {
+                    this.rounded_bl(px(image_radius))
+                        .rounded_br(px(image_radius))
+                });
+            thumb = thumb.child(image);
         }
         let bounds_map = self.card_image_bounds.clone();
         let bounds_frame = self.render_epoch;
@@ -773,13 +787,6 @@ impl App {
             )
         });
 
-        let meta_line = card_meta_line(
-            show_date,
-            show_size,
-            &photo.captured_at_local,
-            format_bytes(photo.effective_file_size()),
-        );
-        let has_info = show_world || meta_line.is_some();
         let mut info = v_flex()
             .min_w_0()
             .px(px(9.))
