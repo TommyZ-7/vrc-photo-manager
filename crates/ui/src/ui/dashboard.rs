@@ -1,7 +1,6 @@
 //! Dashboard screen: library/queue stats, daemon status, errors, and logs.
 //!
-//! Daemon commands live in `app::daemon`; screen dispatch stays in the crate
-//! root for PR1.
+//! Daemon commands live in `app::daemon`; screen dispatch lives in `ui::shell`.
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -11,12 +10,13 @@ use gpui_kit::*;
 use vrc_photo_core::logging::{DAEMON_LOG_FILE, UI_LOG_FILE, logs_dir};
 
 use crate::app::App;
-use crate::ui::components::glass_panel;
-use crate::ui::theme::*;
-use crate::{
+use crate::app::daemon::{
     daemon_operation_label, daemon_state_label, daemon_sync_label, format_timestamp,
-    ipc_status_label, open_path, scan_progress_label, scan_progress_ratio,
+    ipc_status_label, open_path,
 };
+use crate::ui::components::glass_panel;
+use crate::ui::shell::{scan_progress_label, scan_progress_ratio};
+use crate::ui::theme::*;
 
 impl App {
     pub(crate) fn dashboard_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {

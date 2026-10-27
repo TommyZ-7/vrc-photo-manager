@@ -10,9 +10,9 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::app::App;
+use crate::app::compression::{ManualOutputTarget, manual_output_available};
 use crate::ui::components::manual_option_row;
 use crate::ui::theme::*;
-use crate::{ManualOutputTarget, manual_output_available};
 
 impl App {
     pub(crate) fn manual_compression_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {

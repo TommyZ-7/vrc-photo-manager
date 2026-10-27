@@ -4,7 +4,7 @@
 //! Rendering stays in `ui::library`; these methods only touch App fields and
 //! background decode queues.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use gpui_kit::*;
@@ -12,12 +12,12 @@ use vrc_photo_core::model::Photo;
 use vrc_photo_core::{preview, thumbnail};
 
 use crate::app::cli::log_timing;
+use crate::app::demo::demo_thumb_path;
 use crate::app::{App, Screen};
-use crate::demo_thumb_path;
 use crate::state::photo_browser::PhotoBrowser;
 use crate::state::preview::{preview_cache_dir, preview_key, should_request_preview};
 use crate::state::thumbnail::{decode_thumbnail, make_render_image, preview_render_image};
-use crate::ui::theme::{selection_range, toggle_selected_id};
+use crate::ui::theme::{BG, scene_color, selection_range, toggle_selected_id};
 
 impl App {
     /// Reloads the metadata for a photo without decoding its 1200 px preview.
@@ -342,5 +342,276 @@ impl App {
         } else {
             &mut self.library
         }
+    }
+
+    pub(crate) fn color_for(&self, photo: &Photo) -> u32 {
+        self.thumbnails
+            .color(photo.id)
+            .unwrap_or_else(|| scene_color(photo.world_name.as_deref().unwrap_or("")))
+    }
+
+    pub(crate) fn selected_color(&self) -> u32 {
+        self.selected_photo
+            .as_ref()
+            .map(|photo| self.color_for(photo))
+            .unwrap_or(BG)
+    }
+
+    pub(crate) fn begin_note_edit(
+        &mut self,
+        id: i64,
+        note: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.note_edit_id = Some(id);
+        let text = note.unwrap_or_default();
+        self.note_edit_input
+            .update(cx, |input, cx| input.set_value(text, window, cx));
+        let focus = self.note_edit_input.read(cx).focus_handle(cx);
+        // The textarea mounts on the next frame, after the editor state flips.
+        cx.defer_in(window, move |this, window, cx| {
+            if this.quick_look_open && this.quick_look_details_open && this.note_edit_id == Some(id)
+            {
+                window.focus(&focus, cx);
+            }
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn save_note(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        let value = self.note_edit_input.read(cx).value();
+        let note = normalize_note(&value);
+        if let Err(error) = self.db.set_note(id, note) {
+            tracing::warn!(%error, photo_id = id, "cannot save photo note");
+            self.message = Some(format!("メモを保存できません: {error}"));
+            cx.notify();
+            return;
+        }
+        self.note_edit_id = None;
+        self.load_selected_meta(id);
+        let focus = self.quick_look_note_edit_focus.clone();
+        // The edit action mounts after the textarea disappears.
+        cx.defer_in(window, move |this, window, cx| {
+            if this.quick_look_open && this.quick_look_details_open && this.note_edit_id.is_none() {
+                window.focus(&focus, cx);
+            }
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn cancel_note_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.note_edit_id.take().is_none() {
+            return;
+        }
+        let focus = self.quick_look_note_edit_focus.clone();
+        cx.defer_in(window, move |this, window, cx| {
+            if this.quick_look_open && this.quick_look_details_open && this.note_edit_id.is_none() {
+                window.focus(&focus, cx);
+            }
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn trash_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(photo) = &self.selected_photo else {
+            return;
+        };
+        let id = photo.id;
+        let effective_path = photo.effective_path().to_string();
+        let replaced = photo.is_replaced();
+
+        if self.delete_armed != Some(id) {
+            self.delete_armed = Some(id);
+            if !replaced
+                && let Ok(derivatives) = self.db.derivatives_for_photo(id)
+                && derivatives
+                    .iter()
+                    .any(|derivative| Path::new(&derivative.path).is_file())
+            {
+                self.message = Some(
+                    "もう一度押すと元画像を削除し、圧縮版をライブラリ表示に使います".to_string(),
+                );
+            }
+            cx.notify();
+            return;
+        }
+
+        // A replaced photo's "original" is already gone; the effective path is
+        // the compressed derivative that the card is currently displaying.
+        let derivative_to_promote = if replaced {
+            None
+        } else {
+            self.db
+                .derivatives_for_photo(id)
+                .ok()
+                .and_then(|derivatives| {
+                    derivatives
+                        .into_iter()
+                        .find(|derivative| Path::new(&derivative.path).is_file())
+                })
+        };
+
+        if let Some(derivative) = &derivative_to_promote
+            && let Err(error) = self.db.set_replaced(id, derivative.id)
+        {
+            self.delete_armed = None;
+            self.message = Some(format!("圧縮版を表示に設定できません: {error}"));
+            cx.notify();
+            return;
+        }
+
+        match trash::delete(&effective_path) {
+            Ok(_) => {
+                if derivative_to_promote.is_some() {
+                    // The row stays visible with the compressed derivative as
+                    // its display asset.
+                    self.delete_armed = None;
+                    let _ = self.db.bump_library_revision();
+                    self.reload_library(true, cx);
+                    self.message =
+                        Some("元画像をゴミ箱へ移動しました（圧縮版を表示中）".to_string());
+                } else {
+                    if let Err(error) = self.db.mark_missing(id) {
+                        tracing::warn!(%error, photo_id = id, "cannot mark trashed photo missing");
+                    }
+                    let _ = self.db.clear_display_derivative(id);
+                    let _ = self.db.bump_library_revision();
+                    self.library.remove_photo(id);
+                    self.search_view.remove_photo(id);
+                    self.thumbnails.unpin(id);
+                    self.selected = None;
+                    self.selected_ids.clear();
+                    self.selection_anchor = None;
+                    self.selected_photo = None;
+                    self.selected_players.clear();
+                    self.selected_tags.clear();
+                    self.selected_derivatives.clear();
+                    self.preview = None;
+                    self.delete_armed = None;
+                    self.message = Some("写真をゴミ箱へ移動しました".to_string());
+                    self.reload_aux(cx);
+                }
+            }
+            Err(error) => {
+                if derivative_to_promote.is_some() {
+                    let _ = self.db.restore_present(id);
+                }
+                self.delete_armed = None;
+                self.message = Some(format!("ゴミ箱へ移動できません: {error}"));
+            }
+        }
+        cx.notify();
+    }
+
+    fn commit_tags(&mut self, photo_id: i64, tags: Vec<String>, cx: &mut Context<Self>) {
+        if let Err(error) = self.db.set_photo_tags(photo_id, &tags) {
+            tracing::warn!(%error, photo_id, "cannot save photo tags");
+            self.message = Some(format!("タグを保存できません: {error}"));
+            cx.notify();
+            return;
+        }
+        self.load_selected_meta(photo_id);
+        // A successful write is authoritative even if the metadata read failed.
+        if self.selected_tags.is_empty() && !tags.is_empty() {
+            self.selected_tags = tags;
+        }
+        self.refresh_search_after_tag_edit(cx);
+        cx.notify();
+    }
+
+    pub(crate) fn add_tag(&mut self, photo_id: i64, tag: String, cx: &mut Context<Self>) {
+        let tags = match self.db.photo_tags(photo_id) {
+            Ok(tags) => tags,
+            Err(error) => {
+                tracing::warn!(%error, photo_id, "cannot load photo tags");
+                self.message = Some(format!("タグを読み込めません: {error}"));
+                cx.notify();
+                return;
+            }
+        };
+        let Some(tags) = with_tag(&tags, &tag) else {
+            return;
+        };
+        self.commit_tags(photo_id, tags, cx);
+    }
+
+    pub(crate) fn remove_tag(&mut self, photo_id: i64, tag: &str, cx: &mut Context<Self>) {
+        let tags = match self.db.photo_tags(photo_id) {
+            Ok(tags) => tags,
+            Err(error) => {
+                tracing::warn!(%error, photo_id, "cannot load photo tags");
+                self.message = Some(format!("タグを読み込めません: {error}"));
+                cx.notify();
+                return;
+            }
+        };
+        let Some(tags) = without_tag(&tags, tag) else {
+            return;
+        };
+        self.commit_tags(photo_id, tags, cx);
+    }
+}
+
+/// Trims the outer whitespace of a note and treats an empty result as "no note".
+fn normalize_note(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+/// Returns the tags left after removing `tag`, or `None` when it is absent.
+fn without_tag(tags: &[String], tag: &str) -> Option<Vec<String>> {
+    if !tags.iter().any(|existing| existing == tag) {
+        return None;
+    }
+    Some(
+        tags.iter()
+            .filter(|existing| existing.as_str() != tag)
+            .cloned()
+            .collect(),
+    )
+}
+
+/// Returns the tags with `tag` appended, or `None` when it is already present.
+fn with_tag(tags: &[String], tag: &str) -> Option<Vec<String>> {
+    if tags.iter().any(|existing| existing == tag) {
+        return None;
+    }
+    let mut tags = tags.to_vec();
+    tags.push(tag.to_string());
+    Some(tags)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_note, with_tag, without_tag};
+
+    #[test]
+    fn notes_normalize_empty_to_none_and_trim_text() {
+        assert_eq!(normalize_note(""), None);
+        assert_eq!(normalize_note("  \n\t "), None);
+        assert_eq!(normalize_note(" hello \n"), Some("hello"));
+        assert_eq!(normalize_note("line1\nline2"), Some("line1\nline2"));
+    }
+
+    #[test]
+    fn tag_removal_filters_only_the_named_tag() {
+        let tags = vec!["alpha".to_string(), "beta".to_string()];
+        assert_eq!(without_tag(&tags, "alpha"), Some(vec!["beta".to_string()]));
+        assert_eq!(without_tag(&tags, "missing"), None);
+    }
+
+    #[test]
+    fn tag_addition_rejects_duplicates() {
+        let tags = vec!["alpha".to_string(), "beta".to_string()];
+        assert_eq!(
+            with_tag(&tags, "gamma"),
+            Some(vec![
+                "alpha".to_string(),
+                "beta".to_string(),
+                "gamma".to_string()
+            ])
+        );
+        assert_eq!(with_tag(&tags, "alpha"), None);
     }
 }

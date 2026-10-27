@@ -1,3 +1,4 @@
+pub(crate) mod actions;
 pub(crate) mod components;
 pub(crate) mod compression;
 pub(crate) mod dashboard;
@@ -6,6 +7,7 @@ pub(crate) mod import;
 pub(crate) mod library;
 pub(crate) mod search;
 pub(crate) mod settings;
+pub(crate) mod shell;
 pub(crate) mod theme;
 pub(crate) mod viewer;
 pub(crate) mod year_rail;

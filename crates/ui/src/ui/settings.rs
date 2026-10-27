@@ -2,7 +2,7 @@
 //! policies.
 //!
 //! The switch, card-size, and field widgets come from `ui::components`; screen
-//! dispatch stays in the crate root for PR1.
+//! dispatch lives in `ui::shell`.
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
@@ -15,10 +15,11 @@ use vrc_photo_core::model::DaemonCommand;
 use vrc_photo_core::settings::CardSize;
 
 use crate::app::App;
+use crate::app::daemon::autostart_description;
 use crate::state::photo_browser::{anchor_photo_id, list_scroll_top};
+use crate::ui::components::compression_policy_warning;
 use crate::ui::components::glass_panel;
 use crate::ui::theme::*;
-use crate::{autostart_description, compression_policy_warning};
 
 impl App {
     pub(crate) fn settings_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {

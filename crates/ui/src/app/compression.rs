@@ -10,13 +10,31 @@ use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::*;
 use vrc_photo_core::compressor;
-use vrc_photo_core::model::CompressionProfile;
+use vrc_photo_core::model::{CompressionProfile, MAX_JOB_RETRIES};
 
 use crate::app::App;
-use crate::ui::theme::{moved_profile_order, step_index};
-use crate::{
-    ManualCompressionDialog, ManualOutputTarget, compression_policy, manual_output_available,
-};
+use crate::ui::components::release_confirmation;
+use crate::ui::theme::{compression_policy, moved_profile_order, step_index};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ManualOutputTarget {
+    Folder,
+    Profile,
+    Clipboard,
+}
+
+pub(crate) fn manual_output_available(photo_count: usize, target: ManualOutputTarget) -> bool {
+    target != ManualOutputTarget::Clipboard || photo_count == 1
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ManualCompressionDialog {
+    pub(crate) photo_ids: Vec<i64>,
+    pub(crate) profile_id: String,
+    pub(crate) output: ManualOutputTarget,
+    pub(crate) folder: Option<String>,
+    pub(crate) keep_original: bool,
+}
 
 impl App {
     pub(crate) fn open_manual_compression(&mut self, photo_ids: Vec<i64>, cx: &mut Context<Self>) {
@@ -330,5 +348,97 @@ impl App {
             }
         }
         cx.notify();
+    }
+    pub(crate) fn retry_job(&mut self, id: String, cx: &mut Context<Self>) {
+        match self.db.retry_job(&id) {
+            Ok(true) => {
+                self.message = Some("再試行をキューに戻しました".to_string());
+                self.reload_job_state();
+                self.send_wake_jobs(cx);
+            }
+            Ok(false) => {
+                self.message = Some(format!("再試行の上限（{MAX_JOB_RETRIES}回）に達しました"));
+            }
+            Err(error) => {
+                tracing::warn!(%error, %id, "cannot retry compression job");
+                self.message = Some(format!("再試行できません: {error}"));
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn retry_all_failed_jobs(&mut self, cx: &mut Context<Self>) {
+        match self.db.retry_failed_jobs() {
+            Ok(count) => {
+                self.message = Some(format!("{count} 件を再試行に戻しました（上限到達は除外）"));
+                self.reload_job_state();
+                self.send_wake_jobs(cx);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "cannot retry failed compression jobs");
+                self.message = Some(format!("再試行できません: {error}"));
+            }
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn request_release_waiting_jobs(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(description) = release_confirmation(
+            self.settings.auto_compress_keep_original,
+            self.waiting_job_count,
+        ) else {
+            self.release_waiting_jobs(cx);
+            return;
+        };
+        let entity = cx.entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let entity = entity.clone();
+            let description = description.clone();
+            alert
+                .title("待機ジョブを圧縮")
+                .description(description)
+                .confirm()
+                .ok_text("圧縮する")
+                .ok_variant(ButtonVariant::Danger)
+                .cancel_text("キャンセル")
+                .on_ok(move |_, _, cx| {
+                    entity.update(cx, |this, cx| this.release_waiting_jobs(cx));
+                    true
+                })
+        });
+    }
+
+    fn release_waiting_jobs(&mut self, cx: &mut Context<Self>) {
+        let policy = compression_policy(self.settings.auto_compress_keep_original);
+        match self.db.release_waiting_jobs(policy) {
+            Ok(0) => self.message = Some("未実行のジョブはありません".to_string()),
+            Ok(count) => {
+                self.message = Some(format!("{count} 件を圧縮キューに戻しました"));
+                self.reload_job_state();
+                self.send_wake_jobs(cx);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "cannot release waiting compression jobs");
+                self.message = Some(format!("待機ジョブを開始できません: {error}"));
+            }
+        }
+        cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ManualOutputTarget, manual_output_available};
+
+    #[test]
+    fn clipboard_output_is_limited_to_one_photo() {
+        assert!(manual_output_available(1, ManualOutputTarget::Clipboard));
+        assert!(!manual_output_available(2, ManualOutputTarget::Clipboard));
+        assert!(manual_output_available(2, ManualOutputTarget::Folder));
+        assert!(manual_output_available(2, ManualOutputTarget::Profile));
     }
 }

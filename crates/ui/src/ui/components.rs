@@ -14,9 +14,10 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use vrc_photo_core::settings::{AppSettings, CardSize};
 
-use crate::ViewerActivate;
 use crate::app::App;
 use crate::ui::theme::*;
+
+pub(crate) type ViewerActivate = Rc<dyn Fn(&mut App, &mut Window, &mut Context<App>)>;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ButtonTone {
@@ -127,6 +128,23 @@ pub(crate) fn manual_option_row(
                         .child(description),
                 ),
         )
+}
+
+pub(crate) fn compression_policy_warning(
+    keep_original: bool,
+    auto_compress: bool,
+) -> Option<&'static str> {
+    (auto_compress && !keep_original).then_some(
+        "自動圧縮で圧縮に成功すると元画像をOSゴミ箱へ移動します。取り消すにはゴミ箱から復元してください。",
+    )
+}
+
+pub(crate) fn release_confirmation(keep_original: bool, count: i64) -> Option<String> {
+    (!keep_original).then(|| {
+        format!(
+            "待機中の自動圧縮 {count} 件を実行し、成功した元画像をOSゴミ箱へ移動します。取り消すにはゴミ箱から復元してください。"
+        )
+    })
 }
 
 impl App {
@@ -442,5 +460,29 @@ impl App {
             .font_medium()
             .text_color(rgb(fg))
             .child(text.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{compression_policy_warning, release_confirmation};
+
+    #[test]
+    fn compression_policy_warning_is_limited_to_automatic_compression() {
+        assert!(compression_policy_warning(true, true).is_none());
+        assert!(compression_policy_warning(true, false).is_none());
+        assert!(compression_policy_warning(false, false).is_none());
+
+        let automatic = compression_policy_warning(false, true).unwrap();
+        assert!(automatic.contains("自動圧縮"));
+        assert!(automatic.contains("OSゴミ箱"));
+    }
+
+    #[test]
+    fn release_confirmation_only_appears_for_replace() {
+        assert!(release_confirmation(true, 3).is_none());
+        let replace = release_confirmation(false, 3).unwrap();
+        assert!(replace.contains("3 件"));
+        assert!(replace.contains("OSゴミ箱"));
     }
 }

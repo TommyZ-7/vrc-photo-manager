@@ -232,10 +232,9 @@ pub(crate) fn rail_text_run(len: usize, color: u32) -> TextRun {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::PHOTO_ROW_HEIGHT;
-    use crate::state::photo_browser::PhotoIndex;
+    use crate::state::photo_browser::{PhotoIndex, anchor_photo_id};
     use crate::state::test_support::index_entry;
-    use crate::ui::theme::RAIL_WIDTH;
+    use crate::ui::theme::{PHOTO_ROW_HEIGHT, RAIL_WIDTH};
     use gpui_kit::{Bounds, point, px, size};
 
     #[test]
@@ -481,5 +480,16 @@ mod tests {
         assert_eq!(f32::from(pill.size.width), RAIL_PILL_WIDTH);
         assert_eq!(marker.center().y, pill.center().y);
         assert!(rail_track_hit_bounds(bounds).contains(&marker.center()));
+    }
+
+    #[test]
+    fn anchor_and_rail_helpers_accept_a_custom_row_height() {
+        let index = PhotoIndex::new(vec![
+            index_entry(1, 202601),
+            index_entry(2, 202601),
+            index_entry(3, 202601),
+        ]);
+        assert_eq!(anchor_photo_id(&index, 153.0, 2, 152.0), Some(3));
+        assert_eq!(rail_scroll_offset(3, 3, 152.0, 10_000.0), -152.0);
     }
 }

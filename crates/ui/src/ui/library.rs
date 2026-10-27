@@ -1,7 +1,7 @@
 //! Library (Photos) screen: grid, selection bar, inspector, and detail body.
 //!
 //! The same grid and card widgets are reused by the Search screen; screen
-//! dispatch and the shared header helper stay in the crate root for PR1.
+//! dispatch and the shared header helper live in `ui::shell`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,15 +16,17 @@ use gpui_kit::*;
 use vrc_photo_core::importer::ImportMode;
 use vrc_photo_core::model::Photo;
 
+use crate::app::App;
+use crate::app::Screen;
 use crate::app::cli::log_timing;
-use crate::app::{App, Screen};
+use crate::app::daemon::daemon_sync_label;
 use crate::state::photo_browser::PAGE_SIZE;
 use crate::state::preview::preview_placeholder_label;
 use crate::state::viewer::ViewerOpenSource;
 use crate::ui::components::{ButtonState, ButtonTone, chip, glass_panel};
+use crate::ui::shell::CardMetrics;
 use crate::ui::theme::*;
 use crate::ui::year_rail::{YearRail, YearRailLabels};
-use crate::{CARD_BODY_GAP, CARD_TEXT_GAP, CardMetrics, daemon_sync_label, grid_placeholder};
 
 impl App {
     pub(crate) fn photos_screen(
@@ -1517,4 +1519,17 @@ impl App {
                     .child(trash_button),
             )
     }
+}
+/// Stands in for a photo whose page has not loaded yet. Matches the card's
+/// current image height so the uniform row never changes height.
+fn grid_placeholder(image_height: f32) -> AnyElement {
+    div()
+        .flex_1()
+        .min_w_0()
+        .h(px(image_height))
+        .rounded(px(14.))
+        .bg(rgb(PANEL_2))
+        .border_2()
+        .border_color(rgb(BORDER))
+        .into_any_element()
 }

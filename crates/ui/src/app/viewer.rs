@@ -9,12 +9,14 @@ use std::time::{Duration, Instant};
 use gpui_kit::*;
 
 use crate::app::{App, Screen};
-use crate::state::viewer::{ViewerBoxState, ViewerMorph, ViewerOpenSource, ViewerPanelState};
+use crate::state::viewer::{
+    ViewerBoxState, ViewerMorph, ViewerOpenSource, ViewerPanelState, current_tagged_bounds,
+    preferred_bounds,
+};
 use crate::ui::theme::{
     MOTION_BASE, MOTION_MORPH, MOTION_SLOW, VIEWER_DETAILS_WIDTH, centered_viewer_rect,
-    eased_progress, next_focus_index, step_index,
+    eased_progress, next_focus_index, step_index, viewer_image_rect,
 };
-use crate::viewer_image_rect;
 
 impl App {
     pub(crate) fn open_quick_look(
@@ -468,5 +470,33 @@ impl App {
         let next = next_focus_index(current, order.len(), reverse);
         self.quick_look_focus_index = next;
         window.focus(&order[next], cx);
+    }
+
+    pub(crate) fn handle_viewer_escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.note_edit_id.is_some() {
+            self.cancel_note_edit(window, cx);
+        } else {
+            self.close_quick_look(window, cx);
+        }
+    }
+
+    fn actual_source(
+        &self,
+        id: i64,
+        source: ViewerOpenSource,
+    ) -> Option<(ViewerOpenSource, Bounds<Pixels>)> {
+        let card = current_tagged_bounds(
+            self.card_image_bounds.borrow().get(&id).copied(),
+            self.render_epoch,
+        );
+        let inspector =
+            current_tagged_bounds(*self.inspector_preview_bounds.borrow(), self.render_epoch);
+        let prefer_card = source != ViewerOpenSource::Inspector;
+        let chosen = preferred_bounds(prefer_card, card, inspector)?;
+        if card == Some(chosen) {
+            Some((ViewerOpenSource::Card, chosen))
+        } else {
+            Some((ViewerOpenSource::Inspector, chosen))
+        }
     }
 }

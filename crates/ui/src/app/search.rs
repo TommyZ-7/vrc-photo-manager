@@ -15,10 +15,18 @@ use vrc_photo_core::model::{PhotoIndexEntry, PhotoTextFilter};
 
 use crate::app::App;
 use crate::app::cli::log_timing;
-use crate::has_tag_filter;
 use crate::state::photo_browser::{
     PhotoIndex, anchor_photo_id, list_scroll_top, search_anchor_after_result,
 };
+
+/// Whether an executed search would be affected by a tag edit.
+pub(crate) fn has_tag_filter(filter: &PhotoTextFilter) -> bool {
+    filter
+        .tag
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|tag| !tag.is_empty())
+}
 
 impl App {
     pub(crate) fn run_search(&mut self, cx: &mut Context<Self>) {
@@ -202,5 +210,24 @@ impl App {
         }
         self.pending_search_anchor = anchor;
         self.start_search(filter, cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_tag_filter;
+    use vrc_photo_core::model::PhotoTextFilter;
+
+    #[test]
+    fn search_refresh_requires_a_non_empty_tag_filter() {
+        assert!(!has_tag_filter(&PhotoTextFilter::default()));
+        assert!(!has_tag_filter(&PhotoTextFilter {
+            tag: Some("  ".to_string()),
+            ..Default::default()
+        }));
+        assert!(has_tag_filter(&PhotoTextFilter {
+            tag: Some("vrc".to_string()),
+            ..Default::default()
+        }));
     }
 }

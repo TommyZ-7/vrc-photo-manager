@@ -11,11 +11,18 @@ use gpui_kit::*;
 use vrc_photo_core::importer::{ImportIssue, ImportIssueKind, ImportMode, ImportProgress};
 
 use crate::app::App;
-use crate::ui::theme::*;
-use crate::{
+use crate::app::import::{
     ImportDialogOrigin, ImportDialogPhase, ImportReportView, import_issue_counts,
-    import_progress_ratio,
 };
+use crate::ui::theme::*;
+
+pub(crate) fn import_progress_ratio(progress: &ImportProgress) -> f32 {
+    if progress.total == 0 {
+        0.0
+    } else {
+        (progress.processed as f32 / progress.total as f32).clamp(0.0, 1.0)
+    }
+}
 
 impl App {
     pub(crate) fn import_modal_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -611,4 +618,67 @@ pub(crate) fn import_progress_label(progress: &ImportProgress) -> String {
         "取り込み {}/{} · 取込 {} · スキップ {} · 失敗 {}",
         progress.processed, progress.total, progress.imported, progress.skipped, progress.failed
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        import_issue_counts, import_progress_label, import_progress_ratio, retryable_sources,
+    };
+    use std::path::PathBuf;
+    use vrc_photo_core::importer::{ImportIssue, ImportIssueKind, ImportProgress};
+
+    #[test]
+    fn import_issue_counts_separate_failures_and_partial_moves() {
+        let issues = vec![
+            ImportIssue {
+                source: PathBuf::from("/a.png"),
+                target: None,
+                message: "copy failed".to_string(),
+                kind: ImportIssueKind::Failed,
+                retryable: true,
+            },
+            ImportIssue {
+                source: PathBuf::from("/b.png"),
+                target: Some(PathBuf::from("/dest/b.png")),
+                message: "source remains".to_string(),
+                kind: ImportIssueKind::PartialMove,
+                retryable: false,
+            },
+        ];
+        assert_eq!(import_issue_counts(&issues), (1, 1));
+        assert_eq!(retryable_sources(&issues), vec![PathBuf::from("/a.png")]);
+    }
+    fn progress_fixture(processed: usize, total: usize) -> ImportProgress {
+        ImportProgress {
+            processed,
+            total,
+            imported: processed.saturating_sub(1),
+            skipped: 0,
+            failed: 0,
+            partial: 0,
+            last_source: None,
+        }
+    }
+    #[test]
+    fn import_progress_label_and_ratio_use_processed_and_total() {
+        let mut progress = progress_fixture(42, 100);
+        progress.imported = 40;
+        progress.skipped = 1;
+        progress.failed = 1;
+
+        assert_eq!(
+            import_progress_label(&progress),
+            "取り込み 42/100 · 取込 40 · スキップ 1 · 失敗 1"
+        );
+        let ratio = import_progress_ratio(&progress);
+        assert!((ratio - 0.42).abs() < 1e-6);
+
+        let empty = progress_fixture(0, 0);
+        assert_eq!(
+            import_progress_label(&empty),
+            "取り込み 0/0 · 取込 0 · スキップ 0 · 失敗 0"
+        );
+        assert_eq!(import_progress_ratio(&empty), 0.0);
+    }
 }

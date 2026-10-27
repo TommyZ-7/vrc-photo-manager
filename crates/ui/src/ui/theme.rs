@@ -29,6 +29,12 @@ pub(crate) const PURPLE: u32 = 0xb79cff;
 pub(crate) const SIDEBAR_EXPANDED: f32 = 238.0;
 pub(crate) const SIDEBAR_COLLAPSED: f32 = 78.0;
 pub(crate) const MIN_CARD_WIDTH: f32 = 170.0;
+pub(crate) const PHOTO_ROW_HEIGHT: f32 = 196.0;
+pub(crate) const CARD_BODY_GAP: f32 = 8.0;
+pub(crate) const CARD_TEXT_GAP: f32 = 3.0;
+pub(crate) const CARD_WORLD_LINE_HEIGHT: f32 = 18.0;
+pub(crate) const CARD_META_LINE_HEIGHT: f32 = 15.0;
+pub(crate) const CARD_ROW_SLACK: f32 = 24.0;
 pub(crate) const GRID_GAP: f32 = 16.0;
 pub(crate) const INSPECTOR_WIDTH: f32 = 330.0;
 pub(crate) const INSPECTOR_CARD_WIDTH: f32 = 314.0;
@@ -319,6 +325,25 @@ pub(crate) fn centered_viewer_rect(
 
 pub(crate) fn grid_columns(available_width: f32, min_card_width: f32) -> usize {
     (((available_width + GRID_GAP) / (min_card_width + GRID_GAP)).floor() as usize).max(1)
+}
+
+pub(crate) fn viewer_image_rect(
+    viewport: gpui_kit::Size<Pixels>,
+    details_open: bool,
+    aspect: f32,
+) -> Bounds<Pixels> {
+    let details_width = if details_open {
+        VIEWER_DETAILS_WIDTH
+    } else {
+        0.0
+    };
+    let (width, height) = viewer_image_box_with_details_width(
+        viewport.width.into(),
+        viewport.height.into(),
+        details_width,
+        aspect,
+    );
+    centered_viewer_rect(viewport, details_width, width, height)
 }
 
 /// Column count for a grid screen. Search uses its own available width because
@@ -815,5 +840,22 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(profile_summary(&lossy), "WebP · Q82 · Lossy");
+    }
+
+    #[test]
+    fn viewer_image_rect_centers_the_box_and_respects_details() {
+        let viewport = size(px(1200.), px(800.));
+        let closed = viewer_image_rect(viewport, false, 16.0 / 10.0);
+        let open = viewer_image_rect(viewport, true, 16.0 / 10.0);
+        assert!((f32::from(closed.center().x) - 600.0).abs() < 0.01);
+        assert!((f32::from(closed.center().y) - 428.0).abs() < 0.01);
+        assert!((f32::from(open.center().x) - 410.0).abs() < 0.01);
+        assert!((f32::from(open.center().y) - 428.0).abs() < 0.01);
+        assert!(closed.size.width > open.size.width);
+    }
+
+    #[test]
+    fn grid_row_height_matches_the_card_height() {
+        assert_eq!(PHOTO_ROW_HEIGHT, 196.0);
     }
 }

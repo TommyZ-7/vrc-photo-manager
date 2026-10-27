@@ -1,7 +1,7 @@
 //! Search screen: filter panel, result header, and result grid.
 //!
 //! The grid and selection bar come from `ui::library`; screen dispatch and the
-//! shared header helper stay in the crate root for PR1.
+//! shared header helper live in `ui::shell`.
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;

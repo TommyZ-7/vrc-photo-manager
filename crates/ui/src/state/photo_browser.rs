@@ -13,10 +13,10 @@ use std::time::{Duration, Instant};
 use gpui_kit::{ScrollStrategy, UniformListScrollHandle};
 use vrc_photo_core::model::{Photo, PhotoIndexEntry};
 
-// `PHOTO_ROW_HEIGHT` still lives at the crate root (Task 16 moves it), so this
-// module borrows it temporarily instead of duplicating its value.
-use crate::PHOTO_ROW_HEIGHT;
+// `PHOTO_ROW_HEIGHT` still lives in the theme module (Task 16 moves it), so
+// this module borrows it temporarily instead of duplicating its value.
 use crate::state::year_rail::{YearBucket, build_year_buckets};
+use crate::ui::theme::PHOTO_ROW_HEIGHT;
 use crate::ui::year_rail::YearRailLabels;
 
 pub(crate) const PAGE_SIZE: usize = 256;
@@ -356,6 +356,7 @@ impl CountDebounce {
 mod tests {
     use super::*;
     use crate::state::test_support::{index_entry, test_photo};
+    use gpui_kit::{ScrollStrategy, UniformListScrollHandle, point, px};
     use vrc_photo_core::error::CoreError;
 
     #[test]
@@ -516,6 +517,123 @@ mod tests {
         assert_eq!(
             anchor_photo_id(&index, PHOTO_ROW_HEIGHT * 2.0 + 1.0, 1, PHOTO_ROW_HEIGHT),
             Some(3)
+        );
+    }
+
+    #[test]
+    fn anchor_photo_id_handles_empty_and_overscrolled_indexes() {
+        assert_eq!(
+            anchor_photo_id(&PhotoIndex::new(Vec::new()), 0.0, 3, PHOTO_ROW_HEIGHT),
+            None
+        );
+        let index = PhotoIndex::new(vec![index_entry(1, 202601), index_entry(2, 202512)]);
+        assert_eq!(
+            anchor_photo_id(&index, PHOTO_ROW_HEIGHT * 50.0, 4, PHOTO_ROW_HEIGHT),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn first_visible_photo_floors_the_row_before_applying_columns() {
+        // Halfway into row 2 with 3 columns: the top row starts at entry 6.
+        // Truncating after multiplying (`2.5 * 3 = 7.5`) would pick entry 7.
+        assert_eq!(
+            first_visible_photo(PHOTO_ROW_HEIGHT * 2.5, 3, PHOTO_ROW_HEIGHT, 100),
+            6
+        );
+        assert_eq!(first_visible_photo(0.0, 3, PHOTO_ROW_HEIGHT, 100), 0);
+        assert_eq!(first_visible_photo(-20.0, 3, PHOTO_ROW_HEIGHT, 100), 0);
+        assert_eq!(
+            first_visible_photo(PHOTO_ROW_HEIGHT * 50.0, 3, PHOTO_ROW_HEIGHT, 10),
+            9
+        );
+        assert_eq!(first_visible_photo(0.0, 3, PHOTO_ROW_HEIGHT, 0), 0);
+    }
+
+    #[test]
+    fn anchor_row_remaps_after_an_insertion_before_it() {
+        let original = PhotoIndex::new(vec![index_entry(10, 202601), index_entry(11, 202512)]);
+        assert_eq!(original.row_of_id(11), Some(1));
+        let updated = PhotoIndex::new(vec![
+            index_entry(12, 202601),
+            index_entry(10, 202601),
+            index_entry(11, 202512),
+        ]);
+        assert_eq!(updated.row_of_id(11), Some(2));
+        assert_eq!(
+            anchor_photo_id(&updated, PHOTO_ROW_HEIGHT * 2.0 + 1.0, 1, PHOTO_ROW_HEIGHT),
+            Some(11)
+        );
+    }
+
+    #[test]
+    fn removing_a_photo_clears_pages_and_rebuilds_year_counts() {
+        let entries = vec![
+            index_entry(1, 202601),
+            index_entry(2, 202601),
+            index_entry(3, 202412),
+        ];
+        let mut browser = PhotoBrowser::new(Arc::new(PhotoIndex::new(entries)));
+        let generation = browser.generation;
+        browser.insert_page(0, vec![test_photo(1)], generation);
+        browser.remove_photo(2);
+        assert_eq!(browser.index.total, 2);
+        assert_eq!(browser.index.years[0].count, 1);
+        assert_eq!(browser.index.years[1].count, 1);
+        assert!(browser.pages.get_page(0).is_none());
+        assert_eq!(browser.index.row_of_id(1), Some(0));
+        assert_eq!(browser.index.row_of_id(2), None);
+        // Removing an id that is already gone is a no-op.
+        browser.remove_photo(2);
+        assert_eq!(browser.index.total, 2);
+    }
+
+    #[test]
+    fn removing_a_photo_clamps_a_scroll_past_the_last_row() {
+        let entries = (1..=10).map(|id| index_entry(id, 202601)).collect();
+        let mut browser = PhotoBrowser::new(Arc::new(PhotoIndex::new(entries)));
+        browser.columns = 2;
+        browser
+            .scroll
+            .0
+            .borrow_mut()
+            .base_handle
+            .set_offset(point(px(0.), px(-PHOTO_ROW_HEIGHT * 10.0)));
+        browser.remove_photo(1);
+
+        let state = browser.scroll.0.borrow();
+        let deferred = state.deferred_scroll_to_item.expect("scroll clamp");
+        // 9 photos over 2 columns is 5 rows; the last row index is 4.
+        assert_eq!(deferred.item_index, 4);
+        assert_eq!(deferred.strategy, ScrollStrategy::Nearest);
+    }
+
+    #[test]
+    fn list_scroll_top_reads_the_uniform_list_offset() {
+        let handle = UniformListScrollHandle::new();
+        handle
+            .0
+            .borrow_mut()
+            .base_handle
+            .set_offset(point(px(0.), px(-392.)));
+        assert_eq!(list_scroll_top(&handle), 392.0);
+        handle
+            .0
+            .borrow_mut()
+            .base_handle
+            .set_offset(point(px(0.), px(12.)));
+        assert_eq!(list_scroll_top(&handle), 0.0);
+    }
+
+    #[test]
+    fn search_anchor_after_result_keeps_existing_or_falls_back_to_first() {
+        let index = PhotoIndex::new(vec![index_entry(1, 202601), index_entry(2, 202512)]);
+        assert_eq!(search_anchor_after_result(Some(2), &index), Some(2));
+        assert_eq!(search_anchor_after_result(Some(9), &index), Some(1));
+        assert_eq!(search_anchor_after_result(None, &index), Some(1));
+        assert_eq!(
+            search_anchor_after_result(Some(1), &PhotoIndex::new(Vec::new())),
+            None
         );
     }
 }

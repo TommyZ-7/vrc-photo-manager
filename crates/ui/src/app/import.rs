@@ -4,26 +4,120 @@
 //! Rendering stays in `ui::import`; these methods only touch App fields and the
 //! importer/scanner services.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use gpui_kit::*;
-use vrc_photo_core::importer::{self, ImportMode, ImportProgress, ImportResult};
+use vrc_photo_core::importer::{
+    self, ImportIssue, ImportIssueKind, ImportMode, ImportProgress, ImportRename, ImportResult,
+};
 use vrc_photo_core::linker;
 use vrc_photo_core::model::DaemonCommand;
+use vrc_photo_core::scanner::ScanFailure;
+use vrc_photo_core::settings::AppSettings;
 use vrc_photo_core::{preview, scanner, thumbnail};
 
 use crate::app::App;
 use crate::app::cli::log_timing;
 use crate::state::preview::{PreviewKey, preview_cache_dir, preview_key};
 use crate::ui::import::retryable_sources;
-use crate::{
-    ImportDialogOrigin, ImportDialogPhase, ImportDialogState, ImportReportView, ImportSource,
-    add_photo_root_and_save, append_scan_error, import_remaining, import_should_index,
-    import_summary, merge_resume_report, merge_retry_report, reserve_import_dialog,
-};
+
+#[derive(Clone)]
+pub(crate) struct ImportReportView {
+    pub(crate) mode: ImportMode,
+    pub(crate) dest: PathBuf,
+    pub(crate) total: usize,
+    pub(crate) processed: usize,
+    pub(crate) imported: usize,
+    pub(crate) skipped: usize,
+    pub(crate) issues: Vec<ImportIssue>,
+    pub(crate) renamed: Vec<ImportRename>,
+    pub(crate) remaining: Vec<PathBuf>,
+    pub(crate) cancelled: bool,
+    pub(crate) scan_failures: Vec<ScanFailure>,
+    pub(crate) scan_error: Option<String>,
+}
+
+#[derive(Clone)]
+pub(crate) enum ImportSource {
+    Files(Vec<PathBuf>),
+    Folder {
+        folder: PathBuf,
+        files: Vec<PathBuf>,
+        issues: Vec<ImportIssue>,
+    },
+}
+
+impl ImportSource {
+    pub(crate) fn files(&self) -> &[PathBuf] {
+        match self {
+            Self::Files(files) => files,
+            Self::Folder { files, .. } => files,
+        }
+    }
+
+    pub(crate) fn issues(&self) -> &[ImportIssue] {
+        match self {
+            Self::Files(_) => &[],
+            Self::Folder { issues, .. } => issues,
+        }
+    }
+
+    pub(crate) fn summary(&self) -> String {
+        match self {
+            Self::Files(files) => format!("{} 件のファイル", files.len()),
+            Self::Folder { folder, files, .. } => {
+                format!("{} · {} 件", folder.display(), files.len())
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) enum ImportDialogOrigin {
+    New,
+    Retry {
+        report: ImportReportView,
+        sources: Vec<PathBuf>,
+    },
+    Resume {
+        report: ImportReportView,
+        sources: Vec<PathBuf>,
+    },
+}
+
+impl ImportDialogOrigin {
+    pub(crate) fn run_summary(&self) -> Option<String> {
+        match self {
+            Self::New => None,
+            Self::Retry { sources, .. } => Some(format!("失敗分 {} 件", sources.len())),
+            Self::Resume { sources, .. } => Some(format!("残り {} 件", sources.len())),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) enum ImportDialogPhase {
+    Ready,
+    Running {
+        progress: ImportProgress,
+        cancel: Arc<AtomicBool>,
+        cancel_requested: bool,
+    },
+}
+
+#[derive(Clone)]
+pub(crate) struct ImportDialogState {
+    pub(crate) origin: ImportDialogOrigin,
+    pub(crate) mode: ImportMode,
+    pub(crate) dest: PathBuf,
+    pub(crate) source: Option<ImportSource>,
+    pub(crate) error: Option<String>,
+    pub(crate) phase: ImportDialogPhase,
+}
 
 enum ImportRunMessage {
     Progress(ImportProgress),
@@ -460,5 +554,443 @@ impl App {
             window.focus(&focus, cx);
         });
         self.start_import_run(sources, cx);
+    }
+}
+/// Import failures and partial moves. Partial moves reached the destination,
+/// so they are warnings and never count as failures.
+pub(crate) fn import_issue_counts(issues: &[ImportIssue]) -> (usize, usize) {
+    let failed = issues
+        .iter()
+        .filter(|issue| issue.kind == ImportIssueKind::Failed)
+        .count();
+    let partial = issues
+        .iter()
+        .filter(|issue| issue.kind == ImportIssueKind::PartialMove)
+        .count();
+    (failed, partial)
+}
+
+/// Keeps every hard error that occurred while indexing the destination.
+fn append_scan_error(report: &mut ImportReportView, message: String) {
+    match &mut report.scan_error {
+        Some(existing) => {
+            existing.push('\n');
+            existing.push_str(&message);
+        }
+        None => report.scan_error = Some(message),
+    }
+}
+
+/// Adds `dest` to the settings roots and persists the change. A failed save
+/// restores the previous in-memory roots so a later retry attempts the save
+/// again instead of treating an unsaved path as persisted.
+fn add_photo_root_and_save<E, F>(
+    settings: &mut AppSettings,
+    dest: &str,
+    save: F,
+) -> std::result::Result<bool, E>
+where
+    E: std::fmt::Display,
+    F: FnOnce(&AppSettings) -> std::result::Result<(), E>,
+{
+    if settings.photo_roots.iter().any(|root| root == dest) {
+        return Ok(false);
+    }
+    let previous = settings.photo_roots.clone();
+    settings.photo_roots.push(dest.to_string());
+    match save(settings) {
+        Ok(()) => Ok(true),
+        Err(error) => {
+            settings.photo_roots = previous;
+            Err(error)
+        }
+    }
+}
+
+fn import_remaining(files: &[PathBuf], processed: usize) -> Vec<PathBuf> {
+    files
+        .iter()
+        .skip(processed.min(files.len()))
+        .cloned()
+        .collect()
+}
+
+fn import_should_index(imported: usize) -> bool {
+    imported > 0
+}
+
+/// Claims the single import-dialog slot. A second open request while any run
+/// is active is ignored so concurrent runs cannot target the same destination.
+fn reserve_import_dialog(slot: &mut Option<ImportDialogState>, next: ImportDialogState) -> bool {
+    if slot.is_some() {
+        return false;
+    }
+    *slot = Some(next);
+    true
+}
+
+fn merge_retry_report(
+    previous: &ImportReportView,
+    retry_sources: &[PathBuf],
+    result: ImportResult,
+) -> ImportReportView {
+    let attempted: HashSet<&Path> = retry_sources
+        .iter()
+        .take(result.processed.min(retry_sources.len()))
+        .map(PathBuf::as_path)
+        .collect();
+    let mut merged = previous.clone();
+    merged.imported += result.imported.len();
+    merged.skipped += result.skipped;
+    merged.issues.retain(|issue| {
+        !(issue.kind == ImportIssueKind::Failed
+            && issue.retryable
+            && attempted.contains(issue.source.as_path()))
+    });
+    merged.issues.extend(result.issues);
+    merged.renamed.extend(result.renamed);
+    merged
+}
+
+fn merge_resume_report(previous: &ImportReportView, result: ImportResult) -> ImportReportView {
+    let mut merged = previous.clone();
+    merged.imported += result.imported.len();
+    merged.skipped += result.skipped;
+    merged.processed += result.processed;
+    merged.issues.extend(result.issues);
+    merged.renamed.extend(result.renamed);
+    let consumed = result.processed.min(previous.remaining.len());
+    merged.remaining = previous.remaining.iter().skip(consumed).cloned().collect();
+    merged.cancelled = !merged.remaining.is_empty();
+    merged
+}
+
+fn import_summary(report: &ImportReportView) -> String {
+    let (failed, _) = import_issue_counts(&report.issues);
+    let mut details = Vec::new();
+    if report.skipped > 0 {
+        details.push(format!("{} 枚スキップ", report.skipped));
+    }
+    if failed > 0 {
+        details.push(format!("失敗 {failed} 件"));
+    }
+    if !report.renamed.is_empty() {
+        details.push(format!("連番 {} 件", report.renamed.len()));
+    }
+    let mut summary = format!(
+        "{} 件中 {} 枚を取り込みました",
+        report.total, report.imported
+    );
+    if !details.is_empty() {
+        summary.push_str(&format!("（{}）", details.join("、")));
+    }
+    if !report.remaining.is_empty() {
+        summary.push_str(&format!("。残り {} 件は未処理です", report.remaining.len()));
+    }
+    summary
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ImportDialogOrigin, ImportDialogPhase, ImportDialogState, ImportReportView,
+        add_photo_root_and_save, import_remaining, import_should_index, import_summary,
+        merge_resume_report, merge_retry_report, reserve_import_dialog,
+    };
+    use crate::ui::import::retryable_sources;
+    use std::cell::Cell;
+    use std::path::{Path, PathBuf};
+    use vrc_photo_core::importer::{
+        ImportIssue, ImportIssueKind, ImportMode, ImportRename, ImportResult,
+    };
+    use vrc_photo_core::scanner::ScanFailure;
+    use vrc_photo_core::settings::AppSettings;
+
+    #[test]
+    fn failed_import_root_save_is_retried_until_it_succeeds() {
+        let mut settings = AppSettings::default();
+        let attempts = Cell::new(0);
+        let dest = "/photos/imported";
+
+        let result = add_photo_root_and_save(&mut settings, dest, |settings| {
+            attempts.set(attempts.get() + 1);
+            assert_eq!(settings.photo_roots, vec![dest.to_string()]);
+            Err::<(), _>("database is locked".to_string())
+        });
+        assert!(result.is_err());
+        assert!(
+            settings.photo_roots.is_empty(),
+            "a failed save must restore the in-memory roots"
+        );
+
+        let result = add_photo_root_and_save(&mut settings, dest, |settings| {
+            attempts.set(attempts.get() + 1);
+            assert_eq!(settings.photo_roots, vec![dest.to_string()]);
+            Ok::<(), String>(())
+        });
+        assert_eq!(result, Ok(true));
+        assert_eq!(attempts.get(), 2, "the retry must save again");
+        assert_eq!(settings.photo_roots, vec![dest.to_string()]);
+
+        let result: Result<bool, String> = add_photo_root_and_save(&mut settings, dest, |_| {
+            panic!("an already saved root must not be saved again")
+        });
+        assert_eq!(result, Ok(false));
+    }
+    fn import_report_fixture() -> ImportReportView {
+        ImportReportView {
+            mode: ImportMode::Copy,
+            dest: PathBuf::from("/dest"),
+            total: 0,
+            processed: 0,
+            imported: 0,
+            skipped: 0,
+            issues: Vec::new(),
+            renamed: Vec::new(),
+            remaining: Vec::new(),
+            cancelled: false,
+            scan_failures: Vec::new(),
+            scan_error: None,
+        }
+    }
+    #[test]
+    fn import_remaining_slices_from_the_processed_prefix() {
+        let files = vec![
+            PathBuf::from("/a.png"),
+            PathBuf::from("/b.png"),
+            PathBuf::from("/c.png"),
+        ];
+        assert_eq!(import_remaining(&files, 0), files);
+        assert_eq!(import_remaining(&files, 2), vec![PathBuf::from("/c.png")]);
+        assert_eq!(import_remaining(&files, 9), Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn import_index_gate_requires_at_least_one_imported_file() {
+        assert!(!import_should_index(0));
+        assert!(import_should_index(1));
+    }
+    fn import_dialog_fixture() -> ImportDialogState {
+        ImportDialogState {
+            origin: ImportDialogOrigin::New,
+            mode: ImportMode::Copy,
+            dest: PathBuf::from("/dest"),
+            source: None,
+            error: None,
+            phase: ImportDialogPhase::Ready,
+        }
+    }
+
+    #[test]
+    fn import_dialog_reservation_rejects_a_second_open() {
+        let mut slot = None;
+        assert!(reserve_import_dialog(&mut slot, import_dialog_fixture()));
+        assert!(slot.is_some());
+        assert!(!reserve_import_dialog(&mut slot, import_dialog_fixture()));
+        assert!(slot.is_some());
+    }
+    fn retryable_issue(source: &str) -> ImportIssue {
+        ImportIssue {
+            source: PathBuf::from(source),
+            target: None,
+            message: "copy failed".to_string(),
+            kind: ImportIssueKind::Failed,
+            retryable: true,
+        }
+    }
+
+    fn non_retryable_issue(source: &str) -> ImportIssue {
+        ImportIssue {
+            retryable: false,
+            ..retryable_issue(source)
+        }
+    }
+
+    fn partial_issue(source: &str) -> ImportIssue {
+        ImportIssue {
+            kind: ImportIssueKind::PartialMove,
+            ..non_retryable_issue(source)
+        }
+    }
+
+    fn rename_fixture(source: &str, target: &str) -> ImportRename {
+        ImportRename {
+            source: PathBuf::from(source),
+            target: PathBuf::from(target),
+        }
+    }
+
+    #[test]
+    fn retry_merge_drops_attempted_retryable_failures_and_keeps_the_rest() {
+        let previous = ImportReportView {
+            total: 3,
+            processed: 3,
+            imported: 1,
+            issues: vec![
+                retryable_issue("/a.png"),
+                non_retryable_issue("/b.png"),
+                partial_issue("/c.png"),
+            ],
+            renamed: vec![rename_fixture("/old.png", "/dest/old-1.png")],
+            scan_failures: vec![ScanFailure {
+                path: PathBuf::from("/dest"),
+                message: "scan failed".to_string(),
+            }],
+            scan_error: Some("scan error".to_string()),
+            ..import_report_fixture()
+        };
+        let result = ImportResult {
+            processed: 1,
+            imported: vec![PathBuf::from("/dest/a.png")],
+            renamed: vec![rename_fixture("/a.png", "/dest/a-1.png")],
+            ..ImportResult::default()
+        };
+
+        let merged = merge_retry_report(
+            &previous,
+            &[PathBuf::from("/a.png"), PathBuf::from("/d.png")],
+            result,
+        );
+
+        assert_eq!(merged.imported, 2);
+        assert_eq!(merged.processed, 3);
+        assert_eq!(merged.issues.len(), 2);
+        assert!(
+            merged
+                .issues
+                .iter()
+                .any(|issue| issue.source.as_path() == Path::new("/b.png"))
+        );
+        assert!(
+            merged
+                .issues
+                .iter()
+                .any(|issue| issue.source.as_path() == Path::new("/c.png"))
+        );
+        assert!(
+            !merged
+                .issues
+                .iter()
+                .any(|issue| issue.source.as_path() == Path::new("/a.png"))
+        );
+        assert_eq!(merged.renamed.len(), 2);
+        assert!(merged.scan_error.is_some());
+        assert_eq!(merged.scan_failures.len(), 1);
+    }
+
+    #[test]
+    fn cancelled_retry_keeps_unattempted_retryable_failures() {
+        let previous = ImportReportView {
+            issues: vec![retryable_issue("/a.png"), retryable_issue("/d.png")],
+            ..import_report_fixture()
+        };
+        let result = ImportResult {
+            processed: 1,
+            issues: vec![retryable_issue("/a.png")],
+            ..ImportResult::default()
+        };
+
+        let merged = merge_retry_report(
+            &previous,
+            &[PathBuf::from("/a.png"), PathBuf::from("/d.png")],
+            result,
+        );
+
+        assert_eq!(merged.issues.len(), 2);
+        assert!(
+            merged
+                .issues
+                .iter()
+                .any(|issue| issue.source.as_path() == Path::new("/d.png"))
+        );
+        assert_eq!(
+            retryable_sources(&merged.issues),
+            vec![PathBuf::from("/d.png"), PathBuf::from("/a.png")]
+        );
+    }
+
+    #[test]
+    fn resume_merge_advances_progress_and_slices_remaining() {
+        let previous = ImportReportView {
+            total: 5,
+            processed: 2,
+            imported: 2,
+            remaining: vec![
+                PathBuf::from("/c.png"),
+                PathBuf::from("/d.png"),
+                PathBuf::from("/e.png"),
+            ],
+            cancelled: true,
+            ..import_report_fixture()
+        };
+        let result = ImportResult {
+            processed: 2,
+            imported: vec![PathBuf::from("/dest/c.png")],
+            skipped: 1,
+            ..ImportResult::default()
+        };
+
+        let merged = merge_resume_report(&previous, result);
+
+        assert_eq!(merged.processed, 4);
+        assert_eq!(merged.imported, 3);
+        assert_eq!(merged.skipped, 1);
+        assert_eq!(merged.remaining, vec![PathBuf::from("/e.png")]);
+        assert!(merged.cancelled);
+    }
+
+    #[test]
+    fn resume_merge_clears_cancelled_when_all_remaining_sources_ran() {
+        let previous = ImportReportView {
+            total: 2,
+            processed: 1,
+            imported: 1,
+            remaining: vec![PathBuf::from("/b.png")],
+            cancelled: true,
+            ..import_report_fixture()
+        };
+        let result = ImportResult {
+            processed: 1,
+            imported: vec![PathBuf::from("/dest/b.png")],
+            ..ImportResult::default()
+        };
+
+        let merged = merge_resume_report(&previous, result);
+
+        assert_eq!(merged.processed, 2);
+        assert_eq!(merged.imported, 2);
+        assert!(merged.remaining.is_empty());
+        assert!(!merged.cancelled);
+    }
+
+    #[test]
+    fn import_summary_reports_a_completed_run() {
+        let report = ImportReportView {
+            total: 3,
+            imported: 3,
+            ..import_report_fixture()
+        };
+
+        assert_eq!(import_summary(&report), "3 件中 3 枚を取り込みました");
+    }
+
+    #[test]
+    fn import_summary_includes_total_failures_renames_and_remaining() {
+        let report = ImportReportView {
+            total: 100,
+            processed: 40,
+            imported: 40,
+            skipped: 1,
+            issues: vec![non_retryable_issue("/bad.png")],
+            renamed: vec![rename_fixture("/old.png", "/dest/old-1.png")],
+            remaining: vec![PathBuf::from("/next.png")],
+            cancelled: true,
+            ..import_report_fixture()
+        };
+
+        assert_eq!(
+            import_summary(&report),
+            "100 件中 40 枚を取り込みました（1 枚スキップ、失敗 1 件、連番 1 件）。残り 1 件は未処理です"
+        );
     }
 }

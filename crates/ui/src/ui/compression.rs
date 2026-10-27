@@ -1,7 +1,7 @@
 //! Compression settings screen: profile cards, profile editor, and job queue.
 //!
 //! Profile and manual-compression state lives in `app::compression`; screen
-//! dispatch stays in the crate root for PR1.
+//! dispatch lives in `ui::shell`.
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
@@ -10,12 +10,38 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use vrc_photo_core::model::{CompressionFormat, CompressionProfile, QueueStatus, ResizeMode};
+use vrc_photo_core::model::{
+    CompressionFormat, CompressionJob, CompressionProfile, MAX_JOB_RETRIES, QueueStatus, ResizeMode,
+};
 
 use crate::app::App;
 use crate::ui::components::glass_panel;
 use crate::ui::theme::*;
-use crate::{job_retry_available, job_retry_label, queue_status_badge};
+
+fn queue_status_badge(status: &QueueStatus) -> (&'static str, u32, u32) {
+    match status {
+        QueueStatus::Waiting => ("未実行", AMBER, 0x2a2412),
+        QueueStatus::Pending => ("実行待ち", MUTED, PANEL_2),
+        QueueStatus::Processing => ("処理中", BLUE, 0x14283d),
+        QueueStatus::Completed => ("完了", GREEN, 0x112a22),
+        QueueStatus::Failed => ("失敗", RED, 0x2a1414),
+        QueueStatus::Cancelled => ("取消", MUTED, PANEL_2),
+    }
+}
+
+/// Whether a failed job can return to the queue without exceeding the cap.
+fn job_retry_available(job: &CompressionJob) -> bool {
+    job.status == QueueStatus::Failed && job.retry_count < MAX_JOB_RETRIES
+}
+
+/// Retry usage for a failed job, or the cap explanation once exhausted.
+fn job_retry_label(job: &CompressionJob) -> String {
+    if job_retry_available(job) {
+        format!("再試行 {}/{MAX_JOB_RETRIES}", job.retry_count)
+    } else {
+        format!("再試行の上限（{MAX_JOB_RETRIES}回）に達しました")
+    }
+}
 
 impl App {
     pub(crate) fn compression_screen(
@@ -1017,5 +1043,48 @@ impl App {
                     )
                 },
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{job_retry_available, job_retry_label, queue_status_badge};
+    use vrc_photo_core::model::{CompressionJob, QueueStatus};
+
+    fn test_job(status: QueueStatus, retry_count: i64) -> CompressionJob {
+        CompressionJob {
+            id: "job".to_string(),
+            photo_id: 1,
+            profile_id: "p".to_string(),
+            status,
+            progress: 0.0,
+            error: Some("boom".to_string()),
+            output_path: None,
+            policy: "keep".to_string(),
+            output_dir: None,
+            created_at: "now".to_string(),
+            started_at: None,
+            finished_at: None,
+            retry_count,
+        }
+    }
+
+    #[test]
+    fn job_retry_availability_stops_at_the_cap() {
+        assert!(job_retry_available(&test_job(QueueStatus::Failed, 0)));
+        assert!(job_retry_available(&test_job(QueueStatus::Failed, 2)));
+        assert!(!job_retry_available(&test_job(QueueStatus::Failed, 3)));
+        assert!(!job_retry_available(&test_job(QueueStatus::Completed, 0)));
+        assert!(job_retry_label(&test_job(QueueStatus::Failed, 3)).contains("上限"));
+    }
+
+    #[test]
+    fn queue_status_badge_distinguishes_waiting_and_pending() {
+        assert_eq!(queue_status_badge(&QueueStatus::Waiting).0, "未実行");
+        assert_eq!(queue_status_badge(&QueueStatus::Pending).0, "実行待ち");
+        assert_eq!(queue_status_badge(&QueueStatus::Processing).0, "処理中");
+        assert_eq!(queue_status_badge(&QueueStatus::Completed).0, "完了");
+        assert_eq!(queue_status_badge(&QueueStatus::Failed).0, "失敗");
+        assert_eq!(queue_status_badge(&QueueStatus::Cancelled).0, "取消");
     }
 }

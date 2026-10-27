@@ -12,7 +12,8 @@ use vrc_photo_update::{
     LastStatus, NativeString, UpdateError, UpdatePaths, UreqClient, check, download, start_apply,
 };
 
-use super::App;
+use crate::app::App;
+use crate::app::daemon::{open_path, spawn_daemon_process};
 
 #[cfg(test)]
 mod tests {
@@ -246,11 +247,10 @@ mod tests {
 }
 
 use super::ipc_bridge;
-use super::{
-    ACCENT_SOFT, AMBER, BLUE, GREEN, MUTED, MUTED_2, PANEL, PANEL_2, RED, TEXT, open_path,
-    spawn_daemon_process,
-};
 use crate::ui::components::glass_panel;
+use crate::ui::theme::{
+    ACCENT_SOFT, AMBER, BLUE, GREEN, MUTED, MUTED_2, PANEL, PANEL_2, RED, TEXT,
+};
 use gpui_kit::base::{Disableable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::component::Sizable as _;
 use gpui_kit::prelude::FluentBuilder as _;
