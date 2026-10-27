@@ -88,6 +88,13 @@ pub struct App {
     pub(crate) nav_epoch: u64,
     pub(crate) screen_epoch: u64,
     pub(crate) screen_direction: f32,
+    /// Scroll position of the settings section column. The category card uses
+    /// it both to jump to a section and to highlight the current one.
+    pub(crate) settings_scroll: ScrollHandle,
+    /// Last section the user jumped to. Sections near the bottom cannot always
+    /// reach the top of the column, so the highlight falls back to this when
+    /// the scroll position alone would point at an earlier section.
+    pub(crate) settings_section: Option<usize>,
     pub(crate) active_ribbon_tab: RibbonTab,
     pub(crate) ribbon_collapsed: bool,
     pub(crate) render_epoch: u64,
@@ -301,6 +308,8 @@ impl App {
             nav_epoch: 0,
             screen_epoch: 0,
             screen_direction: 1.0,
+            settings_scroll: ScrollHandle::new(),
+            settings_section: None,
             active_ribbon_tab: default_ribbon_tab(Screen::Photos),
             ribbon_collapsed: initial_settings.ui_ribbon_collapsed,
             render_epoch: 0,
