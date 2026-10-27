@@ -408,9 +408,9 @@ impl App {
             .flex_col()
             .flex_1()
             .min_w_0()
-            .p(px(16.))
+            .p(px(14.))
             .gap(px(6.))
-            .bg(rgb(PANEL))
+            .rounded(px(17.))
             .child(
                 div()
                     .text_size(px(10.))
@@ -419,7 +419,7 @@ impl App {
             )
             .child(
                 div()
-                    .text_size(px(17.))
+                    .text_size(px(20.))
                     .font_semibold()
                     .text_color(rgb(TEXT))
                     .truncate()

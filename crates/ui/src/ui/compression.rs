@@ -50,233 +50,184 @@ impl App {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let profile = self.profiles.get(self.profile_index).cloned();
-        let profile_count = self.profiles.len();
-
-        v_flex().flex_1().min_h_0().child(
-            v_flex()
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scrollbar()
-                .px(px(26.))
-                .pt(px(22.))
-                .pb(px(26.))
-                .gap(px(24.))
-                .child(
-                    h_flex()
-                        .gap(px(24.))
-                        .items_start()
-                        .child(
-                            v_flex()
-                                .w(px(280.))
-                                .gap(px(8.))
-                                .child(self.profile_list_header(cx))
-                                .children(self.profiles.iter().enumerate().map(
-                                    |(index, profile)| {
-                                        let active = index == self.profile_index;
-                                        let auto = profile.auto_enabled;
-                                        let title = profile.name.clone();
-                                        let meta = profile_summary(profile);
-                                        glass_panel()
-                                            .id(SharedString::from(format!("profile-{index}")))
-                                            .flex()
-                                            .flex_col()
-                                            .p(px(14.))
-                                            .gap(px(6.))
-                                            .bg(rgb(if active { ACCENT_SOFT } else { PANEL }))
-                                            .border_color(rgb(if active { BLUE } else { BORDER }))
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.profile_index = index;
-                                                cx.notify();
-                                            }))
-                                            .child(
-                                                h_flex()
-                                                    .items_center()
-                                                    .gap(px(6.))
-                                                    .child(
-                                                        div()
-                                                            .flex_1()
-                                                            .min_w_0()
-                                                            .truncate()
-                                                            .text_size(px(12.))
-                                                            .font_semibold()
-                                                            .text_color(rgb(if active {
-                                                                BLUE
-                                                            } else {
-                                                                MUTED
-                                                            }))
-                                                            .child(title),
-                                                    )
-                                                    .child(self.badge(
-                                                        if auto { "自動" } else { "手動" },
-                                                        if auto { GREEN } else { MUTED },
-                                                        if auto { 0x112a22 } else { PANEL_2 },
-                                                    ))
-                                                    .child(
-                                                        div()
-                                                            .id(SharedString::from(format!(
-                                                                "profile-up-{index}"
-                                                            )))
-                                                            .w(px(20.))
-                                                            .h(px(20.))
-                                                            .flex()
-                                                            .items_center()
-                                                            .justify_center()
-                                                            .rounded(px(6.))
-                                                            .text_size(px(11.))
-                                                            .text_color(rgb(if index == 0 {
-                                                                MUTED_2
-                                                            } else {
-                                                                MUTED
-                                                            }))
-                                                            .when(index > 0, |this| {
-                                                                this.cursor_pointer()
-                                                                    .hover(|this| {
-                                                                        this.bg(rgb(PANEL_2))
-                                                                            .text_color(rgb(TEXT))
-                                                                    })
-                                                                    .on_click(cx.listener(
-                                                                        move |this, _, _, cx| {
-                                                                            this.move_profile(
-                                                                                index, -1, cx,
-                                                                            );
-                                                                            cx.stop_propagation();
-                                                                        },
-                                                                    ))
-                                                            })
-                                                            .child("↑"),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .id(SharedString::from(format!(
-                                                                "profile-down-{index}"
-                                                            )))
-                                                            .w(px(20.))
-                                                            .h(px(20.))
-                                                            .flex()
-                                                            .items_center()
-                                                            .justify_center()
-                                                            .rounded(px(6.))
-                                                            .text_size(px(11.))
-                                                            .text_color(rgb(
-                                                                if index + 1 == profile_count {
-                                                                    MUTED_2
-                                                                } else {
-                                                                    MUTED
-                                                                },
-                                                            ))
-                                                            .when(
-                                                                index + 1 < profile_count,
-                                                                |this| {
-                                                                    this.cursor_pointer()
-                                                            .hover(|this| {
-                                                                this.bg(rgb(PANEL_2))
-                                                                    .text_color(rgb(TEXT))
-                                                            })
-                                                            .on_click(cx.listener(
-                                                                move |this, _, _, cx| {
-                                                                    this.move_profile(index, 1, cx);
-                                                                    cx.stop_propagation();
-                                                                },
-                                                            ))
-                                                                },
-                                                            )
-                                                            .child("↓"),
-                                                    ),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_size(px(10.))
-                                                    .text_color(rgb(if active {
-                                                        MUTED
-                                                    } else {
-                                                        MUTED_2
-                                                    }))
-                                                    .child(meta),
-                                            )
-                                            .with_animation(
-                                                SharedString::from(format!(
-                                                    "profile-card-{}-{active}",
-                                                    profile.id
-                                                )),
-                                                Animation::new(MOTION_FAST)
-                                                    .with_easing(ease_motion)
-                                                    .with_max_fps(MOTION_FPS),
-                                                move |el, t| {
-                                                    let (bg_from, bg_to) = if active {
-                                                        (PANEL, ACCENT_SOFT)
-                                                    } else {
-                                                        (ACCENT_SOFT, PANEL)
-                                                    };
-                                                    let (border_from, border_to) = if active {
-                                                        (BORDER, BLUE)
-                                                    } else {
-                                                        (BLUE, BORDER)
-                                                    };
-                                                    el.bg(rgb(lerp_color(bg_from, bg_to, t)))
-                                                        .border_color(rgb(lerp_color(
-                                                            border_from,
-                                                            border_to,
-                                                            t,
-                                                        )))
-                                                },
-                                            )
-                                    },
-                                )),
-                        )
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .gap(px(24.))
-                                .when_some(profile, |this, profile| {
-                                    let profile_index = self.profile_index;
-                                    this.child(
-                                        v_flex()
-                                            .child(self.profile_editor(&profile, window, cx))
-                                            .with_animation(
-                                                ("profile-editor", profile_index),
-                                                Animation::new(MOTION_FAST)
-                                                    .with_easing(ease_motion)
-                                                    .with_max_fps(MOTION_FPS),
-                                                |el, t| {
-                                                    el.opacity(t)
-                                                        .relative()
-                                                        .top(px(4.0 * (1.0 - t)))
-                                                },
-                                            ),
-                                    )
-                                })
-                                .child(
-                                    h_flex()
-                                        .gap_3()
-                                        .child(self.stat_card(
-                                            "総圧縮数",
-                                            self.stats.compressed_count.to_string(),
-                                        ))
-                                        .child(
-                                            self.stat_card(
-                                                "写真",
-                                                self.stats.photo_count.to_string(),
-                                            ),
-                                        )
-                                        .child(self.stat_card(
-                                            "圧縮後合計",
-                                            format_bytes(self.db.derivative_bytes().unwrap_or(0)),
-                                        )),
-                                ),
-                        ),
-                ),
-        )
+        h_flex()
+            .flex_1()
+            .min_h_0()
+            .gap(px(CARD_GAP))
+            .items_stretch()
+            .child(self.profile_list_card(cx))
+            .child(match profile {
+                Some(profile) => self.profile_editor(&profile, window, cx).into_any_element(),
+                None => glass_panel()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(17.))
+                    .text_size(px(12.))
+                    .text_color(rgb(MUTED_2))
+                    .child("プロファイルがありません")
+                    .into_any_element(),
+            })
     }
 
-    /// Small header row for the profile column. Rehomed from the deleted page
+    /// Left card: profile list header with the add action, then the selectable
+    /// profile cards in a scroll body.
+    fn profile_list_card(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let profile_count = self.profiles.len();
+        glass_panel()
+            .flex()
+            .flex_col()
+            .w(px(COMPRESSION_PROFILE_WIDTH))
+            .h_full()
+            .min_h_0()
+            .flex_shrink_0()
+            .overflow_hidden()
+            .rounded(px(17.))
+            .child(self.profile_list_header(cx))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .p(px(10.))
+                    .gap(px(8.))
+                    .children(self.profiles.iter().enumerate().map(|(index, profile)| {
+                        let active = index == self.profile_index;
+                        let auto = profile.auto_enabled;
+                        let title = profile.name.clone();
+                        let meta = profile_summary(profile);
+                        glass_panel()
+                            .id(SharedString::from(format!("profile-{index}")))
+                            .flex()
+                            .flex_col()
+                            .p(px(12.))
+                            .gap(px(6.))
+                            .rounded(px(12.))
+                            .bg(rgb(if active { ACCENT_SOFT } else { PANEL_INNER }))
+                            .border_color(rgb(if active { BLUE } else { BORDER }))
+                            .cursor_pointer()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.profile_index = index;
+                                cx.notify();
+                            }))
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(px(12.))
+                                            .font_semibold()
+                                            .text_color(rgb(if active { BLUE } else { MUTED }))
+                                            .child(title),
+                                    )
+                                    .child(self.badge(
+                                        if auto { "自動" } else { "手動" },
+                                        if auto { GREEN } else { MUTED },
+                                        if auto { 0x112a22 } else { PANEL_2 },
+                                    ))
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!("profile-up-{index}")))
+                                            .w(px(20.))
+                                            .h(px(20.))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded(px(6.))
+                                            .text_size(px(11.))
+                                            .text_color(rgb(if index == 0 {
+                                                MUTED_2
+                                            } else {
+                                                MUTED
+                                            }))
+                                            .when(index > 0, |this| {
+                                                this.cursor_pointer()
+                                                    .hover(|this| {
+                                                        this.bg(rgb(PANEL_2)).text_color(rgb(TEXT))
+                                                    })
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        this.move_profile(index, -1, cx);
+                                                        cx.stop_propagation();
+                                                    }))
+                                            })
+                                            .child("↑"),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!("profile-down-{index}")))
+                                            .w(px(20.))
+                                            .h(px(20.))
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .rounded(px(6.))
+                                            .text_size(px(11.))
+                                            .text_color(rgb(if index + 1 == profile_count {
+                                                MUTED_2
+                                            } else {
+                                                MUTED
+                                            }))
+                                            .when(index + 1 < profile_count, |this| {
+                                                this.cursor_pointer()
+                                                    .hover(|this| {
+                                                        this.bg(rgb(PANEL_2)).text_color(rgb(TEXT))
+                                                    })
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        this.move_profile(index, 1, cx);
+                                                        cx.stop_propagation();
+                                                    }))
+                                            })
+                                            .child("↓"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(if active { MUTED } else { MUTED_2 }))
+                                    .child(meta),
+                            )
+                            .with_animation(
+                                SharedString::from(format!("profile-card-{}-{active}", profile.id)),
+                                Animation::new(MOTION_FAST)
+                                    .with_easing(ease_motion)
+                                    .with_max_fps(MOTION_FPS),
+                                move |el, t| {
+                                    let (bg_from, bg_to) = if active {
+                                        (PANEL_INNER, ACCENT_SOFT)
+                                    } else {
+                                        (ACCENT_SOFT, PANEL_INNER)
+                                    };
+                                    let (border_from, border_to) = if active {
+                                        (BORDER, BLUE)
+                                    } else {
+                                        (BLUE, BORDER)
+                                    };
+                                    el.bg(rgb(lerp_color(bg_from, bg_to, t)))
+                                        .border_color(rgb(lerp_color(border_from, border_to, t)))
+                                },
+                            )
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// Header bar for the profile column. Rehomed from the deleted page
     /// header; the add action keeps its original save/reload path.
     fn profile_list_header(&mut self, cx: &mut Context<Self>) -> AnyElement {
         h_flex()
             .flex_shrink_0()
-            .items_center()
+            .h(px(GALLERY_HEADER_HEIGHT))
+            .px(px(GALLERY_PAD_X))
             .gap(px(8.))
+            .items_center()
+            .border_b_1()
+            .border_color(rgba(0xffffff14))
             .child(
                 div()
                     .flex_1()
@@ -331,16 +282,26 @@ impl App {
         glass_panel()
             .flex()
             .flex_col()
-            .p(px(16.))
-            .gap(px(14.))
-            .bg(rgb(PANEL))
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .h_full()
+            .overflow_hidden()
+            .rounded(px(17.))
             .child(
                 h_flex()
-                    .items_center()
+                    .flex_shrink_0()
+                    .h(px(GALLERY_HEADER_HEIGHT))
+                    .px(px(GALLERY_PAD_X))
                     .gap(px(8.))
+                    .items_center()
+                    .border_b_1()
+                    .border_color(rgba(0xffffff14))
                     .child(
                         div()
-                            .text_size(px(17.))
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(13.))
                             .font_semibold()
                             .text_color(rgb(TEXT))
                             .child(profile.name.clone()),
@@ -365,251 +326,355 @@ impl App {
                     ),
             )
             .child(
-                h_flex()
-                    .items_center()
-                    .gap_2()
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .p(px(14.))
+                    .gap(px(14.))
                     .child(
-                        v_flex()
-                            .gap(px(2.))
+                        h_flex()
+                            .items_center()
+                            .gap_2()
                             .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(rgb(TEXT))
-                                    .child("自動圧縮に使う"),
+                                v_flex()
+                                    .gap(px(2.))
+                                    .child(
+                                        div()
+                                            .text_size(px(12.))
+                                            .text_color(rgb(TEXT))
+                                            .child("自動圧縮に使う"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(10.))
+                                            .text_color(rgb(MUTED_2))
+                                            .child("新規写真にこのプロファイルを適用します"),
+                                    ),
                             )
+                            .child(div().flex_1())
                             .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(MUTED_2))
-                                    .child("新規写真にこのプロファイルを適用します"),
+                                Switch::new("profile-auto")
+                                    .checked(profile.auto_enabled)
+                                    .on_click(cx.listener(move |this, checked, _, cx| {
+                                        this.edit_profile(
+                                            |profile| profile.auto_enabled = *checked,
+                                            cx,
+                                        );
+                                    })),
                             ),
                     )
-                    .child(div().flex_1())
+                    .child(self.section_label("形式と画質"))
                     .child(
-                        Switch::new("profile-auto")
-                            .checked(profile.auto_enabled)
-                            .on_click(cx.listener(move |this, checked, _, cx| {
-                                this.edit_profile(|profile| profile.auto_enabled = *checked, cx);
-                            })),
-                    ),
-            )
-            .child(self.section_label("形式と画質"))
-            .child(
-                h_flex().gap(px(4.)).children(
-                    [
-                        CompressionFormat::Jpeg,
-                        CompressionFormat::Webp,
-                        CompressionFormat::Avif,
-                        CompressionFormat::JpegXl,
-                    ]
-                    .into_iter()
-                    .map(|format| {
-                        let active = profile.format == format;
-                        let label = format_label(&format);
-                        let selected_format = format.clone();
-                        div()
-                            .id(SharedString::from(format!("format-{}", format.as_str())))
-                            .px(px(10.))
-                            .py(px(5.))
-                            .rounded(px(8.))
-                            .bg(if active {
-                                rgb(ACCENT_SOFT)
-                            } else {
-                                rgba(0x00000000)
-                            })
-                            .text_size(px(12.))
-                            .font_medium()
-                            .text_color(if active { rgb(BLUE) } else { rgb(MUTED) })
-                            .cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.edit_profile(
-                                    |profile| {
-                                        apply_profile_format(profile, selected_format.clone())
-                                    },
-                                    cx,
-                                );
-                            }))
-                            .child(label)
-                    }),
-                ),
-            )
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .w(px(80.))
-                            .text_size(px(12.))
-                            .text_color(rgb(MUTED))
-                            .child("ロスレス"),
+                        h_flex().gap(px(4.)).children(
+                            [
+                                CompressionFormat::Jpeg,
+                                CompressionFormat::Webp,
+                                CompressionFormat::Avif,
+                                CompressionFormat::JpegXl,
+                            ]
+                            .into_iter()
+                            .map(|format| {
+                                let active = profile.format == format;
+                                let label = format_label(&format);
+                                let selected_format = format.clone();
+                                div()
+                                    .id(SharedString::from(format!(
+                                        "format-{}",
+                                        format.as_str()
+                                    )))
+                                    .px(px(10.))
+                                    .py(px(5.))
+                                    .rounded(px(8.))
+                                    .bg(if active {
+                                        rgb(ACCENT_SOFT)
+                                    } else {
+                                        rgba(0x00000000)
+                                    })
+                                    .text_size(px(12.))
+                                    .font_medium()
+                                    .text_color(if active { rgb(BLUE) } else { rgb(MUTED) })
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.edit_profile(
+                                            |profile| {
+                                                apply_profile_format(
+                                                    profile,
+                                                    selected_format.clone(),
+                                                )
+                                            },
+                                            cx,
+                                        );
+                                    }))
+                                    .child(label)
+                            }),
+                        ),
                     )
-                    .child(
-                        Switch::new("profile-lossless")
-                            .checked(profile.lossless)
-                            .disabled(!lossless_supported(&profile.format))
-                            .on_click(cx.listener(move |this, checked, _, cx| {
-                                this.edit_profile(|profile| profile.lossless = *checked, cx);
-                            })),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(MUTED_2))
-                            .child(lossless_hint(&profile.format)),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        div()
-                            .w(px(80.))
-                            .text_size(px(12.))
-                            .text_color(rgb(MUTED))
-                            .child("品質"),
-                    )
-                    .child(
-                        Button::new("quality-minus")
-                            .label("−")
-                            .small()
-                            .disabled(profile.lossless)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.edit_profile(
-                                    |profile| {
-                                        profile.quality = profile.quality.saturating_sub(1).max(1);
-                                    },
-                                    cx,
-                                );
-                            })),
-                    )
-                    .child(
-                        div()
-                            .w(px(36.))
-                            .text_size(px(12.))
-                            .font_semibold()
-                            .text_color(rgb(TEXT))
-                            .child(profile.quality.to_string()),
-                    )
-                    .child(
-                        Button::new("quality-plus")
-                            .label("＋")
-                            .small()
-                            .disabled(profile.lossless)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.edit_profile(
-                                    |profile| {
-                                        profile.quality =
-                                            profile.quality.saturating_add(1).min(100);
-                                    },
-                                    cx,
-                                );
-                            })),
-                    )
-                    .child(div().text_size(px(10.)).text_color(rgb(MUTED_2)).child(
-                        if profile.lossless {
-                            "ロスレスでは品質指定を使用しません"
-                        } else {
-                            "品質を調整"
-                        },
-                    )),
-            )
-            .child(self.section_label("リサイズ"))
-            .child(
-                v_flex()
-                    .gap(px(8.))
                     .child(
                         h_flex()
                             .items_center()
                             .gap_2()
                             .child(
                                 div()
+                                    .w(px(80.))
                                     .text_size(px(12.))
                                     .text_color(rgb(MUTED))
-                                    .child("リサイズを有効にする"),
+                                    .child("ロスレス"),
                             )
                             .child(
-                                Switch::new("profile-resize")
-                                    .checked(profile.resize_enabled)
-                                    .on_click(cx.listener(|this, checked, _, cx| {
+                                Switch::new("profile-lossless")
+                                    .checked(profile.lossless)
+                                    .disabled(!lossless_supported(&profile.format))
+                                    .on_click(cx.listener(move |this, checked, _, cx| {
                                         this.edit_profile(
-                                            |profile| profile.resize_enabled = *checked,
+                                            |profile| profile.lossless = *checked,
                                             cx,
                                         );
                                     })),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(MUTED_2))
+                                    .child(lossless_hint(&profile.format)),
                             ),
                     )
-                    .when(profile.resize_enabled, |this| {
-                        this.child(
-                            h_flex()
-                                .items_center()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .w(px(96.))
-                                        .flex_shrink_0()
-                                        .text_size(px(12.))
-                                        .text_color(rgb(MUTED))
-                                        .child("解像度"),
-                                )
-                                .children(
-                                    [
-                                        ("HD", 1280u32, 720u32),
-                                        ("FHD", 1920, 1080),
-                                        ("2K", 2560, 1440),
-                                        ("4K", 3840, 2160),
-                                    ]
-                                    .into_iter()
-                                    .map(
-                                        |(label, width, height)| {
-                                            let active =
-                                                profile.width == width && profile.height == height;
-                                            div()
-                                                .id(SharedString::from(format!("resize-{label}")))
-                                                .px(px(8.))
-                                                .py(px(4.))
-                                                .rounded(px(8.))
-                                                .bg(if active {
-                                                    rgb(ACCENT_SOFT)
-                                                } else {
-                                                    rgba(0x00000000)
-                                                })
-                                                .text_size(px(10.))
-                                                .font_medium()
-                                                .text_color(if active {
-                                                    rgb(BLUE)
-                                                } else {
-                                                    rgb(MUTED)
-                                                })
-                                                .cursor_pointer()
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    this.edit_profile(
-                                                        |profile| {
-                                                            profile.resize_enabled = true;
-                                                            profile.width = width;
-                                                            profile.height = height;
-                                                        },
-                                                        cx,
-                                                    );
-                                                }))
-                                                .child(label)
-                                        },
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .w(px(80.))
+                                    .text_size(px(12.))
+                                    .text_color(rgb(MUTED))
+                                    .child("品質"),
+                            )
+                            .child(
+                                Button::new("quality-minus")
+                                    .label("−")
+                                    .small()
+                                    .disabled(profile.lossless)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.edit_profile(
+                                            |profile| {
+                                                profile.quality =
+                                                    profile.quality.saturating_sub(1).max(1);
+                                            },
+                                            cx,
+                                        );
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .w(px(36.))
+                                    .text_size(px(12.))
+                                    .font_semibold()
+                                    .text_color(rgb(TEXT))
+                                    .child(profile.quality.to_string()),
+                            )
+                            .child(
+                                Button::new("quality-plus")
+                                    .label("＋")
+                                    .small()
+                                    .disabled(profile.lossless)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.edit_profile(
+                                            |profile| {
+                                                profile.quality =
+                                                    profile.quality.saturating_add(1).min(100);
+                                            },
+                                            cx,
+                                        );
+                                    })),
+                            )
+                            .child(div().text_size(px(10.)).text_color(rgb(MUTED_2)).child(
+                                if profile.lossless {
+                                    "ロスレスでは品質指定を使用しません"
+                                } else {
+                                    "品質を調整"
+                                },
+                            )),
+                    )
+                    .child(self.section_label("リサイズ"))
+                    .child(
+                        v_flex()
+                            .gap(px(8.))
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_size(px(12.))
+                                            .text_color(rgb(MUTED))
+                                            .child("リサイズを有効にする"),
+                                    )
+                                    .child(
+                                        Switch::new("profile-resize")
+                                            .checked(profile.resize_enabled)
+                                            .on_click(cx.listener(|this, checked, _, cx| {
+                                                this.edit_profile(
+                                                    |profile| profile.resize_enabled = *checked,
+                                                    cx,
+                                                );
+                                            })),
                                     ),
+                            )
+                            .when(profile.resize_enabled, |this| {
+                                this.child(
+                                    h_flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .child(
+                                            div()
+                                                .w(px(96.))
+                                                .flex_shrink_0()
+                                                .text_size(px(12.))
+                                                .text_color(rgb(MUTED))
+                                                .child("解像度"),
+                                        )
+                                        .children(
+                                            [
+                                                ("HD", 1280u32, 720u32),
+                                                ("FHD", 1920, 1080),
+                                                ("2K", 2560, 1440),
+                                                ("4K", 3840, 2160),
+                                            ]
+                                            .into_iter()
+                                            .map(|(label, width, height)| {
+                                                let active = profile.width == width
+                                                    && profile.height == height;
+                                                div()
+                                                    .id(SharedString::from(format!(
+                                                        "resize-{label}"
+                                                    )))
+                                                    .px(px(8.))
+                                                    .py(px(4.))
+                                                    .rounded(px(8.))
+                                                    .bg(if active {
+                                                        rgb(ACCENT_SOFT)
+                                                    } else {
+                                                        rgba(0x00000000)
+                                                    })
+                                                    .text_size(px(10.))
+                                                    .font_medium()
+                                                    .text_color(if active {
+                                                        rgb(BLUE)
+                                                    } else {
+                                                        rgb(MUTED)
+                                                    })
+                                                    .cursor_pointer()
+                                                    .on_click(cx.listener(
+                                                        move |this, _, _, cx| {
+                                                            this.edit_profile(
+                                                                |profile| {
+                                                                    profile.resize_enabled = true;
+                                                                    profile.width = width;
+                                                                    profile.height = height;
+                                                                },
+                                                                cx,
+                                                            );
+                                                        },
+                                                    ))
+                                                    .child(label)
+                                            }),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(10.))
+                                                .text_color(rgb(MUTED_2))
+                                                .child(format!(
+                                                    "{} × {}",
+                                                    profile.width, profile.height
+                                                )),
+                                        ),
                                 )
-                                .child(
-                                    div()
-                                        .text_size(px(10.))
-                                        .text_color(rgb(MUTED_2))
-                                        .child(format!("{} × {}", profile.width, profile.height)),
-                                ),
-                        )
-                    })
-                    .when(profile.resize_enabled, |this| {
-                        this.child(
-                            v_flex()
-                                .gap(px(4.))
-                                .child(
+                            })
+                            .when(profile.resize_enabled, |this| {
+                                this.child(
+                                    v_flex()
+                                        .gap(px(4.))
+                                        .child(
+                                            h_flex()
+                                                .items_center()
+                                                .gap_2()
+                                                .child(
+                                                    div()
+                                                        .w(px(96.))
+                                                        .flex_shrink_0()
+                                                        .text_size(px(12.))
+                                                        .text_color(rgb(MUTED))
+                                                        .child("リサイズ方法"),
+                                                )
+                                                .child(
+                                                    h_flex().gap(px(4.)).children(
+                                                        [
+                                                            (
+                                                                ResizeMode::DownscaleOnly,
+                                                                "大きい場合のみ",
+                                                            ),
+                                                            (ResizeMode::Always, "毎回"),
+                                                        ]
+                                                        .into_iter()
+                                                        .map(|(mode, label)| {
+                                                            let active =
+                                                                profile.resize_mode == mode;
+                                                            div()
+                                                                .id(SharedString::from(format!(
+                                                                    "resize-mode-{}",
+                                                                    mode.as_str()
+                                                                )))
+                                                                .px(px(8.))
+                                                                .py(px(4.))
+                                                                .rounded(px(8.))
+                                                                .bg(if active {
+                                                                    rgb(ACCENT_SOFT)
+                                                                } else {
+                                                                    rgba(0x00000000)
+                                                                })
+                                                                .text_size(px(10.))
+                                                                .font_medium()
+                                                                .text_color(if active {
+                                                                    rgb(BLUE)
+                                                                } else {
+                                                                    rgb(MUTED)
+                                                                })
+                                                                .cursor_pointer()
+                                                                .on_click(cx.listener(
+                                                                    move |this, _, _, cx| {
+                                                                        this.edit_profile(
+                                                                            |profile| {
+                                                                                profile.resize_mode =
+                                                                                    mode;
+                                                                            },
+                                                                            cx,
+                                                                        );
+                                                                    },
+                                                                ))
+                                                                .child(label)
+                                                        }),
+                                                    ),
+                                                ),
+                                        )
+                                        .child(
+                                            div()
+                                                .pl(px(104.))
+                                                .text_size(px(10.))
+                                                .text_color(rgb(MUTED_2))
+                                                .child(match profile.resize_mode {
+                                                    ResizeMode::DownscaleOnly => {
+                                                        "指定解像度より大きい画像だけ縮小します"
+                                                    }
+                                                    ResizeMode::Always => {
+                                                        "小さい画像も指定解像度に合わせて拡大します"
+                                                    }
+                                                }),
+                                        ),
+                                )
+                            })
+                            .when(profile.resize_enabled, |this| {
+                                this.child(
                                     h_flex()
                                         .items_center()
                                         .gap_2()
@@ -618,186 +683,171 @@ impl App {
                                                 .w(px(96.))
                                                 .flex_shrink_0()
                                                 .text_size(px(12.))
-                                                .text_color(rgb(MUTED))
-                                                .child("リサイズ方法"),
+                                                .text_color(rgb(MUTED_2))
+                                                .child("アスペクト比維持"),
                                         )
                                         .child(
-                                            h_flex().gap(px(4.)).children(
-                                                [
-                                                    (ResizeMode::DownscaleOnly, "大きい場合のみ"),
-                                                    (ResizeMode::Always, "毎回"),
-                                                ]
-                                                .into_iter()
-                                                .map(|(mode, label)| {
-                                                    let active = profile.resize_mode == mode;
-                                                    div()
-                                                        .id(SharedString::from(format!(
-                                                            "resize-mode-{}",
-                                                            mode.as_str()
-                                                        )))
-                                                        .px(px(8.))
-                                                        .py(px(4.))
-                                                        .rounded(px(8.))
-                                                        .bg(if active {
-                                                            rgb(ACCENT_SOFT)
-                                                        } else {
-                                                            rgba(0x00000000)
-                                                        })
-                                                        .text_size(px(10.))
-                                                        .font_medium()
-                                                        .text_color(if active {
-                                                            rgb(BLUE)
-                                                        } else {
-                                                            rgb(MUTED)
-                                                        })
-                                                        .cursor_pointer()
-                                                        .on_click(cx.listener(
-                                                            move |this, _, _, cx| {
-                                                                this.edit_profile(
-                                                                    |profile| {
-                                                                        profile.resize_mode = mode;
-                                                                    },
-                                                                    cx,
-                                                                );
-                                                            },
-                                                        ))
-                                                        .child(label)
-                                                }),
-                                            ),
+                                            Switch::new("profile-aspect")
+                                                .checked(profile.maintain_aspect)
+                                                .on_click(cx.listener(|this, checked, _, cx| {
+                                                    this.edit_profile(
+                                                        |profile| {
+                                                            profile.maintain_aspect = *checked
+                                                        },
+                                                        cx,
+                                                    );
+                                                })),
                                         ),
                                 )
-                                .child(
-                                    div()
-                                        .pl(px(104.))
-                                        .text_size(px(10.))
-                                        .text_color(rgb(MUTED_2))
-                                        .child(match profile.resize_mode {
-                                            ResizeMode::DownscaleOnly => {
-                                                "指定解像度より大きい画像だけ縮小します"
-                                            }
-                                            ResizeMode::Always => {
-                                                "小さい画像も指定解像度に合わせて拡大します"
-                                            }
-                                        }),
-                                ),
-                        )
-                    })
-                    .when(profile.resize_enabled, |this| {
-                        this.child(
-                            h_flex()
-                                .items_center()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .w(px(96.))
-                                        .flex_shrink_0()
-                                        .text_size(px(12.))
-                                        .text_color(rgb(MUTED_2))
-                                        .child("アスペクト比維持"),
-                                )
-                                .child(
-                                    Switch::new("profile-aspect")
-                                        .checked(profile.maintain_aspect)
-                                        .on_click(cx.listener(|this, checked, _, cx| {
+                            }),
+                    )
+                    .child(self.section_label("出力"))
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(MUTED_2))
+                                    .child("出力先"),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(MUTED))
+                                    .child(
+                                        profile
+                                            .output_dir
+                                            .clone()
+                                            .unwrap_or_else(|| "compressed/".to_string()),
+                                    ),
+                            )
+                            .child(
+                                Button::new("profile-output-pick")
+                                    .label("フォルダを選択")
+                                    .small()
+                                    .ghost()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let current = this
+                                            .profiles
+                                            .get(this.profile_index)
+                                            .and_then(|profile| profile.output_dir.clone());
+                                        let mut picker = rfd::FileDialog::new();
+                                        if let Some(dir) = current {
+                                            picker = picker.set_directory(dir);
+                                        }
+                                        if let Some(dir) = picker.pick_folder() {
+                                            let path = dir.to_string_lossy().to_string();
                                             this.edit_profile(
-                                                |profile| profile.maintain_aspect = *checked,
+                                                move |profile| {
+                                                    profile.output_dir = Some(path.clone())
+                                                },
+                                                cx,
+                                            );
+                                        }
+                                    })),
+                            )
+                            .when(profile.output_dir.is_some(), |this| {
+                                this.child(
+                                    Button::new("profile-output-clear")
+                                        .label("既定に戻す")
+                                        .small()
+                                        .ghost()
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.edit_profile(
+                                                |profile| profile.output_dir = None,
                                                 cx,
                                             );
                                         })),
-                                ),
-                        )
-                    }),
-            )
-            .child(self.section_label("出力"))
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(MUTED_2))
-                            .child("出力先"),
+                                )
+                            }),
                     )
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(11.))
-                            .text_color(rgb(MUTED))
+                        h_flex()
+                            .items_center()
+                            .gap(px(8.))
                             .child(
-                                profile
-                                    .output_dir
-                                    .clone()
-                                    .unwrap_or_else(|| "compressed/".to_string()),
+                                div()
+                                    .w(px(86.))
+                                    .flex_shrink_0()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(MUTED_2))
+                                    .child("サフィックス"),
+                            )
+                            .child(Input::new(&self.profile_suffix_input).small().flex_1())
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(MUTED_2))
+                                    .child("空欄可"),
                             ),
                     )
                     .child(
-                        Button::new("profile-output-pick")
-                            .label("フォルダを選択")
-                            .small()
-                            .ghost()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let current = this
-                                    .profiles
-                                    .get(this.profile_index)
-                                    .and_then(|profile| profile.output_dir.clone());
-                                let mut picker = rfd::FileDialog::new();
-                                if let Some(dir) = current {
-                                    picker = picker.set_directory(dir);
-                                }
-                                if let Some(dir) = picker.pick_folder() {
-                                    let path = dir.to_string_lossy().to_string();
-                                    this.edit_profile(
-                                        move |profile| profile.output_dir = Some(path.clone()),
-                                        cx,
-                                    );
-                                }
-                            })),
-                    )
-                    .when(profile.output_dir.is_some(), |this| {
-                        this.child(
-                            Button::new("profile-output-clear")
-                                .label("既定に戻す")
-                                .small()
-                                .ghost()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.edit_profile(|profile| profile.output_dir = None, cx);
-                                })),
-                        )
-                    }),
-            )
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(
                         div()
-                            .w(px(86.))
-                            .flex_shrink_0()
+                            .p(px(12.))
+                            .rounded(px(8.))
+                            .bg(rgb(PANEL_2))
+                            .border_1()
+                            .border_color(rgb(BORDER))
                             .text_size(px(10.))
-                            .text_color(rgb(MUTED_2))
-                            .child("サフィックス"),
-                    )
-                    .child(Input::new(&self.profile_suffix_input).small().flex_1())
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(MUTED_2))
-                            .child("空欄可"),
+                            .text_color(rgb(MUTED))
+                            .child("変更は即時保存されます。サフィックスの使用不可文字は _ に置換されます。手動圧縮の出力先と元画像の扱いは実行時に選べます。"),
                     ),
             )
             .child(
-                div()
+                h_flex()
+                    .flex_shrink_0()
+                    .gap(px(12.))
                     .p(px(12.))
-                    .rounded(px(8.))
-                    .bg(rgb(PANEL_2))
-                    .border_1()
-                    .border_color(rgb(BORDER))
+                    .border_t_1()
+                    .border_color(rgba(0xffffff14))
+                    .child(self.editor_stat(
+                        "総圧縮数",
+                        self.stats.compressed_count.to_string(),
+                    ))
+                    .child(self.editor_stat("写真", self.stats.photo_count.to_string()))
+                    .child(self.editor_stat(
+                        "圧縮後合計",
+                        format_bytes(self.db.derivative_bytes().unwrap_or(0)),
+                    )),
+            )
+            .with_animation(
+                ("profile-editor", self.profile_index),
+                Animation::new(MOTION_FAST)
+                    .with_easing(ease_motion)
+                    .with_max_fps(MOTION_FPS),
+                |el, t| el.opacity(t).relative().top(px(4.0 * (1.0 - t))),
+            )
+    }
+
+    /// Small stat block inside the editor card's footer.
+    fn editor_stat(&self, label: &str, value: String) -> impl IntoElement {
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .gap(px(4.))
+            .p(px(10.))
+            .rounded(px(12.))
+            .bg(rgb(PANEL_INNER))
+            .border_1()
+            .border_color(rgba(0xffffff0f))
+            .child(
+                div()
                     .text_size(px(10.))
-                    .text_color(rgb(MUTED))
-                    .child("変更は即時保存されます。サフィックスの使用不可文字は _ に置換されます。手動圧縮の出力先と元画像の扱いは実行時に選べます。"),
+                    .text_color(rgb(MUTED_2))
+                    .child(label.to_string()),
+            )
+            .child(
+                div()
+                    .text_size(px(16.))
+                    .font_semibold()
+                    .text_color(rgb(TEXT))
+                    .truncate()
+                    .child(value),
             )
     }
 
@@ -806,18 +856,25 @@ impl App {
         glass_panel()
             .flex()
             .flex_col()
-            .bg(rgb(PANEL))
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .overflow_hidden()
+            .rounded(px(17.))
             .child(
                 h_flex()
-                    .px(px(16.))
-                    .py(px(14.))
+                    .flex_shrink_0()
+                    .min_h(px(GALLERY_HEADER_HEIGHT))
+                    .px(px(GALLERY_PAD_X))
+                    .py(px(8.))
                     .gap(px(8.))
+                    .flex_wrap()
                     .items_center()
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgba(0xffffff14))
                     .child(
                         div()
-                            .text_size(px(17.))
+                            .text_size(px(13.))
                             .font_semibold()
                             .text_color(rgb(TEXT))
                             .child("圧縮キュー"),
@@ -874,10 +931,15 @@ impl App {
                         )
                     }),
             )
-            .when(self.failed_job_count > 100, |this| {
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .when(self.failed_job_count > 100, |this| {
                 this.child(
                     div()
-                        .px(px(16.))
+                        .px(px(GALLERY_PAD_X))
                         .py(px(8.))
                         .text_size(px(10.))
                         .text_color(rgb(MUTED_2))
@@ -1050,12 +1112,13 @@ impl App {
                 |this| {
                     this.child(
                         div()
-                            .p(px(16.))
+                            .p(px(GALLERY_PAD_X))
                             .text_size(px(12.))
                             .text_color(rgb(MUTED_2))
                             .child("キューは空です"),
                     )
                 },
+            ),
             )
     }
 }

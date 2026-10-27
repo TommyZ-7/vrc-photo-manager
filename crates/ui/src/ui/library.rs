@@ -292,32 +292,29 @@ impl App {
         } else {
             self.pending_layout_anchor_library.take()
         };
-        let (next_columns, row_height, image_height, card_width) = if search {
-            // Search keeps its pre-Task 17 fixed-image metrics and flex cells.
-            let metrics = self.card_metrics();
-            (
-                search_grid_columns(width, self.sidebar_collapsed, metrics.min_card_width),
-                metrics.row_height,
-                metrics.image_height,
-                None,
+        let metrics = if search {
+            search_grid_metrics(
+                width,
+                self.sidebar_collapsed,
+                self.settings.ui_card_size,
+                self.settings.ui_card_show_world,
+                self.settings.ui_card_show_date || self.settings.ui_card_show_size,
             )
         } else {
-            let metrics = library_grid_metrics(
+            library_grid_metrics(
                 width,
                 self.sidebar_collapsed,
                 self.inspector_collapsed,
                 self.settings.ui_card_size,
                 self.settings.ui_card_show_world,
                 self.settings.ui_card_show_date || self.settings.ui_card_show_size,
-            );
-            (
-                metrics.columns,
-                metrics.row_height,
-                metrics.image_height,
-                Some(metrics.card_width),
             )
         };
-        let grid_gap = if search { 16.0 } else { GRID_GAP };
+        let next_columns = metrics.columns;
+        let row_height = metrics.row_height;
+        let image_height = metrics.image_height;
+        let card_width = Some(metrics.card_width);
+        let grid_gap = GRID_GAP;
         let browser = self.browser_mut(search);
         browser.columns = next_columns;
         browser.row_height = row_height;
@@ -400,19 +397,16 @@ impl App {
                     )
                     .into_any_element()
             };
-            let mut container = v_flex()
+            let container = v_flex()
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
                 .h_full()
-                .items_stretch();
-            if !search {
-                container = container
-                    .pl(px(GALLERY_PAD_X))
-                    .pr(px(GALLERY_PAD_X))
-                    .pt(px(GALLERY_PAD_TOP))
-                    .pb(px(GALLERY_PAD_BOTTOM));
-            }
+                .items_stretch()
+                .pl(px(GALLERY_PAD_X))
+                .pr(px(GALLERY_PAD_X))
+                .pt(px(GALLERY_PAD_TOP))
+                .pb(px(GALLERY_PAD_BOTTOM));
             return container.child(empty).into_any_element();
         }
 
@@ -481,10 +475,8 @@ impl App {
         .w_full()
         .min_w_0()
         .min_h_0();
-        // Search has no gallery padding above the list yet; leave room for
-        // the first row's -4px hover lift. The library gallery supplies that
-        // room through GALLERY_PAD_TOP.
-        let list = if search { list.pt(px(4.)) } else { list };
+        // The gallery body padding is shared by both screens; the first row's
+        // -4px hover lift fits inside GALLERY_PAD_TOP.
 
         // The wrapper stays mounted (and relative) so the year rail can
         // overlay the list without remounting it.
@@ -528,20 +520,18 @@ impl App {
                     )),
             );
         }
-        let mut container = v_flex()
+        v_flex()
             .flex_1()
             .min_w_0()
             .min_h_0()
             .h_full()
-            .items_stretch();
-        if !search {
-            container = container
-                .pl(px(GALLERY_PAD_X))
-                .pr(px(GALLERY_PAD_X))
-                .pt(px(GALLERY_PAD_TOP))
-                .pb(px(GALLERY_PAD_BOTTOM));
-        }
-        container.child(grid).into_any_element()
+            .items_stretch()
+            .pl(px(GALLERY_PAD_X))
+            .pr(px(GALLERY_PAD_X))
+            .pt(px(GALLERY_PAD_TOP))
+            .pb(px(GALLERY_PAD_BOTTOM))
+            .child(grid)
+            .into_any_element()
     }
 
     /// Loads at most two pages for the grid, then inserts them unless the
@@ -886,9 +876,8 @@ impl App {
         // ends would change the hover animation's ancestor path and remount it,
         // causing a 4 px settle without a hover.
         //
-        // Library cells use the computed fixed width so a capped preset leaves
-        // row space empty (left-aligned) instead of stretching. Search keeps
-        // its legacy flex cell until Task 17.
+        // Library and Search cells use the computed fixed width so a capped
+        // preset leaves row space empty (left-aligned) instead of stretching.
         let cell = div().relative().min_w_0().child(card);
         let cell = match card_width {
             Some(width) => cell.w(px(width)).flex_shrink_0(),

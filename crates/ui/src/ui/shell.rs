@@ -2,7 +2,7 @@
 //! wrapper.
 //!
 //! `App::render` stays in `app.rs`; this module owns the chrome around the
-//! active screen and the card metrics shared by the grids.
+//! active screen and the grid helpers shared by the screens.
 
 use std::time::Duration;
 
@@ -11,7 +11,6 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use vrc_photo_core::importer::ImportProgress;
-use vrc_photo_core::settings::{AppSettings, CardSize};
 use vrc_photo_ipc::ScanPhase as IpcScanPhase;
 
 use crate::app::import::{
@@ -930,10 +929,6 @@ impl App {
             .child(screen)
             .into_any_element()
     }
-
-    pub(crate) fn card_metrics(&self) -> CardMetrics {
-        card_metrics(&self.settings)
-    }
 }
 
 /// Window-wide ambient glass surface.
@@ -1259,64 +1254,21 @@ pub(crate) fn screen_direction(from: Screen, to: Screen) -> f32 {
         -1.0
     }
 }
-/// Legacy presentation metrics for one Search result card and its uniform
-/// grid row. The library uses [`crate::ui::theme::GridMetrics`] instead; Task
-/// 17 moves Search to the same 3:2 metrics.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct CardMetrics {
-    pub(crate) image_height: f32,
-    pub(crate) row_height: f32,
-    pub(crate) min_card_width: f32,
-}
-
-/// Derives the Search card layout from the display settings.
-///
-/// The text line heights are the values already implicit in the fixed 196 px
-/// medium row: 128 image + 8 body gap + 18 world + 3 text gap + 15 meta + 24
-/// slack. Hiding a text group removes its height so the grid tightens instead
-/// of leaving a blank strip.
-fn card_metrics(settings: &AppSettings) -> CardMetrics {
-    let (image_height, min_card_width) = match settings.ui_card_size {
-        CardSize::Small => (96.0, 140.0),
-        CardSize::Medium => (128.0, MIN_CARD_WIDTH),
-        CardSize::Large => (168.0, 220.0),
-        CardSize::ExtraLarge => (208.0, 280.0),
-    };
-    let meta_line = settings.ui_card_show_date || settings.ui_card_show_size;
-    let mut row_height = image_height + CARD_ROW_SLACK;
-    if settings.ui_card_show_world || meta_line {
-        row_height += CARD_BODY_GAP;
-    }
-    if settings.ui_card_show_world {
-        row_height += CARD_WORLD_LINE_HEIGHT;
-    }
-    if meta_line {
-        if settings.ui_card_show_world {
-            row_height += CARD_TEXT_GAP;
-        }
-        row_height += CARD_META_LINE_HEIGHT;
-    }
-    CardMetrics {
-        image_height,
-        row_height,
-        min_card_width,
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::{
-        NAV_ITEM_GAP, NAV_ITEM_HEIGHT, StatusTone, alert_summaries, card_metrics,
-        compression_attention, compression_card_status, import_attention, import_card_status,
-        import_running_progress, nav_index, nav_item_top, running_job_count, scan_attention,
-        scan_card_status, scan_progress_label, scan_progress_ratio, screen_direction,
+        NAV_ITEM_GAP, NAV_ITEM_HEIGHT, StatusTone, alert_summaries, compression_attention,
+        compression_card_status, import_attention, import_card_status, import_running_progress,
+        nav_index, nav_item_top, running_job_count, scan_attention, scan_card_status,
+        scan_progress_label, scan_progress_ratio, screen_direction,
     };
     use crate::app::Screen;
     use crate::app::import::{
         ImportDialogOrigin, ImportDialogPhase, ImportDialogState, ImportReportView,
     };
     use crate::app::lifecycle::ScanProgressView;
-    use crate::ui::theme::{AMBER, BLUE, GREEN, MIN_CARD_WIDTH, MUTED_2, RED};
+    use crate::ui::theme::{AMBER, BLUE, GREEN, MUTED_2, RED};
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
@@ -1324,7 +1276,6 @@ mod tests {
         ImportIssue, ImportIssueKind, ImportMode, ImportProgress, ImportRename,
     };
     use vrc_photo_core::scanner::ScanFailure;
-    use vrc_photo_core::settings::{AppSettings, CardSize};
     use vrc_photo_ipc::ScanPhase as IpcScanPhase;
 
     #[test]
@@ -1363,73 +1314,6 @@ mod tests {
         assert_eq!(screen_direction(Screen::Photos, Screen::Settings), 1.0);
         assert_eq!(screen_direction(Screen::Settings, Screen::Photos), -1.0);
         assert_eq!(screen_direction(Screen::Search, Screen::Search), 1.0);
-    }
-    /// The Search grid keeps its pre-Task 17 fixed-image layout.
-    const SEARCH_LEGACY_ROW_HEIGHT: f32 = 196.0;
-
-    #[test]
-    fn search_card_metrics_keep_the_legacy_grid() {
-        let metrics = card_metrics(&AppSettings::default());
-        assert_eq!(metrics.image_height, 128.0);
-        assert_eq!(metrics.row_height, SEARCH_LEGACY_ROW_HEIGHT);
-        assert_eq!(metrics.min_card_width, MIN_CARD_WIDTH);
-    }
-
-    #[test]
-    fn hidden_card_text_shrinks_the_row_but_keeps_the_image() {
-        let settings = AppSettings {
-            ui_card_show_world: false,
-            ui_card_show_date: false,
-            ui_card_show_size: false,
-            ..Default::default()
-        };
-        let metrics = card_metrics(&settings);
-        assert_eq!(metrics.image_height, 128.0);
-        assert_eq!(metrics.row_height, 152.0);
-    }
-
-    #[test]
-    fn card_metrics_count_only_visible_text_lines() {
-        let world_only = AppSettings {
-            ui_card_show_date: false,
-            ui_card_show_size: false,
-            ..Default::default()
-        };
-        assert_eq!(card_metrics(&world_only).row_height, 178.0);
-
-        let meta_only = AppSettings {
-            ui_card_show_world: false,
-            ..Default::default()
-        };
-        assert_eq!(card_metrics(&meta_only).row_height, 175.0);
-
-        let status_hidden = AppSettings {
-            ui_card_show_status: false,
-            ..Default::default()
-        };
-        assert_eq!(
-            card_metrics(&status_hidden).row_height,
-            SEARCH_LEGACY_ROW_HEIGHT
-        );
-    }
-
-    #[test]
-    fn card_size_presets_scale_the_grid() {
-        let expected = [
-            (CardSize::Small, 96.0, 140.0),
-            (CardSize::Medium, 128.0, 190.0),
-            (CardSize::Large, 168.0, 220.0),
-            (CardSize::ExtraLarge, 208.0, 280.0),
-        ];
-        for (size, image, min_width) in expected {
-            let metrics = card_metrics(&AppSettings {
-                ui_card_size: size,
-                ..Default::default()
-            });
-            assert_eq!(metrics.image_height, image);
-            assert_eq!(metrics.min_card_width, min_width);
-            assert_eq!(metrics.row_height, image + 68.0);
-        }
     }
     #[test]
     fn scan_progress_label_uses_root_and_counts() {

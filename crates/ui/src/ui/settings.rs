@@ -25,28 +25,29 @@ impl App {
     pub(crate) fn settings_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let autostart_hint =
             autostart_description(self.daemon_active, self.daemon_supervisor.as_deref());
-        v_flex()
+        h_flex()
             .flex_1()
             .min_h_0()
+            .gap(px(CARD_GAP))
+            .items_stretch()
+            .child(self.settings_nav_card())
             .child(
                 v_flex()
                     .flex_1()
+                    .min_w_0()
                     .min_h_0()
                     .overflow_y_scrollbar()
-                    .px(px(26.))
-                    .pt(px(22.))
-                    .pb(px(26.))
-                    .gap(px(24.))
+                    .gap(px(CARD_GAP))
                     .child(
                         glass_panel()
                             .flex()
                             .flex_col()
-                            .p(px(24.))
-                            .gap(px(16.))
-                            .bg(rgb(PANEL))
+                            .p(px(14.))
+                            .gap(px(12.))
+                            .rounded(px(17.))
                             .child(
                                 div()
-                                    .text_size(px(17.))
+                                    .text_size(px(13.))
                                     .font_semibold()
                                     .text_color(rgb(TEXT))
                                     .child("ライブラリ"),
@@ -163,12 +164,12 @@ impl App {
                         glass_panel()
                             .flex()
                             .flex_col()
-                            .p(px(24.))
-                            .gap(px(16.))
-                            .bg(rgb(PANEL))
+                            .p(px(14.))
+                            .gap(px(12.))
+                            .rounded(px(17.))
                             .child(
                                 div()
-                                    .text_size(px(17.))
+                                    .text_size(px(13.))
                                     .font_semibold()
                                     .text_color(rgb(TEXT))
                                     .child("表示（ライブラリ・検索）"),
@@ -241,12 +242,12 @@ impl App {
                         glass_panel()
                             .flex()
                             .flex_col()
-                            .p(px(24.))
-                            .gap(px(16.))
-                            .bg(rgb(PANEL))
+                            .p(px(14.))
+                            .gap(px(12.))
+                            .rounded(px(17.))
                             .child(
                                 div()
-                                    .text_size(px(17.))
+                                    .text_size(px(13.))
                                     .font_semibold()
                                     .text_color(rgb(TEXT))
                                     .child("起動と圧縮"),
@@ -373,6 +374,49 @@ impl App {
             )
     }
 
+    /// Left category card. The rows are a static map of the settings sections
+    /// below; reloading stays on the existing in-card control.
+    fn settings_nav_card(&self) -> impl IntoElement {
+        glass_panel()
+            .flex()
+            .flex_col()
+            .w(px(SETTINGS_NAV_WIDTH))
+            .h_full()
+            .min_h_0()
+            .flex_shrink_0()
+            .overflow_hidden()
+            .rounded(px(17.))
+            .child(
+                h_flex()
+                    .flex_shrink_0()
+                    .h(px(GALLERY_HEADER_HEIGHT))
+                    .px(px(GALLERY_PAD_X))
+                    .items_center()
+                    .border_b_1()
+                    .border_color(rgba(0xffffff14))
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_semibold()
+                            .text_color(rgb(TEXT))
+                            .child("設定"),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scrollbar()
+                    .p(px(10.))
+                    .gap(px(3.))
+                    .child(settings_nav_item("ライブラリ", true))
+                    .child(settings_nav_item("表示", false))
+                    .child(settings_nav_item("起動と圧縮", false))
+                    .child(settings_nav_item("アップデート", false))
+                    .child(settings_nav_item("ログ", false)),
+            )
+    }
+
     pub(crate) fn set_card_size(&mut self, size: CardSize, cx: &mut Context<Self>) {
         if self.settings.ui_card_size == size {
             return;
@@ -414,4 +458,21 @@ impl App {
         cx.set_reduce_motion(enabled);
         cx.notify();
     }
+}
+
+fn settings_nav_item(label: &'static str, active: bool) -> Div {
+    h_flex()
+        .h(px(30.))
+        .px(px(10.))
+        .items_center()
+        .rounded(px(8.))
+        .bg(if active {
+            rgb(ACCENT_SOFT)
+        } else {
+            rgba(0x00000000)
+        })
+        .text_size(px(11.))
+        .font_medium()
+        .text_color(rgb(if active { BLUE } else { MUTED }))
+        .child(label)
 }

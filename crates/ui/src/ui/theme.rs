@@ -66,9 +66,6 @@ pub(crate) const CARD_BODY_GAP: f32 = 8.0;
 pub(crate) const CARD_TEXT_GAP: f32 = 3.0;
 pub(crate) const CARD_WORLD_LINE_HEIGHT: f32 = 18.0;
 pub(crate) const CARD_META_LINE_HEIGHT: f32 = 15.0;
-/// Legacy row slack retained for the Search grid until Task 17 moves it to the
-/// 3:2 library metrics.
-pub(crate) const CARD_ROW_SLACK: f32 = 24.0;
 /// Vertical room reserved inside each library row for the card's -4px hover
 /// lift. The actual gap between rows is this slack; the horizontal gap is
 /// [`GRID_GAP`].
@@ -87,6 +84,15 @@ pub(crate) const GALLERY_HEADER_HEIGHT: f32 = 42.0;
 pub(crate) const GALLERY_PAD_X: f32 = 12.0;
 pub(crate) const GALLERY_PAD_TOP: f32 = 10.0;
 pub(crate) const GALLERY_PAD_BOTTOM: f32 = 12.0;
+/// Search keeps its existing 290 px filter card; the results card takes the
+/// rest of the content width.
+pub(crate) const SEARCH_FILTER_WIDTH: f32 = 290.0;
+/// Fixed-ish width of the dashboard's daemon/session/log column.
+pub(crate) const DASHBOARD_SIDE_WIDTH: f32 = 340.0;
+/// Settings category navigation card.
+pub(crate) const SETTINGS_NAV_WIDTH: f32 = 220.0;
+/// Compression profile list card.
+pub(crate) const COMPRESSION_PROFILE_WIDTH: f32 = 280.0;
 pub(crate) const VIEWER_DETAILS_WIDTH: f32 = 380.0;
 pub(crate) const VIEWER_TOP_BAR: f32 = 56.0;
 pub(crate) const VIEWER_PAD: f32 = 24.0;
@@ -365,11 +371,17 @@ pub(crate) fn grid_available_width(
     (gallery - GALLERY_PAD_X * 2.0 - RAIL_WIDTH).max(0.0)
 }
 
-/// Width left for the search grid after the filter panel (290 px + 26 px
-/// margin), the right column's 26 px padding on both sides, and the rail
-/// gutter. The Search screen has no inspector column, so none is subtracted.
+/// Width left for the search grid after the filter card, the card gap, the
+/// results card's gallery padding, and the rail gutter. The Search screen has
+/// no inspector column, so none is subtracted.
 pub(crate) fn search_available_width(window_width: f32, sidebar_collapsed: bool) -> f32 {
-    (window_width - sidebar_width(sidebar_collapsed) - 290.0 - 26.0 - 52.0 - RAIL_WIDTH).max(0.0)
+    let results_card = window_width
+        - WORKSPACE_PAD * 2.0
+        - sidebar_width(sidebar_collapsed)
+        - WORKSPACE_GAP
+        - SEARCH_FILTER_WIDTH
+        - CARD_GAP;
+    (results_card - GALLERY_PAD_X * 2.0 - RAIL_WIDTH).max(0.0)
 }
 
 pub(crate) fn viewer_image_box_with_details_width(
@@ -514,8 +526,40 @@ pub(crate) fn library_grid_metrics(
     show_world: bool,
     show_meta: bool,
 ) -> GridMetrics {
-    let available_width =
-        grid_available_width(window_width, sidebar_collapsed, inspector_collapsed);
+    grid_metrics_for(
+        grid_available_width(window_width, sidebar_collapsed, inspector_collapsed),
+        window_width,
+        card_size,
+        show_world,
+        show_meta,
+    )
+}
+
+/// Search uses the same 3:2 card geometry as the library, but its available
+/// width excludes the filter card and the results card's own padding/rail.
+pub(crate) fn search_grid_metrics(
+    window_width: f32,
+    sidebar_collapsed: bool,
+    card_size: CardSize,
+    show_world: bool,
+    show_meta: bool,
+) -> GridMetrics {
+    grid_metrics_for(
+        search_available_width(window_width, sidebar_collapsed),
+        window_width,
+        card_size,
+        show_world,
+        show_meta,
+    )
+}
+
+fn grid_metrics_for(
+    available_width: f32,
+    window_width: f32,
+    card_size: CardSize,
+    show_world: bool,
+    show_meta: bool,
+) -> GridMetrics {
     let raw_columns = grid_columns(available_width, library_min_card_width(card_size));
     let columns = raw_columns
         .min(library_column_cap(window_width, card_size))
@@ -530,18 +574,6 @@ pub(crate) fn library_grid_metrics(
         image_height,
         row_height,
     }
-}
-
-/// Column count for the Search grid while it keeps its pre-Task 17 metrics.
-pub(crate) fn search_grid_columns(
-    window_width: f32,
-    sidebar_collapsed: bool,
-    min_card_width: f32,
-) -> usize {
-    grid_columns(
-        search_available_width(window_width, sidebar_collapsed),
-        min_card_width,
-    )
 }
 
 pub(crate) fn viewer_image_rect(
@@ -1079,7 +1111,10 @@ mod tests {
     fn grid_columns_respect_the_card_size() {
         assert!(grid_columns(1280.0, 140.0) >= grid_columns(1280.0, 280.0));
         assert_eq!(grid_columns(300.0, 280.0), 1);
-        assert_eq!(search_grid_columns(1280.0, false, MIN_CARD_WIDTH), 3);
+        assert_eq!(
+            search_grid_metrics(1280.0, false, CardSize::Medium, true, true).columns,
+            3
+        );
     }
 
     #[test]
@@ -1118,31 +1153,112 @@ mod tests {
 
     #[test]
     fn search_available_width_drops_to_the_filter_panel_width() {
-        assert_eq!(
-            grid_columns(search_available_width(1280.0, false), MIN_CARD_WIDTH),
-            3
-        );
-        assert_eq!(
-            grid_columns(search_available_width(1440.0, false), MIN_CARD_WIDTH),
-            4
-        );
-        assert_eq!(
-            grid_columns(search_available_width(1080.0, false), MIN_CARD_WIDTH),
-            2
-        );
-        assert_eq!(
-            grid_columns(search_available_width(1280.0, true), MIN_CARD_WIDTH),
-            4
-        );
+        assert_eq!(search_available_width(1280.0, false), 654.0);
+        assert_eq!(search_available_width(1440.0, false), 814.0);
+        assert_eq!(search_available_width(1080.0, false), 454.0);
+        assert_eq!(search_available_width(1280.0, true), 814.0);
+        assert_eq!(search_available_width(200.0, false), 0.0);
     }
 
     #[test]
-    fn search_grid_columns_ignore_the_inspector_state() {
+    fn search_grid_metrics_use_the_library_card_geometry() {
+        for (width, columns, available) in
+            [(1280.0, 3, 654.0), (1440.0, 3, 814.0), (1080.0, 2, 454.0)]
+        {
+            let metrics = search_grid_metrics(width, false, CardSize::Medium, true, true);
+            assert_eq!(metrics.columns, columns, "width {width}");
+            close(
+                metrics.card_width * columns as f32 + GRID_GAP * (columns as f32 - 1.0),
+                available,
+            );
+            close(metrics.image_height, metrics.card_width * 2.0 / 3.0);
+            close(metrics.row_height, metrics.image_height + 48.0);
+        }
+        assert_eq!(GRID_GAP, 9.0);
+    }
+
+    #[test]
+    fn search_grid_ignores_the_inspector_and_keeps_the_medium_cap() {
         // The Search screen has no inspector column, so the default expanded
-        // inspector must not shrink its grid.
-        assert_eq!(search_grid_columns(1280.0, false, MIN_CARD_WIDTH), 3);
-        assert_eq!(search_grid_columns(1440.0, false, MIN_CARD_WIDTH), 4);
-        assert_eq!(search_grid_columns(1080.0, false, MIN_CARD_WIDTH), 2);
+        // inspector must not shrink its grid. The medium cap still limits wide
+        // windows to three columns and 1080 to two.
+        for sidebar_collapsed in [false, true] {
+            assert_eq!(
+                search_grid_metrics(1280.0, sidebar_collapsed, CardSize::Medium, true, true)
+                    .columns,
+                3
+            );
+            assert_eq!(
+                search_grid_metrics(1440.0, sidebar_collapsed, CardSize::Medium, true, true)
+                    .columns,
+                3
+            );
+            assert_eq!(
+                search_grid_metrics(1080.0, sidebar_collapsed, CardSize::Medium, true, true)
+                    .columns,
+                2
+            );
+        }
+    }
+
+    #[test]
+    fn search_grid_respects_hidden_text_and_card_size_presets() {
+        let visible = search_grid_metrics(1280.0, false, CardSize::Medium, true, true);
+        let hidden = search_grid_metrics(1280.0, false, CardSize::Medium, false, false);
+        close(visible.card_width, hidden.card_width);
+        close(visible.row_height, visible.image_height + 48.0);
+        close(hidden.row_height, hidden.image_height + 4.0);
+        close(visible.image_height, hidden.image_height);
+
+        let small = search_grid_metrics(1280.0, false, CardSize::Small, true, true);
+        let medium = search_grid_metrics(1280.0, false, CardSize::Medium, true, true);
+        let large = search_grid_metrics(1280.0, false, CardSize::Large, true, true);
+        let extra = search_grid_metrics(1280.0, false, CardSize::ExtraLarge, true, true);
+        assert!(small.columns > medium.columns);
+        assert!(medium.columns > large.columns);
+        assert!(large.columns > extra.columns);
+        assert!(small.card_width < medium.card_width);
+        assert!(medium.card_width < large.card_width);
+        assert!(large.card_width < extra.card_width);
+    }
+
+    #[test]
+    fn search_grid_row_height_counts_only_visible_text_lines() {
+        let world_only = search_grid_metrics(1280.0, false, CardSize::Medium, true, false);
+        close(
+            world_only.row_height,
+            photo_row_height(world_only.card_width, true, false),
+        );
+        close(world_only.row_height, world_only.image_height + 30.0);
+
+        let meta_only = search_grid_metrics(1280.0, false, CardSize::Medium, false, true);
+        close(
+            meta_only.row_height,
+            photo_row_height(meta_only.card_width, false, true),
+        );
+        close(meta_only.row_height, meta_only.image_height + 27.0);
+
+        let hidden = search_grid_metrics(1280.0, false, CardSize::Medium, false, false);
+        close(
+            hidden.row_height,
+            photo_row_height(hidden.card_width, false, false),
+        );
+        close(hidden.row_height, hidden.image_height + 4.0);
+    }
+
+    #[test]
+    fn search_card_width_respects_the_preset_maximum() {
+        let medium = search_grid_metrics(1440.0, true, CardSize::Medium, true, true);
+        assert_eq!(medium.columns, 3);
+        assert!(medium.card_width <= library_max_card_width(CardSize::Medium));
+
+        let large = search_grid_metrics(1440.0, true, CardSize::Large, true, true);
+        assert_eq!(large.columns, 2);
+        close(large.card_width, library_max_card_width(CardSize::Large));
+        assert!(
+            large.card_width * 2.0 + GRID_GAP < search_available_width(1440.0, true),
+            "a capped preset leaves the remaining row width empty"
+        );
     }
 
     #[test]
