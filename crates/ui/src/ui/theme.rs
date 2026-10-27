@@ -326,6 +326,12 @@ pub(crate) fn sidebar_reveal_width(collapsed: bool, t: f32) -> f32 {
     from + (to - from) * t
 }
 
+/// §8.2: the sidebar's progress card is omitted once the content height is
+/// 760 px or less. The navigation itself stays visible.
+pub(crate) fn sidebar_status_visible(content_height: f32) -> bool {
+    content_height > 760.0
+}
+
 /// Responsive inspector column width from design §8.2. The card itself is
 /// [`inspector_card_width`]; the difference is the right-hand margin.
 pub(crate) fn inspector_column_width(window_width: f32) -> f32 {
@@ -725,6 +731,14 @@ mod tests {
         assert_eq!(sidebar_reveal_width(false, 1.0), 130.0);
         assert_eq!(sidebar_reveal_width(true, 0.0), 130.0);
         assert_eq!(sidebar_reveal_width(true, 1.0), 0.0);
+    }
+
+    #[test]
+    fn sidebar_status_hides_at_760() {
+        assert!(!sidebar_status_visible(700.0));
+        assert!(!sidebar_status_visible(760.0));
+        assert!(sidebar_status_visible(761.0));
+        assert!(sidebar_status_visible(820.0));
     }
 
     fn close(actual: f32, expected: f32) {

@@ -54,7 +54,7 @@ pub(crate) struct CardStatus {
 }
 
 impl App {
-    pub(crate) fn sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn sidebar(&mut self, content_height: f32, cx: &mut Context<Self>) -> AnyElement {
         let collapsed = self.sidebar_collapsed;
         let update_badge = self.update.nav_badge();
         let epoch = self.sidebar_motion_epoch;
@@ -66,7 +66,8 @@ impl App {
         let photo_count = format_count(self.stats.photo_count);
         let compression_count =
             (self.active_job_count > 0).then(|| format_count(self.active_job_count));
-        let status_card = (!collapsed).then(|| self.sidebar_status_card(cx));
+        let status_card = (!collapsed && sidebar_status_visible(content_height))
+            .then(|| self.sidebar_status_card(cx));
 
         let brand_text = v_flex()
             .min_w_0()

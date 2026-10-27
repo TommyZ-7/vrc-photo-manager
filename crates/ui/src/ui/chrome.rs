@@ -222,14 +222,7 @@ fn chrome_icon(name: IconName) -> Icon {
 impl App {
     /// Header card: titlebar line plus the ribbon body. Sits above the
     /// transparent content area with a 14px gap.
-    pub(crate) fn chrome(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let viewport = window.viewport_size();
-        let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
-        let layout = chrome_layout(
-            f32::from(viewport.width),
-            f32::from(viewport.height),
-            client_inset,
-        );
+    pub(crate) fn chrome(&mut self, layout: ChromeLayout, cx: &mut Context<Self>) -> AnyElement {
         let titlebar = self.titlebar(layout.sync_visible, cx);
         let body = (!self.ribbon_collapsed).then(|| self.ribbon_body(layout, cx));
 

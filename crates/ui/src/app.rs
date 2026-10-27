@@ -41,7 +41,7 @@ use crate::ui::actions::{
     CloseQuickLook, FocusSearch, OpenQuickLook, QuickLookNextFocus, QuickLookPrevFocus,
     ToggleInspector, ToggleSidebar, ViewerNextPhoto, ViewerPreviousPhoto,
 };
-use crate::ui::chrome::{RibbonTab, default_ribbon_tab};
+use crate::ui::chrome::{ChromeLayout, RibbonTab, chrome_layout, default_ribbon_tab};
 use crate::ui::shell::ambient_background;
 use crate::ui::theme::GLASS_WINDOW;
 use crate::update_view;
@@ -515,12 +515,19 @@ impl Render for App {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.render_epoch = self.render_epoch.wrapping_add(1);
         self.guard_viewer_selection(window, cx);
+        let viewport = window.viewport_size();
+        let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
+        let layout: ChromeLayout = chrome_layout(
+            f32::from(viewport.width),
+            f32::from(viewport.height),
+            client_inset,
+        );
         let main = v_flex()
             .flex_1()
             .min_w_0()
             .h_full()
             .gap(px(14.))
-            .child(self.chrome(window, cx))
+            .child(self.chrome(layout, cx))
             .child(v_flex().flex_1().min_h_0().child(self.content(window, cx)));
         let root = h_flex()
             .relative()
@@ -553,7 +560,7 @@ impl Render for App {
                 this.cycle_quick_look_focus(true, window, cx)
             }))
             .child(ambient_background())
-            .child(self.sidebar(cx))
+            .child(self.sidebar(layout.content_height, cx))
             .child(main)
             .child(self.nav_tooltip())
             .child(self.rail_toggle(cx));
