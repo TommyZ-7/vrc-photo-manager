@@ -9,7 +9,7 @@ use gpui_kit::*;
 
 use crate::app::App;
 use crate::state::preview::preview_placeholder_label;
-use crate::state::viewer::{MorphImageKind, morph_image_plan};
+use crate::state::viewer::morph_image_plan;
 use crate::ui::components::{ButtonState, ButtonTone};
 use crate::ui::theme::*;
 
@@ -339,69 +339,26 @@ impl App {
         let closing = morph.closing;
         let fade_only = morph.fade_only;
         let backdrop_from = morph.backdrop_from;
-        let (old_kind, new_kind, start_radius, end_radius) = morph_image_plan(
+        let (_old_kind, _new_kind, start_radius, end_radius) = morph_image_plan(
             closing,
             morph.source,
             morph.thumbnail.is_some(),
             morph.preview.is_some(),
         );
-        let image_for = |kind: MorphImageKind| match kind {
-            MorphImageKind::Thumbnail => morph.thumbnail.clone(),
-            MorphImageKind::Preview => morph.preview.clone(),
-        };
-        let Some(old_image) = old_kind.and_then(image_for) else {
+        let Some(image) = morph.preview.clone().or_else(|| morph.thumbnail.clone()) else {
             // Keep the empty slot out of flow for the same reason as the idle
             // return above: a root flex gap would narrow the whole shell.
             return div().absolute().into_any_element();
         };
-        let new_image = if fade_only || (!closing && morph.preview.is_none()) {
-            // Never present the thumbnail as the full-size incoming image.
-            // If the preview is missing, the viewer shows its explicit failure
-            // state after the overlay clears.
-            None
-        } else {
-            new_kind.and_then(image_for)
-        };
-        let old_fit = if closing {
-            ObjectFit::Contain
-        } else {
-            ObjectFit::Cover
-        };
-        let new_fit = if closing {
-            ObjectFit::Cover
-        } else {
-            ObjectFit::Contain
-        };
-        let layer_anim = || {
-            Animation::new(MOTION_MORPH)
-                .with_easing(ease_motion)
-                .with_max_fps(MOTION_FPS)
-        };
-        let old_layer = gpui_kit::img(old_image)
-            .object_fit(old_fit)
-            .size_full()
-            .with_animation(("viewer-morph-old", epoch), layer_anim(), move |el, t| {
-                let radius = start_radius + (end_radius - start_radius) * t;
-                let opacity = if fade_only { 1.0 } else { 1.0 - t };
-                el.opacity(opacity).rounded(px(radius))
-            });
-        let new_layer = new_image.map(|image| {
-            gpui_kit::img(image)
-                .object_fit(new_fit)
-                .size_full()
-                .with_animation(("viewer-morph-new", epoch), layer_anim(), move |el, t| {
-                    let radius = start_radius + (end_radius - start_radius) * t;
-                    el.opacity(t).rounded(px(radius))
-                })
-        });
         let frame = div()
             .absolute()
             .overflow_hidden()
             .bg(rgb(color))
-            .child(old_layer)
-            .when(!fade_only, |this| {
-                this.when_some(new_layer, |this, layer| this.child(layer))
-            })
+            .child(
+                gpui_kit::img(image)
+                    .object_fit(ObjectFit::Cover)
+                    .size_full(),
+            )
             .with_animation(
                 ("viewer-morph-frame", epoch),
                 Animation::new(MOTION_MORPH)
@@ -410,7 +367,8 @@ impl App {
                 move |el, t| {
                     let bounds = lerp_bounds(from, to, t);
                     let radius = start_radius + (end_radius - start_radius) * t;
-                    el.opacity(if fade_only { 1.0 - t } else { 1.0 })
+                    let opacity = if closing || fade_only { 1.0 - t } else { 1.0 };
+                    el.opacity(opacity)
                         .left(bounds.origin.x)
                         .top(bounds.origin.y)
                         .w(bounds.size.width)
