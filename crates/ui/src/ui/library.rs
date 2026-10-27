@@ -1,7 +1,7 @@
 //! Library (Photos) screen: grid, selection bar, inspector, and detail body.
 //!
 //! The same grid and card widgets are reused by the Search screen; screen
-//! dispatch and the shared header helper live in `ui::shell`.
+//! dispatch lives in `ui::shell`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,17 +13,15 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use vrc_photo_core::importer::ImportMode;
 use vrc_photo_core::model::Photo;
 
 use crate::app::App;
 use crate::app::Screen;
 use crate::app::cli::log_timing;
-use crate::app::daemon::daemon_sync_label;
 use crate::state::photo_browser::PAGE_SIZE;
 use crate::state::preview::preview_placeholder_label;
 use crate::state::viewer::ViewerOpenSource;
-use crate::ui::components::{ButtonState, ButtonTone, chip, glass_panel};
+use crate::ui::components::{ButtonState, ButtonTone, glass_panel};
 use crate::ui::shell::CardMetrics;
 use crate::ui::theme::*;
 use crate::ui::year_rail::{YearRail, YearRailLabels};
@@ -38,11 +36,16 @@ impl App {
             .import_report
             .clone()
             .map(|report| self.import_report_panel(&report, cx));
+        let library_error = self
+            .library_error
+            .clone()
+            .map(|error| self.library_error_row(error, cx));
         v_flex()
             .flex_1()
             .min_h_0()
-            .child(self.photos_header(cx))
+            .child(self.selection_bar(cx))
             .children(import_panel)
+            .children(library_error)
             .child(
                 h_flex()
                     .flex_1()
@@ -103,108 +106,48 @@ impl App {
             .into_any_element()
     }
 
-    fn photos_header(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let sync = if self.demo_assets.is_some() {
-            "デモデータ".to_string()
-        } else {
-            daemon_sync_label(
-                self.daemon_age_secs,
-                self.daemon_supervisor.as_deref(),
-                self.ipc_connected,
-            )
-        };
-        let subtitle = format!(
-            "{} 枚 · {} · {}",
-            format_count(self.stats.photo_count),
-            format_bytes(self.stats.total_bytes),
-            sync
-        );
-        let message = self.message.clone();
-        let inspector_collapsed = self.inspector_collapsed;
-        let library_error = self.library_error.clone();
-
-        let actions = vec![
-            Button::new("library-reload")
-                .label("再読込")
-                .small()
-                .ghost()
-                .tooltip("写真一覧を再読み込み")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.reload_library(true, cx);
-                }))
-                .into_any_element(),
-            Button::new("inspector-toggle")
-                .label(if inspector_collapsed {
-                    "詳細"
-                } else {
-                    "詳細を隠す"
-                })
-                .small()
-                .ghost()
-                .tooltip("詳細パネル (Ctrl+I)")
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_inspector(cx)))
-                .into_any_element(),
-            Button::new("import-copy")
-                .label("コピー取込")
-                .small()
-                .ghost()
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.open_import_dialog(ImportMode::Copy, window, cx);
-                }))
-                .into_any_element(),
-            Button::new("import-move")
-                .label("移動取込")
-                .small()
-                .primary()
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.open_import_dialog(ImportMode::Move, window, cx);
-                }))
-                .into_any_element(),
-        ];
-
-        let mut header = v_flex()
+    /// Slim inline failure row above the gallery. The message keeps its full
+    /// text; detail is never truncated into the ribbon status slot.
+    fn library_error_row(&mut self, error: String, cx: &mut Context<Self>) -> AnyElement {
+        h_flex()
             .flex_shrink_0()
-            .child(self.screen_header("ライブラリ", subtitle, message, actions))
-            .child(self.selection_bar(cx))
+            .mx(px(26.))
+            .mt(px(12.))
+            .mb(px(12.))
+            .px(px(14.))
+            .py(px(9.))
+            .gap(px(10.))
+            .items_center()
+            .rounded(px(12.))
+            .bg(rgb(PANEL))
+            .border_1()
+            .border_color(rgb(BORDER))
             .child(
-                h_flex()
-                    .px(px(26.))
-                    .pt(px(12.))
-                    .pb(px(14.))
-                    .gap(px(8.))
-                    .items_center()
-                    .child(chip("ワールド", true))
-                    .child(chip("プレイヤー", false))
-                    .child(chip("日時", false))
-                    .child(chip("タグ", false))
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(MUTED_2))
-                            .child("並び: 新しい順"),
-                    ),
-            );
-        if let Some(error) = library_error {
-            header = header.child(
-                h_flex()
-                    .px(px(26.))
-                    .pb(px(12.))
-                    .gap(px(10.))
-                    .items_center()
-                    .child(div().text_size(px(11.)).text_color(rgb(RED)).child(error))
-                    .child(
-                        Button::new("library-reload-banner")
-                            .label("再読込")
-                            .small()
-                            .primary()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.reload_library(true, cx);
-                            })),
-                    ),
-            );
-        }
-        header.into_any_element()
+                div()
+                    .flex_shrink_0()
+                    .w(px(6.))
+                    .h(px(6.))
+                    .rounded_full()
+                    .bg(rgb(RED)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(11.))
+                    .text_color(rgb(RED))
+                    .child(error),
+            )
+            .child(
+                Button::new("library-reload-banner")
+                    .label("再読込")
+                    .small()
+                    .primary()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.reload_library(true, cx);
+                    })),
+            )
+            .into_any_element()
     }
 
     /// Virtualized grid shared by the library and the search screen.
@@ -295,7 +238,7 @@ impl App {
                             .pt(px(4.))
                             .text_size(px(10.))
                             .text_color(rgb(MUTED_2))
-                            .child("右上の「再読込」で再試行できます。"),
+                            .child("ヘッダーの「再読込」で再試行できます。"),
                     )
                     .into_any_element()
             } else {

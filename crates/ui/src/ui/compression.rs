@@ -51,55 +51,8 @@ impl App {
     ) -> impl IntoElement {
         let profile = self.profiles.get(self.profile_index).cloned();
         let profile_count = self.profiles.len();
-        let message = self.message.clone();
-        let header = self.screen_header(
-            "圧縮設定",
-            "プロファイルと画質を管理します。手動圧縮の出力先と元画像は実行時に選べます。"
-                .to_string(),
-            message,
-            vec![
-                Button::new("add-profile")
-                    .label("＋ プロファイル")
-                    .small()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        let profile = CompressionProfile {
-                            name: format!("新規プロファイル {}", this.profiles.len() + 1),
-                            auto_enabled: false,
-                            ..CompressionProfile::default()
-                        };
-                        if let Err(error) = this.db.save_profile(&profile) {
-                            tracing::warn!(%error, "cannot add compression profile");
-                            this.message = Some(format!("プロファイルを追加できません: {error}"));
-                        }
-                        this.profiles = this.db.list_profiles().unwrap_or_else(|error| {
-                            tracing::warn!(%error, "cannot reload compression profiles");
-                            Vec::new()
-                        });
-                        this.profile_index = this
-                            .profiles
-                            .iter()
-                            .position(|item| item.id == profile.id)
-                            .unwrap_or(0);
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-                Button::new("manual-compress")
-                    .label("手動圧縮")
-                    .small()
-                    .primary()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        let ids = if this.selected_ids.is_empty() {
-                            this.selected.into_iter().collect()
-                        } else {
-                            this.selected_ids.clone()
-                        };
-                        this.open_manual_compression(ids, cx);
-                    }))
-                    .into_any_element(),
-            ],
-        );
 
-        v_flex().flex_1().min_h_0().child(header).child(
+        v_flex().flex_1().min_h_0().child(
             v_flex()
                 .flex_1()
                 .min_h_0()
@@ -112,103 +65,110 @@ impl App {
                     h_flex()
                         .gap(px(24.))
                         .items_start()
-                        .child(v_flex().w(px(280.)).gap(px(8.)).children(
-                            self.profiles.iter().enumerate().map(|(index, profile)| {
-                                let active = index == self.profile_index;
-                                let auto = profile.auto_enabled;
-                                let title = profile.name.clone();
-                                let meta = profile_summary(profile);
-                                glass_panel()
-                                    .id(SharedString::from(format!("profile-{index}")))
-                                    .flex()
-                                    .flex_col()
-                                    .p(px(14.))
-                                    .gap(px(6.))
-                                    .bg(rgb(if active { ACCENT_SOFT } else { PANEL }))
-                                    .border_color(rgb(if active { BLUE } else { BORDER }))
-                                    .cursor_pointer()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.profile_index = index;
-                                        cx.notify();
-                                    }))
-                                    .child(
-                                        h_flex()
-                                            .items_center()
+                        .child(
+                            v_flex()
+                                .w(px(280.))
+                                .gap(px(8.))
+                                .child(self.profile_list_header(cx))
+                                .children(self.profiles.iter().enumerate().map(
+                                    |(index, profile)| {
+                                        let active = index == self.profile_index;
+                                        let auto = profile.auto_enabled;
+                                        let title = profile.name.clone();
+                                        let meta = profile_summary(profile);
+                                        glass_panel()
+                                            .id(SharedString::from(format!("profile-{index}")))
+                                            .flex()
+                                            .flex_col()
+                                            .p(px(14.))
                                             .gap(px(6.))
+                                            .bg(rgb(if active { ACCENT_SOFT } else { PANEL }))
+                                            .border_color(rgb(if active { BLUE } else { BORDER }))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.profile_index = index;
+                                                cx.notify();
+                                            }))
                                             .child(
-                                                div()
-                                                    .flex_1()
-                                                    .min_w_0()
-                                                    .truncate()
-                                                    .text_size(px(12.))
-                                                    .font_semibold()
-                                                    .text_color(rgb(if active {
-                                                        BLUE
-                                                    } else {
-                                                        MUTED
-                                                    }))
-                                                    .child(title),
-                                            )
-                                            .child(self.badge(
-                                                if auto { "自動" } else { "手動" },
-                                                if auto { GREEN } else { MUTED },
-                                                if auto { 0x112a22 } else { PANEL_2 },
-                                            ))
-                                            .child(
-                                                div()
-                                                    .id(SharedString::from(format!(
-                                                        "profile-up-{index}"
-                                                    )))
-                                                    .w(px(20.))
-                                                    .h(px(20.))
-                                                    .flex()
+                                                h_flex()
                                                     .items_center()
-                                                    .justify_center()
-                                                    .rounded(px(6.))
-                                                    .text_size(px(11.))
-                                                    .text_color(rgb(if index == 0 {
-                                                        MUTED_2
-                                                    } else {
-                                                        MUTED
-                                                    }))
-                                                    .when(index > 0, |this| {
-                                                        this.cursor_pointer()
-                                                            .hover(|this| {
-                                                                this.bg(rgb(PANEL_2))
-                                                                    .text_color(rgb(TEXT))
+                                                    .gap(px(6.))
+                                                    .child(
+                                                        div()
+                                                            .flex_1()
+                                                            .min_w_0()
+                                                            .truncate()
+                                                            .text_size(px(12.))
+                                                            .font_semibold()
+                                                            .text_color(rgb(if active {
+                                                                BLUE
+                                                            } else {
+                                                                MUTED
+                                                            }))
+                                                            .child(title),
+                                                    )
+                                                    .child(self.badge(
+                                                        if auto { "自動" } else { "手動" },
+                                                        if auto { GREEN } else { MUTED },
+                                                        if auto { 0x112a22 } else { PANEL_2 },
+                                                    ))
+                                                    .child(
+                                                        div()
+                                                            .id(SharedString::from(format!(
+                                                                "profile-up-{index}"
+                                                            )))
+                                                            .w(px(20.))
+                                                            .h(px(20.))
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_center()
+                                                            .rounded(px(6.))
+                                                            .text_size(px(11.))
+                                                            .text_color(rgb(if index == 0 {
+                                                                MUTED_2
+                                                            } else {
+                                                                MUTED
+                                                            }))
+                                                            .when(index > 0, |this| {
+                                                                this.cursor_pointer()
+                                                                    .hover(|this| {
+                                                                        this.bg(rgb(PANEL_2))
+                                                                            .text_color(rgb(TEXT))
+                                                                    })
+                                                                    .on_click(cx.listener(
+                                                                        move |this, _, _, cx| {
+                                                                            this.move_profile(
+                                                                                index, -1, cx,
+                                                                            );
+                                                                            cx.stop_propagation();
+                                                                        },
+                                                                    ))
                                                             })
-                                                            .on_click(cx.listener(
-                                                                move |this, _, _, cx| {
-                                                                    this.move_profile(
-                                                                        index, -1, cx,
-                                                                    );
-                                                                    cx.stop_propagation();
+                                                            .child("↑"),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .id(SharedString::from(format!(
+                                                                "profile-down-{index}"
+                                                            )))
+                                                            .w(px(20.))
+                                                            .h(px(20.))
+                                                            .flex()
+                                                            .items_center()
+                                                            .justify_center()
+                                                            .rounded(px(6.))
+                                                            .text_size(px(11.))
+                                                            .text_color(rgb(
+                                                                if index + 1 == profile_count {
+                                                                    MUTED_2
+                                                                } else {
+                                                                    MUTED
                                                                 },
                                                             ))
-                                                    })
-                                                    .child("↑"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .id(SharedString::from(format!(
-                                                        "profile-down-{index}"
-                                                    )))
-                                                    .w(px(20.))
-                                                    .h(px(20.))
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .rounded(px(6.))
-                                                    .text_size(px(11.))
-                                                    .text_color(rgb(
-                                                        if index + 1 == profile_count {
-                                                            MUTED_2
-                                                        } else {
-                                                            MUTED
-                                                        },
-                                                    ))
-                                                    .when(index + 1 < profile_count, |this| {
-                                                        this.cursor_pointer()
+                                                            .when(
+                                                                index + 1 < profile_count,
+                                                                |this| {
+                                                                    this.cursor_pointer()
                                                             .hover(|this| {
                                                                 this.bg(rgb(PANEL_2))
                                                                     .text_color(rgb(TEXT))
@@ -219,42 +179,51 @@ impl App {
                                                                     cx.stop_propagation();
                                                                 },
                                                             ))
-                                                    })
-                                                    .child("↓"),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(10.))
-                                            .text_color(rgb(if active { MUTED } else { MUTED_2 }))
-                                            .child(meta),
-                                    )
-                                    .with_animation(
-                                        SharedString::from(format!(
-                                            "profile-card-{}-{active}",
-                                            profile.id
-                                        )),
-                                        Animation::new(MOTION_FAST)
-                                            .with_easing(ease_motion)
-                                            .with_max_fps(MOTION_FPS),
-                                        move |el, t| {
-                                            let (bg_from, bg_to) = if active {
-                                                (PANEL, ACCENT_SOFT)
-                                            } else {
-                                                (ACCENT_SOFT, PANEL)
-                                            };
-                                            let (border_from, border_to) = if active {
-                                                (BORDER, BLUE)
-                                            } else {
-                                                (BLUE, BORDER)
-                                            };
-                                            el.bg(rgb(lerp_color(bg_from, bg_to, t))).border_color(
-                                                rgb(lerp_color(border_from, border_to, t)),
+                                                                },
+                                                            )
+                                                            .child("↓"),
+                                                    ),
                                             )
-                                        },
-                                    )
-                            }),
-                        ))
+                                            .child(
+                                                div()
+                                                    .text_size(px(10.))
+                                                    .text_color(rgb(if active {
+                                                        MUTED
+                                                    } else {
+                                                        MUTED_2
+                                                    }))
+                                                    .child(meta),
+                                            )
+                                            .with_animation(
+                                                SharedString::from(format!(
+                                                    "profile-card-{}-{active}",
+                                                    profile.id
+                                                )),
+                                                Animation::new(MOTION_FAST)
+                                                    .with_easing(ease_motion)
+                                                    .with_max_fps(MOTION_FPS),
+                                                move |el, t| {
+                                                    let (bg_from, bg_to) = if active {
+                                                        (PANEL, ACCENT_SOFT)
+                                                    } else {
+                                                        (ACCENT_SOFT, PANEL)
+                                                    };
+                                                    let (border_from, border_to) = if active {
+                                                        (BORDER, BLUE)
+                                                    } else {
+                                                        (BLUE, BORDER)
+                                                    };
+                                                    el.bg(rgb(lerp_color(bg_from, bg_to, t)))
+                                                        .border_color(rgb(lerp_color(
+                                                            border_from,
+                                                            border_to,
+                                                            t,
+                                                        )))
+                                                },
+                                            )
+                                    },
+                                )),
+                        )
                         .child(
                             v_flex()
                                 .flex_1()
@@ -299,6 +268,51 @@ impl App {
                         ),
                 ),
         )
+    }
+
+    /// Small header row for the profile column. Rehomed from the deleted page
+    /// header; the add action keeps its original save/reload path.
+    fn profile_list_header(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        h_flex()
+            .flex_shrink_0()
+            .items_center()
+            .gap(px(8.))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(13.))
+                    .font_semibold()
+                    .text_color(rgb(TEXT))
+                    .child("プロファイル"),
+            )
+            .child(
+                Button::new("add-profile")
+                    .label("＋ 追加")
+                    .small()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let profile = CompressionProfile {
+                            name: format!("新規プロファイル {}", this.profiles.len() + 1),
+                            auto_enabled: false,
+                            ..CompressionProfile::default()
+                        };
+                        if let Err(error) = this.db.save_profile(&profile) {
+                            tracing::warn!(%error, "cannot add compression profile");
+                            this.message = Some(format!("プロファイルを追加できません: {error}"));
+                        }
+                        this.profiles = this.db.list_profiles().unwrap_or_else(|error| {
+                            tracing::warn!(%error, "cannot reload compression profiles");
+                            Vec::new()
+                        });
+                        this.profile_index = this
+                            .profiles
+                            .iter()
+                            .position(|item| item.id == profile.id)
+                            .unwrap_or(0);
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
     }
 
     fn profile_editor(

@@ -2,7 +2,7 @@
 //!
 //! Daemon commands live in `app::daemon`; screen dispatch lives in `ui::shell`.
 
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -23,22 +23,6 @@ impl App {
         v_flex()
             .flex_1()
             .min_h_0()
-            .child(self.screen_header(
-                "ダッシュボード",
-                "ライブラリ、圧縮キュー、ログ監視の状況をまとめて確認できます。".to_string(),
-                self.message.clone(),
-                vec![
-                    Button::new("dashboard-refresh")
-                        .label("再読込")
-                        .small()
-                        .ghost()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.reload_aux(cx);
-                            cx.notify();
-                        }))
-                        .into_any_element(),
-                ],
-            ))
             .child(
                 v_flex()
                     .flex_1()

@@ -1,5 +1,5 @@
-//! App shell: sidebar navigation, screen headers, global alerts, and the
-//! screen dispatch wrapper.
+//! App shell: sidebar navigation, global alerts, and the screen dispatch
+//! wrapper.
 //!
 //! `App::render` stays in `app.rs`; this module owns the chrome around the
 //! active screen and the card metrics shared by the grids.
@@ -820,60 +820,6 @@ impl App {
                     let to = sidebar_width(collapsed);
                     el.left(px(14. + from + (to - from) * t - 12.))
                 },
-            )
-            .into_any_element()
-    }
-
-    pub(crate) fn screen_header(
-        &self,
-        title: &'static str,
-        subtitle: String,
-        message: Option<String>,
-        actions: Vec<AnyElement>,
-    ) -> AnyElement {
-        h_flex()
-            .h(px(72.))
-            .flex_shrink_0()
-            .px(px(26.))
-            .gap(px(14.))
-            .items_center()
-            .border_b_1()
-            .border_color(rgb(BORDER))
-            .child(
-                v_flex()
-                    .flex_shrink_0()
-                    .gap(px(2.))
-                    .child(
-                        div()
-                            .text_size(px(24.))
-                            .font_semibold()
-                            .text_color(rgb(TEXT))
-                            .child(title),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(MUTED_2))
-                            .child(subtitle),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .when_some(message, |this, message| {
-                        this.text_size(px(10.))
-                            .text_color(rgb(AMBER))
-                            .truncate()
-                            .child(message)
-                    }),
-            )
-            .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .items_center()
-                    .gap(px(8.))
-                    .children(actions),
             )
             .into_any_element()
     }

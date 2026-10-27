@@ -28,12 +28,6 @@ impl App {
         v_flex()
             .flex_1()
             .min_h_0()
-            .child(self.screen_header(
-                "設定",
-                "ライブラリと起動オプション".to_string(),
-                self.message.clone(),
-                Vec::new(),
-            ))
             .child(
                 v_flex()
                     .flex_1()
