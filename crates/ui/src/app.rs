@@ -41,6 +41,7 @@ use crate::ui::actions::{
     CloseQuickLook, FocusSearch, OpenQuickLook, QuickLookNextFocus, QuickLookPrevFocus,
     ToggleInspector, ToggleSidebar, ViewerNextPhoto, ViewerPreviousPhoto,
 };
+use crate::ui::chrome::{RibbonTab, default_ribbon_tab};
 use crate::ui::shell::ambient_background;
 use crate::ui::theme::GLASS_WINDOW;
 use crate::update_view;
@@ -87,6 +88,8 @@ pub struct App {
     pub(crate) nav_epoch: u64,
     pub(crate) screen_epoch: u64,
     pub(crate) screen_direction: f32,
+    pub(crate) active_ribbon_tab: RibbonTab,
+    pub(crate) ribbon_collapsed: bool,
     pub(crate) render_epoch: u64,
     pub(crate) card_image_bounds: CardBoundsMap,
     pub(crate) inspector_preview_bounds: InspectorBounds,
@@ -295,6 +298,8 @@ impl App {
             nav_epoch: 0,
             screen_epoch: 0,
             screen_direction: 1.0,
+            active_ribbon_tab: default_ribbon_tab(Screen::Photos),
+            ribbon_collapsed: initial_settings.ui_ribbon_collapsed,
             render_epoch: 0,
             card_image_bounds: Rc::new(RefCell::new(HashMap::new())),
             inspector_preview_bounds: Rc::new(RefCell::new(None)),
@@ -478,10 +483,18 @@ impl Render for App {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.render_epoch = self.render_epoch.wrapping_add(1);
         self.guard_viewer_selection(window, cx);
-        let workspace = v_flex().flex_1().min_w_0().h_full();
+        let main = v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .gap(px(14.))
+            .child(self.chrome(window, cx))
+            .child(v_flex().flex_1().min_h_0().child(self.content(window, cx)));
         let root = h_flex()
             .relative()
             .size_full()
+            .p(px(14.))
+            .gap(px(14.))
             .bg(rgba(GLASS_WINDOW))
             .font_family("Noto Sans JP")
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
@@ -509,7 +522,7 @@ impl Render for App {
             }))
             .child(ambient_background())
             .child(self.sidebar(cx))
-            .child(workspace.child(self.content(window, cx)))
+            .child(main)
             .child(self.nav_tooltip())
             .child(self.rail_toggle(cx));
         let root = if self.quick_look_open {

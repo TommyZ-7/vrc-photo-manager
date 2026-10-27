@@ -17,6 +17,7 @@ use crate::app::{App, Screen};
 use crate::state::photo_browser::PhotoBrowser;
 use crate::state::preview::{preview_cache_dir, preview_key, should_request_preview};
 use crate::state::thumbnail::{decode_thumbnail, make_render_image, preview_render_image};
+use crate::state::viewer::ViewerOpenSource;
 use crate::ui::theme::{BG, scene_color, selection_range, toggle_selected_id};
 
 impl App {
@@ -342,6 +343,97 @@ impl App {
         } else {
             &mut self.library
         }
+    }
+
+    /// Selects every photo in the active grid. The current primary photo stays
+    /// primary when it is still present so the inspector does not jump.
+    pub(crate) fn select_all_photos(&mut self, cx: &mut Context<Self>) {
+        let ids: Vec<i64> = self
+            .photo_browser()
+            .index
+            .entries
+            .iter()
+            .map(|entry| entry.id)
+            .collect();
+        if ids.is_empty() {
+            self.clear_selection(cx);
+            return;
+        }
+        let primary = self
+            .selected
+            .filter(|selected| ids.contains(selected))
+            .unwrap_or(ids[0]);
+        self.selection_anchor = Some(ids[0]);
+        self.selected_ids = ids;
+        self.set_primary_photo(primary, cx);
+        cx.notify();
+    }
+
+    /// IDs the ribbon's bulk actions operate on. The primary selection is the
+    /// fallback while the multi-selection list is empty.
+    pub(crate) fn selected_action_ids(&self) -> Vec<i64> {
+        if self.selected_ids.is_empty() {
+            self.selected.into_iter().collect()
+        } else {
+            self.selected_ids.clone()
+        }
+    }
+
+    pub(crate) fn toggle_selected_favorite(&mut self, cx: &mut Context<Self>) {
+        let Some(photo) = self.selected_photo.as_ref() else {
+            return;
+        };
+        let id = photo.id;
+        let favorite = photo.is_favorite;
+        match self.db.set_favorite(id, !favorite) {
+            Ok(()) => self.load_selected_meta(id),
+            Err(error) => {
+                tracing::warn!(%error, photo_id = id, "cannot update favorite");
+                self.message = Some(format!("お気に入りを更新できません: {error}"));
+            }
+        }
+        cx.notify();
+    }
+
+    /// Opens the viewer details panel for the current photo. Shared by the
+    /// ribbon's tag and note commands.
+    fn show_selected_details(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selected_photo.is_none() {
+            return;
+        }
+        if !self.quick_look_open {
+            self.open_quick_look(window, cx, ViewerOpenSource::Inspector);
+        }
+        if self.quick_look_open && !self.quick_look_details_open {
+            self.toggle_quick_look_details(window, cx);
+        }
+    }
+
+    pub(crate) fn edit_selected_tags(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_selected_details(window, cx);
+        if !self.quick_look_open || !self.quick_look_details_open {
+            return;
+        }
+        let focus = self.tag_edit_input.read(cx).focus_handle(cx);
+        cx.defer_in(window, move |this, window, cx| {
+            if this.quick_look_open && this.quick_look_details_open {
+                window.focus(&focus, cx);
+            }
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn edit_selected_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(photo) = self.selected_photo.as_ref() else {
+            return;
+        };
+        let id = photo.id;
+        let note = photo.note.clone();
+        self.show_selected_details(window, cx);
+        if !self.quick_look_open || !self.quick_look_details_open {
+            return;
+        }
+        self.begin_note_edit(id, note, window, cx);
     }
 
     pub(crate) fn color_for(&self, photo: &Photo) -> u32 {

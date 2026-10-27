@@ -1,4 +1,5 @@
 pub(crate) mod actions;
+pub(crate) mod chrome;
 pub(crate) mod components;
 pub(crate) mod compression;
 pub(crate) mod dashboard;

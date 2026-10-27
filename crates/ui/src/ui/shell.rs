@@ -105,9 +105,17 @@ impl App {
             .py(px(16.))
             .px(px(12.))
             .gap(px(3.))
-            .bg(rgb(SIDEBAR))
-            .border_r_1()
-            .border_color(rgba(0xffffff14))
+            .bg(rgb(PANEL_SIDEBAR))
+            .rounded(px(22.))
+            .border_1()
+            .border_color(rgba(0xffffff1b))
+            .overflow_hidden()
+            .shadow(vec![
+                BoxShadow::new(px(0.), px(18.), rgba(0x00000047).into()).blur_radius(px(44.)),
+                BoxShadow::new(px(0.), px(1.), rgba(0xffffff10).into())
+                    .inset()
+                    .blur_radius(px(0.)),
+            ])
             .child(
                 h_flex()
                     .h(px(34.))
@@ -745,8 +753,8 @@ impl App {
 
         div()
             .absolute()
-            .left(px(86.))
-            .top(px(70.0 + nav_item_top(index)))
+            .left(px(100.))
+            .top(px(84.0 + nav_item_top(index)))
             .px(px(8.))
             .py(px(5.))
             .rounded(px(7.))
@@ -783,8 +791,8 @@ impl App {
 
         div()
             .absolute()
-            .top(px(18.))
-            .left(px(sidebar_width(collapsed) - 12.))
+            .top(px(32.))
+            .left(px(14. + sidebar_width(collapsed) - 12.))
             .child(
                 Button::new("rail-toggle")
                     .ghost()
@@ -810,7 +818,7 @@ impl App {
                 move |el, t| {
                     let from = sidebar_width(!collapsed);
                     let to = sidebar_width(collapsed);
-                    el.left(px(from + (to - from) * t - 12.))
+                    el.left(px(14. + from + (to - from) * t - 12.))
                 },
             )
             .into_any_element()

@@ -13,6 +13,9 @@ use vrc_photo_core::settings::CardSize;
 pub(crate) const BG: u32 = 0x07090d;
 pub(crate) const PANEL: u32 = 0x121722;
 pub(crate) const PANEL_2: u32 = 0x1a2130;
+/// Legacy sidebar fill, superseded by the opaque `PANEL_SIDEBAR` card. Kept as
+/// a named token for callers that still reference the original palette.
+#[allow(dead_code)]
 pub(crate) const SIDEBAR: u32 = 0x0d1119;
 
 // Window glass and the ambient backdrop. The low byte is the alpha channel, so
