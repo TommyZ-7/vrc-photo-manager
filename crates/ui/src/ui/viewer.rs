@@ -9,7 +9,7 @@ use gpui_kit::*;
 
 use crate::app::App;
 use crate::state::preview::preview_placeholder_label;
-use crate::state::viewer::morph_image_plan;
+use crate::state::viewer::{ViewerMorph, morph_image_plan};
 use crate::ui::components::{ButtonState, ButtonTone};
 use crate::ui::theme::*;
 
@@ -108,14 +108,7 @@ impl App {
                     .text_color(rgb(MUTED))
                     .child(photo.file_name.clone()),
             )
-            .child(details_button)
-            .with_animation(
-                ("viewer-topbar", self.quick_look_epoch),
-                Animation::new(MOTION_BASE)
-                    .with_easing(ease_motion)
-                    .with_max_fps(MOTION_FPS),
-                |el, t| el.relative().top(px(-8.0 * (1.0 - t))),
-            );
+            .child(details_button);
 
         let viewport = content_viewport(window);
         let box_state = self.viewer_box;
@@ -195,7 +188,7 @@ impl App {
             ("viewer-box", box_state.epoch),
             Animation::new(box_state.duration)
                 .with_easing(ease_motion)
-                .with_max_fps(MOTION_FPS),
+                .with_max_fps(self.motion_fps()),
             move |el, t| {
                 let (width, height) = box_state.size_at(t, viewport);
                 el.w(px(width)).h(px(height))
@@ -214,7 +207,7 @@ impl App {
                 MOTION_BASE
             })
             .with_easing(ease_motion)
-            .with_max_fps(MOTION_FPS),
+            .with_max_fps(self.motion_fps()),
             |el, _| el,
         );
         let image_area = div()
@@ -266,7 +259,7 @@ impl App {
                     MOTION_FAST
                 })
                 .with_easing(ease_motion)
-                .with_max_fps(MOTION_FPS),
+                .with_max_fps(self.motion_fps()),
                 |el, t| el.opacity(t).relative().top(px(6.0 * (1.0 - t))),
             );
             // The details column stays a fixed-width dock so the image geometry
@@ -295,7 +288,7 @@ impl App {
             ("viewer-panel", panel_state.epoch),
             Animation::new(panel_state.duration)
                 .with_easing(ease_motion)
-                .with_max_fps(MOTION_FPS),
+                .with_max_fps(self.motion_fps()),
             move |el, t| el.w(px(panel_state.width_at(t))).overflow_hidden(),
         );
 
@@ -318,16 +311,38 @@ impl App {
             .child(div().absolute().size_full().bg(rgba((color << 8) | 0x22)))
             .child(top_bar)
             .child(content)
-            .with_animation(
-                ("viewer", self.quick_look_epoch),
-                Animation::new(Duration::from_millis(240)).with_easing(ease_motion),
-                |el, t| el.opacity(t),
-            )
             .into_any_element()
     }
+}
 
-    pub(crate) fn viewer_morph_overlay(&self) -> AnyElement {
-        let Some(morph) = self.viewer_morph.as_ref() else {
+pub(crate) struct ViewerMorphView {
+    morph: Option<ViewerMorph>,
+    max_fps: f32,
+}
+
+impl ViewerMorphView {
+    pub(crate) fn new() -> Self {
+        Self {
+            morph: None,
+            max_fps: 60.0,
+        }
+    }
+
+    pub(crate) fn set_morph(
+        &mut self,
+        morph: Option<ViewerMorph>,
+        max_fps: f32,
+        cx: &mut Context<Self>,
+    ) {
+        self.morph = morph;
+        self.max_fps = max_fps;
+        cx.notify();
+    }
+}
+
+impl Render for ViewerMorphView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(morph) = self.morph.as_ref() else {
             // An in-flow empty slot would still take a root flex gap and
             // narrow the main column by 14px.
             return div().absolute().into_any_element();
@@ -363,7 +378,7 @@ impl App {
                 ("viewer-morph-frame", epoch),
                 Animation::new(MOTION_MORPH)
                     .with_easing(ease_motion)
-                    .with_max_fps(MOTION_FPS),
+                    .with_max_fps(self.max_fps),
                 move |el, t| {
                     let bounds = lerp_bounds(from, to, t);
                     let radius = start_radius + (end_radius - start_radius) * t;
@@ -391,7 +406,7 @@ impl App {
                     ("viewer-morph-backdrop", epoch),
                     Animation::new(MOTION_MORPH)
                         .with_easing(ease_motion)
-                        .with_max_fps(MOTION_FPS),
+                        .with_max_fps(self.max_fps),
                     move |el, t| el.opacity(backdrop_from * (1.0 - t)),
                 )
         });

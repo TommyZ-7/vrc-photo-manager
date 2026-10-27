@@ -415,7 +415,6 @@ impl App {
     /// Full rebuild used at startup: resets the grid animation state too.
     pub(crate) fn reload_all(&mut self, reset_scroll: bool, cx: &mut Context<Self>) {
         self.grid_epoch = self.grid_epoch.wrapping_add(1);
-        self.hovered_photo = None;
         self.reload_library(!reset_scroll, cx);
     }
 

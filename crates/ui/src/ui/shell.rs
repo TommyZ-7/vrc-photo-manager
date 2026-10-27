@@ -206,7 +206,7 @@ impl App {
                 Duration::from_millis(440)
             })
             .with_easing(ease_motion)
-            .with_max_fps(60.0),
+            .with_max_fps(self.motion_fps()),
             move |el, t| {
                 let from = sidebar_width(!collapsed);
                 let to = sidebar_width(collapsed);
@@ -533,7 +533,7 @@ impl App {
         let vertical_anim = || {
             Animation::new(vertical_duration)
                 .with_easing(ease_motion)
-                .with_max_fps(MOTION_FPS)
+                .with_max_fps(self.motion_fps())
         };
 
         let pill = div()
@@ -556,7 +556,7 @@ impl App {
             MOTION_SLOW
         })
         .with_easing(ease_motion)
-        .with_max_fps(MOTION_FPS);
+        .with_max_fps(self.motion_fps());
         let bar = div()
             .absolute()
             .left_0()
@@ -615,7 +615,7 @@ impl App {
         let color_anim = || {
             Animation::new(MOTION_FAST)
                 .with_easing(ease_motion)
-                .with_max_fps(MOTION_FPS)
+                .with_max_fps(self.motion_fps())
         };
 
         let icon_element = Icon::new(icon).with_size(px(17.)).with_animation(
@@ -674,7 +674,7 @@ impl App {
                 SharedString::from(format!("sidebar-label-{label}-{epoch}")),
                 Animation::new(reveal_duration)
                     .with_easing(ease_motion)
-                    .with_max_fps(60.0),
+                    .with_max_fps(self.motion_fps()),
                 move |el, t| {
                     el.w(px(sidebar_reveal_width(collapsed, t)))
                         .opacity(if collapsed { 1.0 - t } else { t })
@@ -691,7 +691,7 @@ impl App {
             MOTION_SLOW
         })
         .with_easing(ease_motion)
-        .with_max_fps(MOTION_FPS);
+        .with_max_fps(self.motion_fps());
         let content = h_flex()
             .w_full()
             .items_center()
@@ -764,7 +764,7 @@ impl App {
                 ("nav-tooltip", index),
                 Animation::new(MOTION_FAST)
                     .with_easing(ease_motion)
-                    .with_max_fps(MOTION_FPS),
+                    .with_max_fps(self.motion_fps()),
                 move |el, t| el.opacity(t).relative().left(px(-4.0 * (1.0 - t))),
             )
             .into_any_element()
@@ -833,7 +833,7 @@ impl App {
                     ("global-alert", index),
                     Animation::new(MOTION_BASE)
                         .with_easing(ease_motion)
-                        .with_max_fps(MOTION_FPS),
+                        .with_max_fps(self.motion_fps()),
                     |el, t| el.opacity(t).relative().top(px(-8.0 * (1.0 - t))),
                 )
                 .into_any_element()
@@ -905,7 +905,7 @@ impl App {
             MOTION_BASE
         })
         .with_easing(ease_motion)
-        .with_max_fps(MOTION_FPS);
+        .with_max_fps(self.motion_fps());
         let direction = self.screen_direction;
         let screen = v_flex().flex_1().min_h_0().child(screen).with_animation(
             ("screen-enter", self.screen_epoch),

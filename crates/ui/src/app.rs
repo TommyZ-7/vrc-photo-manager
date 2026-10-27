@@ -100,6 +100,7 @@ pub struct App {
     pub(crate) card_image_bounds: CardBoundsMap,
     pub(crate) inspector_preview_bounds: InspectorBounds,
     pub(crate) viewer_morph: Option<ViewerMorph>,
+    pub(crate) viewer_morph_view: Entity<crate::ui::viewer::ViewerMorphView>,
     pub(crate) viewer_morph_epoch: u64,
     pub(crate) viewer_return_source: Option<ViewerOpenSource>,
     pub(crate) viewer_nav_epoch: u64,
@@ -138,8 +139,6 @@ pub struct App {
     /// selected; otherwise the primary is always included.
     pub(crate) selected_ids: Vec<i64>,
     pub(crate) selection_anchor: Option<i64>,
-    pub(crate) selection_epoch: u64,
-    pub(crate) selection_changed_at: Option<Instant>,
     pub(crate) selected_photo: Option<Photo>,
     pub(crate) selected_players: Vec<PhotoPlayer>,
     pub(crate) selected_tags: Vec<String>,
@@ -147,8 +146,8 @@ pub struct App {
     pub(crate) compressed_ids: HashSet<i64>,
     pub(crate) duplicate_ids: HashSet<i64>,
     pub(crate) thumbnails: ThumbnailCache,
+    pub(crate) thumbnail_notify_pending: bool,
     pub(crate) grid_epoch: u64,
-    pub(crate) hovered_photo: Option<i64>,
     pub(crate) photo_grid_focus: FocusHandle,
     pub(crate) import_dialog_focus: FocusHandle,
     pub(crate) quick_look_open: bool,
@@ -238,6 +237,11 @@ pub(crate) fn any_overlay_open(
 }
 
 impl App {
+    /// Animation frame cap from settings. `0` disables throttling.
+    pub(crate) fn motion_fps(&self) -> f32 {
+        self.settings.ui_max_fps as f32
+    }
+
     pub(crate) fn overlay_open(&self) -> bool {
         any_overlay_open(
             self.quick_look_open,
@@ -352,6 +356,7 @@ impl App {
             card_image_bounds: Rc::new(RefCell::new(HashMap::new())),
             inspector_preview_bounds: Rc::new(RefCell::new(None)),
             viewer_morph: None,
+            viewer_morph_view: cx.new(|_| crate::ui::viewer::ViewerMorphView::new()),
             viewer_morph_epoch: 0,
             viewer_return_source: None,
             viewer_nav_epoch: 0,
@@ -393,8 +398,6 @@ impl App {
             selected: None,
             selected_ids: Vec::new(),
             selection_anchor: None,
-            selection_epoch: 0,
-            selection_changed_at: None,
             selected_photo: None,
             selected_players: Vec::new(),
             selected_tags: Vec::new(),
@@ -402,8 +405,8 @@ impl App {
             compressed_ids: HashSet::new(),
             duplicate_ids: HashSet::new(),
             thumbnails: ThumbnailCache::default(),
+            thumbnail_notify_pending: false,
             grid_epoch: 0,
-            hovered_photo: None,
             photo_grid_focus,
             import_dialog_focus,
             quick_look_open: false,
@@ -606,7 +609,7 @@ impl Render for App {
         } else {
             root
         };
-        root.child(self.viewer_morph_overlay())
+        root.child(self.viewer_morph_view.clone())
     }
 }
 

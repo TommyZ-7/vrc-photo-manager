@@ -294,7 +294,7 @@ impl App {
             "manual-compression-panel",
             Animation::new(MOTION_BASE)
                 .with_easing(ease_motion)
-                .with_max_fps(MOTION_FPS),
+                .with_max_fps(self.motion_fps()),
             |el, t| el.relative().top(px(10.0 * (1.0 - t))),
         );
         div()
@@ -317,7 +317,7 @@ impl App {
                 "manual-compression-scrim",
                 Animation::new(MOTION_FAST)
                     .with_easing(ease_motion)
-                    .with_max_fps(MOTION_FPS),
+                    .with_max_fps(self.motion_fps()),
                 |el, t| el.opacity(t),
             )
             .into_any_element()

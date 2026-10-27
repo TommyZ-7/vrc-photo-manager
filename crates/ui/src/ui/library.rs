@@ -199,7 +199,7 @@ impl App {
                 "selection-bar",
                 Animation::new(MOTION_FAST)
                     .with_easing(ease_motion)
-                    .with_max_fps(MOTION_FPS),
+                    .with_max_fps(self.motion_fps()),
                 |el, t| el.h(px(36.0 * t)).opacity(t),
             )
             .into_any_element()
@@ -623,7 +623,6 @@ impl App {
             self.request_thumbnail(photo, cx);
         }
         let color = self.color_for(photo);
-        let hovered = self.hovered_photo == Some(id);
         let card_radius = 13.0;
         let image_radius = inner_corner_radius(card_radius, 1.0);
         let meta_line = card_meta_line(
@@ -791,13 +790,14 @@ impl App {
                 rgba(0x66b3ff)
             } else if selected {
                 rgba(0x9fcaff)
-            } else if hovered {
-                rgba(0xffffff30)
             } else {
                 rgba(0xffffff16)
             })
             .bg(rgb(PANEL_DEEP))
             .cursor_pointer()
+            .when(!primary && !selected, |this| {
+                this.hover(|this| this.border_color(rgba(0xffffff30)))
+            })
             .child(thumb);
         if selected {
             card = card.shadow(vec![
@@ -808,19 +808,6 @@ impl App {
             card = card.child(info);
         }
         let card = card
-            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                // Hover listeners fire in reverse paint order, so the
-                // entering card must win over the leaving card's clear.
-                if *hovered {
-                    if this.hovered_photo != Some(id) {
-                        this.hovered_photo = Some(id);
-                        cx.notify();
-                    }
-                } else if this.hovered_photo == Some(id) {
-                    this.hovered_photo = None;
-                    cx.notify();
-                }
-            }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -885,7 +872,7 @@ impl App {
                     Duration::from_millis(300)
                 })
                 .with_easing(ease_motion)
-                .with_max_fps(60.0),
+                .with_max_fps(self.motion_fps()),
                 move |el, t| {
                     let from = if collapsed { column_width } else { 0.0 };
                     let to = if collapsed { 0.0 } else { column_width };
@@ -903,16 +890,6 @@ impl App {
         let column_width = inspector_column_width(content_width);
         let card_width = inspector_card_width(content_width);
         let preview_height = inspector_preview_height(content_height);
-        let transitioning = self
-            .selection_changed_at
-            .is_some_and(|at| at.elapsed() < Duration::from_millis(260));
-        if !transitioning {
-            // The cross-fade snapshot is only valid for the selection window.
-            // Keeping it would replay the old photo when the inspector remounts
-            // after a collapse or a viewer session.
-            self.previous_preview = None;
-            self.previous_color = None;
-        }
         let Some(photo) = self.selected_photo.as_ref() else {
             return v_flex()
                 .w(px(column_width))
@@ -948,9 +925,6 @@ impl App {
 
         let id = photo.id;
         let current_color = self.selected_color();
-        let previous_color = self.previous_color.unwrap_or(current_color);
-        let selection_epoch = self.selection_epoch;
-        let previous_preview = self.previous_preview.clone();
         let current_preview = self.preview.clone();
         let thumbnail = self.thumbnails.get(id);
         let compressed = self.compressed_ids.contains(&id);
@@ -964,11 +938,6 @@ impl App {
             .map(|player| player.display_name.clone())
             .collect::<Vec<_>>();
         let tags = self.selected_tags.clone();
-        let fade = || {
-            Animation::new(Duration::from_millis(260))
-                .with_easing(ease_motion)
-                .with_max_fps(60.0)
-        };
         let section = |label: &'static str| {
             div()
                 .text_size(px(10.))
@@ -1011,15 +980,7 @@ impl App {
             .size_full()
             .rounded(px(inner_corner_radius(18.0, 1.0)))
             .bg(rgb(current_color));
-        card = card.child(if transitioning {
-            tint_layer
-                .with_animation(("inspector-tint", selection_epoch), fade(), move |el, t| {
-                    el.bg(rgb(lerp_color(previous_color, current_color, t)))
-                })
-                .into_any_element()
-        } else {
-            tint_layer.into_any_element()
-        });
+        card = card.child(tint_layer.into_any_element());
 
         // 2. The selected 256 px thumbnail, upscaled and softened by opacity.
         //    The layer matches the card bounds so its rounded corners can be
@@ -1072,22 +1033,7 @@ impl App {
             .shadow(vec![
                 BoxShadow::new(px(0.), px(16.), rgba(0x000000a6).into()).blur_radius(px(32.)),
             ]);
-        if transitioning {
-            if let Some(previous) = previous_preview.as_ref() {
-                preview_frame = preview_frame.child(image_layer(previous.clone()).with_animation(
-                    ("inspector-preview-old", selection_epoch),
-                    fade(),
-                    move |el, t| el.opacity(1.0 - t),
-                ));
-            }
-            if let Some(preview) = current_preview.as_ref() {
-                preview_frame = preview_frame.child(image_layer(preview.clone()).with_animation(
-                    ("inspector-preview-new", selection_epoch),
-                    fade(),
-                    move |el, t| el.opacity(t),
-                ));
-            }
-        } else if let Some(preview) = current_preview.as_ref() {
+        if let Some(preview) = current_preview.as_ref() {
             preview_frame = preview_frame.child(image_layer(preview.clone()));
         }
         if current_preview.is_none() {

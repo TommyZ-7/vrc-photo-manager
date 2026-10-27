@@ -5,7 +5,7 @@
 //! background decode queues.
 
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::ButtonVariant;
@@ -82,6 +82,27 @@ impl App {
                 // The selected photo may have been refused earlier because
                 // every in-flight slot was busy; a freed slot is its retry.
                 this.retry_pinned_thumbnail(cx);
+                this.notify_thumbnail_loaded(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Coalesces bursts of thumbnail decodes into one UI notification. A
+    /// 16 ms window keeps scrolling responsive without one full-app render per
+    /// decoded thumbnail.
+    fn notify_thumbnail_loaded(&mut self, cx: &mut Context<Self>) {
+        if self.thumbnail_notify_pending {
+            return;
+        }
+        self.thumbnail_notify_pending = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(16))
+                .await;
+            this.update(cx, |this, cx| {
+                this.thumbnail_notify_pending = false;
                 cx.notify();
             })
             .ok();
@@ -135,8 +156,6 @@ impl App {
             self.previous_color = previous_color;
             self.preview_key = None;
             self.preview_attempt = None;
-            self.selection_epoch = self.selection_epoch.wrapping_add(1);
-            self.selection_changed_at = Some(Instant::now());
             self.load_selected_meta(id);
             self.request_preview(cx);
         } else {

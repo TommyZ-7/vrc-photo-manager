@@ -100,7 +100,6 @@ pub(crate) const MOTION_FAST: Duration = Duration::from_millis(160);
 pub(crate) const MOTION_BASE: Duration = Duration::from_millis(220);
 pub(crate) const MOTION_SLOW: Duration = Duration::from_millis(300);
 pub(crate) const MOTION_MORPH: Duration = Duration::from_millis(340);
-pub(crate) const MOTION_FPS: f32 = 60.0;
 pub(crate) const SCREEN_SLIDE: f32 = 14.0;
 pub(crate) const VIEWER_NAV_SLIDE: f32 = 28.0;
 

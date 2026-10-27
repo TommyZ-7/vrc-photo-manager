@@ -870,13 +870,6 @@ impl App {
                         format_bytes(self.db.derivative_bytes().unwrap_or(0)),
                     )),
             )
-            .with_animation(
-                ("profile-editor", self.profile_index),
-                Animation::new(MOTION_FAST)
-                    .with_easing(ease_motion)
-                    .with_max_fps(MOTION_FPS),
-                |el, t| el.opacity(t).relative().top(px(4.0 * (1.0 - t))),
-            )
     }
 
     /// Small stat block inside the editor card's footer.

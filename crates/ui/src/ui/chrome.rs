@@ -194,7 +194,7 @@ impl App {
                     Duration::from_millis(220)
                 })
                 .with_easing(ease_motion)
-                .with_max_fps(60.0),
+                .with_max_fps(self.motion_fps()),
                 move |el, t| {
                     let height = if collapsed {
                         body_height * (1.0 - t)

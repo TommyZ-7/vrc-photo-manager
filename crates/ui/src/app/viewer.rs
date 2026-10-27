@@ -20,6 +20,14 @@ use crate::ui::theme::{
 };
 
 impl App {
+    fn set_viewer_morph(&mut self, morph: Option<ViewerMorph>, cx: &mut Context<Self>) {
+        let max_fps = self.motion_fps();
+        self.viewer_morph = morph.clone();
+        self.viewer_morph_view.update(cx, |view, cx| {
+            view.set_morph(morph, max_fps, cx);
+        });
+    }
+
     pub(crate) fn open_quick_look(
         &mut self,
         window: &mut Window,
@@ -34,7 +42,7 @@ impl App {
             .as_ref()
             .is_some_and(|morph| morph.closing)
         {
-            self.viewer_morph = None;
+            self.set_viewer_morph(None, cx);
             self.viewer_morph_epoch = self.viewer_morph_epoch.wrapping_add(1);
         }
         self.message = None;
@@ -108,7 +116,7 @@ impl App {
                     .as_ref()
                     .map(|photo| self.color_for(photo))
                     .unwrap_or(0);
-                self.viewer_morph = Some(ViewerMorph {
+                let morph = ViewerMorph {
                     epoch,
                     started_at: Instant::now(),
                     from,
@@ -120,7 +128,8 @@ impl App {
                     closing: false,
                     fade_only: false,
                     backdrop_from: 1.0,
-                });
+                };
+                self.set_viewer_morph(Some(morph), cx);
                 cx.spawn(async move |this, cx| {
                     cx.background_executor()
                         .timer(MOTION_MORPH + Duration::from_millis(60))
@@ -132,7 +141,7 @@ impl App {
                                 .as_ref()
                                 .is_some_and(|morph| !morph.closing)
                         {
-                            this.viewer_morph = None;
+                            this.set_viewer_morph(None, cx);
                             cx.notify();
                         }
                     })
@@ -207,7 +216,7 @@ impl App {
         if !cx.reduce_motion() && (thumbnail.is_some() || preview.is_some()) {
             self.viewer_morph_epoch = self.viewer_morph_epoch.wrapping_add(1);
             let epoch = self.viewer_morph_epoch;
-            self.viewer_morph = Some(ViewerMorph {
+            let morph = ViewerMorph {
                 epoch,
                 started_at: Instant::now(),
                 from,
@@ -219,7 +228,8 @@ impl App {
                 closing: true,
                 fade_only,
                 backdrop_from,
-            });
+            };
+            self.set_viewer_morph(Some(morph), cx);
             cx.spawn(async move |this, cx| {
                 cx.background_executor()
                     .timer(MOTION_MORPH + Duration::from_millis(60))
@@ -231,7 +241,7 @@ impl App {
                             .as_ref()
                             .is_some_and(|morph| morph.closing)
                     {
-                        this.viewer_morph = None;
+                        this.set_viewer_morph(None, cx);
                         cx.notify();
                     }
                 })
@@ -239,7 +249,7 @@ impl App {
             })
             .detach();
         } else {
-            self.viewer_morph = None;
+            self.set_viewer_morph(None, cx);
         }
         self.viewer_return_source = None;
         self.quick_look_open = false;
@@ -262,7 +272,7 @@ impl App {
         self.quick_look_open = false;
         self.delete_armed = None;
         self.note_edit_id = None;
-        self.viewer_morph = None;
+        self.set_viewer_morph(None, cx);
         self.viewer_morph_epoch = self.viewer_morph_epoch.wrapping_add(1);
         self.viewer_return_source = None;
         if let Some(id) = self.selected.take() {
@@ -314,7 +324,7 @@ impl App {
             .as_ref()
             .is_some_and(|morph| !morph.closing)
         {
-            self.viewer_morph = None;
+            self.set_viewer_morph(None, cx);
         }
         let next = step_index(
             self.quick_look_index,
@@ -376,7 +386,7 @@ impl App {
             .as_ref()
             .is_some_and(|morph| !morph.closing)
         {
-            self.viewer_morph = None;
+            self.set_viewer_morph(None, cx);
         }
         let current_width = self.viewer_panel.current_width();
         let viewport = content_viewport(window);

@@ -221,6 +221,83 @@ impl App {
                                     .text_size(px(13.))
                                     .font_semibold()
                                     .text_color(rgb(TEXT))
+                                    .child("パフォーマンス"),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap(px(6.))
+                                    .child(
+                                        div()
+                                            .text_size(px(12.))
+                                            .text_color(rgb(TEXT))
+                                            .child("アニメーションの最大FPS"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(10.))
+                                            .text_color(rgb(MUTED_2))
+                                            .child("0（無制限）はモニタのリフレッシュレートまで描画します"),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .flex_wrap()
+                                            .gap(px(4.))
+                                            .children(
+                                                [
+                                                    (30u32, "30"),
+                                                    (60, "60"),
+                                                    (120, "120"),
+                                                    (144, "144"),
+                                                    (240, "240"),
+                                                    (0, "無制限"),
+                                                ]
+                                                .into_iter()
+                                                .map(|(fps, label)| {
+                                                    let active =
+                                                        self.settings.ui_max_fps == fps;
+                                                    div()
+                                                        .id(SharedString::from(format!(
+                                                            "max-fps-{fps}"
+                                                        )))
+                                                        .px(px(10.))
+                                                        .py(px(5.))
+                                                        .rounded(px(8.))
+                                                        .bg(if active {
+                                                            rgb(ACCENT_SOFT)
+                                                        } else {
+                                                            rgba(0x00000000)
+                                                        })
+                                                        .text_size(px(11.))
+                                                        .font_medium()
+                                                        .text_color(if active {
+                                                            rgb(BLUE)
+                                                        } else {
+                                                            rgb(MUTED)
+                                                        })
+                                                        .cursor_pointer()
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                this.set_max_fps(fps, cx)
+                                                            },
+                                                        ))
+                                                        .child(label)
+                                                }),
+                                            ),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        glass_panel()
+                            .flex()
+                            .flex_col()
+                            .p(px(14.))
+                            .gap(px(12.))
+                            .rounded(px(17.))
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .font_semibold()
+                                    .text_color(rgb(TEXT))
                                     .child("起動と圧縮"),
                             )
                             .child(self.setting_switch(
@@ -352,6 +429,17 @@ impl App {
                     .w(px(8.))
                     .child(Scrollbar::vertical(&self.settings_scroll)),
             )
+    }
+
+    pub(crate) fn set_max_fps(&mut self, fps: u32, cx: &mut Context<Self>) {
+        if self.settings.ui_max_fps == fps {
+            return;
+        }
+        self.settings.ui_max_fps = fps;
+        if let Err(error) = self.settings.save(&self.db) {
+            tracing::warn!(%error, "cannot save max fps");
+        }
+        cx.notify();
     }
 
     pub(crate) fn set_card_size(&mut self, size: CardSize, cx: &mut Context<Self>) {
