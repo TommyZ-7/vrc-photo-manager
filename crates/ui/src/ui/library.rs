@@ -1097,8 +1097,9 @@ impl App {
             .relative()
             .w_full()
             .flex_shrink_0()
-            // The spec fixes the preview height (168 / 118 short); the image
-            // is cropped to cover the 16:10 frame.
+            // The spec fixes the preview height (168 / 118 short); the frame
+            // width follows the inspector column, so the visible ratio varies.
+            // The image covers the frame rather than letterboxing.
             .h(px(preview_height))
             .overflow_hidden()
             .rounded(px(12.))

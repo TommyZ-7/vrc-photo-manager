@@ -27,21 +27,16 @@ pub(crate) const BG_AMBIENT_B: u32 = 0xff56b51f; // rgba(255,86,181,0.12)
 pub(crate) const BG_AMBIENT_C: u32 = 0x1ecab21a; // rgba(30,202,178,0.10)
 
 // Opaque panel surfaces. Every card, sidebar, header, and inner row keeps the
-// ambient glass behind it instead of letting it show through. `PANEL_CARD` is
-// live now; the rest ship with the palette they belong to and are consumed by
-// the Task 14-17 shell refit.
-#[allow(dead_code)]
+// ambient glass behind it instead of letting it show through. Tokens that no
+// screen consumes yet keep `dead_code` allows until they are adopted.
 pub(crate) const PANEL_SIDEBAR: u32 = 0x0b111b;
 #[allow(dead_code)]
 pub(crate) const PANEL_SIDEBAR_DEEP: u32 = 0x080d15;
-#[allow(dead_code)]
 pub(crate) const PANEL_HEADER: u32 = 0x101725;
 pub(crate) const PANEL_CARD: u32 = 0x0d1420;
-#[allow(dead_code)]
 pub(crate) const PANEL_INNER: u32 = 0x111927;
 #[allow(dead_code)]
 pub(crate) const PANEL_INNER_DEEP: u32 = 0x0c1320;
-#[allow(dead_code)]
 pub(crate) const PANEL_DEEP: u32 = 0x0a1019;
 #[allow(dead_code)]
 pub(crate) const PANEL_RAISED: u32 = 0x172132;
@@ -96,6 +91,15 @@ pub(crate) const COMPRESSION_PROFILE_WIDTH: f32 = 280.0;
 pub(crate) const VIEWER_DETAILS_WIDTH: f32 = 380.0;
 pub(crate) const VIEWER_TOP_BAR: f32 = 56.0;
 pub(crate) const VIEWER_PAD: f32 = 24.0;
+/// Breathing room between a modal card and the window content edge.
+pub(crate) const DIALOG_VIEWPORT_MARGIN: f32 = 24.0;
+
+/// Maximum height of a modal card inside the content area. The manual
+/// compression sheet's 720 px design height is the cap; shorter windows keep a
+/// 24 px margin so the card never touches (and clips at) the window edge.
+pub(crate) fn dialog_max_height(content_height: f32) -> f32 {
+    (content_height - DIALOG_VIEWPORT_MARGIN * 2.0).clamp(0.0, 720.0)
+}
 pub(crate) const CARD_INTRO_SECS: f32 = 0.6;
 pub(crate) const CARD_STAGGER_SECS: f32 = 0.04;
 pub(crate) const CARD_STAGGER_MAX: usize = 8;
@@ -338,8 +342,9 @@ pub(crate) fn inspector_card_width(window_width: f32) -> f32 {
     (inspector_column_width(window_width) - INSPECTOR_MARGIN).max(0.0)
 }
 
-/// The inspector preview is a fixed 16:10 frame; short windows use the mock's
-/// compact height.
+/// The inspector preview keeps the spec's fixed heights (168 px, 118 px in a
+/// short window). The frame width follows the responsive inspector card, so
+/// the visible ratio approaches 16:10 without being derived from it.
 pub(crate) fn inspector_preview_height(window_height: f32) -> f32 {
     if window_height <= 760.0 {
         INSPECTOR_SHORT_PREVIEW_HEIGHT
@@ -737,6 +742,17 @@ mod tests {
         assert_eq!(inspector_card_width(1280.0) + INSPECTOR_MARGIN, 276.0);
         assert_eq!(inspector_preview_height(760.0), 118.0);
         assert_eq!(inspector_preview_height(761.0), 168.0);
+    }
+
+    #[test]
+    fn dialog_height_stays_inside_the_content_area() {
+        // The minimum 1080x700 content area leaves a 24 px margin per side.
+        assert_eq!(dialog_max_height(700.0), 652.0);
+        // Regular windows keep the sheet's 720 px design height.
+        assert_eq!(dialog_max_height(820.0), 720.0);
+        // Degenerate sizes never produce a negative height.
+        assert_eq!(dialog_max_height(0.0), 0.0);
+        assert_eq!(dialog_max_height(40.0), 0.0);
     }
 
     #[test]

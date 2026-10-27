@@ -54,6 +54,24 @@ pub(crate) fn glass_panel() -> Div {
         ])
 }
 
+/// Opaque modal card surface for the import and manual-compression dialogs.
+///
+/// Same fill rule as [`glass_panel`] — the scrim behind may dim the window, but
+/// the foreground card itself never lets the glass show through. The larger
+/// 20 px radius and header-to-card gradient follow the mock's modal card;
+/// focus order and dialog actions stay in the caller.
+pub(crate) fn dialog_panel() -> Div {
+    glass_panel()
+        .flex()
+        .flex_col()
+        .rounded(px(20.))
+        .bg(linear_gradient(
+            180.,
+            linear_color_stop(rgb(PANEL_HEADER), 0.),
+            linear_color_stop(rgb(PANEL_CARD), 1.),
+        ))
+}
+
 pub(crate) fn chip(label: &str, active: bool) -> Div {
     div()
         .px(px(8.))

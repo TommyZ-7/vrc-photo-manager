@@ -460,7 +460,7 @@ impl App {
     }
 
     pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
-        if self.quick_look_open {
+        if self.overlay_open() {
             return;
         }
         self.sidebar_collapsed = !self.sidebar_collapsed;
@@ -477,7 +477,7 @@ impl App {
     }
 
     pub(crate) fn toggle_inspector(&mut self, cx: &mut Context<Self>) {
-        if self.quick_look_open {
+        if self.overlay_open() {
             return;
         }
         self.inspector_collapsed = !self.inspector_collapsed;
@@ -513,7 +513,7 @@ impl App {
     }
 
     pub(crate) fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.quick_look_open {
+        if self.overlay_open() {
             return;
         }
         self.switch_screen(Screen::Search, cx);

@@ -229,7 +229,26 @@ pub struct App {
     pub(crate) demo_assets: Option<DemoAssets>,
 }
 
+/// True while any full-window overlay owns the input tree: the quick-look
+/// viewer, the manual-compression dialog, or the import dialog. Global
+/// shortcuts that reshape the shell must not fire through these layers.
+pub(crate) fn any_overlay_open(
+    quick_look_open: bool,
+    manual_compression_open: bool,
+    import_dialog_open: bool,
+) -> bool {
+    quick_look_open || manual_compression_open || import_dialog_open
+}
+
 impl App {
+    pub(crate) fn overlay_open(&self) -> bool {
+        any_overlay_open(
+            self.quick_look_open,
+            self.manual_compress.is_some(),
+            self.import_dialog.is_some(),
+        )
+    }
+
     pub(crate) fn new(
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -544,7 +563,7 @@ impl Render for App {
             root
         };
         let root = if self.manual_compress.is_some() {
-            root.child(self.manual_compression_overlay(cx))
+            root.child(self.manual_compression_overlay(window, cx))
         } else {
             root
         };
@@ -554,5 +573,18 @@ impl Render for App {
             root
         };
         root.child(self.viewer_morph_overlay())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::any_overlay_open;
+
+    #[test]
+    fn overlay_guard_covers_the_viewer_and_both_modals() {
+        assert!(!any_overlay_open(false, false, false));
+        assert!(any_overlay_open(true, false, false));
+        assert!(any_overlay_open(false, true, false));
+        assert!(any_overlay_open(false, false, true));
     }
 }

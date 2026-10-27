@@ -101,6 +101,39 @@ pub(crate) fn titlebar_sync_visible(window_width: f32) -> bool {
     window_width > NARROW_CHROME_WIDTH
 }
 
+/// Chrome values derived from the window's content extent.
+///
+/// X11 client-side decorations report the outer window through
+/// `viewport_size`, so the responsive thresholds must see the same inner size
+/// the gallery and inspector use. `client_inset` is 0 on Wayland and on X11
+/// without CSD.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ChromeLayout {
+    pub(crate) content_width: f32,
+    pub(crate) content_height: f32,
+    pub(crate) ribbon_height: f32,
+    pub(crate) ribbon_metrics: RibbonMetrics,
+    pub(crate) status_visible: bool,
+    pub(crate) sync_visible: bool,
+}
+
+pub(crate) fn chrome_layout(
+    viewport_width: f32,
+    viewport_height: f32,
+    client_inset: f32,
+) -> ChromeLayout {
+    let content_width = window_content_extent(viewport_width, client_inset);
+    let content_height = window_content_extent(viewport_height, client_inset);
+    ChromeLayout {
+        content_width,
+        content_height,
+        ribbon_height: ribbon_height(content_height),
+        ribbon_metrics: ribbon_metrics(content_height),
+        status_visible: ribbon_status_visible(content_width),
+        sync_visible: titlebar_sync_visible(content_width),
+    }
+}
+
 /// Compact sync text for the 46px titlebar. The full
 /// `daemon_sync_label` (including the supervisor) stays in the Photos header
 /// and on the Dashboard; the titlebar only needs the age or transport state.
@@ -190,11 +223,15 @@ impl App {
     /// Header card: titlebar line plus the ribbon body. Sits above the
     /// transparent content area with a 14px gap.
     pub(crate) fn chrome(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let window_height = f32::from(window.bounds().size.height);
-        let window_width = f32::from(window.bounds().size.width);
-        let titlebar = self.titlebar(titlebar_sync_visible(window_width), cx);
-        let body =
-            (!self.ribbon_collapsed).then(|| self.ribbon_body(window_height, window_width, cx));
+        let viewport = window.viewport_size();
+        let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
+        let layout = chrome_layout(
+            f32::from(viewport.width),
+            f32::from(viewport.height),
+            client_inset,
+        );
+        let titlebar = self.titlebar(layout.sync_visible, cx);
+        let body = (!self.ribbon_collapsed).then(|| self.ribbon_body(layout, cx));
 
         v_flex()
             .flex_shrink_0()
@@ -394,14 +431,9 @@ impl App {
             .into_any_element()
     }
 
-    fn ribbon_body(
-        &mut self,
-        window_height: f32,
-        window_width: f32,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let show_status = ribbon_status_visible(window_width);
-        let metrics = ribbon_metrics(window_height);
+    fn ribbon_body(&mut self, layout: ChromeLayout, cx: &mut Context<Self>) -> AnyElement {
+        let show_status = layout.status_visible;
+        let metrics = layout.ribbon_metrics;
         let page = match self.active_ribbon_tab {
             RibbonTab::Home => self.ribbon_home(show_status, metrics, cx),
             RibbonTab::Photo => self.ribbon_photo(metrics, cx),
@@ -409,7 +441,7 @@ impl App {
         };
         h_flex()
             .w_full()
-            .h(px(ribbon_height(window_height)))
+            .h(px(layout.ribbon_height))
             .flex_shrink_0()
             .items_stretch()
             .overflow_hidden()
@@ -1126,8 +1158,8 @@ fn status_note(icon: IconName, text: String, warning: bool) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHROME_ICONS, RibbonTab, compression_status_note, default_ribbon_tab, is_bundled,
-        ribbon_height, ribbon_metrics, ribbon_selection_label, ribbon_status_visible,
+        CHROME_ICONS, RibbonTab, chrome_layout, compression_status_note, default_ribbon_tab,
+        is_bundled, ribbon_height, ribbon_metrics, ribbon_selection_label, ribbon_status_visible,
         titlebar_sync_label, titlebar_sync_visible,
     };
     use crate::app::Screen;
@@ -1219,6 +1251,43 @@ mod tests {
     fn status_note_hides_at_1180() {
         assert!(!ribbon_status_visible(1180.0));
         assert!(ribbon_status_visible(1181.0));
+    }
+
+    #[test]
+    fn chrome_layout_uses_the_content_extent() {
+        // The requested 1080x700 is the content size; X11 reports the outer
+        // 1120x740 window, and the 20 px CSD inset on each edge is removed.
+        let minimum = chrome_layout(1120.0, 740.0, 20.0);
+        assert_eq!(minimum.content_width, 1080.0);
+        assert_eq!(minimum.content_height, 700.0);
+        assert_eq!(minimum.ribbon_height, 62.0);
+        assert_eq!(minimum.ribbon_metrics, ribbon_metrics(700.0));
+        assert!(!minimum.status_visible);
+        assert!(!minimum.sync_visible);
+
+        // 1280x820 content keeps the regular ribbon and both status readouts.
+        let regular = chrome_layout(1320.0, 860.0, 20.0);
+        assert_eq!(regular.content_width, 1280.0);
+        assert_eq!(regular.content_height, 820.0);
+        assert_eq!(regular.ribbon_height, 68.0);
+        assert!(regular.status_visible);
+        assert!(regular.sync_visible);
+
+        let large = chrome_layout(1480.0, 940.0, 20.0);
+        assert_eq!(large.content_width, 1440.0);
+        assert_eq!(large.ribbon_height, 68.0);
+        assert!(large.status_visible);
+        assert!(large.sync_visible);
+    }
+
+    #[test]
+    fn chrome_layout_thresholds_sit_on_the_content_edge() {
+        assert_eq!(chrome_layout(1200.0, 760.0, 0.0).ribbon_height, 62.0);
+        assert_eq!(chrome_layout(1200.0, 761.0, 0.0).ribbon_height, 68.0);
+        assert!(!chrome_layout(1180.0, 820.0, 0.0).status_visible);
+        assert!(chrome_layout(1181.0, 820.0, 0.0).status_visible);
+        assert!(!chrome_layout(1180.0, 820.0, 0.0).sync_visible);
+        assert!(chrome_layout(1181.0, 820.0, 0.0).sync_visible);
     }
 
     #[test]
