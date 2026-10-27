@@ -1202,8 +1202,11 @@ impl Db {
     // ---------- compression profiles ----------
 
     pub fn save_profile(&self, profile: &CompressionProfile) -> Result<()> {
-        let sort_order = Self::next_sort_order(&self.conn)?;
-        Self::write_profile(&self.conn, profile, sort_order)
+        let tx = self.conn.unchecked_transaction()?;
+        let sort_order = Self::next_sort_order(&tx)?;
+        Self::write_profile(&tx, profile, sort_order)?;
+        tx.commit()?;
+        Ok(())
     }
 
     fn next_sort_order(conn: &Connection) -> Result<i64> {
