@@ -62,7 +62,7 @@ pub(crate) const CARD_META_LINE_HEIGHT: f32 = 15.0;
 /// [`GRID_GAP`].
 pub(crate) const CARD_HOVER_SLACK: f32 = 4.0;
 pub(crate) const GRID_GAP: f32 = 14.0;
-pub(crate) const INSPECTOR_MARGIN: f32 = 16.0;
+pub(crate) const INSPECTOR_MARGIN: f32 = 0.0;
 pub(crate) const INSPECTOR_PREVIEW_HEIGHT: f32 = 168.0;
 pub(crate) const INSPECTOR_SHORT_PREVIEW_HEIGHT: f32 = 118.0;
 /// Shell padding: 14px around the window and between the sidebar, header, and
@@ -740,10 +740,10 @@ mod tests {
         assert_eq!(inspector_column_width(1080.0), 254.0);
         assert_eq!(inspector_column_width(1280.0), 276.0);
         assert_eq!(inspector_column_width(1440.0), 298.0);
-        assert_eq!(inspector_card_width(1080.0), 238.0);
-        assert_eq!(inspector_card_width(1280.0), 260.0);
-        assert_eq!(inspector_card_width(1440.0), 282.0);
-        assert_eq!(inspector_card_width(1280.0) + INSPECTOR_MARGIN, 276.0);
+        assert_eq!(inspector_card_width(1080.0), 254.0);
+        assert_eq!(inspector_card_width(1280.0), 276.0);
+        assert_eq!(inspector_card_width(1440.0), 298.0);
+        assert_eq!(inspector_card_width(1280.0), inspector_column_width(1280.0));
         assert_eq!(inspector_preview_height(760.0), 118.0);
         assert_eq!(inspector_preview_height(761.0), 168.0);
     }
