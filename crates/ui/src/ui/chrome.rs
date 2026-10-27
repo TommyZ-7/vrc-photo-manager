@@ -55,6 +55,38 @@ pub(crate) fn ribbon_height(window_height: f32) -> f32 {
     if window_height <= 760.0 { 62.0 } else { 68.0 }
 }
 
+/// Ribbon metrics for the current window height. The regular 68px body has
+/// room for 44px buttons; the 62px body uses the mock's short mode (38/19px
+/// buttons, smaller group label and padding) so no label or button clips.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RibbonMetrics {
+    pub(crate) large_height: f32,
+    pub(crate) small_height: f32,
+    pub(crate) group_label: f32,
+    pub(crate) padding: f32,
+    pub(crate) small_gap: f32,
+}
+
+pub(crate) fn ribbon_metrics(window_height: f32) -> RibbonMetrics {
+    if ribbon_height(window_height) <= 62.0 {
+        RibbonMetrics {
+            large_height: 38.0,
+            small_height: 19.0,
+            group_label: 9.0,
+            padding: 3.0,
+            small_gap: 1.0,
+        }
+    } else {
+        RibbonMetrics {
+            large_height: 44.0,
+            small_height: 21.0,
+            group_label: 10.0,
+            padding: 4.0,
+            small_gap: 2.0,
+        }
+    }
+}
+
 /// §8.2: the ribbon's right-hand status note disappears at 1180 px and below.
 pub(crate) fn ribbon_status_visible(window_width: f32) -> bool {
     window_width > 1180.0
@@ -71,6 +103,50 @@ pub(crate) fn ribbon_selection_label(selected: usize, total: i64, bytes: u64) ->
             format_bytes(bytes)
         )
     }
+}
+
+/// Every icon chrome renders. `gpui_kit::assets::Assets` embeds only the icons
+/// in `gpui-kit-assets-0.8.0/default-icons.txt`; the full `IconName` catalog is
+/// much larger and unbundled variants paint nothing without an error. Keep this
+/// list in sync with every icon passed to [`chrome_icon`].
+const CHROME_ICONS: &[IconName] = &[
+    IconName::Asterisk,
+    IconName::Calendar,
+    IconName::Bell,
+    IconName::ChevronDown,
+    IconName::ChevronUp,
+    IconName::Copy,
+    IconName::Replace,
+    IconName::RefreshCw,
+    IconName::FolderOpen,
+    IconName::RotateCw,
+    IconName::PanelRight,
+    IconName::GalleryVerticalEnd,
+    IconName::CircleAlert,
+    IconName::Check,
+    IconName::Close,
+    IconName::Star,
+    IconName::Maximize,
+    IconName::BookOpen,
+    IconName::FileText,
+    IconName::Delete,
+    IconName::Minimize,
+    IconName::Play,
+    IconName::LayoutDashboard,
+    IconName::ChartPie,
+    IconName::CircleCheck,
+];
+
+fn is_bundled(name: IconName) -> bool {
+    gpui_kit::assets::Assets::get(name.path().as_ref()).is_some()
+}
+
+fn chrome_icon(name: IconName) -> Icon {
+    debug_assert!(
+        CHROME_ICONS.contains(&name) && is_bundled(name),
+        "chrome icon {name:?} is not listed or not in the bundled gpui-kit asset set"
+    );
+    Icon::new(name)
 }
 
 impl App {
@@ -131,7 +207,7 @@ impl App {
                     .blur_radius(px(0.)),
             ])
             .child(
-                Icon::new(IconName::Aperture)
+                chrome_icon(IconName::Asterisk)
                     .with_size(px(13.))
                     .text_color(rgb(0xffffff)),
             );
@@ -192,7 +268,7 @@ impl App {
             .gap(px(4.))
             .items_center()
             .child(
-                Icon::new(IconName::Clock)
+                chrome_icon(IconName::Calendar)
                     .with_size(px(11.))
                     .text_color(rgb(MUTED_2)),
             )
@@ -246,7 +322,7 @@ impl App {
                     .justify_center()
                     .rounded(px(6.))
                     .text_color(rgb(MUTED_2))
-                    .child(Icon::new(IconName::Bell).with_size(px(14.)))
+                    .child(chrome_icon(IconName::Bell).with_size(px(14.)))
                     .when(has_message, |this| {
                         this.child(
                             div()
@@ -286,10 +362,11 @@ impl App {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let show_status = ribbon_status_visible(window_width);
+        let metrics = ribbon_metrics(window_height);
         let page = match self.active_ribbon_tab {
-            RibbonTab::Home => self.ribbon_home(show_status, cx),
-            RibbonTab::Photo => self.ribbon_photo(cx),
-            RibbonTab::Compression => self.ribbon_compression(show_status, cx),
+            RibbonTab::Home => self.ribbon_home(show_status, metrics, cx),
+            RibbonTab::Photo => self.ribbon_photo(metrics, cx),
+            RibbonTab::Compression => self.ribbon_compression(show_status, metrics, cx),
         };
         h_flex()
             .w_full()
@@ -301,28 +378,36 @@ impl App {
             .into_any_element()
     }
 
-    fn ribbon_home(&mut self, show_status: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn ribbon_home(
+        &mut self,
+        show_status: bool,
+        metrics: RibbonMetrics,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let import_group = ribbon_group(
             vec![
                 large_button(
                     "ribbon-import-copy",
                     "コピー取込",
-                    IconName::FolderPlus,
+                    IconName::Copy,
                     RibbonLook::Normal,
+                    metrics,
                     cx,
                     |this, window, cx| this.open_import_dialog(ImportMode::Copy, window, cx),
                 ),
                 large_button(
                     "ribbon-import-move",
                     "移動取込",
-                    IconName::FolderInput,
+                    IconName::Replace,
                     RibbonLook::Normal,
+                    metrics,
                     cx,
                     |this, window, cx| this.open_import_dialog(ImportMode::Move, window, cx),
                 ),
             ],
             "取り込み",
             false,
+            metrics,
         );
 
         let reload = large_button(
@@ -330,6 +415,7 @@ impl App {
             "再読込",
             IconName::RefreshCw,
             RibbonLook::Normal,
+            metrics,
             cx,
             |this, _, cx| {
                 if matches!(this.screen, Screen::Photos | Screen::Search) {
@@ -348,6 +434,7 @@ impl App {
             } else {
                 RibbonLook::Normal
             },
+            metrics,
             cx,
             |this, _, cx| match this.settings.photo_roots.first() {
                 Some(root) => {
@@ -365,8 +452,9 @@ impl App {
         let rebuild = small_button(
             "ribbon-rebuild-index",
             "索引を再構築",
-            IconName::Database,
+            IconName::RotateCw,
             RibbonLook::Normal,
+            metrics,
             cx,
             |this, _, cx| this.request_daemon_rescan(cx),
         );
@@ -376,13 +464,14 @@ impl App {
                 v_flex()
                     .flex_shrink_0()
                     .justify_center()
-                    .gap(px(2.))
+                    .gap(px(metrics.small_gap))
                     .child(open_folder)
                     .child(rebuild)
                     .into_any_element(),
             ],
             "ライブラリ",
             false,
+            metrics,
         );
 
         let inspector_group = (self.screen == Screen::Photos).then(|| {
@@ -396,11 +485,13 @@ impl App {
                     } else {
                         RibbonLook::Active
                     },
+                    metrics,
                     cx,
                     |this, _, cx| this.toggle_inspector(cx),
                 )],
                 "表示",
                 false,
+                metrics,
             )
         });
 
@@ -416,13 +507,14 @@ impl App {
                 if self.message.is_some() {
                     IconName::CircleAlert
                 } else {
-                    IconName::Layers
+                    IconName::GalleryVerticalEnd
                 },
                 status,
                 self.message.is_some(),
             )],
             "現在の状態",
             true,
+            metrics,
         );
 
         h_flex()
@@ -435,31 +527,33 @@ impl App {
             .into_any_element()
     }
 
-    fn ribbon_photo(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn ribbon_photo(&mut self, metrics: RibbonMetrics, cx: &mut Context<Self>) -> AnyElement {
         let has_selection = self.selected_photo.is_some();
         let select_group = ribbon_group(
             vec![
                 large_button(
                     "ribbon-select-all",
                     "すべて選択",
-                    IconName::ListChecks,
+                    IconName::Check,
                     if self.photo_browser_empty() {
                         RibbonLook::Disabled
                     } else {
                         RibbonLook::Normal
                     },
+                    metrics,
                     cx,
                     |this, _, cx| this.select_all_photos(cx),
                 ),
                 large_button(
                     "ribbon-clear-selection",
                     "選択解除",
-                    IconName::SquareDashed,
+                    IconName::Close,
                     if self.selected_ids.is_empty() {
                         RibbonLook::Disabled
                     } else {
                         RibbonLook::Normal
                     },
+                    metrics,
                     cx,
                     |this, _, cx| this.clear_selection(cx),
                 ),
@@ -478,12 +572,14 @@ impl App {
                     } else {
                         RibbonLook::Normal
                     },
+                    metrics,
                     cx,
                     |this, _, cx| this.toggle_selected_favorite(cx),
                 ),
             ],
             "選択",
             false,
+            metrics,
         );
 
         let detail_group = ribbon_group(
@@ -493,6 +589,7 @@ impl App {
                     "全画面",
                     IconName::Maximize,
                     selection_look(has_selection),
+                    metrics,
                     cx,
                     |this, window, cx| {
                         this.open_quick_look(window, cx, ViewerOpenSource::Inspector)
@@ -501,8 +598,9 @@ impl App {
                 large_button(
                     "ribbon-tags",
                     "タグ",
-                    IconName::Tag,
+                    IconName::BookOpen,
                     selection_look(has_selection),
+                    metrics,
                     cx,
                     |this, window, cx| this.edit_selected_tags(window, cx),
                 ),
@@ -511,12 +609,14 @@ impl App {
                     "メモ",
                     IconName::FileText,
                     selection_look(has_selection),
+                    metrics,
                     cx,
                     |this, window, cx| this.edit_selected_note(window, cx),
                 ),
             ],
             "詳細",
             false,
+            metrics,
         );
 
         let armed = self
@@ -527,7 +627,7 @@ impl App {
                 large_button(
                     "ribbon-trash",
                     "ゴミ箱へ",
-                    IconName::Trash,
+                    IconName::Delete,
                     if !has_selection {
                         RibbonLook::Disabled
                     } else if armed {
@@ -535,14 +635,16 @@ impl App {
                     } else {
                         RibbonLook::Normal
                     },
+                    metrics,
                     cx,
                     |this, _, cx| this.trash_selected(cx),
                 ),
                 large_button(
                     "ribbon-manual-compress",
                     "圧縮",
-                    IconName::WandSparkles,
+                    IconName::Minimize,
                     selection_look(!self.selected_action_ids().is_empty()),
+                    metrics,
                     cx,
                     |this, _, cx| {
                         let ids = this.selected_action_ids();
@@ -552,6 +654,7 @@ impl App {
             ],
             "整理",
             false,
+            metrics,
         );
 
         h_flex()
@@ -563,7 +666,12 @@ impl App {
             .into_any_element()
     }
 
-    fn ribbon_compression(&mut self, show_status: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn ribbon_compression(
+        &mut self,
+        show_status: bool,
+        metrics: RibbonMetrics,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let has_selection = !self.selected_action_ids().is_empty();
         let waiting = self.waiting_job_count;
         let failed = self.failed_job_count;
@@ -572,12 +680,13 @@ impl App {
                 large_button(
                     "ribbon-compress-selection",
                     "手動圧縮",
-                    IconName::WandSparkles,
+                    IconName::Minimize,
                     if has_selection {
                         RibbonLook::Primary
                     } else {
                         RibbonLook::Disabled
                     },
+                    metrics,
                     cx,
                     |this, _, cx| {
                         let ids = this.selected_action_ids();
@@ -593,6 +702,7 @@ impl App {
                     } else {
                         RibbonLook::Disabled
                     },
+                    metrics,
                     cx,
                     |this, window, cx| this.request_release_waiting_jobs(window, cx),
                 ),
@@ -605,12 +715,14 @@ impl App {
                     } else {
                         RibbonLook::Disabled
                     },
+                    metrics,
                     cx,
                     |this, _, cx| this.retry_all_failed_jobs(cx),
                 ),
             ],
             "実行",
             false,
+            metrics,
         );
 
         let queue_group = ribbon_group(
@@ -618,22 +730,25 @@ impl App {
                 large_button(
                     "ribbon-open-queue",
                     "キュー",
-                    IconName::Layers,
+                    IconName::LayoutDashboard,
                     RibbonLook::Normal,
+                    metrics,
                     cx,
                     |this, _, cx| this.switch_screen(Screen::Dashboard, cx),
                 ),
                 large_button(
                     "ribbon-open-status",
                     "状態",
-                    IconName::Gauge,
+                    IconName::ChartPie,
                     RibbonLook::Normal,
+                    metrics,
                     cx,
                     |this, _, cx| this.switch_screen(Screen::Dashboard, cx),
                 ),
             ],
             "キュー",
             false,
+            metrics,
         );
 
         let auto = if self.settings.auto_compress {
@@ -653,12 +768,13 @@ impl App {
         };
         let status_group = ribbon_group(
             vec![status_note(
-                IconName::Shield,
+                IconName::CircleCheck,
                 format!("{auto} · {profile} · {policy}"),
                 false,
             )],
             "現在の設定",
             true,
+            metrics,
         );
 
         h_flex()
@@ -734,16 +850,21 @@ fn collapse_button(collapsed: bool, cx: &mut Context<App>) -> AnyElement {
         .hover(|this| this.bg(rgba(0xffffff0a)).text_color(rgb(TEXT)))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_click(cx.listener(|this, _, _, cx| this.toggle_ribbon_collapsed(cx)))
-        .child(Icon::new(icon).with_size(px(14.)))
+        .child(chrome_icon(icon).with_size(px(14.)))
         .into_any_element()
 }
 
-fn ribbon_group(items: Vec<AnyElement>, label: &'static str, grow: bool) -> AnyElement {
+fn ribbon_group(
+    items: Vec<AnyElement>,
+    label: &'static str,
+    grow: bool,
+    metrics: RibbonMetrics,
+) -> AnyElement {
     h_flex()
         .flex_shrink_0()
         .when(grow, |this| this.flex_1().min_w_0())
         .items_stretch()
-        .py(px(4.))
+        .py(px(metrics.padding))
         .px(px(10.))
         .border_r_1()
         .border_color(rgba(0xffffff0d))
@@ -764,7 +885,7 @@ fn ribbon_group(items: Vec<AnyElement>, label: &'static str, grow: bool) -> AnyE
                     div()
                         .pl(px(2.))
                         .font_family("monospace")
-                        .text_size(px(10.))
+                        .text_size(px(metrics.group_label))
                         .text_color(rgb(MUTED_2))
                         .whitespace_nowrap()
                         .child(label),
@@ -808,6 +929,7 @@ fn large_button(
     label: &'static str,
     icon: IconName,
     look: RibbonLook,
+    metrics: RibbonMetrics,
     cx: &mut Context<App>,
     on_click: impl Fn(&mut App, &mut Window, &mut Context<App>) + 'static,
 ) -> AnyElement {
@@ -826,11 +948,11 @@ fn large_button(
 
     let mut button = div()
         .id(id)
-        .h(px(44.))
+        .h(px(metrics.large_height))
         .min_w(px(50.))
         .flex_shrink_0()
         .px(px(6.))
-        .py(px(2.))
+        .py(px(if metrics.large_height <= 38.0 { 1. } else { 2. }))
         .flex()
         .flex_col()
         .items_center()
@@ -844,7 +966,7 @@ fn large_button(
         .text_color(fg)
         .whitespace_nowrap()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(Icon::new(icon).with_size(px(18.)).text_color(if enabled {
+        .child(chrome_icon(icon).with_size(px(18.)).text_color(if enabled {
             if active || primary {
                 rgb(BLUE)
             } else {
@@ -877,6 +999,7 @@ fn small_button(
     label: &'static str,
     icon: IconName,
     look: RibbonLook,
+    metrics: RibbonMetrics,
     cx: &mut Context<App>,
     on_click: impl Fn(&mut App, &mut Window, &mut Context<App>) + 'static,
 ) -> AnyElement {
@@ -884,7 +1007,7 @@ fn small_button(
     let active = look.active();
     let mut button = h_flex()
         .id(id)
-        .h(px(21.))
+        .h(px(metrics.small_height))
         .min_w(px(110.))
         .flex_shrink_0()
         .px(px(7.))
@@ -907,7 +1030,7 @@ fn small_button(
         .whitespace_nowrap()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(
-            Icon::new(icon)
+            chrome_icon(icon)
                 .with_size(px(12.))
                 .text_color(rgb(if !enabled {
                     MUTED_2
@@ -940,7 +1063,7 @@ fn status_note(icon: IconName, text: String, warning: bool) -> AnyElement {
         .gap(px(6.))
         .items_center()
         .child(
-            Icon::new(icon)
+            chrome_icon(icon)
                 .with_size(px(13.))
                 .text_color(rgb(if warning { AMBER } else { MUTED_2 })),
         )
@@ -958,7 +1081,8 @@ fn status_note(icon: IconName, text: String, warning: bool) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use super::{
-        RibbonTab, default_ribbon_tab, ribbon_height, ribbon_selection_label, ribbon_status_visible,
+        CHROME_ICONS, RibbonTab, default_ribbon_tab, is_bundled, ribbon_height, ribbon_metrics,
+        ribbon_selection_label, ribbon_status_visible,
     };
     use crate::app::Screen;
 
@@ -983,6 +1107,36 @@ mod tests {
         assert_eq!(ribbon_height(700.0), 62.0);
         assert_eq!(ribbon_height(760.0), 62.0);
         assert_eq!(ribbon_height(761.0), 68.0);
+    }
+
+    #[test]
+    fn short_ribbon_metrics_fit_the_62px_body() {
+        let short = ribbon_metrics(700.0);
+        assert_eq!(short.large_height, 38.0);
+        assert_eq!(short.small_height, 19.0);
+        assert_eq!(short.group_label, 9.0);
+        assert_eq!(short.padding, 3.0);
+        // Two stacked small buttons stay close to one large button row.
+        assert!(short.small_height * 2.0 + short.small_gap <= short.large_height + 3.0);
+        // Group row + one label line + vertical padding fits the 62px body
+        // without clipping the label.
+        assert!(short.large_height + short.group_label * 1.4 + short.padding * 2.0 <= 62.0);
+
+        let regular = ribbon_metrics(820.0);
+        assert_eq!(regular.large_height, 44.0);
+        assert_eq!(regular.small_height, 21.0);
+        assert_eq!(regular.group_label, 10.0);
+        assert_eq!(regular.padding, 4.0);
+    }
+
+    #[test]
+    fn every_chrome_icon_is_bundled() {
+        for &name in CHROME_ICONS {
+            assert!(
+                is_bundled(name),
+                "chrome icon {name:?} is missing from gpui_kit::assets::Assets"
+            );
+        }
     }
 
     #[test]
