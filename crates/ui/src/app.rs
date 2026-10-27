@@ -1,8 +1,10 @@
 pub(crate) mod cli;
 pub(crate) mod compression;
 pub(crate) mod daemon;
+pub(crate) mod import;
 pub(crate) mod photos;
 pub(crate) mod search;
+pub(crate) mod viewer;
 
 pub(crate) use cli::LaunchOptions;
 
