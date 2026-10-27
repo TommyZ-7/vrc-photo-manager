@@ -74,6 +74,7 @@ pub(crate) fn morph_image_plan(
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct ViewerMorph {
     pub(crate) epoch: u64,
     pub(crate) started_at: Instant,

@@ -18,11 +18,14 @@ use vrc_photo_core::model::Photo;
 use crate::app::App;
 use crate::app::Screen;
 use crate::app::cli::log_timing;
-use crate::state::photo_browser::{PAGE_SIZE, anchor_photo_id, list_scroll_top, row_for_photo};
+use crate::app::daemon::open_path;
+use crate::state::photo_browser::{
+    PAGE_SIZE, anchor_photo_id, first_visible_photo, list_scroll_top, row_for_photo, visible_month,
+};
 use crate::state::preview::preview_placeholder_label;
 use crate::state::viewer::ViewerOpenSource;
 use crate::state::year_rail::format_captured_month;
-use crate::ui::components::{ButtonState, ButtonTone, chip, glass_panel};
+use crate::ui::components::{ButtonState, ButtonTone, glass_panel};
 use crate::ui::theme::*;
 use crate::ui::year_rail::{YearRail, YearRailLabels};
 
@@ -65,7 +68,7 @@ impl App {
     }
 
     fn gallery_card(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let mut card = v_flex()
+        v_flex()
             .relative()
             .flex_1()
             .min_w_0()
@@ -82,39 +85,35 @@ impl App {
                     .inset()
                     .blur_radius(px(0.)),
             ])
-            .child(self.gallery_header(cx));
-        if self.gallery_filters_open {
-            card = card.child(self.gallery_filter_row(cx));
-        }
-        card.child(self.photo_grid(false, window, cx))
+            .child(self.gallery_header(window, cx))
+            .child(self.photo_grid(false, window, cx))
             .into_any_element()
     }
 
-    fn gallery_header(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn gallery_header(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> AnyElement {
         let entries = &self.library.index.entries;
         let total = entries.len();
-        let (month, month_count) = match entries.first() {
-            Some(first) => {
-                let count = entries
-                    .iter()
-                    .filter(|entry| entry.captured_month == first.captured_month)
-                    .count();
-                (format_captured_month(first.captured_month), count)
-            }
-            None => ("写真なし".to_string(), 0),
-        };
-        let filters_open = self.gallery_filters_open;
-        let filter_button = Button::new("gallery-filter")
-            .label("フィルター")
-            .small()
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.gallery_filters_open = !this.gallery_filters_open;
-                cx.notify();
-            }));
-        let filter_button = if filters_open {
-            filter_button.secondary()
+        let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
+        let width = window_content_extent(f32::from(window.viewport_size().width), client_inset);
+        let metrics = library_grid_metrics(
+            width,
+            self.sidebar_collapsed,
+            self.inspector_collapsed,
+            self.settings.ui_card_size,
+            self.settings.ui_card_show_world,
+            self.settings.ui_card_show_date || self.settings.ui_card_show_size,
+        );
+        let first_visible = first_visible_photo(
+            list_scroll_top(&self.library.scroll),
+            metrics.columns,
+            metrics.row_height,
+            total,
+        );
+        let (month, month_count) = if total == 0 {
+            ("写真なし".to_string(), 0)
         } else {
-            filter_button.ghost()
+            let (month, count) = visible_month(entries, first_visible);
+            (format_captured_month(month), count)
         };
 
         h_flex()
@@ -152,31 +151,6 @@ impl App {
                     ),
             )
             .child(div().flex_1())
-            .child(filter_button)
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .whitespace_nowrap()
-                    .text_size(px(10.))
-                    .text_color(rgb(MUTED_2))
-                    .child("並び: 新しい順"),
-            )
-            .into_any_element()
-    }
-
-    fn gallery_filter_row(&mut self, _cx: &mut Context<Self>) -> AnyElement {
-        h_flex()
-            .flex_shrink_0()
-            .h(px(34.))
-            .px(px(GALLERY_PAD_X))
-            .gap(px(6.))
-            .items_center()
-            .border_b_1()
-            .border_color(rgba(0xffffff0f))
-            .child(chip("ワールド", true))
-            .child(chip("プレイヤー", false))
-            .child(chip("日時", false))
-            .child(chip("タグ", false))
             .into_any_element()
     }
 
@@ -226,7 +200,7 @@ impl App {
                 "selection-bar",
                 Animation::new(MOTION_FAST)
                     .with_easing(ease_motion)
-                    .with_max_fps(MOTION_FPS),
+                    .with_max_fps(self.motion_fps()),
                 |el, t| el.h(px(36.0 * t)).opacity(t),
             )
             .into_any_element()
@@ -467,7 +441,6 @@ impl App {
                             Some(photo) => {
                                 line = line.child(this.photo_card(
                                     photo.as_ref(),
-                                    photo_index,
                                     image_height,
                                     card_width,
                                     cx,
@@ -488,8 +461,7 @@ impl App {
         .w_full()
         .min_w_0()
         .min_h_0();
-        // The gallery body padding is shared by both screens; the first row's
-        // -4px hover lift fits inside GALLERY_PAD_TOP.
+        // The gallery body padding is shared by both screens.
 
         // The wrapper stays mounted (and relative) so the year rail can
         // overlay the list without remounting it.
@@ -628,7 +600,6 @@ impl App {
     fn photo_card(
         &mut self,
         photo: &Photo,
-        grid_index: usize,
         image_height: f32,
         card_width: Option<f32>,
         cx: &mut Context<Self>,
@@ -652,17 +623,15 @@ impl App {
             self.request_thumbnail(photo, cx);
         }
         let color = self.color_for(photo);
-        let hovered = self.hovered_photo == Some(id);
-        let intro_total =
-            CARD_INTRO_SECS + grid_index.min(CARD_STAGGER_MAX) as f32 * CARD_STAGGER_SECS;
-        let intro_started =
-            (grid_index < 24).then(|| *self.intro_seen.entry(id).or_insert_with(Instant::now));
-        let intro = intro_started.is_some_and(|started| {
-            Instant::now().duration_since(started).as_secs_f32() < intro_total
-        });
-        let grid_epoch = self.grid_epoch;
         let card_radius = 13.0;
         let image_radius = inner_corner_radius(card_radius, 1.0);
+        let meta_line = card_meta_line(
+            show_date,
+            show_size,
+            &photo.captured_at_local,
+            format_bytes(photo.effective_file_size()),
+        );
+        let has_info = show_world || meta_line.is_some();
 
         let mut thumb = div()
             .relative()
@@ -671,17 +640,24 @@ impl App {
             .overflow_hidden()
             .bg(rgb(color))
             .rounded_tl(px(image_radius))
-            .rounded_tr(px(image_radius));
+            .rounded_tr(px(image_radius))
+            .when(!has_info, |this| {
+                this.rounded_bl(px(image_radius))
+                    .rounded_br(px(image_radius))
+            });
         if let Some(image) = thumbnail {
-            thumb = thumb.child(
-                gpui_kit::img(image)
-                    .object_fit(ObjectFit::Cover)
-                    .size_full()
-                    // GPUI clips overflow to a rectangle, so the image has to
-                    // carry the rounded silhouette itself.
-                    .rounded_tl(px(image_radius))
-                    .rounded_tr(px(image_radius)),
-            );
+            let image = gpui_kit::img(image)
+                .object_fit(ObjectFit::Cover)
+                .size_full()
+                // GPUI clips overflow to a rectangle, so the image has to
+                // carry the rounded silhouette itself.
+                .rounded_tl(px(image_radius))
+                .rounded_tr(px(image_radius))
+                .when(!has_info, |this| {
+                    this.rounded_bl(px(image_radius))
+                        .rounded_br(px(image_radius))
+                });
+            thumb = thumb.child(image);
         }
         let bounds_map = self.card_image_bounds.clone();
         let bounds_frame = self.render_epoch;
@@ -707,44 +683,36 @@ impl App {
             } else {
                 AMBER
             };
-            thumb = thumb
-                .child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .right_0()
-                        .bottom_0()
-                        .h(px(56.))
-                        .bg(linear_gradient(
-                            180.,
-                            linear_color_stop(rgba(0x07090d00), 0.),
-                            linear_color_stop(rgba(0x07090dcc), 1.),
-                        )),
-                )
-                .child(
-                    h_flex()
-                        .absolute()
-                        .left(px(9.))
-                        .bottom(px(8.))
-                        .gap(px(5.))
-                        .items_center()
-                        .child(div().size(px(5.)).rounded_full().bg(rgb(status_color)))
-                        .child(
-                            div()
-                                .text_size(px(9.))
-                                .font_medium()
-                                .text_color(rgb(status_color))
-                                .child(if replaced {
-                                    "圧縮版のみ"
-                                } else if duplicate {
-                                    "重複"
-                                } else if compressed {
-                                    "圧縮済"
-                                } else {
-                                    "未圧縮"
-                                }),
-                        ),
-                );
+            thumb = thumb.child(
+                h_flex()
+                    .absolute()
+                    .left(px(9.))
+                    .bottom(px(8.))
+                    .px(px(6.))
+                    .py(px(3.))
+                    .rounded(px(6.))
+                    .bg(rgb(PANEL_DEEP))
+                    .border_1()
+                    .border_color(rgba(0xffffff1a))
+                    .gap(px(5.))
+                    .items_center()
+                    .child(div().size(px(5.)).rounded_full().bg(rgb(status_color)))
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .font_medium()
+                            .text_color(rgb(status_color))
+                            .child(if replaced {
+                                "圧縮版のみ"
+                            } else if duplicate {
+                                "重複"
+                            } else if compressed {
+                                "圧縮済"
+                            } else {
+                                "未圧縮"
+                            }),
+                    ),
+            );
         }
         thumb = thumb.when(selected, |this| {
             this.child(
@@ -781,13 +749,6 @@ impl App {
             )
         });
 
-        let meta_line = card_meta_line(
-            show_date,
-            show_size,
-            &photo.captured_at_local,
-            format_bytes(photo.effective_file_size()),
-        );
-        let has_info = show_world || meta_line.is_some();
         let mut info = v_flex()
             .min_w_0()
             .px(px(9.))
@@ -834,6 +795,9 @@ impl App {
             })
             .bg(rgb(PANEL_DEEP))
             .cursor_pointer()
+            .when(!primary && !selected, |this| {
+                this.hover(|this| this.border_color(rgba(0xffffff30)))
+            })
             .child(thumb);
         if selected {
             card = card.shadow(vec![
@@ -844,21 +808,22 @@ impl App {
             card = card.child(info);
         }
         let card = card
-            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                // Hover listeners fire in reverse paint order, so the
-                // entering card must win over the leaving card's clear.
-                if *hovered {
-                    if this.hovered_photo != Some(id) {
-                        this.hovered_photo = Some(id);
-                        cx.notify();
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.handle_photo_press(id, event.modifiers, cx);
+                    if this.screen == Screen::Photos {
+                        window.focus(&this.photo_grid_focus, cx);
+                    } else {
+                        let handle = this.world_input.read(cx).focus_handle(cx);
+                        window.focus(&handle, cx);
                     }
-                } else if this.hovered_photo == Some(id) {
-                    this.hovered_photo = None;
-                    cx.notify();
-                }
-            }))
+                }),
+            )
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                this.handle_photo_click(id, event, cx);
+                // Selection happens on mouse-down so a few pixels of movement
+                // still count as a click. Do not repeat it here: Ctrl/Cmd-click
+                // would toggle twice and cancel itself out.
                 if this.screen == Screen::Photos {
                     window.focus(&this.photo_grid_focus, cx);
                 } else {
@@ -873,48 +838,17 @@ impl App {
                 {
                     this.open_quick_look(window, cx, ViewerOpenSource::Card);
                 }
-            }))
-            .with_animation(
-                SharedString::from(format!("card-hover-{id}-{hovered}")),
-                Animation::new(Duration::from_millis(180)).with_easing(ease_motion),
-                move |el, t| {
-                    let offset = if hovered { -4.0 * t } else { -4.0 * (1.0 - t) };
-                    el.relative().top(px(offset))
-                },
-            );
+            }));
 
-        // The intro wrapper is the flex item; keep the hover animation inside
-        // it so changing `hovered` does not remount the intro state. Keep the
-        // wrapper mounted for the card's lifetime: removing it when the intro
-        // ends would change the hover animation's ancestor path and remount it,
-        // causing a 4 px settle without a hover.
-        //
-        // Library and Search cells use the computed fixed width so a capped
-        // preset leaves row space empty (left-aligned) instead of stretching.
+        // Library and Search cells use the computed fixed width so a preset
+        // never stretches a card beyond the width its image was sized for.
         let cell = div().relative().min_w_0().child(card);
         let cell = match card_width {
             Some(width) => cell.w(px(width)).flex_shrink_0(),
             None => cell.flex_1(),
         };
 
-        cell.with_animation(
-            SharedString::from(format!("card-intro-{grid_epoch}-{id}")),
-            Animation::new(if intro {
-                Duration::from_secs_f32(intro_total)
-            } else {
-                Duration::ZERO
-            })
-            .with_max_fps(60.0),
-            move |el, t| {
-                if intro {
-                    let value = stagger_value(t, grid_index);
-                    el.opacity(value).relative().top(px(14.0 * (1.0 - value)))
-                } else {
-                    el
-                }
-            },
-        )
-        .into_any_element()
+        cell.into_any_element()
     }
 
     fn inspector_column(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -935,7 +869,7 @@ impl App {
                     Duration::from_millis(300)
                 })
                 .with_easing(ease_motion)
-                .with_max_fps(60.0),
+                .with_max_fps(self.motion_fps()),
                 move |el, t| {
                     let from = if collapsed { column_width } else { 0.0 };
                     let to = if collapsed { 0.0 } else { column_width };
@@ -953,22 +887,11 @@ impl App {
         let column_width = inspector_column_width(content_width);
         let card_width = inspector_card_width(content_width);
         let preview_height = inspector_preview_height(content_height);
-        let transitioning = self
-            .selection_changed_at
-            .is_some_and(|at| at.elapsed() < Duration::from_millis(260));
-        if !transitioning {
-            // The cross-fade snapshot is only valid for the selection window.
-            // Keeping it would replay the old photo when the inspector remounts
-            // after a collapse or a viewer session.
-            self.previous_preview = None;
-            self.previous_color = None;
-        }
         let Some(photo) = self.selected_photo.as_ref() else {
             return v_flex()
                 .w(px(column_width))
                 .h_full()
                 .flex_shrink_0()
-                .pr(px(INSPECTOR_MARGIN))
                 .child(
                     glass_panel()
                         .flex_1()
@@ -998,9 +921,6 @@ impl App {
 
         let id = photo.id;
         let current_color = self.selected_color();
-        let previous_color = self.previous_color.unwrap_or(current_color);
-        let selection_epoch = self.selection_epoch;
-        let previous_preview = self.previous_preview.clone();
         let current_preview = self.preview.clone();
         let thumbnail = self.thumbnails.get(id);
         let compressed = self.compressed_ids.contains(&id);
@@ -1014,11 +934,6 @@ impl App {
             .map(|player| player.display_name.clone())
             .collect::<Vec<_>>();
         let tags = self.selected_tags.clone();
-        let fade = || {
-            Animation::new(Duration::from_millis(260))
-                .with_easing(ease_motion)
-                .with_max_fps(60.0)
-        };
         let section = |label: &'static str| {
             div()
                 .text_size(px(10.))
@@ -1061,15 +976,7 @@ impl App {
             .size_full()
             .rounded(px(inner_corner_radius(18.0, 1.0)))
             .bg(rgb(current_color));
-        card = card.child(if transitioning {
-            tint_layer
-                .with_animation(("inspector-tint", selection_epoch), fade(), move |el, t| {
-                    el.bg(rgb(lerp_color(previous_color, current_color, t)))
-                })
-                .into_any_element()
-        } else {
-            tint_layer.into_any_element()
-        });
+        card = card.child(tint_layer.into_any_element());
 
         // 2. The selected 256 px thumbnail, upscaled and softened by opacity.
         //    The layer matches the card bounds so its rounded corners can be
@@ -1122,22 +1029,7 @@ impl App {
             .shadow(vec![
                 BoxShadow::new(px(0.), px(16.), rgba(0x000000a6).into()).blur_radius(px(32.)),
             ]);
-        if transitioning {
-            if let Some(previous) = previous_preview.as_ref() {
-                preview_frame = preview_frame.child(image_layer(previous.clone()).with_animation(
-                    ("inspector-preview-old", selection_epoch),
-                    fade(),
-                    move |el, t| el.opacity(1.0 - t),
-                ));
-            }
-            if let Some(preview) = current_preview.as_ref() {
-                preview_frame = preview_frame.child(image_layer(preview.clone()).with_animation(
-                    ("inspector-preview-new", selection_epoch),
-                    fade(),
-                    move |el, t| el.opacity(t),
-                ));
-            }
-        } else if let Some(preview) = current_preview.as_ref() {
+        if let Some(preview) = current_preview.as_ref() {
             preview_frame = preview_frame.child(image_layer(preview.clone()));
         }
         if current_preview.is_none() {
@@ -1331,7 +1223,6 @@ impl App {
             .w(px(column_width))
             .h_full()
             .flex_shrink_0()
-            .pr(px(INSPECTOR_MARGIN))
             .child(card.w(px(card_width)).rounded(px(17.)))
             .into_any_element()
     }
@@ -1357,7 +1248,6 @@ impl App {
         let favorite = photo.is_favorite;
         let note = photo.note.clone();
         let note_for_edit = note.clone();
-        let armed = self.delete_armed == Some(id);
         let section = |label: &'static str| {
             div()
                 .text_size(px(10.))
@@ -1423,6 +1313,28 @@ impl App {
                 this.add_tag(id, tag, cx);
             },
         );
+        let photo_path = photo.effective_path().to_string();
+        let folder_button = self.focusable_text_button(
+            "viewer-open-folder",
+            "フォルダを開く",
+            self.quick_look_folder_focus.clone(),
+            ButtonState {
+                tone: ButtonTone::Neutral,
+                enabled: true,
+            },
+            cx,
+            move |this, _, cx| {
+                let path = std::path::Path::new(&photo_path);
+                let folder = path
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .unwrap_or(path);
+                if let Err(error) = open_path(folder) {
+                    this.message = Some(format!("フォルダを開けません: {error}"));
+                }
+                cx.notify();
+            },
+        );
         let compress_button = self.focusable_text_button(
             "viewer-compress",
             "圧縮",
@@ -1436,23 +1348,15 @@ impl App {
         );
         let trash_button = self.focusable_text_button(
             "viewer-trash",
-            if armed {
-                "本当にゴミ箱へ移動"
-            } else {
-                "ゴミ箱へ移動"
-            },
+            "ゴミ箱へ移動",
             self.quick_look_trash_focus.clone(),
             ButtonState {
-                tone: if armed {
-                    ButtonTone::Danger
-                } else {
-                    ButtonTone::Neutral
-                },
+                tone: ButtonTone::Danger,
                 enabled: true,
             },
             cx,
             move |this, window, cx| {
-                this.trash_selected(cx);
+                this.trash_selected(window, cx);
                 if this.selected.is_none() {
                     this.close_quick_look(window, cx);
                 }
@@ -1652,6 +1556,7 @@ impl App {
                 h_flex()
                     .gap(px(8.))
                     .items_center()
+                    .child(folder_button)
                     .child(compress_button)
                     .child(trash_button),
             )

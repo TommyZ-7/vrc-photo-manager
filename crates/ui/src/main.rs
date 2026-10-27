@@ -43,6 +43,13 @@ fn main() {
             gpui_kit::init(cx);
             // gpui_component::init forces the light theme; the app is dark-only.
             gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
+            {
+                // gpui_component's Root paints `tokens.background` across the
+                // whole window. Keep it transparent so the glass layer reaches
+                // the compositor (Linux) or the acrylic backdrop (Windows).
+                let theme = gpui_kit::component::Theme::global_mut(cx);
+                theme.tokens.background = transparent_black().into();
+            }
             cx.bind_keys([
                 KeyBinding::new("ctrl-b", ToggleSidebar, None),
                 KeyBinding::new("cmd-b", ToggleSidebar, None),
@@ -59,16 +66,21 @@ fn main() {
                 KeyBinding::new("shift-tab", QuickLookPrevFocus, Some("quick_look")),
             ]);
             let (width, height) = options.window_size;
+            // Linux only needs a transparent surface; blur is the compositor's
+            // job (e.g. a Hyprland window rule). Windows' acrylic backdrop is
+            // requested through the platform API.
+            let window_background = if cfg!(target_os = "windows") {
+                WindowBackgroundAppearance::Blurred
+            } else {
+                WindowBackgroundAppearance::Transparent
+            };
             let window_options = WindowOptions {
                 window_bounds: Some(WindowBounds::centered(size(px(width), px(height)), cx)),
                 window_min_size: Some(size(px(1080.), px(700.))),
                 // The shell draws its own titlebar (Task 14); ask the compositor
-                // for client decorations and a blurred window background. Both
-                // are requests: X11 without a compositor and Wayland without a
-                // blur protocol fall back to server decorations and a plain
-                // translucent window, and the ambient layer stays readable.
+                // for client decorations.
                 window_decorations: Some(WindowDecorations::Client),
-                window_background: WindowBackgroundAppearance::Blurred,
+                window_background,
                 ..TitleBar::window_options()
             };
             let (_, app) = gpui_kit::open_window(window_options, cx, |window, cx| {

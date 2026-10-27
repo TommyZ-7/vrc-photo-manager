@@ -912,15 +912,16 @@ impl Db {
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        let compressed_count: i64 = self.conn.query_row(
-            "SELECT COUNT(DISTINCT photo_id) FROM derivatives",
+        let (compressed_count, derivative_bytes): (i64, i64) = self.conn.query_row(
+            "SELECT COUNT(DISTINCT photo_id), COALESCE(SUM(file_size), 0) FROM derivatives",
             [],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         Ok(LibraryStats {
             photo_count,
             total_bytes: total_bytes.max(0) as u64,
             compressed_count,
+            derivative_bytes: derivative_bytes.max(0) as u64,
         })
     }
 
@@ -1201,8 +1202,11 @@ impl Db {
     // ---------- compression profiles ----------
 
     pub fn save_profile(&self, profile: &CompressionProfile) -> Result<()> {
-        let sort_order = Self::next_sort_order(&self.conn)?;
-        Self::write_profile(&self.conn, profile, sort_order)
+        let tx = self.conn.unchecked_transaction()?;
+        let sort_order = Self::next_sort_order(&tx)?;
+        Self::write_profile(&tx, profile, sort_order)?;
+        tx.commit()?;
+        Ok(())
     }
 
     fn next_sort_order(conn: &Connection) -> Result<i64> {
@@ -1218,6 +1222,9 @@ impl Db {
         profile: &CompressionProfile,
         sort_order: i64,
     ) -> Result<()> {
+        if profile.clipboard {
+            Self::clear_other_clipboard_profiles(conn, &profile.id)?;
+        }
         let json = serde_json::to_string(profile)?;
         conn.execute(
             "INSERT INTO compression_profiles(id, name, enabled, auto_enabled, json, sort_order) \
@@ -1233,6 +1240,32 @@ impl Db {
                 sort_order,
             ],
         )?;
+        Ok(())
+    }
+
+    /// Keeps the clipboard target unique even when a caller other than the
+    /// profile switch saves a flagged profile.
+    fn clear_other_clipboard_profiles(conn: &Connection, keep_id: &str) -> Result<()> {
+        let mut stmt = conn.prepare("SELECT id, json FROM compression_profiles WHERE id != ?1")?;
+        let rows = stmt.query_map(params![keep_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut updates = Vec::new();
+        for row in rows {
+            let (id, json) = row?;
+            let mut profile: CompressionProfile = serde_json::from_str(&json)?;
+            if profile.clipboard {
+                profile.clipboard = false;
+                updates.push((id, serde_json::to_string(&profile)?));
+            }
+        }
+        drop(stmt);
+        for (id, json) in updates {
+            conn.execute(
+                "UPDATE compression_profiles SET json = ?1 WHERE id = ?2",
+                params![json, id],
+            )?;
+        }
         Ok(())
     }
 
@@ -1328,6 +1361,9 @@ impl Db {
             id: uuid::Uuid::new_v4().to_string(),
             name,
             auto_enabled: false,
+            // The clipboard target is unique system-wide (the UI switch clears
+            // every other profile). A duplicate must not bypass that invariant.
+            clipboard: false,
             ..ordered[source_index].1.clone()
         };
         Self::write_profile(&tx, &copy, source_index as i64 + 1)?;
@@ -1799,15 +1835,6 @@ impl Db {
             .prepare("SELECT DISTINCT photo_id FROM derivatives")?;
         let rows = stmt.query_map([], |row| row.get(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-    }
-
-    pub fn derivative_bytes(&self) -> Result<u64> {
-        let bytes: i64 = self.conn.query_row(
-            "SELECT COALESCE(SUM(file_size), 0) FROM derivatives",
-            [],
-            |row| row.get(0),
-        )?;
-        Ok(bytes.max(0) as u64)
     }
 
     pub fn derivatives_for_photo(&self, photo_id: i64) -> Result<Vec<Derivative>> {
@@ -2987,41 +3014,32 @@ mod tests {
     fn ensure_default_profiles_is_idempotent() {
         let db = Db::open_in_memory().unwrap();
         let first = db.ensure_default_profiles().unwrap();
-        assert_eq!(first.len(), 4);
+        assert_eq!(first.len(), 3);
 
         let order: Vec<&str> = first.iter().map(|profile| profile.name.as_str()).collect();
-        assert_eq!(
-            order,
-            [
-                "WebP 高品質",
-                "AVIF 容量優先",
-                "JPEG XL ロスレス",
-                "JPEG 互換用"
-            ]
-        );
+        assert_eq!(order, ["無劣化webp", "discord用webp", "高画質webp"]);
 
-        let mut names: Vec<&str> = first.iter().map(|profile| profile.name.as_str()).collect();
-        names.sort_unstable();
-        assert_eq!(
-            names,
-            [
-                "AVIF 容量優先",
-                "JPEG XL ロスレス",
-                "JPEG 互換用",
-                "WebP 高品質"
-            ]
-        );
         let by_name = |name: &str| first.iter().find(|profile| profile.name == name).unwrap();
-        assert!(by_name("AVIF 容量優先").auto_enabled);
-        assert!(!by_name("JPEG XL ロスレス").auto_enabled);
-        assert!(!by_name("JPEG 互換用").auto_enabled);
+        assert!(by_name("無劣化webp").auto_enabled);
+        assert!(by_name("無劣化webp").lossless);
+        assert!(!by_name("discord用webp").auto_enabled);
+        assert!(by_name("discord用webp").clipboard);
+        assert_eq!(by_name("discord用webp").width, 2560);
+        assert_eq!(by_name("discord用webp").height, 1440);
+        assert_eq!(
+            by_name("discord用webp").output_dir.as_deref(),
+            Some("discord")
+        );
+        assert_eq!(by_name("discord用webp").suffix, "_discord");
+        assert_eq!(by_name("高画質webp").quality, 90);
+        assert_eq!(by_name("高画質webp").output_dir.as_deref(), Some("webp"));
 
         let first_ids: Vec<String> = first.iter().map(|profile| profile.id.clone()).collect();
         let second = db.ensure_default_profiles().unwrap();
-        assert_eq!(second.len(), 4);
+        assert_eq!(second.len(), 3);
         let second_ids: Vec<String> = second.iter().map(|profile| profile.id.clone()).collect();
         assert_eq!(first_ids, second_ids);
-        assert_eq!(db.list_profiles().unwrap().len(), 4);
+        assert_eq!(db.list_profiles().unwrap().len(), 3);
     }
 
     #[test]
@@ -3234,6 +3252,78 @@ mod tests {
     }
 
     #[test]
+    fn failed_profile_save_restores_the_previous_clipboard_flag() {
+        let db = Db::open_in_memory().unwrap();
+        let mut first = profile("first", "First");
+        first.clipboard = true;
+        db.save_profile(&first).unwrap();
+
+        db.connection()
+            .execute_batch(
+                "CREATE TRIGGER fail_broken_profile BEFORE INSERT ON compression_profiles \
+                 WHEN NEW.id = 'broken' BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END;",
+            )
+            .unwrap();
+
+        let mut broken = profile("broken", "Broken");
+        broken.clipboard = true;
+        assert!(db.save_profile(&broken).is_err());
+
+        let stored = db.list_profiles().unwrap();
+        assert_eq!(stored.len(), 1);
+        assert!(stored[0].clipboard);
+    }
+
+    #[test]
+    fn saving_a_clipboard_profile_clears_the_previous_one() {
+        let db = Db::open_in_memory().unwrap();
+        let mut first = profile("first", "First");
+        first.clipboard = true;
+        db.save_profile(&first).unwrap();
+        let mut second = profile("second", "Second");
+        second.clipboard = true;
+        db.save_profile(&second).unwrap();
+
+        let stored = db.list_profiles().unwrap();
+        assert_eq!(stored.iter().filter(|profile| profile.clipboard).count(), 1);
+        assert!(
+            stored
+                .iter()
+                .find(|profile| profile.id == "second")
+                .unwrap()
+                .clipboard
+        );
+    }
+
+    #[test]
+    fn duplicate_profile_clears_the_clipboard_flag_on_the_copy() {
+        let db = Db::open_in_memory().unwrap();
+        let mut source = profile("source", "Source");
+        source.clipboard = true;
+        db.save_profile(&source).unwrap();
+
+        let copy = db.duplicate_profile("source").unwrap();
+        assert!(!copy.clipboard);
+
+        let stored = db.list_profiles().unwrap();
+        assert!(
+            stored
+                .iter()
+                .find(|profile| profile.id == "source")
+                .unwrap()
+                .clipboard
+        );
+        assert!(
+            !stored
+                .iter()
+                .find(|profile| profile.id == copy.id)
+                .unwrap()
+                .clipboard
+        );
+        assert_eq!(stored.iter().filter(|profile| profile.clipboard).count(), 1);
+    }
+
+    #[test]
     fn duplicate_profile_normalizes_legacy_zero_order() {
         let db = Db::open_in_memory().unwrap();
         for (id, name) in [("a", "A"), ("b", "B"), ("c", "C")] {
@@ -3376,6 +3466,7 @@ mod tests {
         let stats = db.stats().unwrap();
         assert_eq!(stats.photo_count, 1);
         assert_eq!(stats.total_bytes, 1_234);
+        assert_eq!(stats.derivative_bytes, 1_234);
     }
 
     #[test]

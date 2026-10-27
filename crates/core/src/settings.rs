@@ -47,9 +47,11 @@ pub struct AppSettings {
     pub ui_inspector_collapsed: bool,
     #[serde(default)]
     pub ui_reduce_motion: bool,
-    /// Whether the compact command ribbon is collapsed. Session tab selection
-    /// is not persisted.
-    #[serde(default)]
+    /// Maximum animation frame rate. `0` means no cap.
+    #[serde(default = "default_max_fps")]
+    pub ui_max_fps: u32,
+    /// Whether the compact command ribbon is collapsed.
+    #[serde(default = "default_true")]
     pub ui_ribbon_collapsed: bool,
     #[serde(default = "default_true")]
     pub ui_card_show_status: bool,
@@ -69,6 +71,10 @@ pub struct AppSettings {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_max_fps() -> u32 {
+    60
 }
 
 fn default_auto_update_check() -> bool {
@@ -106,7 +112,8 @@ impl Default for AppSettings {
             ui_sidebar_collapsed: false,
             ui_inspector_collapsed: false,
             ui_reduce_motion: false,
-            ui_ribbon_collapsed: false,
+            ui_max_fps: 60,
+            ui_ribbon_collapsed: true,
             ui_card_show_status: true,
             ui_card_show_world: true,
             ui_card_show_date: true,
@@ -273,7 +280,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn missing_ribbon_collapsed_defaults_to_false_and_keeps_other_settings() {
+    fn missing_ribbon_collapsed_defaults_to_true_and_keeps_other_settings() {
         let json = r#"{
             "photo_roots": ["/tmp/photos"],
             "log_dir": "/tmp/logs",
@@ -288,7 +295,8 @@ mod tests {
             "compression_workers": 2
         }"#;
         let settings: AppSettings = serde_json::from_str(json).unwrap();
-        assert!(!settings.ui_ribbon_collapsed);
+        assert!(settings.ui_ribbon_collapsed);
+        assert_eq!(settings.ui_max_fps, 60);
         assert_eq!(settings.photo_roots, vec!["/tmp/photos".to_string()]);
         assert_eq!(settings.log_dir, Some("/tmp/logs".to_string()));
         assert!(!settings.autostart);

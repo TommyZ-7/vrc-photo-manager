@@ -122,7 +122,15 @@ impl YearRail {
 
     /// Scrolls the grid to the row under `y`, snapping to a year label when
     /// the pointer is within its 8 px hit area.
-    fn jump_to(&self, y: Pixels, bounds_top: Pixels, height: f32, window: &mut Window) {
+    fn jump_to(
+        &self,
+        y: Pixels,
+        bounds_top: Pixels,
+        height: f32,
+        window: &mut Window,
+        view: EntityId,
+        cx: &mut gpui_kit::App,
+    ) {
         let total = self.index.total;
         if total == 0 {
             return;
@@ -149,6 +157,13 @@ impl YearRail {
             .borrow_mut()
             .base_handle
             .set_offset(point(px(0.), px(offset)));
+        // The gallery month header and the morph's card bounds are computed
+        // during `App::render`. Setting the offset repaints the list only, so
+        // notify the containing view as well; otherwise a rail jump leaves the
+        // header and the viewer fallback on the pre-jump frame. The view id is
+        // captured during prepaint because `current_view` is not available
+        // while dispatching mouse events.
+        cx.notify(view);
         window.refresh();
     }
 }
@@ -165,6 +180,7 @@ pub(crate) struct YearRailPrepaint {
     gutter: Hitbox,
     track: Hitbox,
     pill: Option<Hitbox>,
+    view: EntityId,
 }
 
 impl Element for YearRail {
@@ -220,10 +236,12 @@ impl Element for YearRail {
         let pill = expanded.then(|| {
             window.insert_hitbox(rail_pill_bounds(bounds, pill_y), HitboxBehavior::Normal)
         });
+        let view = window.current_view();
         YearRailPrepaint {
             gutter,
             track,
             pill,
+            view,
         }
     }
 
@@ -351,6 +369,7 @@ impl Element for YearRail {
 
         let gutter_hitbox = hitboxes.gutter.clone();
         let pill_hitbox = hitboxes.pill.clone();
+        let view_id = hitboxes.view;
         let rail = self.clone();
         window.on_mouse_event({
             let rail = rail.clone();
@@ -386,7 +405,7 @@ impl Element for YearRail {
                 cx.stop_propagation();
                 rail.hovered.set(true);
                 rail.drag_active.set(true);
-                rail.jump_to(event.position.y, bounds.top(), height, window);
+                rail.jump_to(event.position.y, bounds.top(), height, window, view_id, cx);
             }
         });
 
@@ -416,7 +435,7 @@ impl Element for YearRail {
                         return;
                     }
                     cx.stop_propagation();
-                    rail.jump_to(event.position.y, bounds.top(), height, window);
+                    rail.jump_to(event.position.y, bounds.top(), height, window, view_id, cx);
                     return;
                 }
                 if !phase.bubble() {

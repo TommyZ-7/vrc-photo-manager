@@ -126,7 +126,11 @@ pub fn determine_output_path(source: &Path, profile: &CompressionProfile) -> Res
         .as_deref()
         .filter(|dir| !dir.trim().is_empty())
     {
-        Some(dir) => PathBuf::from(dir),
+        Some(dir) if Path::new(dir).is_absolute() => PathBuf::from(dir),
+        Some(dir) => source
+            .parent()
+            .ok_or_else(|| CoreError::Invalid("source has no parent directory".to_string()))?
+            .join(dir),
         None => source
             .parent()
             .ok_or_else(|| CoreError::Invalid("source has no parent directory".to_string()))?
@@ -373,6 +377,31 @@ mod tests {
         let result = compress_image(&source, &profile).unwrap();
 
         assert_eq!((result.width, result.height), (32, 20));
+    }
+
+    #[test]
+    fn relative_output_dir_is_joined_to_the_source_parent() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("photo.png");
+        sample(&source);
+        let mut profile = profile(CompressionFormat::Webp);
+        profile.output_dir = Some("discord".to_string());
+        let output = determine_output_path(&source, &profile).unwrap();
+        assert_eq!(output.parent().unwrap(), dir.path().join("discord"));
+        assert!(output.parent().unwrap().exists());
+    }
+
+    #[test]
+    fn absolute_output_dir_is_used_as_is() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("photo.png");
+        sample(&source);
+        let absolute = dir.path().join("absolute");
+        let mut profile = profile(CompressionFormat::Webp);
+        profile.output_dir = Some(absolute.to_string_lossy().to_string());
+        let output = determine_output_path(&source, &profile).unwrap();
+        assert_eq!(output.parent().unwrap(), absolute);
+        assert!(absolute.exists());
     }
 
     #[test]

@@ -95,6 +95,10 @@ pub struct CompressionProfile {
     pub name: String,
     pub enabled: bool,
     pub auto_enabled: bool,
+    /// At most one profile system-wide may use this flag. The clipboard action
+    /// compresses with it immediately, without opening the manual modal.
+    #[serde(default)]
+    pub clipboard: bool,
     pub format: CompressionFormat,
     pub quality: u8,
     pub lossless: bool,
@@ -117,6 +121,7 @@ impl Default for CompressionProfile {
             name: "WebP 高品質".to_string(),
             enabled: true,
             auto_enabled: true,
+            clipboard: false,
             format: CompressionFormat::Webp,
             quality: 82,
             lossless: false,
@@ -136,29 +141,42 @@ impl CompressionProfile {
     /// Built-in presets seeded into an empty database.
     pub fn defaults() -> Vec<Self> {
         vec![
-            Self::default(),
             Self {
-                name: "AVIF 容量優先".to_string(),
-                format: CompressionFormat::Avif,
-                quality: 68,
-                encode_speed: 6,
-                suffix: "_avif".to_string(),
-                ..Self::default()
-            },
-            Self {
-                name: "JPEG XL ロスレス".to_string(),
-                format: CompressionFormat::JpegXl,
+                name: "無劣化webp".to_string(),
+                auto_enabled: true,
+                clipboard: false,
+                format: CompressionFormat::Webp,
                 lossless: true,
-                auto_enabled: false,
-                suffix: "_jxl".to_string(),
+                resize_enabled: false,
+                output_dir: Some("compressed".to_string()),
+                suffix: String::new(),
                 ..Self::default()
             },
             Self {
-                name: "JPEG 互換用".to_string(),
-                format: CompressionFormat::Jpeg,
-                quality: 88,
+                name: "discord用webp".to_string(),
                 auto_enabled: false,
-                suffix: "_jpg".to_string(),
+                clipboard: true,
+                format: CompressionFormat::Webp,
+                lossless: true,
+                resize_enabled: true,
+                resize_mode: ResizeMode::DownscaleOnly,
+                width: 2560,
+                height: 1440,
+                maintain_aspect: true,
+                output_dir: Some("discord".to_string()),
+                suffix: "_discord".to_string(),
+                ..Self::default()
+            },
+            Self {
+                name: "高画質webp".to_string(),
+                auto_enabled: false,
+                clipboard: false,
+                format: CompressionFormat::Webp,
+                quality: 90,
+                lossless: false,
+                resize_enabled: false,
+                output_dir: Some("webp".to_string()),
+                suffix: String::new(),
                 ..Self::default()
             },
         ]
@@ -483,6 +501,7 @@ pub struct LibraryStats {
     pub photo_count: i64,
     pub total_bytes: u64,
     pub compressed_count: i64,
+    pub derivative_bytes: u64,
 }
 
 #[cfg(test)]

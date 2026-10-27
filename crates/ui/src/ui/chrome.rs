@@ -6,14 +6,15 @@
 //! window's glass backdrop.
 
 use gpui_kit::assets::IconName;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use std::time::Duration;
 use vrc_photo_core::importer::ImportMode;
+use vrc_photo_core::settings::CardSize;
 
-use crate::app::daemon::open_path;
 use crate::app::{App, Screen};
-use crate::state::viewer::ViewerOpenSource;
 use crate::ui::theme::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,26 +24,8 @@ pub(crate) enum RibbonTab {
     Compression,
 }
 
-impl RibbonTab {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Home => "ホーム",
-            Self::Photo => "写真",
-            Self::Compression => "圧縮",
-        }
-    }
-
-    fn id(self) -> &'static str {
-        match self {
-            Self::Home => "ribbon-tab-home",
-            Self::Photo => "ribbon-tab-photo",
-            Self::Compression => "ribbon-tab-compression",
-        }
-    }
-}
-
-/// Default tab for a screen switch. Manual tab choices survive until the next
-/// switch; Compression owns its screen, everything else starts at Home.
+/// Default tab used by the message-strip visibility rule on a screen switch.
+/// The ribbon itself shows every group, so this no longer selects a page.
 pub(crate) fn default_ribbon_tab(screen: Screen) -> RibbonTab {
     match screen {
         Screen::Compression => RibbonTab::Compression,
@@ -65,6 +48,9 @@ pub(crate) struct RibbonMetrics {
     pub(crate) group_label: f32,
     pub(crate) padding: f32,
     pub(crate) small_gap: f32,
+    /// Narrow windows keep every command but show icons with tooltips so the
+    /// three groups never clip or scroll horizontally.
+    pub(crate) compact: bool,
 }
 
 pub(crate) fn ribbon_metrics(window_height: f32) -> RibbonMetrics {
@@ -75,6 +61,7 @@ pub(crate) fn ribbon_metrics(window_height: f32) -> RibbonMetrics {
             group_label: 9.0,
             padding: 3.0,
             small_gap: 1.0,
+            compact: false,
         }
     } else {
         RibbonMetrics {
@@ -83,6 +70,7 @@ pub(crate) fn ribbon_metrics(window_height: f32) -> RibbonMetrics {
             group_label: 10.0,
             padding: 4.0,
             small_gap: 2.0,
+            compact: false,
         }
     }
 }
@@ -90,8 +78,39 @@ pub(crate) fn ribbon_metrics(window_height: f32) -> RibbonMetrics {
 /// §8.2: the ribbon's right-hand status note disappears at 1180 px and below.
 pub(crate) const NARROW_CHROME_WIDTH: f32 = 1180.0;
 
+/// Below this header width the labelled ribbon no longer fits beside the
+/// status note. The compact ribbon keeps the same commands as icons with
+/// tooltips so nothing clips and there is no horizontal scrollbar.
+pub(crate) const RIBBON_LABELS_MIN_WIDTH: f32 = 1000.0;
+
 pub(crate) fn ribbon_status_visible(window_width: f32) -> bool {
     window_width > NARROW_CHROME_WIDTH
+}
+
+/// The titlebar's compact sync readout hides with the ribbon status note so
+/// the screen crumb, notification indicator, and window controls keep their
+/// room at narrow widths.
+pub(crate) fn titlebar_sync_visible(window_width: f32) -> bool {
+    window_width > NARROW_CHROME_WIDTH
+}
+
+/// Compact sync text for the 46px titlebar. The full `daemon_sync_label`
+/// (including the supervisor) stays on the Dashboard; the titlebar only needs
+/// the age or transport state.
+pub(crate) fn titlebar_sync_label(
+    age_secs: Option<i64>,
+    _supervisor: Option<&str>,
+    ipc_connected: bool,
+    demo: bool,
+) -> String {
+    if demo {
+        return "デモ".to_string();
+    }
+    match age_secs.filter(|age| *age < 20) {
+        Some(age) => format!("{age}秒前"),
+        None if ipc_connected => "IPC".to_string(),
+        None => "停止".to_string(),
+    }
 }
 
 /// True when `App.message` needs the persistent strip above the screen because
@@ -101,13 +120,6 @@ pub(crate) fn ribbon_status_visible(window_width: f32) -> bool {
 /// never rendered twice.
 pub(crate) fn message_strip_visible(collapsed: bool, tab: RibbonTab, content_width: f32) -> bool {
     collapsed || tab == RibbonTab::Photo || !ribbon_status_visible(content_width)
-}
-
-/// The titlebar's sparkline of sync state hides with the ribbon status note so
-/// the screen crumb, tabs, notification bell, and window controls keep their
-/// room at narrow widths.
-pub(crate) fn titlebar_sync_visible(window_width: f32) -> bool {
-    window_width > NARROW_CHROME_WIDTH
 }
 
 /// Chrome values derived from the window's content extent.
@@ -130,35 +142,22 @@ pub(crate) fn chrome_layout(
     viewport_width: f32,
     viewport_height: f32,
     client_inset: f32,
+    sidebar_collapsed: bool,
 ) -> ChromeLayout {
     let content_width = window_content_extent(viewport_width, client_inset);
     let content_height = window_content_extent(viewport_height, client_inset);
+    let header_width =
+        (content_width - WORKSPACE_PAD * 2.0 - sidebar_width(sidebar_collapsed) - WORKSPACE_GAP)
+            .max(0.0);
+    let mut ribbon_metrics = ribbon_metrics(content_height);
+    ribbon_metrics.compact = header_width < RIBBON_LABELS_MIN_WIDTH;
     ChromeLayout {
         content_width,
         content_height,
         ribbon_height: ribbon_height(content_height),
-        ribbon_metrics: ribbon_metrics(content_height),
+        ribbon_metrics,
         status_visible: ribbon_status_visible(content_width),
         sync_visible: titlebar_sync_visible(content_width),
-    }
-}
-
-/// Compact sync text for the 46px titlebar. The full
-/// `daemon_sync_label` (including the supervisor) stays in the Photos header
-/// and on the Dashboard; the titlebar only needs the age or transport state.
-pub(crate) fn titlebar_sync_label(
-    age_secs: Option<i64>,
-    _supervisor: Option<&str>,
-    ipc_connected: bool,
-    demo: bool,
-) -> String {
-    if demo {
-        return "デモ".to_string();
-    }
-    match age_secs.filter(|age| *age < 20) {
-        Some(age) => format!("{age}秒前"),
-        None if ipc_connected => "IPC".to_string(),
-        None => "停止".to_string(),
     }
 }
 
@@ -173,15 +172,6 @@ pub(crate) fn ribbon_selection_label(selected: usize, total: i64, bytes: u64) ->
             format_bytes(bytes)
         )
     }
-}
-
-/// Compression ribbon status text. A fresh action message (profile save,
-/// reorder, delete, queueing, retry, ...) replaces the steady auto-apply note
-/// so failures stay visible while the Compression tab is the default.
-fn compression_status_note(message: Option<&str>, auto_note: &str) -> String {
-    message
-        .map(str::to_string)
-        .unwrap_or_else(|| auto_note.to_string())
 }
 
 /// Every icon chrome renders. `gpui_kit::assets::Assets` embeds only the icons
@@ -233,17 +223,39 @@ impl App {
     /// transparent content area with a 14px gap.
     pub(crate) fn chrome(&mut self, layout: ChromeLayout, cx: &mut Context<Self>) -> AnyElement {
         let titlebar = self.titlebar(layout.sync_visible, cx);
-        let body = (!self.ribbon_collapsed).then(|| self.ribbon_body(layout, cx));
+        let collapsed = self.ribbon_collapsed;
+        let epoch = self.ribbon_epoch;
+        let body_height = layout.ribbon_height;
+        let body = self.ribbon_body(layout, cx);
+        let body = div()
+            .w_full()
+            .overflow_hidden()
+            .with_animation(
+                ("ribbon-body", epoch),
+                Animation::new(if epoch == 0 {
+                    Duration::ZERO
+                } else {
+                    Duration::from_millis(220)
+                })
+                .with_easing(ease_motion)
+                .with_max_fps(self.motion_fps()),
+                move |el, t| {
+                    let height = if collapsed {
+                        body_height * (1.0 - t)
+                    } else {
+                        body_height * t
+                    };
+                    el.h(px(height))
+                        .opacity(if collapsed { 1.0 - t } else { t })
+                },
+            )
+            .child(body);
 
         v_flex()
             .flex_shrink_0()
             .w_full()
             .rounded(px(22.))
-            .bg(linear_gradient(
-                180.,
-                linear_color_stop(rgb(PANEL_HEADER), 0.),
-                linear_color_stop(rgb(PANEL_CARD), 1.),
-            ))
+            .bg(rgb(PANEL_HEADER))
             .border_1()
             .border_color(rgba(0xffffff1b))
             .overflow_hidden()
@@ -254,13 +266,12 @@ impl App {
                     .blur_radius(px(0.)),
             ])
             .child(titlebar)
-            .children(body)
+            .child(body)
             .into_any_element()
     }
 
     fn titlebar(&mut self, show_sync: bool, cx: &mut Context<Self>) -> AnyElement {
         let screen = self.screen;
-        let active_tab = self.active_ribbon_tab;
 
         let app_glyph = div()
             .size(px(22.))
@@ -271,11 +282,7 @@ impl App {
             .justify_center()
             .border_1()
             .border_color(rgba(0xffffff30))
-            .bg(linear_gradient(
-                145.,
-                linear_color_stop(rgb(0x74c8ff), 0.),
-                linear_color_stop(rgb(0xa67eff), 1.),
-            ))
+            .bg(rgb(BLUE))
             .shadow(vec![
                 BoxShadow::new(px(0.), px(3.), rgba(0x608cff47).into()).blur_radius(px(9.)),
                 BoxShadow::new(px(0.), px(1.), rgba(0xffffff66).into())
@@ -288,17 +295,6 @@ impl App {
                     .text_color(rgb(0xffffff)),
             );
 
-        let tabs = h_flex()
-            .flex_shrink_0()
-            .ml(px(7.))
-            .pl(px(9.))
-            .gap(px(2.))
-            .border_l_1()
-            .border_color(rgba(0xffffff14))
-            .child(tab_button(RibbonTab::Home, active_tab, cx))
-            .child(tab_button(RibbonTab::Photo, active_tab, cx))
-            .child(tab_button(RibbonTab::Compression, active_tab, cx));
-
         let (daemon_tone, daemon_label, daemon_border, daemon_bg) = if self.demo_assets.is_some() {
             (BLUE, "デモモード", rgba(0x8bcbff29), rgba(0x8bcbff0e))
         } else if !self.daemon_active {
@@ -308,13 +304,6 @@ impl App {
         } else {
             (GREEN, "デーモン稼働中", rgba(0x7ee2b829), rgba(0x7ee2b80e))
         };
-        let sync = titlebar_sync_label(
-            self.daemon_age_secs,
-            self.daemon_supervisor.as_deref(),
-            self.ipc_connected,
-            self.demo_assets.is_some(),
-        );
-        let has_message = self.message.is_some();
         let collapsed = self.ribbon_collapsed;
 
         let status_pill = h_flex()
@@ -336,6 +325,12 @@ impl App {
                     .child(daemon_label),
             );
 
+        let sync = titlebar_sync_label(
+            self.daemon_age_secs,
+            self.daemon_supervisor.as_deref(),
+            self.ipc_connected,
+            self.demo_assets.is_some(),
+        );
         let sync_label = h_flex()
             .min_w_0()
             .max_w(px(96.))
@@ -384,7 +379,6 @@ impl App {
                     .text_color(rgb(TEXT))
                     .child(screen.title()),
             )
-            .child(tabs)
             .child(div().flex_1().min_w_0())
             .child(status_pill)
             .when(show_sync, |this| this.child(sync_label))
@@ -401,7 +395,7 @@ impl App {
                     .rounded(px(6.))
                     .text_color(rgb(MUTED_2))
                     .child(chrome_icon(IconName::Bell).with_size(px(14.)))
-                    .when(has_message, |this| {
+                    .when(self.message.is_some(), |this| {
                         this.child(
                             div()
                                 .absolute()
@@ -424,11 +418,7 @@ impl App {
             .pl(px(14.))
             .pr(px(8.))
             .border_color(rgba(0xffffff0e))
-            .bg(linear_gradient(
-                180.,
-                linear_color_stop(rgba(0xffffff0a), 0.),
-                linear_color_stop(rgba(0x00000000), 1.),
-            ))
+            .bg(rgba(0x00000000))
             .child(line)
             .into_any_element()
     }
@@ -436,18 +426,17 @@ impl App {
     fn ribbon_body(&mut self, layout: ChromeLayout, cx: &mut Context<Self>) -> AnyElement {
         let show_status = layout.status_visible;
         let metrics = layout.ribbon_metrics;
-        let page = match self.active_ribbon_tab {
-            RibbonTab::Home => self.ribbon_home(show_status, metrics, cx),
-            RibbonTab::Photo => self.ribbon_photo(metrics, cx),
-            RibbonTab::Compression => self.ribbon_compression(show_status, metrics, cx),
-        };
         h_flex()
             .w_full()
             .h(px(layout.ribbon_height))
             .flex_shrink_0()
             .items_stretch()
+            // The three groups must fit at 1080 px; the shell design forbids a
+            // horizontal scrollbar anywhere in the ribbon.
             .overflow_hidden()
-            .child(page)
+            .child(self.ribbon_home(show_status, metrics, cx))
+            .child(self.ribbon_photo(metrics, cx))
+            .child(self.ribbon_compression(metrics, cx))
             .into_any_element()
     }
 
@@ -499,75 +488,25 @@ impl App {
                 cx.notify();
             },
         );
-        let open_folder = small_button(
-            "ribbon-open-folder",
-            "フォルダを開く",
-            IconName::FolderOpen,
-            if self.settings.photo_roots.is_empty() {
-                RibbonLook::Disabled
-            } else {
-                RibbonLook::Normal
-            },
-            metrics,
-            cx,
-            |this, _, cx| match this.settings.photo_roots.first() {
-                Some(root) => {
-                    if let Err(error) = open_path(std::path::Path::new(root)) {
-                        this.message = Some(format!("フォルダを開けません: {error}"));
-                        cx.notify();
-                    }
-                }
-                None => {
-                    this.message = Some("写真フォルダが設定されていません".to_string());
-                    cx.notify();
-                }
-            },
-        );
-        let rebuild = small_button(
-            "ribbon-rebuild-index",
-            "索引を再構築",
-            IconName::RotateCw,
-            RibbonLook::Normal,
-            metrics,
-            cx,
-            |this, _, cx| this.request_daemon_rescan(cx),
-        );
-        let library_group = ribbon_group(
-            vec![
-                reload,
-                v_flex()
-                    .flex_shrink_0()
-                    .justify_center()
-                    .gap(px(metrics.small_gap))
-                    .child(open_folder)
-                    .child(rebuild)
-                    .into_any_element(),
-            ],
-            "ライブラリ",
-            false,
-            metrics,
-        );
+        let library_group = ribbon_group(vec![reload], "ライブラリ", false, metrics);
 
-        let inspector_group = (self.screen == Screen::Photos).then(|| {
-            ribbon_group(
-                vec![large_button(
-                    "ribbon-toggle-inspector",
-                    "詳細パネル",
-                    IconName::PanelRight,
-                    if self.inspector_collapsed {
-                        RibbonLook::Normal
-                    } else {
-                        RibbonLook::Active
-                    },
-                    metrics,
-                    cx,
-                    |this, _, cx| this.toggle_inspector(cx),
-                )],
-                "表示",
-                false,
+        let mut display_items = vec![self.card_size_selector(metrics, cx)];
+        if self.screen == Screen::Photos {
+            display_items.push(large_button(
+                "ribbon-toggle-inspector",
+                "詳細パネル",
+                IconName::PanelRight,
+                if self.inspector_collapsed {
+                    RibbonLook::Normal
+                } else {
+                    RibbonLook::Active
+                },
                 metrics,
-            )
-        });
+                cx,
+                |this, _, cx| this.toggle_inspector(cx),
+            ));
+        }
+        let display_group = ribbon_group(display_items, "表示", false, metrics);
 
         let status = self.message.clone().unwrap_or_else(|| {
             ribbon_selection_label(
@@ -592,13 +531,52 @@ impl App {
         );
 
         h_flex()
-            .w_full()
+            .flex_shrink_0()
             .items_stretch()
             .child(import_group)
             .child(library_group)
-            .when_some(inspector_group, |this, group| this.child(group))
+            .child(display_group)
             .when(show_status, |this| this.child(status_group))
             .into_any_element()
+    }
+
+    fn card_size_selector(&mut self, metrics: RibbonMetrics, cx: &mut Context<Self>) -> AnyElement {
+        let current = self.settings.ui_card_size;
+        let mut row = h_flex().gap(px(2.)).items_center();
+        for size in [
+            CardSize::Small,
+            CardSize::Medium,
+            CardSize::Large,
+            CardSize::ExtraLarge,
+        ] {
+            let active = size == current;
+            row = row.child(
+                div()
+                    .id(SharedString::from(format!("ribbon-card-size-{size:?}")))
+                    .h(px(metrics.small_height.max(20.)))
+                    .px(px(6.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(5.))
+                    .border_1()
+                    .border_color(if active {
+                        rgba(0x8bcbff29)
+                    } else {
+                        rgba(0x00000000)
+                    })
+                    .when(active, |this| this.bg(rgba(0x8bcbff17)))
+                    .text_size(px(9.))
+                    .text_color(rgb(if active { TEXT } else { MUTED }))
+                    .whitespace_nowrap()
+                    .cursor_pointer()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |this, _, _, cx| this.set_card_size(size, cx)))
+                    .child(card_size_label(size)),
+            );
+        }
+        row.into_any_element()
     }
 
     fn ribbon_photo(&mut self, metrics: RibbonMetrics, cx: &mut Context<Self>) -> AnyElement {
@@ -631,87 +609,26 @@ impl App {
                     cx,
                     |this, _, cx| this.clear_selection(cx),
                 ),
-                large_button(
-                    "ribbon-favorite",
-                    "お気に入り",
-                    IconName::Star,
-                    if !has_selection {
-                        RibbonLook::Disabled
-                    } else if self
-                        .selected_photo
-                        .as_ref()
-                        .is_some_and(|photo| photo.is_favorite)
-                    {
-                        RibbonLook::Active
-                    } else {
-                        RibbonLook::Normal
-                    },
-                    metrics,
-                    cx,
-                    |this, _, cx| this.toggle_selected_favorite(cx),
-                ),
             ],
             "選択",
             false,
             metrics,
         );
 
-        let detail_group = ribbon_group(
-            vec![
-                large_button(
-                    "ribbon-fullscreen",
-                    "全画面",
-                    IconName::Maximize,
-                    selection_look(has_selection),
-                    metrics,
-                    cx,
-                    |this, window, cx| {
-                        this.open_quick_look(window, cx, ViewerOpenSource::Inspector)
-                    },
-                ),
-                large_button(
-                    "ribbon-tags",
-                    "タグ",
-                    IconName::BookOpen,
-                    selection_look(has_selection),
-                    metrics,
-                    cx,
-                    |this, window, cx| this.edit_selected_tags(window, cx),
-                ),
-                large_button(
-                    "ribbon-note",
-                    "メモ",
-                    IconName::FileText,
-                    selection_look(has_selection),
-                    metrics,
-                    cx,
-                    |this, window, cx| this.edit_selected_note(window, cx),
-                ),
-            ],
-            "詳細",
-            false,
-            metrics,
-        );
-
-        let armed = self
-            .selected
-            .is_some_and(|id| self.delete_armed == Some(id));
         let organize_group = ribbon_group(
             vec![
                 large_button(
                     "ribbon-trash",
-                    trash_label(armed),
+                    "ゴミ箱へ",
                     IconName::Delete,
                     if !has_selection {
                         RibbonLook::Disabled
-                    } else if armed {
-                        RibbonLook::Active
                     } else {
                         RibbonLook::Normal
                     },
                     metrics,
                     cx,
-                    |this, _, cx| this.trash_selected(cx),
+                    |this, window, cx| this.trash_selected(window, cx),
                 ),
                 large_button(
                     "ribbon-manual-compress",
@@ -732,40 +649,44 @@ impl App {
         );
 
         h_flex()
-            .w_full()
+            .flex_shrink_0()
             .items_stretch()
             .child(select_group)
-            .child(detail_group)
             .child(organize_group)
             .into_any_element()
     }
 
-    fn ribbon_compression(
-        &mut self,
-        show_status: bool,
-        metrics: RibbonMetrics,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn ribbon_compression(&mut self, metrics: RibbonMetrics, cx: &mut Context<Self>) -> AnyElement {
         let has_selection = !self.selected_action_ids().is_empty();
         let waiting = self.waiting_job_count;
-        let failed = self.failed_job_count;
         let run_group = ribbon_group(
             vec![
                 large_button(
-                    "ribbon-compress-selection",
-                    "手動圧縮",
-                    IconName::Minimize,
-                    if has_selection {
-                        RibbonLook::Primary
-                    } else {
-                        RibbonLook::Disabled
-                    },
+                    "ribbon-compress-folder",
+                    "指定フォルダ",
+                    IconName::FolderOpen,
+                    selection_look(has_selection),
                     metrics,
                     cx,
-                    |this, _, cx| {
-                        let ids = this.selected_action_ids();
-                        this.open_manual_compression(ids, cx);
-                    },
+                    |this, _, cx| this.compress_selection_to_folder(cx),
+                ),
+                large_button(
+                    "ribbon-compress-profile",
+                    "プロファイル先",
+                    IconName::FolderOpen,
+                    selection_look(has_selection),
+                    metrics,
+                    cx,
+                    |this, _, cx| this.compress_selection_to_profile_folder(cx),
+                ),
+                large_button(
+                    "ribbon-compress-clipboard",
+                    "クリップボード",
+                    IconName::Copy,
+                    selection_look(has_selection),
+                    metrics,
+                    cx,
+                    |this, _, cx| this.compress_selection_to_clipboard(cx),
                 ),
                 large_button(
                     "ribbon-release-waiting",
@@ -780,91 +701,13 @@ impl App {
                     cx,
                     |this, window, cx| this.request_release_waiting_jobs(window, cx),
                 ),
-                large_button(
-                    "ribbon-retry-failed",
-                    "失敗を再試行",
-                    IconName::RotateCw,
-                    if failed > 0 {
-                        RibbonLook::Normal
-                    } else {
-                        RibbonLook::Disabled
-                    },
-                    metrics,
-                    cx,
-                    |this, _, cx| this.retry_all_failed_jobs(cx),
-                ),
             ],
-            "実行",
+            "圧縮",
             false,
             metrics,
         );
 
-        let queue_group = ribbon_group(
-            vec![
-                large_button(
-                    "ribbon-open-queue",
-                    "キュー",
-                    IconName::LayoutDashboard,
-                    RibbonLook::Normal,
-                    metrics,
-                    cx,
-                    |this, _, cx| this.switch_screen(Screen::Dashboard, cx),
-                ),
-                large_button(
-                    "ribbon-open-status",
-                    "状態",
-                    IconName::ChartPie,
-                    RibbonLook::Normal,
-                    metrics,
-                    cx,
-                    |this, _, cx| this.switch_screen(Screen::Dashboard, cx),
-                ),
-            ],
-            "キュー",
-            false,
-            metrics,
-        );
-
-        let auto = if self.settings.auto_compress {
-            "自動適用: ON"
-        } else {
-            "自動適用: OFF"
-        };
-        let profile = self
-            .profiles
-            .get(self.profile_index)
-            .map(profile_summary)
-            .unwrap_or_else(|| "プロファイルなし".to_string());
-        let policy = if self.settings.auto_compress_keep_original {
-            "元画像を保持"
-        } else {
-            "元画像を置換"
-        };
-        let auto_note = format!("{auto} · {profile} · {policy}");
-        let message = self.message.as_deref();
-        let status_text = compression_status_note(message, &auto_note);
-        let status_group = ribbon_group(
-            vec![status_note(
-                if message.is_some() {
-                    IconName::CircleAlert
-                } else {
-                    IconName::CircleCheck
-                },
-                status_text,
-                message.is_some(),
-            )],
-            "現在の設定",
-            true,
-            metrics,
-        );
-
-        h_flex()
-            .w_full()
-            .items_stretch()
-            .child(run_group)
-            .child(queue_group)
-            .when(show_status, |this| this.child(status_group))
-            .into_any_element()
+        run_group.into_any_element()
     }
 
     fn photo_browser_empty(&self) -> bool {
@@ -874,48 +717,6 @@ impl App {
             self.library.index.entries.is_empty()
         }
     }
-}
-
-fn tab_button(tab: RibbonTab, active: RibbonTab, cx: &mut Context<App>) -> AnyElement {
-    let is_active = tab == active;
-    let mut button = div()
-        .id(tab.id())
-        .h(px(27.))
-        .px(px(10.))
-        .flex_shrink_0()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded(px(7.))
-        .border_1()
-        .text_size(px(10.))
-        .whitespace_nowrap()
-        .cursor_pointer()
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        // The titlebar's drag region treats a double click as zoom. Tabs are
-        // controls, so keep both the click and its second press inside them.
-        .on_double_click(|_, _, cx| cx.stop_propagation())
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.select_ribbon_tab(tab, cx);
-            cx.stop_propagation();
-        }));
-    if is_active {
-        button = button
-            .border_color(rgba(0x8bcbff29))
-            .bg(rgba(0x8bcbff1a))
-            .text_color(rgb(TEXT))
-            .shadow(vec![
-                BoxShadow::new(px(0.), px(1.), rgba(0xffffff12).into())
-                    .inset()
-                    .blur_radius(px(0.)),
-            ]);
-    } else {
-        button = button
-            .border_color(rgba(0x00000000))
-            .text_color(rgb(MUTED_2))
-            .hover(|this| this.bg(rgba(0xffffff0a)).text_color(rgb(TEXT)));
-    }
-    button.child(tab.label()).into_any_element()
 }
 
 fn collapse_button(collapsed: bool, cx: &mut Context<App>) -> AnyElement {
@@ -945,16 +746,6 @@ fn collapse_button(collapsed: bool, cx: &mut Context<App>) -> AnyElement {
         .into_any_element()
 }
 
-/// Trash command label. The first press only arms deletion, so the armed state
-/// spells out the second click without relying on the status message.
-fn trash_label(armed: bool) -> &'static str {
-    if armed {
-        "もう一度で削除"
-    } else {
-        "ゴミ箱へ"
-    }
-}
-
 fn ribbon_group(
     items: Vec<AnyElement>,
     label: &'static str,
@@ -966,7 +757,9 @@ fn ribbon_group(
         .when(grow, |this| this.flex_1().min_w_0())
         .items_stretch()
         .py(px(metrics.padding))
-        .px(px(10.))
+        // Keep the three ribbon groups inside the default 1280 px window and
+        // the 1080 px minimum without a horizontal scroll surface.
+        .px(px(6.))
         .border_r_1()
         .border_color(rgba(0xffffff0d))
         .child(
@@ -979,7 +772,7 @@ fn ribbon_group(
                         .flex_1()
                         .min_w_0()
                         .items_center()
-                        .gap(px(3.))
+                        .gap(px(2.))
                         .children(items),
                 )
                 .child(
@@ -998,7 +791,6 @@ fn ribbon_group(
 enum RibbonLook {
     Normal,
     Active,
-    Primary,
     Disabled,
 }
 
@@ -1009,10 +801,6 @@ impl RibbonLook {
 
     fn active(self) -> bool {
         matches!(self, Self::Active)
-    }
-
-    fn primary(self) -> bool {
-        matches!(self, Self::Primary)
     }
 }
 
@@ -1035,11 +823,8 @@ fn large_button(
 ) -> AnyElement {
     let enabled = look.enabled();
     let active = look.active();
-    let primary = look.primary();
     let (bg, border, fg) = if !enabled {
         (rgba(0x00000000), rgba(0x00000000), rgba(0x76819680))
-    } else if primary {
-        (rgba(0x66b3ff33), rgba(0x8bcbff38), rgb(0xf8fcff))
     } else if active {
         (rgba(0x8bcbff1a), rgba(0x8bcbff2e), rgb(TEXT))
     } else {
@@ -1049,9 +834,9 @@ fn large_button(
     let mut button = div()
         .id(id)
         .h(px(metrics.large_height))
-        .min_w(px(50.))
+        .min_w(px(if metrics.compact { 30. } else { 42. }))
         .flex_shrink_0()
-        .px(px(6.))
+        .px(px(if metrics.compact { 2. } else { 3. }))
         .py(px(if metrics.large_height <= 38.0 { 1. } else { 2. }))
         .flex()
         .flex_col()
@@ -1067,15 +852,16 @@ fn large_button(
         .whitespace_nowrap()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(chrome_icon(icon).with_size(px(18.)).text_color(if enabled {
-            if active || primary {
-                rgb(BLUE)
-            } else {
-                rgba(0x8bcbffe0)
-            }
+            if active { rgb(BLUE) } else { rgba(0x8bcbffe0) }
         } else {
             rgb(MUTED_2)
-        }))
-        .child(label);
+        }));
+
+    if metrics.compact {
+        button = button.tooltip(move |window, cx| Tooltip::new(label).build(window, cx));
+    } else {
+        button = button.child(label);
+    }
 
     if enabled {
         button = button
@@ -1085,67 +871,6 @@ fn large_button(
                     .bg(rgba(0xffffff0e))
                     .text_color(rgb(TEXT))
             })
-            .on_click(
-                cx.listener(move |this, _: &ClickEvent, window, cx| on_click(this, window, cx)),
-            );
-    } else {
-        button = button.opacity(0.42);
-    }
-    button.into_any_element()
-}
-
-fn small_button(
-    id: &'static str,
-    label: &'static str,
-    icon: IconName,
-    look: RibbonLook,
-    metrics: RibbonMetrics,
-    cx: &mut Context<App>,
-    on_click: impl Fn(&mut App, &mut Window, &mut Context<App>) + 'static,
-) -> AnyElement {
-    let enabled = look.enabled();
-    let active = look.active();
-    let mut button = h_flex()
-        .id(id)
-        .h(px(metrics.small_height))
-        .min_w(px(110.))
-        .flex_shrink_0()
-        .px(px(7.))
-        .gap(px(5.))
-        .items_center()
-        .rounded(px(6.))
-        .border_1()
-        .border_color(if active {
-            rgba(0x8bcbff29)
-        } else {
-            rgba(0x00000000)
-        })
-        .when(active, |this| this.bg(rgba(0x8bcbff17)))
-        .text_size(px(8.5))
-        .text_color(rgb(if enabled {
-            if active { TEXT } else { MUTED }
-        } else {
-            MUTED_2
-        }))
-        .whitespace_nowrap()
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .child(
-            chrome_icon(icon)
-                .with_size(px(12.))
-                .text_color(rgb(if !enabled {
-                    MUTED_2
-                } else if active {
-                    BLUE
-                } else {
-                    MUTED
-                })),
-        )
-        .child(label);
-
-    if enabled {
-        button = button
-            .cursor_pointer()
-            .hover(|this| this.bg(rgba(0xffffff0e)).text_color(rgb(TEXT)))
             .on_click(
                 cx.listener(move |this, _: &ClickEvent, window, cx| on_click(this, window, cx)),
             );
@@ -1181,9 +906,9 @@ fn status_note(icon: IconName, text: String, warning: bool) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHROME_ICONS, RibbonTab, chrome_layout, compression_status_note, default_ribbon_tab,
-        is_bundled, message_strip_visible, ribbon_height, ribbon_metrics, ribbon_selection_label,
-        ribbon_status_visible, titlebar_sync_label, titlebar_sync_visible, trash_label,
+        CHROME_ICONS, RibbonTab, chrome_layout, default_ribbon_tab, is_bundled,
+        message_strip_visible, ribbon_height, ribbon_metrics, ribbon_selection_label,
+        ribbon_status_visible, titlebar_sync_label, titlebar_sync_visible,
     };
     use crate::app::Screen;
 
@@ -1241,39 +966,48 @@ mod tests {
     }
 
     #[test]
-    fn titlebar_sync_label_stays_compact() {
-        assert_eq!(
-            titlebar_sync_label(Some(5), Some("systemd"), false, false),
-            "5秒前"
+    fn ribbon_uses_icons_below_1280() {
+        assert!(
+            chrome_layout(1279.0, 820.0, 0.0, false)
+                .ribbon_metrics
+                .compact
         );
-        assert_eq!(
-            titlebar_sync_label(
-                Some(5),
-                Some("a-very-long-supervisor-name-that-would-overflow-the-titlebar"),
-                false,
-                false
-            ),
-            "5秒前"
+        assert!(
+            !chrome_layout(1280.0, 820.0, 0.0, false)
+                .ribbon_metrics
+                .compact
         );
-        assert_eq!(titlebar_sync_label(None, None, true, true), "デモ");
-        assert_eq!(titlebar_sync_label(None, None, true, false), "IPC");
-        assert_eq!(titlebar_sync_label(None, None, false, false), "停止");
-        assert_eq!(
-            titlebar_sync_label(Some(30), Some("systemd"), true, false),
-            "IPC"
+        // Collapsed sidebar: 1080 - 28 - 78 - 14 = 960 (compact), while
+        // 1280 - 28 - 78 - 14 = 1160 leaves room for labels.
+        assert!(
+            chrome_layout(1080.0, 700.0, 0.0, true)
+                .ribbon_metrics
+                .compact
         );
-    }
-
-    #[test]
-    fn titlebar_sync_hides_at_1180() {
-        assert!(!titlebar_sync_visible(1180.0));
-        assert!(titlebar_sync_visible(1181.0));
+        assert!(
+            !chrome_layout(1280.0, 820.0, 0.0, true)
+                .ribbon_metrics
+                .compact
+        );
     }
 
     #[test]
     fn status_note_hides_at_1180() {
         assert!(!ribbon_status_visible(1180.0));
         assert!(ribbon_status_visible(1181.0));
+        assert!(!titlebar_sync_visible(1180.0));
+        assert!(titlebar_sync_visible(1181.0));
+    }
+
+    #[test]
+    fn titlebar_sync_label_stays_compact() {
+        assert_eq!(titlebar_sync_label(Some(5), None, true, false), "5秒前");
+        assert_eq!(titlebar_sync_label(None, None, true, false), "IPC");
+        assert_eq!(titlebar_sync_label(None, None, false, false), "停止");
+        assert_eq!(
+            titlebar_sync_label(None, Some("systemd"), true, true),
+            "デモ"
+        );
     }
 
     #[test]
@@ -1296,46 +1030,41 @@ mod tests {
     }
 
     #[test]
-    fn trash_label_spells_out_the_armed_click() {
-        assert_eq!(trash_label(false), "ゴミ箱へ");
-        assert_eq!(trash_label(true), "もう一度で削除");
-    }
-
-    #[test]
     fn chrome_layout_uses_the_content_extent() {
         // The requested 1080x700 is the content size; X11 reports the outer
         // 1120x740 window, and the 20 px CSD inset on each edge is removed.
-        let minimum = chrome_layout(1120.0, 740.0, 20.0);
+        let minimum = chrome_layout(1120.0, 740.0, 20.0, false);
         assert_eq!(minimum.content_width, 1080.0);
         assert_eq!(minimum.content_height, 700.0);
         assert_eq!(minimum.ribbon_height, 62.0);
-        assert_eq!(minimum.ribbon_metrics, ribbon_metrics(700.0));
+        let mut expected_metrics = ribbon_metrics(700.0);
+        expected_metrics.compact = true;
+        assert_eq!(minimum.ribbon_metrics, expected_metrics);
         assert!(!minimum.status_visible);
         assert!(!minimum.sync_visible);
 
-        // 1280x820 content keeps the regular ribbon and both status readouts.
-        let regular = chrome_layout(1320.0, 860.0, 20.0);
+        // 1280x820 content keeps the regular ribbon and status readout.
+        let regular = chrome_layout(1320.0, 860.0, 20.0, false);
         assert_eq!(regular.content_width, 1280.0);
         assert_eq!(regular.content_height, 820.0);
         assert_eq!(regular.ribbon_height, 68.0);
         assert!(regular.status_visible);
         assert!(regular.sync_visible);
 
-        let large = chrome_layout(1480.0, 940.0, 20.0);
+        let large = chrome_layout(1480.0, 940.0, 20.0, false);
         assert_eq!(large.content_width, 1440.0);
         assert_eq!(large.ribbon_height, 68.0);
         assert!(large.status_visible);
-        assert!(large.sync_visible);
     }
 
     #[test]
     fn chrome_layout_thresholds_sit_on_the_content_edge() {
-        assert_eq!(chrome_layout(1200.0, 760.0, 0.0).ribbon_height, 62.0);
-        assert_eq!(chrome_layout(1200.0, 761.0, 0.0).ribbon_height, 68.0);
-        assert!(!chrome_layout(1180.0, 820.0, 0.0).status_visible);
-        assert!(chrome_layout(1181.0, 820.0, 0.0).status_visible);
-        assert!(!chrome_layout(1180.0, 820.0, 0.0).sync_visible);
-        assert!(chrome_layout(1181.0, 820.0, 0.0).sync_visible);
+        assert_eq!(chrome_layout(1200.0, 760.0, 0.0, false).ribbon_height, 62.0);
+        assert_eq!(chrome_layout(1200.0, 761.0, 0.0, false).ribbon_height, 68.0);
+        assert!(!chrome_layout(1180.0, 820.0, 0.0, false).status_visible);
+        assert!(chrome_layout(1181.0, 820.0, 0.0, false).status_visible);
+        assert!(!chrome_layout(1180.0, 820.0, 0.0, false).sync_visible);
+        assert!(chrome_layout(1181.0, 820.0, 0.0, false).sync_visible);
     }
 
     #[test]
@@ -1345,15 +1074,5 @@ mod tests {
             ribbon_selection_label(3, 2418, 1_048_576),
             "選択中 3 枚 · 2,418 枚 / 1.0 MB"
         );
-    }
-
-    #[test]
-    fn compression_status_prefers_message_over_auto_note() {
-        let auto_note = "自動適用: ON · WebP · Q82 · 元画像を保持";
-        assert_eq!(
-            compression_status_note(Some("プロファイルを保存できません: disk full"), auto_note),
-            "プロファイルを保存できません: disk full"
-        );
-        assert_eq!(compression_status_note(None, auto_note), auto_note);
     }
 }

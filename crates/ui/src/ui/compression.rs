@@ -3,6 +3,8 @@
 //! Profile and manual-compression state lives in `app::compression`; screen
 //! dispatch lives in `ui::shell`.
 
+use std::path::Path;
+
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -17,6 +19,14 @@ use vrc_photo_core::model::{
 use crate::app::App;
 use crate::ui::components::glass_panel;
 use crate::ui::theme::*;
+
+fn section_divider() -> AnyElement {
+    div()
+        .h(px(1.))
+        .w_full()
+        .bg(rgba(0xffffff0e))
+        .into_any_element()
+}
 
 fn queue_status_badge(status: &QueueStatus) -> (&'static str, u32, u32) {
     match status {
@@ -49,7 +59,11 @@ impl App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let profile = self.profiles.get(self.profile_index).cloned();
+        let profile = self
+            .profiles
+            .get(self.profile_index)
+            .or_else(|| self.profiles.first())
+            .cloned();
         h_flex()
             .flex_1()
             .min_h_0()
@@ -131,6 +145,9 @@ impl App {
                                         if auto { GREEN } else { MUTED },
                                         if auto { 0x112a22 } else { PANEL_2 },
                                     ))
+                                    .when(profile.clipboard, |this| {
+                                        this.child(self.badge("クリップボード", BLUE, 0x14283d))
+                                    })
                                     .child(
                                         div()
                                             .id(SharedString::from(format!("profile-up-{index}")))
@@ -191,26 +208,6 @@ impl App {
                                     .text_size(px(10.))
                                     .text_color(rgb(if active { MUTED } else { MUTED_2 }))
                                     .child(meta),
-                            )
-                            .with_animation(
-                                SharedString::from(format!("profile-card-{}-{active}", profile.id)),
-                                Animation::new(MOTION_FAST)
-                                    .with_easing(ease_motion)
-                                    .with_max_fps(MOTION_FPS),
-                                move |el, t| {
-                                    let (bg_from, bg_to) = if active {
-                                        (PANEL_INNER, ACCENT_SOFT)
-                                    } else {
-                                        (ACCENT_SOFT, PANEL_INNER)
-                                    };
-                                    let (border_from, border_to) = if active {
-                                        (BORDER, BLUE)
-                                    } else {
-                                        (BLUE, BORDER)
-                                    };
-                                    el.bg(rgb(lerp_color(bg_from, bg_to, t)))
-                                        .border_color(rgb(lerp_color(border_from, border_to, t)))
-                                },
                             )
                     })),
             )
@@ -273,12 +270,25 @@ impl App {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let profile_id = profile.id.clone();
+        let clipboard_profile_id = profile.id.clone();
         let suffix_value = self.profile_suffix_input.read(cx).value();
         if suffix_value.as_ref() != profile.suffix.as_str() {
             self.profile_suffix_input.update(cx, |input, cx| {
                 input.set_value(profile.suffix.clone(), window, cx);
             });
         }
+        let output_value = self.profile_output_input.read(cx).value();
+        let output_current = profile.output_dir.clone().unwrap_or_default();
+        if output_value.as_ref() != output_current.as_str() {
+            self.profile_output_input.update(cx, |input, cx| {
+                input.set_value(output_current, window, cx);
+            });
+        }
+        let output_hint = match profile.output_dir.as_deref() {
+            None => "空欄: 元画像と同じフォルダの compressed/".to_string(),
+            Some(dir) if Path::new(dir).is_absolute() => "絶対パス".to_string(),
+            Some(_) => "相対パス: 元画像のフォルダ基準".to_string(),
+        };
         glass_panel()
             .flex()
             .flex_col()
@@ -364,6 +374,7 @@ impl App {
                                     })),
                             ),
                     )
+                    .child(section_divider())
                     .child(self.section_label("形式と画質"))
                     .child(
                         h_flex().gap(px(4.)).children(
@@ -496,6 +507,7 @@ impl App {
                                 },
                             )),
                     )
+                    .child(section_divider())
                     .child(self.section_label("リサイズ"))
                     .child(
                         v_flex()
@@ -701,89 +713,132 @@ impl App {
                                 )
                             }),
                     )
+                    .child(section_divider())
                     .child(self.section_label("出力"))
                     .child(
                         h_flex()
-                            .items_center()
-                            .gap(px(8.))
+                            .flex_wrap()
+                            .gap(px(12.))
+                            .items_start()
                             .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(MUTED_2))
-                                    .child("出力先"),
-                            )
-                            .child(
-                                div()
+                                v_flex()
                                     .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(MUTED))
+                                    .min_w(px(300.))
+                                    .gap(px(6.))
                                     .child(
-                                        profile
-                                            .output_dir
-                                            .clone()
-                                            .unwrap_or_else(|| "compressed/".to_string()),
+                                        div()
+                                            .text_size(px(10.))
+                                            .text_color(rgb(MUTED_2))
+                                            .child("出力先"),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .items_center()
+                                            .gap(px(6.))
+                                            .child(
+                                                Input::new(&self.profile_output_input)
+                                                    .small()
+                                                    .flex_1(),
+                                            )
+                                            .child(
+                                                Button::new("profile-output-pick")
+                                                    .label("参照")
+                                                    .small()
+                                                    .ghost()
+                                                    .on_click(cx.listener(
+                                                        |this, _, window, cx| {
+                                                            let current = this
+                                                                .profiles
+                                                                .get(this.profile_index)
+                                                                .and_then(|profile| {
+                                                                    profile.output_dir.clone()
+                                                                });
+                                                            let mut picker = rfd::FileDialog::new();
+                                                            if let Some(dir) = current {
+                                                                picker = picker.set_directory(dir);
+                                                            }
+                                                            if let Some(dir) = picker.pick_folder() {
+                                                                let path = dir
+                                                                    .to_string_lossy()
+                                                                    .to_string();
+                                                                this.profile_output_input.update(
+                                                                    cx,
+                                                                    |input, cx| {
+                                                                        input.set_value(
+                                                                            path.clone(),
+                                                                            window,
+                                                                            cx,
+                                                                        )
+                                                                    },
+                                                                );
+                                                                this.edit_profile(
+                                                                    move |profile| {
+                                                                        profile.output_dir =
+                                                                            Some(path.clone())
+                                                                    },
+                                                                    cx,
+                                                                );
+                                                            }
+                                                        },
+                                                    )),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(9.5))
+                                            .text_color(rgb(MUTED_2))
+                                            .child(output_hint),
                                     ),
                             )
                             .child(
-                                Button::new("profile-output-pick")
-                                    .label("フォルダを選択")
-                                    .small()
-                                    .ghost()
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        let current = this
-                                            .profiles
-                                            .get(this.profile_index)
-                                            .and_then(|profile| profile.output_dir.clone());
-                                        let mut picker = rfd::FileDialog::new();
-                                        if let Some(dir) = current {
-                                            picker = picker.set_directory(dir);
-                                        }
-                                        if let Some(dir) = picker.pick_folder() {
-                                            let path = dir.to_string_lossy().to_string();
-                                            this.edit_profile(
-                                                move |profile| {
-                                                    profile.output_dir = Some(path.clone())
-                                                },
-                                                cx,
-                                            );
-                                        }
-                                    })),
-                            )
-                            .when(profile.output_dir.is_some(), |this| {
-                                this.child(
-                                    Button::new("profile-output-clear")
-                                        .label("既定に戻す")
-                                        .small()
-                                        .ghost()
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.edit_profile(
-                                                |profile| profile.output_dir = None,
-                                                cx,
-                                            );
-                                        })),
-                                )
-                            }),
+                                v_flex()
+                                    .flex_1()
+                                    .min_w(px(240.))
+                                    .gap(px(6.))
+                                    .child(
+                                        div()
+                                            .text_size(px(10.))
+                                            .text_color(rgb(MUTED_2))
+                                            .child("サフィックス"),
+                                    )
+                                    .child(Input::new(&self.profile_suffix_input).small().flex_1())
+                                    .child(
+                                        div()
+                                            .text_size(px(9.5))
+                                            .text_color(rgb(MUTED_2))
+                                            .child("空欄可"),
+                                    ),
+                            ),
                     )
+                    .child(section_divider())
                     .child(
                         h_flex()
                             .items_center()
                             .gap(px(8.))
                             .child(
-                                div()
-                                    .w(px(86.))
-                                    .flex_shrink_0()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(MUTED_2))
-                                    .child("サフィックス"),
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap(px(2.))
+                                    .child(
+                                        div()
+                                            .text_size(px(12.))
+                                            .text_color(rgb(TEXT))
+                                            .child("クリップボード用"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(10.))
+                                            .text_color(rgb(MUTED_2))
+                                            .child("システム全体で1つだけ設定できます"),
+                                    ),
                             )
-                            .child(Input::new(&self.profile_suffix_input).small().flex_1())
                             .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(MUTED_2))
-                                    .child("空欄可"),
+                                Switch::new("profile-clipboard")
+                                    .checked(profile.clipboard)
+                                    .on_click(cx.listener(move |this, checked, _, cx| {
+                                        this.set_clipboard_profile(&clipboard_profile_id, *checked, cx);
+                                    })),
                             ),
                     )
                     .child(
@@ -812,15 +867,8 @@ impl App {
                     .child(self.editor_stat("写真", self.stats.photo_count.to_string()))
                     .child(self.editor_stat(
                         "圧縮後合計",
-                        format_bytes(self.db.derivative_bytes().unwrap_or(0)),
+                        format_bytes(self.stats.derivative_bytes),
                     )),
-            )
-            .with_animation(
-                ("profile-editor", self.profile_index),
-                Animation::new(MOTION_FAST)
-                    .with_easing(ease_motion)
-                    .with_max_fps(MOTION_FPS),
-                |el, t| el.opacity(t).relative().top(px(4.0 * (1.0 - t))),
             )
     }
 

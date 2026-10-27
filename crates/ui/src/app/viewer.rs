@@ -15,10 +15,19 @@ use crate::state::viewer::{
 };
 use crate::ui::theme::{
     MOTION_BASE, MOTION_MORPH, MOTION_SLOW, VIEWER_DETAILS_WIDTH, centered_viewer_rect,
-    eased_progress, next_focus_index, step_index, viewer_image_rect,
+    content_bounds, content_viewport, eased_progress, next_focus_index, step_index,
+    viewer_image_rect,
 };
 
 impl App {
+    fn set_viewer_morph(&mut self, morph: Option<ViewerMorph>, cx: &mut Context<Self>) {
+        let max_fps = self.motion_fps();
+        self.viewer_morph = morph.clone();
+        self.viewer_morph_view.update(cx, |view, cx| {
+            view.set_morph(morph, max_fps, cx);
+        });
+    }
+
     pub(crate) fn open_quick_look(
         &mut self,
         window: &mut Window,
@@ -33,11 +42,10 @@ impl App {
             .as_ref()
             .is_some_and(|morph| morph.closing)
         {
-            self.viewer_morph = None;
+            self.set_viewer_morph(None, cx);
             self.viewer_morph_epoch = self.viewer_morph_epoch.wrapping_add(1);
         }
         self.message = None;
-        self.delete_armed = None;
         self.note_edit_id = None;
         self.quick_look_return_focus = window.focused(cx);
         self.quick_look_photo_ids = self.viewer_source_ids();
@@ -59,7 +67,7 @@ impl App {
                 }
             })
             .unwrap_or(16.0 / 9.0);
-        let viewport = window.viewport_size();
+        let viewport = content_viewport(window);
         let to = viewer_image_rect(viewport, self.quick_look_details_open, aspect);
         let now = Instant::now();
         self.viewer_nav_epoch = 0;
@@ -87,7 +95,10 @@ impl App {
             to_width: details_width,
             duration: Duration::ZERO,
         };
-        let resolved = self.actual_source(id, source);
+        let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
+        let resolved = self
+            .actual_source(id, source)
+            .map(|(kind, bounds)| (kind, content_bounds(bounds, client_inset)));
         if let Some((actual_source, _)) = resolved {
             self.viewer_return_source = Some(actual_source);
         }
@@ -104,7 +115,7 @@ impl App {
                     .as_ref()
                     .map(|photo| self.color_for(photo))
                     .unwrap_or(0);
-                self.viewer_morph = Some(ViewerMorph {
+                let morph = ViewerMorph {
                     epoch,
                     started_at: Instant::now(),
                     from,
@@ -116,7 +127,8 @@ impl App {
                     closing: false,
                     fade_only: false,
                     backdrop_from: 1.0,
-                });
+                };
+                self.set_viewer_morph(Some(morph), cx);
                 cx.spawn(async move |this, cx| {
                     cx.background_executor()
                         .timer(MOTION_MORPH + Duration::from_millis(60))
@@ -128,7 +140,7 @@ impl App {
                                 .as_ref()
                                 .is_some_and(|morph| !morph.closing)
                         {
-                            this.viewer_morph = None;
+                            this.set_viewer_morph(None, cx);
                             cx.notify();
                         }
                     })
@@ -169,7 +181,7 @@ impl App {
         let viewer_rect = if let Some((bounds, _)) = opening {
             bounds
         } else {
-            let viewport = window.viewport_size();
+            let viewport = content_viewport(window);
             let (width, height) = self.viewer_box.current_size(viewport);
             centered_viewer_rect(viewport, self.viewer_panel.current_width(), width, height)
         };
@@ -179,7 +191,10 @@ impl App {
             .or(self.viewer_return_source)
             .unwrap_or(ViewerOpenSource::Auto);
         let id = self.selected.unwrap_or_default();
-        let target = self.actual_source(id, source);
+        let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
+        let target = self
+            .actual_source(id, source)
+            .map(|(kind, bounds)| (kind, content_bounds(bounds, client_inset)));
         let (to, target_kind, fade_only) = match target {
             Some((kind, bounds)) => (bounds, kind, false),
             None => (from, source, true),
@@ -200,7 +215,7 @@ impl App {
         if !cx.reduce_motion() && (thumbnail.is_some() || preview.is_some()) {
             self.viewer_morph_epoch = self.viewer_morph_epoch.wrapping_add(1);
             let epoch = self.viewer_morph_epoch;
-            self.viewer_morph = Some(ViewerMorph {
+            let morph = ViewerMorph {
                 epoch,
                 started_at: Instant::now(),
                 from,
@@ -212,7 +227,8 @@ impl App {
                 closing: true,
                 fade_only,
                 backdrop_from,
-            });
+            };
+            self.set_viewer_morph(Some(morph), cx);
             cx.spawn(async move |this, cx| {
                 cx.background_executor()
                     .timer(MOTION_MORPH + Duration::from_millis(60))
@@ -224,7 +240,7 @@ impl App {
                             .as_ref()
                             .is_some_and(|morph| morph.closing)
                     {
-                        this.viewer_morph = None;
+                        this.set_viewer_morph(None, cx);
                         cx.notify();
                     }
                 })
@@ -232,11 +248,10 @@ impl App {
             })
             .detach();
         } else {
-            self.viewer_morph = None;
+            self.set_viewer_morph(None, cx);
         }
         self.viewer_return_source = None;
         self.quick_look_open = false;
-        self.delete_armed = None;
         self.note_edit_id = None;
         let focus = self
             .quick_look_return_focus
@@ -253,9 +268,8 @@ impl App {
             return;
         }
         self.quick_look_open = false;
-        self.delete_armed = None;
         self.note_edit_id = None;
-        self.viewer_morph = None;
+        self.set_viewer_morph(None, cx);
         self.viewer_morph_epoch = self.viewer_morph_epoch.wrapping_add(1);
         self.viewer_return_source = None;
         if let Some(id) = self.selected.take() {
@@ -307,7 +321,7 @@ impl App {
             .as_ref()
             .is_some_and(|morph| !morph.closing)
         {
-            self.viewer_morph = None;
+            self.set_viewer_morph(None, cx);
         }
         let next = step_index(
             self.quick_look_index,
@@ -328,7 +342,7 @@ impl App {
         }
         // Keep the top-bar navigation focused; only the library selection and
         // the displayed photo change behind the overlay.
-        let viewport = window.viewport_size();
+        let viewport = content_viewport(window);
         let from_size = self.viewer_box.current_size(viewport);
         let target_details_width = self.viewer_panel.to_width;
         self.select_photo(self.quick_look_photo_ids[next], cx);
@@ -369,10 +383,10 @@ impl App {
             .as_ref()
             .is_some_and(|morph| !morph.closing)
         {
-            self.viewer_morph = None;
+            self.set_viewer_morph(None, cx);
         }
         let current_width = self.viewer_panel.current_width();
-        let viewport = window.viewport_size();
+        let viewport = content_viewport(window);
         let from_size = self.viewer_box.current_size(viewport);
         self.quick_look_details_open = !self.quick_look_details_open;
         if !self.quick_look_details_open {
@@ -445,6 +459,7 @@ impl App {
             } else {
                 order.push(self.quick_look_note_edit_focus.clone());
             }
+            order.push(self.quick_look_folder_focus.clone());
             order.push(self.quick_look_compress_focus.clone());
             order.push(self.quick_look_trash_focus.clone());
         }
@@ -483,7 +498,7 @@ impl App {
     fn actual_source(
         &self,
         id: i64,
-        source: ViewerOpenSource,
+        _source: ViewerOpenSource,
     ) -> Option<(ViewerOpenSource, Bounds<Pixels>)> {
         let card = current_tagged_bounds(
             self.card_image_bounds.borrow().get(&id).copied(),
@@ -491,8 +506,9 @@ impl App {
         );
         let inspector =
             current_tagged_bounds(*self.inspector_preview_bounds.borrow(), self.render_epoch);
-        let prefer_card = source != ViewerOpenSource::Inspector;
-        let chosen = preferred_bounds(prefer_card, card, inspector)?;
+        // The morph always starts from the grid card. The inspector preview is
+        // only a fallback for a card that is scrolled out of view.
+        let chosen = preferred_bounds(true, card, inspector)?;
         if card == Some(chosen) {
             Some((ViewerOpenSource::Card, chosen))
         } else {

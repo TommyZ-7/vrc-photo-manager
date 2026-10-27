@@ -42,8 +42,7 @@ use crate::ui::actions::{
     ToggleInspector, ToggleSidebar, ViewerNextPhoto, ViewerPreviousPhoto,
 };
 use crate::ui::chrome::{ChromeLayout, RibbonTab, chrome_layout, default_ribbon_tab};
-use crate::ui::shell::ambient_background;
-use crate::ui::theme::GLASS_WINDOW;
+use crate::ui::theme::{GLASS_WINDOW, WORKSPACE_GAP, WORKSPACE_PAD};
 use crate::update_view;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -94,13 +93,14 @@ pub struct App {
     /// Last section the user jumped to. Sections near the bottom cannot always
     /// reach the top of the column, so the highlight falls back to this when
     /// the scroll position alone would point at an earlier section.
-    pub(crate) settings_section: Option<usize>,
     pub(crate) active_ribbon_tab: RibbonTab,
     pub(crate) ribbon_collapsed: bool,
+    pub(crate) ribbon_epoch: u64,
     pub(crate) render_epoch: u64,
     pub(crate) card_image_bounds: CardBoundsMap,
     pub(crate) inspector_preview_bounds: InspectorBounds,
     pub(crate) viewer_morph: Option<ViewerMorph>,
+    pub(crate) viewer_morph_view: Entity<crate::ui::viewer::ViewerMorphView>,
     pub(crate) viewer_morph_epoch: u64,
     pub(crate) viewer_return_source: Option<ViewerOpenSource>,
     pub(crate) viewer_nav_epoch: u64,
@@ -139,8 +139,6 @@ pub struct App {
     /// selected; otherwise the primary is always included.
     pub(crate) selected_ids: Vec<i64>,
     pub(crate) selection_anchor: Option<i64>,
-    pub(crate) selection_epoch: u64,
-    pub(crate) selection_changed_at: Option<Instant>,
     pub(crate) selected_photo: Option<Photo>,
     pub(crate) selected_players: Vec<PhotoPlayer>,
     pub(crate) selected_tags: Vec<String>,
@@ -148,9 +146,7 @@ pub struct App {
     pub(crate) compressed_ids: HashSet<i64>,
     pub(crate) duplicate_ids: HashSet<i64>,
     pub(crate) thumbnails: ThumbnailCache,
-    pub(crate) grid_epoch: u64,
-    pub(crate) hovered_photo: Option<i64>,
-    pub(crate) intro_seen: HashMap<i64, Instant>,
+    pub(crate) thumbnail_notify_pending: bool,
     pub(crate) photo_grid_focus: FocusHandle,
     pub(crate) import_dialog_focus: FocusHandle,
     pub(crate) quick_look_open: bool,
@@ -166,6 +162,7 @@ pub struct App {
     pub(crate) quick_look_next_focus: FocusHandle,
     pub(crate) quick_look_details_focus: FocusHandle,
     pub(crate) quick_look_favorite_focus: FocusHandle,
+    pub(crate) quick_look_folder_focus: FocusHandle,
     pub(crate) quick_look_compress_focus: FocusHandle,
     pub(crate) quick_look_trash_focus: FocusHandle,
     pub(crate) quick_look_add_tag_focus: FocusHandle,
@@ -182,6 +179,8 @@ pub struct App {
     pub(crate) profile_index: usize,
     pub(crate) profile_suffix_input: Entity<InputState>,
     pub(crate) _profile_suffix_subscription: Subscription,
+    pub(crate) profile_output_input: Entity<InputState>,
+    pub(crate) _profile_output_subscription: Subscription,
     pub(crate) manual_compress: Option<ManualCompressionDialog>,
     pub(crate) stats: LibraryStats,
     pub(crate) settings: AppSettings,
@@ -209,9 +208,6 @@ pub struct App {
     pub(crate) photo_root_input: Entity<InputState>,
     pub(crate) log_dir_input: Entity<InputState>,
     pub(crate) import_dir_input: Entity<InputState>,
-    /// Session-only toggle for the library gallery's appearance-only filter
-    /// chip row. It never participates in filtering.
-    pub(crate) gallery_filters_open: bool,
     pub(crate) search_active: bool,
     pub(crate) searching: bool,
     pub(crate) search_request: u64,
@@ -222,7 +218,6 @@ pub struct App {
     pub(crate) search_refresh_pending: bool,
     pub(crate) search_favorite: bool,
     pub(crate) search_days: Option<i64>,
-    pub(crate) delete_armed: Option<i64>,
     pub(crate) daemon_shutdown_armed: bool,
     pub(crate) message: Option<String>,
     pub(crate) demo: bool,
@@ -241,6 +236,11 @@ pub(crate) fn any_overlay_open(
 }
 
 impl App {
+    /// Animation frame cap from settings. `0` disables throttling.
+    pub(crate) fn motion_fps(&self) -> f32 {
+        self.settings.ui_max_fps as f32
+    }
+
     pub(crate) fn overlay_open(&self) -> bool {
         any_overlay_open(
             self.quick_look_open,
@@ -303,6 +303,26 @@ impl App {
                 }
             },
         );
+        let profile_output_input = cx
+            .new(|cx| InputState::new(window, cx).placeholder("compressed または /path/to/output"));
+        let profile_output_subscription = cx.subscribe(
+            &profile_output_input,
+            |this, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let value = input.read(cx).value().trim().to_string();
+                    this.edit_profile(
+                        |profile| {
+                            profile.output_dir = if value.is_empty() {
+                                None
+                            } else {
+                                Some(value.clone())
+                            }
+                        },
+                        cx,
+                    );
+                }
+            },
+        );
         let photo_grid_focus = cx.focus_handle();
         let import_dialog_focus = cx.focus_handle();
         let quick_look_close_focus = cx.focus_handle();
@@ -310,6 +330,7 @@ impl App {
         let quick_look_next_focus = cx.focus_handle();
         let quick_look_details_focus = cx.focus_handle();
         let quick_look_favorite_focus = cx.focus_handle();
+        let quick_look_folder_focus = cx.focus_handle();
         let quick_look_compress_focus = cx.focus_handle();
         let quick_look_trash_focus = cx.focus_handle();
         let quick_look_add_tag_focus = cx.focus_handle();
@@ -328,13 +349,14 @@ impl App {
             screen_epoch: 0,
             screen_direction: 1.0,
             settings_scroll: ScrollHandle::new(),
-            settings_section: None,
             active_ribbon_tab: default_ribbon_tab(Screen::Photos),
             ribbon_collapsed: initial_settings.ui_ribbon_collapsed,
+            ribbon_epoch: 0,
             render_epoch: 0,
             card_image_bounds: Rc::new(RefCell::new(HashMap::new())),
             inspector_preview_bounds: Rc::new(RefCell::new(None)),
             viewer_morph: None,
+            viewer_morph_view: cx.new(|_| crate::ui::viewer::ViewerMorphView::new()),
             viewer_morph_epoch: 0,
             viewer_return_source: None,
             viewer_nav_epoch: 0,
@@ -376,8 +398,6 @@ impl App {
             selected: None,
             selected_ids: Vec::new(),
             selection_anchor: None,
-            selection_epoch: 0,
-            selection_changed_at: None,
             selected_photo: None,
             selected_players: Vec::new(),
             selected_tags: Vec::new(),
@@ -385,9 +405,7 @@ impl App {
             compressed_ids: HashSet::new(),
             duplicate_ids: HashSet::new(),
             thumbnails: ThumbnailCache::default(),
-            grid_epoch: 0,
-            hovered_photo: None,
-            intro_seen: HashMap::new(),
+            thumbnail_notify_pending: false,
             photo_grid_focus,
             import_dialog_focus,
             quick_look_open: false,
@@ -403,6 +421,7 @@ impl App {
             quick_look_next_focus,
             quick_look_details_focus,
             quick_look_favorite_focus,
+            quick_look_folder_focus,
             quick_look_compress_focus,
             quick_look_trash_focus,
             quick_look_add_tag_focus,
@@ -419,6 +438,8 @@ impl App {
             profile_index: 0,
             profile_suffix_input,
             _profile_suffix_subscription: profile_suffix_subscription,
+            profile_output_input,
+            _profile_output_subscription: profile_output_subscription,
             manual_compress: None,
             stats: LibraryStats::default(),
             settings: AppSettings::default(),
@@ -446,7 +467,6 @@ impl App {
             photo_root_input,
             log_dir_input,
             import_dir_input,
-            gallery_filters_open: false,
             search_active: false,
             searching: false,
             search_request: 0,
@@ -457,7 +477,6 @@ impl App {
             search_refresh_pending: false,
             search_favorite: false,
             search_days: Some(7),
-            delete_armed: None,
             daemon_shutdown_armed: false,
             message: None,
             demo,
@@ -517,23 +536,38 @@ impl Render for App {
         self.guard_viewer_selection(window, cx);
         let viewport = window.viewport_size();
         let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
-        let layout: ChromeLayout = chrome_layout(
+        let mut layout: ChromeLayout = chrome_layout(
             f32::from(viewport.width),
             f32::from(viewport.height),
             client_inset,
+            self.sidebar_collapsed,
         );
+        if self.ribbon_collapsed {
+            // The collapsed body still has its target height for the expand
+            // animation, but the content area can use that space.
+            layout.content_height += layout.ribbon_height;
+        }
         let main = v_flex()
             .flex_1()
             .min_w_0()
             .h_full()
-            .gap(px(14.))
+            .gap(px(WORKSPACE_GAP))
             .child(self.chrome(layout, cx))
             .child(v_flex().flex_1().min_h_0().child(self.content(window, cx)));
+        // The padding and gaps belong to the shell, not the window root:
+        // overlays must use the full window coordinate space (the viewer's
+        // morph bounds and centering are captured/computed there).
+        let shell = h_flex()
+            .relative()
+            .size_full()
+            .p(px(WORKSPACE_PAD))
+            .gap(px(WORKSPACE_GAP))
+            .child(self.sidebar(layout.content_height, cx))
+            .child(main)
+            .child(self.nav_tooltip());
         let root = h_flex()
             .relative()
             .size_full()
-            .p(px(14.))
-            .gap(px(14.))
             .bg(rgba(GLASS_WINDOW))
             .font_family("Noto Sans JP")
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
@@ -559,11 +593,7 @@ impl Render for App {
             .on_action(cx.listener(|this, _: &QuickLookPrevFocus, window, cx| {
                 this.cycle_quick_look_focus(true, window, cx)
             }))
-            .child(ambient_background())
-            .child(self.sidebar(layout.content_height, cx))
-            .child(main)
-            .child(self.nav_tooltip())
-            .child(self.rail_toggle(cx));
+            .child(shell);
         let root = if self.quick_look_open {
             root.child(self.quick_look(window, cx))
         } else {
@@ -579,7 +609,7 @@ impl Render for App {
         } else {
             root
         };
-        root.child(self.viewer_morph_overlay())
+        root.child(self.viewer_morph_view.clone())
     }
 }
 
