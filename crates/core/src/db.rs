@@ -3252,6 +3252,29 @@ mod tests {
     }
 
     #[test]
+    fn failed_profile_save_restores_the_previous_clipboard_flag() {
+        let db = Db::open_in_memory().unwrap();
+        let mut first = profile("first", "First");
+        first.clipboard = true;
+        db.save_profile(&first).unwrap();
+
+        db.connection()
+            .execute_batch(
+                "CREATE TRIGGER fail_broken_profile BEFORE INSERT ON compression_profiles \
+                 WHEN NEW.id = 'broken' BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END;",
+            )
+            .unwrap();
+
+        let mut broken = profile("broken", "Broken");
+        broken.clipboard = true;
+        assert!(db.save_profile(&broken).is_err());
+
+        let stored = db.list_profiles().unwrap();
+        assert_eq!(stored.len(), 1);
+        assert!(stored[0].clipboard);
+    }
+
+    #[test]
     fn saving_a_clipboard_profile_clears_the_previous_one() {
         let db = Db::open_in_memory().unwrap();
         let mut first = profile("first", "First");
