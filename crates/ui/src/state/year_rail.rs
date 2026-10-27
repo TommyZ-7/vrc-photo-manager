@@ -234,8 +234,11 @@ mod tests {
     use super::*;
     use crate::state::photo_browser::{PhotoIndex, anchor_photo_id};
     use crate::state::test_support::index_entry;
-    use crate::ui::theme::{PHOTO_ROW_HEIGHT, RAIL_WIDTH};
+    use crate::ui::theme::RAIL_WIDTH;
     use gpui_kit::{Bounds, point, px, size};
+
+    /// Local row height so the rail maths is not tied to the old 196px grid.
+    const TEST_ROW_HEIGHT: f32 = 180.0;
 
     #[test]
     fn year_buckets_merge_interleaved_local_years() {
@@ -334,27 +337,33 @@ mod tests {
     #[test]
     fn rail_jump_offset_uses_grid_rows_and_clamps_to_the_list() {
         // `ScrollHandle::max_offset()` is a non-negative scrollable extent.
-        assert_eq!(rail_scroll_offset(0, 3, PHOTO_ROW_HEIGHT, 10_000.0), 0.0);
-        assert_eq!(rail_scroll_offset(2, 3, PHOTO_ROW_HEIGHT, 10_000.0), 0.0);
-        assert_eq!(rail_scroll_offset(3, 3, PHOTO_ROW_HEIGHT, 10_000.0), -196.0);
-        assert_eq!(rail_scroll_offset(5, 3, PHOTO_ROW_HEIGHT, 10_000.0), -196.0);
-        // The target (-2156) is clamped to the 1000 px extent.
+        assert_eq!(rail_scroll_offset(0, 3, TEST_ROW_HEIGHT, 10_000.0), 0.0);
+        assert_eq!(rail_scroll_offset(2, 3, TEST_ROW_HEIGHT, 10_000.0), 0.0);
         assert_eq!(
-            rail_scroll_offset(11, 1, PHOTO_ROW_HEIGHT, 1_000.0),
+            rail_scroll_offset(3, 3, TEST_ROW_HEIGHT, 10_000.0),
+            -TEST_ROW_HEIGHT
+        );
+        assert_eq!(
+            rail_scroll_offset(5, 3, TEST_ROW_HEIGHT, 10_000.0),
+            -TEST_ROW_HEIGHT
+        );
+        // The target (-1980) is clamped to the 1000 px extent.
+        assert_eq!(
+            rail_scroll_offset(11, 1, TEST_ROW_HEIGHT, 1_000.0),
             -1_000.0
         );
         assert_eq!(
-            rail_scroll_offset(600, 3, PHOTO_ROW_HEIGHT, 10_000.0),
+            rail_scroll_offset(600, 3, TEST_ROW_HEIGHT, 10_000.0),
             -10_000.0
         );
         assert_eq!(
-            rail_scroll_offset(600, 0, PHOTO_ROW_HEIGHT, 10_000.0),
+            rail_scroll_offset(600, 0, TEST_ROW_HEIGHT, 10_000.0),
             -10_000.0
         );
         // No scrollable extent means no movement, even for a negative extent
         // rather than the real non-negative contract.
-        assert_eq!(rail_scroll_offset(600, 3, PHOTO_ROW_HEIGHT, 0.0), 0.0);
-        assert_eq!(rail_scroll_offset(600, 3, PHOTO_ROW_HEIGHT, -5.0), 0.0);
+        assert_eq!(rail_scroll_offset(600, 3, TEST_ROW_HEIGHT, 0.0), 0.0);
+        assert_eq!(rail_scroll_offset(600, 3, TEST_ROW_HEIGHT, -5.0), 0.0);
     }
 
     #[test]

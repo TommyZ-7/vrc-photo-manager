@@ -314,8 +314,7 @@ impl App {
 
         let mut panel = v_flex()
             .flex_shrink_0()
-            .mx(px(26.))
-            .mb(px(12.))
+            .mx(px(GALLERY_PAD_X))
             .rounded(px(14.))
             .bg(rgb(PANEL))
             .border_1()

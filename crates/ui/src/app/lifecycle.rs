@@ -374,7 +374,7 @@ impl App {
                 &self.library.index,
                 list_scroll_top(&self.library.scroll),
                 self.library.columns,
-                self.card_metrics().row_height,
+                self.library.row_height,
             )
         });
         let anchor = anchor.flatten();

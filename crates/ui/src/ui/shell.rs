@@ -747,7 +747,10 @@ impl App {
 
     pub(crate) fn nav_tooltip(&self) -> AnyElement {
         let Some(screen) = self.hovered_nav.filter(|_| self.sidebar_collapsed) else {
-            return div().into_any_element();
+            // Keep the empty slot out of the root flex flow; an in-flow
+            // zero-width child would still consume a 14px gap and shrink the
+            // main column on every layout.
+            return div().absolute().into_any_element();
         };
         let index = nav_index(screen);
 
@@ -1256,7 +1259,9 @@ pub(crate) fn screen_direction(from: Screen, to: Screen) -> f32 {
         -1.0
     }
 }
-/// Presentation metrics for one photo card and the uniform grid row it sits in.
+/// Legacy presentation metrics for one Search result card and its uniform
+/// grid row. The library uses [`crate::ui::theme::GridMetrics`] instead; Task
+/// 17 moves Search to the same 3:2 metrics.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct CardMetrics {
     pub(crate) image_height: f32,
@@ -1264,7 +1269,7 @@ pub(crate) struct CardMetrics {
     pub(crate) min_card_width: f32,
 }
 
-/// Derives the card layout from the display settings.
+/// Derives the Search card layout from the display settings.
 ///
 /// The text line heights are the values already implicit in the fixed 196 px
 /// medium row: 128 image + 8 body gap + 18 world + 3 text gap + 15 meta + 24
@@ -1311,7 +1316,7 @@ mod tests {
         ImportDialogOrigin, ImportDialogPhase, ImportDialogState, ImportReportView,
     };
     use crate::app::lifecycle::ScanProgressView;
-    use crate::ui::theme::{AMBER, BLUE, GREEN, MIN_CARD_WIDTH, MUTED_2, PHOTO_ROW_HEIGHT, RED};
+    use crate::ui::theme::{AMBER, BLUE, GREEN, MIN_CARD_WIDTH, MUTED_2, RED};
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
@@ -1359,11 +1364,14 @@ mod tests {
         assert_eq!(screen_direction(Screen::Settings, Screen::Photos), -1.0);
         assert_eq!(screen_direction(Screen::Search, Screen::Search), 1.0);
     }
+    /// The Search grid keeps its pre-Task 17 fixed-image layout.
+    const SEARCH_LEGACY_ROW_HEIGHT: f32 = 196.0;
+
     #[test]
-    fn default_card_metrics_match_the_current_grid() {
+    fn search_card_metrics_keep_the_legacy_grid() {
         let metrics = card_metrics(&AppSettings::default());
         assert_eq!(metrics.image_height, 128.0);
-        assert_eq!(metrics.row_height, PHOTO_ROW_HEIGHT);
+        assert_eq!(metrics.row_height, SEARCH_LEGACY_ROW_HEIGHT);
         assert_eq!(metrics.min_card_width, MIN_CARD_WIDTH);
     }
 
@@ -1399,14 +1407,17 @@ mod tests {
             ui_card_show_status: false,
             ..Default::default()
         };
-        assert_eq!(card_metrics(&status_hidden).row_height, PHOTO_ROW_HEIGHT);
+        assert_eq!(
+            card_metrics(&status_hidden).row_height,
+            SEARCH_LEGACY_ROW_HEIGHT
+        );
     }
 
     #[test]
     fn card_size_presets_scale_the_grid() {
         let expected = [
             (CardSize::Small, 96.0, 140.0),
-            (CardSize::Medium, 128.0, 170.0),
+            (CardSize::Medium, 128.0, 190.0),
             (CardSize::Large, 168.0, 220.0),
             (CardSize::ExtraLarge, 208.0, 280.0),
         ];

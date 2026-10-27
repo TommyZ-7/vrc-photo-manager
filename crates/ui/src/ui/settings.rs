@@ -388,13 +388,12 @@ impl App {
     /// Remembers the top-left photo before a display change alters columns or
     /// row height. The next render of each grid restores that photo.
     pub(crate) fn capture_display_layout_anchors(&mut self) {
-        let metrics = self.card_metrics();
         if self.pending_layout_anchor_library.is_none() {
             self.pending_layout_anchor_library = anchor_photo_id(
                 &self.library.index,
                 list_scroll_top(&self.library.scroll),
                 self.library.columns,
-                metrics.row_height,
+                self.library.row_height,
             );
         }
         if self.pending_layout_anchor_search.is_none() {
@@ -402,7 +401,7 @@ impl App {
                 &self.search_view.index,
                 list_scroll_top(&self.search_view.scroll),
                 self.search_view.columns,
-                metrics.row_height,
+                self.search_view.row_height,
             );
         }
     }

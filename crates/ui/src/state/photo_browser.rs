@@ -13,10 +13,8 @@ use std::time::{Duration, Instant};
 use gpui_kit::{ScrollStrategy, UniformListScrollHandle};
 use vrc_photo_core::model::{Photo, PhotoIndexEntry};
 
-// `PHOTO_ROW_HEIGHT` still lives in the theme module (Task 16 moves it), so
-// this module borrows it temporarily instead of duplicating its value.
 use crate::state::year_rail::{YearBucket, build_year_buckets};
-use crate::ui::theme::PHOTO_ROW_HEIGHT;
+use crate::ui::theme::{MIN_CARD_WIDTH, photo_row_height};
 use crate::ui::year_rail::YearRailLabels;
 
 pub(crate) const PAGE_SIZE: usize = 256;
@@ -209,7 +207,8 @@ impl PhotoBrowser {
             pages: PhotoPageCache::new(),
             scroll: UniformListScrollHandle::new(),
             columns: 1,
-            row_height: PHOTO_ROW_HEIGHT,
+            // The first grid render replaces this with the current layout.
+            row_height: photo_row_height(MIN_CARD_WIDTH, true, true),
             generation: 0,
             labels_generation: 0,
             labels: None,
@@ -356,8 +355,14 @@ impl CountDebounce {
 mod tests {
     use super::*;
     use crate::state::test_support::{index_entry, test_photo};
+    use crate::ui::theme::library_grid_metrics;
     use gpui_kit::{ScrollStrategy, UniformListScrollHandle, point, px};
     use vrc_photo_core::error::CoreError;
+    use vrc_photo_core::settings::CardSize;
+
+    /// Arbitrary non-196 row height so these tests prove the maths reads the
+    /// supplied layout instead of a fixed constant.
+    const TEST_ROW_HEIGHT: f32 = 180.0;
 
     #[test]
     fn page_cache_evicts_the_oldest_page() {
@@ -509,13 +514,13 @@ mod tests {
             index_entry(3, 202411),
         ];
         let index = PhotoIndex::new(entries);
-        assert_eq!(anchor_photo_id(&index, 0.0, 3, PHOTO_ROW_HEIGHT), Some(1));
+        assert_eq!(anchor_photo_id(&index, 0.0, 3, TEST_ROW_HEIGHT), Some(1));
         assert_eq!(
-            anchor_photo_id(&index, PHOTO_ROW_HEIGHT + 1.0, 1, PHOTO_ROW_HEIGHT),
+            anchor_photo_id(&index, TEST_ROW_HEIGHT + 1.0, 1, TEST_ROW_HEIGHT),
             Some(2)
         );
         assert_eq!(
-            anchor_photo_id(&index, PHOTO_ROW_HEIGHT * 2.0 + 1.0, 1, PHOTO_ROW_HEIGHT),
+            anchor_photo_id(&index, TEST_ROW_HEIGHT * 2.0 + 1.0, 1, TEST_ROW_HEIGHT),
             Some(3)
         );
     }
@@ -523,13 +528,32 @@ mod tests {
     #[test]
     fn anchor_photo_id_handles_empty_and_overscrolled_indexes() {
         assert_eq!(
-            anchor_photo_id(&PhotoIndex::new(Vec::new()), 0.0, 3, PHOTO_ROW_HEIGHT),
+            anchor_photo_id(&PhotoIndex::new(Vec::new()), 0.0, 3, TEST_ROW_HEIGHT),
             None
         );
         let index = PhotoIndex::new(vec![index_entry(1, 202601), index_entry(2, 202512)]);
         assert_eq!(
-            anchor_photo_id(&index, PHOTO_ROW_HEIGHT * 50.0, 4, PHOTO_ROW_HEIGHT),
+            anchor_photo_id(&index, TEST_ROW_HEIGHT * 50.0, 4, TEST_ROW_HEIGHT),
             Some(2)
+        );
+    }
+
+    #[test]
+    fn first_visible_photo_uses_the_3_2_library_row_height() {
+        let metrics = library_grid_metrics(1280.0, false, false, CardSize::Medium, true, true);
+        assert_eq!(metrics.columns, 3);
+        assert_eq!(
+            first_visible_photo(
+                metrics.row_height * 2.5,
+                metrics.columns,
+                metrics.row_height,
+                100,
+            ),
+            6
+        );
+        assert_eq!(
+            first_visible_photo(0.0, metrics.columns, metrics.row_height, 100),
+            0
         );
     }
 
@@ -538,16 +562,16 @@ mod tests {
         // Halfway into row 2 with 3 columns: the top row starts at entry 6.
         // Truncating after multiplying (`2.5 * 3 = 7.5`) would pick entry 7.
         assert_eq!(
-            first_visible_photo(PHOTO_ROW_HEIGHT * 2.5, 3, PHOTO_ROW_HEIGHT, 100),
+            first_visible_photo(TEST_ROW_HEIGHT * 2.5, 3, TEST_ROW_HEIGHT, 100),
             6
         );
-        assert_eq!(first_visible_photo(0.0, 3, PHOTO_ROW_HEIGHT, 100), 0);
-        assert_eq!(first_visible_photo(-20.0, 3, PHOTO_ROW_HEIGHT, 100), 0);
+        assert_eq!(first_visible_photo(0.0, 3, TEST_ROW_HEIGHT, 100), 0);
+        assert_eq!(first_visible_photo(-20.0, 3, TEST_ROW_HEIGHT, 100), 0);
         assert_eq!(
-            first_visible_photo(PHOTO_ROW_HEIGHT * 50.0, 3, PHOTO_ROW_HEIGHT, 10),
+            first_visible_photo(TEST_ROW_HEIGHT * 50.0, 3, TEST_ROW_HEIGHT, 10),
             9
         );
-        assert_eq!(first_visible_photo(0.0, 3, PHOTO_ROW_HEIGHT, 0), 0);
+        assert_eq!(first_visible_photo(0.0, 3, TEST_ROW_HEIGHT, 0), 0);
     }
 
     #[test]
@@ -561,7 +585,7 @@ mod tests {
         ]);
         assert_eq!(updated.row_of_id(11), Some(2));
         assert_eq!(
-            anchor_photo_id(&updated, PHOTO_ROW_HEIGHT * 2.0 + 1.0, 1, PHOTO_ROW_HEIGHT),
+            anchor_photo_id(&updated, TEST_ROW_HEIGHT * 2.0 + 1.0, 1, TEST_ROW_HEIGHT),
             Some(11)
         );
     }
@@ -598,7 +622,7 @@ mod tests {
             .0
             .borrow_mut()
             .base_handle
-            .set_offset(point(px(0.), px(-PHOTO_ROW_HEIGHT * 10.0)));
+            .set_offset(point(px(0.), px(-TEST_ROW_HEIGHT * 10.0)));
         browser.remove_photo(1);
 
         let state = browser.scroll.0.borrow();

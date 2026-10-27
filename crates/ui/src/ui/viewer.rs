@@ -316,7 +316,9 @@ impl App {
 
     pub(crate) fn viewer_morph_overlay(&self) -> AnyElement {
         let Some(morph) = self.viewer_morph.as_ref() else {
-            return div().into_any_element();
+            // An in-flow empty slot would still take a root flex gap and
+            // narrow the main column by 14px.
+            return div().absolute().into_any_element();
         };
         let from = morph.from;
         let to = morph.to;
