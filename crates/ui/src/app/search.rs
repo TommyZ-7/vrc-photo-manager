@@ -196,7 +196,7 @@ impl App {
             &self.search_view.index,
             list_scroll_top(&self.search_view.scroll),
             self.search_view.columns,
-            self.card_metrics().row_height,
+            self.search_view.row_height,
         );
         self.start_search_refresh(anchor, cx);
     }

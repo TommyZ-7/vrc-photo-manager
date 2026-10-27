@@ -32,18 +32,44 @@ pub(crate) struct ButtonState {
     pub(crate) enabled: bool,
 }
 
+/// Opaque panel surface.
+///
+/// The window background is the only glass surface in the refit, so cards must
+/// stand on their own fill: solid `PANEL_CARD`, a 1px border, a top inset
+/// highlight, and a weak drop shadow. There is deliberately no element-level
+/// blur or translucent fill here.
 pub(crate) fn glass_panel() -> Div {
     div()
         .rounded(px(18.))
-        .bg(rgba(0x141922c4))
+        .bg(rgb(PANEL_CARD))
         .border_1()
-        .border_color(rgba(0xffffff14))
+        // BORDER from the spec: rgba(255,255,255,0.105).
+        .border_color(rgba(0xffffff1b))
         .shadow(vec![
-            BoxShadow::new(px(0.), px(24.), rgba(0x00000060).into()).blur_radius(px(60.)),
-            BoxShadow::new(px(0.), px(1.), rgba(0xffffff0d).into())
+            // Spec card shadow: 0 18px 44px rgba(0,0,0,0.28).
+            BoxShadow::new(px(0.), px(18.), rgba(0x00000047).into()).blur_radius(px(44.)),
+            BoxShadow::new(px(0.), px(1.), rgba(0xffffff14).into())
                 .inset()
                 .blur_radius(px(0.)),
         ])
+}
+
+/// Opaque modal card surface for the import and manual-compression dialogs.
+///
+/// Same fill rule as [`glass_panel`] — the scrim behind may dim the window, but
+/// the foreground card itself never lets the glass show through. The larger
+/// 20 px radius and header-to-card gradient follow the mock's modal card;
+/// focus order and dialog actions stay in the caller.
+pub(crate) fn dialog_panel() -> Div {
+    glass_panel()
+        .flex()
+        .flex_col()
+        .rounded(px(20.))
+        .bg(linear_gradient(
+            180.,
+            linear_color_stop(rgb(PANEL_HEADER), 0.),
+            linear_color_stop(rgb(PANEL_CARD), 1.),
+        ))
 }
 
 pub(crate) fn chip(label: &str, active: bool) -> Div {
@@ -400,9 +426,9 @@ impl App {
             .flex_col()
             .flex_1()
             .min_w_0()
-            .p(px(16.))
+            .p(px(14.))
             .gap(px(6.))
-            .bg(rgb(PANEL))
+            .rounded(px(17.))
             .child(
                 div()
                     .text_size(px(10.))
@@ -411,7 +437,7 @@ impl App {
             )
             .child(
                 div()
-                    .text_size(px(17.))
+                    .text_size(px(20.))
                     .font_semibold()
                     .text_color(rgb(TEXT))
                     .truncate()

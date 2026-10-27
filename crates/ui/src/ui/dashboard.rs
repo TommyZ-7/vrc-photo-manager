@@ -2,7 +2,7 @@
 //!
 //! Daemon commands live in `app::daemon`; screen dispatch lives in `ui::shell`.
 
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::button::Button;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -20,163 +20,152 @@ use crate::ui::theme::*;
 
 impl App {
     pub(crate) fn dashboard_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let stats = h_flex()
+            .flex_shrink_0()
+            .gap(px(CARD_GAP))
+            .child(self.stat_card("写真", format!("{} 枚", self.stats.photo_count)))
+            .child(self.stat_card("未完了ジョブ", format!("{} 件", self.active_job_count)))
+            .child(self.stat_card("未実行", format!("{} 件", self.waiting_job_count)))
+            .child(self.stat_card(
+                "デーモン",
+                if self.daemon_active {
+                    daemon_state_label(true, self.daemon_paused).to_string()
+                } else if self.settings.log_dir.is_some() {
+                    "停止中".to_string()
+                } else {
+                    "未設定".to_string()
+                },
+            ));
         v_flex()
             .flex_1()
             .min_h_0()
-            .child(self.screen_header(
-                "ダッシュボード",
-                "ライブラリ、圧縮キュー、ログ監視の状況をまとめて確認できます。".to_string(),
-                self.message.clone(),
-                vec![
-                    Button::new("dashboard-refresh")
-                        .label("再読込")
-                        .small()
-                        .ghost()
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.reload_aux(cx);
-                            cx.notify();
-                        }))
-                        .into_any_element(),
-                ],
-            ))
+            .gap(px(CARD_GAP))
+            .child(stats)
             .child(
-                v_flex()
+                h_flex()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scrollbar()
-                    .px(px(26.))
-                    .pt(px(22.))
-                    .pb(px(26.))
-                    .gap(px(24.))
+                    .gap(px(CARD_GAP))
+                    .items_stretch()
                     .child(
-                        h_flex()
-                            .gap(px(16.))
-                            .child(self.stat_card(
-                                "写真",
-                                format!("{} 枚", self.stats.photo_count),
-                            ))
-                            .child(self.stat_card(
-                                "未完了ジョブ",
-                                format!("{} 件", self.active_job_count),
-                            ))
-                            .child(self.stat_card(
-                                "未実行",
-                                format!("{} 件", self.waiting_job_count),
-                            ))
-                            .child(self.stat_card(
-                                "デーモン",
-                                if self.daemon_active {
-                                    daemon_state_label(true, self.daemon_paused).to_string()
-                                } else if self.settings.log_dir.is_some() {
-                                    "停止中".to_string()
-                                } else {
-                                    "未設定".to_string()
-                                },
-                            )),
-                    )
-                    .child(self.queue_panel(cx))
-                    .child(self.daemon_card(cx))
-                    .when(!self.daemon_errors.is_empty(), |this| {
-                        this.child(self.daemon_error_card(cx))
-                    })
-                    .child(
-                        h_flex()
-                            .gap(px(24.))
-                            .items_start()
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h_0()
+                            .gap(px(CARD_GAP))
+                            .child(self.queue_panel(cx))
                             .child(
-                                glass_panel()
-                                    .flex()
-                                    .flex_col()
-                                    .flex_1()
-                                    .p(px(16.))
-                                    .gap(px(10.))
-                                    .bg(rgb(PANEL))
-                                    .child(
-                                        div()
-                                            .text_size(px(17.))
-                                            .font_semibold()
-                                            .text_color(rgb(TEXT))
-                                            .child("現在のセッション"),
-                                    )
-                                    .child(self.meta_row(
-                                        "ワールド",
-                                        self.monitor_world
-                                            .clone()
-                                            .unwrap_or_else(|| "—".to_string()),
-                                    ))
-                                    .child(self.meta_row(
-                                        "インスタンス",
-                                        self.monitor_instance
-                                            .clone()
-                                            .unwrap_or_else(|| "—".to_string()),
-                                    ))
-                                    .child(self.meta_row(
-                                        "同接",
-                                        format!("{} 人", self.monitor_players.len()),
-                                    ))
-                                    .child(self.section_label(if self.monitor_players.is_empty() {
-                                        "プレイヤー情報はまだありません"
-                                    } else {
-                                        "入室中のプレイヤー"
-                                    }))
-                                    .children(self.monitor_players.iter().map(|player| {
-                                        div()
-                                            .text_size(px(12.))
-                                            .text_color(rgb(MUTED))
-                                            .child(player.clone())
-                                    })),
-                            )
-                            .child(
-                                glass_panel()
-                                    .flex()
-                                    .flex_col()
-                                    .flex_1()
-                                    .p(px(16.))
-                                    .gap(px(10.))
-                                    .bg(rgb(PANEL))
-                                    .child(
-                                        div()
-                                            .text_size(px(17.))
-                                            .font_semibold()
-                                            .text_color(rgb(TEXT))
-                                            .child("監視パス"),
-                                    )
-                                    .children(self.settings.photo_roots.iter().map(|path| {
-                                        div()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_size(px(10.))
-                                            .font_family("monospace")
-                                            .text_color(rgb(MUTED))
-                                            .child(path.clone())
-                                    }))
-                                    .child(
-                                        div()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_size(px(10.))
-                                            .font_family("monospace")
-                                            .text_color(rgb(MUTED))
-                                            .child(
-                                                self.settings
-                                                    .log_dir
-                                                    .clone()
-                                                    .unwrap_or_else(|| "ログフォルダ未設定".to_string()),
-                                            ),
-                                    ),
+                                v_flex()
+                                    .flex_shrink_0()
+                                    .p(px(12.))
+                                    .rounded(px(12.))
+                                    .bg(rgb(0x2a2412))
+                                    .border_1()
+                                    .border_color(rgba(0xfbbf2440))
+                                    .text_size(px(11.))
+                                    .text_color(rgb(AMBER))
+                                    .child("VRChat本体は出力ログを24時間で削除します。アプリ側には解析済みイベントだけを保存します。"),
                             ),
                     )
-                    .child(self.log_card(cx))
                     .child(
-                        div()
-                            .p(px(14.))
-                            .rounded(px(14.))
-                            .bg(rgb(0x2a2412))
-                            .border_1()
-                            .border_color(rgba(0xfbbf2440))
-                            .text_size(px(12.))
-                            .text_color(rgb(AMBER))
-                            .child("VRChat本体は出力ログを24時間で削除します。アプリ側には解析済みイベントだけを保存します。"),
+                        v_flex()
+                            .w(px(DASHBOARD_SIDE_WIDTH))
+                            .flex_shrink_0()
+                            .min_h_0()
+                            .gap(px(CARD_GAP))
+                            .overflow_y_scrollbar()
+                            .child(self.daemon_card(cx))
+                            .when(!self.daemon_errors.is_empty(), |this| {
+                                this.child(self.daemon_error_card(cx))
+                            })
+                            .child(self.session_card())
+                            .child(self.monitor_paths_card())
+                            .child(self.log_card(cx)),
+                    ),
+            )
+    }
+
+    fn session_card(&self) -> impl IntoElement {
+        glass_panel()
+            .flex()
+            .flex_col()
+            .flex_shrink_0()
+            .p(px(14.))
+            .gap(px(10.))
+            .rounded(px(17.))
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .font_semibold()
+                    .text_color(rgb(TEXT))
+                    .child("現在のセッション"),
+            )
+            .child(
+                self.meta_row(
+                    "ワールド",
+                    self.monitor_world
+                        .clone()
+                        .unwrap_or_else(|| "—".to_string()),
+                ),
+            )
+            .child(
+                self.meta_row(
+                    "インスタンス",
+                    self.monitor_instance
+                        .clone()
+                        .unwrap_or_else(|| "—".to_string()),
+                ),
+            )
+            .child(self.meta_row("同接", format!("{} 人", self.monitor_players.len())))
+            .child(self.section_label(if self.monitor_players.is_empty() {
+                "プレイヤー情報はまだありません"
+            } else {
+                "入室中のプレイヤー"
+            }))
+            .children(self.monitor_players.iter().map(|player| {
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgb(MUTED))
+                    .child(player.clone())
+            }))
+    }
+
+    fn monitor_paths_card(&self) -> impl IntoElement {
+        glass_panel()
+            .flex()
+            .flex_col()
+            .flex_shrink_0()
+            .p(px(14.))
+            .gap(px(10.))
+            .rounded(px(17.))
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .font_semibold()
+                    .text_color(rgb(TEXT))
+                    .child("監視パス"),
+            )
+            .children(self.settings.photo_roots.iter().map(|path| {
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(10.))
+                    .font_family("monospace")
+                    .text_color(rgb(MUTED))
+                    .child(path.clone())
+            }))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(10.))
+                    .font_family("monospace")
+                    .text_color(rgb(MUTED))
+                    .child(
+                        self.settings
+                            .log_dir
+                            .clone()
+                            .unwrap_or_else(|| "ログフォルダ未設定".to_string()),
                     ),
             )
     }
@@ -217,16 +206,17 @@ impl App {
         let mut card = glass_panel()
             .flex()
             .flex_col()
-            .p(px(16.))
-            .gap(px(12.))
-            .bg(rgb(PANEL))
+            .flex_shrink_0()
+            .p(px(14.))
+            .gap(px(10.))
+            .rounded(px(17.))
             .child(
                 h_flex()
                     .items_center()
                     .gap(px(8.))
                     .child(
                         div()
-                            .text_size(px(17.))
+                            .text_size(px(13.))
                             .font_semibold()
                             .text_color(rgb(TEXT))
                             .child("デーモン"),
@@ -303,16 +293,17 @@ impl App {
         let mut card = glass_panel()
             .flex()
             .flex_col()
-            .p(px(16.))
+            .flex_shrink_0()
+            .p(px(14.))
             .gap(px(10.))
-            .bg(rgb(PANEL))
+            .rounded(px(17.))
             .child(
                 h_flex()
                     .items_center()
                     .gap(px(8.))
                     .child(
                         div()
-                            .text_size(px(17.))
+                            .text_size(px(13.))
                             .font_semibold()
                             .text_color(rgb(TEXT))
                             .child("処理エラー"),
@@ -407,12 +398,13 @@ impl App {
         let mut card = glass_panel()
             .flex()
             .flex_col()
-            .p(px(24.))
-            .gap(px(16.))
-            .bg(rgb(PANEL))
+            .flex_shrink_0()
+            .p(px(14.))
+            .gap(px(10.))
+            .rounded(px(17.))
             .child(
                 div()
-                    .text_size(px(17.))
+                    .text_size(px(13.))
                     .font_semibold()
                     .text_color(rgb(TEXT))
                     .child("ログ"),

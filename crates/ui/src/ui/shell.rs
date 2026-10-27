@@ -1,8 +1,8 @@
-//! App shell: sidebar navigation, screen headers, global alerts, and the
-//! screen dispatch wrapper.
+//! App shell: sidebar navigation, global alerts, and the screen dispatch
+//! wrapper.
 //!
 //! `App::render` stays in `app.rs`; this module owns the chrome around the
-//! active screen and the card metrics shared by the grids.
+//! active screen and the grid helpers shared by the screens.
 
 use std::time::Duration;
 
@@ -11,7 +11,6 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use vrc_photo_core::importer::ImportProgress;
-use vrc_photo_core::settings::{AppSettings, CardSize};
 use vrc_photo_ipc::ScanPhase as IpcScanPhase;
 
 use crate::app::import::{
@@ -19,6 +18,7 @@ use crate::app::import::{
 };
 use crate::app::lifecycle::ScanProgressView;
 use crate::app::{App, Screen, SidebarStatusTab};
+use crate::ui::chrome::message_strip_visible;
 use crate::ui::components::status_progress_bar;
 use crate::ui::import::import_progress_ratio;
 use crate::ui::theme::*;
@@ -55,7 +55,7 @@ pub(crate) struct CardStatus {
 }
 
 impl App {
-    pub(crate) fn sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn sidebar(&mut self, content_height: f32, cx: &mut Context<Self>) -> AnyElement {
         let collapsed = self.sidebar_collapsed;
         let update_badge = self.update.nav_badge();
         let epoch = self.sidebar_motion_epoch;
@@ -67,7 +67,8 @@ impl App {
         let photo_count = format_count(self.stats.photo_count);
         let compression_count =
             (self.active_job_count > 0).then(|| format_count(self.active_job_count));
-        let status_card = (!collapsed).then(|| self.sidebar_status_card(cx));
+        let status_card = (!collapsed && sidebar_status_visible(content_height))
+            .then(|| self.sidebar_status_card(cx));
 
         let brand_text = v_flex()
             .min_w_0()
@@ -105,9 +106,17 @@ impl App {
             .py(px(16.))
             .px(px(12.))
             .gap(px(3.))
-            .bg(rgb(SIDEBAR))
-            .border_r_1()
-            .border_color(rgba(0xffffff14))
+            .bg(rgb(PANEL_SIDEBAR))
+            .rounded(px(22.))
+            .border_1()
+            .border_color(rgba(0xffffff1b))
+            .overflow_hidden()
+            .shadow(vec![
+                BoxShadow::new(px(0.), px(18.), rgba(0x00000047).into()).blur_radius(px(44.)),
+                BoxShadow::new(px(0.), px(1.), rgba(0xffffff10).into())
+                    .inset()
+                    .blur_radius(px(0.)),
+            ])
             .child(
                 h_flex()
                     .h(px(34.))
@@ -739,14 +748,17 @@ impl App {
 
     pub(crate) fn nav_tooltip(&self) -> AnyElement {
         let Some(screen) = self.hovered_nav.filter(|_| self.sidebar_collapsed) else {
-            return div().into_any_element();
+            // Keep the empty slot out of the root flex flow; an in-flow
+            // zero-width child would still consume a 14px gap and shrink the
+            // main column on every layout.
+            return div().absolute().into_any_element();
         };
         let index = nav_index(screen);
 
         div()
             .absolute()
-            .left(px(86.))
-            .top(px(70.0 + nav_item_top(index)))
+            .left(px(100.))
+            .top(px(84.0 + nav_item_top(index)))
             .px(px(8.))
             .py(px(5.))
             .rounded(px(7.))
@@ -783,8 +795,8 @@ impl App {
 
         div()
             .absolute()
-            .top(px(18.))
-            .left(px(sidebar_width(collapsed) - 12.))
+            .top(px(32.))
+            .left(px(14. + sidebar_width(collapsed) - 12.))
             .child(
                 Button::new("rail-toggle")
                     .ghost()
@@ -810,62 +822,8 @@ impl App {
                 move |el, t| {
                     let from = sidebar_width(!collapsed);
                     let to = sidebar_width(collapsed);
-                    el.left(px(from + (to - from) * t - 12.))
+                    el.left(px(14. + from + (to - from) * t - 12.))
                 },
-            )
-            .into_any_element()
-    }
-
-    pub(crate) fn screen_header(
-        &self,
-        title: &'static str,
-        subtitle: String,
-        message: Option<String>,
-        actions: Vec<AnyElement>,
-    ) -> AnyElement {
-        h_flex()
-            .h(px(72.))
-            .flex_shrink_0()
-            .px(px(26.))
-            .gap(px(14.))
-            .items_center()
-            .border_b_1()
-            .border_color(rgb(BORDER))
-            .child(
-                v_flex()
-                    .flex_shrink_0()
-                    .gap(px(2.))
-                    .child(
-                        div()
-                            .text_size(px(24.))
-                            .font_semibold()
-                            .text_color(rgb(TEXT))
-                            .child(title),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(MUTED_2))
-                            .child(subtitle),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .when_some(message, |this, message| {
-                        this.text_size(px(10.))
-                            .text_color(rgb(AMBER))
-                            .truncate()
-                            .child(message)
-                    }),
-            )
-            .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .items_center()
-                    .gap(px(8.))
-                    .children(actions),
             )
             .into_any_element()
     }
@@ -941,7 +899,57 @@ impl App {
         .collect()
     }
 
+    /// Slim persistent row for `App.message` when the ribbon cannot show it.
+    /// Unlike a toast it stays until the user dismisses it or an action
+    /// replaces it; failure details remain on their own screens.
+    fn message_strip(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let message = self.message.clone().unwrap_or_default();
+        h_flex()
+            .flex_shrink_0()
+            .w_full()
+            .items_center()
+            .gap(px(10.))
+            .px(px(26.))
+            .py(px(7.))
+            .bg(rgb(PANEL_INNER))
+            .border_b_1()
+            .border_color(rgb(BORDER))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .size(px(6.))
+                    .rounded_full()
+                    .bg(rgb(AMBER)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(11.))
+                    .text_color(rgb(AMBER))
+                    .child(message),
+            )
+            .child(
+                Button::new("message-dismiss")
+                    .label("閉じる")
+                    .small()
+                    .ghost()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.message = None;
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
+    }
+
     pub(crate) fn content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
+        let content_width =
+            window_content_extent(f32::from(window.viewport_size().width), client_inset);
+        let message_strip = (self.message.is_some()
+            && message_strip_visible(self.ribbon_collapsed, self.active_ribbon_tab, content_width))
+        .then(|| self.message_strip(cx));
         let screen = match self.screen {
             Screen::Photos => self.photos_screen(window, cx).into_any_element(),
             Screen::Compression => self.compression_screen(window, cx).into_any_element(),
@@ -970,13 +978,53 @@ impl App {
             .flex_1()
             .min_h_0()
             .children(self.global_alerts(cx))
+            .children(message_strip)
             .child(screen)
             .into_any_element()
     }
+}
 
-    pub(crate) fn card_metrics(&self) -> CardMetrics {
-        card_metrics(&self.settings)
-    }
+/// Window-wide ambient glass surface.
+///
+/// The compositor may refuse the `Blurred` window request, so this layer paints
+/// its own dark base: a diagonal navy gradient plus three broad colour washes.
+/// GPUI has no radial gradient, so each wash is a linear gradient anchored at a
+/// corner and fading to fully transparent; stacked washes stay smooth at any
+/// window size and never rely on element-level blur. Cards drawn after this
+/// layer are opaque, which keeps text legible either way.
+pub(crate) fn ambient_background() -> impl IntoElement {
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .overflow_hidden()
+        .bg(linear_gradient(
+            160.,
+            linear_color_stop(rgba(0x0a1526cc), 0.),
+            linear_color_stop(rgba(0x04060be6), 1.),
+        ))
+        // Blue from the top-left, violet from the top-right, teal from the
+        // bottom. The stops cover ~half the window so the centre stays dark.
+        .child(ambient_glow(135., BG_AMBIENT_A, 0.58))
+        .child(ambient_glow(225., BG_AMBIENT_B, 0.52))
+        .child(ambient_glow(0., BG_AMBIENT_C, 0.55))
+}
+
+/// One ambient colour wash. `angle` places the full-strength corner, and the
+/// colour is transparent past `falloff`, so overlapping washes never stack
+/// into a flat tint.
+fn ambient_glow(angle: f32, color: u32, falloff: f32) -> Div {
+    div()
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full()
+        .bg(linear_gradient(
+            angle,
+            linear_color_stop(rgba(color), 0.),
+            linear_color_stop(rgba(color & 0xffffff00), falloff),
+        ))
 }
 
 /// Compact, ordered summaries of every failure that deserves a global alert.
@@ -1259,62 +1307,21 @@ pub(crate) fn screen_direction(from: Screen, to: Screen) -> f32 {
         -1.0
     }
 }
-/// Presentation metrics for one photo card and the uniform grid row it sits in.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct CardMetrics {
-    pub(crate) image_height: f32,
-    pub(crate) row_height: f32,
-    pub(crate) min_card_width: f32,
-}
-
-/// Derives the card layout from the display settings.
-///
-/// The text line heights are the values already implicit in the fixed 196 px
-/// medium row: 128 image + 8 body gap + 18 world + 3 text gap + 15 meta + 24
-/// slack. Hiding a text group removes its height so the grid tightens instead
-/// of leaving a blank strip.
-fn card_metrics(settings: &AppSettings) -> CardMetrics {
-    let (image_height, min_card_width) = match settings.ui_card_size {
-        CardSize::Small => (96.0, 140.0),
-        CardSize::Medium => (128.0, MIN_CARD_WIDTH),
-        CardSize::Large => (168.0, 220.0),
-        CardSize::ExtraLarge => (208.0, 280.0),
-    };
-    let meta_line = settings.ui_card_show_date || settings.ui_card_show_size;
-    let mut row_height = image_height + CARD_ROW_SLACK;
-    if settings.ui_card_show_world || meta_line {
-        row_height += CARD_BODY_GAP;
-    }
-    if settings.ui_card_show_world {
-        row_height += CARD_WORLD_LINE_HEIGHT;
-    }
-    if meta_line {
-        if settings.ui_card_show_world {
-            row_height += CARD_TEXT_GAP;
-        }
-        row_height += CARD_META_LINE_HEIGHT;
-    }
-    CardMetrics {
-        image_height,
-        row_height,
-        min_card_width,
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::{
-        NAV_ITEM_GAP, NAV_ITEM_HEIGHT, StatusTone, alert_summaries, card_metrics,
-        compression_attention, compression_card_status, import_attention, import_card_status,
-        import_running_progress, nav_index, nav_item_top, running_job_count, scan_attention,
-        scan_card_status, scan_progress_label, scan_progress_ratio, screen_direction,
+        NAV_ITEM_GAP, NAV_ITEM_HEIGHT, StatusTone, alert_summaries, compression_attention,
+        compression_card_status, import_attention, import_card_status, import_running_progress,
+        nav_index, nav_item_top, running_job_count, scan_attention, scan_card_status,
+        scan_progress_label, scan_progress_ratio, screen_direction,
     };
     use crate::app::Screen;
     use crate::app::import::{
         ImportDialogOrigin, ImportDialogPhase, ImportDialogState, ImportReportView,
     };
     use crate::app::lifecycle::ScanProgressView;
-    use crate::ui::theme::{AMBER, BLUE, GREEN, MIN_CARD_WIDTH, MUTED_2, PHOTO_ROW_HEIGHT, RED};
+    use crate::ui::theme::{AMBER, BLUE, GREEN, MUTED_2, RED};
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
@@ -1322,7 +1329,6 @@ mod tests {
         ImportIssue, ImportIssueKind, ImportMode, ImportProgress, ImportRename,
     };
     use vrc_photo_core::scanner::ScanFailure;
-    use vrc_photo_core::settings::{AppSettings, CardSize};
     use vrc_photo_ipc::ScanPhase as IpcScanPhase;
 
     #[test]
@@ -1361,67 +1367,6 @@ mod tests {
         assert_eq!(screen_direction(Screen::Photos, Screen::Settings), 1.0);
         assert_eq!(screen_direction(Screen::Settings, Screen::Photos), -1.0);
         assert_eq!(screen_direction(Screen::Search, Screen::Search), 1.0);
-    }
-    #[test]
-    fn default_card_metrics_match_the_current_grid() {
-        let metrics = card_metrics(&AppSettings::default());
-        assert_eq!(metrics.image_height, 128.0);
-        assert_eq!(metrics.row_height, PHOTO_ROW_HEIGHT);
-        assert_eq!(metrics.min_card_width, MIN_CARD_WIDTH);
-    }
-
-    #[test]
-    fn hidden_card_text_shrinks_the_row_but_keeps_the_image() {
-        let settings = AppSettings {
-            ui_card_show_world: false,
-            ui_card_show_date: false,
-            ui_card_show_size: false,
-            ..Default::default()
-        };
-        let metrics = card_metrics(&settings);
-        assert_eq!(metrics.image_height, 128.0);
-        assert_eq!(metrics.row_height, 152.0);
-    }
-
-    #[test]
-    fn card_metrics_count_only_visible_text_lines() {
-        let world_only = AppSettings {
-            ui_card_show_date: false,
-            ui_card_show_size: false,
-            ..Default::default()
-        };
-        assert_eq!(card_metrics(&world_only).row_height, 178.0);
-
-        let meta_only = AppSettings {
-            ui_card_show_world: false,
-            ..Default::default()
-        };
-        assert_eq!(card_metrics(&meta_only).row_height, 175.0);
-
-        let status_hidden = AppSettings {
-            ui_card_show_status: false,
-            ..Default::default()
-        };
-        assert_eq!(card_metrics(&status_hidden).row_height, PHOTO_ROW_HEIGHT);
-    }
-
-    #[test]
-    fn card_size_presets_scale_the_grid() {
-        let expected = [
-            (CardSize::Small, 96.0, 140.0),
-            (CardSize::Medium, 128.0, 170.0),
-            (CardSize::Large, 168.0, 220.0),
-            (CardSize::ExtraLarge, 208.0, 280.0),
-        ];
-        for (size, image, min_width) in expected {
-            let metrics = card_metrics(&AppSettings {
-                ui_card_size: size,
-                ..Default::default()
-            });
-            assert_eq!(metrics.image_height, image);
-            assert_eq!(metrics.min_card_width, min_width);
-            assert_eq!(metrics.row_height, image + 68.0);
-        }
     }
     #[test]
     fn scan_progress_label_uses_root_and_counts() {

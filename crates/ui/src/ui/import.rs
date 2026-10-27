@@ -14,6 +14,7 @@ use crate::app::App;
 use crate::app::import::{
     ImportDialogOrigin, ImportDialogPhase, ImportReportView, import_issue_counts,
 };
+use crate::ui::components::dialog_panel;
 use crate::ui::theme::*;
 
 pub(crate) fn import_progress_ratio(progress: &ImportProgress) -> f32 {
@@ -37,18 +38,11 @@ impl App {
         let mode = import_mode_label(dialog.mode);
         let dest = dialog.dest.to_string_lossy().to_string();
 
-        let mut panel = v_flex()
+        let mut panel = dialog_panel()
             .id("import-dialog-panel")
             .w(px(560.))
             .gap(px(16.))
             .p(px(22.))
-            .rounded(px(18.))
-            .bg(rgb(PANEL))
-            .border_1()
-            .border_color(rgb(BORDER_STRONG))
-            .shadow(vec![
-                BoxShadow::new(px(0.), px(24.), rgba(0x00000099).into()).blur_radius(px(60.)),
-            ])
             .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
             .track_focus(&self.import_dialog_focus)
             .focus_trap("import-dialog", &self.import_dialog_focus)
@@ -278,6 +272,7 @@ impl App {
             .flex()
             .items_center()
             .justify_center()
+            .p(px(DIALOG_VIEWPORT_MARGIN))
             .bg(rgba(0x05070acc))
             .on_click(cx.listener(|this, _, _, cx| this.cancel_or_close_import(cx)))
             .child(panel)
@@ -314,8 +309,7 @@ impl App {
 
         let mut panel = v_flex()
             .flex_shrink_0()
-            .mx(px(26.))
-            .mb(px(12.))
+            .mx(px(GALLERY_PAD_X))
             .rounded(px(14.))
             .bg(rgb(PANEL))
             .border_1()

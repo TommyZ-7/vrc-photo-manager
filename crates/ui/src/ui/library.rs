@@ -1,7 +1,7 @@
 //! Library (Photos) screen: grid, selection bar, inspector, and detail body.
 //!
 //! The same grid and card widgets are reused by the Search screen; screen
-//! dispatch and the shared header helper live in `ui::shell`.
+//! dispatch lives in `ui::shell`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,18 +13,16 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use vrc_photo_core::importer::ImportMode;
 use vrc_photo_core::model::Photo;
 
 use crate::app::App;
 use crate::app::Screen;
 use crate::app::cli::log_timing;
-use crate::app::daemon::daemon_sync_label;
-use crate::state::photo_browser::PAGE_SIZE;
+use crate::state::photo_browser::{PAGE_SIZE, anchor_photo_id, list_scroll_top, row_for_photo};
 use crate::state::preview::preview_placeholder_label;
 use crate::state::viewer::ViewerOpenSource;
+use crate::state::year_rail::format_captured_month;
 use crate::ui::components::{ButtonState, ButtonTone, chip, glass_panel};
-use crate::ui::shell::CardMetrics;
 use crate::ui::theme::*;
 use crate::ui::year_rail::{YearRail, YearRailLabels};
 
@@ -34,22 +32,152 @@ impl App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let selection = (self.selected_ids.len() > 1).then(|| self.selection_bar(cx));
         let import_panel = self
             .import_report
             .clone()
             .map(|report| self.import_report_panel(&report, cx));
-        v_flex()
+        let library_error = self
+            .library_error
+            .clone()
+            .map(|error| self.library_error_row(error, cx));
+        let mut screen = v_flex().flex_1().min_h_0().gap(px(CARD_GAP));
+        if let Some(selection) = selection {
+            screen = screen.child(selection);
+        }
+        if let Some(import_panel) = import_panel {
+            screen = screen.child(import_panel);
+        }
+        if let Some(library_error) = library_error {
+            screen = screen.child(library_error);
+        }
+        let mut layout = h_flex().flex_1().min_h_0();
+        if !self.inspector_collapsed {
+            layout = layout.gap(px(CARD_GAP));
+        }
+        screen
+            .child(
+                layout
+                    .child(self.gallery_card(window, cx))
+                    .child(self.inspector_column(window, cx)),
+            )
+            .into_any_element()
+    }
+
+    fn gallery_card(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let mut card = v_flex()
+            .relative()
             .flex_1()
+            .min_w_0()
             .min_h_0()
-            .child(self.photos_header(cx))
-            .children(import_panel)
+            .h_full()
+            .overflow_hidden()
+            .rounded(px(17.))
+            .bg(rgb(PANEL_CARD))
+            .border_1()
+            .border_color(rgba(0xffffff1b))
+            .shadow(vec![
+                BoxShadow::new(px(0.), px(18.), rgba(0x00000047).into()).blur_radius(px(44.)),
+                BoxShadow::new(px(0.), px(1.), rgba(0xffffff14).into())
+                    .inset()
+                    .blur_radius(px(0.)),
+            ])
+            .child(self.gallery_header(cx));
+        if self.gallery_filters_open {
+            card = card.child(self.gallery_filter_row(cx));
+        }
+        card.child(self.photo_grid(false, window, cx))
+            .into_any_element()
+    }
+
+    fn gallery_header(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let entries = &self.library.index.entries;
+        let total = entries.len();
+        let (month, month_count) = match entries.first() {
+            Some(first) => {
+                let count = entries
+                    .iter()
+                    .filter(|entry| entry.captured_month == first.captured_month)
+                    .count();
+                (format_captured_month(first.captured_month), count)
+            }
+            None => ("写真なし".to_string(), 0),
+        };
+        let filters_open = self.gallery_filters_open;
+        let filter_button = Button::new("gallery-filter")
+            .label("フィルター")
+            .small()
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.gallery_filters_open = !this.gallery_filters_open;
+                cx.notify();
+            }));
+        let filter_button = if filters_open {
+            filter_button.secondary()
+        } else {
+            filter_button.ghost()
+        };
+
+        h_flex()
+            .flex_shrink_0()
+            .h(px(GALLERY_HEADER_HEIGHT))
+            .px(px(GALLERY_PAD_X))
+            .gap(px(8.))
+            .items_center()
+            .border_b_1()
+            .border_color(rgba(0xffffff14))
             .child(
                 h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .child(self.photo_grid(false, window, cx))
-                    .child(self.inspector_column(cx)),
+                    .min_w_0()
+                    .items_baseline()
+                    .gap(px(7.))
+                    .child(
+                        div()
+                            .whitespace_nowrap()
+                            .text_size(px(12.))
+                            .font_semibold()
+                            .text_color(rgb(TEXT))
+                            .child(month),
+                    )
+                    .child(
+                        div()
+                            .whitespace_nowrap()
+                            .font_family("monospace")
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED_2))
+                            .child(format!(
+                                "{}枚 / {}",
+                                format_count(month_count as i64),
+                                format_count(total as i64)
+                            )),
+                    ),
             )
+            .child(div().flex_1())
+            .child(filter_button)
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .whitespace_nowrap()
+                    .text_size(px(10.))
+                    .text_color(rgb(MUTED_2))
+                    .child("並び: 新しい順"),
+            )
+            .into_any_element()
+    }
+
+    fn gallery_filter_row(&mut self, _cx: &mut Context<Self>) -> AnyElement {
+        h_flex()
+            .flex_shrink_0()
+            .h(px(34.))
+            .px(px(GALLERY_PAD_X))
+            .gap(px(6.))
+            .items_center()
+            .border_b_1()
+            .border_color(rgba(0xffffff0f))
+            .child(chip("ワールド", true))
+            .child(chip("プレイヤー", false))
+            .child(chip("日時", false))
+            .child(chip("タグ", false))
+            .into_any_element()
     }
 
     pub(crate) fn selection_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -64,11 +192,12 @@ impl App {
             .overflow_hidden()
             .items_center()
             .gap(px(10.))
-            .px(px(26.))
+            .px(px(14.))
             .py(px(8.))
+            .rounded(px(12.))
             .bg(rgb(ACCENT_SOFT))
-            .border_b_1()
-            .border_color(rgb(BORDER))
+            .border_1()
+            .border_color(rgba(0xffffff14))
             .child(
                 div()
                     .text_size(px(11.))
@@ -103,108 +232,46 @@ impl App {
             .into_any_element()
     }
 
-    fn photos_header(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let sync = if self.demo_assets.is_some() {
-            "デモデータ".to_string()
-        } else {
-            daemon_sync_label(
-                self.daemon_age_secs,
-                self.daemon_supervisor.as_deref(),
-                self.ipc_connected,
-            )
-        };
-        let subtitle = format!(
-            "{} 枚 · {} · {}",
-            format_count(self.stats.photo_count),
-            format_bytes(self.stats.total_bytes),
-            sync
-        );
-        let message = self.message.clone();
-        let inspector_collapsed = self.inspector_collapsed;
-        let library_error = self.library_error.clone();
-
-        let actions = vec![
-            Button::new("library-reload")
-                .label("再読込")
-                .small()
-                .ghost()
-                .tooltip("写真一覧を再読み込み")
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.reload_library(true, cx);
-                }))
-                .into_any_element(),
-            Button::new("inspector-toggle")
-                .label(if inspector_collapsed {
-                    "詳細"
-                } else {
-                    "詳細を隠す"
-                })
-                .small()
-                .ghost()
-                .tooltip("詳細パネル (Ctrl+I)")
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_inspector(cx)))
-                .into_any_element(),
-            Button::new("import-copy")
-                .label("コピー取込")
-                .small()
-                .ghost()
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.open_import_dialog(ImportMode::Copy, window, cx);
-                }))
-                .into_any_element(),
-            Button::new("import-move")
-                .label("移動取込")
-                .small()
-                .primary()
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.open_import_dialog(ImportMode::Move, window, cx);
-                }))
-                .into_any_element(),
-        ];
-
-        let mut header = v_flex()
+    /// Slim inline failure row above the gallery. The message keeps its full
+    /// text; detail is never truncated into the ribbon status slot.
+    fn library_error_row(&mut self, error: String, cx: &mut Context<Self>) -> AnyElement {
+        h_flex()
             .flex_shrink_0()
-            .child(self.screen_header("ライブラリ", subtitle, message, actions))
-            .child(self.selection_bar(cx))
+            .mx(px(GALLERY_PAD_X))
+            .px(px(14.))
+            .py(px(9.))
+            .gap(px(10.))
+            .items_center()
+            .rounded(px(12.))
+            .bg(rgb(PANEL))
+            .border_1()
+            .border_color(rgb(BORDER))
             .child(
-                h_flex()
-                    .px(px(26.))
-                    .pt(px(12.))
-                    .pb(px(14.))
-                    .gap(px(8.))
-                    .items_center()
-                    .child(chip("ワールド", true))
-                    .child(chip("プレイヤー", false))
-                    .child(chip("日時", false))
-                    .child(chip("タグ", false))
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(MUTED_2))
-                            .child("並び: 新しい順"),
-                    ),
-            );
-        if let Some(error) = library_error {
-            header = header.child(
-                h_flex()
-                    .px(px(26.))
-                    .pb(px(12.))
-                    .gap(px(10.))
-                    .items_center()
-                    .child(div().text_size(px(11.)).text_color(rgb(RED)).child(error))
-                    .child(
-                        Button::new("library-reload-banner")
-                            .label("再読込")
-                            .small()
-                            .primary()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.reload_library(true, cx);
-                            })),
-                    ),
-            );
-        }
-        header.into_any_element()
+                div()
+                    .flex_shrink_0()
+                    .w(px(6.))
+                    .h(px(6.))
+                    .rounded_full()
+                    .bg(rgb(RED)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(11.))
+                    .text_color(rgb(RED))
+                    .child(error),
+            )
+            .child(
+                Button::new("library-reload-banner")
+                    .label("再読込")
+                    .small()
+                    .primary()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.reload_library(true, cx);
+                    })),
+            )
+            .into_any_element()
     }
 
     /// Virtualized grid shared by the library and the search screen.
@@ -218,29 +285,58 @@ impl App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let width: f32 = window.viewport_size().width.into();
-        let metrics = self.card_metrics();
+        let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
+        let width = window_content_extent(f32::from(window.viewport_size().width), client_inset);
         let pending = if search {
             self.pending_layout_anchor_search.take()
         } else {
             self.pending_layout_anchor_library.take()
         };
-        let next_columns = grid_columns_for(
-            search,
-            width,
-            self.sidebar_collapsed,
-            self.inspector_collapsed,
-            metrics.min_card_width,
-        );
+        let metrics = if search {
+            search_grid_metrics(
+                width,
+                self.sidebar_collapsed,
+                self.settings.ui_card_size,
+                self.settings.ui_card_show_world,
+                self.settings.ui_card_show_date || self.settings.ui_card_show_size,
+            )
+        } else {
+            library_grid_metrics(
+                width,
+                self.sidebar_collapsed,
+                self.inspector_collapsed,
+                self.settings.ui_card_size,
+                self.settings.ui_card_show_world,
+                self.settings.ui_card_show_date || self.settings.ui_card_show_size,
+            )
+        };
+        let next_columns = metrics.columns;
+        let row_height = metrics.row_height;
+        let image_height = metrics.image_height;
+        let card_width = Some(metrics.card_width);
+        let grid_gap = GRID_GAP;
         let browser = self.browser_mut(search);
+        let layout_changed =
+            next_columns != browser.columns || (row_height - browser.row_height).abs() > 0.5;
+        // A resize or pane toggle changes the metrics mid-scroll. Capture the
+        // old top photo before replacing them so `uniform_list` does not keep
+        // a pixel offset that now points at a different row.
+        let anchor = pending.or_else(|| {
+            layout_changed
+                .then(|| {
+                    anchor_photo_id(
+                        &browser.index,
+                        list_scroll_top(&browser.scroll),
+                        browser.columns,
+                        browser.row_height,
+                    )
+                })
+                .flatten()
+        });
         browser.columns = next_columns;
-        browser.row_height = metrics.row_height;
-        if let Some(id) = pending {
-            let row = browser
-                .index
-                .row_of_id(id)
-                .map(|position| position / browser.columns.max(1))
-                .unwrap_or(0);
+        browser.row_height = row_height;
+        if let Some(id) = anchor {
+            let row = row_for_photo(&browser.index, id, browser.columns);
             browser
                 .scroll
                 .scroll_to_item_strict(row, ScrollStrategy::Top);
@@ -295,7 +391,7 @@ impl App {
                             .pt(px(4.))
                             .text_size(px(10.))
                             .text_color(rgb(MUTED_2))
-                            .child("右上の「再読込」で再試行できます。"),
+                            .child("リボンの「再読込」で再試行できます。"),
                     )
                     .into_any_element()
             } else {
@@ -314,22 +410,24 @@ impl App {
                     )
                     .into_any_element()
             };
-            let mut container = v_flex()
+            let container = v_flex()
                 .flex_1()
                 .min_w_0()
                 .min_h_0()
                 .h_full()
-                .items_stretch();
-            if !search {
-                container = container.pl(px(26.)).pr(px(18.)).pb(px(18.));
-            }
+                .items_stretch()
+                .pl(px(GALLERY_PAD_X))
+                .pr(px(GALLERY_PAD_X))
+                .pt(px(GALLERY_PAD_TOP))
+                .pb(px(GALLERY_PAD_BOTTOM));
             return container.child(empty).into_any_element();
         }
 
         let list_index = index.clone();
         let list = uniform_list(
             // Keep the list ID stable so uniform_list retains its scroll
-            // offset when the column count changes; row height is fixed.
+            // offset when the column count changes; the row height is constant
+            // for the current layout and only changes on resize.
             SharedString::from(if search {
                 "search-grid-list"
             } else {
@@ -350,11 +448,11 @@ impl App {
                 let mut rendered = Vec::with_capacity(range.len());
                 for row in range {
                     let mut line = h_flex()
-                        .h(px(metrics.row_height))
+                        .h(px(row_height))
                         .w_full()
                         .min_w_0()
                         .items_start()
-                        .gap(px(16.))
+                        .gap(px(grid_gap))
                         // Keep cards out from under the year rail. The list
                         // itself stays full width so wheel events over the
                         // gutter still reach its scroll handle.
@@ -370,12 +468,13 @@ impl App {
                                 line = line.child(this.photo_card(
                                     photo.as_ref(),
                                     photo_index,
-                                    metrics,
+                                    image_height,
+                                    card_width,
                                     cx,
                                 ));
                             }
                             None => {
-                                line = line.child(grid_placeholder(metrics.image_height));
+                                line = line.child(grid_placeholder(image_height, card_width));
                             }
                         }
                     }
@@ -385,12 +484,12 @@ impl App {
             }),
         )
         .track_scroll(&scroll)
-        // Room for the first row's -4 px hover lift.
-        .pt(px(4.))
         .flex_1()
         .w_full()
         .min_w_0()
         .min_h_0();
+        // The gallery body padding is shared by both screens; the first row's
+        // -4px hover lift fits inside GALLERY_PAD_TOP.
 
         // The wrapper stays mounted (and relative) so the year rail can
         // overlay the list without remounting it.
@@ -428,22 +527,24 @@ impl App {
                         index,
                         scroll,
                         columns,
-                        metrics.row_height,
+                        row_height,
                         rail_drag,
                         rail_hover,
                     )),
             );
         }
-        let mut container = v_flex()
+        v_flex()
             .flex_1()
             .min_w_0()
             .min_h_0()
             .h_full()
-            .items_stretch();
-        if !search {
-            container = container.pl(px(26.)).pr(px(18.)).pb(px(18.));
-        }
-        container.child(grid).into_any_element()
+            .items_stretch()
+            .pl(px(GALLERY_PAD_X))
+            .pr(px(GALLERY_PAD_X))
+            .pt(px(GALLERY_PAD_TOP))
+            .pb(px(GALLERY_PAD_BOTTOM))
+            .child(grid)
+            .into_any_element()
     }
 
     /// Loads at most two pages for the grid, then inserts them unless the
@@ -528,7 +629,8 @@ impl App {
         &mut self,
         photo: &Photo,
         grid_index: usize,
-        metrics: CardMetrics,
+        image_height: f32,
+        card_width: Option<f32>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = photo.id;
@@ -559,27 +661,17 @@ impl App {
             Instant::now().duration_since(started).as_secs_f32() < intro_total
         });
         let grid_epoch = self.grid_epoch;
+        let card_radius = 13.0;
+        let image_radius = inner_corner_radius(card_radius, 1.0);
 
         let mut thumb = div()
             .relative()
-            .h(px(metrics.image_height))
+            .h(px(image_height))
             .w_full()
-            .rounded(px(14.))
             .overflow_hidden()
             .bg(rgb(color))
-            .border_2()
-            .border_color(if primary {
-                rgb(BLUE)
-            } else if selected {
-                rgb(0x9fcaff)
-            } else {
-                rgb(BORDER)
-            });
-        if selected {
-            thumb = thumb.shadow(vec![
-                BoxShadow::new(px(0.), px(8.), rgba(0x66b3ff4d).into()).blur_radius(px(24.)),
-            ]);
-        }
+            .rounded_tl(px(image_radius))
+            .rounded_tr(px(image_radius));
         if let Some(image) = thumbnail {
             thumb = thumb.child(
                 gpui_kit::img(image)
@@ -587,7 +679,8 @@ impl App {
                     .size_full()
                     // GPUI clips overflow to a rectangle, so the image has to
                     // carry the rounded silhouette itself.
-                    .rounded(px(inner_corner_radius(14.0, 2.0))),
+                    .rounded_tl(px(image_radius))
+                    .rounded_tr(px(image_radius)),
             );
         }
         let bounds_map = self.card_image_bounds.clone();
@@ -622,7 +715,6 @@ impl App {
                         .right_0()
                         .bottom_0()
                         .h(px(56.))
-                        .rounded_b(px(inner_corner_radius(14.0, 2.0)))
                         .bg(linear_gradient(
                             180.,
                             linear_color_stop(rgba(0x07090d00), 0.),
@@ -695,36 +787,63 @@ impl App {
             &photo.captured_at_local,
             format_bytes(photo.effective_file_size()),
         );
-        let mut body = v_flex().min_w_0().gap(px(CARD_BODY_GAP)).child(thumb);
-        if show_world || meta_line.is_some() {
-            let mut text = v_flex().min_w_0().gap(px(CARD_TEXT_GAP));
-            if show_world {
-                text = text.child(
-                    div()
-                        .text_size(px(12.))
-                        .font_semibold()
-                        .text_color(rgb(TEXT))
-                        .truncate()
-                        .child(world),
-                );
-            }
-            if let Some(meta) = meta_line {
-                text = text.child(
-                    div()
-                        .text_size(px(10.))
-                        .text_color(rgb(MUTED_2))
-                        .truncate()
-                        .child(meta),
-                );
-            }
-            body = body.child(text);
+        let has_info = show_world || meta_line.is_some();
+        let mut info = v_flex()
+            .min_w_0()
+            .px(px(9.))
+            .pt(px(CARD_BODY_GAP))
+            .gap(px(CARD_TEXT_GAP));
+        if show_world {
+            info = info.child(
+                div()
+                    .min_w_0()
+                    .text_size(px(12.))
+                    .line_height(relative(1.5))
+                    .font_semibold()
+                    .text_color(rgb(TEXT))
+                    .truncate()
+                    .child(world),
+            );
+        }
+        if let Some(meta) = meta_line {
+            info = info.child(
+                div()
+                    .min_w_0()
+                    .text_size(px(10.))
+                    .line_height(relative(1.5))
+                    .text_color(rgb(MUTED_2))
+                    .truncate()
+                    .child(meta),
+            );
         }
 
-        let card = v_flex()
+        let mut card = v_flex()
             .id(SharedString::from(format!("photo-{id}")))
             .relative()
             .w_full()
+            .min_w_0()
+            .overflow_hidden()
+            .rounded(px(card_radius))
+            .border_1()
+            .border_color(if primary {
+                rgba(0x66b3ff)
+            } else if selected {
+                rgba(0x9fcaff)
+            } else {
+                rgba(0xffffff16)
+            })
+            .bg(rgb(PANEL_DEEP))
             .cursor_pointer()
+            .child(thumb);
+        if selected {
+            card = card.shadow(vec![
+                BoxShadow::new(px(0.), px(8.), rgba(0x66b3ff4d).into()).blur_radius(px(24.)),
+            ]);
+        }
+        if has_info {
+            card = card.child(info);
+        }
+        let card = card
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 // Hover listeners fire in reverse paint order, so the
                 // entering card must win over the leaving card's clear.
@@ -755,7 +874,6 @@ impl App {
                     this.open_quick_look(window, cx, ViewerOpenSource::Card);
                 }
             }))
-            .child(body)
             .with_animation(
                 SharedString::from(format!("card-hover-{id}-{hovered}")),
                 Animation::new(Duration::from_millis(180)).with_easing(ease_motion),
@@ -770,7 +888,14 @@ impl App {
         // wrapper mounted for the card's lifetime: removing it when the intro
         // ends would change the hover animation's ancestor path and remount it,
         // causing a 4 px settle without a hover.
-        let cell = div().relative().flex_1().min_w_0().child(card);
+        //
+        // Library and Search cells use the computed fixed width so a capped
+        // preset leaves row space empty (left-aligned) instead of stretching.
+        let cell = div().relative().min_w_0().child(card);
+        let cell = match card_width {
+            Some(width) => cell.w(px(width)).flex_shrink_0(),
+            None => cell.flex_1(),
+        };
 
         cell.with_animation(
             SharedString::from(format!("card-intro-{grid_epoch}-{id}")),
@@ -792,11 +917,14 @@ impl App {
         .into_any_element()
     }
 
-    fn inspector_column(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn inspector_column(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let collapsed = self.inspector_collapsed;
+        let inset = window.client_inset().map(f32::from).unwrap_or(0.0);
+        let content_width = window_content_extent(f32::from(window.viewport_size().width), inset);
+        let column_width = inspector_column_width(content_width);
         let mut column = v_flex().h_full().flex_shrink_0().overflow_hidden();
         if !collapsed {
-            column = column.child(self.inspector(cx));
+            column = column.child(self.inspector(window, cx));
         }
         column
             .with_animation(
@@ -809,15 +937,22 @@ impl App {
                 .with_easing(ease_motion)
                 .with_max_fps(60.0),
                 move |el, t| {
-                    let from = if collapsed { INSPECTOR_WIDTH } else { 0.0 };
-                    let to = if collapsed { 0.0 } else { INSPECTOR_WIDTH };
+                    let from = if collapsed { column_width } else { 0.0 };
+                    let to = if collapsed { 0.0 } else { column_width };
                     el.w(px(from + (to - from) * t))
                 },
             )
             .into_any_element()
     }
 
-    fn inspector(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let viewport = window.viewport_size();
+        let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
+        let content_width = window_content_extent(f32::from(viewport.width), client_inset);
+        let content_height = window_content_extent(f32::from(viewport.height), client_inset);
+        let column_width = inspector_column_width(content_width);
+        let card_width = inspector_card_width(content_width);
+        let preview_height = inspector_preview_height(content_height);
         let transitioning = self
             .selection_changed_at
             .is_some_and(|at| at.elapsed() < Duration::from_millis(260));
@@ -830,15 +965,15 @@ impl App {
         }
         let Some(photo) = self.selected_photo.as_ref() else {
             return v_flex()
-                .w(px(INSPECTOR_CARD_WIDTH))
+                .w(px(column_width))
                 .h_full()
                 .flex_shrink_0()
-                .mr(px(INSPECTOR_MARGIN))
-                .py(px(INSPECTOR_MARGIN))
+                .pr(px(INSPECTOR_MARGIN))
                 .child(
                     glass_panel()
                         .flex_1()
-                        .w_full()
+                        .w(px(card_width))
+                        .rounded(px(17.))
                         .flex()
                         .flex_col()
                         .justify_center()
@@ -975,7 +1110,10 @@ impl App {
             .relative()
             .w_full()
             .flex_shrink_0()
-            .aspect_ratio(16.0 / 10.0)
+            // The spec fixes the preview height (168 / 118 short); the frame
+            // width follows the inspector column, so the visible ratio varies.
+            // The image covers the frame rather than letterboxing.
+            .h(px(preview_height))
             .overflow_hidden()
             .rounded(px(12.))
             .border_1()
@@ -1182,7 +1320,7 @@ impl App {
                 .flex_1()
                 .min_h_0()
                 .w_full()
-                .p(px(18.))
+                .p(px(12.))
                 .gap(px(12.))
                 .child(header)
                 .child(body)
@@ -1190,12 +1328,11 @@ impl App {
         );
 
         v_flex()
-            .w(px(INSPECTOR_CARD_WIDTH))
+            .w(px(column_width))
             .h_full()
             .flex_shrink_0()
-            .mr(px(INSPECTOR_MARGIN))
-            .py(px(INSPECTOR_MARGIN))
-            .child(card)
+            .pr(px(INSPECTOR_MARGIN))
+            .child(card.w(px(card_width)).rounded(px(17.)))
             .into_any_element()
     }
 
@@ -1522,14 +1659,17 @@ impl App {
 }
 /// Stands in for a photo whose page has not loaded yet. Matches the card's
 /// current image height so the uniform row never changes height.
-fn grid_placeholder(image_height: f32) -> AnyElement {
-    div()
-        .flex_1()
+fn grid_placeholder(image_height: f32, card_width: Option<f32>) -> AnyElement {
+    let mut placeholder = div()
         .min_w_0()
         .h(px(image_height))
-        .rounded(px(14.))
-        .bg(rgb(PANEL_2))
-        .border_2()
-        .border_color(rgb(BORDER))
-        .into_any_element()
+        .rounded(px(13.))
+        .bg(rgb(PANEL_DEEP))
+        .border_1()
+        .border_color(rgba(0xffffff16));
+    placeholder = match card_width {
+        Some(width) => placeholder.w(px(width)).flex_shrink_0(),
+        None => placeholder.flex_1(),
+    };
+    placeholder.into_any_element()
 }

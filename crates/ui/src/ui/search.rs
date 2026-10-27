@@ -1,10 +1,11 @@
-//! Search screen: filter panel, result header, and result grid.
+//! Search screen: filter card, results card, and the shared 3:2 result grid.
 //!
-//! The grid and selection bar come from `ui::library`; screen dispatch and the
-//! shared header helper live in `ui::shell`.
+//! The grid and selection bar come from `ui::library`; screen dispatch lives
+//! in `ui::shell`.
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -21,63 +22,102 @@ impl App {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let filters = self.search_filter_panel(cx);
-        let message = self.message.clone().or_else(|| self.library_error.clone());
-        let total = self.search_view.index.total;
-        let count = if self.searching {
-            "検索中…".to_string()
-        } else {
-            format!("{total} 枚")
-        };
+        let results = self.search_results_card(window, cx);
         h_flex()
             .flex_1()
             .min_h_0()
+            .gap(px(CARD_GAP))
             .items_stretch()
             .child(filters)
+            .child(results)
+            .into_any_element()
+    }
+
+    fn search_results_card(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let message = self.message.clone().or_else(|| self.library_error.clone());
+        let has_message = message.is_some();
+        let total = self.search_view.index.total;
+        let count = format!("{total} 枚");
+        let selection = (self.selected_ids.len() > 1).then(|| self.selection_bar(cx));
+        let mut card = glass_panel()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .h_full()
+            .overflow_hidden()
+            .rounded(px(17.))
             .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .h_full()
-                    .px(px(26.))
-                    .pt(px(26.))
-                    .pb(px(26.))
-                    .gap(px(18.))
+                h_flex()
+                    .flex_shrink_0()
+                    .h(px(GALLERY_HEADER_HEIGHT))
+                    .px(px(GALLERY_PAD_X))
+                    .gap(px(8.))
+                    .items_center()
+                    .border_b_1()
+                    .border_color(rgba(0xffffff14))
                     .child(
-                        v_flex()
+                        h_flex()
                             .flex_shrink_0()
-                            .gap(px(4.))
+                            .items_baseline()
+                            .gap(px(7.))
                             .child(
-                                h_flex()
-                                    .items_center()
-                                    .gap(px(8.))
-                                    .child(
-                                        div()
-                                            .text_size(px(24.))
-                                            .font_semibold()
-                                            .text_color(rgb(TEXT))
-                                            .child(count),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(10.))
-                                            .text_color(rgb(MUTED_2))
-                                            .child("検索結果"),
-                                    ),
+                                div()
+                                    .whitespace_nowrap()
+                                    .text_size(px(12.))
+                                    .font_semibold()
+                                    .text_color(rgb(TEXT))
+                                    .child(count),
                             )
-                            .when_some(message, |this, message| {
-                                this.child(
-                                    div()
-                                        .text_size(px(10.))
-                                        .text_color(rgb(AMBER))
-                                        .truncate()
-                                        .child(message),
-                                )
-                            })
-                            .child(self.selection_bar(cx)),
+                            .child(
+                                div()
+                                    .whitespace_nowrap()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(MUTED_2))
+                                    .child("検索結果"),
+                            ),
                     )
-                    .child(self.photo_grid(true, window, cx)),
-            )
+                    .when(self.searching, |this| {
+                        this.child(
+                            div()
+                                .flex_shrink_0()
+                                .text_size(px(10.))
+                                .text_color(rgb(AMBER))
+                                .child("検索中…"),
+                        )
+                    })
+                    .when_some(message, |this, message| {
+                        this.child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(10.))
+                                .text_color(rgb(AMBER))
+                                .child(message),
+                        )
+                    })
+                    .when(!has_message, |this| this.child(div().flex_1()))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .whitespace_nowrap()
+                            .text_size(px(10.))
+                            .text_color(rgb(MUTED_2))
+                            .child("並び: 新しい順"),
+                    ),
+            );
+        if let Some(selection) = selection {
+            card = card.child(
+                div()
+                    .flex_shrink_0()
+                    .px(px(GALLERY_PAD_X))
+                    .pt(px(8.))
+                    .child(selection),
+            );
+        }
+        card.child(self.photo_grid(true, window, cx))
             .into_any_element()
     }
 
@@ -85,18 +125,17 @@ impl App {
         glass_panel()
             .flex()
             .flex_col()
-            .w(px(290.))
+            .w(px(SEARCH_FILTER_WIDTH))
+            .h_full()
+            .min_h_0()
             .flex_shrink_0()
-            .my(px(22.))
-            .ml(px(26.))
+            .overflow_y_scrollbar()
             .p(px(16.))
             .gap(px(14.))
-            .rounded(px(20.))
-            .bg(rgb(PANEL))
-            .border_color(rgb(BORDER))
+            .rounded(px(17.))
             .child(
                 div()
-                    .text_size(px(17.))
+                    .text_size(px(13.))
                     .font_semibold()
                     .text_color(rgb(TEXT))
                     .child("絞り込み"),

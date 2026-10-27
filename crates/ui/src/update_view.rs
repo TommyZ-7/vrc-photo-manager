@@ -248,9 +248,7 @@ mod tests {
 
 use super::ipc_bridge;
 use crate::ui::components::glass_panel;
-use crate::ui::theme::{
-    ACCENT_SOFT, AMBER, BLUE, GREEN, MUTED, MUTED_2, PANEL, PANEL_2, RED, TEXT,
-};
+use crate::ui::theme::{ACCENT_SOFT, AMBER, BLUE, GREEN, MUTED, MUTED_2, PANEL_2, RED, TEXT};
 use gpui_kit::base::{Disableable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::component::Sizable as _;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -934,16 +932,17 @@ impl App {
         let mut card = glass_panel()
             .flex()
             .flex_col()
-            .p(px(24.))
-            .gap(px(16.))
-            .bg(rgb(PANEL))
+            .flex_shrink_0()
+            .p(px(14.))
+            .gap(px(12.))
+            .rounded(px(17.))
             .child(
                 h_flex()
                     .items_center()
                     .gap(px(8.))
                     .child(
                         div()
-                            .text_size(px(17.))
+                            .text_size(px(13.))
                             .font_semibold()
                             .text_color(rgb(TEXT))
                             .child("アップデート"),

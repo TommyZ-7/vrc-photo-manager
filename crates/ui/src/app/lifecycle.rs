@@ -18,6 +18,7 @@ use crate::ipc_bridge;
 use crate::state::photo_browser::{
     anchor_photo_id, apply_library_index, list_scroll_top, sync_search_mirror,
 };
+use crate::ui::chrome::{RibbonTab, default_ribbon_tab};
 use crate::ui::shell::screen_direction;
 
 /// Current daemon scan progress, shown by the sidebar status card and the
@@ -373,7 +374,7 @@ impl App {
                 &self.library.index,
                 list_scroll_top(&self.library.scroll),
                 self.library.columns,
-                self.card_metrics().row_height,
+                self.library.row_height,
             )
         });
         let anchor = anchor.flatten();
@@ -431,6 +432,7 @@ impl App {
             self.nav_epoch = self.nav_epoch.wrapping_add(1);
             self.screen_direction = screen_direction(self.screen, screen);
             self.screen_epoch = self.screen_epoch.wrapping_add(1);
+            self.active_ribbon_tab = default_ribbon_tab(screen);
         }
         // The two photo grids have separate snapshots, so a selection made in
         // one tab cannot stay meaningful in the other. Keep it when visiting
@@ -458,7 +460,7 @@ impl App {
     }
 
     pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
-        if self.quick_look_open {
+        if self.overlay_open() {
             return;
         }
         self.sidebar_collapsed = !self.sidebar_collapsed;
@@ -475,7 +477,7 @@ impl App {
     }
 
     pub(crate) fn toggle_inspector(&mut self, cx: &mut Context<Self>) {
-        if self.quick_look_open {
+        if self.overlay_open() {
             return;
         }
         self.inspector_collapsed = !self.inspector_collapsed;
@@ -487,8 +489,31 @@ impl App {
         cx.notify();
     }
 
+    /// Selects a ribbon tab. A collapsed ribbon expands so the chosen page is
+    /// visible, matching the design's "click a tab to open" rule.
+    pub(crate) fn select_ribbon_tab(&mut self, tab: RibbonTab, cx: &mut Context<Self>) {
+        if self.ribbon_collapsed {
+            self.set_ribbon_collapsed(false, cx);
+        }
+        self.active_ribbon_tab = tab;
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_ribbon_collapsed(&mut self, cx: &mut Context<Self>) {
+        self.set_ribbon_collapsed(!self.ribbon_collapsed, cx);
+    }
+
+    fn set_ribbon_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
+        self.ribbon_collapsed = collapsed;
+        self.settings.ui_ribbon_collapsed = collapsed;
+        if let Err(error) = self.settings.save(&self.db) {
+            tracing::warn!(%error, "cannot save ribbon state");
+        }
+        cx.notify();
+    }
+
     pub(crate) fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.quick_look_open {
+        if self.overlay_open() {
             return;
         }
         self.switch_screen(Screen::Search, cx);

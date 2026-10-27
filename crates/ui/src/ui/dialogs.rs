@@ -11,15 +11,23 @@ use gpui_kit::*;
 
 use crate::app::App;
 use crate::app::compression::{ManualOutputTarget, manual_output_available};
-use crate::ui::components::manual_option_row;
+use crate::ui::components::{dialog_panel, manual_option_row};
 use crate::ui::theme::*;
 
 impl App {
-    pub(crate) fn manual_compression_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn manual_compression_overlay(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let Some(dialog) = self.manual_compress.clone() else {
             return div().into_any_element();
         };
         let count = dialog.photo_ids.len();
+        let viewport = window.viewport_size();
+        let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
+        let content_height = window_content_extent(f32::from(viewport.height), client_inset);
+        let max_height = dialog_max_height(content_height);
         let selected_profile = self
             .profiles
             .iter()
@@ -147,21 +155,8 @@ impl App {
             format!("{count} 件を圧縮")
         };
 
-        let panel = v_flex()
-            .id("manual-compression-panel")
-            .w(px(580.))
-            .max_h(px(720.))
+        let header = v_flex()
             .gap(px(16.))
-            .p(px(22.))
-            .rounded(px(18.))
-            .bg(rgb(PANEL))
-            .border_1()
-            .border_color(rgb(BORDER_STRONG))
-            .shadow(vec![
-                BoxShadow::new(px(0.), px(24.), rgba(0x00000099).into()).blur_radius(px(60.)),
-            ])
-            .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
-            .overflow_y_scrollbar()
             .child(
                 h_flex()
                     .items_center()
@@ -186,7 +181,13 @@ impl App {
                     .text_size(px(11.))
                     .text_color(rgb(MUTED))
                     .child("使用するプロファイル、出力先、元画像の扱いを選んでから実行します。"),
-            )
+            );
+
+        let body = v_flex()
+            .flex_1()
+            .min_h_0()
+            .gap(px(16.))
+            .overflow_y_scrollbar()
             .child(self.section_label("プロファイル"))
             .child(
                 v_flex()
@@ -248,31 +249,38 @@ impl App {
                         .text_color(rgb(MUTED))
                         .child("クリップボード出力では元画像を変更しません。形式はPNG、リサイズ設定のみ反映します。"),
                 )
-            })
+            });
+
+        let footer = h_flex()
+            .flex_shrink_0()
+            .justify_end()
+            .gap(px(8.))
             .child(
-                h_flex()
-                    .justify_end()
-                    .gap(px(8.))
-                    .child(
-                        Button::new("manual-cancel")
-                            .label("キャンセル")
-                            .small()
-                            .ghost()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.close_manual_compression(cx)
-                            })),
-                    )
-                    .child(
-                        Button::new("manual-confirm")
-                            .label(confirm_label)
-                            .small()
-                            .primary()
-                            .disabled(!can_confirm)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.confirm_manual_compression(cx)
-                            })),
-                    ),
+                Button::new("manual-cancel")
+                    .label("キャンセル")
+                    .small()
+                    .ghost()
+                    .on_click(cx.listener(|this, _, _, cx| this.close_manual_compression(cx))),
+            )
+            .child(
+                Button::new("manual-confirm")
+                    .label(confirm_label)
+                    .small()
+                    .primary()
+                    .disabled(!can_confirm)
+                    .on_click(cx.listener(|this, _, _, cx| this.confirm_manual_compression(cx))),
             );
+
+        let panel = dialog_panel()
+            .id("manual-compression-panel")
+            .w(px(580.))
+            .h(px(max_height))
+            .gap(px(16.))
+            .p(px(22.))
+            .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
+            .child(header)
+            .child(body)
+            .child(footer);
 
         let panel = panel.with_animation(
             "manual-compression-panel",
@@ -293,6 +301,7 @@ impl App {
             .flex()
             .items_center()
             .justify_center()
+            .p(px(DIALOG_VIEWPORT_MARGIN))
             .bg(rgba(0x05070acc))
             .on_click(cx.listener(|this, _, _, cx| this.close_manual_compression(cx)))
             .child(panel)

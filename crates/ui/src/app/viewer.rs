@@ -25,7 +25,7 @@ impl App {
         cx: &mut Context<Self>,
         source: ViewerOpenSource,
     ) {
-        if self.quick_look_open || self.selected_photo.is_none() {
+        if self.overlay_open() || self.selected_photo.is_none() {
             return;
         }
         if self

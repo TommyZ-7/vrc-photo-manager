@@ -41,7 +41,9 @@ use crate::ui::actions::{
     CloseQuickLook, FocusSearch, OpenQuickLook, QuickLookNextFocus, QuickLookPrevFocus,
     ToggleInspector, ToggleSidebar, ViewerNextPhoto, ViewerPreviousPhoto,
 };
-use crate::ui::theme::BG;
+use crate::ui::chrome::{ChromeLayout, RibbonTab, chrome_layout, default_ribbon_tab};
+use crate::ui::shell::ambient_background;
+use crate::ui::theme::GLASS_WINDOW;
 use crate::update_view;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,6 +88,15 @@ pub struct App {
     pub(crate) nav_epoch: u64,
     pub(crate) screen_epoch: u64,
     pub(crate) screen_direction: f32,
+    /// Scroll position of the settings section column. The category card uses
+    /// it both to jump to a section and to highlight the current one.
+    pub(crate) settings_scroll: ScrollHandle,
+    /// Last section the user jumped to. Sections near the bottom cannot always
+    /// reach the top of the column, so the highlight falls back to this when
+    /// the scroll position alone would point at an earlier section.
+    pub(crate) settings_section: Option<usize>,
+    pub(crate) active_ribbon_tab: RibbonTab,
+    pub(crate) ribbon_collapsed: bool,
     pub(crate) render_epoch: u64,
     pub(crate) card_image_bounds: CardBoundsMap,
     pub(crate) inspector_preview_bounds: InspectorBounds,
@@ -198,6 +209,9 @@ pub struct App {
     pub(crate) photo_root_input: Entity<InputState>,
     pub(crate) log_dir_input: Entity<InputState>,
     pub(crate) import_dir_input: Entity<InputState>,
+    /// Session-only toggle for the library gallery's appearance-only filter
+    /// chip row. It never participates in filtering.
+    pub(crate) gallery_filters_open: bool,
     pub(crate) search_active: bool,
     pub(crate) searching: bool,
     pub(crate) search_request: u64,
@@ -215,7 +229,26 @@ pub struct App {
     pub(crate) demo_assets: Option<DemoAssets>,
 }
 
+/// True while any full-window overlay owns the input tree: the quick-look
+/// viewer, the manual-compression dialog, or the import dialog. Global
+/// shortcuts that reshape the shell must not fire through these layers.
+pub(crate) fn any_overlay_open(
+    quick_look_open: bool,
+    manual_compression_open: bool,
+    import_dialog_open: bool,
+) -> bool {
+    quick_look_open || manual_compression_open || import_dialog_open
+}
+
 impl App {
+    pub(crate) fn overlay_open(&self) -> bool {
+        any_overlay_open(
+            self.quick_look_open,
+            self.manual_compress.is_some(),
+            self.import_dialog.is_some(),
+        )
+    }
+
     pub(crate) fn new(
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -294,6 +327,10 @@ impl App {
             nav_epoch: 0,
             screen_epoch: 0,
             screen_direction: 1.0,
+            settings_scroll: ScrollHandle::new(),
+            settings_section: None,
+            active_ribbon_tab: default_ribbon_tab(Screen::Photos),
+            ribbon_collapsed: initial_settings.ui_ribbon_collapsed,
             render_epoch: 0,
             card_image_bounds: Rc::new(RefCell::new(HashMap::new())),
             inspector_preview_bounds: Rc::new(RefCell::new(None)),
@@ -409,6 +446,7 @@ impl App {
             photo_root_input,
             log_dir_input,
             import_dir_input,
+            gallery_filters_open: false,
             search_active: false,
             searching: false,
             search_request: 0,
@@ -477,11 +515,26 @@ impl Render for App {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.render_epoch = self.render_epoch.wrapping_add(1);
         self.guard_viewer_selection(window, cx);
-        let workspace = v_flex().flex_1().min_w_0().h_full();
+        let viewport = window.viewport_size();
+        let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
+        let layout: ChromeLayout = chrome_layout(
+            f32::from(viewport.width),
+            f32::from(viewport.height),
+            client_inset,
+        );
+        let main = v_flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .gap(px(14.))
+            .child(self.chrome(layout, cx))
+            .child(v_flex().flex_1().min_h_0().child(self.content(window, cx)));
         let root = h_flex()
             .relative()
             .size_full()
-            .bg(rgb(BG))
+            .p(px(14.))
+            .gap(px(14.))
+            .bg(rgba(GLASS_WINDOW))
             .font_family("Noto Sans JP")
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
             .on_action(cx.listener(|this, _: &ToggleInspector, _, cx| this.toggle_inspector(cx)))
@@ -506,8 +559,9 @@ impl Render for App {
             .on_action(cx.listener(|this, _: &QuickLookPrevFocus, window, cx| {
                 this.cycle_quick_look_focus(true, window, cx)
             }))
-            .child(self.sidebar(cx))
-            .child(workspace.child(self.content(window, cx)))
+            .child(ambient_background())
+            .child(self.sidebar(layout.content_height, cx))
+            .child(main)
             .child(self.nav_tooltip())
             .child(self.rail_toggle(cx));
         let root = if self.quick_look_open {
@@ -516,7 +570,7 @@ impl Render for App {
             root
         };
         let root = if self.manual_compress.is_some() {
-            root.child(self.manual_compression_overlay(cx))
+            root.child(self.manual_compression_overlay(window, cx))
         } else {
             root
         };
@@ -526,5 +580,18 @@ impl Render for App {
             root
         };
         root.child(self.viewer_morph_overlay())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::any_overlay_open;
+
+    #[test]
+    fn overlay_guard_covers_the_viewer_and_both_modals() {
+        assert!(!any_overlay_open(false, false, false));
+        assert!(any_overlay_open(true, false, false));
+        assert!(any_overlay_open(false, true, false));
+        assert!(any_overlay_open(false, false, true));
     }
 }

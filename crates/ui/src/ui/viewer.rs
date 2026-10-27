@@ -234,14 +234,7 @@ impl App {
             .child(image_frame);
 
         let message = self.message.clone();
-        let mut details_panel = v_flex()
-            .h_full()
-            .flex_shrink_0()
-            .overflow_hidden()
-            .bg(rgba(0x0e131bdc))
-            .when(details_open, |this| {
-                this.border_l_1().border_color(rgba(0xffffff12))
-            });
+        let mut details_panel = v_flex().h_full().flex_shrink_0().overflow_hidden();
         if details_open {
             let mut body = v_flex()
                 .id("viewer-details-body")
@@ -276,7 +269,30 @@ impl App {
                 .with_max_fps(MOTION_FPS),
                 |el, t| el.opacity(t).relative().top(px(6.0 * (1.0 - t))),
             );
-            details_panel = details_panel.child(body);
+            // The details column stays a fixed-width dock so the image geometry
+            // is unchanged; the card inside it is the opaque foreground surface.
+            details_panel = details_panel.p(px(14.)).child(
+                v_flex()
+                    .h_full()
+                    .w_full()
+                    .overflow_hidden()
+                    .rounded(px(17.))
+                    .border_1()
+                    .border_color(rgba(0xffffff1b))
+                    .bg(linear_gradient(
+                        180.,
+                        linear_color_stop(rgb(PANEL_CARD), 0.),
+                        linear_color_stop(rgb(PANEL_DEEP), 1.),
+                    ))
+                    .shadow(vec![
+                        BoxShadow::new(px(0.), px(18.), rgba(0x00000047).into())
+                            .blur_radius(px(44.)),
+                        BoxShadow::new(px(0.), px(1.), rgba(0xffffff10).into())
+                            .inset()
+                            .blur_radius(px(0.)),
+                    ])
+                    .child(body),
+            );
         }
         let panel_state = self.viewer_panel;
         let details_panel = details_panel.with_animation(
@@ -316,7 +332,9 @@ impl App {
 
     pub(crate) fn viewer_morph_overlay(&self) -> AnyElement {
         let Some(morph) = self.viewer_morph.as_ref() else {
-            return div().into_any_element();
+            // An in-flow empty slot would still take a root flex gap and
+            // narrow the main column by 14px.
+            return div().absolute().into_any_element();
         };
         let from = morph.from;
         let to = morph.to;
@@ -336,7 +354,9 @@ impl App {
             MorphImageKind::Preview => morph.preview.clone(),
         };
         let Some(old_image) = old_kind.and_then(image_for) else {
-            return div().into_any_element();
+            // Keep the empty slot out of flow for the same reason as the idle
+            // return above: a root flex gap would narrow the whole shell.
+            return div().absolute().into_any_element();
         };
         let new_image = if fade_only || (!closing && morph.preview.is_none()) {
             // Never present the thumbnail as the full-size incoming image.
