@@ -70,6 +70,22 @@ pub(crate) fn first_visible_photo(
     row.saturating_mul(columns).min(total - 1)
 }
 
+/// Month and count for the first fully visible row.
+///
+/// The gallery header follows the scroll position, not the first entry in the
+/// index, so the month label always describes the cards the user can see.
+pub(crate) fn visible_month(entries: &[PhotoIndexEntry], first_visible: usize) -> (i32, usize) {
+    let Some(entry) = entries.get(first_visible) else {
+        return (0, 0);
+    };
+    let month = entry.captured_month;
+    let count = entries
+        .iter()
+        .filter(|entry| entry.captured_month == month)
+        .count();
+    (month, count)
+}
+
 /// Photo at the top-left of the first visible row.
 ///
 /// `offset_y` is the non-negative scroll distance from the top of the list;
@@ -598,6 +614,19 @@ mod tests {
             9
         );
         assert_eq!(first_visible_photo(0.0, 3, TEST_ROW_HEIGHT, 0), 0);
+    }
+
+    #[test]
+    fn visible_month_follows_the_first_visible_row() {
+        let entries = vec![
+            index_entry(1, 202610),
+            index_entry(2, 202610),
+            index_entry(3, 202609),
+            index_entry(4, 202609),
+        ];
+        assert_eq!(visible_month(&entries, 0), (202610, 2));
+        assert_eq!(visible_month(&entries, 2), (202609, 2));
+        assert_eq!(visible_month(&entries, 99), (0, 0));
     }
 
     #[test]

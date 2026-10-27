@@ -18,7 +18,9 @@ use vrc_photo_core::model::Photo;
 use crate::app::App;
 use crate::app::Screen;
 use crate::app::cli::log_timing;
-use crate::state::photo_browser::{PAGE_SIZE, anchor_photo_id, list_scroll_top, row_for_photo};
+use crate::state::photo_browser::{
+    PAGE_SIZE, anchor_photo_id, first_visible_photo, list_scroll_top, row_for_photo, visible_month,
+};
 use crate::state::preview::preview_placeholder_label;
 use crate::state::viewer::ViewerOpenSource;
 use crate::state::year_rail::format_captured_month;
@@ -82,7 +84,7 @@ impl App {
                     .inset()
                     .blur_radius(px(0.)),
             ])
-            .child(self.gallery_header(cx));
+            .child(self.gallery_header(window, cx));
         if self.gallery_filters_open {
             card = card.child(self.gallery_filter_row(cx));
         }
@@ -90,18 +92,30 @@ impl App {
             .into_any_element()
     }
 
-    fn gallery_header(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn gallery_header(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let entries = &self.library.index.entries;
         let total = entries.len();
-        let (month, month_count) = match entries.first() {
-            Some(first) => {
-                let count = entries
-                    .iter()
-                    .filter(|entry| entry.captured_month == first.captured_month)
-                    .count();
-                (format_captured_month(first.captured_month), count)
-            }
-            None => ("写真なし".to_string(), 0),
+        let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
+        let width = window_content_extent(f32::from(window.viewport_size().width), client_inset);
+        let metrics = library_grid_metrics(
+            width,
+            self.sidebar_collapsed,
+            self.inspector_collapsed,
+            self.settings.ui_card_size,
+            self.settings.ui_card_show_world,
+            self.settings.ui_card_show_date || self.settings.ui_card_show_size,
+        );
+        let first_visible = first_visible_photo(
+            list_scroll_top(&self.library.scroll),
+            metrics.columns,
+            metrics.row_height,
+            total,
+        );
+        let (month, month_count) = if total == 0 {
+            ("写真なし".to_string(), 0)
+        } else {
+            let (month, count) = visible_month(entries, first_visible);
+            (format_captured_month(month), count)
         };
         let filters_open = self.gallery_filters_open;
         let filter_button = Button::new("gallery-filter")
