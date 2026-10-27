@@ -24,7 +24,7 @@ use crate::state::photo_browser::{
 use crate::state::preview::preview_placeholder_label;
 use crate::state::viewer::ViewerOpenSource;
 use crate::state::year_rail::format_captured_month;
-use crate::ui::components::{ButtonState, ButtonTone, chip, glass_panel};
+use crate::ui::components::{ButtonState, ButtonTone, glass_panel};
 use crate::ui::theme::*;
 use crate::ui::year_rail::{YearRail, YearRailLabels};
 
@@ -67,7 +67,7 @@ impl App {
     }
 
     fn gallery_card(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let mut card = v_flex()
+        v_flex()
             .relative()
             .flex_1()
             .min_w_0()
@@ -84,15 +84,12 @@ impl App {
                     .inset()
                     .blur_radius(px(0.)),
             ])
-            .child(self.gallery_header(window, cx));
-        if self.gallery_filters_open {
-            card = card.child(self.gallery_filter_row(cx));
-        }
-        card.child(self.photo_grid(false, window, cx))
+            .child(self.gallery_header(window, cx))
+            .child(self.photo_grid(false, window, cx))
             .into_any_element()
     }
 
-    fn gallery_header(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn gallery_header(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> AnyElement {
         let entries = &self.library.index.entries;
         let total = entries.len();
         let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
@@ -116,19 +113,6 @@ impl App {
         } else {
             let (month, count) = visible_month(entries, first_visible);
             (format_captured_month(month), count)
-        };
-        let filters_open = self.gallery_filters_open;
-        let filter_button = Button::new("gallery-filter")
-            .label("フィルター")
-            .small()
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.gallery_filters_open = !this.gallery_filters_open;
-                cx.notify();
-            }));
-        let filter_button = if filters_open {
-            filter_button.secondary()
-        } else {
-            filter_button.ghost()
         };
 
         h_flex()
@@ -166,31 +150,6 @@ impl App {
                     ),
             )
             .child(div().flex_1())
-            .child(filter_button)
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .whitespace_nowrap()
-                    .text_size(px(10.))
-                    .text_color(rgb(MUTED_2))
-                    .child("並び: 新しい順"),
-            )
-            .into_any_element()
-    }
-
-    fn gallery_filter_row(&mut self, _cx: &mut Context<Self>) -> AnyElement {
-        h_flex()
-            .flex_shrink_0()
-            .h(px(34.))
-            .px(px(GALLERY_PAD_X))
-            .gap(px(6.))
-            .items_center()
-            .border_b_1()
-            .border_color(rgba(0xffffff0f))
-            .child(chip("ワールド", true))
-            .child(chip("プレイヤー", false))
-            .child(chip("日時", false))
-            .child(chip("タグ", false))
             .into_any_element()
     }
 

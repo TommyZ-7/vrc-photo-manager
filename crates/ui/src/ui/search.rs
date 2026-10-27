@@ -98,15 +98,7 @@ impl App {
                                 .child(message),
                         )
                     })
-                    .when(!has_message, |this| this.child(div().flex_1()))
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .whitespace_nowrap()
-                            .text_size(px(10.))
-                            .text_color(rgb(MUTED_2))
-                            .child("並び: 新しい順"),
-                    ),
+                    .when(!has_message, |this| this.child(div().flex_1())),
             );
         if let Some(selection) = selection {
             card = card.child(

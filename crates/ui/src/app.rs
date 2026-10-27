@@ -208,9 +208,6 @@ pub struct App {
     pub(crate) photo_root_input: Entity<InputState>,
     pub(crate) log_dir_input: Entity<InputState>,
     pub(crate) import_dir_input: Entity<InputState>,
-    /// Session-only toggle for the library gallery's appearance-only filter
-    /// chip row. It never participates in filtering.
-    pub(crate) gallery_filters_open: bool,
     pub(crate) search_active: bool,
     pub(crate) searching: bool,
     pub(crate) search_request: u64,
@@ -445,7 +442,6 @@ impl App {
             photo_root_input,
             log_dir_input,
             import_dir_input,
-            gallery_filters_open: false,
             search_active: false,
             searching: false,
             search_request: 0,
