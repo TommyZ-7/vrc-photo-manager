@@ -439,6 +439,18 @@ pub(crate) fn library_min_card_width(size: CardSize) -> f32 {
     }
 }
 
+/// Upper bound for a single card in each density preset. Wide or
+/// inspector-collapsed layouts leave the remaining row width empty rather than
+/// stretching the card past its preset.
+pub(crate) fn library_max_card_width(size: CardSize) -> f32 {
+    match size {
+        CardSize::Small => 240.0,
+        CardSize::Medium => 320.0,
+        CardSize::Large => 420.0,
+        CardSize::ExtraLarge => 480.0,
+    }
+}
+
 /// Card width when `available_width` is split into `columns` equal cells with
 /// one [`GRID_GAP`] between neighbours.
 pub(crate) fn photo_card_width(available_width: f32, columns: usize) -> f32 {
@@ -466,24 +478,34 @@ pub(crate) fn photo_row_height(card_width: f32, show_world: bool, show_meta: boo
     height
 }
 
-/// The default medium grid keeps three columns once the gallery is wide
-/// enough; pure 190 px packing would produce a fourth column at 1440. Narrow
-/// windows keep two, and collapsing the inspector may reveal more room.
-fn library_column_cap(window_width: f32, inspector_collapsed: bool, card_size: CardSize) -> usize {
-    if card_size != CardSize::Medium {
-        return usize::MAX;
-    }
+/// Column cap for each density preset. The caps are deliberately independent
+/// of sidebar/inspector collapse: a preset always means the same relative card
+/// size, and a narrower window may only reduce the count further.
+pub(crate) fn library_column_cap(window_width: f32, card_size: CardSize) -> usize {
     if window_width <= 1_100.0 {
-        2
-    } else if inspector_collapsed {
-        usize::MAX
+        match card_size {
+            CardSize::Small => 3,
+            CardSize::Medium => 2,
+            CardSize::Large => 1,
+            CardSize::ExtraLarge => 1,
+        }
     } else {
-        3
+        match card_size {
+            CardSize::Small => 4,
+            CardSize::Medium => 3,
+            CardSize::Large => 2,
+            CardSize::ExtraLarge => 1,
+        }
     }
 }
 
 /// Complete library grid layout for the current window, sidebar/inspector
 /// state, density preset, and visible card text.
+///
+/// The card width is the smaller of the equal-width share and the preset's
+/// maximum. A capped card leaves the rest of its row empty (left-aligned)
+/// rather than growing, so presets stay monotonic even when the inspector or
+/// sidebar is collapsed.
 pub(crate) fn library_grid_metrics(
     window_width: f32,
     sidebar_collapsed: bool,
@@ -495,12 +517,11 @@ pub(crate) fn library_grid_metrics(
     let available_width =
         grid_available_width(window_width, sidebar_collapsed, inspector_collapsed);
     let raw_columns = grid_columns(available_width, library_min_card_width(card_size));
-    let columns = raw_columns.min(library_column_cap(
-        window_width,
-        inspector_collapsed,
-        card_size,
-    ));
-    let card_width = photo_card_width(available_width, columns);
+    let columns = raw_columns
+        .min(library_column_cap(window_width, card_size))
+        .max(1);
+    let card_width =
+        photo_card_width(available_width, columns).min(library_max_card_width(card_size));
     let image_height = card_width * 2.0 / 3.0;
     let row_height = photo_row_height(card_width, show_world, show_meta);
     GridMetrics {
@@ -737,9 +758,145 @@ mod tests {
         let extra = library_grid_metrics(1280.0, false, false, CardSize::ExtraLarge, true, true);
         assert!(small.columns > medium.columns);
         assert!(medium.columns > large.columns);
-        assert!(large.columns >= extra.columns);
+        assert!(large.columns > extra.columns);
+        assert!(small.card_width < medium.card_width);
+        assert!(medium.card_width < large.card_width);
+        assert!(large.card_width < extra.card_width);
+        assert_eq!(small.columns, 4);
+        assert_eq!(medium.columns, 3);
         assert_eq!(large.columns, 2);
-        assert_eq!(extra.columns, 2);
+        assert_eq!(extra.columns, 1);
+    }
+
+    #[test]
+    fn library_card_size_presets_are_monotone_at_every_target_size() {
+        let sizes = [
+            CardSize::Small,
+            CardSize::Medium,
+            CardSize::Large,
+            CardSize::ExtraLarge,
+        ];
+        for width in [1080.0, 1280.0, 1440.0] {
+            for sidebar_collapsed in [false, true] {
+                for inspector_collapsed in [false, true] {
+                    let cards = sizes.map(|size| {
+                        library_grid_metrics(
+                            width,
+                            sidebar_collapsed,
+                            inspector_collapsed,
+                            size,
+                            true,
+                            true,
+                        )
+                        .card_width
+                    });
+                    assert!(
+                        cards[0] < cards[1] && cards[1] < cards[2] && cards[2] < cards[3],
+                        "width={width} sidebar_collapsed={sidebar_collapsed} \
+                         inspector_collapsed={inspector_collapsed} cards={cards:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn medium_columns_stay_three_three_two_independent_of_chrome_state() {
+        for (width, expected_columns) in [(1080.0, 2), (1280.0, 3), (1440.0, 3)] {
+            for sidebar_collapsed in [false, true] {
+                for inspector_collapsed in [false, true] {
+                    let metrics = library_grid_metrics(
+                        width,
+                        sidebar_collapsed,
+                        inspector_collapsed,
+                        CardSize::Medium,
+                        true,
+                        true,
+                    );
+                    assert_eq!(
+                        metrics.columns, expected_columns,
+                        "width={width} sidebar_collapsed={sidebar_collapsed} \
+                         inspector_collapsed={inspector_collapsed}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn library_column_caps_and_max_widths_match_the_presets() {
+        assert_eq!(library_column_cap(1440.0, CardSize::Small), 4);
+        assert_eq!(library_column_cap(1440.0, CardSize::Medium), 3);
+        assert_eq!(library_column_cap(1440.0, CardSize::Large), 2);
+        assert_eq!(library_column_cap(1440.0, CardSize::ExtraLarge), 1);
+        assert_eq!(library_column_cap(1080.0, CardSize::Small), 3);
+        assert_eq!(library_column_cap(1080.0, CardSize::Medium), 2);
+        assert_eq!(library_column_cap(1080.0, CardSize::Large), 1);
+        assert_eq!(library_column_cap(1080.0, CardSize::ExtraLarge), 1);
+
+        assert_eq!(library_max_card_width(CardSize::Small), 240.0);
+        assert_eq!(library_max_card_width(CardSize::Medium), 320.0);
+        assert_eq!(library_max_card_width(CardSize::Large), 420.0);
+        assert_eq!(library_max_card_width(CardSize::ExtraLarge), 480.0);
+
+        for width in [1080.0, 1280.0, 1440.0] {
+            for sidebar_collapsed in [false, true] {
+                for inspector_collapsed in [false, true] {
+                    for size in [
+                        CardSize::Small,
+                        CardSize::Medium,
+                        CardSize::Large,
+                        CardSize::ExtraLarge,
+                    ] {
+                        let metrics = library_grid_metrics(
+                            width,
+                            sidebar_collapsed,
+                            inspector_collapsed,
+                            size,
+                            true,
+                            true,
+                        );
+                        assert!(
+                            metrics.card_width <= library_max_card_width(size),
+                            "width={width} size={size:?} card={} max={}",
+                            metrics.card_width,
+                            library_max_card_width(size)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn medium_three_by_three_still_fits_the_gallery_height_budget() {
+        for (width, height) in [(1280.0, 820.0), (1440.0, 900.0)] {
+            let metrics = library_grid_metrics(width, false, false, CardSize::Medium, true, true);
+            assert_eq!(metrics.columns, 3);
+            let chrome = 46.0 + crate::ui::chrome::ribbon_height(height);
+            let gallery_height = height - WORKSPACE_PAD * 2.0 - WORKSPACE_GAP - chrome;
+            let body_height =
+                gallery_height - GALLERY_HEADER_HEIGHT - GALLERY_PAD_TOP - GALLERY_PAD_BOTTOM;
+            assert!(
+                metrics.row_height * 3.0 <= body_height,
+                "width={width} rows={} body={body_height}",
+                metrics.row_height * 3.0
+            );
+        }
+    }
+
+    #[test]
+    fn one_column_caps_leave_leftover_row_space() {
+        let extra = library_grid_metrics(1440.0, false, false, CardSize::ExtraLarge, true, true);
+        assert_eq!(extra.columns, 1);
+        close(extra.card_width, 480.0);
+        assert!(extra.card_width < grid_available_width(1440.0, false, false));
+
+        let extra_narrow =
+            library_grid_metrics(1080.0, false, false, CardSize::ExtraLarge, true, true);
+        assert_eq!(extra_narrow.columns, 1);
+        close(extra_narrow.card_width, 480.0);
+        assert!(extra_narrow.card_width < grid_available_width(1080.0, false, false));
     }
 
     #[test]

@@ -292,13 +292,14 @@ impl App {
         } else {
             self.pending_layout_anchor_library.take()
         };
-        let (next_columns, row_height, image_height) = if search {
-            // Search keeps its pre-Task 17 fixed-image metrics.
+        let (next_columns, row_height, image_height, card_width) = if search {
+            // Search keeps its pre-Task 17 fixed-image metrics and flex cells.
             let metrics = self.card_metrics();
             (
                 search_grid_columns(width, self.sidebar_collapsed, metrics.min_card_width),
                 metrics.row_height,
                 metrics.image_height,
+                None,
             )
         } else {
             let metrics = library_grid_metrics(
@@ -309,7 +310,12 @@ impl App {
                 self.settings.ui_card_show_world,
                 self.settings.ui_card_show_date || self.settings.ui_card_show_size,
             );
-            (metrics.columns, metrics.row_height, metrics.image_height)
+            (
+                metrics.columns,
+                metrics.row_height,
+                metrics.image_height,
+                Some(metrics.card_width),
+            )
         };
         let grid_gap = if search { 16.0 } else { GRID_GAP };
         let browser = self.browser_mut(search);
@@ -456,11 +462,12 @@ impl App {
                                     photo.as_ref(),
                                     photo_index,
                                     image_height,
+                                    card_width,
                                     cx,
                                 ));
                             }
                             None => {
-                                line = line.child(grid_placeholder(image_height));
+                                line = line.child(grid_placeholder(image_height, card_width));
                             }
                         }
                     }
@@ -620,6 +627,7 @@ impl App {
         photo: &Photo,
         grid_index: usize,
         image_height: f32,
+        card_width: Option<f32>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let id = photo.id;
@@ -877,7 +885,15 @@ impl App {
         // wrapper mounted for the card's lifetime: removing it when the intro
         // ends would change the hover animation's ancestor path and remount it,
         // causing a 4 px settle without a hover.
-        let cell = div().relative().flex_1().min_w_0().child(card);
+        //
+        // Library cells use the computed fixed width so a capped preset leaves
+        // row space empty (left-aligned) instead of stretching. Search keeps
+        // its legacy flex cell until Task 17.
+        let cell = div().relative().min_w_0().child(card);
+        let cell = match card_width {
+            Some(width) => cell.w(px(width)).flex_shrink_0(),
+            None => cell.flex_1(),
+        };
 
         cell.with_animation(
             SharedString::from(format!("card-intro-{grid_epoch}-{id}")),
@@ -1640,14 +1656,17 @@ impl App {
 }
 /// Stands in for a photo whose page has not loaded yet. Matches the card's
 /// current image height so the uniform row never changes height.
-fn grid_placeholder(image_height: f32) -> AnyElement {
-    div()
-        .flex_1()
+fn grid_placeholder(image_height: f32, card_width: Option<f32>) -> AnyElement {
+    let mut placeholder = div()
         .min_w_0()
         .h(px(image_height))
         .rounded(px(13.))
         .bg(rgb(PANEL_DEEP))
         .border_1()
-        .border_color(rgba(0xffffff16))
-        .into_any_element()
+        .border_color(rgba(0xffffff16));
+    placeholder = match card_width {
+        Some(width) => placeholder.w(px(width)).flex_shrink_0(),
+        None => placeholder.flex_1(),
+    };
+    placeholder.into_any_element()
 }
