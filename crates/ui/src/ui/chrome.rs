@@ -133,6 +133,15 @@ pub(crate) fn ribbon_selection_label(selected: usize, total: i64, bytes: u64) ->
     }
 }
 
+/// Compression ribbon status text. A fresh action message (profile save,
+/// reorder, delete, queueing, retry, ...) replaces the steady auto-apply note
+/// so failures stay visible while the Compression tab is the default.
+fn compression_status_note(message: Option<&str>, auto_note: &str) -> String {
+    message
+        .map(str::to_string)
+        .unwrap_or_else(|| auto_note.to_string())
+}
+
 /// Every icon chrome renders. `gpui_kit::assets::Assets` embeds only the icons
 /// in `gpui-kit-assets-0.8.0/default-icons.txt`; the full `IconName` catalog is
 /// much larger and unbundled variants paint nothing without an error. Keep this
@@ -796,11 +805,18 @@ impl App {
         } else {
             "元画像を置換"
         };
+        let auto_note = format!("{auto} · {profile} · {policy}");
+        let message = self.message.as_deref();
+        let status_text = compression_status_note(message, &auto_note);
         let status_group = ribbon_group(
             vec![status_note(
-                IconName::CircleCheck,
-                format!("{auto} · {profile} · {policy}"),
-                false,
+                if message.is_some() {
+                    IconName::CircleAlert
+                } else {
+                    IconName::CircleCheck
+                },
+                status_text,
+                message.is_some(),
             )],
             "現在の設定",
             true,
@@ -1110,8 +1126,9 @@ fn status_note(icon: IconName, text: String, warning: bool) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHROME_ICONS, RibbonTab, default_ribbon_tab, is_bundled, ribbon_height, ribbon_metrics,
-        ribbon_selection_label, ribbon_status_visible, titlebar_sync_label, titlebar_sync_visible,
+        CHROME_ICONS, RibbonTab, compression_status_note, default_ribbon_tab, is_bundled,
+        ribbon_height, ribbon_metrics, ribbon_selection_label, ribbon_status_visible,
+        titlebar_sync_label, titlebar_sync_visible,
     };
     use crate::app::Screen;
 
@@ -1211,5 +1228,15 @@ mod tests {
             ribbon_selection_label(3, 2418, 1_048_576),
             "選択中 3 枚 · 2,418 枚 / 1.0 MB"
         );
+    }
+
+    #[test]
+    fn compression_status_prefers_message_over_auto_note() {
+        let auto_note = "自動適用: ON · WebP · Q82 · 元画像を保持";
+        assert_eq!(
+            compression_status_note(Some("プロファイルを保存できません: disk full"), auto_note),
+            "プロファイルを保存できません: disk full"
+        );
+        assert_eq!(compression_status_note(None, auto_note), auto_note);
     }
 }
