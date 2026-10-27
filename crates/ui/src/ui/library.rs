@@ -801,6 +801,8 @@ impl App {
                 rgba(0x66b3ff)
             } else if selected {
                 rgba(0x9fcaff)
+            } else if hovered {
+                rgba(0xffffff30)
             } else {
                 rgba(0xffffff16)
             })
@@ -829,6 +831,18 @@ impl App {
                     cx.notify();
                 }
             }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.handle_photo_press(id, event.modifiers, cx);
+                    if this.screen == Screen::Photos {
+                        window.focus(&this.photo_grid_focus, cx);
+                    } else {
+                        let handle = this.world_input.read(cx).focus_handle(cx);
+                        window.focus(&handle, cx);
+                    }
+                }),
+            )
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 this.handle_photo_click(id, event, cx);
                 if this.screen == Screen::Photos {
@@ -845,21 +859,12 @@ impl App {
                 {
                     this.open_quick_look(window, cx, ViewerOpenSource::Card);
                 }
-            }))
-            .with_animation(
-                SharedString::from(format!("card-hover-{id}-{hovered}")),
-                Animation::new(Duration::from_millis(180)).with_easing(ease_motion),
-                move |el, t| {
-                    let offset = if hovered { -4.0 * t } else { -4.0 * (1.0 - t) };
-                    el.relative().top(px(offset))
-                },
-            );
+            }));
 
-        // The intro wrapper is the flex item; keep the hover animation inside
+        // The intro wrapper is the flex item; keep the intro animation inside
         // it so changing `hovered` does not remount the intro state. Keep the
         // wrapper mounted for the card's lifetime: removing it when the intro
-        // ends would change the hover animation's ancestor path and remount it,
-        // causing a 4 px settle without a hover.
+        // ends would change the intro's ancestor path and remount it.
         //
         // Library and Search cells use the computed fixed width so a capped
         // preset leaves row space empty (left-aligned) instead of stretching.
@@ -880,7 +885,7 @@ impl App {
             move |el, t| {
                 if intro {
                     let value = stagger_value(t, grid_index);
-                    el.opacity(value).relative().top(px(14.0 * (1.0 - value)))
+                    el.opacity(value)
                 } else {
                     el
                 }

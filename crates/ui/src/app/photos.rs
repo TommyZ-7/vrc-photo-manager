@@ -321,13 +321,12 @@ impl App {
         cx.notify();
     }
 
-    pub(crate) fn handle_photo_click(
+    pub(crate) fn handle_photo_press(
         &mut self,
         id: i64,
-        event: &ClickEvent,
+        modifiers: Modifiers,
         cx: &mut Context<Self>,
     ) {
-        let modifiers = event.modifiers();
         if modifiers.shift {
             self.select_photo_range(id, modifiers.secondary(), cx);
         } else if modifiers.secondary() {
@@ -335,6 +334,15 @@ impl App {
         } else {
             self.select_photo(id, cx);
         }
+    }
+
+    pub(crate) fn handle_photo_click(
+        &mut self,
+        id: i64,
+        event: &ClickEvent,
+        cx: &mut Context<Self>,
+    ) {
+        self.handle_photo_press(id, event.modifiers(), cx);
     }
 
     pub(crate) fn browser_mut(&mut self, search: bool) -> &mut PhotoBrowser {
