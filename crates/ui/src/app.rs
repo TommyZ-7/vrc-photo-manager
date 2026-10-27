@@ -1,5 +1,6 @@
 pub(crate) mod cli;
 pub(crate) mod compression;
+pub(crate) mod daemon;
 pub(crate) mod photos;
 pub(crate) mod search;
 
