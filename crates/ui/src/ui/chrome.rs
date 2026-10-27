@@ -94,6 +94,15 @@ pub(crate) fn ribbon_status_visible(window_width: f32) -> bool {
     window_width > NARROW_CHROME_WIDTH
 }
 
+/// True when `App.message` needs the persistent strip above the screen because
+/// the ribbon cannot show it: the body is collapsed, the Photo tab has no
+/// status group, or the right-hand slot is hidden at narrow widths. Home and
+/// Compression keep using the ribbon slot when it is visible, so a message is
+/// never rendered twice.
+pub(crate) fn message_strip_visible(collapsed: bool, tab: RibbonTab, content_width: f32) -> bool {
+    collapsed || tab == RibbonTab::Photo || !ribbon_status_visible(content_width)
+}
+
 /// The titlebar's sparkline of sync state hides with the ribbon status note so
 /// the screen crumb, tabs, notification bell, and window controls keep their
 /// room at narrow widths.
@@ -487,6 +496,7 @@ impl App {
                 } else {
                     this.reload_aux(cx);
                 }
+                cx.notify();
             },
         );
         let open_folder = small_button(
@@ -690,7 +700,7 @@ impl App {
             vec![
                 large_button(
                     "ribbon-trash",
-                    "ゴミ箱へ",
+                    trash_label(armed),
                     IconName::Delete,
                     if !has_selection {
                         RibbonLook::Disabled
@@ -882,7 +892,13 @@ fn tab_button(tab: RibbonTab, active: RibbonTab, cx: &mut Context<App>) -> AnyEl
         .whitespace_nowrap()
         .cursor_pointer()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(cx.listener(move |this, _, _, cx| this.select_ribbon_tab(tab, cx)));
+        // The titlebar's drag region treats a double click as zoom. Tabs are
+        // controls, so keep both the click and its second press inside them.
+        .on_double_click(|_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.select_ribbon_tab(tab, cx);
+            cx.stop_propagation();
+        }));
     if is_active {
         button = button
             .border_color(rgba(0x8bcbff29))
@@ -920,9 +936,23 @@ fn collapse_button(collapsed: bool, cx: &mut Context<App>) -> AnyElement {
         .cursor_pointer()
         .hover(|this| this.bg(rgba(0xffffff0a)).text_color(rgb(TEXT)))
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .on_click(cx.listener(|this, _, _, cx| this.toggle_ribbon_collapsed(cx)))
+        .on_double_click(|_, _, cx| cx.stop_propagation())
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.toggle_ribbon_collapsed(cx);
+            cx.stop_propagation();
+        }))
         .child(chrome_icon(icon).with_size(px(14.)))
         .into_any_element()
+}
+
+/// Trash command label. The first press only arms deletion, so the armed state
+/// spells out the second click without relying on the status message.
+fn trash_label(armed: bool) -> &'static str {
+    if armed {
+        "もう一度で削除"
+    } else {
+        "ゴミ箱へ"
+    }
 }
 
 fn ribbon_group(
@@ -1152,8 +1182,8 @@ fn status_note(icon: IconName, text: String, warning: bool) -> AnyElement {
 mod tests {
     use super::{
         CHROME_ICONS, RibbonTab, chrome_layout, compression_status_note, default_ribbon_tab,
-        is_bundled, ribbon_height, ribbon_metrics, ribbon_selection_label, ribbon_status_visible,
-        titlebar_sync_label, titlebar_sync_visible,
+        is_bundled, message_strip_visible, ribbon_height, ribbon_metrics, ribbon_selection_label,
+        ribbon_status_visible, titlebar_sync_label, titlebar_sync_visible, trash_label,
     };
     use crate::app::Screen;
 
@@ -1244,6 +1274,31 @@ mod tests {
     fn status_note_hides_at_1180() {
         assert!(!ribbon_status_visible(1180.0));
         assert!(ribbon_status_visible(1181.0));
+    }
+
+    #[test]
+    fn message_strip_covers_slots_the_ribbon_cannot_show() {
+        // Wide Home/Compression keep the message in the ribbon status slot.
+        assert!(!message_strip_visible(false, RibbonTab::Home, 1440.0));
+        assert!(!message_strip_visible(
+            false,
+            RibbonTab::Compression,
+            1280.0
+        ));
+        // The Photo page has no status group at any width.
+        assert!(message_strip_visible(false, RibbonTab::Photo, 1440.0));
+        // A collapsed ribbon hides the whole body, including the slot.
+        assert!(message_strip_visible(true, RibbonTab::Home, 1440.0));
+        // The status slot disappears at 1180 and below.
+        assert!(message_strip_visible(false, RibbonTab::Home, 1180.0));
+        assert!(message_strip_visible(false, RibbonTab::Compression, 1080.0));
+        assert!(!message_strip_visible(false, RibbonTab::Home, 1181.0));
+    }
+
+    #[test]
+    fn trash_label_spells_out_the_armed_click() {
+        assert_eq!(trash_label(false), "ゴミ箱へ");
+        assert_eq!(trash_label(true), "もう一度で削除");
     }
 
     #[test]

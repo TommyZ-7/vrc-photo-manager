@@ -88,6 +88,15 @@ pub(crate) fn anchor_photo_id(
     index.entries.get(first_photo).map(|entry| entry.id)
 }
 
+/// List row that keeps `id` as the first photo of the top visible row under
+/// `columns`. Missing ids anchor at the top.
+pub(crate) fn row_for_photo(index: &PhotoIndex, id: i64, columns: usize) -> usize {
+    index
+        .row_of_id(id)
+        .map(|position| position / columns.max(1))
+        .unwrap_or(0)
+}
+
 /// The photo the next search result should be anchored to. Keep the requested
 /// anchor when it survived the query; otherwise fall back to the first photo
 /// (the top of the grid) or `None` for an empty result.
@@ -523,6 +532,23 @@ mod tests {
             anchor_photo_id(&index, TEST_ROW_HEIGHT * 2.0 + 1.0, 1, TEST_ROW_HEIGHT),
             Some(3)
         );
+    }
+
+    #[test]
+    fn row_for_photo_keeps_an_old_layout_anchor_on_the_new_grid() {
+        let index = PhotoIndex::new((1..=12).map(|id| index_entry(id, 202601)).collect());
+        // Under the old two-column layout the top visible row starts at id 7.
+        let old_anchor = anchor_photo_id(&index, 3.0 * 100.0, 2, 100.0);
+        assert_eq!(old_anchor, Some(7));
+
+        // After the metrics change (three columns) the same photo must still
+        // be the first card of the anchored row.
+        let row = row_for_photo(&index, old_anchor.expect("anchor"), 3);
+        assert_eq!(row, 2);
+        assert_eq!(index.entries[row * 3].id, 7);
+
+        // A removed photo falls back to the top instead of a stale row.
+        assert_eq!(row_for_photo(&index, 999, 3), 0);
     }
 
     #[test]

@@ -18,6 +18,7 @@ use crate::app::import::{
 };
 use crate::app::lifecycle::ScanProgressView;
 use crate::app::{App, Screen, SidebarStatusTab};
+use crate::ui::chrome::message_strip_visible;
 use crate::ui::components::status_progress_bar;
 use crate::ui::import::import_progress_ratio;
 use crate::ui::theme::*;
@@ -898,7 +899,57 @@ impl App {
         .collect()
     }
 
+    /// Slim persistent row for `App.message` when the ribbon cannot show it.
+    /// Unlike a toast it stays until the user dismisses it or an action
+    /// replaces it; failure details remain on their own screens.
+    fn message_strip(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let message = self.message.clone().unwrap_or_default();
+        h_flex()
+            .flex_shrink_0()
+            .w_full()
+            .items_center()
+            .gap(px(10.))
+            .px(px(26.))
+            .py(px(7.))
+            .bg(rgb(PANEL_INNER))
+            .border_b_1()
+            .border_color(rgb(BORDER))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .size(px(6.))
+                    .rounded_full()
+                    .bg(rgb(AMBER)),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(11.))
+                    .text_color(rgb(AMBER))
+                    .child(message),
+            )
+            .child(
+                Button::new("message-dismiss")
+                    .label("閉じる")
+                    .small()
+                    .ghost()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.message = None;
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
+    }
+
     pub(crate) fn content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
+        let content_width =
+            window_content_extent(f32::from(window.viewport_size().width), client_inset);
+        let message_strip = (self.message.is_some()
+            && message_strip_visible(self.ribbon_collapsed, self.active_ribbon_tab, content_width))
+        .then(|| self.message_strip(cx));
         let screen = match self.screen {
             Screen::Photos => self.photos_screen(window, cx).into_any_element(),
             Screen::Compression => self.compression_screen(window, cx).into_any_element(),
@@ -927,6 +978,7 @@ impl App {
             .flex_1()
             .min_h_0()
             .children(self.global_alerts(cx))
+            .children(message_strip)
             .child(screen)
             .into_any_element()
     }

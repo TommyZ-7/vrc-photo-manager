@@ -18,7 +18,7 @@ use vrc_photo_core::model::Photo;
 use crate::app::App;
 use crate::app::Screen;
 use crate::app::cli::log_timing;
-use crate::state::photo_browser::PAGE_SIZE;
+use crate::state::photo_browser::{PAGE_SIZE, anchor_photo_id, list_scroll_top, row_for_photo};
 use crate::state::preview::preview_placeholder_label;
 use crate::state::viewer::ViewerOpenSource;
 use crate::state::year_rail::format_captured_month;
@@ -316,14 +316,27 @@ impl App {
         let card_width = Some(metrics.card_width);
         let grid_gap = GRID_GAP;
         let browser = self.browser_mut(search);
+        let layout_changed =
+            next_columns != browser.columns || (row_height - browser.row_height).abs() > 0.5;
+        // A resize or pane toggle changes the metrics mid-scroll. Capture the
+        // old top photo before replacing them so `uniform_list` does not keep
+        // a pixel offset that now points at a different row.
+        let anchor = pending.or_else(|| {
+            layout_changed
+                .then(|| {
+                    anchor_photo_id(
+                        &browser.index,
+                        list_scroll_top(&browser.scroll),
+                        browser.columns,
+                        browser.row_height,
+                    )
+                })
+                .flatten()
+        });
         browser.columns = next_columns;
         browser.row_height = row_height;
-        if let Some(id) = pending {
-            let row = browser
-                .index
-                .row_of_id(id)
-                .map(|position| position / browser.columns.max(1))
-                .unwrap_or(0);
+        if let Some(id) = anchor {
+            let row = row_for_photo(&browser.index, id, browser.columns);
             browser
                 .scroll
                 .scroll_to_item_strict(row, ScrollStrategy::Top);
