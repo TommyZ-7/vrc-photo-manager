@@ -136,12 +136,18 @@ impl App {
             cx.notify();
             return;
         }
-        if ids.len() == 1
-            && let Some(profile) = self
-                .profiles
-                .iter()
-                .find(|profile| profile.clipboard && profile.enabled)
-                .cloned()
+        if ids.len() != 1 {
+            // A clipboard holds one image. Opening the normal modal would hide
+            // the output selector and leave the confirm button disabled.
+            self.message = Some("クリップボード圧縮は1枚選択時のみ使えます".to_string());
+            cx.notify();
+            return;
+        }
+        if let Some(profile) = self
+            .profiles
+            .iter()
+            .find(|profile| profile.clipboard && profile.enabled)
+            .cloned()
         {
             self.manual_compress = Some(ManualCompressionDialog {
                 photo_ids: ids,

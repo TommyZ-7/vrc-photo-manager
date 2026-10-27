@@ -143,9 +143,6 @@ impl App {
     /// Makes `id` the inspector/viewer photo without changing the selection
     /// list. Multi-selection toggles call this when the primary changes.
     fn set_primary_photo(&mut self, id: i64, cx: &mut Context<Self>) {
-        if self.delete_armed != Some(id) {
-            self.delete_armed = None;
-        }
         let changed = self.selected != Some(id) || self.selected_photo.is_none();
         if changed {
             let previous_color = self
@@ -281,7 +278,6 @@ impl App {
         self.preview_queue.cancel_wanted();
         self.previous_preview = None;
         self.previous_color = None;
-        self.delete_armed = None;
         self.note_edit_id = None;
         cx.notify();
     }
@@ -354,15 +350,6 @@ impl App {
         } else {
             self.select_photo(id, cx);
         }
-    }
-
-    pub(crate) fn handle_photo_click(
-        &mut self,
-        id: i64,
-        event: &ClickEvent,
-        cx: &mut Context<Self>,
-    ) {
-        self.handle_photo_press(id, event.modifiers(), cx);
     }
 
     pub(crate) fn browser_mut(&mut self, search: bool) -> &mut PhotoBrowser {

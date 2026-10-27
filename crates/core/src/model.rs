@@ -501,6 +501,7 @@ pub struct LibraryStats {
     pub photo_count: i64,
     pub total_bytes: u64,
     pub compressed_count: i64,
+    pub derivative_bytes: u64,
 }
 
 #[cfg(test)]

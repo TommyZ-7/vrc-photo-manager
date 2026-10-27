@@ -18,6 +18,7 @@ use vrc_photo_core::model::Photo;
 use crate::app::App;
 use crate::app::Screen;
 use crate::app::cli::log_timing;
+use crate::app::daemon::open_path;
 use crate::state::photo_browser::{
     PAGE_SIZE, anchor_photo_id, first_visible_photo, list_scroll_top, row_for_photo, visible_month,
 };
@@ -460,8 +461,7 @@ impl App {
         .w_full()
         .min_w_0()
         .min_h_0();
-        // The gallery body padding is shared by both screens; the first row's
-        // -4px hover lift fits inside GALLERY_PAD_TOP.
+        // The gallery body padding is shared by both screens.
 
         // The wrapper stays mounted (and relative) so the year rail can
         // overlay the list without remounting it.
@@ -821,7 +821,9 @@ impl App {
                 }),
             )
             .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                this.handle_photo_click(id, event, cx);
+                // Selection happens on mouse-down so a few pixels of movement
+                // still count as a click. Do not repeat it here: Ctrl/Cmd-click
+                // would toggle twice and cancel itself out.
                 if this.screen == Screen::Photos {
                     window.focus(&this.photo_grid_focus, cx);
                 } else {
@@ -838,13 +840,8 @@ impl App {
                 }
             }));
 
-        // The intro wrapper is the flex item; keep the intro animation inside
-        // it so changing `hovered` does not remount the intro state. Keep the
-        // wrapper mounted for the card's lifetime: removing it when the intro
-        // ends would change the intro's ancestor path and remount it.
-        //
-        // Library and Search cells use the computed fixed width so a capped
-        // preset leaves row space empty (left-aligned) instead of stretching.
+        // Library and Search cells use the computed fixed width so a preset
+        // never stretches a card beyond the width its image was sized for.
         let cell = div().relative().min_w_0().child(card);
         let cell = match card_width {
             Some(width) => cell.w(px(width)).flex_shrink_0(),
@@ -895,7 +892,6 @@ impl App {
                 .w(px(column_width))
                 .h_full()
                 .flex_shrink_0()
-                .pr(px(INSPECTOR_MARGIN))
                 .child(
                     glass_panel()
                         .flex_1()
@@ -1227,7 +1223,6 @@ impl App {
             .w(px(column_width))
             .h_full()
             .flex_shrink_0()
-            .pr(px(INSPECTOR_MARGIN))
             .child(card.w(px(card_width)).rounded(px(17.)))
             .into_any_element()
     }
@@ -1253,7 +1248,6 @@ impl App {
         let favorite = photo.is_favorite;
         let note = photo.note.clone();
         let note_for_edit = note.clone();
-        let armed = self.delete_armed == Some(id);
         let section = |label: &'static str| {
             div()
                 .text_size(px(10.))
@@ -1319,6 +1313,25 @@ impl App {
                 this.add_tag(id, tag, cx);
             },
         );
+        let photo_path = photo.effective_path().to_string();
+        let folder_button = self.focusable_text_button(
+            "viewer-open-folder",
+            "フォルダを開く",
+            self.quick_look_folder_focus.clone(),
+            ButtonState {
+                tone: ButtonTone::Neutral,
+                enabled: true,
+            },
+            cx,
+            move |this, _, cx| {
+                let path = std::path::Path::new(&photo_path);
+                let folder = path.parent().unwrap_or(path);
+                if let Err(error) = open_path(folder) {
+                    this.message = Some(format!("フォルダを開けません: {error}"));
+                }
+                cx.notify();
+            },
+        );
         let compress_button = self.focusable_text_button(
             "viewer-compress",
             "圧縮",
@@ -1332,18 +1345,10 @@ impl App {
         );
         let trash_button = self.focusable_text_button(
             "viewer-trash",
-            if armed {
-                "本当にゴミ箱へ移動"
-            } else {
-                "ゴミ箱へ移動"
-            },
+            "ゴミ箱へ移動",
             self.quick_look_trash_focus.clone(),
             ButtonState {
-                tone: if armed {
-                    ButtonTone::Danger
-                } else {
-                    ButtonTone::Neutral
-                },
+                tone: ButtonTone::Danger,
                 enabled: true,
             },
             cx,
@@ -1548,6 +1553,7 @@ impl App {
                 h_flex()
                     .gap(px(8.))
                     .items_center()
+                    .child(folder_button)
                     .child(compress_button)
                     .child(trash_button),
             )

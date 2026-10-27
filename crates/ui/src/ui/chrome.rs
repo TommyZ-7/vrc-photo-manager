@@ -6,7 +6,7 @@
 //! window's glass backdrop.
 
 use gpui_kit::assets::IconName;
-use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -48,6 +48,9 @@ pub(crate) struct RibbonMetrics {
     pub(crate) group_label: f32,
     pub(crate) padding: f32,
     pub(crate) small_gap: f32,
+    /// Narrow windows keep every command but show icons with tooltips so the
+    /// three groups never clip or scroll horizontally.
+    pub(crate) compact: bool,
 }
 
 pub(crate) fn ribbon_metrics(window_height: f32) -> RibbonMetrics {
@@ -58,6 +61,7 @@ pub(crate) fn ribbon_metrics(window_height: f32) -> RibbonMetrics {
             group_label: 9.0,
             padding: 3.0,
             small_gap: 1.0,
+            compact: false,
         }
     } else {
         RibbonMetrics {
@@ -66,6 +70,7 @@ pub(crate) fn ribbon_metrics(window_height: f32) -> RibbonMetrics {
             group_label: 10.0,
             padding: 4.0,
             small_gap: 2.0,
+            compact: false,
         }
     }
 }
@@ -73,8 +78,39 @@ pub(crate) fn ribbon_metrics(window_height: f32) -> RibbonMetrics {
 /// §8.2: the ribbon's right-hand status note disappears at 1180 px and below.
 pub(crate) const NARROW_CHROME_WIDTH: f32 = 1180.0;
 
+/// Below this content width the labelled ribbon no longer fits beside the
+/// status note. The compact ribbon keeps the same commands as icons with
+/// tooltips so nothing clips and there is no horizontal scrollbar.
+pub(crate) const RIBBON_LABELS_MIN_WIDTH: f32 = 1280.0;
+
 pub(crate) fn ribbon_status_visible(window_width: f32) -> bool {
     window_width > NARROW_CHROME_WIDTH
+}
+
+/// The titlebar's compact sync readout hides with the ribbon status note so
+/// the screen crumb, notification indicator, and window controls keep their
+/// room at narrow widths.
+pub(crate) fn titlebar_sync_visible(window_width: f32) -> bool {
+    window_width > NARROW_CHROME_WIDTH
+}
+
+/// Compact sync text for the 46px titlebar. The full `daemon_sync_label`
+/// (including the supervisor) stays on the Dashboard; the titlebar only needs
+/// the age or transport state.
+pub(crate) fn titlebar_sync_label(
+    age_secs: Option<i64>,
+    _supervisor: Option<&str>,
+    ipc_connected: bool,
+    demo: bool,
+) -> String {
+    if demo {
+        return "デモ".to_string();
+    }
+    match age_secs.filter(|age| *age < 20) {
+        Some(age) => format!("{age}秒前"),
+        None if ipc_connected => "IPC".to_string(),
+        None => "停止".to_string(),
+    }
 }
 
 /// True when `App.message` needs the persistent strip above the screen because
@@ -99,6 +135,7 @@ pub(crate) struct ChromeLayout {
     pub(crate) ribbon_height: f32,
     pub(crate) ribbon_metrics: RibbonMetrics,
     pub(crate) status_visible: bool,
+    pub(crate) sync_visible: bool,
 }
 
 pub(crate) fn chrome_layout(
@@ -108,12 +145,15 @@ pub(crate) fn chrome_layout(
 ) -> ChromeLayout {
     let content_width = window_content_extent(viewport_width, client_inset);
     let content_height = window_content_extent(viewport_height, client_inset);
+    let mut ribbon_metrics = ribbon_metrics(content_height);
+    ribbon_metrics.compact = content_width < RIBBON_LABELS_MIN_WIDTH;
     ChromeLayout {
         content_width,
         content_height,
         ribbon_height: ribbon_height(content_height),
-        ribbon_metrics: ribbon_metrics(content_height),
+        ribbon_metrics,
         status_visible: ribbon_status_visible(content_width),
+        sync_visible: titlebar_sync_visible(content_width),
     }
 }
 
@@ -178,7 +218,7 @@ impl App {
     /// Header card: titlebar line plus the ribbon body. Sits above the
     /// transparent content area with a 14px gap.
     pub(crate) fn chrome(&mut self, layout: ChromeLayout, cx: &mut Context<Self>) -> AnyElement {
-        let titlebar = self.titlebar(cx);
+        let titlebar = self.titlebar(layout.sync_visible, cx);
         let collapsed = self.ribbon_collapsed;
         let epoch = self.ribbon_epoch;
         let body_height = layout.ribbon_height;
@@ -201,7 +241,8 @@ impl App {
                     } else {
                         body_height * t
                     };
-                    el.h(px(height)).opacity(t)
+                    el.h(px(height))
+                        .opacity(if collapsed { 1.0 - t } else { t })
                 },
             )
             .child(body);
@@ -225,7 +266,7 @@ impl App {
             .into_any_element()
     }
 
-    fn titlebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn titlebar(&mut self, show_sync: bool, cx: &mut Context<Self>) -> AnyElement {
         let screen = self.screen;
 
         let app_glyph = div()
@@ -280,6 +321,33 @@ impl App {
                     .child(daemon_label),
             );
 
+        let sync = titlebar_sync_label(
+            self.daemon_age_secs,
+            self.daemon_supervisor.as_deref(),
+            self.ipc_connected,
+            self.demo_assets.is_some(),
+        );
+        let sync_label = h_flex()
+            .min_w_0()
+            .max_w(px(96.))
+            .gap(px(4.))
+            .items_center()
+            .child(
+                chrome_icon(IconName::Calendar)
+                    .with_size(px(11.))
+                    .text_color(rgb(MUTED_2)),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .max_w(px(96.))
+                    .truncate()
+                    .font_family("monospace")
+                    .text_size(px(7.5))
+                    .text_color(rgb(MUTED_2))
+                    .child(sync),
+            );
+
         let line = h_flex()
             .flex_1()
             .min_w_0()
@@ -309,7 +377,36 @@ impl App {
             )
             .child(div().flex_1().min_w_0())
             .child(status_pill)
-            .child(collapse_button(collapsed, cx));
+            .when(show_sync, |this| this.child(sync_label))
+            .child(collapse_button(collapsed, cx))
+            .child(
+                div()
+                    .id("titlebar-notifications")
+                    .relative()
+                    .flex_shrink_0()
+                    .size(px(26.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(6.))
+                    .text_color(rgb(MUTED_2))
+                    .child(chrome_icon(IconName::Bell).with_size(px(14.)))
+                    .when(self.message.is_some(), |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .top(px(5.))
+                                .right(px(5.))
+                                .size(px(4.))
+                                .rounded_full()
+                                .bg(rgb(AMBER))
+                                .shadow(vec![
+                                    BoxShadow::new(px(0.), px(0.), rgba(0xf4c878cc).into())
+                                        .blur_radius(px(6.)),
+                                ]),
+                        )
+                    }),
+            );
 
         TitleBar::new()
             .h(px(46.))
@@ -330,7 +427,9 @@ impl App {
             .h(px(layout.ribbon_height))
             .flex_shrink_0()
             .items_stretch()
-            .overflow_x_scrollbar()
+            // The three groups must fit at 1080 px; the shell design forbids a
+            // horizontal scrollbar anywhere in the ribbon.
+            .overflow_hidden()
             .child(self.ribbon_home(show_status, metrics, cx))
             .child(self.ribbon_photo(metrics, cx))
             .child(self.ribbon_compression(metrics, cx))
@@ -512,19 +611,14 @@ impl App {
             metrics,
         );
 
-        let armed = self
-            .selected
-            .is_some_and(|id| self.delete_armed == Some(id));
         let organize_group = ribbon_group(
             vec![
                 large_button(
                     "ribbon-trash",
-                    trash_label(armed),
+                    "ゴミ箱へ",
                     IconName::Delete,
                     if !has_selection {
                         RibbonLook::Disabled
-                    } else if armed {
-                        RibbonLook::Active
                     } else {
                         RibbonLook::Normal
                     },
@@ -648,16 +742,6 @@ fn collapse_button(collapsed: bool, cx: &mut Context<App>) -> AnyElement {
         .into_any_element()
 }
 
-/// Trash command label. The first press only arms deletion, so the armed state
-/// spells out the second click without relying on the status message.
-fn trash_label(armed: bool) -> &'static str {
-    if armed {
-        "もう一度で削除"
-    } else {
-        "ゴミ箱へ"
-    }
-}
-
 fn ribbon_group(
     items: Vec<AnyElement>,
     label: &'static str,
@@ -669,7 +753,9 @@ fn ribbon_group(
         .when(grow, |this| this.flex_1().min_w_0())
         .items_stretch()
         .py(px(metrics.padding))
-        .px(px(10.))
+        // Keep the three ribbon groups inside the default 1280 px window and
+        // the 1080 px minimum without a horizontal scroll surface.
+        .px(px(6.))
         .border_r_1()
         .border_color(rgba(0xffffff0d))
         .child(
@@ -682,7 +768,7 @@ fn ribbon_group(
                         .flex_1()
                         .min_w_0()
                         .items_center()
-                        .gap(px(3.))
+                        .gap(px(2.))
                         .children(items),
                 )
                 .child(
@@ -744,9 +830,9 @@ fn large_button(
     let mut button = div()
         .id(id)
         .h(px(metrics.large_height))
-        .min_w(px(50.))
+        .min_w(px(if metrics.compact { 30. } else { 42. }))
         .flex_shrink_0()
-        .px(px(6.))
+        .px(px(if metrics.compact { 2. } else { 3. }))
         .py(px(if metrics.large_height <= 38.0 { 1. } else { 2. }))
         .flex()
         .flex_col()
@@ -765,8 +851,13 @@ fn large_button(
             if active { rgb(BLUE) } else { rgba(0x8bcbffe0) }
         } else {
             rgb(MUTED_2)
-        }))
-        .child(label);
+        }));
+
+    if metrics.compact {
+        button = button.tooltip(move |window, cx| Tooltip::new(label).build(window, cx));
+    } else {
+        button = button.child(label);
+    }
 
     if enabled {
         button = button
@@ -813,7 +904,7 @@ mod tests {
     use super::{
         CHROME_ICONS, RibbonTab, chrome_layout, default_ribbon_tab, is_bundled,
         message_strip_visible, ribbon_height, ribbon_metrics, ribbon_selection_label,
-        ribbon_status_visible, trash_label,
+        ribbon_status_visible, titlebar_sync_label, titlebar_sync_visible,
     };
     use crate::app::Screen;
 
@@ -871,9 +962,28 @@ mod tests {
     }
 
     #[test]
+    fn ribbon_uses_icons_below_1280() {
+        assert!(chrome_layout(1279.0, 820.0, 0.0).ribbon_metrics.compact);
+        assert!(!chrome_layout(1280.0, 820.0, 0.0).ribbon_metrics.compact);
+    }
+
+    #[test]
     fn status_note_hides_at_1180() {
         assert!(!ribbon_status_visible(1180.0));
         assert!(ribbon_status_visible(1181.0));
+        assert!(!titlebar_sync_visible(1180.0));
+        assert!(titlebar_sync_visible(1181.0));
+    }
+
+    #[test]
+    fn titlebar_sync_label_stays_compact() {
+        assert_eq!(titlebar_sync_label(Some(5), None, true, false), "5秒前");
+        assert_eq!(titlebar_sync_label(None, None, true, false), "IPC");
+        assert_eq!(titlebar_sync_label(None, None, false, false), "停止");
+        assert_eq!(
+            titlebar_sync_label(None, Some("systemd"), true, true),
+            "デモ"
+        );
     }
 
     #[test]
@@ -896,12 +1006,6 @@ mod tests {
     }
 
     #[test]
-    fn trash_label_spells_out_the_armed_click() {
-        assert_eq!(trash_label(false), "ゴミ箱へ");
-        assert_eq!(trash_label(true), "もう一度で削除");
-    }
-
-    #[test]
     fn chrome_layout_uses_the_content_extent() {
         // The requested 1080x700 is the content size; X11 reports the outer
         // 1120x740 window, and the 20 px CSD inset on each edge is removed.
@@ -909,8 +1013,11 @@ mod tests {
         assert_eq!(minimum.content_width, 1080.0);
         assert_eq!(minimum.content_height, 700.0);
         assert_eq!(minimum.ribbon_height, 62.0);
-        assert_eq!(minimum.ribbon_metrics, ribbon_metrics(700.0));
+        let mut expected_metrics = ribbon_metrics(700.0);
+        expected_metrics.compact = true;
+        assert_eq!(minimum.ribbon_metrics, expected_metrics);
         assert!(!minimum.status_visible);
+        assert!(!minimum.sync_visible);
 
         // 1280x820 content keeps the regular ribbon and status readout.
         let regular = chrome_layout(1320.0, 860.0, 20.0);
@@ -918,6 +1025,7 @@ mod tests {
         assert_eq!(regular.content_height, 820.0);
         assert_eq!(regular.ribbon_height, 68.0);
         assert!(regular.status_visible);
+        assert!(regular.sync_visible);
 
         let large = chrome_layout(1480.0, 940.0, 20.0);
         assert_eq!(large.content_width, 1440.0);
@@ -931,6 +1039,8 @@ mod tests {
         assert_eq!(chrome_layout(1200.0, 761.0, 0.0).ribbon_height, 68.0);
         assert!(!chrome_layout(1180.0, 820.0, 0.0).status_visible);
         assert!(chrome_layout(1181.0, 820.0, 0.0).status_visible);
+        assert!(!chrome_layout(1180.0, 820.0, 0.0).sync_visible);
+        assert!(chrome_layout(1181.0, 820.0, 0.0).sync_visible);
     }
 
     #[test]

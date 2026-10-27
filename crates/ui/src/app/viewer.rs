@@ -46,7 +46,6 @@ impl App {
             self.viewer_morph_epoch = self.viewer_morph_epoch.wrapping_add(1);
         }
         self.message = None;
-        self.delete_armed = None;
         self.note_edit_id = None;
         self.quick_look_return_focus = window.focused(cx);
         self.quick_look_photo_ids = self.viewer_source_ids();
@@ -253,7 +252,6 @@ impl App {
         }
         self.viewer_return_source = None;
         self.quick_look_open = false;
-        self.delete_armed = None;
         self.note_edit_id = None;
         let focus = self
             .quick_look_return_focus
@@ -270,7 +268,6 @@ impl App {
             return;
         }
         self.quick_look_open = false;
-        self.delete_armed = None;
         self.note_edit_id = None;
         self.set_viewer_morph(None, cx);
         self.viewer_morph_epoch = self.viewer_morph_epoch.wrapping_add(1);
@@ -462,6 +459,7 @@ impl App {
             } else {
                 order.push(self.quick_look_note_edit_focus.clone());
             }
+            order.push(self.quick_look_folder_focus.clone());
             order.push(self.quick_look_compress_focus.clone());
             order.push(self.quick_look_trash_focus.clone());
         }

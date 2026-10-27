@@ -243,14 +243,6 @@ impl App {
                         .child(message),
                 );
             }
-            if self.delete_armed == Some(photo.id) {
-                body = body.child(
-                    div()
-                        .text_size(px(10.))
-                        .text_color(rgb(AMBER))
-                        .child("もう一度押すとOSゴミ箱へ移動します。"),
-                );
-            }
             let body = body.child(self.detail_body(&photo, cx)).with_animation(
                 ("viewer-details-body", self.quick_look_details_epoch),
                 Animation::new(if self.quick_look_details_epoch == 0 {

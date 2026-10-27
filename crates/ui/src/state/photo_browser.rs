@@ -70,10 +70,11 @@ pub(crate) fn first_visible_photo(
     row.saturating_mul(columns).min(total - 1)
 }
 
-/// Month and count for the first fully visible row.
+/// Month and count for the top visible row.
 ///
 /// The gallery header follows the scroll position, not the first entry in the
-/// index, so the month label always describes the cards the user can see.
+/// index, so the month label always describes the cards at the top of the
+/// viewport.
 pub(crate) fn visible_month(entries: &[PhotoIndexEntry], first_visible: usize) -> (i32, usize) {
     let Some(entry) = entries.get(first_visible) else {
         return (0, 0);

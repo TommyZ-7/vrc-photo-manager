@@ -867,7 +867,7 @@ impl App {
                     .child(self.editor_stat("写真", self.stats.photo_count.to_string()))
                     .child(self.editor_stat(
                         "圧縮後合計",
-                        format_bytes(self.db.derivative_bytes().unwrap_or(0)),
+                        format_bytes(self.stats.derivative_bytes),
                     )),
             )
     }

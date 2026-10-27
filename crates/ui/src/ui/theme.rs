@@ -57,12 +57,10 @@ pub(crate) const CARD_BODY_GAP: f32 = 8.0;
 pub(crate) const CARD_TEXT_GAP: f32 = 3.0;
 pub(crate) const CARD_WORLD_LINE_HEIGHT: f32 = 18.0;
 pub(crate) const CARD_META_LINE_HEIGHT: f32 = 15.0;
-/// Vertical room reserved inside each library row for the card's -4px hover
-/// lift. The actual gap between rows is this slack; the horizontal gap is
-/// [`GRID_GAP`].
-pub(crate) const CARD_HOVER_SLACK: f32 = 4.0;
+/// Small vertical breathing room reserved inside each library row. The
+/// horizontal gap between cards is [`GRID_GAP`].
+pub(crate) const CARD_ROW_SLACK: f32 = 4.0;
 pub(crate) const GRID_GAP: f32 = 14.0;
-pub(crate) const INSPECTOR_MARGIN: f32 = 0.0;
 pub(crate) const INSPECTOR_PREVIEW_HEIGHT: f32 = 168.0;
 pub(crate) const INSPECTOR_SHORT_PREVIEW_HEIGHT: f32 = 118.0;
 /// Shell padding: 14px around the window and between the sidebar, header, and
@@ -339,8 +337,8 @@ pub(crate) fn sidebar_status_visible(content_height: f32) -> bool {
     content_height > 760.0
 }
 
-/// Responsive inspector column width from design §8.2. The card itself is
-/// [`inspector_card_width`]; the difference is the right-hand margin.
+/// Responsive inspector column width from design §8.2. The card fills the
+/// column so its right edge aligns with the header card.
 pub(crate) fn inspector_column_width(window_width: f32) -> f32 {
     if window_width <= 1_100.0 {
         254.0
@@ -352,7 +350,7 @@ pub(crate) fn inspector_column_width(window_width: f32) -> f32 {
 }
 
 pub(crate) fn inspector_card_width(window_width: f32) -> f32 {
-    (inspector_column_width(window_width) - INSPECTOR_MARGIN).max(0.0)
+    inspector_column_width(window_width)
 }
 
 /// The inspector preview keeps the spec's fixed heights (168 px, 118 px in a
@@ -480,7 +478,7 @@ pub(crate) fn photo_card_width(available_width: f32, columns: usize) -> f32 {
 /// hover slack. Hiding text through the display settings tightens the row.
 pub(crate) fn photo_row_height(card_width: f32, show_world: bool, show_meta: bool) -> f32 {
     let image_height = (card_width.max(0.0) * 2.0 / 3.0).max(0.0);
-    let mut height = image_height + CARD_HOVER_SLACK;
+    let mut height = image_height + CARD_ROW_SLACK;
     if show_world || show_meta {
         height += CARD_BODY_GAP;
     }

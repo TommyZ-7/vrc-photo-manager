@@ -122,7 +122,14 @@ impl YearRail {
 
     /// Scrolls the grid to the row under `y`, snapping to a year label when
     /// the pointer is within its 8 px hit area.
-    fn jump_to(&self, y: Pixels, bounds_top: Pixels, height: f32, window: &mut Window) {
+    fn jump_to(
+        &self,
+        y: Pixels,
+        bounds_top: Pixels,
+        height: f32,
+        window: &mut Window,
+        cx: &mut gpui_kit::App,
+    ) {
         let total = self.index.total;
         if total == 0 {
             return;
@@ -149,6 +156,11 @@ impl YearRail {
             .borrow_mut()
             .base_handle
             .set_offset(point(px(0.), px(offset)));
+        // The gallery month header and the morph's card bounds are computed
+        // during `App::render`. Setting the offset repaints the list only, so
+        // notify the containing view as well; otherwise a rail jump leaves the
+        // header and the viewer fallback on the pre-jump frame.
+        cx.notify(window.current_view());
         window.refresh();
     }
 }
@@ -386,7 +398,7 @@ impl Element for YearRail {
                 cx.stop_propagation();
                 rail.hovered.set(true);
                 rail.drag_active.set(true);
-                rail.jump_to(event.position.y, bounds.top(), height, window);
+                rail.jump_to(event.position.y, bounds.top(), height, window, cx);
             }
         });
 
@@ -416,7 +428,7 @@ impl Element for YearRail {
                         return;
                     }
                     cx.stop_propagation();
-                    rail.jump_to(event.position.y, bounds.top(), height, window);
+                    rail.jump_to(event.position.y, bounds.top(), height, window, cx);
                     return;
                 }
                 if !phase.bubble() {

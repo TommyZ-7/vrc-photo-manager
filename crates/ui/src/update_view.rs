@@ -350,7 +350,6 @@ impl UpdateNotice {
 pub struct UpdateState {
     pub phase: UpdatePhase,
     pub install: InstallKind,
-    armed: bool,
     notice: Option<UpdateNotice>,
     resume_available: Option<AvailableUpdate>,
     tx: Sender<UpdateMessage>,
@@ -389,7 +388,6 @@ impl UpdateState {
         Self {
             phase: UpdatePhase::Idle,
             install,
-            armed: false,
             notice,
             resume_available: None,
             tx,
@@ -564,7 +562,6 @@ impl App {
             _ => None,
         };
         self.update.in_flight = true;
-        self.update.armed = false;
         self.update.phase = UpdatePhase::Checking;
         cx.notify();
 
@@ -646,7 +643,6 @@ impl App {
             received: 0,
             total: Some(asset.size),
         };
-        self.update.armed = false;
         cx.notify();
 
         let tx = self.update.tx.clone();

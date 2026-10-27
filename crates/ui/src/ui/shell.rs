@@ -252,22 +252,19 @@ impl App {
                     .text_size(px(8.))
                     .text_color(rgb(MUTED_2))
                     .whitespace_nowrap()
-                    .child(format!("未実行 {}", format_count(self.waiting_job_count))),
-            )
-            .child(
-                div()
-                    .text_size(px(8.))
-                    .text_color(rgb(TEXT))
-                    .whitespace_nowrap()
-                    .child(format!("{}枚", format_count(self.stats.photo_count))),
+                    .child(format!("未実行 {}件", format_count(self.waiting_job_count))),
             )
             .child(
                 div()
                     .text_size(px(7.5))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(TEXT))
                     .whitespace_nowrap()
                     .truncate()
-                    .child(format_bytes(self.stats.total_bytes)),
+                    .child(format!(
+                        "{}枚 / {}",
+                        format_count(self.stats.photo_count),
+                        format_bytes(self.stats.total_bytes)
+                    )),
             )
             .into_any_element()
     }

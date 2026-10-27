@@ -147,7 +147,6 @@ pub struct App {
     pub(crate) duplicate_ids: HashSet<i64>,
     pub(crate) thumbnails: ThumbnailCache,
     pub(crate) thumbnail_notify_pending: bool,
-    pub(crate) grid_epoch: u64,
     pub(crate) photo_grid_focus: FocusHandle,
     pub(crate) import_dialog_focus: FocusHandle,
     pub(crate) quick_look_open: bool,
@@ -163,6 +162,7 @@ pub struct App {
     pub(crate) quick_look_next_focus: FocusHandle,
     pub(crate) quick_look_details_focus: FocusHandle,
     pub(crate) quick_look_favorite_focus: FocusHandle,
+    pub(crate) quick_look_folder_focus: FocusHandle,
     pub(crate) quick_look_compress_focus: FocusHandle,
     pub(crate) quick_look_trash_focus: FocusHandle,
     pub(crate) quick_look_add_tag_focus: FocusHandle,
@@ -218,7 +218,6 @@ pub struct App {
     pub(crate) search_refresh_pending: bool,
     pub(crate) search_favorite: bool,
     pub(crate) search_days: Option<i64>,
-    pub(crate) delete_armed: Option<i64>,
     pub(crate) daemon_shutdown_armed: bool,
     pub(crate) message: Option<String>,
     pub(crate) demo: bool,
@@ -331,6 +330,7 @@ impl App {
         let quick_look_next_focus = cx.focus_handle();
         let quick_look_details_focus = cx.focus_handle();
         let quick_look_favorite_focus = cx.focus_handle();
+        let quick_look_folder_focus = cx.focus_handle();
         let quick_look_compress_focus = cx.focus_handle();
         let quick_look_trash_focus = cx.focus_handle();
         let quick_look_add_tag_focus = cx.focus_handle();
@@ -350,7 +350,7 @@ impl App {
             screen_direction: 1.0,
             settings_scroll: ScrollHandle::new(),
             active_ribbon_tab: default_ribbon_tab(Screen::Photos),
-            ribbon_collapsed: true,
+            ribbon_collapsed: initial_settings.ui_ribbon_collapsed,
             ribbon_epoch: 0,
             render_epoch: 0,
             card_image_bounds: Rc::new(RefCell::new(HashMap::new())),
@@ -406,7 +406,6 @@ impl App {
             duplicate_ids: HashSet::new(),
             thumbnails: ThumbnailCache::default(),
             thumbnail_notify_pending: false,
-            grid_epoch: 0,
             photo_grid_focus,
             import_dialog_focus,
             quick_look_open: false,
@@ -422,6 +421,7 @@ impl App {
             quick_look_next_focus,
             quick_look_details_focus,
             quick_look_favorite_focus,
+            quick_look_folder_focus,
             quick_look_compress_focus,
             quick_look_trash_focus,
             quick_look_add_tag_focus,
@@ -477,7 +477,6 @@ impl App {
             search_refresh_pending: false,
             search_favorite: false,
             search_days: Some(7),
-            delete_armed: None,
             daemon_shutdown_armed: false,
             message: None,
             demo,
