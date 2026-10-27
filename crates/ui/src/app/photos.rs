@@ -329,8 +329,8 @@ impl App {
         cx: &mut Context<Self>,
     ) {
         if modifiers.shift {
-            self.select_photo_range(id, modifiers.secondary(), cx);
-        } else if modifiers.secondary() {
+            self.select_photo_range(id, modifiers.secondary(cx), cx);
+        } else if modifiers.secondary(cx) {
             self.toggle_photo_selection(id, cx);
         } else {
             self.select_photo(id, cx);
