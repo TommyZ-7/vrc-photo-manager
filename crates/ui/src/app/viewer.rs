@@ -490,7 +490,7 @@ impl App {
     fn actual_source(
         &self,
         id: i64,
-        source: ViewerOpenSource,
+        _source: ViewerOpenSource,
     ) -> Option<(ViewerOpenSource, Bounds<Pixels>)> {
         let card = current_tagged_bounds(
             self.card_image_bounds.borrow().get(&id).copied(),
@@ -498,8 +498,9 @@ impl App {
         );
         let inspector =
             current_tagged_bounds(*self.inspector_preview_bounds.borrow(), self.render_epoch);
-        let prefer_card = source != ViewerOpenSource::Inspector;
-        let chosen = preferred_bounds(prefer_card, card, inspector)?;
+        // The morph always starts from the grid card. The inspector preview is
+        // only a fallback for a card that is scrolled out of view.
+        let chosen = preferred_bounds(true, card, inspector)?;
         if card == Some(chosen) {
             Some((ViewerOpenSource::Card, chosen))
         } else {
