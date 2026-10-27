@@ -131,11 +131,7 @@ impl App {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .bg(linear_gradient(
-                                135.,
-                                linear_color_stop(rgb(BLUE), 0.),
-                                linear_color_stop(rgb(PURPLE), 1.),
-                            ))
+                            .bg(rgb(BLUE))
                             .text_size(px(12.))
                             .font_semibold()
                             .text_color(rgb(0xffffff))
@@ -982,49 +978,6 @@ impl App {
             .child(screen)
             .into_any_element()
     }
-}
-
-/// Window-wide ambient glass surface.
-///
-/// The compositor may refuse the `Blurred` window request, so this layer paints
-/// its own dark base: a diagonal navy gradient plus three broad colour washes.
-/// GPUI has no radial gradient, so each wash is a linear gradient anchored at a
-/// corner and fading to fully transparent; stacked washes stay smooth at any
-/// window size and never rely on element-level blur. Cards drawn after this
-/// layer are opaque, which keeps text legible either way.
-pub(crate) fn ambient_background() -> impl IntoElement {
-    div()
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
-        .overflow_hidden()
-        .bg(linear_gradient(
-            160.,
-            linear_color_stop(rgba(0x0a1526cc), 0.),
-            linear_color_stop(rgba(0x04060be6), 1.),
-        ))
-        // Blue from the top-left, violet from the top-right, teal from the
-        // bottom. The stops cover ~half the window so the centre stays dark.
-        .child(ambient_glow(135., BG_AMBIENT_A, 0.58))
-        .child(ambient_glow(225., BG_AMBIENT_B, 0.52))
-        .child(ambient_glow(0., BG_AMBIENT_C, 0.55))
-}
-
-/// One ambient colour wash. `angle` places the full-strength corner, and the
-/// colour is transparent past `falloff`, so overlapping washes never stack
-/// into a flat tint.
-fn ambient_glow(angle: f32, color: u32, falloff: f32) -> Div {
-    div()
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
-        .bg(linear_gradient(
-            angle,
-            linear_color_stop(rgba(color), 0.),
-            linear_color_stop(rgba(color & 0xffffff00), falloff),
-        ))
 }
 
 /// Compact, ordered summaries of every failure that deserves a global alert.

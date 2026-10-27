@@ -707,44 +707,36 @@ impl App {
             } else {
                 AMBER
             };
-            thumb = thumb
-                .child(
-                    div()
-                        .absolute()
-                        .left_0()
-                        .right_0()
-                        .bottom_0()
-                        .h(px(56.))
-                        .bg(linear_gradient(
-                            180.,
-                            linear_color_stop(rgba(0x07090d00), 0.),
-                            linear_color_stop(rgba(0x07090dcc), 1.),
-                        )),
-                )
-                .child(
-                    h_flex()
-                        .absolute()
-                        .left(px(9.))
-                        .bottom(px(8.))
-                        .gap(px(5.))
-                        .items_center()
-                        .child(div().size(px(5.)).rounded_full().bg(rgb(status_color)))
-                        .child(
-                            div()
-                                .text_size(px(9.))
-                                .font_medium()
-                                .text_color(rgb(status_color))
-                                .child(if replaced {
-                                    "圧縮版のみ"
-                                } else if duplicate {
-                                    "重複"
-                                } else if compressed {
-                                    "圧縮済"
-                                } else {
-                                    "未圧縮"
-                                }),
-                        ),
-                );
+            thumb = thumb.child(
+                h_flex()
+                    .absolute()
+                    .left(px(9.))
+                    .bottom(px(8.))
+                    .px(px(6.))
+                    .py(px(3.))
+                    .rounded(px(6.))
+                    .bg(rgb(PANEL_DEEP))
+                    .border_1()
+                    .border_color(rgba(0xffffff1a))
+                    .gap(px(5.))
+                    .items_center()
+                    .child(div().size(px(5.)).rounded_full().bg(rgb(status_color)))
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .font_medium()
+                            .text_color(rgb(status_color))
+                            .child(if replaced {
+                                "圧縮版のみ"
+                            } else if duplicate {
+                                "重複"
+                            } else if compressed {
+                                "圧縮済"
+                            } else {
+                                "未圧縮"
+                            }),
+                    ),
+            );
         }
         thumb = thumb.when(selected, |this| {
             this.child(

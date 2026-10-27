@@ -6,7 +6,7 @@
 
 use std::time::{Duration, Instant};
 
-use gpui_kit::{Bounds, Pixels, point, px, size};
+use gpui_kit::{Bounds, Pixels, Size, Window, point, px, size};
 use vrc_photo_core::model::{CompressionFormat, CompressionProfile};
 use vrc_photo_core::settings::CardSize;
 
@@ -22,9 +22,6 @@ pub(crate) const SIDEBAR: u32 = 0x0d1119;
 // these are used with `rgba()`; the values follow the design spec §9.1 and the
 // fractional alphas are rounded to the nearest 8-bit channel.
 pub(crate) const GLASS_WINDOW: u32 = 0x0a101c61; // rgba(10,16,28,0.38)
-pub(crate) const BG_AMBIENT_A: u32 = 0x366bff47; // rgba(54,107,255,0.28)
-pub(crate) const BG_AMBIENT_B: u32 = 0xff56b51f; // rgba(255,86,181,0.12)
-pub(crate) const BG_AMBIENT_C: u32 = 0x1ecab21a; // rgba(30,202,178,0.10)
 
 // Opaque panel surfaces. Every card, sidebar, header, and inner row keeps the
 // ambient glass behind it instead of letting it show through. Tokens that no
@@ -50,7 +47,6 @@ pub(crate) const ACCENT_SOFT: u32 = 0x1a2f47;
 pub(crate) const GREEN: u32 = 0x5eead4;
 pub(crate) const AMBER: u32 = 0xfbbf24;
 pub(crate) const RED: u32 = 0xfb7185;
-pub(crate) const PURPLE: u32 = 0xb79cff;
 
 pub(crate) const SIDEBAR_EXPANDED: f32 = 238.0;
 pub(crate) const SIDEBAR_COLLAPSED: f32 = 78.0;
@@ -307,6 +303,29 @@ pub(crate) fn moved_profile_order(
 /// X11 without a client inset report `0`.
 pub(crate) fn window_content_extent(viewport: f32, client_inset: f32) -> f32 {
     (viewport - client_inset * 2.0).max(0.0)
+}
+
+/// Window content size after the platform's client-side decoration inset.
+/// Viewer geometry and overlays must use this, not the outer surface size.
+pub(crate) fn content_viewport(window: &Window) -> Size<Pixels> {
+    let inset = window.client_inset().map(f32::from).unwrap_or(0.0);
+    let viewport = window.viewport_size();
+    size(
+        px(window_content_extent(f32::from(viewport.width), inset)),
+        px(window_content_extent(f32::from(viewport.height), inset)),
+    )
+}
+
+/// Converts a window-space bounds into the content coordinate space used by
+/// overlays (the viewer/morph layer sits inside the client-decoration inset).
+pub(crate) fn content_bounds(bounds: Bounds<Pixels>, client_inset: f32) -> Bounds<Pixels> {
+    Bounds::new(
+        point(
+            bounds.origin.x - px(client_inset),
+            bounds.origin.y - px(client_inset),
+        ),
+        bounds.size,
+    )
 }
 
 pub(crate) fn sidebar_width(collapsed: bool) -> f32 {
@@ -721,6 +740,15 @@ mod tests {
         assert_eq!(window_content_extent(1480.0, 20.0), 1440.0);
         assert_eq!(window_content_extent(1280.0, 0.0), 1280.0);
         assert_eq!(window_content_extent(10.0, 20.0), 0.0);
+    }
+
+    #[test]
+    fn content_bounds_convert_card_bounds_into_overlay_space() {
+        let card = Bounds::new(point(px(301.), px(228.)), size(px(215.), px(144.)));
+        let converted = content_bounds(card, 20.0);
+        assert_eq!(converted.origin, point(px(281.), px(208.)));
+        assert_eq!(converted.size, card.size);
+        assert_eq!(content_bounds(card, 0.0), card);
     }
 
     #[test]
@@ -1384,12 +1412,6 @@ mod tests {
 
         close(alpha(GLASS_WINDOW), 0.38);
         assert_eq!(GLASS_WINDOW >> 8, 0x0a101c);
-        close(alpha(BG_AMBIENT_A), 0.28);
-        assert_eq!(BG_AMBIENT_A >> 8, 0x366bff);
-        close(alpha(BG_AMBIENT_B), 0.12);
-        assert_eq!(BG_AMBIENT_B >> 8, 0xff56b5);
-        close(alpha(BG_AMBIENT_C), 0.10);
-        assert_eq!(BG_AMBIENT_C >> 8, 0x1ecab2);
 
         // Panels are opaque: they are used with `rgb()` and never carry a
         // window-glass alpha.

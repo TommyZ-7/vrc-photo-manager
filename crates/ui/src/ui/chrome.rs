@@ -239,11 +239,7 @@ impl App {
             .flex_shrink_0()
             .w_full()
             .rounded(px(22.))
-            .bg(linear_gradient(
-                180.,
-                linear_color_stop(rgb(PANEL_HEADER), 0.),
-                linear_color_stop(rgb(PANEL_CARD), 1.),
-            ))
+            .bg(rgb(PANEL_HEADER))
             .border_1()
             .border_color(rgba(0xffffff1b))
             .overflow_hidden()
@@ -271,11 +267,7 @@ impl App {
             .justify_center()
             .border_1()
             .border_color(rgba(0xffffff30))
-            .bg(linear_gradient(
-                145.,
-                linear_color_stop(rgb(0x74c8ff), 0.),
-                linear_color_stop(rgb(0xa67eff), 1.),
-            ))
+            .bg(rgb(BLUE))
             .shadow(vec![
                 BoxShadow::new(px(0.), px(3.), rgba(0x608cff47).into()).blur_radius(px(9.)),
                 BoxShadow::new(px(0.), px(1.), rgba(0xffffff66).into())
@@ -424,11 +416,7 @@ impl App {
             .pl(px(14.))
             .pr(px(8.))
             .border_color(rgba(0xffffff0e))
-            .bg(linear_gradient(
-                180.,
-                linear_color_stop(rgba(0xffffff0a), 0.),
-                linear_color_stop(rgba(0x00000000), 1.),
-            ))
+            .bg(rgba(0x00000000))
             .child(line)
             .into_any_element()
     }

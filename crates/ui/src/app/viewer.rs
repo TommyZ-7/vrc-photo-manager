@@ -15,7 +15,8 @@ use crate::state::viewer::{
 };
 use crate::ui::theme::{
     MOTION_BASE, MOTION_MORPH, MOTION_SLOW, VIEWER_DETAILS_WIDTH, centered_viewer_rect,
-    eased_progress, next_focus_index, step_index, viewer_image_rect,
+    content_bounds, content_viewport, eased_progress, next_focus_index, step_index,
+    viewer_image_rect,
 };
 
 impl App {
@@ -59,7 +60,7 @@ impl App {
                 }
             })
             .unwrap_or(16.0 / 9.0);
-        let viewport = window.viewport_size();
+        let viewport = content_viewport(window);
         let to = viewer_image_rect(viewport, self.quick_look_details_open, aspect);
         let now = Instant::now();
         self.viewer_nav_epoch = 0;
@@ -87,7 +88,10 @@ impl App {
             to_width: details_width,
             duration: Duration::ZERO,
         };
-        let resolved = self.actual_source(id, source);
+        let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
+        let resolved = self
+            .actual_source(id, source)
+            .map(|(kind, bounds)| (kind, content_bounds(bounds, client_inset)));
         if let Some((actual_source, _)) = resolved {
             self.viewer_return_source = Some(actual_source);
         }
@@ -169,7 +173,7 @@ impl App {
         let viewer_rect = if let Some((bounds, _)) = opening {
             bounds
         } else {
-            let viewport = window.viewport_size();
+            let viewport = content_viewport(window);
             let (width, height) = self.viewer_box.current_size(viewport);
             centered_viewer_rect(viewport, self.viewer_panel.current_width(), width, height)
         };
@@ -179,7 +183,10 @@ impl App {
             .or(self.viewer_return_source)
             .unwrap_or(ViewerOpenSource::Auto);
         let id = self.selected.unwrap_or_default();
-        let target = self.actual_source(id, source);
+        let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
+        let target = self
+            .actual_source(id, source)
+            .map(|(kind, bounds)| (kind, content_bounds(bounds, client_inset)));
         let (to, target_kind, fade_only) = match target {
             Some((kind, bounds)) => (bounds, kind, false),
             None => (from, source, true),
@@ -328,7 +335,7 @@ impl App {
         }
         // Keep the top-bar navigation focused; only the library selection and
         // the displayed photo change behind the overlay.
-        let viewport = window.viewport_size();
+        let viewport = content_viewport(window);
         let from_size = self.viewer_box.current_size(viewport);
         let target_details_width = self.viewer_panel.to_width;
         self.select_photo(self.quick_look_photo_ids[next], cx);
@@ -372,7 +379,7 @@ impl App {
             self.viewer_morph = None;
         }
         let current_width = self.viewer_panel.current_width();
-        let viewport = window.viewport_size();
+        let viewport = content_viewport(window);
         let from_size = self.viewer_box.current_size(viewport);
         self.quick_look_details_open = !self.quick_look_details_open;
         if !self.quick_look_details_open {

@@ -65,11 +65,7 @@ pub(crate) fn dialog_panel() -> Div {
         .flex()
         .flex_col()
         .rounded(px(20.))
-        .bg(linear_gradient(
-            180.,
-            linear_color_stop(rgb(PANEL_HEADER), 0.),
-            linear_color_stop(rgb(PANEL_CARD), 1.),
-        ))
+        .bg(rgb(PANEL_CARD))
 }
 
 pub(crate) fn chip(label: &str, active: bool) -> Div {

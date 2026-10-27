@@ -42,8 +42,7 @@ use crate::ui::actions::{
     ToggleInspector, ToggleSidebar, ViewerNextPhoto, ViewerPreviousPhoto,
 };
 use crate::ui::chrome::{ChromeLayout, RibbonTab, chrome_layout, default_ribbon_tab};
-use crate::ui::shell::ambient_background;
-use crate::ui::theme::GLASS_WINDOW;
+use crate::ui::theme::{GLASS_WINDOW, WORKSPACE_GAP, WORKSPACE_PAD};
 use crate::update_view;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -526,14 +525,24 @@ impl Render for App {
             .flex_1()
             .min_w_0()
             .h_full()
-            .gap(px(14.))
+            .gap(px(WORKSPACE_GAP))
             .child(self.chrome(layout, cx))
             .child(v_flex().flex_1().min_h_0().child(self.content(window, cx)));
+        // The padding and gaps belong to the shell, not the window root:
+        // overlays must use the full window coordinate space (the viewer's
+        // morph bounds and centering are captured/computed there).
+        let shell = h_flex()
+            .relative()
+            .size_full()
+            .p(px(WORKSPACE_PAD))
+            .gap(px(WORKSPACE_GAP))
+            .child(self.sidebar(layout.content_height, cx))
+            .child(main)
+            .child(self.nav_tooltip())
+            .child(self.rail_toggle(cx));
         let root = h_flex()
             .relative()
             .size_full()
-            .p(px(14.))
-            .gap(px(14.))
             .bg(rgba(GLASS_WINDOW))
             .font_family("Noto Sans JP")
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
@@ -559,11 +568,7 @@ impl Render for App {
             .on_action(cx.listener(|this, _: &QuickLookPrevFocus, window, cx| {
                 this.cycle_quick_look_focus(true, window, cx)
             }))
-            .child(ambient_background())
-            .child(self.sidebar(layout.content_height, cx))
-            .child(main)
-            .child(self.nav_tooltip())
-            .child(self.rail_toggle(cx));
+            .child(shell);
         let root = if self.quick_look_open {
             root.child(self.quick_look(window, cx))
         } else {

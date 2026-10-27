@@ -117,7 +117,7 @@ impl App {
                 |el, t| el.relative().top(px(-8.0 * (1.0 - t))),
             );
 
-        let viewport = window.viewport_size();
+        let viewport = content_viewport(window);
         let box_state = self.viewer_box;
         let nav_epoch = self.viewer_nav_epoch;
         let nav_direction = self.viewer_nav_direction;
@@ -279,11 +279,7 @@ impl App {
                     .rounded(px(17.))
                     .border_1()
                     .border_color(rgba(0xffffff1b))
-                    .bg(linear_gradient(
-                        180.,
-                        linear_color_stop(rgb(PANEL_CARD), 0.),
-                        linear_color_stop(rgb(PANEL_DEEP), 1.),
-                    ))
+                    .bg(rgb(PANEL_DEEP))
                     .shadow(vec![
                         BoxShadow::new(px(0.), px(18.), rgba(0x00000047).into())
                             .blur_radius(px(44.)),
