@@ -14,6 +14,34 @@ pub(crate) const BG: u32 = 0x07090d;
 pub(crate) const PANEL: u32 = 0x121722;
 pub(crate) const PANEL_2: u32 = 0x1a2130;
 pub(crate) const SIDEBAR: u32 = 0x0d1119;
+
+// Window glass and the ambient backdrop. The low byte is the alpha channel, so
+// these are used with `rgba()`; the values follow the design spec §9.1 and the
+// fractional alphas are rounded to the nearest 8-bit channel.
+pub(crate) const GLASS_WINDOW: u32 = 0x0a101c61; // rgba(10,16,28,0.38)
+pub(crate) const BG_AMBIENT_A: u32 = 0x366bff47; // rgba(54,107,255,0.28)
+pub(crate) const BG_AMBIENT_B: u32 = 0xff56b51f; // rgba(255,86,181,0.12)
+pub(crate) const BG_AMBIENT_C: u32 = 0x1ecab21a; // rgba(30,202,178,0.10)
+
+// Opaque panel surfaces. Every card, sidebar, header, and inner row keeps the
+// ambient glass behind it instead of letting it show through. `PANEL_CARD` is
+// live now; the rest ship with the palette they belong to and are consumed by
+// the Task 14-17 shell refit.
+#[allow(dead_code)]
+pub(crate) const PANEL_SIDEBAR: u32 = 0x0b111b;
+#[allow(dead_code)]
+pub(crate) const PANEL_SIDEBAR_DEEP: u32 = 0x080d15;
+#[allow(dead_code)]
+pub(crate) const PANEL_HEADER: u32 = 0x101725;
+pub(crate) const PANEL_CARD: u32 = 0x0d1420;
+#[allow(dead_code)]
+pub(crate) const PANEL_INNER: u32 = 0x111927;
+#[allow(dead_code)]
+pub(crate) const PANEL_INNER_DEEP: u32 = 0x0c1320;
+#[allow(dead_code)]
+pub(crate) const PANEL_DEEP: u32 = 0x0a1019;
+#[allow(dead_code)]
+pub(crate) const PANEL_RAISED: u32 = 0x172132;
 pub(crate) const BORDER: u32 = 0x232b38;
 pub(crate) const BORDER_STRONG: u32 = 0x364256;
 pub(crate) const TEXT: u32 = 0xeef3fb;
@@ -857,5 +885,33 @@ mod tests {
     #[test]
     fn grid_row_height_matches_the_card_height() {
         assert_eq!(PHOTO_ROW_HEIGHT, 196.0);
+    }
+
+    #[test]
+    fn glass_and_panel_tokens_follow_the_spec() {
+        // Translucent tokens pack the spec's alpha into the low byte, so the
+        // spec's fractional alphas survive within one 8-bit step.
+        let alpha = |token: u32| (token & 0xff) as f32 / 255.0;
+        let close = |value: f32, expected: f32| assert!((value - expected).abs() <= 1.0 / 255.0);
+
+        close(alpha(GLASS_WINDOW), 0.38);
+        assert_eq!(GLASS_WINDOW >> 8, 0x0a101c);
+        close(alpha(BG_AMBIENT_A), 0.28);
+        assert_eq!(BG_AMBIENT_A >> 8, 0x366bff);
+        close(alpha(BG_AMBIENT_B), 0.12);
+        assert_eq!(BG_AMBIENT_B >> 8, 0xff56b5);
+        close(alpha(BG_AMBIENT_C), 0.10);
+        assert_eq!(BG_AMBIENT_C >> 8, 0x1ecab2);
+
+        // Panels are opaque: they are used with `rgb()` and never carry a
+        // window-glass alpha.
+        assert_eq!(PANEL_SIDEBAR, 0x0b111b);
+        assert_eq!(PANEL_SIDEBAR_DEEP, 0x080d15);
+        assert_eq!(PANEL_HEADER, 0x101725);
+        assert_eq!(PANEL_CARD, 0x0d1420);
+        assert_eq!(PANEL_INNER, 0x111927);
+        assert_eq!(PANEL_INNER_DEEP, 0x0c1320);
+        assert_eq!(PANEL_DEEP, 0x0a1019);
+        assert_eq!(PANEL_RAISED, 0x172132);
     }
 }

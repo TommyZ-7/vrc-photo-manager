@@ -41,7 +41,8 @@ use crate::ui::actions::{
     CloseQuickLook, FocusSearch, OpenQuickLook, QuickLookNextFocus, QuickLookPrevFocus,
     ToggleInspector, ToggleSidebar, ViewerNextPhoto, ViewerPreviousPhoto,
 };
-use crate::ui::theme::BG;
+use crate::ui::shell::ambient_background;
+use crate::ui::theme::GLASS_WINDOW;
 use crate::update_view;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -481,7 +482,7 @@ impl Render for App {
         let root = h_flex()
             .relative()
             .size_full()
-            .bg(rgb(BG))
+            .bg(rgba(GLASS_WINDOW))
             .font_family("Noto Sans JP")
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
             .on_action(cx.listener(|this, _: &ToggleInspector, _, cx| this.toggle_inspector(cx)))
@@ -506,6 +507,7 @@ impl Render for App {
             .on_action(cx.listener(|this, _: &QuickLookPrevFocus, window, cx| {
                 this.cycle_quick_look_focus(true, window, cx)
             }))
+            .child(ambient_background())
             .child(self.sidebar(cx))
             .child(workspace.child(self.content(window, cx)))
             .child(self.nav_tooltip())

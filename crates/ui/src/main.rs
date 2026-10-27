@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 
+use gpui_kit::component::TitleBar;
 use gpui_kit::*;
 
 use crate::app::App;
@@ -61,7 +62,14 @@ fn main() {
             let window_options = WindowOptions {
                 window_bounds: Some(WindowBounds::centered(size(px(width), px(height)), cx)),
                 window_min_size: Some(size(px(1080.), px(700.))),
-                ..Default::default()
+                // The shell draws its own titlebar (Task 14); ask the compositor
+                // for client decorations and a blurred window background. Both
+                // are requests: X11 without a compositor and Wayland without a
+                // blur protocol fall back to server decorations and a plain
+                // translucent window, and the ambient layer stays readable.
+                window_decorations: Some(WindowDecorations::Client),
+                window_background: WindowBackgroundAppearance::Blurred,
+                ..TitleBar::window_options()
             };
             let (_, app) = gpui_kit::open_window(window_options, cx, |window, cx| {
                 window.set_window_title("VRC Photo Manager");
