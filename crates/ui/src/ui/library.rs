@@ -1325,7 +1325,10 @@ impl App {
             cx,
             move |this, _, cx| {
                 let path = std::path::Path::new(&photo_path);
-                let folder = path.parent().unwrap_or(path);
+                let folder = path
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .unwrap_or(path);
                 if let Err(error) = open_path(folder) {
                     this.message = Some(format!("フォルダを開けません: {error}"));
                 }

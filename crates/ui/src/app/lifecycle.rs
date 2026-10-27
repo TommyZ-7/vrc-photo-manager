@@ -412,7 +412,7 @@ impl App {
         true
     }
 
-    /// Full rebuild used at startup: resets the grid animation state too.
+    /// Full rebuild used at startup.
     pub(crate) fn reload_all(&mut self, reset_scroll: bool, cx: &mut Context<Self>) {
         self.reload_library(!reset_scroll, cx);
     }

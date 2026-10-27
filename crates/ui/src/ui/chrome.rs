@@ -78,10 +78,10 @@ pub(crate) fn ribbon_metrics(window_height: f32) -> RibbonMetrics {
 /// §8.2: the ribbon's right-hand status note disappears at 1180 px and below.
 pub(crate) const NARROW_CHROME_WIDTH: f32 = 1180.0;
 
-/// Below this content width the labelled ribbon no longer fits beside the
+/// Below this header width the labelled ribbon no longer fits beside the
 /// status note. The compact ribbon keeps the same commands as icons with
 /// tooltips so nothing clips and there is no horizontal scrollbar.
-pub(crate) const RIBBON_LABELS_MIN_WIDTH: f32 = 1280.0;
+pub(crate) const RIBBON_LABELS_MIN_WIDTH: f32 = 1000.0;
 
 pub(crate) fn ribbon_status_visible(window_width: f32) -> bool {
     window_width > NARROW_CHROME_WIDTH
@@ -142,11 +142,15 @@ pub(crate) fn chrome_layout(
     viewport_width: f32,
     viewport_height: f32,
     client_inset: f32,
+    sidebar_collapsed: bool,
 ) -> ChromeLayout {
     let content_width = window_content_extent(viewport_width, client_inset);
     let content_height = window_content_extent(viewport_height, client_inset);
+    let header_width =
+        (content_width - WORKSPACE_PAD * 2.0 - sidebar_width(sidebar_collapsed) - WORKSPACE_GAP)
+            .max(0.0);
     let mut ribbon_metrics = ribbon_metrics(content_height);
-    ribbon_metrics.compact = content_width < RIBBON_LABELS_MIN_WIDTH;
+    ribbon_metrics.compact = header_width < RIBBON_LABELS_MIN_WIDTH;
     ChromeLayout {
         content_width,
         content_height,
@@ -963,8 +967,28 @@ mod tests {
 
     #[test]
     fn ribbon_uses_icons_below_1280() {
-        assert!(chrome_layout(1279.0, 820.0, 0.0).ribbon_metrics.compact);
-        assert!(!chrome_layout(1280.0, 820.0, 0.0).ribbon_metrics.compact);
+        assert!(
+            chrome_layout(1279.0, 820.0, 0.0, false)
+                .ribbon_metrics
+                .compact
+        );
+        assert!(
+            !chrome_layout(1280.0, 820.0, 0.0, false)
+                .ribbon_metrics
+                .compact
+        );
+        // Collapsed sidebar: 1080 - 28 - 78 - 14 = 960 (compact), while
+        // 1280 - 28 - 78 - 14 = 1160 leaves room for labels.
+        assert!(
+            chrome_layout(1080.0, 700.0, 0.0, true)
+                .ribbon_metrics
+                .compact
+        );
+        assert!(
+            !chrome_layout(1280.0, 820.0, 0.0, true)
+                .ribbon_metrics
+                .compact
+        );
     }
 
     #[test]
@@ -1009,7 +1033,7 @@ mod tests {
     fn chrome_layout_uses_the_content_extent() {
         // The requested 1080x700 is the content size; X11 reports the outer
         // 1120x740 window, and the 20 px CSD inset on each edge is removed.
-        let minimum = chrome_layout(1120.0, 740.0, 20.0);
+        let minimum = chrome_layout(1120.0, 740.0, 20.0, false);
         assert_eq!(minimum.content_width, 1080.0);
         assert_eq!(minimum.content_height, 700.0);
         assert_eq!(minimum.ribbon_height, 62.0);
@@ -1020,14 +1044,14 @@ mod tests {
         assert!(!minimum.sync_visible);
 
         // 1280x820 content keeps the regular ribbon and status readout.
-        let regular = chrome_layout(1320.0, 860.0, 20.0);
+        let regular = chrome_layout(1320.0, 860.0, 20.0, false);
         assert_eq!(regular.content_width, 1280.0);
         assert_eq!(regular.content_height, 820.0);
         assert_eq!(regular.ribbon_height, 68.0);
         assert!(regular.status_visible);
         assert!(regular.sync_visible);
 
-        let large = chrome_layout(1480.0, 940.0, 20.0);
+        let large = chrome_layout(1480.0, 940.0, 20.0, false);
         assert_eq!(large.content_width, 1440.0);
         assert_eq!(large.ribbon_height, 68.0);
         assert!(large.status_visible);
@@ -1035,12 +1059,12 @@ mod tests {
 
     #[test]
     fn chrome_layout_thresholds_sit_on_the_content_edge() {
-        assert_eq!(chrome_layout(1200.0, 760.0, 0.0).ribbon_height, 62.0);
-        assert_eq!(chrome_layout(1200.0, 761.0, 0.0).ribbon_height, 68.0);
-        assert!(!chrome_layout(1180.0, 820.0, 0.0).status_visible);
-        assert!(chrome_layout(1181.0, 820.0, 0.0).status_visible);
-        assert!(!chrome_layout(1180.0, 820.0, 0.0).sync_visible);
-        assert!(chrome_layout(1181.0, 820.0, 0.0).sync_visible);
+        assert_eq!(chrome_layout(1200.0, 760.0, 0.0, false).ribbon_height, 62.0);
+        assert_eq!(chrome_layout(1200.0, 761.0, 0.0, false).ribbon_height, 68.0);
+        assert!(!chrome_layout(1180.0, 820.0, 0.0, false).status_visible);
+        assert!(chrome_layout(1181.0, 820.0, 0.0, false).status_visible);
+        assert!(!chrome_layout(1180.0, 820.0, 0.0, false).sync_visible);
+        assert!(chrome_layout(1181.0, 820.0, 0.0, false).sync_visible);
     }
 
     #[test]

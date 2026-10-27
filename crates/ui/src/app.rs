@@ -540,6 +540,7 @@ impl Render for App {
             f32::from(viewport.width),
             f32::from(viewport.height),
             client_inset,
+            self.sidebar_collapsed,
         );
         if self.ribbon_collapsed {
             // The collapsed body still has its target height for the expand

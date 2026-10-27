@@ -1837,15 +1837,6 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    pub fn derivative_bytes(&self) -> Result<u64> {
-        let bytes: i64 = self.conn.query_row(
-            "SELECT COALESCE(SUM(file_size), 0) FROM derivatives",
-            [],
-            |row| row.get(0),
-        )?;
-        Ok(bytes.max(0) as u64)
-    }
-
     pub fn derivatives_for_photo(&self, photo_id: i64) -> Result<Vec<Derivative>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, photo_id, path, format, width, height, file_size, profile_id, policy, created_at \

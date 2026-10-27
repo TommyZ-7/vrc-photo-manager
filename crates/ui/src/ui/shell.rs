@@ -259,12 +259,15 @@ impl App {
                     .text_size(px(7.5))
                     .text_color(rgb(TEXT))
                     .whitespace_nowrap()
+                    .child(format!("{}枚", format_count(self.stats.photo_count))),
+            )
+            .child(
+                div()
+                    .text_size(px(7.5))
+                    .text_color(rgb(MUTED))
+                    .whitespace_nowrap()
                     .truncate()
-                    .child(format!(
-                        "{}枚 / {}",
-                        format_count(self.stats.photo_count),
-                        format_bytes(self.stats.total_bytes)
-                    )),
+                    .child(format_bytes(self.stats.total_bytes)),
             )
             .into_any_element()
     }
