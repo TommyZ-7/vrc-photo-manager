@@ -81,7 +81,6 @@ pub(crate) const SEARCH_FILTER_WIDTH: f32 = 290.0;
 /// Fixed-ish width of the dashboard's daemon/session/log column.
 pub(crate) const DASHBOARD_SIDE_WIDTH: f32 = 340.0;
 /// Settings category navigation card.
-pub(crate) const SETTINGS_NAV_WIDTH: f32 = 220.0;
 /// Compression profile list card.
 pub(crate) const COMPRESSION_PROFILE_WIDTH: f32 = 280.0;
 pub(crate) const VIEWER_DETAILS_WIDTH: f32 = 380.0;
@@ -96,9 +95,6 @@ pub(crate) const DIALOG_VIEWPORT_MARGIN: f32 = 24.0;
 pub(crate) fn dialog_max_height(content_height: f32) -> f32 {
     (content_height - DIALOG_VIEWPORT_MARGIN * 2.0).clamp(0.0, 720.0)
 }
-pub(crate) const CARD_INTRO_SECS: f32 = 0.6;
-pub(crate) const CARD_STAGGER_SECS: f32 = 0.04;
-pub(crate) const CARD_STAGGER_MAX: usize = 8;
 pub(crate) const RAIL_WIDTH: f32 = 20.0;
 pub(crate) const MOTION_FAST: Duration = Duration::from_millis(160);
 pub(crate) const MOTION_BASE: Duration = Duration::from_millis(220);
@@ -225,13 +221,6 @@ pub(crate) fn viewer_nav_progress(started_at: Instant, now: Instant, reduce_moti
     } else {
         eased_progress(started_at, MOTION_BASE, now)
     }
-}
-
-pub(crate) fn stagger_value(elapsed: f32, index: usize) -> f32 {
-    let delay = index.min(CARD_STAGGER_MAX) as f32 * CARD_STAGGER_SECS;
-    let total = CARD_INTRO_SECS + delay;
-    let local = ((elapsed * total - delay) / CARD_INTRO_SECS).clamp(0.0, 1.0);
-    ease_motion(local)
 }
 
 pub(crate) fn next_focus_index(current: usize, len: usize, reverse: bool) -> usize {
@@ -1037,15 +1026,6 @@ mod tests {
         assert!(MOTION_FAST < MOTION_BASE);
         assert!(MOTION_BASE < MOTION_SLOW);
         assert!(MOTION_SLOW < MOTION_MORPH);
-    }
-
-    #[test]
-    fn stagger_value_waits_for_the_card_delay() {
-        assert_eq!(stagger_value(0.0, 0), 0.0);
-        assert!((stagger_value(1.0, 0) - 1.0).abs() < 1e-4);
-        let total = 0.6 + 0.32;
-        assert!(stagger_value(0.32 / total, 8) < 1e-4);
-        assert!((stagger_value(1.0, 8) - 1.0).abs() < 1e-4);
     }
 
     #[test]

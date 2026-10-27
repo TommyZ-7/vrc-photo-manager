@@ -18,7 +18,7 @@ use crate::ipc_bridge;
 use crate::state::photo_browser::{
     anchor_photo_id, apply_library_index, list_scroll_top, sync_search_mirror,
 };
-use crate::ui::chrome::{RibbonTab, default_ribbon_tab};
+use crate::ui::chrome::default_ribbon_tab;
 use crate::ui::shell::screen_direction;
 
 /// Current daemon scan progress, shown by the sidebar status card and the
@@ -415,7 +415,6 @@ impl App {
     /// Full rebuild used at startup: resets the grid animation state too.
     pub(crate) fn reload_all(&mut self, reset_scroll: bool, cx: &mut Context<Self>) {
         self.grid_epoch = self.grid_epoch.wrapping_add(1);
-        self.intro_seen.clear();
         self.hovered_photo = None;
         self.reload_library(!reset_scroll, cx);
     }
@@ -489,22 +488,13 @@ impl App {
         cx.notify();
     }
 
-    /// Selects a ribbon tab. A collapsed ribbon expands so the chosen page is
-    /// visible, matching the design's "click a tab to open" rule.
-    pub(crate) fn select_ribbon_tab(&mut self, tab: RibbonTab, cx: &mut Context<Self>) {
-        if self.ribbon_collapsed {
-            self.set_ribbon_collapsed(false, cx);
-        }
-        self.active_ribbon_tab = tab;
-        cx.notify();
-    }
-
     pub(crate) fn toggle_ribbon_collapsed(&mut self, cx: &mut Context<Self>) {
         self.set_ribbon_collapsed(!self.ribbon_collapsed, cx);
     }
 
     fn set_ribbon_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
         self.ribbon_collapsed = collapsed;
+        self.ribbon_epoch = self.ribbon_epoch.wrapping_add(1);
         self.settings.ui_ribbon_collapsed = collapsed;
         if let Err(error) = self.settings.save(&self.db) {
             tracing::warn!(%error, "cannot save ribbon state");

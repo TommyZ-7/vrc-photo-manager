@@ -6,13 +6,12 @@
 
 use std::rc::Rc;
 
-use gpui_kit::component::button::Button;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use vrc_photo_core::settings::{AppSettings, CardSize};
+use vrc_photo_core::settings::AppSettings;
 
 use crate::app::App;
 use crate::ui::theme::*;
@@ -402,18 +401,6 @@ impl App {
                         cx.notify();
                     })),
             )
-    }
-
-    pub(crate) fn card_size_button(&self, size: CardSize, cx: &mut Context<Self>) -> AnyElement {
-        let selected = self.settings.ui_card_size == size;
-        let label = card_size_label(size);
-        Button::new(SharedString::from(format!("card-size-{label}")))
-            .label(label)
-            .small()
-            .selected(selected)
-            .toggled(selected)
-            .on_click(cx.listener(move |this, _, _, cx| this.set_card_size(size, cx)))
-            .into_any_element()
     }
 
     pub(crate) fn stat_card(&self, label: &str, value: String) -> impl IntoElement {

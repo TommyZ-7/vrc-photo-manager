@@ -440,7 +440,6 @@ impl App {
                             Some(photo) => {
                                 line = line.child(this.photo_card(
                                     photo.as_ref(),
-                                    photo_index,
                                     image_height,
                                     card_width,
                                     cx,
@@ -601,7 +600,6 @@ impl App {
     fn photo_card(
         &mut self,
         photo: &Photo,
-        grid_index: usize,
         image_height: f32,
         card_width: Option<f32>,
         cx: &mut Context<Self>,
@@ -626,14 +624,6 @@ impl App {
         }
         let color = self.color_for(photo);
         let hovered = self.hovered_photo == Some(id);
-        let intro_total =
-            CARD_INTRO_SECS + grid_index.min(CARD_STAGGER_MAX) as f32 * CARD_STAGGER_SECS;
-        let intro_started =
-            (grid_index < 24).then(|| *self.intro_seen.entry(id).or_insert_with(Instant::now));
-        let intro = intro_started.is_some_and(|started| {
-            Instant::now().duration_since(started).as_secs_f32() < intro_total
-        });
-        let grid_epoch = self.grid_epoch;
         let card_radius = 13.0;
         let image_radius = inner_corner_radius(card_radius, 1.0);
         let meta_line = card_meta_line(
@@ -874,24 +864,7 @@ impl App {
             None => cell.flex_1(),
         };
 
-        cell.with_animation(
-            SharedString::from(format!("card-intro-{grid_epoch}-{id}")),
-            Animation::new(if intro {
-                Duration::from_secs_f32(intro_total)
-            } else {
-                Duration::ZERO
-            })
-            .with_max_fps(60.0),
-            move |el, t| {
-                if intro {
-                    let value = stagger_value(t, grid_index);
-                    el.opacity(value)
-                } else {
-                    el
-                }
-            },
-        )
-        .into_any_element()
+        cell.into_any_element()
     }
 
     fn inspector_column(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -1429,7 +1402,7 @@ impl App {
             },
             cx,
             move |this, window, cx| {
-                this.trash_selected(cx);
+                this.trash_selected(window, cx);
                 if this.selected.is_none() {
                     this.close_quick_look(window, cx);
                 }

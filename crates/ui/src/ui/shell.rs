@@ -59,45 +59,11 @@ impl App {
         let collapsed = self.sidebar_collapsed;
         let update_badge = self.update.nav_badge();
         let epoch = self.sidebar_motion_epoch;
-        let reveal_duration = if epoch == 0 {
-            Duration::ZERO
-        } else {
-            Duration::from_millis(320)
-        };
         let photo_count = format_count(self.stats.photo_count);
         let compression_count =
             (self.active_job_count > 0).then(|| format_count(self.active_job_count));
         let status_card = (!collapsed && sidebar_status_visible(content_height))
             .then(|| self.sidebar_status_card(cx));
-
-        let brand_text = v_flex()
-            .min_w_0()
-            .gap(px(0.))
-            .overflow_hidden()
-            .whitespace_nowrap()
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .font_semibold()
-                    .text_color(rgb(TEXT))
-                    .child("VRC Photo"),
-            )
-            .child(
-                div()
-                    .text_size(px(10.))
-                    .text_color(rgb(MUTED_2))
-                    .child(format!("Manager · {photo_count}枚")),
-            )
-            .with_animation(
-                SharedString::from(format!("sidebar-brand-{epoch}")),
-                Animation::new(reveal_duration)
-                    .with_easing(ease_motion)
-                    .with_max_fps(60.0),
-                move |el, t| {
-                    el.w(px(sidebar_reveal_width(collapsed, t)))
-                        .opacity(if collapsed { 1.0 - t } else { t })
-                },
-            );
 
         let body = v_flex()
             .relative()
@@ -121,23 +87,9 @@ impl App {
                 h_flex()
                     .h(px(34.))
                     .px(px(2.))
-                    .gap(px(10.))
                     .items_center()
-                    .when(collapsed, |this| this.justify_center().gap(px(0.)))
-                    .child(
-                        div()
-                            .size(px(34.))
-                            .rounded(px(10.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .bg(rgb(BLUE))
-                            .text_size(px(12.))
-                            .font_semibold()
-                            .text_color(rgb(0xffffff))
-                            .child("VP"),
-                    )
-                    .child(brand_text),
+                    .when(collapsed, |this| this.justify_center())
+                    .child(self.sidebar_toggle_button(cx)),
             )
             .child(div().h(px(12.)))
             .child(
@@ -208,6 +160,7 @@ impl App {
                         ),
                 )
             })
+            .when(collapsed, |this| this.child(self.sidebar_compact_stats()))
             .child(
                 h_flex()
                     .h(px(26.))
@@ -226,21 +179,7 @@ impl App {
                             } else {
                                 GREEN
                             })),
-                    )
-                    .when(!collapsed, |this| {
-                        this.child(
-                            div()
-                                .text_size(px(10.))
-                                .text_color(rgb(if self.daemon_active { MUTED } else { MUTED_2 }))
-                                .child(if !self.daemon_active {
-                                    "デーモン停止"
-                                } else if self.daemon_paused {
-                                    "一時停止中"
-                                } else {
-                                    "監視中"
-                                }),
-                        )
-                    }),
+                    ),
             )
             .child(
                 div()
@@ -275,6 +214,62 @@ impl App {
             },
         )
         .into_any_element()
+    }
+
+    fn sidebar_toggle_button(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let collapsed = self.sidebar_collapsed;
+        let icon = if collapsed {
+            IconName::ChevronRight
+        } else {
+            IconName::ChevronLeft
+        };
+        let tooltip = if collapsed {
+            "サイドバーを展開 (Ctrl+B)"
+        } else {
+            "サイドバーを最小化 (Ctrl+B)"
+        };
+        Button::new("sidebar-toggle")
+            .ghost()
+            .icon(icon)
+            .tooltip(tooltip)
+            .size(px(28.))
+            .rounded(px(8.))
+            .text_color(rgb(MUTED))
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)))
+            .into_any_element()
+    }
+
+    fn sidebar_compact_stats(&self) -> AnyElement {
+        v_flex()
+            .p(px(6.))
+            .gap(px(3.))
+            .rounded(px(10.))
+            .bg(rgb(PANEL))
+            .border_1()
+            .border_color(rgba(0xffffff0f))
+            .child(
+                div()
+                    .text_size(px(8.))
+                    .text_color(rgb(MUTED_2))
+                    .whitespace_nowrap()
+                    .child(format!("未実行 {}", format_count(self.waiting_job_count))),
+            )
+            .child(
+                div()
+                    .text_size(px(8.))
+                    .text_color(rgb(TEXT))
+                    .whitespace_nowrap()
+                    .child(format!("{}枚", format_count(self.stats.photo_count))),
+            )
+            .child(
+                div()
+                    .text_size(px(7.5))
+                    .text_color(rgb(MUTED))
+                    .whitespace_nowrap()
+                    .truncate()
+                    .child(format_bytes(self.stats.total_bytes)),
+            )
+            .into_any_element()
     }
 
     fn sidebar_status_card(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -611,12 +606,12 @@ impl App {
         let hovered = self.hovered_nav == Some(screen);
         let collapsed = self.sidebar_collapsed;
         let epoch = self.sidebar_motion_epoch;
-        let nav_epoch = self.nav_epoch;
         let reveal_duration = if epoch == 0 {
             Duration::ZERO
         } else {
             Duration::from_millis(320)
         };
+        let nav_epoch = self.nav_epoch;
         let color_anim = || {
             Animation::new(MOTION_FAST)
                 .with_easing(ease_motion)
@@ -754,7 +749,7 @@ impl App {
         div()
             .absolute()
             .left(px(100.))
-            .top(px(84.0 + nav_item_top(index)))
+            .top(px(76.0 + nav_item_top(index)))
             .px(px(8.))
             .py(px(5.))
             .rounded(px(7.))
@@ -771,55 +766,6 @@ impl App {
                     .with_easing(ease_motion)
                     .with_max_fps(MOTION_FPS),
                 move |el, t| el.opacity(t).relative().left(px(-4.0 * (1.0 - t))),
-            )
-            .into_any_element()
-    }
-
-    pub(crate) fn rail_toggle(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let collapsed = self.sidebar_collapsed;
-        let epoch = self.sidebar_motion_epoch;
-        let icon = if collapsed {
-            IconName::ChevronRight
-        } else {
-            IconName::ChevronLeft
-        };
-        let tooltip = if collapsed {
-            "サイドバーを展開 (Ctrl+B)"
-        } else {
-            "サイドバーを最小化 (Ctrl+B)"
-        };
-
-        div()
-            .absolute()
-            .top(px(32.))
-            .left(px(14. + sidebar_width(collapsed) - 12.))
-            .child(
-                Button::new("rail-toggle")
-                    .ghost()
-                    .icon(icon)
-                    .tooltip(tooltip)
-                    .size(px(24.))
-                    .rounded_full()
-                    .bg(rgb(0x131923))
-                    .border_1()
-                    .border_color(rgb(BORDER_STRONG))
-                    .text_color(rgb(MUTED))
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
-            )
-            .with_animation(
-                ("rail-toggle", epoch),
-                Animation::new(if epoch == 0 {
-                    Duration::ZERO
-                } else {
-                    Duration::from_millis(440)
-                })
-                .with_easing(ease_motion)
-                .with_max_fps(60.0),
-                move |el, t| {
-                    let from = sidebar_width(!collapsed);
-                    let to = sidebar_width(collapsed);
-                    el.left(px(14. + from + (to - from) * t - 12.))
-                },
             )
             .into_any_element()
     }
@@ -964,11 +910,7 @@ impl App {
         let screen = v_flex().flex_1().min_h_0().child(screen).with_animation(
             ("screen-enter", self.screen_epoch),
             enter,
-            move |el, t| {
-                el.relative()
-                    .left(px(direction * SCREEN_SLIDE * (1.0 - t)))
-                    .opacity(t)
-            },
+            move |el, t| el.relative().left(px(direction * SCREEN_SLIDE * (1.0 - t))),
         );
         v_flex()
             .flex_1()

@@ -6,7 +6,7 @@
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
-use gpui_kit::component::scroll::{ScrollableElement as _, Scrollbar};
+use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -22,21 +22,6 @@ use crate::ui::components::compression_policy_warning;
 use crate::ui::components::glass_panel;
 use crate::ui::theme::*;
 
-/// Settings sections in the same order as the right column's direct children.
-const SETTINGS_SECTIONS: [&str; 5] = ["ライブラリ", "表示", "起動と圧縮", "アップデート", "ログ"];
-
-/// Active category: normally the section at the top of the scroll viewport.
-/// The final sections cannot always reach the top, so at the end of the
-/// scroll range the last explicit jump supplies the highlight when it is at or
-/// below the current top item.
-fn settings_active_section(scroll_top: usize, jumped: Option<usize>, at_end: bool) -> usize {
-    let index = match jumped {
-        Some(jumped) if at_end && jumped >= scroll_top => jumped,
-        _ => scroll_top,
-    };
-    index.min(SETTINGS_SECTIONS.len().saturating_sub(1))
-}
-
 impl App {
     pub(crate) fn settings_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let autostart_hint =
@@ -45,9 +30,7 @@ impl App {
             .relative()
             .flex_1()
             .min_h_0()
-            .gap(px(CARD_GAP))
             .items_stretch()
-            .child(self.settings_nav_card(cx))
             .child(
                 v_flex()
                     .id("settings-sections")
@@ -56,12 +39,6 @@ impl App {
                     .min_h_0()
                     .overflow_y_scroll()
                     .track_scroll(&self.settings_scroll)
-                    .on_scroll_wheel(cx.listener(|this, _, window, cx| {
-                        if this.settings_section.take().is_some() {
-                            cx.notify();
-                            cx.defer_in(window, |_, _, cx| cx.notify());
-                        }
-                    }))
                     .gap(px(CARD_GAP))
                     .child(
                         glass_panel()
@@ -231,37 +208,6 @@ impl App {
                                 cx,
                                 |settings, value| settings.ui_card_show_size = value,
                             ))
-                            .child(
-                                h_flex()
-                                    .items_center()
-                                    .gap(px(12.))
-                                    .py(px(2.))
-                                    .child(
-                                        v_flex()
-                                            .gap(px(2.))
-                                            .child(
-                                                div()
-                                                    .text_size(px(12.))
-                                                    .text_color(rgb(TEXT))
-                                                    .child("カードの大きさ"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_size(px(10.))
-                                                    .text_color(rgb(MUTED_2))
-                                                    .child("ライブラリと検索の両方に適用されます"),
-                                            ),
-                                    )
-                                    .child(div().flex_1())
-                                    .child(
-                                        h_flex()
-                                            .gap(px(6.))
-                                            .child(self.card_size_button(CardSize::Small, cx))
-                                            .child(self.card_size_button(CardSize::Medium, cx))
-                                            .child(self.card_size_button(CardSize::Large, cx))
-                                            .child(self.card_size_button(CardSize::ExtraLarge, cx)),
-                                    ),
-                            ),
                     )
                     .child(
                         glass_panel()
@@ -408,98 +354,6 @@ impl App {
             )
     }
 
-    /// Left category card. Rows jump to the matching section in the tracked
-    /// settings column and highlight whichever section is currently at the
-    /// top. Reloading stays on the existing in-card control.
-    fn settings_nav_card(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let max_offset = f32::from(self.settings_scroll.max_offset().y);
-        let offset = f32::from(self.settings_scroll.offset().y);
-        let at_end = max_offset > 0.0 && -offset >= max_offset - 1.0;
-        let active = settings_active_section(
-            self.settings_scroll.top_item(),
-            self.settings_section,
-            at_end,
-        );
-        let items: Vec<_> = SETTINGS_SECTIONS
-            .into_iter()
-            .enumerate()
-            .map(|(index, label)| self.settings_nav_item(label, index, index == active, cx))
-            .collect();
-        glass_panel()
-            .flex()
-            .flex_col()
-            .w(px(SETTINGS_NAV_WIDTH))
-            .h_full()
-            .min_h_0()
-            .flex_shrink_0()
-            .overflow_hidden()
-            .rounded(px(17.))
-            .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .h(px(GALLERY_HEADER_HEIGHT))
-                    .px(px(GALLERY_PAD_X))
-                    .items_center()
-                    .border_b_1()
-                    .border_color(rgba(0xffffff14))
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .font_semibold()
-                            .text_color(rgb(TEXT))
-                            .child("設定"),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scrollbar()
-                    .p(px(10.))
-                    .gap(px(3.))
-                    .children(items),
-            )
-    }
-
-    fn settings_nav_item(
-        &mut self,
-        label: &'static str,
-        index: usize,
-        active: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        h_flex()
-            .id(SharedString::from(format!("settings-nav-{index}")))
-            .h(px(30.))
-            .px(px(10.))
-            .items_center()
-            .rounded(px(8.))
-            .cursor_pointer()
-            .bg(if active {
-                rgb(ACCENT_SOFT)
-            } else {
-                rgba(0x00000000)
-            })
-            .text_size(px(11.))
-            .font_medium()
-            .text_color(rgb(if active { BLUE } else { MUTED }))
-            .hover(move |this| {
-                this.bg(rgb(if active { ACCENT_SOFT } else { PANEL_2 }))
-                    .text_color(rgb(if active { BLUE } else { TEXT }))
-            })
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.settings_section = Some(index);
-                this.settings_scroll.scroll_to_top_of_item(index);
-                cx.notify();
-                // The scroll offset is applied during prepaint; a deferred
-                // notify lets the active-row highlight catch up on the next
-                // frame as well.
-                cx.defer_in(window, |_, _, cx| cx.notify());
-            }))
-            .child(label)
-            .into_any_element()
-    }
-
     pub(crate) fn set_card_size(&mut self, size: CardSize, cx: &mut Context<Self>) {
         if self.settings.ui_card_size == size {
             return;
@@ -540,22 +394,5 @@ impl App {
         }
         cx.set_reduce_motion(enabled);
         cx.notify();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::settings_active_section;
-
-    #[test]
-    fn settings_active_section_prefers_the_last_jump() {
-        assert_eq!(settings_active_section(0, None, false), 0);
-        assert_eq!(settings_active_section(2, None, false), 2);
-        assert_eq!(settings_active_section(2, Some(3), true), 3);
-        assert_eq!(settings_active_section(2, Some(0), true), 2);
-        assert_eq!(settings_active_section(2, Some(4), false), 2);
-        assert_eq!(settings_active_section(9, None, false), 4);
-        assert_eq!(settings_active_section(0, Some(9), true), 4);
-        assert_eq!(settings_active_section(1, Some(4), true), 4);
     }
 }

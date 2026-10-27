@@ -2987,41 +2987,32 @@ mod tests {
     fn ensure_default_profiles_is_idempotent() {
         let db = Db::open_in_memory().unwrap();
         let first = db.ensure_default_profiles().unwrap();
-        assert_eq!(first.len(), 4);
+        assert_eq!(first.len(), 3);
 
         let order: Vec<&str> = first.iter().map(|profile| profile.name.as_str()).collect();
-        assert_eq!(
-            order,
-            [
-                "WebP 高品質",
-                "AVIF 容量優先",
-                "JPEG XL ロスレス",
-                "JPEG 互換用"
-            ]
-        );
+        assert_eq!(order, ["無劣化webp", "discord用webp", "高画質webp"]);
 
-        let mut names: Vec<&str> = first.iter().map(|profile| profile.name.as_str()).collect();
-        names.sort_unstable();
-        assert_eq!(
-            names,
-            [
-                "AVIF 容量優先",
-                "JPEG XL ロスレス",
-                "JPEG 互換用",
-                "WebP 高品質"
-            ]
-        );
         let by_name = |name: &str| first.iter().find(|profile| profile.name == name).unwrap();
-        assert!(by_name("AVIF 容量優先").auto_enabled);
-        assert!(!by_name("JPEG XL ロスレス").auto_enabled);
-        assert!(!by_name("JPEG 互換用").auto_enabled);
+        assert!(by_name("無劣化webp").auto_enabled);
+        assert!(by_name("無劣化webp").lossless);
+        assert!(!by_name("discord用webp").auto_enabled);
+        assert!(by_name("discord用webp").clipboard);
+        assert_eq!(by_name("discord用webp").width, 2560);
+        assert_eq!(by_name("discord用webp").height, 1440);
+        assert_eq!(
+            by_name("discord用webp").output_dir.as_deref(),
+            Some("discord")
+        );
+        assert_eq!(by_name("discord用webp").suffix, "_discord");
+        assert_eq!(by_name("高画質webp").quality, 90);
+        assert_eq!(by_name("高画質webp").output_dir.as_deref(), Some("webp"));
 
         let first_ids: Vec<String> = first.iter().map(|profile| profile.id.clone()).collect();
         let second = db.ensure_default_profiles().unwrap();
-        assert_eq!(second.len(), 4);
+        assert_eq!(second.len(), 3);
         let second_ids: Vec<String> = second.iter().map(|profile| profile.id.clone()).collect();
         assert_eq!(first_ids, second_ids);
-        assert_eq!(db.list_profiles().unwrap().len(), 4);
+        assert_eq!(db.list_profiles().unwrap().len(), 3);
     }
 
     #[test]

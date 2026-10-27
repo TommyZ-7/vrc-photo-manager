@@ -155,33 +155,35 @@ impl App {
             format!("{count} 件を圧縮")
         };
 
-        let header = v_flex()
-            .gap(px(16.))
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .child(
-                        div()
-                            .text_size(px(20.))
-                            .font_semibold()
-                            .text_color(rgb(TEXT))
-                            .child("手動圧縮"),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(rgb(MUTED_2))
-                            .child(format!("{count} 枚を対象")),
-                    ),
-            )
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(rgb(MUTED))
-                    .child("使用するプロファイル、出力先、元画像の扱いを選んでから実行します。"),
-            );
+        let header =
+            v_flex()
+                .gap(px(16.))
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .child(
+                            div()
+                                .text_size(px(20.))
+                                .font_semibold()
+                                .text_color(rgb(TEXT))
+                                .child("手動圧縮"),
+                        )
+                        .child(div().flex_1())
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(rgb(MUTED_2))
+                                .child(format!("{count} 枚を対象")),
+                        ),
+                )
+                .child(div().text_size(px(11.)).text_color(rgb(MUTED)).child(
+                    if dialog.hide_output {
+                        "プロファイルと元画像の扱いを確認して実行します。"
+                    } else {
+                        "使用するプロファイル、出力先、元画像の扱いを選んでから実行します。"
+                    },
+                ));
 
         let body = v_flex()
             .flex_1()
@@ -197,38 +199,44 @@ impl App {
                     .gap(px(6.))
                     .children(profile_rows),
             )
-            .child(self.section_label("出力先"))
-            .child(v_flex().gap(px(6.)).child(folder_row).when(
-                dialog.output == ManualOutputTarget::Folder,
-                |this| {
-                    this.child(
-                        h_flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .pl(px(24.))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(if folder_ready { MUTED } else { AMBER }))
-                                    .child(folder_path),
+            .when(!dialog.hide_output, |this| {
+                this.child(self.section_label("出力先"))
+                    .child(v_flex().gap(px(6.)).child(folder_row).when(
+                        dialog.output == ManualOutputTarget::Folder,
+                        |this| {
+                            this.child(
+                                h_flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .pl(px(24.))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(px(10.))
+                                            .text_color(rgb(if folder_ready {
+                                                MUTED
+                                            } else {
+                                                AMBER
+                                            }))
+                                            .child(folder_path),
+                                    )
+                                    .child(
+                                        Button::new("manual-choose-folder")
+                                            .label("フォルダを選択")
+                                            .small()
+                                            .ghost()
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.choose_manual_folder(cx)
+                                            })),
+                                    ),
                             )
-                            .child(
-                                Button::new("manual-choose-folder")
-                                    .label("フォルダを選択")
-                                    .small()
-                                    .ghost()
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.choose_manual_folder(cx)
-                                    })),
-                            ),
-                    )
-                },
-            ))
-            .child(profile_row)
-            .child(clipboard_row)
+                        },
+                    ))
+                    .child(profile_row)
+                    .child(clipboard_row)
+            })
             .when(dialog.output != ManualOutputTarget::Clipboard, |this| {
                 this.child(self.section_label("元画像"))
                     .child(v_flex().gap(px(6.)).child(keep_row).child(trash_row))

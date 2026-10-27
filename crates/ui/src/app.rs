@@ -93,9 +93,9 @@ pub struct App {
     /// Last section the user jumped to. Sections near the bottom cannot always
     /// reach the top of the column, so the highlight falls back to this when
     /// the scroll position alone would point at an earlier section.
-    pub(crate) settings_section: Option<usize>,
     pub(crate) active_ribbon_tab: RibbonTab,
     pub(crate) ribbon_collapsed: bool,
+    pub(crate) ribbon_epoch: u64,
     pub(crate) render_epoch: u64,
     pub(crate) card_image_bounds: CardBoundsMap,
     pub(crate) inspector_preview_bounds: InspectorBounds,
@@ -149,7 +149,6 @@ pub struct App {
     pub(crate) thumbnails: ThumbnailCache,
     pub(crate) grid_epoch: u64,
     pub(crate) hovered_photo: Option<i64>,
-    pub(crate) intro_seen: HashMap<i64, Instant>,
     pub(crate) photo_grid_focus: FocusHandle,
     pub(crate) import_dialog_focus: FocusHandle,
     pub(crate) quick_look_open: bool,
@@ -181,6 +180,8 @@ pub struct App {
     pub(crate) profile_index: usize,
     pub(crate) profile_suffix_input: Entity<InputState>,
     pub(crate) _profile_suffix_subscription: Subscription,
+    pub(crate) profile_output_input: Entity<InputState>,
+    pub(crate) _profile_output_subscription: Subscription,
     pub(crate) manual_compress: Option<ManualCompressionDialog>,
     pub(crate) stats: LibraryStats,
     pub(crate) settings: AppSettings,
@@ -299,6 +300,26 @@ impl App {
                 }
             },
         );
+        let profile_output_input = cx
+            .new(|cx| InputState::new(window, cx).placeholder("compressed または /path/to/output"));
+        let profile_output_subscription = cx.subscribe(
+            &profile_output_input,
+            |this, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let value = input.read(cx).value().trim().to_string();
+                    this.edit_profile(
+                        |profile| {
+                            profile.output_dir = if value.is_empty() {
+                                None
+                            } else {
+                                Some(value.clone())
+                            }
+                        },
+                        cx,
+                    );
+                }
+            },
+        );
         let photo_grid_focus = cx.focus_handle();
         let import_dialog_focus = cx.focus_handle();
         let quick_look_close_focus = cx.focus_handle();
@@ -324,9 +345,9 @@ impl App {
             screen_epoch: 0,
             screen_direction: 1.0,
             settings_scroll: ScrollHandle::new(),
-            settings_section: None,
             active_ribbon_tab: default_ribbon_tab(Screen::Photos),
-            ribbon_collapsed: initial_settings.ui_ribbon_collapsed,
+            ribbon_collapsed: true,
+            ribbon_epoch: 0,
             render_epoch: 0,
             card_image_bounds: Rc::new(RefCell::new(HashMap::new())),
             inspector_preview_bounds: Rc::new(RefCell::new(None)),
@@ -383,7 +404,6 @@ impl App {
             thumbnails: ThumbnailCache::default(),
             grid_epoch: 0,
             hovered_photo: None,
-            intro_seen: HashMap::new(),
             photo_grid_focus,
             import_dialog_focus,
             quick_look_open: false,
@@ -415,6 +435,8 @@ impl App {
             profile_index: 0,
             profile_suffix_input,
             _profile_suffix_subscription: profile_suffix_subscription,
+            profile_output_input,
+            _profile_output_subscription: profile_output_subscription,
             manual_compress: None,
             stats: LibraryStats::default(),
             settings: AppSettings::default(),
@@ -512,11 +534,16 @@ impl Render for App {
         self.guard_viewer_selection(window, cx);
         let viewport = window.viewport_size();
         let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
-        let layout: ChromeLayout = chrome_layout(
+        let mut layout: ChromeLayout = chrome_layout(
             f32::from(viewport.width),
             f32::from(viewport.height),
             client_inset,
         );
+        if self.ribbon_collapsed {
+            // The collapsed body still has its target height for the expand
+            // animation, but the content area can use that space.
+            layout.content_height += layout.ribbon_height;
+        }
         let main = v_flex()
             .flex_1()
             .min_w_0()
@@ -534,8 +561,7 @@ impl Render for App {
             .gap(px(WORKSPACE_GAP))
             .child(self.sidebar(layout.content_height, cx))
             .child(main)
-            .child(self.nav_tooltip())
-            .child(self.rail_toggle(cx));
+            .child(self.nav_tooltip());
         let root = h_flex()
             .relative()
             .size_full()

@@ -7,6 +7,8 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use gpui_kit::component::WindowExt;
+use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::*;
 use vrc_photo_core::model::Photo;
 use vrc_photo_core::{preview, thumbnail};
@@ -17,7 +19,6 @@ use crate::app::{App, Screen};
 use crate::state::photo_browser::PhotoBrowser;
 use crate::state::preview::{preview_cache_dir, preview_key, should_request_preview};
 use crate::state::thumbnail::{decode_thumbnail, make_render_image, preview_render_image};
-use crate::state::viewer::ViewerOpenSource;
 use crate::ui::theme::{BG, scene_color, selection_range, toggle_selected_id};
 
 impl App {
@@ -387,63 +388,6 @@ impl App {
         }
     }
 
-    pub(crate) fn toggle_selected_favorite(&mut self, cx: &mut Context<Self>) {
-        let Some(photo) = self.selected_photo.as_ref() else {
-            return;
-        };
-        let id = photo.id;
-        let favorite = photo.is_favorite;
-        match self.db.set_favorite(id, !favorite) {
-            Ok(()) => self.load_selected_meta(id),
-            Err(error) => {
-                tracing::warn!(%error, photo_id = id, "cannot update favorite");
-                self.message = Some(format!("お気に入りを更新できません: {error}"));
-            }
-        }
-        cx.notify();
-    }
-
-    /// Opens the viewer details panel for the current photo. Shared by the
-    /// ribbon's tag and note commands.
-    fn show_selected_details(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.selected_photo.is_none() {
-            return;
-        }
-        if !self.quick_look_open {
-            self.open_quick_look(window, cx, ViewerOpenSource::Inspector);
-        }
-        if self.quick_look_open && !self.quick_look_details_open {
-            self.toggle_quick_look_details(window, cx);
-        }
-    }
-
-    pub(crate) fn edit_selected_tags(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.show_selected_details(window, cx);
-        if !self.quick_look_open || !self.quick_look_details_open {
-            return;
-        }
-        let focus = self.tag_edit_input.read(cx).focus_handle(cx);
-        cx.defer_in(window, move |this, window, cx| {
-            if this.quick_look_open && this.quick_look_details_open {
-                window.focus(&focus, cx);
-            }
-        });
-        cx.notify();
-    }
-
-    pub(crate) fn edit_selected_note(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(photo) = self.selected_photo.as_ref() else {
-            return;
-        };
-        let id = photo.id;
-        let note = photo.note.clone();
-        self.show_selected_details(window, cx);
-        if !self.quick_look_open || !self.quick_look_details_open {
-            return;
-        }
-        self.begin_note_edit(id, note, window, cx);
-    }
-
     pub(crate) fn color_for(&self, photo: &Photo) -> u32 {
         self.thumbnails
             .color(photo.id)
@@ -513,29 +457,58 @@ impl App {
         cx.notify();
     }
 
-    pub(crate) fn trash_selected(&mut self, cx: &mut Context<Self>) {
-        let Some(photo) = &self.selected_photo else {
-            return;
-        };
-        let id = photo.id;
-        let effective_path = photo.effective_path().to_string();
-        let replaced = photo.is_replaced();
-
-        if self.delete_armed != Some(id) {
-            self.delete_armed = Some(id);
-            if !replaced
-                && let Ok(derivatives) = self.db.derivatives_for_photo(id)
-                && derivatives
-                    .iter()
-                    .any(|derivative| Path::new(&derivative.path).is_file())
-            {
-                self.message = Some(
-                    "もう一度押すと元画像を削除し、圧縮版をライブラリ表示に使います".to_string(),
-                );
-            }
-            cx.notify();
+    pub(crate) fn trash_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ids = self.selected_action_ids();
+        if ids.is_empty() {
             return;
         }
+        let count = ids.len();
+        let title = if count == 1 {
+            "写真をゴミ箱へ移動"
+        } else {
+            "選択した写真をゴミ箱へ移動"
+        };
+        let description = if count == 1 {
+            self.selected_photo
+                .as_ref()
+                .map(|photo| {
+                    format!(
+                        "「{}」をOSゴミ箱へ移動します。この操作は元に戻せません。",
+                        photo.captured_at_local
+                    )
+                })
+                .unwrap_or_else(|| "写真をOSゴミ箱へ移動します。".to_string())
+        } else {
+            format!("{count} 枚をOSゴミ箱へ移動します。この操作は元に戻せません。")
+        };
+        let entity = cx.entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let entity = entity.clone();
+            let ids = ids.clone();
+            alert
+                .title(title)
+                .description(description.clone())
+                .confirm()
+                .ok_text("ゴミ箱へ")
+                .ok_variant(ButtonVariant::Danger)
+                .cancel_text("キャンセル")
+                .on_ok(move |_, _, cx| {
+                    entity.update(cx, |this, cx| {
+                        for id in &ids {
+                            this.trash_photo(*id, cx);
+                        }
+                    });
+                    true
+                })
+        });
+    }
+
+    fn trash_photo(&mut self, id: i64, cx: &mut Context<Self>) {
+        let Some(photo) = self.db.photo_by_id(id).ok().flatten() else {
+            return;
+        };
+        let effective_path = photo.effective_path().to_string();
+        let replaced = photo.is_replaced();
 
         // A replaced photo's "original" is already gone; the effective path is
         // the compressed derivative that the card is currently displaying.
@@ -555,7 +528,6 @@ impl App {
         if let Some(derivative) = &derivative_to_promote
             && let Err(error) = self.db.set_replaced(id, derivative.id)
         {
-            self.delete_armed = None;
             self.message = Some(format!("圧縮版を表示に設定できません: {error}"));
             cx.notify();
             return;
@@ -566,7 +538,6 @@ impl App {
                 if derivative_to_promote.is_some() {
                     // The row stays visible with the compressed derivative as
                     // its display asset.
-                    self.delete_armed = None;
                     let _ = self.db.bump_library_revision();
                     self.reload_library(true, cx);
                     self.message =
@@ -580,15 +551,22 @@ impl App {
                     self.library.remove_photo(id);
                     self.search_view.remove_photo(id);
                     self.thumbnails.unpin(id);
-                    self.selected = None;
-                    self.selected_ids.clear();
+                    if self.selected == Some(id) {
+                        self.selected = None;
+                    }
+                    self.selected_ids.retain(|selected| *selected != id);
                     self.selection_anchor = None;
-                    self.selected_photo = None;
-                    self.selected_players.clear();
-                    self.selected_tags.clear();
-                    self.selected_derivatives.clear();
-                    self.preview = None;
-                    self.delete_armed = None;
+                    if self
+                        .selected_photo
+                        .as_ref()
+                        .is_some_and(|photo| photo.id == id)
+                    {
+                        self.selected_photo = None;
+                        self.selected_players.clear();
+                        self.selected_tags.clear();
+                        self.selected_derivatives.clear();
+                        self.preview = None;
+                    }
                     self.message = Some("写真をゴミ箱へ移動しました".to_string());
                     self.reload_aux(cx);
                 }
@@ -597,7 +575,6 @@ impl App {
                 if derivative_to_promote.is_some() {
                     let _ = self.db.restore_present(id);
                 }
-                self.delete_armed = None;
                 self.message = Some(format!("ゴミ箱へ移動できません: {error}"));
             }
         }

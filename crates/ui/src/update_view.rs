@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use async_channel::{Receiver, Sender};
 use chrono::{DateTime, Local, Utc};
-use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::WindowExt;
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
 use semver::Version;
 use vrc_photo_update::{
     ApplyJob, ApplyKind, AvailableUpdate, FeedConfig, InstallKind, IoOperation, LastResult,
@@ -690,15 +691,28 @@ impl App {
         }
     }
 
-    pub(crate) fn apply_update(&mut self, cx: &mut Context<Self>) {
-        if !self.update.armed {
-            self.update.armed = true;
-            self.message = Some("もう一度押すと更新して再起動します".to_string());
-            cx.notify();
+    pub(crate) fn apply_update(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.update.phase, UpdatePhase::Ready { .. }) {
             return;
         }
-        self.update.armed = false;
+        let entity = cx.entity();
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let entity = entity.clone();
+            alert
+                .title("更新を適用")
+                .description("ダウンロード済みの更新を適用して再起動します。")
+                .confirm()
+                .ok_text("更新して再起動")
+                .ok_variant(ButtonVariant::Primary)
+                .cancel_text("キャンセル")
+                .on_ok(move |_, _, cx| {
+                    entity.update(cx, |this, cx| this.apply_update_confirmed(cx));
+                    true
+                })
+        });
+    }
 
+    fn apply_update_confirmed(&mut self, cx: &mut Context<Self>) {
         let UpdatePhase::Ready { update, staged } = &self.update.phase else {
             return;
         };
@@ -1124,7 +1138,6 @@ impl App {
             self.daemon_active,
             self.ipc_connected,
         ) && appimage_writable(&self.update.install);
-        let armed = self.update.armed;
         v_flex()
             .gap(px(8.))
             .child(
@@ -1135,16 +1148,12 @@ impl App {
             )
             .child(
                 Button::new("update-apply")
-                    .label(if armed {
-                        "もう一度押して更新"
-                    } else {
-                        "更新して再起動"
-                    })
+                    .label("更新して再起動")
                     .small()
                     .primary()
                     .disabled(!apply_ok)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.apply_update(cx);
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.apply_update(window, cx);
                     })),
             )
             .when(!apply_ok, |this| {
