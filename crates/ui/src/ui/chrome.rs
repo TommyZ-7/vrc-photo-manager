@@ -11,7 +11,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use vrc_photo_core::importer::ImportMode;
 
-use crate::app::daemon::{daemon_sync_label, open_path};
+use crate::app::daemon::open_path;
 use crate::app::{App, Screen};
 use crate::state::viewer::ViewerOpenSource;
 use crate::ui::theme::*;
@@ -88,8 +88,36 @@ pub(crate) fn ribbon_metrics(window_height: f32) -> RibbonMetrics {
 }
 
 /// §8.2: the ribbon's right-hand status note disappears at 1180 px and below.
+pub(crate) const NARROW_CHROME_WIDTH: f32 = 1180.0;
+
 pub(crate) fn ribbon_status_visible(window_width: f32) -> bool {
-    window_width > 1180.0
+    window_width > NARROW_CHROME_WIDTH
+}
+
+/// The titlebar's sparkline of sync state hides with the ribbon status note so
+/// the screen crumb, tabs, notification bell, and window controls keep their
+/// room at narrow widths.
+pub(crate) fn titlebar_sync_visible(window_width: f32) -> bool {
+    window_width > NARROW_CHROME_WIDTH
+}
+
+/// Compact sync text for the 46px titlebar. The full
+/// `daemon_sync_label` (including the supervisor) stays in the Photos header
+/// and on the Dashboard; the titlebar only needs the age or transport state.
+pub(crate) fn titlebar_sync_label(
+    age_secs: Option<i64>,
+    _supervisor: Option<&str>,
+    ipc_connected: bool,
+    demo: bool,
+) -> String {
+    if demo {
+        return "デモ".to_string();
+    }
+    match age_secs.filter(|age| *age < 20) {
+        Some(age) => format!("{age}秒前"),
+        None if ipc_connected => "IPC".to_string(),
+        None => "停止".to_string(),
+    }
 }
 
 /// Number of photos reflected in the ribbon's status note.
@@ -155,7 +183,7 @@ impl App {
     pub(crate) fn chrome(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let window_height = f32::from(window.bounds().size.height);
         let window_width = f32::from(window.bounds().size.width);
-        let titlebar = self.titlebar(cx);
+        let titlebar = self.titlebar(titlebar_sync_visible(window_width), cx);
         let body =
             (!self.ribbon_collapsed).then(|| self.ribbon_body(window_height, window_width, cx));
 
@@ -182,7 +210,7 @@ impl App {
             .into_any_element()
     }
 
-    fn titlebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn titlebar(&mut self, show_sync: bool, cx: &mut Context<Self>) -> AnyElement {
         let screen = self.screen;
         let active_tab = self.active_ribbon_tab;
 
@@ -232,15 +260,12 @@ impl App {
         } else {
             (GREEN, "デーモン稼働中", rgba(0x7ee2b829), rgba(0x7ee2b80e))
         };
-        let sync = if self.demo_assets.is_some() {
-            "デモデータ".to_string()
-        } else {
-            daemon_sync_label(
-                self.daemon_age_secs,
-                self.daemon_supervisor.as_deref(),
-                self.ipc_connected,
-            )
-        };
+        let sync = titlebar_sync_label(
+            self.daemon_age_secs,
+            self.daemon_supervisor.as_deref(),
+            self.ipc_connected,
+            self.demo_assets.is_some(),
+        );
         let has_message = self.message.is_some();
         let collapsed = self.ribbon_collapsed;
 
@@ -264,7 +289,8 @@ impl App {
             );
 
         let sync_label = h_flex()
-            .flex_shrink_0()
+            .min_w_0()
+            .max_w(px(96.))
             .gap(px(4.))
             .items_center()
             .child(
@@ -274,10 +300,12 @@ impl App {
             )
             .child(
                 div()
+                    .min_w_0()
+                    .max_w(px(96.))
+                    .truncate()
                     .font_family("monospace")
                     .text_size(px(7.5))
                     .text_color(rgb(MUTED_2))
-                    .whitespace_nowrap()
                     .child(sync),
             );
 
@@ -290,26 +318,28 @@ impl App {
             .child(app_glyph)
             .child(
                 div()
-                    .flex_shrink_0()
+                    .max_w(px(140.))
+                    .min_w_0()
+                    .truncate()
                     .text_size(px(11.))
                     .text_color(rgb(MUTED))
-                    .whitespace_nowrap()
                     .child("VRC Photo Manager"),
             )
             .child(div().w(px(1.)).h(px(14.)).bg(rgba(0xffffff14)))
             .child(
                 div()
-                    .flex_shrink_0()
+                    .max_w(px(140.))
+                    .min_w_0()
+                    .truncate()
                     .text_size(px(11.5))
                     .font_semibold()
                     .text_color(rgb(TEXT))
-                    .whitespace_nowrap()
                     .child(screen.title()),
             )
             .child(tabs)
             .child(div().flex_1().min_w_0())
             .child(status_pill)
-            .child(sync_label)
+            .when(show_sync, |this| this.child(sync_label))
             .child(collapse_button(collapsed, cx))
             .child(
                 div()
@@ -884,7 +914,6 @@ fn ribbon_group(
                 .child(
                     div()
                         .pl(px(2.))
-                        .font_family("monospace")
                         .text_size(px(metrics.group_label))
                         .text_color(rgb(MUTED_2))
                         .whitespace_nowrap()
@@ -1082,7 +1111,7 @@ fn status_note(icon: IconName, text: String, warning: bool) -> AnyElement {
 mod tests {
     use super::{
         CHROME_ICONS, RibbonTab, default_ribbon_tab, is_bundled, ribbon_height, ribbon_metrics,
-        ribbon_selection_label, ribbon_status_visible,
+        ribbon_selection_label, ribbon_status_visible, titlebar_sync_label, titlebar_sync_visible,
     };
     use crate::app::Screen;
 
@@ -1137,6 +1166,36 @@ mod tests {
                 "chrome icon {name:?} is missing from gpui_kit::assets::Assets"
             );
         }
+    }
+
+    #[test]
+    fn titlebar_sync_label_stays_compact() {
+        assert_eq!(
+            titlebar_sync_label(Some(5), Some("systemd"), false, false),
+            "5秒前"
+        );
+        assert_eq!(
+            titlebar_sync_label(
+                Some(5),
+                Some("a-very-long-supervisor-name-that-would-overflow-the-titlebar"),
+                false,
+                false
+            ),
+            "5秒前"
+        );
+        assert_eq!(titlebar_sync_label(None, None, true, true), "デモ");
+        assert_eq!(titlebar_sync_label(None, None, true, false), "IPC");
+        assert_eq!(titlebar_sync_label(None, None, false, false), "停止");
+        assert_eq!(
+            titlebar_sync_label(Some(30), Some("systemd"), true, false),
+            "IPC"
+        );
+    }
+
+    #[test]
+    fn titlebar_sync_hides_at_1180() {
+        assert!(!titlebar_sync_visible(1180.0));
+        assert!(titlebar_sync_visible(1181.0));
     }
 
     #[test]
