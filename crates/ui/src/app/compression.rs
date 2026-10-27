@@ -140,7 +140,7 @@ impl App {
             && let Some(profile) = self
                 .profiles
                 .iter()
-                .find(|profile| profile.clipboard)
+                .find(|profile| profile.clipboard && profile.enabled)
                 .cloned()
         {
             self.manual_compress = Some(ManualCompressionDialog {
