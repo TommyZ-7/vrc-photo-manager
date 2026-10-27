@@ -79,7 +79,11 @@ crates/
     src/lib.rs            # latest.json生成、署名、検証
     src/main.rs           # vrc-photo-update-manifest CLI（Release専用）
   ui/
-    src/main.rs           # gpui-kitアプリ本体
+    src/main.rs           # ブートストラップ、ウィンドウ、グローバルキーバインド
+    src/app.rs            # App/Screen、new/render、アプリ全体の状態
+    src/app/              # 機能別のAppメソッド（lifecycle/photos/search/...）
+    src/state/            # UI非依存の状態・キャッシュ・計算
+    src/ui/               # シェル、タイトルバー/リボン、画面、共通部品
     src/update_view.rs    # 更新カード、バックグラウンド確認/DL/適用
     assets/               # Noto Sans JP、ライセンス
 ```
@@ -102,6 +106,55 @@ release-tool ───> update
 - `daemon` は `core` のDB・スキャナ・解析・圧縮・サムネイルと、`ipc` のサーバー/プロトコルを使う。
 - `ui` は `core` のDB・モデル・設定・圧縮キュー、`ipc` のクライアント/プロトコル、`update` の確認/DL/適用を使う。
 - GPUI（`gpui-kit` / `gpui-pre`）に依存するのは `ui` のみ。`core` / `daemon` / `ipc` / `update` はGPUI非依存。
+
+### 3.1 UIモジュール構成
+
+```text
+crates/ui/src/
+  main.rs                 # mod宣言、main()、WindowOptions、キーバインド
+  app.rs                  # App構造体、Screen、new()、render()
+  app/
+    cli.rs                # LaunchOptions/parse_args/timing
+    lifecycle.rs          # 3秒更新、IPC、再読込、画面切替、サイドバー/インスペクタ
+    photos.rs             # 選択、サムネイル/プレビュー要求、ライブラリ状態
+    search.rs             # 検索実行・結果適用
+    compression.rs        # プロファイル/手動圧縮
+    daemon.rs             # デーモン操作、ログ、プロセス起動
+    import.rs             # 取り込みダイアログ/実行/再試行/再開
+    viewer.rs             # ビューア開閉、フォーカス、前後移動
+    demo.rs               # デモデータ
+  state/
+    preview.rs            # PreviewKey/PreviewQueue/キャッシュパス
+    thumbnail.rs          # ThumbnailCache/decode_thumbnail
+    photo_browser.rs      # PhotoIndex/PhotoPageCache/PhotoBrowser/CountDebounce
+    year_rail.rs          # YearBucket/年レール計算
+    viewer.rs             # ViewerMorph/ViewerBoxState/ViewerPanelState/幾何
+  ui/
+    theme.rs              # トークン、寸法、色、モーション、純粋なレイアウト計算
+    components.rs         # パネル、ボタン、チップ、バッジ、メタ行
+    shell.rs              # ルート、アンビエント、サイドバー、画面ディスパッチ
+    chrome.rs             # タイトルバー、3タブリボン
+    library.rs            # 写真画面、ギャラリー、インスペクタ、年レール呼び出し
+    year_rail.rs          # 年レールのGPUI要素
+    search.rs             # 検索画面
+    compression.rs        # 圧縮設定画面
+    dashboard.rs          # ダッシュボード
+    settings.rs           # 設定
+    import.rs             # 取り込みモーダル/結果パネル
+    viewer.rs             # フルスクリーンビューア/モーフ
+    dialogs.rs            # 手動圧縮などのモーダル
+    actions.rs            # actions!とグローバルアクション登録
+  ipc_bridge.rs
+  logging.rs
+  update_view.rs
+```
+
+- `main.rs` はブートストラップだけ。画面描画やUIヘルパーを置かない。
+- `app.rs` は `App` の状態と `Render` を持ち、`app/*` は機能ごとの状態遷移を持つ。画面モジュールから参照するフィールド/メソッドは `pub(crate)`。
+- `state/` はDBクエリやGPUI描画を持たない。状態・キャッシュ・純粋な計算だけを置く。`ui/theme.rs` の純粋な色/寸法ヘルパーへの依存は許容する。
+- `ui/` は `App` と GPUI に依存してよい。画面固有の `impl App` はその画面モジュールに置く。
+- 画面間で共有するカード/ボタン/チップは `ui/components.rs`、画面共通の余白・色・モーションは `ui/theme.rs` に寄せる。
+- タイトルバー/リボンは `ui/chrome.rs`、ウィンドウ全体のアンビエントとサイドバーは `ui/shell.rs` が持つ。
 
 ## 4. データフロー
 
