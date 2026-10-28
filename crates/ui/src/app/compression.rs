@@ -14,7 +14,7 @@ use vrc_photo_core::model::{CompressionProfile, MAX_JOB_RETRIES};
 
 use crate::app::App;
 use crate::ui::components::release_confirmation;
-use crate::ui::theme::{compression_policy, moved_profile_order, step_index};
+use crate::ui::theme::{PANEL_DEEP, compression_policy, moved_profile_order, step_index};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ManualOutputTarget {
@@ -424,6 +424,7 @@ impl App {
                     let id = id.clone();
                     alert
                         .title("プロファイルを削除")
+                        .bg(rgb(PANEL_DEEP))
                         .description(format!(
                             "「{name}」を削除します。この操作は元に戻せません。"
                         ))
@@ -544,6 +545,7 @@ impl App {
             let description = description.clone();
             alert
                 .title("待機ジョブを圧縮")
+                .bg(rgb(PANEL_DEEP))
                 .description(description)
                 .confirm()
                 .ok_text("圧縮する")

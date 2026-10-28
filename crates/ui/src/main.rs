@@ -50,6 +50,7 @@ fn main() {
                 // the compositor (Linux) or the acrylic backdrop (Windows).
                 let theme = gpui_kit::component::Theme::global_mut(cx);
                 theme.tokens.background = transparent_black().into();
+                theme.overlay = rgba(0x05070acc).into();
                 theme.notification.placement = Anchor::BottomRight;
                 theme.notification.width = px(340.);
                 theme.notification.margins = Edges {

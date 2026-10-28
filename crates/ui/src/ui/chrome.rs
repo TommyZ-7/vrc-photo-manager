@@ -323,21 +323,15 @@ impl App {
         let library_group = ribbon_group(vec![reload], "ライブラリ", false, metrics);
 
         let mut display_items = vec![self.card_size_selector(metrics, cx)];
-        if self.screen == Screen::Photos {
-            display_items.push(large_button(
-                "ribbon-toggle-inspector",
-                "詳細パネル",
-                IconName::PanelRight,
-                if self.inspector_collapsed {
-                    RibbonLook::Normal
-                } else {
-                    RibbonLook::Active
-                },
-                metrics,
-                cx,
-                |this, _, cx| this.toggle_inspector(cx),
-            ));
-        }
+        display_items.push(large_button(
+            "ribbon-toggle-inspector",
+            "詳細パネル",
+            IconName::PanelRight,
+            inspector_button_look(self.screen, self.inspector_collapsed),
+            metrics,
+            cx,
+            |this, _, cx| this.toggle_inspector(cx),
+        ));
         let display_group = ribbon_group(display_items, "表示", false, metrics);
 
         h_flex()
@@ -596,11 +590,21 @@ fn ribbon_group(
         .into_any_element()
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RibbonLook {
     Normal,
     Active,
     Disabled,
+}
+
+fn inspector_button_look(screen: Screen, inspector_collapsed: bool) -> RibbonLook {
+    if screen != Screen::Photos {
+        RibbonLook::Disabled
+    } else if inspector_collapsed {
+        RibbonLook::Normal
+    } else {
+        RibbonLook::Active
+    }
 }
 
 impl RibbonLook {
@@ -691,7 +695,27 @@ fn large_button(
 
 #[cfg(test)]
 mod tests {
-    use super::{CHROME_ICONS, chrome_layout, is_bundled, ribbon_height, ribbon_metrics};
+    use super::{
+        CHROME_ICONS, RibbonLook, chrome_layout, inspector_button_look, is_bundled, ribbon_height,
+        ribbon_metrics,
+    };
+    use crate::app::Screen;
+
+    #[test]
+    fn inspector_button_is_always_present_but_disabled_outside_photos() {
+        assert_eq!(
+            inspector_button_look(Screen::Settings, true),
+            RibbonLook::Disabled
+        );
+        assert_eq!(
+            inspector_button_look(Screen::Photos, true),
+            RibbonLook::Normal
+        );
+        assert_eq!(
+            inspector_button_look(Screen::Photos, false),
+            RibbonLook::Active
+        );
+    }
 
     #[test]
     fn ribbon_height_switches_at_760() {

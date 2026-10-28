@@ -19,7 +19,7 @@ use crate::app::{App, Screen};
 use crate::state::photo_browser::PhotoBrowser;
 use crate::state::preview::{preview_cache_dir, preview_key, should_request_preview};
 use crate::state::thumbnail::{decode_thumbnail, make_render_image, preview_render_image};
-use crate::ui::theme::{BG, scene_color, selection_range, toggle_selected_id};
+use crate::ui::theme::{BG, PANEL_DEEP, scene_color, selection_range, toggle_selected_id};
 
 impl App {
     /// Reloads the metadata for a photo without decoding its 1200 px preview.
@@ -493,6 +493,7 @@ impl App {
             let ids = ids.clone();
             alert
                 .title(title)
+                .bg(rgb(PANEL_DEEP))
                 .description(description.clone())
                 .confirm()
                 .ok_text("ゴミ箱へ")

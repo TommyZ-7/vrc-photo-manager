@@ -249,7 +249,9 @@ mod tests {
 
 use super::ipc_bridge;
 use crate::ui::components::glass_panel;
-use crate::ui::theme::{ACCENT_SOFT, AMBER, BLUE, GREEN, MUTED, MUTED_2, PANEL_2, RED, TEXT};
+use crate::ui::theme::{
+    ACCENT_SOFT, AMBER, BLUE, GREEN, MUTED, MUTED_2, PANEL_2, PANEL_DEEP, RED, TEXT,
+};
 use gpui_kit::base::{Disableable as _, StyledExt as _, h_flex, v_flex};
 use gpui_kit::component::Sizable as _;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -696,6 +698,7 @@ impl App {
             let entity = entity.clone();
             alert
                 .title("更新を適用")
+                .bg(rgb(PANEL_DEEP))
                 .description("ダウンロード済みの更新を適用して再起動します。")
                 .confirm()
                 .ok_text("更新して再起動")
