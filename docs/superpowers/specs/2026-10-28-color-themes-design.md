@@ -519,9 +519,10 @@ A new card at the top of the Settings screen, above "ライブラリ":
   six colours; `panel_card` would render all light swatches as pure white and
   all dark swatches as near-black. Accent preview = the entry's raw base
   colour.
-- Layout: rows of six circles with `w_full()` + `justify_between()`, and a
-  `w_full()` theme card, so each axis uses the full settings width. The
-  catalog order (dark, light, pastel) is kept without headings.
+- Layout: left-aligned rows of six circles with an 8 px gap. The rows do not
+  stretch to the card width; the catalog order (dark, light, pastel) is kept
+  without headings. The section header shows the selected colour name
+  (`メインカラー（背景・パネル） · チャコール`).
 - Clicking applies immediately and saves; there is no Apply button. A save
   failure restores the previous selection and reports through the existing
   message/toast path.

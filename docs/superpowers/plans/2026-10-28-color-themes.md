@@ -398,7 +398,7 @@ git commit -m "refactor(ui): remove the static palette and guard it"
 
 - [ ] **Step 1: Add the theme card**
 
-At the top of `settings_screen`, before the library card, add a `w_full()` `glass_panel(&self.palette)` with the title `テーマ`, a `メインカラー（背景・パネル）` block and a `サブカラー（アクセント）` block. Each block is rows of six 30 px circles (`preview_main`/`preview_accent`) with no family headings and no inline names; `w_full()` + `justify_between()` spans the card. Each circle has an `.id(SharedString)`, a tooltip with the colour name, a selected ring (`p.accent_border`), and a check mark using `readable_on(swatch)`. End with the note: `サブカラーは背景とのコントラストに合わせて明度を自動調整します`.
+At the top of `settings_screen`, before the library card, add a `w_full()` `glass_panel(&self.palette)` with the title `テーマ`, a `メインカラー（背景・パネル）` block and a `サブカラー（アクセント）` block. Each block is left-aligned rows of six 30 px circles (`preview_main`/`preview_accent`) with no family headings and no inline names; the section header shows the selected colour name. Each circle has an `.id(SharedString)`, a tooltip with the colour name, a selected ring (`p.accent_border`), and a check mark using `readable_on(swatch)`. End with the note: `サブカラーは背景とのコントラストに合わせて明度を自動調整します`.
 
 - [ ] **Step 2: Add the setters**
 

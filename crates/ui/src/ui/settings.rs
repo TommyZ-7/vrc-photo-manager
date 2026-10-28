@@ -467,7 +467,6 @@ impl App {
     fn theme_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.palette;
         glass_panel(&self.palette)
-            .w_full()
             .flex()
             .flex_col()
             .p(px(14.))
@@ -492,8 +491,12 @@ impl App {
 
     fn theme_axis(&self, axis: ThemeAxis, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.palette;
-        let selected_main = find_main(&self.settings.ui_theme_main).id;
-        let selected_accent = find_accent(&self.settings.ui_theme_accent).id;
+        let selected_main = find_main(&self.settings.ui_theme_main);
+        let selected_accent = find_accent(&self.settings.ui_theme_accent);
+        let selected_label = match axis {
+            ThemeAxis::Main => selected_main.label,
+            ThemeAxis::Accent => selected_accent.label,
+        };
         let items: Vec<(&'static str, &'static str, u32, bool)> = match axis {
             ThemeAxis::Main => main_colors()
                 .iter()
@@ -502,7 +505,7 @@ impl App {
                         color.id,
                         color.label,
                         preview_main(color),
-                        selected_main == color.id,
+                        selected_main.id == color.id,
                     )
                 })
                 .collect(),
@@ -513,12 +516,12 @@ impl App {
                         color.id,
                         color.label,
                         preview_accent(color),
-                        selected_accent == color.id,
+                        selected_accent.id == color.id,
                     )
                 })
                 .collect(),
         };
-        let mut rows = v_flex().w_full().gap(px(8.));
+        let mut rows = v_flex().gap(px(8.));
         for chunk in items.chunks(6) {
             let mut row = h_flex()
                 .w_full()
@@ -531,14 +534,24 @@ impl App {
             rows = rows.child(row);
         }
         v_flex()
-            .w_full()
             .gap(px(8.))
             .child(
-                div()
-                    .text_size(px(12.))
-                    .font_medium()
-                    .text_color(rgb(p.text))
-                    .child(axis.title()),
+                h_flex()
+                    .items_baseline()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .font_medium()
+                            .text_color(rgb(p.text))
+                            .child(axis.title()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(p.muted))
+                            .child(format!("· {selected_label}")),
+                    ),
             )
             .child(rows)
     }
