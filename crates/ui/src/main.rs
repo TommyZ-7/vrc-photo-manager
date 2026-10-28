@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use gpui_kit::component::TitleBar;
+use gpui_kit::component::{Edges, TitleBar};
 use gpui_kit::*;
 
 use crate::app::App;
@@ -49,6 +49,14 @@ fn main() {
                 // the compositor (Linux) or the acrylic backdrop (Windows).
                 let theme = gpui_kit::component::Theme::global_mut(cx);
                 theme.tokens.background = transparent_black().into();
+                theme.notification.placement = Anchor::BottomRight;
+                theme.notification.width = px(340.);
+                theme.notification.margins = Edges {
+                    top: px(16.),
+                    right: px(16.),
+                    bottom: px(16.),
+                    left: px(16.),
+                };
             }
             cx.bind_keys([
                 KeyBinding::new("ctrl-b", ToggleSidebar, None),

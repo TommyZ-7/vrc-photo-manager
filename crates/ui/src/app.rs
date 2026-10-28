@@ -42,6 +42,7 @@ use crate::ui::actions::{
     ToggleInspector, ToggleSidebar, ViewerNextPhoto, ViewerPreviousPhoto,
 };
 use crate::ui::chrome::{ChromeLayout, RibbonTab, chrome_layout, default_ribbon_tab};
+use crate::ui::notifications::{FailureNotice, ToastSpec, failure_transition};
 use crate::ui::theme::{GLASS_WINDOW, WORKSPACE_GAP, WORKSPACE_PAD};
 use crate::update_view;
 
@@ -220,6 +221,9 @@ pub struct App {
     pub(crate) search_days: Option<i64>,
     pub(crate) daemon_shutdown_armed: bool,
     pub(crate) message: Option<String>,
+    pub(crate) window_handle: AnyWindowHandle,
+    pub(crate) pending_toasts: Vec<ToastSpec>,
+    pub(crate) toasts_ready: bool,
     pub(crate) demo: bool,
     pub(crate) demo_assets: Option<DemoAssets>,
 }
@@ -254,7 +258,7 @@ impl App {
         cx: &mut Context<Self>,
         options: &LaunchOptions,
     ) -> Self {
-        let (db, demo, database_ok, mut message, demo_assets) = open_database(options);
+        let (db, demo, database_ok, message, demo_assets) = open_database(options);
         let db_path = db.path().and_then(|path| std::fs::canonicalize(path).ok());
         let health_token = std::env::var("VRC_PHOTO_HEALTH_TOKEN").ok();
         let updating = health_token.is_some();
@@ -338,6 +342,7 @@ impl App {
         let quick_look_note_save_focus = cx.focus_handle();
         let quick_look_note_cancel_focus = cx.focus_handle();
         let empty_index = Arc::new(PhotoIndex::new(Vec::new()));
+        let window_handle = window.window_handle();
         let mut app = Self {
             db,
             screen: Screen::Photos,
@@ -479,21 +484,30 @@ impl App {
             search_days: Some(7),
             daemon_shutdown_armed: false,
             message: None,
+            window_handle,
+            pending_toasts: Vec::new(),
+            toasts_ready: false,
             demo,
             demo_assets,
         };
         app.ensure_profiles();
         app.reload_all(true, cx);
+        if let Some(message) = message {
+            if database_ok {
+                app.toast_warning(message, cx);
+            } else {
+                app.toast_error(message, cx);
+            }
+        }
         if app.library_error.is_none() && app.library.index.total == 0 {
-            message.get_or_insert_with(|| {
-                "写真がありません。VRChatの写真フォルダを設定するか、--demo で起動してください。"
-                    .to_string()
-            });
+            app.toast_info(
+                "写真がありません。VRChatの写真フォルダを設定するか、--demo で起動してください。",
+                cx,
+            );
         }
         if let Some(notice) = app.update.notice() {
-            message.get_or_insert_with(|| notice.message.to_string());
+            app.toast_info(notice.message.clone(), cx);
         }
-        app.message = message;
         if let Some(id) = app.library.index.entries.first().map(|entry| entry.id) {
             app.select_photo(id, cx);
             // The grid is not mounted until the first frame, so focus it once
@@ -508,7 +522,7 @@ impl App {
             && !updating
             && let Err(error) = spawn_daemon_process()
         {
-            app.message = Some(format!("デーモンを起動できません: {error}"));
+            app.toast_error(format!("デーモンを起動できません: {error}"), cx);
         }
         app.start_auto_refresh(cx);
         if !app.demo {
@@ -533,6 +547,12 @@ impl App {
 impl Render for App {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.render_epoch = self.render_epoch.wrapping_add(1);
+        if !self.toasts_ready {
+            self.toasts_ready = true;
+            cx.defer_in(window, |this, window, cx| {
+                this.flush_pending_toasts(window, cx);
+            });
+        }
         self.guard_viewer_selection(window, cx);
         let viewport = window.viewport_size();
         let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
@@ -615,7 +635,7 @@ impl Render for App {
 
 #[cfg(test)]
 mod tests {
-    use super::any_overlay_open;
+    use super::{FailureNotice, any_overlay_open, failure_transition};
 
     #[test]
     fn overlay_guard_covers_the_viewer_and_both_modals() {
@@ -623,5 +643,19 @@ mod tests {
         assert!(any_overlay_open(true, false, false));
         assert!(any_overlay_open(false, true, false));
         assert!(any_overlay_open(false, false, true));
+    }
+
+    #[test]
+    fn failure_transition_only_reports_new_failures_after_the_baseline() {
+        assert!(failure_transition(None, (3, 2)).is_empty());
+        assert_eq!(
+            failure_transition(Some((3, 2)), (5, 2)),
+            vec![FailureNotice::Compression { count: 5 }]
+        );
+        assert_eq!(
+            failure_transition(Some((3, 2)), (3, 4)),
+            vec![FailureNotice::Daemon { count: 4 }]
+        );
+        assert!(failure_transition(Some((5, 4)), (5, 4)).is_empty());
     }
 }
