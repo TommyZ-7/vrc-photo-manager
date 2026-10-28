@@ -137,7 +137,7 @@ impl App {
         let current_image = self
             .preview
             .clone()
-            .or_else(|| self.thumbnails.get(photo.id));
+            .or_else(|| self.thumbnails.borrow_mut().get(photo.id));
         let (start_w, start_h) = box_state.size_at(0.0, viewport);
 
         let mut image_frame = div()

@@ -4,6 +4,7 @@ pub(crate) mod components;
 pub(crate) mod compression;
 pub(crate) mod dashboard;
 pub(crate) mod dialogs;
+pub(crate) mod gallery;
 pub(crate) mod import;
 pub(crate) mod library;
 pub(crate) mod notifications;

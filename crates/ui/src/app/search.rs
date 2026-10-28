@@ -55,13 +55,13 @@ impl App {
         };
         self.applied_search = Some(filter.clone());
         self.pending_search_anchor = None;
-        self.pending_layout_anchor_search = None;
+        self.search_view.borrow_mut().pending_anchor = None;
         self.search_refresh_pending = false;
         self.start_search(filter, cx);
     }
 
     pub(crate) fn start_search(&mut self, filter: PhotoTextFilter, cx: &mut Context<Self>) {
-        self.pending_layout_anchor_search = None;
+        self.search_view.borrow_mut().pending_anchor = None;
         self.search_request = self.search_request.wrapping_add(1);
         let generation = self.search_request;
 
@@ -117,25 +117,27 @@ impl App {
         if generation != self.search_request {
             return;
         }
-        self.pending_layout_anchor_search = None;
+        self.pending_search_anchor = None;
         match result {
             Ok(entries) => {
-                self.search_view
-                    .replace_index(Arc::new(PhotoIndex::new(entries)));
                 let requested_anchor = self.pending_search_anchor.take();
-                let anchor = search_anchor_after_result(requested_anchor, &self.search_view.index);
-                let columns = self.search_view.columns.max(1);
-                let row = anchor.and_then(|id| self.search_view.index.row_of_id(id));
-                match row {
-                    Some(row) => self
-                        .search_view
-                        .scroll
-                        .scroll_to_item_strict(row / columns, ScrollStrategy::Top),
-                    None => self
-                        .search_view
-                        .scroll
-                        .scroll_to_item_strict(0, ScrollStrategy::Top),
-                }
+                let anchor = {
+                    let mut view = self.search_view.borrow_mut();
+                    view.replace_index(Arc::new(PhotoIndex::new(entries)));
+                    let anchor = search_anchor_after_result(requested_anchor, &view.index);
+                    let columns = view.columns.max(1);
+                    let row = anchor.and_then(|id| view.index.row_of_id(id));
+                    match row {
+                        Some(row) => {
+                            view.scroll
+                                .scroll_to_item_strict(row / columns, ScrollStrategy::Top);
+                        }
+                        None => {
+                            view.scroll.scroll_to_item_strict(0, ScrollStrategy::Top);
+                        }
+                    }
+                    anchor
+                };
                 self.search_active = true;
                 self.searching = false;
                 if self.search_refresh_pending {
@@ -161,15 +163,15 @@ impl App {
         self.searching = false;
         self.applied_search = None;
         self.pending_search_anchor = None;
-        self.pending_layout_anchor_search = None;
+        self.search_view.borrow_mut().pending_anchor = None;
         self.search_refresh_pending = false;
         // Invalidate an in-flight request so it cannot revive the cleared view.
         self.search_request = self.search_request.wrapping_add(1);
-        let index = self.library.index.clone();
-        self.search_view.replace_index(index);
-        self.search_view
-            .scroll
-            .scroll_to_item_strict(0, ScrollStrategy::Top);
+        let index = self.library.borrow().index.clone();
+        let mut view = self.search_view.borrow_mut();
+        view.replace_index(index);
+        view.scroll.scroll_to_item_strict(0, ScrollStrategy::Top);
+        drop(view);
         cx.notify();
     }
 
@@ -189,12 +191,15 @@ impl App {
             self.search_refresh_pending = true;
             return;
         }
-        let anchor = anchor_photo_id(
-            &self.search_view.index,
-            list_scroll_top(&self.search_view.scroll),
-            self.search_view.columns,
-            self.search_view.row_height,
-        );
+        let anchor = {
+            let view = self.search_view.borrow();
+            anchor_photo_id(
+                &view.index,
+                list_scroll_top(&view.scroll),
+                view.columns,
+                view.row_height,
+            )
+        };
         self.start_search_refresh(anchor, cx);
     }
 

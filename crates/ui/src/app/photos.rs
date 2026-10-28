@@ -4,6 +4,7 @@
 //! Rendering stays in `ui::library`; these methods only touch App fields and
 //! background decode queues.
 
+use std::cell::{Ref, RefMut};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -61,7 +62,7 @@ impl App {
     /// Starts a background decode for a grid thumbnail when the cache has a
     /// free slot. Cached, pending, and previously failed photos are skipped.
     pub(crate) fn request_thumbnail(&mut self, photo: &Photo, cx: &mut Context<Self>) {
-        if !self.thumbnails.begin(photo.id) {
+        if !self.thumbnails.borrow_mut().begin(photo.id) {
             return;
         }
         let id = photo.id;
@@ -83,9 +84,11 @@ impl App {
             this.update(cx, |this, cx| {
                 match decoded {
                     Some((color, rgba)) => {
-                        this.thumbnails.insert(id, make_render_image(rgba), color);
+                        this.thumbnails
+                            .borrow_mut()
+                            .insert(id, make_render_image(rgba), color);
                     }
-                    None => this.thumbnails.fail(id),
+                    None => this.thumbnails.borrow_mut().fail(id),
                 }
                 // The selected photo may have been refused earlier because
                 // every in-flight slot was busy; a freed slot is its retry.
@@ -122,10 +125,10 @@ impl App {
     /// `begin` ignores cached, pending, failed, and over-cap requests, so this
     /// is safe to call after every decode completion.
     fn retry_pinned_thumbnail(&mut self, cx: &mut Context<Self>) {
-        let Some(pinned) = self.thumbnails.pinned else {
+        let Some(pinned) = self.thumbnails.borrow().pinned else {
             return;
         };
-        if self.thumbnails.get(pinned).is_some() {
+        if self.thumbnails.borrow_mut().get(pinned).is_some() {
             return;
         }
         let Some(photo) = self
@@ -171,8 +174,8 @@ impl App {
                 self.request_preview(cx);
             }
         }
-        self.thumbnails.pin(id);
-        if self.thumbnails.get(id).is_none()
+        self.thumbnails.borrow_mut().pin(id);
+        if self.thumbnails.borrow_mut().get(id).is_none()
             && let Some(photo) = self.selected_photo.clone()
         {
             self.request_thumbnail(&photo, cx);
@@ -271,7 +274,7 @@ impl App {
 
     pub(crate) fn clear_selection(&mut self, cx: &mut Context<Self>) {
         if let Some(id) = self.selected.take() {
-            self.thumbnails.unpin(id);
+            self.thumbnails.borrow_mut().unpin(id);
         }
         self.selected_ids.clear();
         self.selection_anchor = None;
@@ -307,11 +310,11 @@ impl App {
         cx.notify();
     }
 
-    fn photo_browser(&self) -> &PhotoBrowser {
+    fn photo_browser(&self) -> Ref<'_, PhotoBrowser> {
         if self.screen == Screen::Search {
-            &self.search_view
+            self.search_view.borrow()
         } else {
-            &self.library
+            self.library.borrow()
         }
     }
 
@@ -352,11 +355,11 @@ impl App {
         }
     }
 
-    pub(crate) fn browser_mut(&mut self, search: bool) -> &mut PhotoBrowser {
+    pub(crate) fn browser_mut(&self, search: bool) -> RefMut<'_, PhotoBrowser> {
         if search {
-            &mut self.search_view
+            self.search_view.borrow_mut()
         } else {
-            &mut self.library
+            self.library.borrow_mut()
         }
     }
 
@@ -395,7 +398,7 @@ impl App {
     }
 
     pub(crate) fn color_for(&self, photo: &Photo) -> u32 {
-        self.thumbnails.color(photo.id).unwrap_or_else(|| {
+        self.thumbnails.borrow().color(photo.id).unwrap_or_else(|| {
             self.palette
                 .scene_color(photo.world_name.as_deref().unwrap_or(""))
         })
@@ -538,15 +541,15 @@ impl App {
                     None
                 }
             };
-            self.library.remove_photos(&removed);
-            self.search_view.remove_photos(&removed);
+            self.library.borrow_mut().remove_photos(&removed);
+            self.search_view.borrow_mut().remove_photos(&removed);
             if !promoted.is_empty() {
                 // Kept cards now display the promoted derivative.
-                self.library.invalidate_pages();
-                self.search_view.invalidate_pages();
+                self.library.borrow_mut().invalidate_pages();
+                self.search_view.borrow_mut().invalidate_pages();
             }
             for id in &removed {
-                self.thumbnails.unpin(*id);
+                self.thumbnails.borrow_mut().unpin(*id);
             }
             self.selected_ids.remove_all(&removed);
             if self

@@ -103,7 +103,7 @@ impl App {
         if !cx.reduce_motion()
             && let Some((actual_source, from)) = resolved
         {
-            let thumbnail = self.thumbnails.get(id);
+            let thumbnail = self.thumbnails.borrow_mut().get(id);
             let preview = self.preview.clone();
             if thumbnail.is_some() || preview.is_some() {
                 self.viewer_morph_epoch = self.viewer_morph_epoch.wrapping_add(1);
@@ -202,7 +202,7 @@ impl App {
             Duration::from_millis(240),
             Instant::now(),
         );
-        let thumbnail = self.thumbnails.get(id);
+        let thumbnail = self.thumbnails.borrow_mut().get(id);
         let preview = self.preview.clone();
         let color = self
             .selected_photo
@@ -278,7 +278,7 @@ impl App {
         self.viewer_morph_epoch = self.viewer_morph_epoch.wrapping_add(1);
         self.viewer_return_source = None;
         if let Some(id) = self.selected.take() {
-            self.thumbnails.unpin(id);
+            self.thumbnails.borrow_mut().unpin(id);
         }
         self.selected_ids.clear();
         self.selection_anchor = None;
@@ -300,9 +300,9 @@ impl App {
 
     fn viewer_source_ids(&self) -> Vec<i64> {
         let browser = if self.screen == Screen::Search && self.search_active {
-            &self.search_view
+            self.search_view.borrow()
         } else {
-            &self.library
+            self.library.borrow()
         };
         let source: Vec<i64> = browser.index.entries.iter().map(|entry| entry.id).collect();
         match self.selected {
@@ -347,10 +347,10 @@ impl App {
         }
         // Keep the top-bar navigation focused; only the library selection and
         // the displayed photo change behind the overlay.
-        let visible_image = self
-            .preview
-            .clone()
-            .or_else(|| self.selected.and_then(|id| self.thumbnails.get(id)));
+        let visible_image = self.preview.clone().or_else(|| {
+            self.selected
+                .and_then(|id| self.thumbnails.borrow_mut().get(id))
+        });
         let viewport = content_viewport(window);
         let from_size = self.viewer_box.current_size(viewport);
         let target_details_width = self.viewer_panel.to_width;
@@ -509,7 +509,12 @@ impl App {
         id: i64,
         _source: ViewerOpenSource,
     ) -> Option<(ViewerOpenSource, Bounds<Pixels>)> {
-        let card_entry = self.card_image_bounds.borrow().get(&id).copied();
+        let (bounds, bounds_epoch) = if self.screen == Screen::Search {
+            (&self.search_bounds, self.search_bounds_epoch.get())
+        } else {
+            (&self.library_bounds, self.library_bounds_epoch.get())
+        };
+        let card_entry = bounds.borrow().get(&id).copied();
         let inspector_entry = *self.inspector_preview_bounds.borrow();
         // The shell is not rebuilt while the opaque viewer is open, so the
         // bounds captured in the opening frame are still the card positions.
@@ -521,7 +526,7 @@ impl App {
             )
         } else {
             (
-                current_tagged_bounds(card_entry, self.render_epoch),
+                current_tagged_bounds(card_entry, bounds_epoch),
                 current_tagged_bounds(inspector_entry, self.render_epoch),
             )
         };
