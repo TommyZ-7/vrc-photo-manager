@@ -25,6 +25,7 @@ pub(crate) fn import_progress_ratio(progress: &ImportProgress) -> f32 {
 
 impl App {
     pub(crate) fn import_modal_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
         let Some(dialog) = self.import_dialog.as_ref() else {
             return div().into_any_element();
         };
@@ -52,12 +53,12 @@ impl App {
                         div()
                             .text_size(px(20.))
                             .font_semibold()
-                            .text_color(rgb(TEXT))
+                            .text_color(rgb(p.text))
                             .child(title),
                     )
-                    .child(self.badge(mode, BLUE, 0x14283d))
+                    .child(self.badge(mode, p.accent, p.accent_soft))
                     .when_some(dialog.origin.run_summary(), |this, summary| {
-                        this.child(self.badge(&summary, MUTED, PANEL_2))
+                        this.child(self.badge(&summary, p.muted, p.panel_2))
                     })
                     .child(div().flex_1()),
             );
@@ -90,7 +91,7 @@ impl App {
                                     ),
                             ),
                     )
-                    .child(div().text_size(px(10.)).text_color(rgb(MUTED_2)).child(
+                    .child(div().text_size(px(10.)).text_color(rgb(p.muted_2)).child(
                         "フォルダはサブフォルダも対象です。compressed フォルダは除外します。",
                     ))
                     .when_some(source.map(|source| source.summary()), |this, summary| {
@@ -98,7 +99,7 @@ impl App {
                             div()
                                 .truncate()
                                 .text_size(px(11.))
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(p.muted))
                                 .child(summary),
                         )
                     })
@@ -115,7 +116,7 @@ impl App {
                             this.child(
                                 div()
                                     .text_size(px(10.))
-                                    .text_color(rgb(AMBER))
+                                    .text_color(rgb(p.amber))
                                     .child(warning),
                             )
                         },
@@ -125,11 +126,11 @@ impl App {
                             div()
                                 .p(px(10.))
                                 .rounded(px(8.))
-                                .bg(rgb(0x2a1414))
+                                .bg(rgb(p.red_soft))
                                 .border_1()
-                                .border_color(rgba(0xfb718533))
+                                .border_color(rgba(p.red_border))
                                 .text_size(px(10.))
-                                .text_color(rgb(RED))
+                                .text_color(rgb(p.red))
                                 .child(error),
                         )
                     });
@@ -140,13 +141,13 @@ impl App {
                             div()
                                 .truncate()
                                 .text_size(px(11.))
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(p.muted))
                                 .child(dest.clone()),
                         )
                         .child(
                             div()
                                 .text_size(px(10.))
-                                .text_color(rgb(MUTED_2))
+                                .text_color(rgb(p.muted_2))
                                 .child("設定 > ライブラリ > 取り込み先で変更できます。"),
                         ),
                 );
@@ -192,7 +193,7 @@ impl App {
                             .child(
                                 div()
                                     .text_size(px(11.))
-                                    .text_color(rgb(MUTED))
+                                    .text_color(rgb(p.muted))
                                     .child(import_progress_label(progress)),
                             )
                             .child(
@@ -200,13 +201,13 @@ impl App {
                                     .h(px(6.))
                                     .w_full()
                                     .rounded_full()
-                                    .bg(rgb(PANEL_2))
+                                    .bg(rgb(p.panel_2))
                                     .child(
                                         div()
                                             .h_full()
                                             .w(relative(import_progress_ratio(progress)))
                                             .rounded_full()
-                                            .bg(rgb(BLUE)),
+                                            .bg(rgb(p.accent)),
                                     ),
                             )
                             .when_some(last_source, |this, file| {
@@ -214,7 +215,7 @@ impl App {
                                     div()
                                         .truncate()
                                         .text_size(px(10.))
-                                        .text_color(rgb(MUTED_2))
+                                        .text_color(rgb(p.muted_2))
                                         .child(file),
                                 )
                             }),
@@ -226,7 +227,7 @@ impl App {
                                 div()
                                     .truncate()
                                     .text_size(px(10.))
-                                    .text_color(rgb(MUTED_2))
+                                    .text_color(rgb(p.muted_2))
                                     .child(summary),
                             )
                         },
@@ -236,7 +237,7 @@ impl App {
                         div()
                             .truncate()
                             .text_size(px(11.))
-                            .text_color(rgb(MUTED))
+                            .text_color(rgb(p.muted))
                             .child(dest.clone()),
                     )
                     .child(
@@ -271,7 +272,7 @@ impl App {
             .items_center()
             .justify_center()
             .p(px(DIALOG_VIEWPORT_MARGIN))
-            .bg(rgba(0x05070acc))
+            .bg(rgba(p.scrim))
             .on_click(cx.listener(|this, _, _, cx| this.cancel_or_close_import(cx)))
             .child(panel)
             .with_animation(
@@ -285,6 +286,7 @@ impl App {
     }
 
     pub(crate) fn import_report_details(&self, report: &ImportReportView) -> AnyElement {
+        let p = self.palette;
         let failed_issues: Vec<&ImportIssue> = report
             .issues
             .iter()
@@ -304,7 +306,7 @@ impl App {
                     .py(px(8.))
                     .gap(px(6.))
                     .border_t_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(p.border))
                     .child(self.section_label("失敗したファイル"))
                     .child(
                         v_flex()
@@ -319,13 +321,13 @@ impl App {
                                         div()
                                             .truncate()
                                             .text_size(px(10.))
-                                            .text_color(rgb(RED))
+                                            .text_color(rgb(p.red))
                                             .child(source),
                                     )
                                     .child(
                                         div()
                                             .text_size(px(10.))
-                                            .text_color(rgb(MUTED))
+                                            .text_color(rgb(p.muted))
                                             .child(issue.message.clone()),
                                     )
                             })),
@@ -340,7 +342,7 @@ impl App {
                     .py(px(8.))
                     .gap(px(6.))
                     .border_t_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(p.border))
                     .child(self.section_label("移動元を削除できなかったファイル"))
                     .children(partial_issues.iter().map(|issue| {
                         let source = issue.source.to_string_lossy().to_string();
@@ -358,7 +360,7 @@ impl App {
                                         div()
                                             .truncate()
                                             .text_size(px(10.))
-                                            .text_color(rgb(AMBER))
+                                            .text_color(rgb(p.amber))
                                             .child(source),
                                     )
                                     .when_some(target, |this, target| {
@@ -366,7 +368,7 @@ impl App {
                                             div()
                                                 .truncate()
                                                 .text_size(px(9.))
-                                                .text_color(rgb(MUTED_2))
+                                                .text_color(rgb(p.muted_2))
                                                 .child(format!("→ {target}")),
                                         )
                                     }),
@@ -374,7 +376,7 @@ impl App {
                             .child(
                                 div()
                                     .text_size(px(10.))
-                                    .text_color(rgb(MUTED))
+                                    .text_color(rgb(p.muted))
                                     .child(issue.message.clone()),
                             )
                     })),
@@ -388,7 +390,7 @@ impl App {
                     .py(px(8.))
                     .gap(px(6.))
                     .border_t_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(p.border))
                     .child(self.section_label("連番を付けたファイル"))
                     .child(
                         v_flex()
@@ -402,14 +404,14 @@ impl App {
                                         div()
                                             .truncate()
                                             .text_size(px(10.))
-                                            .text_color(rgb(MUTED))
+                                            .text_color(rgb(p.muted))
                                             .child(rename.source.to_string_lossy().to_string()),
                                     )
                                     .child(
                                         div()
                                             .truncate()
                                             .text_size(px(9.))
-                                            .text_color(rgb(BLUE))
+                                            .text_color(rgb(p.accent))
                                             .child(format!(
                                                 "→ {}",
                                                 rename.target.to_string_lossy()
@@ -427,7 +429,7 @@ impl App {
                     .py(px(8.))
                     .gap(px(6.))
                     .border_t_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(p.border))
                     .child(self.section_label("スキャンできなかったファイル"))
                     .children(report.scan_failures.iter().map(|failure| {
                         v_flex()
@@ -436,13 +438,13 @@ impl App {
                                 div()
                                     .truncate()
                                     .text_size(px(10.))
-                                    .text_color(rgb(RED))
+                                    .text_color(rgb(p.red))
                                     .child(failure.path.to_string_lossy().to_string()),
                             )
                             .child(
                                 div()
                                     .text_size(px(10.))
-                                    .text_color(rgb(MUTED))
+                                    .text_color(rgb(p.muted))
                                     .child(failure.message.clone()),
                             )
                     })),
@@ -456,11 +458,11 @@ impl App {
                     .my(px(8.))
                     .p(px(8.))
                     .rounded(px(8.))
-                    .bg(rgb(0x2a1414))
+                    .bg(rgb(p.red_soft))
                     .border_1()
-                    .border_color(rgba(0xfb718533))
+                    .border_color(rgba(p.red_border))
                     .text_size(px(10.))
-                    .text_color(rgb(RED))
+                    .text_color(rgb(p.red))
                     .child(error),
             );
         }

@@ -28,6 +28,7 @@ pub(crate) fn viewer_nav_frame(t: f32, direction: f32) -> (f32, f32, f32, f32) {
 
 impl App {
     pub(crate) fn quick_look(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
         let Some(photo) = self.selected_photo.clone() else {
             return div().into_any_element();
         };
@@ -105,9 +106,9 @@ impl App {
             .px(px(20.))
             .gap(px(10.))
             .items_center()
-            .bg(rgba(0x05070a99))
+            .bg(rgba(with_alpha(p.panel_header, 0x99)))
             .border_b_1()
-            .border_color(rgba(0xffffff12))
+            .border_color(rgba(p.line_soft))
             .key_context("viewer_nav")
             .child(close_button)
             .child(prev_button)
@@ -118,7 +119,7 @@ impl App {
                     .min_w_0()
                     .truncate()
                     .text_size(px(12.))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(p.muted))
                     .child(photo.file_name.clone()),
             )
             .child(details_button);
@@ -203,7 +204,7 @@ impl App {
                     .items_center()
                     .justify_center()
                     .text_size(px(11.))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(p.muted))
                     .child(preview_placeholder_label(
                         self.preview_queue.pending_for(photo.id),
                     )),
@@ -268,12 +269,11 @@ impl App {
                     .overflow_hidden()
                     .rounded(px(17.))
                     .border_1()
-                    .border_color(rgba(0xffffff1b))
-                    .bg(rgb(PANEL_DEEP))
+                    .border_color(rgba(p.line_soft))
+                    .bg(rgb(p.panel_deep))
                     .shadow(vec![
-                        BoxShadow::new(px(0.), px(18.), rgba(0x00000047).into())
-                            .blur_radius(px(44.)),
-                        BoxShadow::new(px(0.), px(1.), rgba(0xffffff10).into())
+                        BoxShadow::new(px(0.), px(18.), rgba(p.shadow).into()).blur_radius(px(44.)),
+                        BoxShadow::new(px(0.), px(1.), rgba(p.highlight).into())
                             .inset()
                             .blur_radius(px(0.)),
                     ])
@@ -302,7 +302,7 @@ impl App {
             .right_0()
             .bottom_0()
             .size_full()
-            .bg(rgb(0x05070a))
+            .bg(rgb(p.bg))
             .key_context("quick_look")
             .occlude()
             .child(div().absolute().size_full().bg(rgba((color << 8) | 0x22)))
@@ -315,14 +315,21 @@ impl App {
 pub(crate) struct ViewerMorphView {
     morph: Option<ViewerMorph>,
     max_fps: f32,
+    palette: Palette,
 }
 
 impl ViewerMorphView {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(palette: Palette) -> Self {
         Self {
             morph: None,
             max_fps: 60.0,
+            palette,
         }
+    }
+
+    pub(crate) fn set_palette(&mut self, palette: Palette, cx: &mut Context<Self>) {
+        self.palette = palette;
+        cx.notify();
     }
 
     pub(crate) fn set_morph(
@@ -339,6 +346,7 @@ impl ViewerMorphView {
 
 impl Render for ViewerMorphView {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.palette;
         let Some(morph) = self.morph.as_ref() else {
             // An in-flow empty slot would still take a root flex gap and
             // narrow the main column by 14px.
@@ -397,7 +405,7 @@ impl Render for ViewerMorphView {
                 .right_0()
                 .bottom_0()
                 .size_full()
-                .bg(rgb(0x05070a))
+                .bg(rgb(p.bg))
                 .child(div().absolute().size_full().bg(rgba((color << 8) | 0x22)))
                 .with_animation(
                     ("viewer-morph-backdrop", epoch),

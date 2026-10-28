@@ -391,7 +391,7 @@ impl App {
             card_image_bounds: Rc::new(RefCell::new(HashMap::new())),
             inspector_preview_bounds: Rc::new(RefCell::new(None)),
             viewer_morph: None,
-            viewer_morph_view: cx.new(|_| crate::ui::viewer::ViewerMorphView::new()),
+            viewer_morph_view: cx.new(|_| crate::ui::viewer::ViewerMorphView::new(initial_palette)),
             viewer_morph_epoch: 0,
             viewer_return_source: None,
             viewer_nav_epoch: 0,
