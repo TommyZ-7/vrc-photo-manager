@@ -20,7 +20,33 @@ use crate::app::daemon::autostart_description;
 use crate::state::photo_browser::{anchor_photo_id, list_scroll_top};
 use crate::ui::components::compression_policy_warning;
 use crate::ui::components::glass_panel;
+use crate::ui::palette::{
+    Family, accent_colors, apply_component_theme, find_accent, find_main, main_colors,
+    preview_accent, preview_main, readable_on, resolve,
+};
 use crate::ui::theme::*;
+
+#[derive(Clone, Copy)]
+enum ThemeAxis {
+    Main,
+    Accent,
+}
+
+impl ThemeAxis {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Accent => "accent",
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Main => "メインカラー（背景・パネル）",
+            Self::Accent => "サブカラー（アクセント）",
+        }
+    }
+}
 
 impl App {
     pub(crate) fn settings_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -41,6 +67,7 @@ impl App {
                     .overflow_y_scroll()
                     .track_scroll(&self.settings_scroll)
                     .gap(px(CARD_GAP))
+                    .child(self.theme_card(cx))
                     .child(
                         glass_panel(&self.palette)
                             .flex()
@@ -434,6 +461,200 @@ impl App {
                     .w(px(8.))
                     .child(Scrollbar::vertical(&self.settings_scroll)),
             )
+    }
+
+    fn theme_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.palette;
+        glass_panel(&self.palette)
+            .flex()
+            .flex_col()
+            .p(px(14.))
+            .gap(px(12.))
+            .rounded(px(17.))
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .font_semibold()
+                    .text_color(rgb(p.text))
+                    .child("テーマ"),
+            )
+            .child(self.theme_axis(ThemeAxis::Main, cx))
+            .child(self.theme_axis(ThemeAxis::Accent, cx))
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(rgb(p.muted_2))
+                    .child("サブカラーは背景とのコントラストに合わせて明度を自動調整します"),
+            )
+    }
+
+    fn theme_axis(&self, axis: ThemeAxis, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.palette;
+        let mut groups = v_flex().gap(px(8.)).child(
+            div()
+                .text_size(px(12.))
+                .font_medium()
+                .text_color(rgb(p.text))
+                .child(axis.title()),
+        );
+        for family in [Family::Dark, Family::Light, Family::Pastel] {
+            let mut row = h_flex().flex_wrap().gap(px(4.));
+            match axis {
+                ThemeAxis::Main => {
+                    for color in main_colors().iter().filter(|color| color.family == family) {
+                        row = row.child(self.theme_chip(
+                            axis,
+                            color.id,
+                            color.label,
+                            preview_main(color),
+                            self.settings.ui_theme_main == color.id,
+                            cx,
+                        ));
+                    }
+                }
+                ThemeAxis::Accent => {
+                    for color in accent_colors()
+                        .iter()
+                        .filter(|color| color.family == family)
+                    {
+                        row = row.child(self.theme_chip(
+                            axis,
+                            color.id,
+                            color.label,
+                            preview_accent(color),
+                            self.settings.ui_theme_accent == color.id,
+                            cx,
+                        ));
+                    }
+                }
+            }
+            groups = groups.child(
+                v_flex()
+                    .gap(px(4.))
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(rgb(p.muted_2))
+                            .child(family.label()),
+                    )
+                    .child(row),
+            );
+        }
+        groups
+    }
+
+    fn theme_chip(
+        &self,
+        axis: ThemeAxis,
+        id: &'static str,
+        label: &'static str,
+        swatch: u32,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let p = self.palette;
+        div()
+            .id(SharedString::from(format!("theme-{}-{id}", axis.key())))
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .px(px(6.))
+            .py(px(4.))
+            .rounded(px(8.))
+            .border_1()
+            .border_color(if selected {
+                rgb(p.accent_border)
+            } else {
+                rgba(0x00000000)
+            })
+            .bg(if selected {
+                rgb(p.accent_soft)
+            } else {
+                rgba(0x00000000)
+            })
+            .cursor_pointer()
+            .hover(move |this| this.bg(rgb(p.panel_inner)))
+            .on_click(cx.listener(move |this, _, _, cx| match axis {
+                ThemeAxis::Main => this.set_main_theme(id, cx),
+                ThemeAxis::Accent => this.set_accent_theme(id, cx),
+            }))
+            .child(
+                div()
+                    .size(px(18.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(5.))
+                    .bg(rgb(swatch))
+                    .border_1()
+                    .border_color(rgba(with_alpha(p.text, 0x24)))
+                    .when(selected, |this| {
+                        this.child(
+                            div()
+                                .text_size(px(10.))
+                                .font_semibold()
+                                .text_color(rgb(readable_on(swatch)))
+                                .child("✓"),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(rgb(if selected { p.text } else { p.muted }))
+                    .child(label),
+            )
+    }
+
+    fn apply_theme_change(&mut self, cx: &mut Context<Self>) {
+        apply_component_theme(self.palette, cx);
+        self.library.labels = None;
+        self.search_view.labels = None;
+        let palette = self.palette;
+        self.viewer_morph_view
+            .update(cx, |view, cx| view.set_palette(palette, cx));
+        cx.notify();
+    }
+
+    pub(crate) fn set_main_theme(&mut self, id: &str, cx: &mut Context<Self>) {
+        let id = find_main(id);
+        if self.settings.ui_theme_main == id.id {
+            return;
+        }
+        let previous = (self.settings.ui_theme_main.clone(), self.palette);
+        self.settings.ui_theme_main = id.id.to_string();
+        let palette = resolve(&self.settings.ui_theme_main, &self.settings.ui_theme_accent);
+        self.palette = palette;
+        if let Err(error) = self.settings.save(&self.db) {
+            self.settings.ui_theme_main = previous.0;
+            self.palette = previous.1;
+            self.toast_error(format!("設定を保存できません: {error}"), cx);
+            tracing::warn!(%error, "cannot save theme setting");
+            cx.notify();
+            return;
+        }
+        self.apply_theme_change(cx);
+    }
+
+    pub(crate) fn set_accent_theme(&mut self, id: &str, cx: &mut Context<Self>) {
+        let id = find_accent(id);
+        if self.settings.ui_theme_accent == id.id {
+            return;
+        }
+        let previous = (self.settings.ui_theme_accent.clone(), self.palette);
+        self.settings.ui_theme_accent = id.id.to_string();
+        let palette = resolve(&self.settings.ui_theme_main, &self.settings.ui_theme_accent);
+        self.palette = palette;
+        if let Err(error) = self.settings.save(&self.db) {
+            self.settings.ui_theme_accent = previous.0;
+            self.palette = previous.1;
+            self.toast_error(format!("設定を保存できません: {error}"), cx);
+            tracing::warn!(%error, "cannot save theme setting");
+            cx.notify();
+            return;
+        }
+        self.apply_theme_change(cx);
     }
 
     pub(crate) fn set_max_fps(&mut self, fps: u32, cx: &mut Context<Self>) {

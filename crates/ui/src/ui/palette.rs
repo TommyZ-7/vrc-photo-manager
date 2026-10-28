@@ -641,6 +641,10 @@ fn ensure_contrast_vs_all(fg: u32, backgrounds: &[u32], min: f32) -> u32 {
     ensure_contrast(fg, worst, min)
 }
 
+pub(crate) fn readable_on(fill: u32) -> u32 {
+    best_text(fill)
+}
+
 fn best_text(fill: u32) -> u32 {
     const DARK_TEXT: u32 = 0x101418;
     const LIGHT_TEXT: u32 = 0xffffff;
