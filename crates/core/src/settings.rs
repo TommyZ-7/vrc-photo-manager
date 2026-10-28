@@ -43,7 +43,7 @@ pub struct AppSettings {
     pub compression_workers: usize,
     #[serde(default)]
     pub ui_sidebar_collapsed: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub ui_inspector_collapsed: bool,
     #[serde(default)]
     pub ui_reduce_motion: bool,
@@ -110,7 +110,7 @@ impl Default for AppSettings {
             thumbnail_cache_mb: 2048,
             compression_workers: 1,
             ui_sidebar_collapsed: false,
-            ui_inspector_collapsed: false,
+            ui_inspector_collapsed: true,
             ui_reduce_motion: false,
             ui_max_fps: 60,
             ui_ribbon_collapsed: true,
@@ -468,7 +468,7 @@ mod tests {
         }"#;
         let settings: AppSettings = serde_json::from_str(json).unwrap();
         assert!(!settings.ui_sidebar_collapsed);
-        assert!(!settings.ui_inspector_collapsed);
+        assert!(settings.ui_inspector_collapsed);
         assert!(!settings.ui_reduce_motion);
         assert!(settings.ui_card_show_status);
         assert!(settings.ui_card_show_world);
@@ -484,6 +484,11 @@ mod tests {
         let settings = AppSettings::default();
         assert!(settings.auto_update_check);
         assert_eq!(settings.update_last_checked_at, None);
+    }
+
+    #[test]
+    fn inspector_defaults_to_collapsed() {
+        assert!(AppSettings::default().ui_inspector_collapsed);
     }
 
     #[test]

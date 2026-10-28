@@ -25,7 +25,7 @@ impl App {
             .gap(px(CARD_GAP))
             .child(self.stat_card("写真", format!("{} 枚", self.stats.photo_count)))
             .child(self.stat_card("未完了ジョブ", format!("{} 件", self.active_job_count)))
-            .child(self.stat_card("未実行", format_bytes(self.stats.total_bytes)))
+            .child(self.stat_card("ライブラリ容量", format_bytes(self.stats.total_bytes)))
             .child(self.stat_card(
                 "デーモン",
                 if self.daemon_active {

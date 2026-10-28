@@ -84,41 +84,44 @@ impl App {
                     .blur_radius(px(0.)),
             ])
             .child(
-                v_flex()
-                    .relative()
-                    .w_full()
-                    .pr(px(NAV_TOGGLE_GUTTER))
-                    .gap(px(NAV_ITEM_GAP))
-                    .child(self.nav_highlight())
-                    .child(self.nav_item(
-                        "写真",
-                        Screen::Photos,
-                        IconName::GalleryVerticalEnd,
-                        Some(photo_count.clone()),
-                        cx,
-                    ))
-                    .child(self.nav_item("検索", Screen::Search, IconName::Search, None, cx))
-                    .child(self.nav_item(
-                        "圧縮",
-                        Screen::Compression,
-                        IconName::Minimize,
-                        compression_count,
-                        cx,
-                    ))
-                    .child(self.nav_item(
-                        "ダッシュボード",
-                        Screen::Dashboard,
-                        IconName::LayoutDashboard,
-                        None,
-                        cx,
-                    ))
-                    .child(self.nav_item(
-                        "設定",
-                        Screen::Settings,
-                        IconName::Settings,
-                        update_badge,
-                        cx,
-                    )),
+                // Keep the absolute highlight in the same box as the rows: the
+                // gutter belongs to the outer wrapper, not the positioning box.
+                v_flex().w_full().pr(px(NAV_TOGGLE_GUTTER)).child(
+                    v_flex()
+                        .relative()
+                        .w_full()
+                        .gap(px(NAV_ITEM_GAP))
+                        .child(self.nav_highlight())
+                        .child(self.nav_item(
+                            "写真",
+                            Screen::Photos,
+                            IconName::GalleryVerticalEnd,
+                            Some(photo_count.clone()),
+                            cx,
+                        ))
+                        .child(self.nav_item("検索", Screen::Search, IconName::Search, None, cx))
+                        .child(self.nav_item(
+                            "圧縮",
+                            Screen::Compression,
+                            IconName::Minimize,
+                            compression_count,
+                            cx,
+                        ))
+                        .child(self.nav_item(
+                            "ダッシュボード",
+                            Screen::Dashboard,
+                            IconName::LayoutDashboard,
+                            None,
+                            cx,
+                        ))
+                        .child(self.nav_item(
+                            "設定",
+                            Screen::Settings,
+                            IconName::Settings,
+                            update_badge,
+                            cx,
+                        )),
+                ),
             )
             .child(div().flex_1())
             .when_some(status_card, |this, card| this.child(card))
@@ -534,7 +537,7 @@ impl App {
         let pill = div()
             .absolute()
             .left_0()
-            .right(px(NAV_TOGGLE_GUTTER))
+            .right_0()
             .h(px(NAV_ITEM_HEIGHT))
             .rounded(px(11.))
             .bg(rgb(ACCENT_SOFT))
