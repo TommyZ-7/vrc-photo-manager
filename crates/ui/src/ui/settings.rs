@@ -8,6 +8,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::switch::Switch;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::prelude::StatefulInteractiveElement as _;
@@ -20,10 +21,37 @@ use crate::app::daemon::autostart_description;
 use crate::state::photo_browser::{anchor_photo_id, list_scroll_top};
 use crate::ui::components::compression_policy_warning;
 use crate::ui::components::glass_panel;
+use crate::ui::palette::{
+    accent_colors, find_accent, find_main, main_colors, preview_accent, preview_main, readable_on,
+    resolve,
+};
 use crate::ui::theme::*;
+
+#[derive(Clone, Copy)]
+enum ThemeAxis {
+    Main,
+    Accent,
+}
+
+impl ThemeAxis {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Accent => "accent",
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Main => "メインカラー（背景・パネル）",
+            Self::Accent => "サブカラー（アクセント）",
+        }
+    }
+}
 
 impl App {
     pub(crate) fn settings_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.palette;
         let autostart_hint =
             autostart_description(self.daemon_active, self.daemon_supervisor.as_deref());
         h_flex()
@@ -40,8 +68,9 @@ impl App {
                     .overflow_y_scroll()
                     .track_scroll(&self.settings_scroll)
                     .gap(px(CARD_GAP))
+                    .child(self.theme_card(cx))
                     .child(
-                        glass_panel()
+                        glass_panel(&self.palette)
                             .flex()
                             .flex_col()
                             .p(px(14.))
@@ -51,7 +80,7 @@ impl App {
                                 div()
                                     .text_size(px(13.))
                                     .font_semibold()
-                                    .text_color(rgb(TEXT))
+                                    .text_color(rgb(p.text))
                                     .child("ライブラリ"),
                             )
                             .child(
@@ -118,9 +147,10 @@ impl App {
                                                         != previous.managed_dir;
                                                 if let Err(error) = this.settings.save(&this.db) {
                                                     this.settings = previous;
-                                                    this.message = Some(format!(
-                                                        "設定を保存できません: {error}"
-                                                    ));
+                                                    this.toast_error(
+                                                        format!("設定を保存できません: {error}"),
+                                                        cx,
+                                                    );
                                                     tracing::warn!(
                                                         %error,
                                                         "cannot save path settings"
@@ -138,18 +168,21 @@ impl App {
                                                     if requested.is_ok() {
                                                         this.send_wake_commands(cx);
                                                     }
-                                                    this.message = Some(match requested {
-                                                        Ok(_) => "保存しました。デーモンに再スキャンを要求しました（停止中なら起動後に実行）".to_string(),
-                                                        Err(error) => {
-                                                            tracing::warn!(
-                                                                %error,
-                                                                "cannot request daemon rescan"
-                                                            );
-                                                            "保存しました。デーモン再起動後に反映されます。".to_string()
-                                                        }
-                                                    });
+                                                    this.toast_success(
+                                                        match requested {
+                                                            Ok(_) => "保存しました。デーモンに再スキャンを要求しました（停止中なら起動後に実行）",
+                                                            Err(error) => {
+                                                                tracing::warn!(
+                                                                    %error,
+                                                                    "cannot request daemon rescan"
+                                                                );
+                                                                "保存しました。デーモン再起動後に反映されます。"
+                                                            }
+                                                        },
+                                                        cx,
+                                                    );
                                                 } else {
-                                                    this.message = Some("保存しました。".to_string());
+                                                    this.toast_success("保存しました。", cx);
                                                 }
                                                 cx.notify();
                                             })),
@@ -157,13 +190,13 @@ impl App {
                                     .child(
                                         div()
                                             .text_size(px(10.))
-                                            .text_color(rgb(MUTED_2))
+                                            .text_color(rgb(p.muted_2))
                                             .child("保存時に再スキャンを要求します（停止中なら起動後に実行）"),
                                     ),
                             ),
                     )
                     .child(
-                        glass_panel()
+                        glass_panel(&self.palette)
                             .flex()
                             .flex_col()
                             .p(px(14.))
@@ -173,7 +206,7 @@ impl App {
                                 div()
                                     .text_size(px(13.))
                                     .font_semibold()
-                                    .text_color(rgb(TEXT))
+                                    .text_color(rgb(p.text))
                                     .child("表示（ライブラリ・検索）"),
                             )
                             .child(self.setting_switch(
@@ -210,7 +243,7 @@ impl App {
                             ))
                     )
                     .child(
-                        glass_panel()
+                        glass_panel(&self.palette)
                             .flex()
                             .flex_col()
                             .p(px(14.))
@@ -220,7 +253,7 @@ impl App {
                                 div()
                                     .text_size(px(13.))
                                     .font_semibold()
-                                    .text_color(rgb(TEXT))
+                                    .text_color(rgb(p.text))
                                     .child("パフォーマンス"),
                             )
                             .child(
@@ -229,13 +262,13 @@ impl App {
                                     .child(
                                         div()
                                             .text_size(px(12.))
-                                            .text_color(rgb(TEXT))
+                                            .text_color(rgb(p.text))
                                             .child("アニメーションの最大FPS"),
                                     )
                                     .child(
                                         div()
                                             .text_size(px(10.))
-                                            .text_color(rgb(MUTED_2))
+                                            .text_color(rgb(p.muted_2))
                                             .child("0（無制限）はモニタのリフレッシュレートまで描画します"),
                                     )
                                     .child(
@@ -263,16 +296,16 @@ impl App {
                                                         .py(px(5.))
                                                         .rounded(px(8.))
                                                         .bg(if active {
-                                                            rgb(ACCENT_SOFT)
+                                                            rgb(p.accent_soft)
                                                         } else {
                                                             rgba(0x00000000)
                                                         })
                                                         .text_size(px(11.))
                                                         .font_medium()
                                                         .text_color(if active {
-                                                            rgb(BLUE)
+                                                            rgb(p.accent)
                                                         } else {
-                                                            rgb(MUTED)
+                                                            rgb(p.muted)
                                                         })
                                                         .cursor_pointer()
                                                         .on_click(cx.listener(
@@ -287,7 +320,7 @@ impl App {
                             ),
                     )
                     .child(
-                        glass_panel()
+                        glass_panel(&self.palette)
                             .flex()
                             .flex_col()
                             .p(px(14.))
@@ -297,7 +330,7 @@ impl App {
                                 div()
                                     .text_size(px(13.))
                                     .font_semibold()
-                                    .text_color(rgb(TEXT))
+                                    .text_color(rgb(p.text))
                                     .child("起動と圧縮"),
                             )
                             .child(self.setting_switch(
@@ -352,11 +385,11 @@ impl App {
                                         div()
                                             .p(px(12.))
                                             .rounded(px(8.))
-                                            .bg(rgb(0x2a1414))
+                                            .bg(rgb(p.red_soft))
                                             .border_1()
-                                            .border_color(rgba(0xfb718533))
+                                            .border_color(rgb(p.red_border))
                                             .text_size(px(10.))
-                                            .text_color(rgb(RED))
+                                            .text_color(rgb(p.red))
                                             .child(warning),
                                     )
                                 },
@@ -372,13 +405,13 @@ impl App {
                                             .child(
                                                 div()
                                                     .text_size(px(12.))
-                                                    .text_color(rgb(TEXT))
+                                                    .text_color(rgb(p.text))
                                                     .child("アニメーションを減らす"),
                                             )
                                             .child(
                                                 div()
                                                     .text_size(px(10.))
-                                                    .text_color(rgb(MUTED_2))
+                                                    .text_color(rgb(p.muted_2))
                                                     .child(
                                                         "画面遷移とカードの動きを抑制します",
                                                     ),
@@ -412,7 +445,7 @@ impl App {
                             .child(
                                 div()
                                     .text_size(px(10.))
-                                    .text_color(rgb(MUTED_2))
+                                    .text_color(rgb(p.muted_2))
                                     .child(format!(
                                         "言語: {} · サムネイルキャッシュ: {} MB",
                                         self.settings.language, self.settings.thumbnail_cache_mb
@@ -429,6 +462,188 @@ impl App {
                     .w(px(8.))
                     .child(Scrollbar::vertical(&self.settings_scroll)),
             )
+    }
+
+    fn theme_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.palette;
+        glass_panel(&self.palette)
+            .flex()
+            .flex_col()
+            .p(px(14.))
+            .gap(px(12.))
+            .rounded(px(17.))
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .font_semibold()
+                    .text_color(rgb(p.text))
+                    .child("テーマ"),
+            )
+            .child(self.theme_axis(ThemeAxis::Main, cx))
+            .child(self.theme_axis(ThemeAxis::Accent, cx))
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(rgb(p.muted_2))
+                    .child("サブカラーは背景とのコントラストに合わせて明度を自動調整します"),
+            )
+    }
+
+    fn theme_axis(&self, axis: ThemeAxis, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.palette;
+        let selected_main = find_main(&self.settings.ui_theme_main);
+        let selected_accent = find_accent(&self.settings.ui_theme_accent);
+        let selected_label = match axis {
+            ThemeAxis::Main => selected_main.label,
+            ThemeAxis::Accent => selected_accent.label,
+        };
+        let items: Vec<(&'static str, &'static str, u32, bool)> = match axis {
+            ThemeAxis::Main => main_colors()
+                .iter()
+                .map(|color| {
+                    (
+                        color.id,
+                        color.label,
+                        preview_main(color),
+                        selected_main.id == color.id,
+                    )
+                })
+                .collect(),
+            ThemeAxis::Accent => accent_colors()
+                .iter()
+                .map(|color| {
+                    (
+                        color.id,
+                        color.label,
+                        preview_accent(color),
+                        selected_accent.id == color.id,
+                    )
+                })
+                .collect(),
+        };
+        let mut rows = v_flex().gap(px(8.));
+        for chunk in items.chunks(6) {
+            let mut row = h_flex().items_center().gap(px(8.));
+            for &(id, label, swatch, selected) in chunk {
+                row = row.child(self.theme_swatch(axis, id, label, swatch, selected, cx));
+            }
+            rows = rows.child(row);
+        }
+        v_flex()
+            .gap(px(8.))
+            .child(
+                h_flex()
+                    .items_baseline()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .font_medium()
+                            .text_color(rgb(p.text))
+                            .child(axis.title()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(p.muted))
+                            .child(format!("· {selected_label}")),
+                    ),
+            )
+            .child(rows)
+    }
+
+    fn theme_swatch(
+        &self,
+        axis: ThemeAxis,
+        id: &'static str,
+        label: &'static str,
+        swatch: u32,
+        selected: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let p = self.palette;
+        div()
+            .id(SharedString::from(format!("theme-{}-{id}", axis.key())))
+            .size(px(30.))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .border_2()
+            .border_color(if selected {
+                rgb(p.accent_border)
+            } else {
+                rgba(0x00000000)
+            })
+            .cursor_pointer()
+            .tooltip(move |window, cx| Tooltip::new(label).build(window, cx))
+            .hover(move |this| this.bg(rgb(p.panel_inner)))
+            .on_click(cx.listener(move |this, _, _, cx| match axis {
+                ThemeAxis::Main => this.set_main_theme(id, cx),
+                ThemeAxis::Accent => this.set_accent_theme(id, cx),
+            }))
+            .child(
+                div()
+                    .size(px(24.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(rgb(swatch))
+                    .border_1()
+                    .border_color(rgba(with_alpha(p.text, 0x24)))
+                    .when(selected, |this| {
+                        this.child(
+                            div()
+                                .text_size(px(12.))
+                                .font_semibold()
+                                .text_color(rgb(readable_on(swatch)))
+                                .child("✓"),
+                        )
+                    }),
+            )
+    }
+
+    pub(crate) fn set_main_theme(&mut self, id: &str, cx: &mut Context<Self>) {
+        let id = find_main(id);
+        if self.settings.ui_theme_main == id.id {
+            return;
+        }
+        let previous = (self.settings.ui_theme_main.clone(), self.palette);
+        self.settings.ui_theme_main = id.id.to_string();
+        let palette = resolve(&self.settings.ui_theme_main, &self.settings.ui_theme_accent);
+        self.palette = palette;
+        if let Err(error) = self.settings.save(&self.db) {
+            self.settings.ui_theme_main = previous.0;
+            self.palette = previous.1;
+            self.toast_error(format!("設定を保存できません: {error}"), cx);
+            tracing::warn!(%error, "cannot save theme setting");
+            cx.notify();
+            return;
+        }
+        self.apply_palette(self.palette, cx);
+    }
+
+    pub(crate) fn set_accent_theme(&mut self, id: &str, cx: &mut Context<Self>) {
+        let id = find_accent(id);
+        if self.settings.ui_theme_accent == id.id {
+            return;
+        }
+        let previous = (self.settings.ui_theme_accent.clone(), self.palette);
+        self.settings.ui_theme_accent = id.id.to_string();
+        let palette = resolve(&self.settings.ui_theme_main, &self.settings.ui_theme_accent);
+        self.palette = palette;
+        if let Err(error) = self.settings.save(&self.db) {
+            self.settings.ui_theme_accent = previous.0;
+            self.palette = previous.1;
+            self.toast_error(format!("設定を保存できません: {error}"), cx);
+            tracing::warn!(%error, "cannot save theme setting");
+            cx.notify();
+            return;
+        }
+        self.apply_palette(self.palette, cx);
     }
 
     pub(crate) fn set_max_fps(&mut self, fps: u32, cx: &mut Context<Self>) {

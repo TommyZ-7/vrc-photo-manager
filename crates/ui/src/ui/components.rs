@@ -34,20 +34,21 @@ pub(crate) struct ButtonState {
 /// Opaque panel surface.
 ///
 /// The window background is the only glass surface in the refit, so cards must
-/// stand on their own fill: solid `PANEL_CARD`, a 1px border, a top inset
+/// stand on their own fill: solid `palette.panel_card`, a 1px border, a top inset
 /// highlight, and a weak drop shadow. There is deliberately no element-level
 /// blur or translucent fill here.
-pub(crate) fn glass_panel() -> Div {
+pub(crate) fn glass_panel(palette: &Palette) -> Div {
+    let p = palette;
     div()
         .rounded(px(18.))
-        .bg(rgb(PANEL_CARD))
+        .bg(rgb(p.panel_card))
         .border_1()
-        // BORDER from the spec: rgba(255,255,255,0.105).
-        .border_color(rgba(0xffffff1b))
+        // The spec's soft border: 10.5% white in the dark template.
+        .border_color(rgba(p.line_soft))
         .shadow(vec![
             // Spec card shadow: 0 18px 44px rgba(0,0,0,0.28).
-            BoxShadow::new(px(0.), px(18.), rgba(0x00000047).into()).blur_radius(px(44.)),
-            BoxShadow::new(px(0.), px(1.), rgba(0xffffff14).into())
+            BoxShadow::new(px(0.), px(18.), rgba(p.shadow).into()).blur_radius(px(44.)),
+            BoxShadow::new(px(0.), px(1.), rgba(p.highlight).into())
                 .inset()
                 .blur_radius(px(0.)),
         ])
@@ -59,48 +60,53 @@ pub(crate) fn glass_panel() -> Div {
 /// the foreground card itself never lets the glass show through. The larger
 /// 20 px radius and header-to-card gradient follow the mock's modal card;
 /// focus order and dialog actions stay in the caller.
-pub(crate) fn dialog_panel() -> Div {
-    glass_panel()
+pub(crate) fn dialog_panel(palette: &Palette) -> Div {
+    let p = palette;
+    glass_panel(palette)
         .flex()
         .flex_col()
         .rounded(px(20.))
-        .bg(rgb(PANEL_CARD))
+        .bg(rgb(p.panel_card))
 }
 
-pub(crate) fn chip(label: &str, active: bool) -> Div {
+pub(crate) fn chip(palette: &Palette, label: &str, active: bool) -> Div {
+    let p = palette;
     div()
         .px(px(8.))
         .py(px(3.))
         .rounded_full()
         .text_size(px(10.))
         .font_medium()
-        .bg(rgb(if active { ACCENT_SOFT } else { PANEL_2 }))
-        .text_color(rgb(if active { BLUE } else { MUTED }))
+        .bg(rgb(if active { p.accent_soft } else { p.panel_2 }))
+        .text_color(rgb(if active { p.accent } else { p.muted }))
         .child(label.to_string())
 }
 
-pub(crate) fn status_progress_bar(ratio: f32) -> Div {
+pub(crate) fn status_progress_bar(palette: &Palette, ratio: f32) -> Div {
+    let p = palette;
     div()
         .h(px(2.))
         .w_full()
         .rounded_full()
-        .bg(rgb(PANEL_2))
+        .bg(rgb(p.panel_2))
         .child(
             div()
                 .h_full()
                 .w(relative(ratio.clamp(0.0, 1.0)))
                 .rounded_full()
-                .bg(rgb(BLUE)),
+                .bg(rgb(p.accent)),
         )
 }
 
 pub(crate) fn manual_option_row(
+    palette: &Palette,
     id: impl Into<SharedString>,
     title: impl Into<SharedString>,
     description: impl Into<SharedString>,
     selected: bool,
     enabled: bool,
 ) -> Stateful<Div> {
+    let p = palette;
     let id: SharedString = id.into();
     let title: SharedString = title.into();
     let description: SharedString = description.into();
@@ -111,9 +117,9 @@ pub(crate) fn manual_option_row(
         .gap(px(10.))
         .p(px(11.))
         .rounded(px(10.))
-        .bg(rgb(if selected { ACCENT_SOFT } else { PANEL_2 }))
+        .bg(rgb(if selected { p.accent_soft } else { p.panel_2 }))
         .border_1()
-        .border_color(rgb(if selected { BLUE } else { BORDER }))
+        .border_color(rgb(if selected { p.accent } else { p.border }))
         .opacity(if enabled { 1.0 } else { 0.5 })
         .when(enabled, |this| this.cursor_pointer())
         .child(
@@ -122,12 +128,12 @@ pub(crate) fn manual_option_row(
                 .size(px(14.))
                 .rounded_full()
                 .border_2()
-                .border_color(rgb(if selected { BLUE } else { BORDER_STRONG }))
+                .border_color(rgb(if selected { p.accent } else { p.border_strong }))
                 .flex()
                 .items_center()
                 .justify_center()
                 .when(selected, |this| {
-                    this.child(div().size(px(6.)).rounded_full().bg(rgb(BLUE)))
+                    this.child(div().size(px(6.)).rounded_full().bg(rgb(p.accent)))
                 }),
         )
         .child(
@@ -139,13 +145,13 @@ pub(crate) fn manual_option_row(
                     div()
                         .text_size(px(12.))
                         .font_medium()
-                        .text_color(rgb(if enabled { TEXT } else { MUTED_2 }))
+                        .text_color(rgb(if enabled { p.text } else { p.muted_2 }))
                         .child(title),
                 )
                 .child(
                     div()
                         .text_size(px(10.))
-                        .text_color(rgb(MUTED_2))
+                        .text_color(rgb(p.muted_2))
                         .child(description),
                 ),
         )
@@ -184,6 +190,7 @@ impl App {
         cx: &mut Context<Self>,
         on_activate: impl Fn(&mut Self, &mut Window, &mut Context<Self>) + Clone + 'static,
     ) -> AnyElement {
+        let p = self.palette;
         let ButtonState { tone, enabled } = state;
         let label: SharedString = label.into();
         let activate: ViewerActivate = Rc::new(on_activate);
@@ -193,12 +200,28 @@ impl App {
         let key_focus = focus.clone();
 
         let (border, background, fg) = if !enabled {
-            (rgba(0xffffff08), rgba(0x00000000), rgba(0x76819680))
+            (
+                rgba(with_alpha(p.text, 0x08)),
+                rgba(0x00000000),
+                rgba(with_alpha(p.muted_2, 0x80)),
+            )
         } else {
             match tone {
-                ButtonTone::Primary => (rgba(0x66b3ff40), rgba(0x66b3ff1a), rgb(0xdceeff)),
-                ButtonTone::Neutral => (rgba(0xffffff10), rgba(0xffffff08), rgb(MUTED_2)),
-                ButtonTone::Danger => (rgba(0xfb718566), rgba(0xfb718526), rgb(RED)),
+                ButtonTone::Primary => (
+                    rgba(with_alpha(p.accent, 0x40)),
+                    rgba(with_alpha(p.accent, 0x1a)),
+                    rgb(p.accent),
+                ),
+                ButtonTone::Neutral => (
+                    rgba(with_alpha(p.text, 0x10)),
+                    rgba(with_alpha(p.text, 0x08)),
+                    rgb(p.muted_2),
+                ),
+                ButtonTone::Danger => (
+                    rgba(with_alpha(p.red, 0x66)),
+                    rgba(with_alpha(p.red, 0x26)),
+                    rgb(p.red),
+                ),
             }
         };
 
@@ -207,25 +230,25 @@ impl App {
         if enabled {
             let (hover_bg, hover_fg, focus_border, focus_bg, focus_fg) = match tone {
                 ButtonTone::Primary => (
-                    rgba(0xffffff14),
-                    rgb(TEXT),
-                    rgb(BLUE),
-                    rgb(ACCENT_SOFT),
-                    rgb(TEXT),
+                    rgba(p.highlight),
+                    rgb(p.text),
+                    rgb(p.accent),
+                    rgb(p.accent_soft),
+                    rgb(p.text),
                 ),
                 ButtonTone::Neutral => (
-                    rgba(0xffffff14),
-                    rgb(TEXT),
-                    rgb(BLUE),
-                    rgb(ACCENT_SOFT),
-                    rgb(TEXT),
+                    rgba(p.highlight),
+                    rgb(p.text),
+                    rgb(p.accent),
+                    rgb(p.accent_soft),
+                    rgb(p.text),
                 ),
                 ButtonTone::Danger => (
-                    rgba(0xfb71853d),
-                    rgb(0xffd9df),
-                    rgb(RED),
-                    rgba(0xfb718533),
-                    rgb(0xffd9df),
+                    rgba(with_alpha(p.red, 0x3d)),
+                    rgb(p.text),
+                    rgb(p.red),
+                    rgba(with_alpha(p.red, 0x33)),
+                    rgb(p.text),
                 ),
             };
             button = button
@@ -293,6 +316,7 @@ impl App {
         tag: String,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let p = self.palette;
         let remove = tag.clone();
         h_flex()
             .id(SharedString::from(format!("viewer-tag-{tag}")))
@@ -302,11 +326,11 @@ impl App {
             .pr(px(3.))
             .py(px(2.))
             .rounded_full()
-            .bg(rgba(0xffffff0f))
+            .bg(rgba(with_alpha(p.text, 0x0f)))
             .border_1()
-            .border_color(rgba(0xffffff12))
+            .border_color(rgba(with_alpha(p.text, 0x12)))
             .text_size(px(10.))
-            .text_color(rgb(MUTED))
+            .text_color(rgb(p.muted))
             .child(format!("#{tag}"))
             .child(
                 div()
@@ -317,8 +341,11 @@ impl App {
                     .items_center()
                     .justify_center()
                     .rounded_full()
-                    .text_color(rgb(MUTED_2))
-                    .hover(|this| this.bg(rgba(0xfb71852e)).text_color(rgb(RED)))
+                    .text_color(rgb(p.muted_2))
+                    .hover(|this| {
+                        this.bg(rgba(with_alpha(p.red, 0x2e)))
+                            .text_color(rgb(p.red))
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
                         this.remove_tag(photo_id, &remove, cx);
@@ -335,7 +362,7 @@ impl App {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let active = self.search_days == days;
-        chip(label, active)
+        chip(&self.palette, label, active)
             .id(SharedString::from(format!("preset-{label}")))
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -345,12 +372,13 @@ impl App {
     }
 
     pub(crate) fn filter_field(&self, label: &str, input: Input) -> impl IntoElement {
+        let p = self.palette;
         v_flex()
             .gap(px(6.))
             .child(
                 div()
                     .text_size(px(10.))
-                    .text_color(rgb(MUTED_2))
+                    .text_color(rgb(p.muted_2))
                     .child(label.to_string()),
             )
             .child(input.w_full())
@@ -365,6 +393,7 @@ impl App {
         cx: &mut Context<Self>,
         apply: fn(&mut AppSettings, bool),
     ) -> impl IntoElement {
+        let p = self.palette;
         let label = label.to_string();
         h_flex()
             .items_center()
@@ -376,13 +405,13 @@ impl App {
                     .child(
                         div()
                             .text_size(px(12.))
-                            .text_color(rgb(TEXT))
+                            .text_color(rgb(p.text))
                             .child(label.to_string()),
                     )
                     .child(
                         div()
                             .text_size(px(10.))
-                            .text_color(rgb(MUTED_2))
+                            .text_color(rgb(p.muted_2))
                             .child(description.to_string()),
                     ),
             )
@@ -404,7 +433,8 @@ impl App {
     }
 
     pub(crate) fn stat_card(&self, label: &str, value: String) -> impl IntoElement {
-        glass_panel()
+        let p = self.palette;
+        glass_panel(&self.palette)
             .flex()
             .flex_col()
             .flex_1()
@@ -415,20 +445,21 @@ impl App {
             .child(
                 div()
                     .text_size(px(10.))
-                    .text_color(rgb(MUTED_2))
+                    .text_color(rgb(p.muted_2))
                     .child(label.to_string()),
             )
             .child(
                 div()
                     .text_size(px(20.))
                     .font_semibold()
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(p.text))
                     .truncate()
                     .child(value),
             )
     }
 
     pub(crate) fn meta_row(&self, label: &str, value: String) -> impl IntoElement {
+        let p = self.palette;
         h_flex()
             .gap(px(8.))
             .text_size(px(10.))
@@ -437,7 +468,7 @@ impl App {
                     .w(px(86.))
                     .flex_shrink_0()
                     .text_size(px(10.))
-                    .text_color(rgb(MUTED_2))
+                    .text_color(rgb(p.muted_2))
                     .child(label.to_string()),
             )
             .child(
@@ -445,17 +476,18 @@ impl App {
                     .flex_1()
                     .min_w_0()
                     .text_size(px(10.))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(p.muted))
                     .truncate()
                     .child(value),
             )
     }
 
     pub(crate) fn section_label(&self, label: &str) -> impl IntoElement {
+        let p = self.palette;
         div()
             .text_size(px(10.))
             .font_semibold()
-            .text_color(rgb(MUTED_2))
+            .text_color(rgb(p.muted_2))
             .child(label.to_string())
     }
 

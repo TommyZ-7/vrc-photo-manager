@@ -1,8 +1,7 @@
-//! Theme tokens, layout metrics, and the pure presentation helpers shared by
-//! every screen.
+//! Layout metrics and the pure presentation helpers shared by every screen.
 //!
-//! Keeping the values here means a screen never re-declares a colour, a width,
-//! or a motion duration, and the layout maths stays testable without a window.
+//! Runtime colours live in [`crate::ui::palette`]; keeping widths and motion
+//! durations here means the layout maths stays testable without a window.
 
 use std::time::{Duration, Instant};
 
@@ -10,43 +9,7 @@ use gpui_kit::{Bounds, Pixels, Size, Window, point, px, size};
 use vrc_photo_core::model::{CompressionFormat, CompressionProfile};
 use vrc_photo_core::settings::CardSize;
 
-pub(crate) const BG: u32 = 0x07090d;
-pub(crate) const PANEL: u32 = 0x121722;
-pub(crate) const PANEL_2: u32 = 0x1a2130;
-/// Legacy sidebar fill, superseded by the opaque `PANEL_SIDEBAR` card. Kept as
-/// a named token for callers that still reference the original palette.
-#[allow(dead_code)]
-pub(crate) const SIDEBAR: u32 = 0x0d1119;
-
-// Window glass and the ambient backdrop. The low byte is the alpha channel, so
-// these are used with `rgba()`; the values follow the design spec §9.1 and the
-// fractional alphas are rounded to the nearest 8-bit channel.
-pub(crate) const GLASS_WINDOW: u32 = 0x0a101c61; // rgba(10,16,28,0.38)
-
-// Opaque panel surfaces. Every card, sidebar, header, and inner row keeps the
-// ambient glass behind it instead of letting it show through. Tokens that no
-// screen consumes yet keep `dead_code` allows until they are adopted.
-pub(crate) const PANEL_SIDEBAR: u32 = 0x0b111b;
-#[allow(dead_code)]
-pub(crate) const PANEL_SIDEBAR_DEEP: u32 = 0x080d15;
-pub(crate) const PANEL_HEADER: u32 = 0x101725;
-pub(crate) const PANEL_CARD: u32 = 0x0d1420;
-pub(crate) const PANEL_INNER: u32 = 0x111927;
-#[allow(dead_code)]
-pub(crate) const PANEL_INNER_DEEP: u32 = 0x0c1320;
-pub(crate) const PANEL_DEEP: u32 = 0x0a1019;
-#[allow(dead_code)]
-pub(crate) const PANEL_RAISED: u32 = 0x172132;
-pub(crate) const BORDER: u32 = 0x232b38;
-pub(crate) const BORDER_STRONG: u32 = 0x364256;
-pub(crate) const TEXT: u32 = 0xeef3fb;
-pub(crate) const MUTED: u32 = 0xa3adbd;
-pub(crate) const MUTED_2: u32 = 0x768196;
-pub(crate) const BLUE: u32 = 0x66b3ff;
-pub(crate) const ACCENT_SOFT: u32 = 0x1a2f47;
-pub(crate) const GREEN: u32 = 0x5eead4;
-pub(crate) const AMBER: u32 = 0xfbbf24;
-pub(crate) const RED: u32 = 0xfb7185;
+pub(crate) use crate::ui::palette::{Palette, lerp_color, with_alpha};
 
 pub(crate) const SIDEBAR_EXPANDED: f32 = 238.0;
 pub(crate) const SIDEBAR_COLLAPSED: f32 = 78.0;
@@ -59,16 +22,18 @@ pub(crate) const CARD_WORLD_LINE_HEIGHT: f32 = 18.0;
 pub(crate) const CARD_META_LINE_HEIGHT: f32 = 15.0;
 /// Small vertical breathing room reserved inside each library row. The
 /// horizontal gap between cards is [`GRID_GAP`].
-pub(crate) const CARD_ROW_SLACK: f32 = 4.0;
+pub(crate) const CARD_ROW_GAP: f32 = 14.0;
 pub(crate) const GRID_GAP: f32 = 14.0;
 pub(crate) const INSPECTOR_PREVIEW_HEIGHT: f32 = 168.0;
 pub(crate) const INSPECTOR_SHORT_PREVIEW_HEIGHT: f32 = 118.0;
 /// Shell padding: 14px around the window and between the sidebar, header, and
 /// content column.
 pub(crate) const WORKSPACE_PAD: f32 = 14.0;
-pub(crate) const WORKSPACE_GAP: f32 = 14.0;
+pub(crate) const WORKSPACE_GAP: f32 = 10.0;
 /// Inner-screen gap between the gallery and inspector cards.
 pub(crate) const CARD_GAP: f32 = 12.0;
+/// Gap between the library gallery and the inspector column.
+pub(crate) const INSPECTOR_GAP: f32 = 8.0;
 pub(crate) const GALLERY_HEADER_HEIGHT: f32 = 42.0;
 pub(crate) const GALLERY_PAD_X: f32 = 12.0;
 pub(crate) const GALLERY_PAD_TOP: f32 = 10.0;
@@ -152,16 +117,6 @@ pub(crate) fn average_bgra(bytes: &[u8]) -> u32 {
     (red << 16) | (green << 8) | blue
 }
 
-pub(crate) fn lerp_color(from: u32, to: u32, t: f32) -> u32 {
-    let t = t.clamp(0.0, 1.0);
-    let channel = |shift: u32| {
-        let from = ((from >> shift) & 0xff) as f32;
-        let to = ((to >> shift) & 0xff) as f32;
-        (((from + (to - from) * t).round() as u32) & 0xff) << shift
-    };
-    channel(16) | channel(8) | channel(0)
-}
-
 pub(crate) fn cubic_bezier(t: f64, p1: f64, p2: f64) -> f64 {
     let mt = 1.0 - t;
     3.0 * mt * mt * t * p1 + 3.0 * mt * t * t * p2 + t * t * t
@@ -210,14 +165,6 @@ pub(crate) fn eased_progress(started_at: Instant, duration: Duration, now: Insta
     }
     let elapsed = now.saturating_duration_since(started_at).as_secs_f32();
     ease_motion((elapsed / duration.as_secs_f32()).clamp(0.0, 1.0))
-}
-
-pub(crate) fn viewer_nav_progress(started_at: Instant, now: Instant, reduce_motion: bool) -> f32 {
-    if reduce_motion {
-        1.0
-    } else {
-        eased_progress(started_at, MOTION_BASE, now)
-    }
 }
 
 pub(crate) fn next_focus_index(current: usize, len: usize, reverse: bool) -> usize {
@@ -377,7 +324,11 @@ pub(crate) fn grid_available_width(
     } else {
         inspector_column_width(window_width)
     };
-    let card_gap = if inspector_collapsed { 0.0 } else { CARD_GAP };
+    let card_gap = if inspector_collapsed {
+        0.0
+    } else {
+        INSPECTOR_GAP
+    };
     let gallery = window_width
         - WORKSPACE_PAD * 2.0
         - sidebar_width(sidebar_collapsed)
@@ -478,7 +429,7 @@ pub(crate) fn photo_card_width(available_width: f32, columns: usize) -> f32 {
 /// hover slack. Hiding text through the display settings tightens the row.
 pub(crate) fn photo_row_height(card_width: f32, show_world: bool, show_meta: bool) -> f32 {
     let image_height = (card_width.max(0.0) * 2.0 / 3.0).max(0.0);
-    let mut height = image_height + CARD_ROW_SLACK;
+    let mut height = image_height + CARD_ROW_GAP;
     if show_world || show_meta {
         height += CARD_BODY_GAP;
     }
@@ -619,17 +570,6 @@ pub(crate) fn card_size_label(size: CardSize) -> &'static str {
         .into_iter()
         .find_map(|(option, label)| (option == size).then_some(label))
         .unwrap_or("中")
-}
-
-pub(crate) fn scene_color(world: &str) -> u32 {
-    let mut hash = 0u32;
-    for byte in world.as_bytes() {
-        hash = hash.wrapping_mul(31).wrapping_add(*byte as u32);
-    }
-    const PALETTE: [u32; 8] = [
-        0x1d2a4a, 0x3a1d2b, 0x123b3b, 0x3b2a14, 0x2a1b3d, 0x1d3320, 0x243447, 0x151a33,
-    ];
-    PALETTE[hash as usize % PALETTE.len()]
 }
 
 pub(crate) fn format_label(format: &CompressionFormat) -> String {
@@ -778,14 +718,14 @@ mod tests {
 
     #[test]
     fn photo_row_height_adds_only_the_visible_text_lines() {
-        close(photo_row_height(300.0, false, false), 204.0);
-        close(photo_row_height(300.0, true, false), 230.0);
-        close(photo_row_height(300.0, false, true), 227.0);
-        close(photo_row_height(300.0, true, true), 248.0);
+        close(photo_row_height(300.0, false, false), 214.0);
+        close(photo_row_height(300.0, true, false), 240.0);
+        close(photo_row_height(300.0, false, true), 237.0);
+        close(photo_row_height(300.0, true, true), 258.0);
 
         let metrics = library_grid_metrics(1280.0, false, false, CardSize::Medium, true, true);
         close(metrics.image_height, metrics.card_width * 2.0 / 3.0);
-        close(metrics.row_height, metrics.image_height + 48.0);
+        close(metrics.row_height, metrics.image_height + 58.0);
     }
 
     #[test]
@@ -875,10 +815,12 @@ mod tests {
             let gallery_height = height - WORKSPACE_PAD * 2.0 - WORKSPACE_GAP - chrome;
             let body_height =
                 gallery_height - GALLERY_HEADER_HEIGHT - GALLERY_PAD_TOP - GALLERY_PAD_BOTTOM;
+            // The trailing row gap does not have to fit; only the three
+            // visible rows and the gaps between them do.
+            let visible_rows = metrics.row_height * 3.0 - CARD_ROW_GAP;
             assert!(
-                metrics.row_height * 3.0 <= body_height,
-                "width={width} rows={} body={body_height}",
-                metrics.row_height * 3.0
+                visible_rows <= body_height,
+                "width={width} rows={visible_rows} body={body_height}"
             );
         }
     }
@@ -911,11 +853,11 @@ mod tests {
 
     #[test]
     fn grid_available_width_matches_the_shell_padding() {
-        assert_eq!(grid_available_width(1440.0, false, false), 806.0);
-        assert_eq!(grid_available_width(1280.0, false, false), 668.0);
-        assert_eq!(grid_available_width(1080.0, false, false), 490.0);
-        assert_eq!(grid_available_width(1440.0, true, false), 966.0);
-        assert_eq!(search_available_width(1280.0, false), 654.0);
+        assert_eq!(grid_available_width(1440.0, false, false), 814.0);
+        assert_eq!(grid_available_width(1280.0, false, false), 676.0);
+        assert_eq!(grid_available_width(1080.0, false, false), 498.0);
+        assert_eq!(grid_available_width(1440.0, true, false), 974.0);
+        assert_eq!(search_available_width(1280.0, false), 658.0);
         assert_eq!(grid_columns(0.0, MIN_CARD_WIDTH), 1);
     }
 
@@ -997,14 +939,6 @@ mod tests {
         let half = eased_progress(start, MOTION_BASE, start + MOTION_BASE / 2);
         assert!(half > 0.5 && half < 1.0);
         assert_eq!(eased_progress(start, Duration::ZERO, start), 1.0);
-    }
-
-    #[test]
-    fn viewer_nav_progress_respects_reduce_motion() {
-        let start = Instant::now();
-        assert_eq!(viewer_nav_progress(start, start, true), 1.0);
-        assert_eq!(viewer_nav_progress(start, start, false), 0.0);
-        assert_eq!(viewer_nav_progress(start, start + MOTION_BASE, false), 1.0);
     }
 
     #[test]
@@ -1114,17 +1048,17 @@ mod tests {
 
     #[test]
     fn search_available_width_drops_to_the_filter_panel_width() {
-        assert_eq!(search_available_width(1280.0, false), 654.0);
-        assert_eq!(search_available_width(1440.0, false), 814.0);
-        assert_eq!(search_available_width(1080.0, false), 454.0);
-        assert_eq!(search_available_width(1280.0, true), 814.0);
+        assert_eq!(search_available_width(1280.0, false), 658.0);
+        assert_eq!(search_available_width(1440.0, false), 818.0);
+        assert_eq!(search_available_width(1080.0, false), 458.0);
+        assert_eq!(search_available_width(1280.0, true), 818.0);
         assert_eq!(search_available_width(200.0, false), 0.0);
     }
 
     #[test]
     fn search_grid_metrics_use_the_library_card_geometry() {
         for (width, columns, available) in
-            [(1280.0, 3, 654.0), (1440.0, 4, 814.0), (1080.0, 2, 454.0)]
+            [(1280.0, 3, 658.0), (1440.0, 4, 818.0), (1080.0, 2, 458.0)]
         {
             let metrics = search_grid_metrics(width, false, CardSize::Medium, true, true);
             assert_eq!(metrics.columns, columns, "width {width}");
@@ -1133,7 +1067,7 @@ mod tests {
                 available,
             );
             close(metrics.image_height, metrics.card_width * 2.0 / 3.0);
-            close(metrics.row_height, metrics.image_height + 48.0);
+            close(metrics.row_height, metrics.image_height + 58.0);
         }
         assert_eq!(GRID_GAP, 14.0);
     }
@@ -1167,8 +1101,8 @@ mod tests {
         let visible = search_grid_metrics(1280.0, false, CardSize::Medium, true, true);
         let hidden = search_grid_metrics(1280.0, false, CardSize::Medium, false, false);
         close(visible.card_width, hidden.card_width);
-        close(visible.row_height, visible.image_height + 48.0);
-        close(hidden.row_height, hidden.image_height + 4.0);
+        close(visible.row_height, visible.image_height + 58.0);
+        close(hidden.row_height, hidden.image_height + 14.0);
         close(visible.image_height, hidden.image_height);
 
         let small = search_grid_metrics(1280.0, false, CardSize::Small, true, true);
@@ -1190,21 +1124,21 @@ mod tests {
             world_only.row_height,
             photo_row_height(world_only.card_width, true, false),
         );
-        close(world_only.row_height, world_only.image_height + 30.0);
+        close(world_only.row_height, world_only.image_height + 40.0);
 
         let meta_only = search_grid_metrics(1280.0, false, CardSize::Medium, false, true);
         close(
             meta_only.row_height,
             photo_row_height(meta_only.card_width, false, true),
         );
-        close(meta_only.row_height, meta_only.image_height + 27.0);
+        close(meta_only.row_height, meta_only.image_height + 37.0);
 
         let hidden = search_grid_metrics(1280.0, false, CardSize::Medium, false, false);
         close(
             hidden.row_height,
             photo_row_height(hidden.card_width, false, false),
         );
-        close(hidden.row_height, hidden.image_height + 4.0);
+        close(hidden.row_height, hidden.image_height + 14.0);
     }
 
     #[test]
@@ -1299,27 +1233,5 @@ mod tests {
         assert!((f32::from(open.center().x) - 410.0).abs() < 0.01);
         assert!((f32::from(open.center().y) - 428.0).abs() < 0.01);
         assert!(closed.size.width > open.size.width);
-    }
-
-    #[test]
-    fn glass_and_panel_tokens_follow_the_spec() {
-        // Translucent tokens pack the spec's alpha into the low byte, so the
-        // spec's fractional alphas survive within one 8-bit step.
-        let alpha = |token: u32| (token & 0xff) as f32 / 255.0;
-        let close = |value: f32, expected: f32| assert!((value - expected).abs() <= 1.0 / 255.0);
-
-        close(alpha(GLASS_WINDOW), 0.38);
-        assert_eq!(GLASS_WINDOW >> 8, 0x0a101c);
-
-        // Panels are opaque: they are used with `rgb()` and never carry a
-        // window-glass alpha.
-        assert_eq!(PANEL_SIDEBAR, 0x0b111b);
-        assert_eq!(PANEL_SIDEBAR_DEEP, 0x080d15);
-        assert_eq!(PANEL_HEADER, 0x101725);
-        assert_eq!(PANEL_CARD, 0x0d1420);
-        assert_eq!(PANEL_INNER, 0x111927);
-        assert_eq!(PANEL_INNER_DEEP, 0x0c1320);
-        assert_eq!(PANEL_DEEP, 0x0a1019);
-        assert_eq!(PANEL_RAISED, 0x172132);
     }
 }

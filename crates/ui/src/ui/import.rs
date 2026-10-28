@@ -11,9 +11,7 @@ use gpui_kit::*;
 use vrc_photo_core::importer::{ImportIssue, ImportIssueKind, ImportMode, ImportProgress};
 
 use crate::app::App;
-use crate::app::import::{
-    ImportDialogOrigin, ImportDialogPhase, ImportReportView, import_issue_counts,
-};
+use crate::app::import::{ImportDialogOrigin, ImportDialogPhase, ImportReportView};
 use crate::ui::components::dialog_panel;
 use crate::ui::theme::*;
 
@@ -27,6 +25,7 @@ pub(crate) fn import_progress_ratio(progress: &ImportProgress) -> f32 {
 
 impl App {
     pub(crate) fn import_modal_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
         let Some(dialog) = self.import_dialog.as_ref() else {
             return div().into_any_element();
         };
@@ -38,7 +37,7 @@ impl App {
         let mode = import_mode_label(dialog.mode);
         let dest = dialog.dest.to_string_lossy().to_string();
 
-        let mut panel = dialog_panel()
+        let mut panel = dialog_panel(&self.palette)
             .id("import-dialog-panel")
             .w(px(560.))
             .gap(px(16.))
@@ -54,12 +53,12 @@ impl App {
                         div()
                             .text_size(px(20.))
                             .font_semibold()
-                            .text_color(rgb(TEXT))
+                            .text_color(rgb(p.text))
                             .child(title),
                     )
-                    .child(self.badge(mode, BLUE, 0x14283d))
+                    .child(self.badge(mode, p.accent, p.accent_soft))
                     .when_some(dialog.origin.run_summary(), |this, summary| {
-                        this.child(self.badge(&summary, MUTED, PANEL_2))
+                        this.child(self.badge(&summary, p.muted, p.panel_2))
                     })
                     .child(div().flex_1()),
             );
@@ -92,7 +91,7 @@ impl App {
                                     ),
                             ),
                     )
-                    .child(div().text_size(px(10.)).text_color(rgb(MUTED_2)).child(
+                    .child(div().text_size(px(10.)).text_color(rgb(p.muted_2)).child(
                         "フォルダはサブフォルダも対象です。compressed フォルダは除外します。",
                     ))
                     .when_some(source.map(|source| source.summary()), |this, summary| {
@@ -100,7 +99,7 @@ impl App {
                             div()
                                 .truncate()
                                 .text_size(px(11.))
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(p.muted))
                                 .child(summary),
                         )
                     })
@@ -117,7 +116,7 @@ impl App {
                             this.child(
                                 div()
                                     .text_size(px(10.))
-                                    .text_color(rgb(AMBER))
+                                    .text_color(rgb(p.amber))
                                     .child(warning),
                             )
                         },
@@ -127,11 +126,11 @@ impl App {
                             div()
                                 .p(px(10.))
                                 .rounded(px(8.))
-                                .bg(rgb(0x2a1414))
+                                .bg(rgb(p.red_soft))
                                 .border_1()
-                                .border_color(rgba(0xfb718533))
+                                .border_color(rgb(p.red_border))
                                 .text_size(px(10.))
-                                .text_color(rgb(RED))
+                                .text_color(rgb(p.red))
                                 .child(error),
                         )
                     });
@@ -142,13 +141,13 @@ impl App {
                             div()
                                 .truncate()
                                 .text_size(px(11.))
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(p.muted))
                                 .child(dest.clone()),
                         )
                         .child(
                             div()
                                 .text_size(px(10.))
-                                .text_color(rgb(MUTED_2))
+                                .text_color(rgb(p.muted_2))
                                 .child("設定 > ライブラリ > 取り込み先で変更できます。"),
                         ),
                 );
@@ -194,7 +193,7 @@ impl App {
                             .child(
                                 div()
                                     .text_size(px(11.))
-                                    .text_color(rgb(MUTED))
+                                    .text_color(rgb(p.muted))
                                     .child(import_progress_label(progress)),
                             )
                             .child(
@@ -202,13 +201,13 @@ impl App {
                                     .h(px(6.))
                                     .w_full()
                                     .rounded_full()
-                                    .bg(rgb(PANEL_2))
+                                    .bg(rgb(p.panel_2))
                                     .child(
                                         div()
                                             .h_full()
                                             .w(relative(import_progress_ratio(progress)))
                                             .rounded_full()
-                                            .bg(rgb(BLUE)),
+                                            .bg(rgb(p.accent)),
                                     ),
                             )
                             .when_some(last_source, |this, file| {
@@ -216,7 +215,7 @@ impl App {
                                     div()
                                         .truncate()
                                         .text_size(px(10.))
-                                        .text_color(rgb(MUTED_2))
+                                        .text_color(rgb(p.muted_2))
                                         .child(file),
                                 )
                             }),
@@ -228,7 +227,7 @@ impl App {
                                 div()
                                     .truncate()
                                     .text_size(px(10.))
-                                    .text_color(rgb(MUTED_2))
+                                    .text_color(rgb(p.muted_2))
                                     .child(summary),
                             )
                         },
@@ -238,7 +237,7 @@ impl App {
                         div()
                             .truncate()
                             .text_size(px(11.))
-                            .text_color(rgb(MUTED))
+                            .text_color(rgb(p.muted))
                             .child(dest.clone()),
                     )
                     .child(
@@ -273,7 +272,7 @@ impl App {
             .items_center()
             .justify_center()
             .p(px(DIALOG_VIEWPORT_MARGIN))
-            .bg(rgba(0x05070acc))
+            .bg(rgba(p.scrim))
             .on_click(cx.listener(|this, _, _, cx| this.cancel_or_close_import(cx)))
             .child(panel)
             .with_animation(
@@ -286,16 +285,8 @@ impl App {
             .into_any_element()
     }
 
-    pub(crate) fn import_report_panel(
-        &self,
-        report: &ImportReportView,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let (failed, partial) = import_issue_counts(&report.issues);
-        let retryable = retryable_sources(&report.issues);
-        let mode = import_mode_label(report.mode);
-        let dest = report.dest.to_string_lossy().to_string();
-        let scan_failed = report.scan_failures.len();
+    pub(crate) fn import_report_details(&self, report: &ImportReportView) -> AnyElement {
+        let p = self.palette;
         let failed_issues: Vec<&ImportIssue> = report
             .issues
             .iter()
@@ -307,118 +298,15 @@ impl App {
             .filter(|issue| issue.kind == ImportIssueKind::PartialMove)
             .collect();
 
-        let mut panel = v_flex()
-            .flex_shrink_0()
-            .mx(px(GALLERY_PAD_X))
-            .rounded(px(14.))
-            .bg(rgb(PANEL))
-            .border_1()
-            .border_color(rgb(BORDER))
-            .child(
-                h_flex()
-                    .px(px(16.))
-                    .py(px(10.))
-                    .gap(px(10.))
-                    .items_center()
-                    .border_b_1()
-                    .border_color(rgb(BORDER))
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .font_semibold()
-                            .text_color(rgb(TEXT))
-                            .child("取り込み結果"),
-                    )
-                    .child(self.badge(mode, BLUE, 0x14283d))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(10.))
-                            .text_color(rgb(MUTED_2))
-                            .child(dest),
-                    )
-                    .when(!retryable.is_empty(), |this| {
-                        let button = Button::new("import-retry-failed")
-                            .label("失敗分を再試行")
-                            .small();
-                        let button = if report.remaining.is_empty() {
-                            button.primary()
-                        } else {
-                            button.ghost()
-                        };
-                        this.child(button.on_click(
-                            cx.listener(|this, _, window, cx| this.open_retry_dialog(window, cx)),
-                        ))
-                    })
-                    .when(!report.remaining.is_empty(), |this| {
-                        this.child(
-                            Button::new("import-resume")
-                                .label(format!("残り {} 件を再開", report.remaining.len()))
-                                .small()
-                                .primary()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.open_resume_dialog(window, cx)
-                                })),
-                        )
-                    })
-                    .child(
-                        Button::new("import-report-close")
-                            .label("閉じる")
-                            .small()
-                            .ghost()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.import_report = None;
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .px(px(16.))
-                    .py(px(8.))
-                    .gap(px(8.))
-                    .items_center()
-                    .child(self.badge(&format!("取込 {}", report.imported), GREEN, 0x102a24))
-                    .child(self.badge(&format!("スキップ {}", report.skipped), MUTED, PANEL_2))
-                    .when(failed > 0, |this| {
-                        this.child(self.badge(&format!("失敗 {failed}"), RED, 0x2a1414))
-                    })
-                    .when(partial > 0, |this| {
-                        this.child(self.badge(&format!("部分移動 {partial}"), AMBER, 0x2b2210))
-                    })
-                    .when(!report.renamed.is_empty(), |this| {
-                        this.child(self.badge(
-                            &format!("連番 {}", report.renamed.len()),
-                            BLUE,
-                            0x14283d,
-                        ))
-                    })
-                    .when(!report.remaining.is_empty(), |this| {
-                        this.child(self.badge(
-                            &format!("未処理 {}", report.remaining.len()),
-                            AMBER,
-                            0x2b2210,
-                        ))
-                    })
-                    .when(scan_failed > 0, |this| {
-                        this.child(self.badge(
-                            &format!("スキャン失敗 {scan_failed}"),
-                            RED,
-                            0x2a1414,
-                        ))
-                    }),
-            );
-
+        let mut body = v_flex().w_full();
         if !failed_issues.is_empty() {
-            panel = panel.child(
+            body = body.child(
                 v_flex()
                     .px(px(16.))
                     .py(px(8.))
                     .gap(px(6.))
                     .border_t_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(p.border))
                     .child(self.section_label("失敗したファイル"))
                     .child(
                         v_flex()
@@ -433,13 +321,13 @@ impl App {
                                         div()
                                             .truncate()
                                             .text_size(px(10.))
-                                            .text_color(rgb(RED))
+                                            .text_color(rgb(p.red))
                                             .child(source),
                                     )
                                     .child(
                                         div()
                                             .text_size(px(10.))
-                                            .text_color(rgb(MUTED))
+                                            .text_color(rgb(p.muted))
                                             .child(issue.message.clone()),
                                     )
                             })),
@@ -448,13 +336,13 @@ impl App {
         }
 
         if !partial_issues.is_empty() {
-            panel = panel.child(
+            body = body.child(
                 v_flex()
                     .px(px(16.))
                     .py(px(8.))
                     .gap(px(6.))
                     .border_t_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(p.border))
                     .child(self.section_label("移動元を削除できなかったファイル"))
                     .children(partial_issues.iter().map(|issue| {
                         let source = issue.source.to_string_lossy().to_string();
@@ -472,7 +360,7 @@ impl App {
                                         div()
                                             .truncate()
                                             .text_size(px(10.))
-                                            .text_color(rgb(AMBER))
+                                            .text_color(rgb(p.amber))
                                             .child(source),
                                     )
                                     .when_some(target, |this, target| {
@@ -480,7 +368,7 @@ impl App {
                                             div()
                                                 .truncate()
                                                 .text_size(px(9.))
-                                                .text_color(rgb(MUTED_2))
+                                                .text_color(rgb(p.muted_2))
                                                 .child(format!("→ {target}")),
                                         )
                                     }),
@@ -488,7 +376,7 @@ impl App {
                             .child(
                                 div()
                                     .text_size(px(10.))
-                                    .text_color(rgb(MUTED))
+                                    .text_color(rgb(p.muted))
                                     .child(issue.message.clone()),
                             )
                     })),
@@ -496,13 +384,13 @@ impl App {
         }
 
         if !report.renamed.is_empty() {
-            panel = panel.child(
+            body = body.child(
                 v_flex()
                     .px(px(16.))
                     .py(px(8.))
                     .gap(px(6.))
                     .border_t_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(p.border))
                     .child(self.section_label("連番を付けたファイル"))
                     .child(
                         v_flex()
@@ -516,14 +404,14 @@ impl App {
                                         div()
                                             .truncate()
                                             .text_size(px(10.))
-                                            .text_color(rgb(MUTED))
+                                            .text_color(rgb(p.muted))
                                             .child(rename.source.to_string_lossy().to_string()),
                                     )
                                     .child(
                                         div()
                                             .truncate()
                                             .text_size(px(9.))
-                                            .text_color(rgb(BLUE))
+                                            .text_color(rgb(p.accent))
                                             .child(format!(
                                                 "→ {}",
                                                 rename.target.to_string_lossy()
@@ -535,13 +423,13 @@ impl App {
         }
 
         if !report.scan_failures.is_empty() {
-            panel = panel.child(
+            body = body.child(
                 v_flex()
                     .px(px(16.))
                     .py(px(8.))
                     .gap(px(6.))
                     .border_t_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(p.border))
                     .child(self.section_label("スキャンできなかったファイル"))
                     .children(report.scan_failures.iter().map(|failure| {
                         v_flex()
@@ -550,13 +438,13 @@ impl App {
                                 div()
                                     .truncate()
                                     .text_size(px(10.))
-                                    .text_color(rgb(RED))
+                                    .text_color(rgb(p.red))
                                     .child(failure.path.to_string_lossy().to_string()),
                             )
                             .child(
                                 div()
                                     .text_size(px(10.))
-                                    .text_color(rgb(MUTED))
+                                    .text_color(rgb(p.muted))
                                     .child(failure.message.clone()),
                             )
                     })),
@@ -564,30 +452,21 @@ impl App {
         }
 
         if let Some(error) = report.scan_error.clone() {
-            panel = panel.child(
+            body = body.child(
                 div()
                     .mx(px(16.))
                     .my(px(8.))
                     .p(px(8.))
                     .rounded(px(8.))
-                    .bg(rgb(0x2a1414))
+                    .bg(rgb(p.red_soft))
                     .border_1()
-                    .border_color(rgba(0xfb718533))
+                    .border_color(rgb(p.red_border))
                     .text_size(px(10.))
-                    .text_color(rgb(RED))
+                    .text_color(rgb(p.red))
                     .child(error),
             );
         }
-
-        panel
-            .with_animation(
-                "import-report",
-                Animation::new(MOTION_BASE)
-                    .with_easing(ease_motion)
-                    .with_max_fps(self.motion_fps()),
-                |el, t| el.opacity(t).relative().top(px(-8.0 * (1.0 - t))),
-            )
-            .into_any_element()
+        body.into_any_element()
     }
 }
 
@@ -616,9 +495,8 @@ pub(crate) fn import_progress_label(progress: &ImportProgress) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        import_issue_counts, import_progress_label, import_progress_ratio, retryable_sources,
-    };
+    use super::{import_progress_label, import_progress_ratio, retryable_sources};
+    use crate::app::import::import_issue_counts;
     use std::path::PathBuf;
     use vrc_photo_core::importer::{ImportIssue, ImportIssueKind, ImportProgress};
 

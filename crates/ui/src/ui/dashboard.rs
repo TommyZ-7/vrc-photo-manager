@@ -20,12 +20,13 @@ use crate::ui::theme::*;
 
 impl App {
     pub(crate) fn dashboard_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.palette;
         let stats = h_flex()
             .flex_shrink_0()
             .gap(px(CARD_GAP))
             .child(self.stat_card("写真", format!("{} 枚", self.stats.photo_count)))
             .child(self.stat_card("未完了ジョブ", format!("{} 件", self.active_job_count)))
-            .child(self.stat_card("未実行", format_bytes(self.stats.total_bytes)))
+            .child(self.stat_card("ライブラリ容量", format_bytes(self.stats.total_bytes)))
             .child(self.stat_card(
                 "デーモン",
                 if self.daemon_active {
@@ -59,11 +60,11 @@ impl App {
                                     .flex_shrink_0()
                                     .p(px(12.))
                                     .rounded(px(12.))
-                                    .bg(rgb(0x2a2412))
+                                    .bg(rgb(p.amber_soft))
                                     .border_1()
-                                    .border_color(rgba(0xfbbf2440))
+                                    .border_color(rgba(with_alpha(p.amber, 0x40)))
                                     .text_size(px(11.))
-                                    .text_color(rgb(AMBER))
+                                    .text_color(rgb(p.amber))
                                     .child("VRChat本体は出力ログを24時間で削除します。アプリ側には解析済みイベントだけを保存します。"),
                             ),
                     )
@@ -86,7 +87,8 @@ impl App {
     }
 
     fn session_card(&self) -> impl IntoElement {
-        glass_panel()
+        let p = self.palette;
+        glass_panel(&self.palette)
             .flex()
             .flex_col()
             .flex_shrink_0()
@@ -97,7 +99,7 @@ impl App {
                 div()
                     .text_size(px(13.))
                     .font_semibold()
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(p.text))
                     .child("現在のセッション"),
             )
             .child(
@@ -125,13 +127,14 @@ impl App {
             .children(self.monitor_players.iter().map(|player| {
                 div()
                     .text_size(px(11.))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(p.muted))
                     .child(player.clone())
             }))
     }
 
     fn monitor_paths_card(&self) -> impl IntoElement {
-        glass_panel()
+        let p = self.palette;
+        glass_panel(&self.palette)
             .flex()
             .flex_col()
             .flex_shrink_0()
@@ -142,7 +145,7 @@ impl App {
                 div()
                     .text_size(px(13.))
                     .font_semibold()
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(p.text))
                     .child("監視パス"),
             )
             .children(self.settings.photo_roots.iter().map(|path| {
@@ -151,7 +154,7 @@ impl App {
                     .truncate()
                     .text_size(px(10.))
                     .font_family("monospace")
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(p.muted))
                     .child(path.clone())
             }))
             .child(
@@ -160,7 +163,7 @@ impl App {
                     .truncate()
                     .text_size(px(10.))
                     .font_family("monospace")
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(p.muted))
                     .child(
                         self.settings
                             .log_dir
@@ -171,12 +174,13 @@ impl App {
     }
 
     pub(crate) fn daemon_card(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.palette;
         let status = if !self.daemon_active {
-            ("停止中", MUTED, PANEL_2)
+            ("停止中", p.muted, p.panel_2)
         } else if self.daemon_paused {
-            ("一時停止中", AMBER, 0x2a2412)
+            ("一時停止中", p.amber, p.amber_soft)
         } else {
-            ("稼働中", GREEN, 0x112a22)
+            ("稼働中", p.green, p.green_soft)
         };
         let sync = daemon_sync_label(
             self.daemon_age_secs,
@@ -189,11 +193,11 @@ impl App {
             "IPC 未接続"
         };
         let ipc_detail = ipc_status_label(self.ipc_connected, self.ipc_error.as_deref());
-        let ipc_color = if self.ipc_connected { GREEN } else { RED };
+        let ipc_color = if self.ipc_connected { p.green } else { p.red };
         let ipc_bg = if self.ipc_connected {
-            0x112a22
+            p.green_soft
         } else {
-            0x2a1414
+            p.red_soft
         };
         let scan = self.scan_progress;
         let armed = self.daemon_shutdown_armed;
@@ -203,7 +207,7 @@ impl App {
             "監視を一時停止"
         };
 
-        let mut card = glass_panel()
+        let mut card = glass_panel(&self.palette)
             .flex()
             .flex_col()
             .flex_shrink_0()
@@ -218,7 +222,7 @@ impl App {
                         div()
                             .text_size(px(13.))
                             .font_semibold()
-                            .text_color(rgb(TEXT))
+                            .text_color(rgb(p.text))
                             .child("デーモン"),
                     )
                     .child(self.badge(status.0, status.1, status.2))
@@ -238,7 +242,7 @@ impl App {
                     .child(
                         div()
                             .text_size(px(10.))
-                            .text_color(rgb(MUTED))
+                            .text_color(rgb(p.muted))
                             .child(scan_progress_label(&progress)),
                     )
                     .child(
@@ -246,13 +250,13 @@ impl App {
                             .h(px(6.))
                             .w_full()
                             .rounded_full()
-                            .bg(rgb(PANEL_2))
+                            .bg(rgb(p.panel_2))
                             .child(
                                 div()
                                     .h_full()
                                     .w(relative(scan_progress_ratio(&progress)))
                                     .rounded_full()
-                                    .bg(rgb(BLUE)),
+                                    .bg(rgb(p.accent)),
                             ),
                     ),
             );
@@ -290,7 +294,8 @@ impl App {
     }
 
     pub(crate) fn daemon_error_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut card = glass_panel()
+        let p = self.palette;
+        let mut card = glass_panel(&self.palette)
             .flex()
             .flex_col()
             .flex_shrink_0()
@@ -305,10 +310,14 @@ impl App {
                         div()
                             .text_size(px(13.))
                             .font_semibold()
-                            .text_color(rgb(TEXT))
+                            .text_color(rgb(p.text))
                             .child("処理エラー"),
                     )
-                    .child(self.badge(&format!("{} 件", self.daemon_errors.len()), RED, 0x2a1414)),
+                    .child(self.badge(
+                        &format!("{} 件", self.daemon_errors.len()),
+                        p.red,
+                        p.red_soft,
+                    )),
             );
         for error in &self.daemon_errors {
             let command = error.operation.retry_command();
@@ -317,24 +326,24 @@ impl App {
                     .gap(px(8.))
                     .p(px(12.))
                     .rounded(px(10.))
-                    .bg(rgb(PANEL_2))
+                    .bg(rgb(p.panel_2))
                     .border_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(p.border))
                     .child(
                         h_flex()
                             .items_center()
                             .gap(px(8.))
                             .child(self.badge(
                                 daemon_operation_label(error.operation),
-                                RED,
-                                0x2a1414,
+                                p.red,
+                                p.red_soft,
                             ))
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w_0()
                                     .text_size(px(12.))
-                                    .text_color(rgb(RED))
+                                    .text_color(rgb(p.red))
                                     .child(error.message.clone()),
                             )
                             .child(
@@ -356,11 +365,11 @@ impl App {
                                 .min_w_0()
                                 .p(px(8.))
                                 .rounded(px(8.))
-                                .bg(rgb(BG))
+                                .bg(rgb(p.bg))
                                 .font_family("monospace")
                                 .whitespace_normal()
                                 .text_size(px(10.))
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(p.muted))
                                 .child(detail),
                         )
                     })
@@ -371,13 +380,13 @@ impl App {
                             .child(
                                 div()
                                     .text_size(px(10.))
-                                    .text_color(rgb(MUTED_2))
+                                    .text_color(rgb(p.muted_2))
                                     .child(format!("検出回数 {}", error.attempts)),
                             )
                             .child(
                                 div()
                                     .text_size(px(10.))
-                                    .text_color(rgb(MUTED_2))
+                                    .text_color(rgb(p.muted_2))
                                     .child(format_timestamp(&error.occurred_at)),
                             ),
                     ),
@@ -387,15 +396,16 @@ impl App {
             this.child(
                 div()
                     .text_size(px(10.))
-                    .text_color(rgb(MUTED_2))
+                    .text_color(rgb(p.muted_2))
                     .child("デーモン停止中です。起動後に実行されます。"),
             )
         })
     }
 
     pub(crate) fn log_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.palette;
         let dir = logs_dir();
-        let mut card = glass_panel()
+        let mut card = glass_panel(&self.palette)
             .flex()
             .flex_col()
             .flex_shrink_0()
@@ -406,7 +416,7 @@ impl App {
                 div()
                     .text_size(px(13.))
                     .font_semibold()
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(p.text))
                     .child("ログ"),
             )
             .child(
@@ -418,11 +428,11 @@ impl App {
                             .min_w_0()
                             .font_family("monospace")
                             .text_size(px(10.))
-                            .text_color(rgb(MUTED))
+                            .text_color(rgb(p.muted))
                             .child(dir.display().to_string()),
                         None => div()
                             .text_size(px(10.))
-                            .text_color(rgb(RED))
+                            .text_color(rgb(p.red))
                             .child("ログフォルダを特定できません"),
                     }),
             )
@@ -434,14 +444,14 @@ impl App {
                         div()
                             .font_family("monospace")
                             .text_size(px(10.))
-                            .text_color(rgb(MUTED_2))
+                            .text_color(rgb(p.muted_2))
                             .child(format!("UI: {UI_LOG_FILE}")),
                     )
                     .child(
                         div()
                             .font_family("monospace")
                             .text_size(px(10.))
-                            .text_color(rgb(MUTED_2))
+                            .text_color(rgb(p.muted_2))
                             .child(format!("デーモン: {DAEMON_LOG_FILE}")),
                     ),
             );
@@ -459,7 +469,7 @@ impl App {
                     .child(
                         div()
                             .text_size(px(10.))
-                            .text_color(rgb(MUTED_2))
+                            .text_color(rgb(p.muted_2))
                             .child("OSのファイラーで開きます"),
                     ),
             );
@@ -467,7 +477,7 @@ impl App {
             card = card.child(
                 div()
                     .text_size(px(10.))
-                    .text_color(rgb(MUTED_2))
+                    .text_color(rgb(p.muted_2))
                     .child("ファイルへのログ出力は利用できません。"),
             );
         }
@@ -476,17 +486,19 @@ impl App {
 
     pub(crate) fn open_logs_folder(&mut self, cx: &mut Context<Self>) {
         let Some(dir) = logs_dir() else {
-            self.message = Some("ログフォルダを特定できません".to_string());
+            self.toast_error("ログフォルダを特定できません", cx);
             cx.notify();
             return;
         };
         let result = std::fs::create_dir_all(&dir)
             .map_err(|error| error.to_string())
             .and_then(|()| open_path(&dir));
-        self.message = Some(match result {
-            Ok(()) => format!("ログフォルダを開きました: {}", dir.display()),
-            Err(error) => format!("ログフォルダを開けません: {error}"),
-        });
+        match result {
+            Ok(()) => {
+                self.toast_success(format!("ログフォルダを開きました: {}", dir.display()), cx)
+            }
+            Err(error) => self.toast_error(format!("ログフォルダを開けません: {error}"), cx),
+        }
         cx.notify();
     }
 }

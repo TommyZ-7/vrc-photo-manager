@@ -7,8 +7,9 @@ use crate::app::App;
 use crate::app::cli::{parse_args, process_start, timing_enabled};
 use crate::app::daemon::run_background_supervisor;
 use crate::ui::actions::{
-    CloseQuickLook, FocusSearch, OpenQuickLook, QuickLookNextFocus, QuickLookPrevFocus,
-    ToggleInspector, ToggleSidebar, ViewerNextPhoto, ViewerPreviousPhoto, register_global_actions,
+    CloseNotifications, CloseQuickLook, FocusSearch, OpenQuickLook, QuickLookNextFocus,
+    QuickLookPrevFocus, ToggleInspector, ToggleSidebar, ViewerNextPhoto, ViewerPreviousPhoto,
+    register_global_actions,
 };
 
 mod app;
@@ -41,15 +42,6 @@ fn main() {
                 )])
                 .expect("load Noto Sans JP");
             gpui_kit::init(cx);
-            // gpui_component::init forces the light theme; the app is dark-only.
-            gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
-            {
-                // gpui_component's Root paints `tokens.background` across the
-                // whole window. Keep it transparent so the glass layer reaches
-                // the compositor (Linux) or the acrylic backdrop (Windows).
-                let theme = gpui_kit::component::Theme::global_mut(cx);
-                theme.tokens.background = transparent_black().into();
-            }
             cx.bind_keys([
                 KeyBinding::new("ctrl-b", ToggleSidebar, None),
                 KeyBinding::new("cmd-b", ToggleSidebar, None),
@@ -60,6 +52,7 @@ fn main() {
                 KeyBinding::new("space", OpenQuickLook, Some("photo_grid")),
                 KeyBinding::new("enter", OpenQuickLook, Some("photo_grid")),
                 KeyBinding::new("escape", CloseQuickLook, Some("quick_look")),
+                KeyBinding::new("escape", CloseNotifications, Some("notification_modal")),
                 KeyBinding::new("left", ViewerPreviousPhoto, Some("viewer_nav")),
                 KeyBinding::new("right", ViewerNextPhoto, Some("viewer_nav")),
                 KeyBinding::new("tab", QuickLookNextFocus, Some("quick_look")),

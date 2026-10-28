@@ -18,7 +18,6 @@ use crate::app::import::{
 };
 use crate::app::lifecycle::ScanProgressView;
 use crate::app::{App, Screen, SidebarStatusTab};
-use crate::ui::chrome::message_strip_visible;
 use crate::ui::components::status_progress_bar;
 use crate::ui::import::import_progress_ratio;
 use crate::ui::theme::*;
@@ -36,13 +35,13 @@ pub(crate) enum StatusTone {
 }
 
 impl StatusTone {
-    fn color(self) -> u32 {
+    fn color(self, p: &Palette) -> u32 {
         match self {
-            Self::Idle => MUTED_2,
-            Self::Running => BLUE,
-            Self::Waiting => AMBER,
-            Self::Failed => RED,
-            Self::Success => GREEN,
+            Self::Idle => p.muted_2,
+            Self::Running => p.accent,
+            Self::Waiting => p.amber,
+            Self::Failed => p.red,
+            Self::Success => p.green,
         }
     }
 }
@@ -56,6 +55,7 @@ pub(crate) struct CardStatus {
 
 impl App {
     pub(crate) fn sidebar(&mut self, content_height: f32, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
         let collapsed = self.sidebar_collapsed;
         let update_badge = self.update.nav_badge();
         let epoch = self.sidebar_motion_epoch;
@@ -72,27 +72,21 @@ impl App {
             .py(px(16.))
             .px(px(12.))
             .gap(px(3.))
-            .bg(rgb(PANEL_SIDEBAR))
+            .bg(rgb(p.panel_sidebar))
             .rounded(px(22.))
             .border_1()
-            .border_color(rgba(0xffffff1b))
+            .border_color(rgba(p.line_soft))
             .overflow_hidden()
             .shadow(vec![
-                BoxShadow::new(px(0.), px(18.), rgba(0x00000047).into()).blur_radius(px(44.)),
-                BoxShadow::new(px(0.), px(1.), rgba(0xffffff10).into())
+                BoxShadow::new(px(0.), px(18.), rgba(p.shadow).into()).blur_radius(px(44.)),
+                BoxShadow::new(px(0.), px(1.), rgba(p.highlight).into())
                     .inset()
                     .blur_radius(px(0.)),
             ])
             .child(
-                h_flex()
-                    .h(px(34.))
-                    .px(px(2.))
-                    .items_center()
-                    .when(collapsed, |this| this.justify_center())
-                    .child(self.sidebar_toggle_button(cx)),
-            )
-            .child(div().h(px(12.)))
-            .child(
+                // The absolute highlight and the rows share this box. The
+                // floating toggle sits outside the content edge, so no right
+                // gutter is needed.
                 v_flex()
                     .relative()
                     .w_full()
@@ -136,51 +130,31 @@ impl App {
                         .p(px(11.))
                         .gap(px(3.))
                         .rounded(px(13.))
-                        .bg(rgb(PANEL))
+                        .bg(rgb(p.panel))
                         .border_1()
-                        .border_color(rgba(0xffffff0f))
+                        .border_color(rgba(with_alpha(p.text, 0x0f)))
                         .child(
                             div()
                                 .text_size(px(10.))
-                                .text_color(rgb(MUTED_2))
+                                .text_color(rgb(p.muted_2))
                                 .child("ライブラリ"),
                         )
                         .child(
                             div()
                                 .text_size(px(13.))
                                 .font_semibold()
-                                .text_color(rgb(TEXT))
+                                .text_color(rgb(p.text))
                                 .child(format!("{photo_count} 枚")),
                         )
                         .child(
                             div()
                                 .text_size(px(10.))
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(p.muted))
                                 .child(format_bytes(self.stats.total_bytes)),
                         ),
                 )
             })
             .when(collapsed, |this| this.child(self.sidebar_compact_stats()))
-            .child(
-                h_flex()
-                    .h(px(26.))
-                    .gap(px(7.))
-                    .items_center()
-                    .when(collapsed, |this| this.justify_center())
-                    .when(!collapsed, |this| this.px(px(9.)))
-                    .child(
-                        div()
-                            .size(px(6.))
-                            .rounded_full()
-                            .bg(rgb(if !self.daemon_active {
-                                MUTED_2
-                            } else if self.daemon_paused {
-                                AMBER
-                            } else {
-                                GREEN
-                            })),
-                    ),
-            )
             .child(
                 div()
                     .h(px(20.))
@@ -190,7 +164,7 @@ impl App {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_size(px(if collapsed { 9. } else { 10. }))
-                    .text_color(rgb(MUTED_2))
+                    .text_color(rgb(p.muted_2))
                     .child(if self.demo_assets.is_some() {
                         "DEMO DATA".to_string()
                     } else {
@@ -216,8 +190,10 @@ impl App {
         .into_any_element()
     }
 
-    fn sidebar_toggle_button(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn rail_toggle(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
         let collapsed = self.sidebar_collapsed;
+        let epoch = self.sidebar_motion_epoch;
         let icon = if collapsed {
             IconName::ChevronRight
         } else {
@@ -228,43 +204,67 @@ impl App {
         } else {
             "サイドバーを最小化 (Ctrl+B)"
         };
-        Button::new("sidebar-toggle")
-            .ghost()
-            .icon(icon)
-            .tooltip(tooltip)
-            .size(px(28.))
-            .rounded(px(8.))
-            .text_color(rgb(MUTED))
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)))
+        let (from_left, top) = rail_toggle_origin(!collapsed);
+        let (to_left, _) = rail_toggle_origin(collapsed);
+
+        div()
+            .absolute()
+            .top(px(top))
+            .left(px(from_left))
+            .child(
+                Button::new("sidebar-toggle")
+                    .ghost()
+                    .icon(icon)
+                    .tooltip(tooltip)
+                    .size(px(24.))
+                    .rounded_full()
+                    .bg(rgb(p.panel_2))
+                    .border_1()
+                    .border_color(rgb(p.border_strong))
+                    .text_color(rgb(p.muted))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
+            )
+            .with_animation(
+                ("rail-toggle", epoch),
+                Animation::new(if epoch == 0 {
+                    Duration::ZERO
+                } else {
+                    Duration::from_millis(440)
+                })
+                .with_easing(ease_motion)
+                .with_max_fps(self.motion_fps()),
+                move |el, t| el.left(px(from_left + (to_left - from_left) * t)),
+            )
             .into_any_element()
     }
 
     fn sidebar_compact_stats(&self) -> AnyElement {
+        let p = self.palette;
         v_flex()
             .p(px(6.))
             .gap(px(3.))
             .rounded(px(10.))
-            .bg(rgb(PANEL))
+            .bg(rgb(p.panel))
             .border_1()
-            .border_color(rgba(0xffffff0f))
+            .border_color(rgba(with_alpha(p.text, 0x0f)))
             .child(
                 div()
                     .text_size(px(8.))
-                    .text_color(rgb(MUTED_2))
+                    .text_color(rgb(p.muted_2))
                     .whitespace_nowrap()
                     .child(format!("未実行 {}件", format_count(self.waiting_job_count))),
             )
             .child(
                 div()
                     .text_size(px(7.5))
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(p.text))
                     .whitespace_nowrap()
                     .child(format!("{}枚", format_count(self.stats.photo_count))),
             )
             .child(
                 div()
                     .text_size(px(7.5))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(p.muted))
                     .whitespace_nowrap()
                     .truncate()
                     .child(format_bytes(self.stats.total_bytes)),
@@ -273,6 +273,7 @@ impl App {
     }
 
     fn sidebar_status_card(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
         let import_progress = import_running_progress(self.import_dialog.as_ref());
         let compression = compression_card_status(
             self.active_job_count,
@@ -345,7 +346,7 @@ impl App {
                         .rounded(px(6.))
                         .border_1()
                         .border_color(if active {
-                            rgba(0x66b3ff33)
+                            rgba(with_alpha(p.accent, 0x33))
                         } else {
                             rgba(0x00000000)
                         })
@@ -353,11 +354,11 @@ impl App {
                         .font_medium()
                         .cursor_pointer()
                         .when(active, |this| {
-                            this.bg(rgb(ACCENT_SOFT)).text_color(rgb(BLUE))
+                            this.bg(rgb(p.accent_soft)).text_color(rgb(p.accent))
                         })
                         .when(!active, |this| {
-                            this.text_color(rgb(MUTED_2))
-                                .hover(|this| this.bg(rgb(PANEL_2)).text_color(rgb(TEXT)))
+                            this.text_color(rgb(p.muted_2))
+                                .hover(|this| this.bg(rgb(p.panel_2)).text_color(rgb(p.text)))
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.sidebar_status_tab = tab;
@@ -371,7 +372,7 @@ impl App {
                                     .right(px(4.))
                                     .size(px(4.))
                                     .rounded_full()
-                                    .bg(rgb(tone.color())),
+                                    .bg(rgb(tone.color(&p))),
                             )
                         })
                         .child(label)
@@ -385,115 +386,114 @@ impl App {
                 div()
                     .text_size(px(13.))
                     .font_semibold()
-                    .text_color(rgb(status.tone.color()))
+                    .text_color(rgb(status.tone.color(&p)))
                     .child(status.headline.clone()),
             )
             .child(
                 div()
                     .text_size(px(10.))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(p.muted))
                     .truncate()
                     .child(status.detail.clone()),
             );
         if let Some(ratio) = ratio {
-            body = body.child(status_progress_bar(ratio));
+            body = body.child(status_progress_bar(&self.palette, ratio));
         }
 
-        let footer =
-            match tab {
-                SidebarStatusTab::Compression => {
-                    let mut row = h_flex().items_center().h(px(24.)).gap(px(6.));
-                    if self.waiting_job_count > 0 {
-                        row = row.child(
-                            Button::new("sidebar-status-release-waiting")
-                                .label("未実行を開始")
-                                .small()
-                                .primary()
-                                .tooltip("未実行のジョブをすべて圧縮します")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.request_release_waiting_jobs(window, cx)
-                                })),
-                        );
-                    }
-                    if self.failed_job_count > 0 {
-                        row = row.child(
-                            Button::new("sidebar-status-retry-failed")
-                                .label("再試行")
-                                .small()
-                                .ghost()
-                                .tooltip("上限内の失敗ジョブを再試行します")
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.retry_all_failed_jobs(cx)),
-                                ),
-                        );
-                    }
-                    if self.waiting_job_count == 0 && self.failed_job_count == 0 {
-                        row = row.child(
-                            Button::new("sidebar-status-open-queue")
-                                .label("キューを開く")
-                                .small()
-                                .ghost()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.switch_screen(Screen::Dashboard, cx)
-                                })),
-                        );
-                    }
-                    row
+        let footer = match tab {
+            SidebarStatusTab::Compression => {
+                let mut row = h_flex().items_center().h(px(24.)).gap(px(6.));
+                if self.waiting_job_count > 0 {
+                    row = row.child(
+                        Button::new("sidebar-status-release-waiting")
+                            .label("未実行を開始")
+                            .small()
+                            .primary()
+                            .tooltip("未実行のジョブをすべて圧縮します")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.request_release_waiting_jobs(window, cx)
+                            })),
+                    );
                 }
-                SidebarStatusTab::Import => {
-                    h_flex()
-                        .items_center()
-                        .h(px(24.))
-                        .gap(px(6.))
-                        .child(if import_has_report {
-                            Button::new("sidebar-status-import-result")
-                                .label("結果を見る")
-                                .small()
-                                .ghost()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.switch_screen(Screen::Photos, cx)
-                                }))
-                        } else {
-                            Button::new("sidebar-status-photos")
-                                .label("写真を開く")
-                                .small()
-                                .ghost()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.switch_screen(Screen::Photos, cx)
-                                }))
-                        })
-                }
-                SidebarStatusTab::Scan => {
-                    let can_rescan =
-                        self.scan_progress.is_none() && self.daemon_active && !self.daemon_paused;
-                    let button = if can_rescan {
-                        Button::new("sidebar-status-rescan")
-                            .label("再スキャン")
+                if self.failed_job_count > 0 {
+                    row = row.child(
+                        Button::new("sidebar-status-retry-failed")
+                            .label("再試行")
                             .small()
                             .ghost()
-                            .tooltip("デーモンに再スキャンを要求します")
-                            .on_click(cx.listener(|this, _, _, cx| this.request_daemon_rescan(cx)))
-                    } else {
-                        Button::new("sidebar-status-dashboard")
-                            .label("ダッシュボード")
+                            .tooltip("上限内の失敗ジョブを再試行します")
+                            .on_click(cx.listener(|this, _, _, cx| this.retry_all_failed_jobs(cx))),
+                    );
+                }
+                if self.waiting_job_count == 0 && self.failed_job_count == 0 {
+                    row = row.child(
+                        Button::new("sidebar-status-open-queue")
+                            .label("キューを開く")
                             .small()
                             .ghost()
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.switch_screen(Screen::Dashboard, cx)
-                            }))
-                    };
-                    h_flex().items_center().h(px(24.)).gap(px(6.)).child(button)
+                            })),
+                    );
                 }
-            };
+                row
+            }
+            SidebarStatusTab::Import => {
+                h_flex()
+                    .items_center()
+                    .h(px(24.))
+                    .gap(px(6.))
+                    .child(if import_has_report {
+                        Button::new("sidebar-status-import-result")
+                            .label("結果を見る")
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_notification_modal(window, cx)
+                            }))
+                    } else {
+                        Button::new("sidebar-status-photos")
+                            .label("写真を開く")
+                            .small()
+                            .ghost()
+                            .on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.switch_screen(Screen::Photos, cx)
+                                }),
+                            )
+                    })
+            }
+            SidebarStatusTab::Scan => {
+                let can_rescan =
+                    self.scan_progress.is_none() && self.daemon_active && !self.daemon_paused;
+                let button = if can_rescan {
+                    Button::new("sidebar-status-rescan")
+                        .label("再スキャン")
+                        .small()
+                        .ghost()
+                        .tooltip("デーモンに再スキャンを要求します")
+                        .on_click(cx.listener(|this, _, _, cx| this.request_daemon_rescan(cx)))
+                } else {
+                    Button::new("sidebar-status-dashboard")
+                        .label("ダッシュボード")
+                        .small()
+                        .ghost()
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.switch_screen(Screen::Dashboard, cx)),
+                        )
+                };
+                h_flex().items_center().h(px(24.)).gap(px(6.)).child(button)
+            }
+        };
 
         v_flex()
             .flex_shrink_0()
             .p(px(9.))
             .gap(px(4.))
             .rounded(px(13.))
-            .bg(rgb(PANEL))
+            .bg(rgb(p.panel))
             .border_1()
-            .border_color(rgba(0xffffff0f))
+            .border_color(rgba(with_alpha(p.text, 0x0f)))
             .child(
                 h_flex()
                     .items_center()
@@ -503,7 +503,7 @@ impl App {
                         div()
                             .text_size(px(10.))
                             .font_semibold()
-                            .text_color(rgb(MUTED_2))
+                            .text_color(rgb(p.muted_2))
                             .child("進行状況"),
                     )
                     .child(div().flex_1())
@@ -511,7 +511,7 @@ impl App {
                         div()
                             .size(px(6.))
                             .rounded_full()
-                            .bg(rgb(status.tone.color())),
+                            .bg(rgb(status.tone.color(&p))),
                     ),
             )
             .child(tab_row)
@@ -521,6 +521,7 @@ impl App {
     }
 
     fn nav_highlight(&self) -> AnyElement {
+        let p = self.palette;
         let collapsed = self.sidebar_collapsed;
         let nav_epoch = self.nav_epoch;
         let from = nav_item_top(nav_index(self.nav_previous));
@@ -542,7 +543,7 @@ impl App {
             .right_0()
             .h(px(NAV_ITEM_HEIGHT))
             .rounded(px(11.))
-            .bg(rgb(ACCENT_SOFT))
+            .bg(rgb(p.accent_soft))
             .with_animation(("nav-pill", nav_epoch), vertical_anim(), move |el, t| {
                 el.top(px(from + (to - from) * t))
             });
@@ -576,7 +577,7 @@ impl App {
                     .w(px(2.))
                     .h(px(18.))
                     .rounded_full()
-                    .bg(rgb(BLUE))
+                    .bg(rgb(p.accent))
                     .with_animation(("nav-bar-y", nav_epoch), vertical_anim(), move |el, t| {
                         el.top(px(from + 11.0 + (to - from) * t))
                     }),
@@ -601,6 +602,7 @@ impl App {
         count: Option<String>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let p = self.palette;
         let active = self.screen == screen;
         let was_active = self.nav_previous == screen;
         let hovered = self.hovered_nav == Some(screen);
@@ -623,22 +625,16 @@ impl App {
             color_anim(),
             move |el, t| {
                 if hovered && !active {
-                    return el.text_color(rgb(TEXT));
+                    return el.text_color(rgb(p.text));
                 }
-                let from = if was_active { BLUE } else { MUTED };
-                let to = if active { BLUE } else { MUTED };
+                let from = if was_active { p.accent } else { p.muted };
+                let to = if active { p.accent } else { p.muted };
                 el.text_color(rgb(lerp_color(from, to, t)))
             },
         );
 
-        let label_from = if was_active { 0xeaf4ff } else { MUTED };
-        let label_to = if active {
-            0xeaf4ff
-        } else if hovered {
-            TEXT
-        } else {
-            MUTED
-        };
+        let label_from = if was_active { p.text } else { p.muted };
+        let label_to = if active || hovered { p.text } else { p.muted };
         let label_block = h_flex()
             .min_w_0()
             .items_center()
@@ -661,10 +657,10 @@ impl App {
                             color_anim(),
                             move |el, t| {
                                 if hovered && !active {
-                                    return el.text_color(rgb(TEXT));
+                                    return el.text_color(rgb(p.text));
                                 }
-                                let from = if was_active { BLUE } else { MUTED_2 };
-                                let to = if active { BLUE } else { MUTED_2 };
+                                let from = if was_active { p.accent } else { p.muted_2 };
+                                let to = if active { p.accent } else { p.muted_2 };
                                 el.text_color(rgb(lerp_color(from, to, t)))
                             },
                         ),
@@ -715,7 +711,7 @@ impl App {
             .cursor_pointer()
             .items_center()
             .when(!active, |this| {
-                this.hover(|this| this.bg(rgb(0x161d28)).text_color(rgb(TEXT)))
+                this.hover(|this| this.bg(rgb(p.panel_inner)).text_color(rgb(p.text)))
             })
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 // Hover listeners fire in reverse paint order. Let the entering
@@ -738,6 +734,7 @@ impl App {
     }
 
     pub(crate) fn nav_tooltip(&self) -> AnyElement {
+        let p = self.palette;
         let Some(screen) = self.hovered_nav.filter(|_| self.sidebar_collapsed) else {
             // Keep the empty slot out of the root flex flow; an in-flow
             // zero-width child would still consume a 14px gap and shrink the
@@ -745,19 +742,20 @@ impl App {
             return div().absolute().into_any_element();
         };
         let index = nav_index(screen);
+        let (left, top) = nav_tooltip_origin(index);
 
         div()
             .absolute()
-            .left(px(100.))
-            .top(px(76.0 + nav_item_top(index)))
+            .left(px(left - 4.0))
+            .top(px(top))
             .px(px(8.))
             .py(px(5.))
             .rounded(px(7.))
-            .bg(rgb(0x161c26))
+            .bg(rgb(p.panel_card))
             .border_1()
-            .border_color(rgb(BORDER_STRONG))
+            .border_color(rgb(p.border_strong))
             .text_size(px(10.))
-            .text_color(rgb(TEXT))
+            .text_color(rgb(p.text))
             .whitespace_nowrap()
             .child(screen.title())
             .with_animation(
@@ -765,133 +763,12 @@ impl App {
                 Animation::new(MOTION_FAST)
                     .with_easing(ease_motion)
                     .with_max_fps(self.motion_fps()),
-                move |el, t| el.opacity(t).relative().left(px(-4.0 * (1.0 - t))),
-            )
-            .into_any_element()
-    }
-
-    /// One compact row per failure domain. Detail text stays on the target
-    /// screen so the bar never truncates the actual reason.
-    fn global_alerts(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let import_failed = self
-            .import_report
-            .as_ref()
-            .map(|report| import_issue_counts(&report.issues).0)
-            .unwrap_or(0);
-        alert_summaries(
-            self.failed_job_count,
-            self.daemon_errors.len(),
-            import_failed,
-        )
-        .into_iter()
-        .enumerate()
-        .map(|(index, (target, message))| {
-            let (id, action) = match target {
-                Screen::Photos => ("alert-photos", "写真を開く"),
-                Screen::Compression => ("alert-compression", "圧縮を開く"),
-                Screen::Search => ("alert-search", "検索を開く"),
-                Screen::Dashboard => ("alert-dashboard", "ダッシュボードを開く"),
-                Screen::Settings => ("alert-settings", "設定を開く"),
-            };
-            h_flex()
-                .flex_shrink_0()
-                .w_full()
-                .items_center()
-                .gap(px(10.))
-                .px(px(26.))
-                .py(px(8.))
-                .bg(rgb(PANEL))
-                .border_b_1()
-                .border_color(rgb(BORDER))
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .w(px(6.))
-                        .h(px(6.))
-                        .rounded_full()
-                        .bg(rgb(RED)),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(11.))
-                        .text_color(rgb(RED))
-                        .child(message),
-                )
-                .child(
-                    Button::new(id)
-                        .label(action)
-                        .small()
-                        .ghost()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.switch_screen(target, cx);
-                        })),
-                )
-                .with_animation(
-                    ("global-alert", index),
-                    Animation::new(MOTION_BASE)
-                        .with_easing(ease_motion)
-                        .with_max_fps(self.motion_fps()),
-                    |el, t| el.opacity(t).relative().top(px(-8.0 * (1.0 - t))),
-                )
-                .into_any_element()
-        })
-        .collect()
-    }
-
-    /// Slim persistent row for `App.message` when the ribbon cannot show it.
-    /// Unlike a toast it stays until the user dismisses it or an action
-    /// replaces it; failure details remain on their own screens.
-    fn message_strip(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let message = self.message.clone().unwrap_or_default();
-        h_flex()
-            .flex_shrink_0()
-            .w_full()
-            .items_center()
-            .gap(px(10.))
-            .px(px(26.))
-            .py(px(7.))
-            .bg(rgb(PANEL_INNER))
-            .border_b_1()
-            .border_color(rgb(BORDER))
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .size(px(6.))
-                    .rounded_full()
-                    .bg(rgb(AMBER)),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(11.))
-                    .text_color(rgb(AMBER))
-                    .child(message),
-            )
-            .child(
-                Button::new("message-dismiss")
-                    .label("閉じる")
-                    .small()
-                    .ghost()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.message = None;
-                        cx.notify();
-                    })),
+                move |el, t| el.opacity(t).left(px(left - 4.0 + 4.0 * t)),
             )
             .into_any_element()
     }
 
     pub(crate) fn content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
-        let content_width =
-            window_content_extent(f32::from(window.viewport_size().width), client_inset);
-        let message_strip = (self.message.is_some()
-            && message_strip_visible(self.ribbon_collapsed, self.active_ribbon_tab, content_width))
-        .then(|| self.message_strip(cx));
         let screen = match self.screen {
             Screen::Photos => self.photos_screen(window, cx).into_any_element(),
             Screen::Compression => self.compression_screen(window, cx).into_any_element(),
@@ -912,44 +789,10 @@ impl App {
             enter,
             move |el, t| el.relative().left(px(direction * SCREEN_SLIDE * (1.0 - t))),
         );
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .children(self.global_alerts(cx))
-            .children(message_strip)
-            .child(screen)
-            .into_any_element()
+        v_flex().flex_1().min_h_0().child(screen).into_any_element()
     }
 }
 
-/// Compact, ordered summaries of every failure that deserves a global alert.
-/// The target screen owns the detail, so the bar only carries the count.
-fn alert_summaries(
-    failed_jobs: i64,
-    daemon_errors: usize,
-    import_failed: usize,
-) -> Vec<(Screen, String)> {
-    let mut rows = Vec::new();
-    if failed_jobs > 0 {
-        rows.push((
-            Screen::Dashboard,
-            format!("圧縮に {failed_jobs} 件の失敗があります"),
-        ));
-    }
-    if daemon_errors > 0 {
-        rows.push((
-            Screen::Dashboard,
-            format!("デーモンで {daemon_errors} 件の処理エラーがあります"),
-        ));
-    }
-    if import_failed > 0 {
-        rows.push((
-            Screen::Photos,
-            format!("取り込みで {import_failed} 件失敗しました"),
-        ));
-    }
-    rows
-}
 pub(crate) fn scan_progress_label(progress: &ScanProgressView) -> String {
     match progress.phase {
         IpcScanPhase::Walking => format!(
@@ -1191,6 +1034,25 @@ fn nav_item_top(index: usize) -> f32 {
     index as f32 * (NAV_ITEM_HEIGHT + NAV_ITEM_GAP)
 }
 
+/// Screen-space origin of the collapsed-sidebar tooltip. The menu starts at
+/// the sidebar's top padding (there is no in-flow toggle row), so the tooltip
+/// tracks the item top plus half of its height.
+pub(crate) fn nav_tooltip_origin(index: usize) -> (f32, f32) {
+    (
+        WORKSPACE_PAD + sidebar_width(true) + 20.0,
+        WORKSPACE_PAD + 16.0 + nav_item_top(index) + 8.5,
+    )
+}
+
+/// Screen-space origin of the floating rail toggle. It straddles the sidebar's
+/// right edge like the v0.7.0 control.
+pub(crate) fn rail_toggle_origin(sidebar_collapsed: bool) -> (f32, f32) {
+    (
+        WORKSPACE_PAD + sidebar_width(sidebar_collapsed) - 12.0,
+        WORKSPACE_PAD + 18.0,
+    )
+}
+
 fn nav_bar_left(collapsed: bool) -> f32 {
     if collapsed { 5.0 } else { -1.0 }
 }
@@ -1206,17 +1068,16 @@ pub(crate) fn screen_direction(from: Screen, to: Screen) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        NAV_ITEM_GAP, NAV_ITEM_HEIGHT, StatusTone, alert_summaries, compression_attention,
-        compression_card_status, import_attention, import_card_status, import_running_progress,
-        nav_index, nav_item_top, running_job_count, scan_attention, scan_card_status,
-        scan_progress_label, scan_progress_ratio, screen_direction,
+        NAV_ITEM_GAP, NAV_ITEM_HEIGHT, StatusTone, compression_attention, compression_card_status,
+        import_attention, import_card_status, import_running_progress, nav_index, nav_item_top,
+        nav_tooltip_origin, rail_toggle_origin, running_job_count, scan_attention,
+        scan_card_status, scan_progress_label, scan_progress_ratio, screen_direction,
     };
     use crate::app::Screen;
     use crate::app::import::{
         ImportDialogOrigin, ImportDialogPhase, ImportDialogState, ImportReportView,
     };
     use crate::app::lifecycle::ScanProgressView;
-    use crate::ui::theme::{AMBER, BLUE, GREEN, MUTED_2, RED};
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
@@ -1226,21 +1087,6 @@ mod tests {
     use vrc_photo_core::scanner::ScanFailure;
     use vrc_photo_ipc::ScanPhase as IpcScanPhase;
 
-    #[test]
-    fn alert_summaries_follow_priority_order() {
-        let rows = alert_summaries(2, 1, 3);
-        assert_eq!(rows[0].0, Screen::Dashboard);
-        assert!(rows[0].1.contains("2"));
-        assert_eq!(rows[1].0, Screen::Dashboard);
-        assert_eq!(rows[2].0, Screen::Photos);
-        assert!(alert_summaries(0, 0, 0).is_empty());
-    }
-
-    #[test]
-    fn dashboard_replaces_the_monitor_screen() {
-        assert_eq!(Screen::Dashboard.title(), "ダッシュボード");
-        assert_eq!(alert_summaries(0, 1, 0)[0].0, Screen::Dashboard);
-    }
     #[test]
     fn nav_index_matches_sidebar_order() {
         assert_eq!(nav_index(Screen::Photos), 0);
@@ -1255,6 +1101,18 @@ mod tests {
         assert_eq!(nav_item_top(0), 0.0);
         assert_eq!(nav_item_top(1), NAV_ITEM_HEIGHT + NAV_ITEM_GAP);
         assert_eq!(nav_item_top(4), 4.0 * (NAV_ITEM_HEIGHT + NAV_ITEM_GAP));
+    }
+
+    #[test]
+    fn nav_tooltip_origin_follows_the_top_aligned_menu() {
+        assert_eq!(nav_tooltip_origin(0), (112.0, 38.5));
+        assert_eq!(nav_tooltip_origin(1), (112.0, 81.5));
+    }
+
+    #[test]
+    fn rail_toggle_origin_straddles_the_sidebar_edge() {
+        assert_eq!(rail_toggle_origin(false), (240.0, 32.0));
+        assert_eq!(rail_toggle_origin(true), (80.0, 32.0));
     }
 
     #[test]
@@ -1634,10 +1492,11 @@ mod tests {
     }
     #[test]
     fn tone_colors_use_the_sidebar_palette() {
-        assert_eq!(StatusTone::Idle.color(), MUTED_2);
-        assert_eq!(StatusTone::Running.color(), BLUE);
-        assert_eq!(StatusTone::Waiting.color(), AMBER);
-        assert_eq!(StatusTone::Failed.color(), RED);
-        assert_eq!(StatusTone::Success.color(), GREEN);
+        let p = crate::ui::palette::resolve("charcoal", "sky");
+        assert_eq!(StatusTone::Idle.color(&p), p.muted_2);
+        assert_eq!(StatusTone::Running.color(&p), p.accent);
+        assert_eq!(StatusTone::Waiting.color(&p), p.amber);
+        assert_eq!(StatusTone::Failed.color(&p), p.red);
+        assert_eq!(StatusTone::Success.color(&p), p.green);
     }
 }

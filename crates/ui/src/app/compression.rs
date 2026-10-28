@@ -73,7 +73,7 @@ impl App {
             }
         }
         if ids.is_empty() {
-            self.message = Some("先に写真を選択してください".to_string());
+            self.toast_error("先に写真を選択してください", cx);
             cx.notify();
             return;
         }
@@ -82,7 +82,7 @@ impl App {
             .get(self.profile_index)
             .or_else(|| self.profiles.first())
         else {
-            self.message = Some("圧縮プロファイルがありません".to_string());
+            self.toast_error("圧縮プロファイルがありません", cx);
             cx.notify();
             return;
         };
@@ -100,7 +100,7 @@ impl App {
     pub(crate) fn compress_selection_to_folder(&mut self, cx: &mut Context<Self>) {
         let ids = self.selected_action_ids();
         if ids.is_empty() {
-            self.message = Some("先に写真を選択してください".to_string());
+            self.toast_error("先に写真を選択してください", cx);
             cx.notify();
             return;
         }
@@ -122,7 +122,7 @@ impl App {
     pub(crate) fn compress_selection_to_profile_folder(&mut self, cx: &mut Context<Self>) {
         let ids = self.selected_action_ids();
         if ids.is_empty() {
-            self.message = Some("先に写真を選択してください".to_string());
+            self.toast_error("先に写真を選択してください", cx);
             cx.notify();
             return;
         }
@@ -132,14 +132,14 @@ impl App {
     pub(crate) fn compress_selection_to_clipboard(&mut self, cx: &mut Context<Self>) {
         let ids = self.selected_action_ids();
         if ids.is_empty() {
-            self.message = Some("先に写真を選択してください".to_string());
+            self.toast_error("先に写真を選択してください", cx);
             cx.notify();
             return;
         }
         if ids.len() != 1 {
             // A clipboard holds one image. Opening the normal modal would hide
             // the output selector and leave the confirm button disabled.
-            self.message = Some("クリップボード圧縮は1枚選択時のみ使えます".to_string());
+            self.toast_error("クリップボード圧縮は1枚選択時のみ使えます", cx);
             cx.notify();
             return;
         }
@@ -177,7 +177,7 @@ impl App {
             }
         }
         if ids.is_empty() {
-            self.message = Some("先に写真を選択してください".to_string());
+            self.toast_error("先に写真を選択してください", cx);
             cx.notify();
             return;
         }
@@ -186,7 +186,7 @@ impl App {
             .get(self.profile_index)
             .or_else(|| self.profiles.first())
         else {
-            self.message = Some("圧縮プロファイルがありません".to_string());
+            self.toast_error("圧縮プロファイルがありません", cx);
             cx.notify();
             return;
         };
@@ -234,12 +234,12 @@ impl App {
             .find(|profile| profile.id == dialog.profile_id)
             .cloned()
         else {
-            self.message = Some("選択したプロファイルが見つかりません".to_string());
+            self.toast_error("選択したプロファイルが見つかりません", cx);
             cx.notify();
             return;
         };
         if !manual_output_available(dialog.photo_ids.len(), dialog.output) {
-            self.message = Some("クリップボード出力は1枚選択時のみ使えます".to_string());
+            self.toast_error("クリップボード出力は1枚選択時のみ使えます", cx);
             cx.notify();
             return;
         }
@@ -248,13 +248,13 @@ impl App {
             let photo_id = dialog.photo_ids[0];
             let Some(photo) = self.db.photo_by_id(photo_id).ok().flatten() else {
                 self.manual_compress = None;
-                self.message = Some("写真が見つかりません".to_string());
+                self.toast_error("写真が見つかりません", cx);
                 cx.notify();
                 return;
             };
             let source = PathBuf::from(photo.effective_path());
             self.manual_compress = None;
-            self.message = Some("クリップボードへコピーしています…".to_string());
+            self.toast_info("クリップボードへコピーしています…", cx);
             cx.notify();
             cx.spawn(async move |this, cx| {
                 let bytes = cx
@@ -267,12 +267,13 @@ impl App {
                             cx.write_to_clipboard(gpui_kit::ClipboardItem::new_image(
                                 &gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, bytes),
                             ));
-                            this.message =
-                                Some("圧縮画像をクリップボードへコピーしました".to_string());
+                            this.toast_success("圧縮画像をクリップボードへコピーしました", cx);
                         }
                         Err(error) => {
-                            this.message =
-                                Some(format!("クリップボードへコピーできません: {error}"));
+                            this.toast_error(
+                                format!("クリップボードへコピーできません: {error}"),
+                                cx,
+                            );
                         }
                     }
                     cx.notify();
@@ -285,7 +286,7 @@ impl App {
 
         let output_dir = if dialog.output == ManualOutputTarget::Folder {
             let Some(folder) = dialog.folder.as_deref() else {
-                self.message = Some("出力フォルダを選択してください".to_string());
+                self.toast_warning("出力フォルダを選択してください", cx);
                 cx.notify();
                 return;
             };
@@ -323,13 +324,14 @@ impl App {
             } else {
                 String::new()
             };
-            self.message = Some(format!(
-                "{enqueued} 件を圧縮キューに追加しました（{policy_note}）{failure_note}"
-            ));
+            self.toast_success(
+                format!("{enqueued} 件を圧縮キューに追加しました（{policy_note}）{failure_note}"),
+                cx,
+            );
             self.reload_aux(cx);
             self.send_wake_jobs(cx);
         } else {
-            self.message = Some("圧縮ジョブを追加できませんでした".to_string());
+            self.toast_error("圧縮ジョブを追加できませんでした", cx);
         }
         cx.notify();
     }
@@ -344,7 +346,7 @@ impl App {
             let profile = profile.clone();
             if let Err(error) = self.db.save_profile(&profile) {
                 tracing::warn!(%error, profile = %profile.id, "cannot save compression profile");
-                self.message = Some(format!("プロファイルを保存できません: {error}"));
+                self.toast_error(format!("プロファイルを保存できません: {error}"), cx);
             }
         }
         cx.notify();
@@ -365,7 +367,7 @@ impl App {
                     self.profile_index = index;
                 }
             }
-            Err(error) => self.message = Some(format!("並び替えを保存できません: {error}")),
+            Err(error) => self.toast_error(format!("並び替えを保存できません: {error}"), cx),
         }
         cx.notify();
     }
@@ -383,9 +385,12 @@ impl App {
                     .iter()
                     .position(|profile| profile.id == copy.id)
                     .unwrap_or(0);
-                self.message = Some(format!("「{}」を複製しました（自動適用はOFF）", copy.name));
+                self.toast_success(
+                    format!("「{}」を複製しました（自動適用はOFF）", copy.name),
+                    cx,
+                );
             }
-            Err(error) => self.message = Some(format!("複製に失敗: {error}")),
+            Err(error) => self.toast_error(format!("複製に失敗: {error}"), cx),
         }
         cx.notify();
     }
@@ -405,7 +410,7 @@ impl App {
             return;
         };
         if self.profiles.len() <= 1 {
-            self.message = Some("最後のプロファイルは削除できません".to_string());
+            self.toast_error("最後のプロファイルは削除できません", cx);
             cx.notify();
             return;
         }
@@ -414,11 +419,13 @@ impl App {
                 let entity = cx.entity();
                 let id = id.to_string();
                 let name = profile.name.clone();
+                let panel_deep = self.palette.panel_deep;
                 window.open_alert_dialog(cx, move |alert, _, _| {
                     let entity = entity.clone();
                     let id = id.clone();
                     alert
                         .title("プロファイルを削除")
+                        .bg(rgb(panel_deep))
                         .description(format!(
                             "「{name}」を削除します。この操作は元に戻せません。"
                         ))
@@ -433,14 +440,17 @@ impl App {
                 });
             }
             Ok(count) => {
-                self.message = Some(format!(
-                    "「{}」は未完了のジョブが{}件あるため削除できません",
-                    profile.name, count
-                ));
+                self.toast_error(
+                    format!(
+                        "「{}」は未完了のジョブが{}件あるため削除できません",
+                        profile.name, count
+                    ),
+                    cx,
+                );
                 cx.notify();
             }
             Err(error) => {
-                self.message = Some(format!("削除前の確認に失敗: {error}"));
+                self.toast_error(format!("削除前の確認に失敗: {error}"), cx);
                 cx.notify();
             }
         }
@@ -462,7 +472,7 @@ impl App {
             Ok(()) => {
                 self.profiles = self.db.list_profiles().unwrap_or_default();
                 self.profile_index = removed_index.min(self.profiles.len().saturating_sub(1));
-                self.message = Some("プロファイルを削除しました".to_string());
+                self.toast_success("プロファイルを削除しました", cx);
             }
             Err(error) => {
                 let message = match self.db.active_job_count_for_profile(id) {
@@ -474,7 +484,7 @@ impl App {
                     }
                     _ => format!("プロファイルを削除できません: {error}"),
                 };
-                self.message = Some(message);
+                self.toast_error(message, cx);
             }
         }
         cx.notify();
@@ -482,16 +492,19 @@ impl App {
     pub(crate) fn retry_job(&mut self, id: String, cx: &mut Context<Self>) {
         match self.db.retry_job(&id) {
             Ok(true) => {
-                self.message = Some("再試行をキューに戻しました".to_string());
-                self.reload_job_state();
+                self.toast_success("再試行をキューに戻しました", cx);
+                self.reload_job_state(cx);
                 self.send_wake_jobs(cx);
             }
             Ok(false) => {
-                self.message = Some(format!("再試行の上限（{MAX_JOB_RETRIES}回）に達しました"));
+                self.toast_warning(
+                    format!("再試行の上限（{MAX_JOB_RETRIES}回）に達しました"),
+                    cx,
+                );
             }
             Err(error) => {
                 tracing::warn!(%error, %id, "cannot retry compression job");
-                self.message = Some(format!("再試行できません: {error}"));
+                self.toast_error(format!("再試行できません: {error}"), cx);
             }
         }
         cx.notify();
@@ -500,13 +513,16 @@ impl App {
     pub(crate) fn retry_all_failed_jobs(&mut self, cx: &mut Context<Self>) {
         match self.db.retry_failed_jobs() {
             Ok(count) => {
-                self.message = Some(format!("{count} 件を再試行に戻しました（上限到達は除外）"));
-                self.reload_job_state();
+                self.toast_success(
+                    format!("{count} 件を再試行に戻しました（上限到達は除外）"),
+                    cx,
+                );
+                self.reload_job_state(cx);
                 self.send_wake_jobs(cx);
             }
             Err(error) => {
                 tracing::warn!(%error, "cannot retry failed compression jobs");
-                self.message = Some(format!("再試行できません: {error}"));
+                self.toast_error(format!("再試行できません: {error}"), cx);
             }
         }
         cx.notify();
@@ -525,11 +541,13 @@ impl App {
             return;
         };
         let entity = cx.entity();
+        let panel_deep = self.palette.panel_deep;
         window.open_alert_dialog(cx, move |alert, _, _| {
             let entity = entity.clone();
             let description = description.clone();
             alert
                 .title("待機ジョブを圧縮")
+                .bg(rgb(panel_deep))
                 .description(description)
                 .confirm()
                 .ok_text("圧縮する")
@@ -545,15 +563,15 @@ impl App {
     fn release_waiting_jobs(&mut self, cx: &mut Context<Self>) {
         let policy = compression_policy(self.settings.auto_compress_keep_original);
         match self.db.release_waiting_jobs(policy) {
-            Ok(0) => self.message = Some("未実行のジョブはありません".to_string()),
+            Ok(0) => self.toast_info("未実行のジョブはありません", cx),
             Ok(count) => {
-                self.message = Some(format!("{count} 件を圧縮キューに戻しました"));
-                self.reload_job_state();
+                self.toast_success(format!("{count} 件を圧縮キューに戻しました"), cx);
+                self.reload_job_state(cx);
                 self.send_wake_jobs(cx);
             }
             Err(error) => {
                 tracing::warn!(%error, "cannot release waiting compression jobs");
-                self.message = Some(format!("待機ジョブを開始できません: {error}"));
+                self.toast_error(format!("待機ジョブを開始できません: {error}"), cx);
             }
         }
         cx.notify();

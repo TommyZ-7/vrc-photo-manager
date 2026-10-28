@@ -45,7 +45,6 @@ impl App {
             self.set_viewer_morph(None, cx);
             self.viewer_morph_epoch = self.viewer_morph_epoch.wrapping_add(1);
         }
-        self.message = None;
         self.note_edit_id = None;
         self.quick_look_return_focus = window.focused(cx);
         self.quick_look_photo_ids = self.viewer_source_ids();
@@ -72,7 +71,6 @@ impl App {
         let now = Instant::now();
         self.viewer_nav_epoch = 0;
         self.viewer_nav_direction = 1.0;
-        self.viewer_nav_started_at = now;
         self.viewer_open_started_at = now;
         let details_width = if self.quick_look_details_open {
             VIEWER_DETAILS_WIDTH
@@ -342,10 +340,15 @@ impl App {
         }
         // Keep the top-bar navigation focused; only the library selection and
         // the displayed photo change behind the overlay.
+        let visible_image = self
+            .preview
+            .clone()
+            .or_else(|| self.selected.and_then(|id| self.thumbnails.get(id)));
         let viewport = content_viewport(window);
         let from_size = self.viewer_box.current_size(viewport);
         let target_details_width = self.viewer_panel.to_width;
         self.select_photo(self.quick_look_photo_ids[next], cx);
+        self.previous_preview = visible_image;
         let new_aspect = self
             .selected_photo
             .as_ref()
@@ -361,7 +364,6 @@ impl App {
         let now = Instant::now();
         self.viewer_nav_epoch = self.viewer_nav_epoch.wrapping_add(1);
         self.viewer_nav_direction = if delta > 0 { 1.0 } else { -1.0 };
-        self.viewer_nav_started_at = now;
         self.viewer_box = ViewerBoxState {
             epoch: self.viewer_box.epoch.wrapping_add(1),
             started_at: now,

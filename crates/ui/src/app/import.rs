@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
+use gpui_kit::component::notification::NotificationType;
 use gpui_kit::*;
 use vrc_photo_core::importer::{
     self, ImportIssue, ImportIssueKind, ImportMode, ImportProgress, ImportRename, ImportResult,
@@ -306,7 +307,7 @@ impl App {
         match result {
             Err(error) => match dialog.origin {
                 ImportDialogOrigin::New => {
-                    self.message = Some(format!("取り込みに失敗: {error}"));
+                    self.toast_error(format!("取り込みに失敗: {error}"), cx);
                     self.import_dialog = Some(ImportDialogState {
                         origin: ImportDialogOrigin::New,
                         mode: dialog.mode,
@@ -317,10 +318,10 @@ impl App {
                     });
                 }
                 ImportDialogOrigin::Retry { .. } => {
-                    self.message = Some(format!("再試行に失敗: {error}"));
+                    self.toast_error(format!("再試行に失敗: {error}"), cx);
                 }
                 ImportDialogOrigin::Resume { .. } => {
-                    self.message = Some(format!("再開に失敗: {error}"));
+                    self.toast_error(format!("再開に失敗: {error}"), cx);
                 }
             },
             Ok(result) => {
@@ -370,8 +371,22 @@ impl App {
                     report.scan_error = None;
                     self.index_import_destination(&mut report, cx);
                 }
-                self.message = Some(import_summary(&report));
+                let summary = import_summary(&report);
+                let (failed, partial) = import_issue_counts(&report.issues);
+                let scan_failed =
+                    report.scan_failures.len() + usize::from(report.scan_error.is_some());
+                let tone = if failed == 0
+                    && partial == 0
+                    && scan_failed == 0
+                    && report.remaining.is_empty()
+                {
+                    NotificationType::Success
+                } else {
+                    NotificationType::Warning
+                };
+                self.toast_actionable(tone, summary, cx);
                 self.import_report = Some(report);
+                self.import_report_expanded = false;
                 self.import_dialog = None;
                 cx.notify();
             }

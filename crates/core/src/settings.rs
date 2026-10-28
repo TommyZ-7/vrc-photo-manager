@@ -43,7 +43,7 @@ pub struct AppSettings {
     pub compression_workers: usize,
     #[serde(default)]
     pub ui_sidebar_collapsed: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub ui_inspector_collapsed: bool,
     #[serde(default)]
     pub ui_reduce_motion: bool,
@@ -63,6 +63,12 @@ pub struct AppSettings {
     pub ui_card_show_size: bool,
     #[serde(default, deserialize_with = "deserialize_card_size")]
     pub ui_card_size: CardSize,
+    /// Main colour catalog id. Unknown ids fall back to `charcoal` in the UI.
+    #[serde(default = "default_ui_theme_main")]
+    pub ui_theme_main: String,
+    /// Accent colour catalog id. Unknown ids fall back to `sky` in the UI.
+    #[serde(default = "default_ui_theme_accent")]
+    pub ui_theme_accent: String,
     #[serde(default = "default_auto_update_check")]
     pub auto_update_check: bool,
     #[serde(default)]
@@ -79,6 +85,14 @@ fn default_max_fps() -> u32 {
 
 fn default_auto_update_check() -> bool {
     true
+}
+
+fn default_ui_theme_main() -> String {
+    "charcoal".to_string()
+}
+
+fn default_ui_theme_accent() -> String {
+    "sky".to_string()
 }
 
 fn deserialize_card_size<'de, D>(deserializer: D) -> std::result::Result<CardSize, D::Error>
@@ -110,7 +124,7 @@ impl Default for AppSettings {
             thumbnail_cache_mb: 2048,
             compression_workers: 1,
             ui_sidebar_collapsed: false,
-            ui_inspector_collapsed: false,
+            ui_inspector_collapsed: true,
             ui_reduce_motion: false,
             ui_max_fps: 60,
             ui_ribbon_collapsed: true,
@@ -119,6 +133,8 @@ impl Default for AppSettings {
             ui_card_show_date: true,
             ui_card_show_size: true,
             ui_card_size: CardSize::Medium,
+            ui_theme_main: default_ui_theme_main(),
+            ui_theme_accent: default_ui_theme_accent(),
             auto_update_check: true,
             update_last_checked_at: None,
         }
@@ -436,6 +452,63 @@ mod tests {
     }
 
     #[test]
+    fn theme_settings_roundtrip() {
+        let db = Db::open_in_memory().unwrap();
+        let settings = AppSettings {
+            ui_theme_main: "forest".to_string(),
+            ui_theme_accent: "rose".to_string(),
+            ..Default::default()
+        };
+        settings.save(&db).unwrap();
+        let loaded = AppSettings::load(&db).unwrap();
+        assert_eq!(loaded.ui_theme_main, "forest");
+        assert_eq!(loaded.ui_theme_accent, "rose");
+    }
+
+    #[test]
+    fn missing_theme_fields_default_to_charcoal_and_sky() {
+        let json = r#"{
+            "photo_roots": [],
+            "log_dir": null,
+            "managed_dir": null,
+            "language": "ja",
+            "autostart": true,
+            "tray": true,
+            "auto_compress": true,
+            "auto_compress_backlog": false,
+            "estimated_link": true,
+            "thumbnail_cache_mb": 2048,
+            "compression_workers": 1
+        }"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(settings.ui_theme_main, "charcoal");
+        assert_eq!(settings.ui_theme_accent, "sky");
+    }
+
+    #[test]
+    fn unknown_theme_id_loads_verbatim() {
+        let json = r#"{
+            "photo_roots": ["/tmp/photos"],
+            "log_dir": null,
+            "managed_dir": null,
+            "language": "ja",
+            "autostart": true,
+            "tray": true,
+            "auto_compress": true,
+            "auto_compress_backlog": false,
+            "estimated_link": true,
+            "thumbnail_cache_mb": 2048,
+            "compression_workers": 1,
+            "ui_theme_main": "neon",
+            "ui_theme_accent": "void"
+        }"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(settings.ui_theme_main, "neon");
+        assert_eq!(settings.ui_theme_accent, "void");
+        assert_eq!(settings.photo_roots, vec!["/tmp/photos".to_string()]);
+    }
+
+    #[test]
     fn settings_roundtrip() {
         let db = Db::open_in_memory().unwrap();
         let settings = AppSettings {
@@ -468,7 +541,7 @@ mod tests {
         }"#;
         let settings: AppSettings = serde_json::from_str(json).unwrap();
         assert!(!settings.ui_sidebar_collapsed);
-        assert!(!settings.ui_inspector_collapsed);
+        assert!(settings.ui_inspector_collapsed);
         assert!(!settings.ui_reduce_motion);
         assert!(settings.ui_card_show_status);
         assert!(settings.ui_card_show_world);
@@ -484,6 +557,11 @@ mod tests {
         let settings = AppSettings::default();
         assert!(settings.auto_update_check);
         assert_eq!(settings.update_last_checked_at, None);
+    }
+
+    #[test]
+    fn inspector_defaults_to_collapsed() {
+        assert!(AppSettings::default().ui_inspector_collapsed);
     }
 
     #[test]

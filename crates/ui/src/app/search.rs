@@ -138,8 +138,6 @@ impl App {
                 }
                 self.search_active = true;
                 self.searching = false;
-                // A previous failure must not linger above a fresh result.
-                self.message = None;
                 if self.search_refresh_pending {
                     self.search_refresh_pending = false;
                     self.start_search_refresh(anchor, cx);
@@ -149,7 +147,7 @@ impl App {
                 self.pending_search_anchor = None;
                 self.search_refresh_pending = false;
                 self.searching = false;
-                self.message = Some(format!("検索に失敗しました: {error}"));
+                self.toast_error(format!("検索に失敗しました: {error}"), cx);
             }
         }
         cx.notify();
@@ -165,7 +163,6 @@ impl App {
         self.pending_search_anchor = None;
         self.pending_layout_anchor_search = None;
         self.search_refresh_pending = false;
-        self.message = None;
         // Invalidate an in-flight request so it cannot revive the cleared view.
         self.search_request = self.search_request.wrapping_add(1);
         let index = self.library.index.clone();

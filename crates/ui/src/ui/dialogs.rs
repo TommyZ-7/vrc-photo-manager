@@ -20,6 +20,7 @@ impl App {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let p = self.palette;
         let Some(dialog) = self.manual_compress.clone() else {
             return div().into_any_element();
         };
@@ -55,6 +56,7 @@ impl App {
             let id = profile.id.clone();
             let selected = profile.id == dialog.profile_id;
             manual_option_row(
+                &self.palette,
                 SharedString::from(format!("manual-profile-{}", profile.id)),
                 profile.name.clone(),
                 profile_summary(&profile),
@@ -70,6 +72,7 @@ impl App {
         });
 
         let folder_row = manual_option_row(
+            &self.palette,
             "manual-output-folder",
             "指定したフォルダに出力",
             "実行のたびに出力先を選びます",
@@ -84,6 +87,7 @@ impl App {
         }));
 
         let profile_row = manual_option_row(
+            &self.palette,
             "manual-output-profile",
             "プロファイル指定のフォルダに出力",
             profile_description,
@@ -99,6 +103,7 @@ impl App {
 
         let clipboard_enabled = manual_output_available(count, ManualOutputTarget::Clipboard);
         let clipboard_row = manual_option_row(
+            &self.palette,
             "manual-output-clipboard",
             "クリップボードに出力",
             if clipboard_enabled {
@@ -119,6 +124,7 @@ impl App {
         });
 
         let keep_row = manual_option_row(
+            &self.palette,
             "manual-keep-original",
             "元画像を保持",
             "圧縮版を別ファイルで出力します",
@@ -132,6 +138,7 @@ impl App {
             cx.notify();
         }));
         let trash_row = manual_option_row(
+            &self.palette,
             "manual-trash-original",
             "元画像をゴミ箱へ移動",
             "圧縮に成功した場合だけOSゴミ箱へ移動します",
@@ -155,35 +162,34 @@ impl App {
             format!("{count} 件を圧縮")
         };
 
-        let header =
-            v_flex()
-                .gap(px(16.))
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap(px(10.))
-                        .child(
-                            div()
-                                .text_size(px(20.))
-                                .font_semibold()
-                                .text_color(rgb(TEXT))
-                                .child("手動圧縮"),
-                        )
-                        .child(div().flex_1())
-                        .child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(rgb(MUTED_2))
-                                .child(format!("{count} 枚を対象")),
-                        ),
-                )
-                .child(div().text_size(px(11.)).text_color(rgb(MUTED)).child(
-                    if dialog.hide_output {
-                        "プロファイルと元画像の扱いを確認して実行します。"
-                    } else {
-                        "使用するプロファイル、出力先、元画像の扱いを選んでから実行します。"
-                    },
-                ));
+        let header = v_flex()
+            .gap(px(16.))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(
+                        div()
+                            .text_size(px(20.))
+                            .font_semibold()
+                            .text_color(rgb(p.text))
+                            .child("手動圧縮"),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(p.muted_2))
+                            .child(format!("{count} 枚を対象")),
+                    ),
+            )
+            .child(div().text_size(px(11.)).text_color(rgb(p.muted)).child(
+                if dialog.hide_output {
+                    "プロファイルと元画像の扱いを確認して実行します。"
+                } else {
+                    "使用するプロファイル、出力先、元画像の扱いを選んでから実行します。"
+                },
+            ));
 
         let body = v_flex()
             .flex_1()
@@ -216,9 +222,9 @@ impl App {
                                             .truncate()
                                             .text_size(px(10.))
                                             .text_color(rgb(if folder_ready {
-                                                MUTED
+                                                p.muted
                                             } else {
-                                                AMBER
+                                                p.amber
                                             }))
                                             .child(folder_path),
                                     )
@@ -243,7 +249,7 @@ impl App {
                     .child(
                         div()
                             .text_size(px(10.))
-                            .text_color(rgb(MUTED_2))
+                            .text_color(rgb(p.muted_2))
                             .child("「ゴミ箱へ移動」は圧縮ファイルの検証に成功した場合だけ実行します。"),
                     )
             })
@@ -252,9 +258,9 @@ impl App {
                     div()
                         .p(px(10.))
                         .rounded(px(8.))
-                        .bg(rgb(PANEL_2))
+                        .bg(rgb(p.panel_2))
                         .text_size(px(10.))
-                        .text_color(rgb(MUTED))
+                        .text_color(rgb(p.muted))
                         .child("クリップボード出力では元画像を変更しません。形式はPNG、リサイズ設定のみ反映します。"),
                 )
             });
@@ -279,7 +285,7 @@ impl App {
                     .on_click(cx.listener(|this, _, _, cx| this.confirm_manual_compression(cx))),
             );
 
-        let panel = dialog_panel()
+        let panel = dialog_panel(&self.palette)
             .id("manual-compression-panel")
             .w(px(580.))
             .h(px(max_height))
@@ -310,7 +316,7 @@ impl App {
             .items_center()
             .justify_center()
             .p(px(DIALOG_VIEWPORT_MARGIN))
-            .bg(rgba(0x05070acc))
+            .bg(rgba(p.scrim))
             .on_click(cx.listener(|this, _, _, cx| this.close_manual_compression(cx)))
             .child(panel)
             .with_animation(

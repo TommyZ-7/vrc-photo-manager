@@ -16,6 +16,7 @@ gpui_kit::actions!(
         ViewerNextPhoto,
         QuickLookNextFocus,
         QuickLookPrevFocus,
+        CloseNotifications,
     ]
 );
 

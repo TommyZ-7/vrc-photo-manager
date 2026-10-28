@@ -20,22 +20,23 @@ use crate::app::App;
 use crate::ui::components::glass_panel;
 use crate::ui::theme::*;
 
-fn section_divider() -> AnyElement {
+fn section_divider(palette: &Palette) -> AnyElement {
+    let p = palette;
     div()
         .h(px(1.))
         .w_full()
-        .bg(rgba(0xffffff0e))
+        .bg(rgba(with_alpha(p.text, 0x0e)))
         .into_any_element()
 }
 
-fn queue_status_badge(status: &QueueStatus) -> (&'static str, u32, u32) {
+fn queue_status_badge(status: &QueueStatus, p: &Palette) -> (&'static str, u32, u32) {
     match status {
-        QueueStatus::Waiting => ("未実行", AMBER, 0x2a2412),
-        QueueStatus::Pending => ("実行待ち", MUTED, PANEL_2),
-        QueueStatus::Processing => ("処理中", BLUE, 0x14283d),
-        QueueStatus::Completed => ("完了", GREEN, 0x112a22),
-        QueueStatus::Failed => ("失敗", RED, 0x2a1414),
-        QueueStatus::Cancelled => ("取消", MUTED, PANEL_2),
+        QueueStatus::Waiting => ("未実行", p.amber, p.amber_soft),
+        QueueStatus::Pending => ("実行待ち", p.muted, p.panel_2),
+        QueueStatus::Processing => ("処理中", p.accent, p.accent_soft),
+        QueueStatus::Completed => ("完了", p.green, p.green_soft),
+        QueueStatus::Failed => ("失敗", p.red, p.red_soft),
+        QueueStatus::Cancelled => ("取消", p.muted, p.panel_2),
     }
 }
 
@@ -59,6 +60,7 @@ impl App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let p = self.palette;
         let profile = self
             .profiles
             .get(self.profile_index)
@@ -72,7 +74,7 @@ impl App {
             .child(self.profile_list_card(cx))
             .child(match profile {
                 Some(profile) => self.profile_editor(&profile, window, cx).into_any_element(),
-                None => glass_panel()
+                None => glass_panel(&self.palette)
                     .flex()
                     .flex_1()
                     .min_h_0()
@@ -80,7 +82,7 @@ impl App {
                     .justify_center()
                     .rounded(px(17.))
                     .text_size(px(12.))
-                    .text_color(rgb(MUTED_2))
+                    .text_color(rgb(p.muted_2))
                     .child("プロファイルがありません")
                     .into_any_element(),
             })
@@ -89,8 +91,9 @@ impl App {
     /// Left card: profile list header with the add action, then the selectable
     /// profile cards in a scroll body.
     fn profile_list_card(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
         let profile_count = self.profiles.len();
-        glass_panel()
+        glass_panel(&self.palette)
             .flex()
             .flex_col()
             .w(px(COMPRESSION_PROFILE_WIDTH))
@@ -112,15 +115,15 @@ impl App {
                         let auto = profile.auto_enabled;
                         let title = profile.name.clone();
                         let meta = profile_summary(profile);
-                        glass_panel()
+                        glass_panel(&self.palette)
                             .id(SharedString::from(format!("profile-{index}")))
                             .flex()
                             .flex_col()
                             .p(px(12.))
                             .gap(px(6.))
                             .rounded(px(12.))
-                            .bg(rgb(if active { ACCENT_SOFT } else { PANEL_INNER }))
-                            .border_color(rgb(if active { BLUE } else { BORDER }))
+                            .bg(rgb(if active { p.accent_soft } else { p.panel_inner }))
+                            .border_color(rgb(if active { p.accent } else { p.border }))
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.profile_index = index;
@@ -137,16 +140,24 @@ impl App {
                                             .truncate()
                                             .text_size(px(12.))
                                             .font_semibold()
-                                            .text_color(rgb(if active { BLUE } else { MUTED }))
+                                            .text_color(rgb(if active {
+                                                p.accent
+                                            } else {
+                                                p.muted
+                                            }))
                                             .child(title),
                                     )
                                     .child(self.badge(
                                         if auto { "自動" } else { "手動" },
-                                        if auto { GREEN } else { MUTED },
-                                        if auto { 0x112a22 } else { PANEL_2 },
+                                        if auto { p.green } else { p.muted },
+                                        if auto { p.green_soft } else { p.panel_2 },
                                     ))
                                     .when(profile.clipboard, |this| {
-                                        this.child(self.badge("クリップボード", BLUE, 0x14283d))
+                                        this.child(self.badge(
+                                            "クリップボード",
+                                            p.accent,
+                                            p.accent_soft,
+                                        ))
                                     })
                                     .child(
                                         div()
@@ -159,14 +170,15 @@ impl App {
                                             .rounded(px(6.))
                                             .text_size(px(11.))
                                             .text_color(rgb(if index == 0 {
-                                                MUTED_2
+                                                p.muted_2
                                             } else {
-                                                MUTED
+                                                p.muted
                                             }))
                                             .when(index > 0, |this| {
                                                 this.cursor_pointer()
                                                     .hover(|this| {
-                                                        this.bg(rgb(PANEL_2)).text_color(rgb(TEXT))
+                                                        this.bg(rgb(p.panel_2))
+                                                            .text_color(rgb(p.text))
                                                     })
                                                     .on_click(cx.listener(move |this, _, _, cx| {
                                                         this.move_profile(index, -1, cx);
@@ -186,14 +198,15 @@ impl App {
                                             .rounded(px(6.))
                                             .text_size(px(11.))
                                             .text_color(rgb(if index + 1 == profile_count {
-                                                MUTED_2
+                                                p.muted_2
                                             } else {
-                                                MUTED
+                                                p.muted
                                             }))
                                             .when(index + 1 < profile_count, |this| {
                                                 this.cursor_pointer()
                                                     .hover(|this| {
-                                                        this.bg(rgb(PANEL_2)).text_color(rgb(TEXT))
+                                                        this.bg(rgb(p.panel_2))
+                                                            .text_color(rgb(p.text))
                                                     })
                                                     .on_click(cx.listener(move |this, _, _, cx| {
                                                         this.move_profile(index, 1, cx);
@@ -206,7 +219,7 @@ impl App {
                             .child(
                                 div()
                                     .text_size(px(10.))
-                                    .text_color(rgb(if active { MUTED } else { MUTED_2 }))
+                                    .text_color(rgb(if active { p.text } else { p.muted_2 }))
                                     .child(meta),
                             )
                     })),
@@ -217,6 +230,7 @@ impl App {
     /// Header bar for the profile column. Rehomed from the deleted page
     /// header; the add action keeps its original save/reload path.
     fn profile_list_header(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
         h_flex()
             .flex_shrink_0()
             .h(px(GALLERY_HEADER_HEIGHT))
@@ -224,14 +238,14 @@ impl App {
             .gap(px(8.))
             .items_center()
             .border_b_1()
-            .border_color(rgba(0xffffff14))
+            .border_color(rgba(p.highlight))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .text_size(px(13.))
                     .font_semibold()
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(p.text))
                     .child("プロファイル"),
             )
             .child(
@@ -246,7 +260,7 @@ impl App {
                         };
                         if let Err(error) = this.db.save_profile(&profile) {
                             tracing::warn!(%error, "cannot add compression profile");
-                            this.message = Some(format!("プロファイルを追加できません: {error}"));
+                            this.toast_error(format!("プロファイルを追加できません: {error}"), cx);
                         }
                         this.profiles = this.db.list_profiles().unwrap_or_else(|error| {
                             tracing::warn!(%error, "cannot reload compression profiles");
@@ -269,6 +283,7 @@ impl App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let p = self.palette;
         let profile_id = profile.id.clone();
         let clipboard_profile_id = profile.id.clone();
         let suffix_value = self.profile_suffix_input.read(cx).value();
@@ -289,7 +304,7 @@ impl App {
             Some(dir) if Path::new(dir).is_absolute() => "絶対パス".to_string(),
             Some(_) => "相対パス: 元画像のフォルダ基準".to_string(),
         };
-        glass_panel()
+        glass_panel(&self.palette)
             .flex()
             .flex_col()
             .flex_1()
@@ -306,17 +321,17 @@ impl App {
                     .gap(px(8.))
                     .items_center()
                     .border_b_1()
-                    .border_color(rgba(0xffffff14))
+                    .border_color(rgba(p.highlight))
                     .child(
                         div()
                             .min_w_0()
                             .truncate()
                             .text_size(px(13.))
                             .font_semibold()
-                            .text_color(rgb(TEXT))
+                            .text_color(rgb(p.text))
                             .child(profile.name.clone()),
                     )
-                    .child(self.badge(&format_label(&profile.format), BLUE, 0x14283d))
+                    .child(self.badge(&format_label(&profile.format), p.accent, p.accent_soft))
                     .child(div().flex_1())
                     .child(
                         Button::new("duplicate-profile")
@@ -352,13 +367,13 @@ impl App {
                                     .child(
                                         div()
                                             .text_size(px(12.))
-                                            .text_color(rgb(TEXT))
+                                            .text_color(rgb(p.text))
                                             .child("自動圧縮に使う"),
                                     )
                                     .child(
                                         div()
                                             .text_size(px(10.))
-                                            .text_color(rgb(MUTED_2))
+                                            .text_color(rgb(p.muted_2))
                                             .child("新規写真にこのプロファイルを適用します"),
                                     ),
                             )
@@ -374,7 +389,7 @@ impl App {
                                     })),
                             ),
                     )
-                    .child(section_divider())
+                    .child(section_divider(&p))
                     .child(self.section_label("形式と画質"))
                     .child(
                         h_flex().gap(px(4.)).children(
@@ -398,13 +413,13 @@ impl App {
                                     .py(px(5.))
                                     .rounded(px(8.))
                                     .bg(if active {
-                                        rgb(ACCENT_SOFT)
+                                        rgb(p.accent_soft)
                                     } else {
                                         rgba(0x00000000)
                                     })
                                     .text_size(px(12.))
                                     .font_medium()
-                                    .text_color(if active { rgb(BLUE) } else { rgb(MUTED) })
+                                    .text_color(if active { rgb(p.accent) } else { rgb(p.muted) })
                                     .cursor_pointer()
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.edit_profile(
@@ -429,7 +444,7 @@ impl App {
                                 div()
                                     .w(px(80.))
                                     .text_size(px(12.))
-                                    .text_color(rgb(MUTED))
+                                    .text_color(rgb(p.muted))
                                     .child("ロスレス"),
                             )
                             .child(
@@ -446,7 +461,7 @@ impl App {
                             .child(
                                 div()
                                     .text_size(px(10.))
-                                    .text_color(rgb(MUTED_2))
+                                    .text_color(rgb(p.muted_2))
                                     .child(lossless_hint(&profile.format)),
                             ),
                     )
@@ -458,7 +473,7 @@ impl App {
                                 div()
                                     .w(px(80.))
                                     .text_size(px(12.))
-                                    .text_color(rgb(MUTED))
+                                    .text_color(rgb(p.muted))
                                     .child("品質"),
                             )
                             .child(
@@ -481,7 +496,7 @@ impl App {
                                     .w(px(36.))
                                     .text_size(px(12.))
                                     .font_semibold()
-                                    .text_color(rgb(TEXT))
+                                    .text_color(rgb(p.text))
                                     .child(profile.quality.to_string()),
                             )
                             .child(
@@ -499,7 +514,7 @@ impl App {
                                         );
                                     })),
                             )
-                            .child(div().text_size(px(10.)).text_color(rgb(MUTED_2)).child(
+                            .child(div().text_size(px(10.)).text_color(rgb(p.muted_2)).child(
                                 if profile.lossless {
                                     "ロスレスでは品質指定を使用しません"
                                 } else {
@@ -507,7 +522,7 @@ impl App {
                                 },
                             )),
                     )
-                    .child(section_divider())
+                    .child(section_divider(&p))
                     .child(self.section_label("リサイズ"))
                     .child(
                         v_flex()
@@ -519,7 +534,7 @@ impl App {
                                     .child(
                                         div()
                                             .text_size(px(12.))
-                                            .text_color(rgb(MUTED))
+                                            .text_color(rgb(p.muted))
                                             .child("リサイズを有効にする"),
                                     )
                                     .child(
@@ -543,7 +558,7 @@ impl App {
                                                 .w(px(96.))
                                                 .flex_shrink_0()
                                                 .text_size(px(12.))
-                                                .text_color(rgb(MUTED))
+                                                .text_color(rgb(p.muted))
                                                 .child("解像度"),
                                         )
                                         .children(
@@ -565,16 +580,16 @@ impl App {
                                                     .py(px(4.))
                                                     .rounded(px(8.))
                                                     .bg(if active {
-                                                        rgb(ACCENT_SOFT)
+                                                        rgb(p.accent_soft)
                                                     } else {
                                                         rgba(0x00000000)
                                                     })
                                                     .text_size(px(10.))
                                                     .font_medium()
                                                     .text_color(if active {
-                                                        rgb(BLUE)
+                                                        rgb(p.accent)
                                                     } else {
-                                                        rgb(MUTED)
+                                                        rgb(p.muted)
                                                     })
                                                     .cursor_pointer()
                                                     .on_click(cx.listener(
@@ -595,7 +610,7 @@ impl App {
                                         .child(
                                             div()
                                                 .text_size(px(10.))
-                                                .text_color(rgb(MUTED_2))
+                                                .text_color(rgb(p.muted_2))
                                                 .child(format!(
                                                     "{} × {}",
                                                     profile.width, profile.height
@@ -616,7 +631,7 @@ impl App {
                                                         .w(px(96.))
                                                         .flex_shrink_0()
                                                         .text_size(px(12.))
-                                                        .text_color(rgb(MUTED))
+                                                        .text_color(rgb(p.muted))
                                                         .child("リサイズ方法"),
                                                 )
                                                 .child(
@@ -641,16 +656,16 @@ impl App {
                                                                 .py(px(4.))
                                                                 .rounded(px(8.))
                                                                 .bg(if active {
-                                                                    rgb(ACCENT_SOFT)
+                                                                    rgb(p.accent_soft)
                                                                 } else {
                                                                     rgba(0x00000000)
                                                                 })
                                                                 .text_size(px(10.))
                                                                 .font_medium()
                                                                 .text_color(if active {
-                                                                    rgb(BLUE)
+                                                                    rgb(p.accent)
                                                                 } else {
-                                                                    rgb(MUTED)
+                                                                    rgb(p.muted)
                                                                 })
                                                                 .cursor_pointer()
                                                                 .on_click(cx.listener(
@@ -673,7 +688,7 @@ impl App {
                                             div()
                                                 .pl(px(104.))
                                                 .text_size(px(10.))
-                                                .text_color(rgb(MUTED_2))
+                                                .text_color(rgb(p.muted_2))
                                                 .child(match profile.resize_mode {
                                                     ResizeMode::DownscaleOnly => {
                                                         "指定解像度より大きい画像だけ縮小します"
@@ -695,7 +710,7 @@ impl App {
                                                 .w(px(96.))
                                                 .flex_shrink_0()
                                                 .text_size(px(12.))
-                                                .text_color(rgb(MUTED_2))
+                                                .text_color(rgb(p.muted_2))
                                                 .child("アスペクト比維持"),
                                         )
                                         .child(
@@ -713,7 +728,7 @@ impl App {
                                 )
                             }),
                     )
-                    .child(section_divider())
+                    .child(section_divider(&p))
                     .child(self.section_label("出力"))
                     .child(
                         h_flex()
@@ -728,7 +743,7 @@ impl App {
                                     .child(
                                         div()
                                             .text_size(px(10.))
-                                            .text_color(rgb(MUTED_2))
+                                            .text_color(rgb(p.muted_2))
                                             .child("出力先"),
                                     )
                                     .child(
@@ -786,7 +801,7 @@ impl App {
                                     .child(
                                         div()
                                             .text_size(px(9.5))
-                                            .text_color(rgb(MUTED_2))
+                                            .text_color(rgb(p.muted_2))
                                             .child(output_hint),
                                     ),
                             )
@@ -798,19 +813,19 @@ impl App {
                                     .child(
                                         div()
                                             .text_size(px(10.))
-                                            .text_color(rgb(MUTED_2))
+                                            .text_color(rgb(p.muted_2))
                                             .child("サフィックス"),
                                     )
                                     .child(Input::new(&self.profile_suffix_input).small().flex_1())
                                     .child(
                                         div()
                                             .text_size(px(9.5))
-                                            .text_color(rgb(MUTED_2))
+                                            .text_color(rgb(p.muted_2))
                                             .child("空欄可"),
                                     ),
                             ),
                     )
-                    .child(section_divider())
+                    .child(section_divider(&p))
                     .child(
                         h_flex()
                             .items_center()
@@ -823,13 +838,13 @@ impl App {
                                     .child(
                                         div()
                                             .text_size(px(12.))
-                                            .text_color(rgb(TEXT))
+                                            .text_color(rgb(p.text))
                                             .child("クリップボード用"),
                                     )
                                     .child(
                                         div()
                                             .text_size(px(10.))
-                                            .text_color(rgb(MUTED_2))
+                                            .text_color(rgb(p.muted_2))
                                             .child("システム全体で1つだけ設定できます"),
                                     ),
                             )
@@ -845,11 +860,11 @@ impl App {
                         div()
                             .p(px(12.))
                             .rounded(px(8.))
-                            .bg(rgb(PANEL_2))
+                            .bg(rgb(p.panel_2))
                             .border_1()
-                            .border_color(rgb(BORDER))
+                            .border_color(rgb(p.border))
                             .text_size(px(10.))
-                            .text_color(rgb(MUTED))
+                            .text_color(rgb(p.muted))
                             .child("変更は即時保存されます。サフィックスの使用不可文字は _ に置換されます。手動圧縮の出力先と元画像の扱いは実行時に選べます。"),
                     ),
             )
@@ -859,7 +874,7 @@ impl App {
                     .gap(px(12.))
                     .p(px(12.))
                     .border_t_1()
-                    .border_color(rgba(0xffffff14))
+                    .border_color(rgba(p.highlight))
                     .child(self.editor_stat(
                         "総圧縮数",
                         self.stats.compressed_count.to_string(),
@@ -874,34 +889,36 @@ impl App {
 
     /// Small stat block inside the editor card's footer.
     fn editor_stat(&self, label: &str, value: String) -> impl IntoElement {
+        let p = self.palette;
         v_flex()
             .flex_1()
             .min_w_0()
             .gap(px(4.))
             .p(px(10.))
             .rounded(px(12.))
-            .bg(rgb(PANEL_INNER))
+            .bg(rgb(p.panel_inner))
             .border_1()
-            .border_color(rgba(0xffffff0f))
+            .border_color(rgba(with_alpha(p.text, 0x0f)))
             .child(
                 div()
                     .text_size(px(10.))
-                    .text_color(rgb(MUTED_2))
+                    .text_color(rgb(p.muted_2))
                     .child(label.to_string()),
             )
             .child(
                 div()
                     .text_size(px(16.))
                     .font_semibold()
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(p.text))
                     .truncate()
                     .child(value),
             )
     }
 
     pub(crate) fn queue_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.palette;
         let retryable_jobs = self.failed_jobs.iter().any(job_retry_available);
-        glass_panel()
+        glass_panel(&self.palette)
             .flex()
             .flex_col()
             .flex_1()
@@ -919,40 +936,40 @@ impl App {
                     .flex_wrap()
                     .items_center()
                     .border_b_1()
-                    .border_color(rgba(0xffffff14))
+                    .border_color(rgba(p.highlight))
                     .child(
                         div()
                             .text_size(px(13.))
                             .font_semibold()
-                            .text_color(rgb(TEXT))
+                            .text_color(rgb(p.text))
                             .child("圧縮キュー"),
                     )
                     .when(self.active_job_count > 0, |this| {
                         this.child(self.badge(
                             &format!("未完了 {}", self.active_job_count),
-                            BLUE,
-                            0x14283d,
+                            p.accent,
+                            p.accent_soft,
                         ))
                     })
                     .when(self.waiting_job_count > 0, |this| {
                         this.child(self.badge(
                             &format!("未実行 {}", self.waiting_job_count),
-                            AMBER,
-                            0x2a2412,
+                            p.amber,
+                            p.amber_soft,
                         ))
                     })
                     .when(self.waiting_job_count > 0, |this| {
                         this.child(if self.settings.auto_compress_keep_original {
-                            self.badge("自動: 元画像を保持", GREEN, 0x112a22)
+                            self.badge("自動: 元画像を保持", p.green, p.green_soft)
                         } else {
-                            self.badge("自動: 元画像を置換", RED, 0x2a1414)
+                            self.badge("自動: 元画像を置換", p.red, p.red_soft)
                         })
                     })
                     .when(self.failed_job_count > 0, |this| {
                         this.child(self.badge(
                             &format!("失敗 {}", self.failed_job_count),
-                            RED,
-                            0x2a1414,
+                            p.red,
+                            p.red_soft,
                         ))
                     })
                     .child(div().flex_1())
@@ -990,12 +1007,12 @@ impl App {
                         .px(px(GALLERY_PAD_X))
                         .py(px(8.))
                         .text_size(px(10.))
-                        .text_color(rgb(MUTED_2))
+                        .text_color(rgb(p.muted_2))
                         .child("失敗は最新の100件のみ表示しています（再試行は上限内のすべてが対象です）"),
                 )
             })
             .children(self.waiting_jobs.iter().take(20).map(|job| {
-                let status = queue_status_badge(&job.status);
+                let status = queue_status_badge(&job.status, &p);
                 let profile_name = self
                     .profiles
                     .iter()
@@ -1008,27 +1025,27 @@ impl App {
                     .gap(px(8.))
                     .items_center()
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(p.border))
                     .child(self.badge(status.0, status.1, status.2))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .text_size(px(12.))
-                            .text_color(rgb(TEXT))
+                            .text_color(rgb(p.text))
                             .truncate()
                             .child(format!("photo #{}", job.photo_id)),
                     )
                     .child(
                         div()
                             .text_size(px(10.))
-                            .text_color(rgb(MUTED_2))
+                            .text_color(rgb(p.muted_2))
                             .child(profile_name),
                     )
                     .child(
                         div()
                             .text_size(px(10.))
-                            .text_color(rgb(MUTED_2))
+                            .text_color(rgb(p.muted_2))
                             .child(format!("{:.0}%", job.progress * 100.0)),
                     )
             }))
@@ -1038,7 +1055,7 @@ impl App {
                     .filter(|job| !matches!(job.status, QueueStatus::Waiting | QueueStatus::Failed))
                     .take(6)
                     .map(|job| {
-                        let status = queue_status_badge(&job.status);
+                        let status = queue_status_badge(&job.status, &p);
                         let profile_name = self
                             .profiles
                             .iter()
@@ -1051,27 +1068,27 @@ impl App {
                             .gap(px(8.))
                             .items_center()
                             .border_b_1()
-                            .border_color(rgb(BORDER))
+                            .border_color(rgb(p.border))
                             .child(self.badge(status.0, status.1, status.2))
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w_0()
                                     .text_size(px(12.))
-                                    .text_color(rgb(TEXT))
+                                    .text_color(rgb(p.text))
                                     .truncate()
                                     .child(format!("photo #{}", job.photo_id)),
                             )
                             .child(
                                 div()
                                     .text_size(px(10.))
-                                    .text_color(rgb(MUTED_2))
+                                    .text_color(rgb(p.muted_2))
                                     .child(profile_name),
                             )
                             .child(
                                 div()
                                     .text_size(px(10.))
-                                    .text_color(rgb(MUTED_2))
+                                    .text_color(rgb(p.muted_2))
                                     .child(format!("{:.0}%", job.progress * 100.0)),
                             )
                     }),
@@ -1095,18 +1112,18 @@ impl App {
                     .py(px(10.))
                     .gap(px(6.))
                     .border_b_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(p.border))
                     .child(
                         h_flex()
                             .items_center()
                             .gap(px(8.))
-                            .child(self.badge("失敗", RED, 0x2a1414))
+                            .child(self.badge("失敗", p.red, p.red_soft))
                             .child(
                                 div()
                                     .flex_1()
                                     .min_w_0()
                                     .text_size(px(12.))
-                                    .text_color(rgb(TEXT))
+                                    .text_color(rgb(p.text))
                                     .truncate()
                                     .child(name),
                             )
@@ -1114,7 +1131,7 @@ impl App {
                                 this.child(
                                     div()
                                         .text_size(px(10.))
-                                        .text_color(rgb(MUTED_2))
+                                        .text_color(rgb(p.muted_2))
                                         .child(name),
                                 )
                             }),
@@ -1124,7 +1141,7 @@ impl App {
                             div()
                                 .w_full()
                                 .text_size(px(10.))
-                                .text_color(rgb(RED))
+                                .text_color(rgb(p.red))
                                 .child(error),
                         )
                     })
@@ -1135,7 +1152,7 @@ impl App {
                             .child(
                                 div()
                                     .text_size(px(10.))
-                                    .text_color(rgb(MUTED_2))
+                                    .text_color(rgb(p.muted_2))
                                     .child(job_retry_label(job)),
                             )
                             .when(retryable, |this| {
@@ -1162,7 +1179,7 @@ impl App {
                         div()
                             .p(px(GALLERY_PAD_X))
                             .text_size(px(12.))
-                            .text_color(rgb(MUTED_2))
+                            .text_color(rgb(p.muted_2))
                             .child("キューは空です"),
                     )
                 },
@@ -1205,11 +1222,12 @@ mod tests {
 
     #[test]
     fn queue_status_badge_distinguishes_waiting_and_pending() {
-        assert_eq!(queue_status_badge(&QueueStatus::Waiting).0, "未実行");
-        assert_eq!(queue_status_badge(&QueueStatus::Pending).0, "実行待ち");
-        assert_eq!(queue_status_badge(&QueueStatus::Processing).0, "処理中");
-        assert_eq!(queue_status_badge(&QueueStatus::Completed).0, "完了");
-        assert_eq!(queue_status_badge(&QueueStatus::Failed).0, "失敗");
-        assert_eq!(queue_status_badge(&QueueStatus::Cancelled).0, "取消");
+        let p = crate::ui::palette::resolve("charcoal", "sky");
+        assert_eq!(queue_status_badge(&QueueStatus::Waiting, &p).0, "未実行");
+        assert_eq!(queue_status_badge(&QueueStatus::Pending, &p).0, "実行待ち");
+        assert_eq!(queue_status_badge(&QueueStatus::Processing, &p).0, "処理中");
+        assert_eq!(queue_status_badge(&QueueStatus::Completed, &p).0, "完了");
+        assert_eq!(queue_status_badge(&QueueStatus::Failed, &p).0, "失敗");
+        assert_eq!(queue_status_badge(&QueueStatus::Cancelled, &p).0, "取消");
     }
 }
