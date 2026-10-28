@@ -45,7 +45,7 @@ use crate::ui::actions::{
 use crate::ui::chrome::{ChromeLayout, chrome_layout};
 use crate::ui::notifications::{ToastSpec, toast_flush_needed};
 use crate::ui::palette::{apply_component_theme, resolve};
-use crate::ui::theme::{GLASS_WINDOW, Palette, WORKSPACE_GAP, WORKSPACE_PAD};
+use crate::ui::theme::{Palette, WORKSPACE_GAP, WORKSPACE_PAD};
 use crate::update_view;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -626,7 +626,7 @@ impl Render for App {
         let root = h_flex()
             .relative()
             .size_full()
-            .bg(rgba(GLASS_WINDOW))
+            .bg(rgba(self.palette.glass))
             .font_family("Noto Sans JP")
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
             .on_action(cx.listener(|this, _: &ToggleInspector, _, cx| this.toggle_inspector(cx)))

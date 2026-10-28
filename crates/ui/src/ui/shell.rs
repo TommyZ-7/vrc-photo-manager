@@ -35,13 +35,13 @@ pub(crate) enum StatusTone {
 }
 
 impl StatusTone {
-    fn color(self) -> u32 {
+    fn color(self, p: &Palette) -> u32 {
         match self {
-            Self::Idle => MUTED_2,
-            Self::Running => BLUE,
-            Self::Waiting => AMBER,
-            Self::Failed => RED,
-            Self::Success => GREEN,
+            Self::Idle => p.muted_2,
+            Self::Running => p.accent,
+            Self::Waiting => p.amber,
+            Self::Failed => p.red,
+            Self::Success => p.green,
         }
     }
 }
@@ -55,6 +55,7 @@ pub(crate) struct CardStatus {
 
 impl App {
     pub(crate) fn sidebar(&mut self, content_height: f32, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
         let collapsed = self.sidebar_collapsed;
         let update_badge = self.update.nav_badge();
         let epoch = self.sidebar_motion_epoch;
@@ -71,14 +72,14 @@ impl App {
             .py(px(16.))
             .px(px(12.))
             .gap(px(3.))
-            .bg(rgb(PANEL_SIDEBAR))
+            .bg(rgb(p.panel_sidebar))
             .rounded(px(22.))
             .border_1()
-            .border_color(rgba(0xffffff1b))
+            .border_color(rgba(p.line_soft))
             .overflow_hidden()
             .shadow(vec![
-                BoxShadow::new(px(0.), px(18.), rgba(0x00000047).into()).blur_radius(px(44.)),
-                BoxShadow::new(px(0.), px(1.), rgba(0xffffff10).into())
+                BoxShadow::new(px(0.), px(18.), rgba(p.shadow).into()).blur_radius(px(44.)),
+                BoxShadow::new(px(0.), px(1.), rgba(p.highlight).into())
                     .inset()
                     .blur_radius(px(0.)),
             ])
@@ -129,26 +130,26 @@ impl App {
                         .p(px(11.))
                         .gap(px(3.))
                         .rounded(px(13.))
-                        .bg(rgb(PANEL))
+                        .bg(rgb(p.panel))
                         .border_1()
-                        .border_color(rgba(0xffffff0f))
+                        .border_color(rgba(with_alpha(p.text, 0x0f)))
                         .child(
                             div()
                                 .text_size(px(10.))
-                                .text_color(rgb(MUTED_2))
+                                .text_color(rgb(p.muted_2))
                                 .child("ライブラリ"),
                         )
                         .child(
                             div()
                                 .text_size(px(13.))
                                 .font_semibold()
-                                .text_color(rgb(TEXT))
+                                .text_color(rgb(p.text))
                                 .child(format!("{photo_count} 枚")),
                         )
                         .child(
                             div()
                                 .text_size(px(10.))
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(p.muted))
                                 .child(format_bytes(self.stats.total_bytes)),
                         ),
                 )
@@ -163,7 +164,7 @@ impl App {
                     .overflow_hidden()
                     .whitespace_nowrap()
                     .text_size(px(if collapsed { 9. } else { 10. }))
-                    .text_color(rgb(MUTED_2))
+                    .text_color(rgb(p.muted_2))
                     .child(if self.demo_assets.is_some() {
                         "DEMO DATA".to_string()
                     } else {
@@ -190,6 +191,7 @@ impl App {
     }
 
     pub(crate) fn rail_toggle(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
         let collapsed = self.sidebar_collapsed;
         let epoch = self.sidebar_motion_epoch;
         let icon = if collapsed {
@@ -216,10 +218,10 @@ impl App {
                     .tooltip(tooltip)
                     .size(px(24.))
                     .rounded_full()
-                    .bg(rgb(0x131923))
+                    .bg(rgb(p.panel_2))
                     .border_1()
-                    .border_color(rgb(BORDER_STRONG))
-                    .text_color(rgb(MUTED))
+                    .border_color(rgb(p.border_strong))
+                    .text_color(rgb(p.muted))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
             )
             .with_animation(
@@ -237,31 +239,32 @@ impl App {
     }
 
     fn sidebar_compact_stats(&self) -> AnyElement {
+        let p = self.palette;
         v_flex()
             .p(px(6.))
             .gap(px(3.))
             .rounded(px(10.))
-            .bg(rgb(PANEL))
+            .bg(rgb(p.panel))
             .border_1()
-            .border_color(rgba(0xffffff0f))
+            .border_color(rgba(with_alpha(p.text, 0x0f)))
             .child(
                 div()
                     .text_size(px(8.))
-                    .text_color(rgb(MUTED_2))
+                    .text_color(rgb(p.muted_2))
                     .whitespace_nowrap()
                     .child(format!("未実行 {}件", format_count(self.waiting_job_count))),
             )
             .child(
                 div()
                     .text_size(px(7.5))
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(p.text))
                     .whitespace_nowrap()
                     .child(format!("{}枚", format_count(self.stats.photo_count))),
             )
             .child(
                 div()
                     .text_size(px(7.5))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(p.muted))
                     .whitespace_nowrap()
                     .truncate()
                     .child(format_bytes(self.stats.total_bytes)),
@@ -270,6 +273,7 @@ impl App {
     }
 
     fn sidebar_status_card(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
         let import_progress = import_running_progress(self.import_dialog.as_ref());
         let compression = compression_card_status(
             self.active_job_count,
@@ -342,7 +346,7 @@ impl App {
                         .rounded(px(6.))
                         .border_1()
                         .border_color(if active {
-                            rgba(0x66b3ff33)
+                            rgba(with_alpha(p.accent, 0x33))
                         } else {
                             rgba(0x00000000)
                         })
@@ -350,11 +354,11 @@ impl App {
                         .font_medium()
                         .cursor_pointer()
                         .when(active, |this| {
-                            this.bg(rgb(ACCENT_SOFT)).text_color(rgb(BLUE))
+                            this.bg(rgb(p.accent_soft)).text_color(rgb(p.accent))
                         })
                         .when(!active, |this| {
-                            this.text_color(rgb(MUTED_2))
-                                .hover(|this| this.bg(rgb(PANEL_2)).text_color(rgb(TEXT)))
+                            this.text_color(rgb(p.muted_2))
+                                .hover(|this| this.bg(rgb(p.panel_2)).text_color(rgb(p.text)))
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.sidebar_status_tab = tab;
@@ -368,7 +372,7 @@ impl App {
                                     .right(px(4.))
                                     .size(px(4.))
                                     .rounded_full()
-                                    .bg(rgb(tone.color())),
+                                    .bg(rgb(tone.color(&p))),
                             )
                         })
                         .child(label)
@@ -382,13 +386,13 @@ impl App {
                 div()
                     .text_size(px(13.))
                     .font_semibold()
-                    .text_color(rgb(status.tone.color()))
+                    .text_color(rgb(status.tone.color(&p)))
                     .child(status.headline.clone()),
             )
             .child(
                 div()
                     .text_size(px(10.))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(p.muted))
                     .truncate()
                     .child(status.detail.clone()),
             );
@@ -487,9 +491,9 @@ impl App {
             .p(px(9.))
             .gap(px(4.))
             .rounded(px(13.))
-            .bg(rgb(PANEL))
+            .bg(rgb(p.panel))
             .border_1()
-            .border_color(rgba(0xffffff0f))
+            .border_color(rgba(with_alpha(p.text, 0x0f)))
             .child(
                 h_flex()
                     .items_center()
@@ -499,7 +503,7 @@ impl App {
                         div()
                             .text_size(px(10.))
                             .font_semibold()
-                            .text_color(rgb(MUTED_2))
+                            .text_color(rgb(p.muted_2))
                             .child("進行状況"),
                     )
                     .child(div().flex_1())
@@ -507,7 +511,7 @@ impl App {
                         div()
                             .size(px(6.))
                             .rounded_full()
-                            .bg(rgb(status.tone.color())),
+                            .bg(rgb(status.tone.color(&p))),
                     ),
             )
             .child(tab_row)
@@ -517,6 +521,7 @@ impl App {
     }
 
     fn nav_highlight(&self) -> AnyElement {
+        let p = self.palette;
         let collapsed = self.sidebar_collapsed;
         let nav_epoch = self.nav_epoch;
         let from = nav_item_top(nav_index(self.nav_previous));
@@ -538,7 +543,7 @@ impl App {
             .right_0()
             .h(px(NAV_ITEM_HEIGHT))
             .rounded(px(11.))
-            .bg(rgb(ACCENT_SOFT))
+            .bg(rgb(p.accent_soft))
             .with_animation(("nav-pill", nav_epoch), vertical_anim(), move |el, t| {
                 el.top(px(from + (to - from) * t))
             });
@@ -572,7 +577,7 @@ impl App {
                     .w(px(2.))
                     .h(px(18.))
                     .rounded_full()
-                    .bg(rgb(BLUE))
+                    .bg(rgb(p.accent))
                     .with_animation(("nav-bar-y", nav_epoch), vertical_anim(), move |el, t| {
                         el.top(px(from + 11.0 + (to - from) * t))
                     }),
@@ -597,6 +602,7 @@ impl App {
         count: Option<String>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let p = self.palette;
         let active = self.screen == screen;
         let was_active = self.nav_previous == screen;
         let hovered = self.hovered_nav == Some(screen);
@@ -619,7 +625,7 @@ impl App {
             color_anim(),
             move |el, t| {
                 if hovered && !active {
-                    return el.text_color(rgb(TEXT));
+                    return el.text_color(rgb(p.text));
                 }
                 let from = if was_active { BLUE } else { MUTED };
                 let to = if active { BLUE } else { MUTED };
@@ -627,9 +633,9 @@ impl App {
             },
         );
 
-        let label_from = if was_active { 0xeaf4ff } else { MUTED };
+        let label_from = if was_active { p.text } else { MUTED };
         let label_to = if active {
-            0xeaf4ff
+            p.text
         } else if hovered {
             TEXT
         } else {
@@ -657,7 +663,7 @@ impl App {
                             color_anim(),
                             move |el, t| {
                                 if hovered && !active {
-                                    return el.text_color(rgb(TEXT));
+                                    return el.text_color(rgb(p.text));
                                 }
                                 let from = if was_active { BLUE } else { MUTED_2 };
                                 let to = if active { BLUE } else { MUTED_2 };
@@ -711,7 +717,7 @@ impl App {
             .cursor_pointer()
             .items_center()
             .when(!active, |this| {
-                this.hover(|this| this.bg(rgb(0x161d28)).text_color(rgb(TEXT)))
+                this.hover(|this| this.bg(rgb(p.panel_inner)).text_color(rgb(p.text)))
             })
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 // Hover listeners fire in reverse paint order. Let the entering
@@ -734,6 +740,7 @@ impl App {
     }
 
     pub(crate) fn nav_tooltip(&self) -> AnyElement {
+        let p = self.palette;
         let Some(screen) = self.hovered_nav.filter(|_| self.sidebar_collapsed) else {
             // Keep the empty slot out of the root flex flow; an in-flow
             // zero-width child would still consume a 14px gap and shrink the
@@ -750,11 +757,11 @@ impl App {
             .px(px(8.))
             .py(px(5.))
             .rounded(px(7.))
-            .bg(rgb(0x161c26))
+            .bg(rgb(p.panel_card))
             .border_1()
-            .border_color(rgb(BORDER_STRONG))
+            .border_color(rgb(p.border_strong))
             .text_size(px(10.))
-            .text_color(rgb(TEXT))
+            .text_color(rgb(p.text))
             .whitespace_nowrap()
             .child(screen.title())
             .with_animation(
@@ -1492,10 +1499,11 @@ mod tests {
     }
     #[test]
     fn tone_colors_use_the_sidebar_palette() {
-        assert_eq!(StatusTone::Idle.color(), MUTED_2);
-        assert_eq!(StatusTone::Running.color(), BLUE);
-        assert_eq!(StatusTone::Waiting.color(), AMBER);
-        assert_eq!(StatusTone::Failed.color(), RED);
-        assert_eq!(StatusTone::Success.color(), GREEN);
+        let p = crate::ui::palette::resolve("charcoal", "sky");
+        assert_eq!(StatusTone::Idle.color(&p), p.muted_2);
+        assert_eq!(StatusTone::Running.color(&p), p.accent);
+        assert_eq!(StatusTone::Waiting.color(&p), p.amber);
+        assert_eq!(StatusTone::Failed.color(&p), p.red);
+        assert_eq!(StatusTone::Success.color(&p), p.green);
     }
 }

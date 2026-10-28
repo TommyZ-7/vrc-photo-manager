@@ -144,6 +144,7 @@ impl App {
     /// Header card: titlebar line plus the ribbon body. Sits above the
     /// transparent content area with a 14px gap.
     pub(crate) fn chrome(&mut self, layout: ChromeLayout, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
         let titlebar = self.titlebar(cx);
         let collapsed = self.ribbon_collapsed;
         let epoch = self.ribbon_epoch;
@@ -177,13 +178,13 @@ impl App {
             .flex_shrink_0()
             .w_full()
             .rounded(px(22.))
-            .bg(rgb(PANEL_HEADER))
+            .bg(rgb(p.panel_header))
             .border_1()
-            .border_color(rgba(0xffffff1b))
+            .border_color(rgba(p.line_soft))
             .overflow_hidden()
             .shadow(vec![
-                BoxShadow::new(px(0.), px(18.), rgba(0x00000047).into()).blur_radius(px(44.)),
-                BoxShadow::new(px(0.), px(1.), rgba(0xffffff10).into())
+                BoxShadow::new(px(0.), px(18.), rgba(p.shadow).into()).blur_radius(px(44.)),
+                BoxShadow::new(px(0.), px(1.), rgba(p.highlight).into())
                     .inset()
                     .blur_radius(px(0.)),
             ])
@@ -193,6 +194,7 @@ impl App {
     }
 
     fn titlebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
         let screen = self.screen;
 
         let app_glyph = div()
@@ -203,18 +205,19 @@ impl App {
             .items_center()
             .justify_center()
             .border_1()
-            .border_color(rgba(0xffffff30))
-            .bg(rgb(BLUE))
+            .border_color(rgba(with_alpha(p.on_accent, 0x30)))
+            .bg(rgb(p.accent))
             .shadow(vec![
-                BoxShadow::new(px(0.), px(3.), rgba(0x608cff47).into()).blur_radius(px(9.)),
-                BoxShadow::new(px(0.), px(1.), rgba(0xffffff66).into())
+                BoxShadow::new(px(0.), px(3.), rgba(with_alpha(p.accent, 0x47)).into())
+                    .blur_radius(px(9.)),
+                BoxShadow::new(px(0.), px(1.), rgba(with_alpha(p.on_accent, 0x66)).into())
                     .inset()
                     .blur_radius(px(0.)),
             ])
             .child(
                 chrome_icon(IconName::Asterisk)
                     .with_size(px(13.))
-                    .text_color(rgb(0xffffff)),
+                    .text_color(rgb(p.on_accent)),
             );
 
         let collapsed = self.ribbon_collapsed;
@@ -232,10 +235,10 @@ impl App {
                     .min_w_0()
                     .truncate()
                     .text_size(px(11.))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(p.muted))
                     .child("VRC Photo Manager"),
             )
-            .child(div().w(px(1.)).h(px(14.)).bg(rgba(0xffffff14)))
+            .child(div().w(px(1.)).h(px(14.)).bg(rgba(p.highlight)))
             .child(
                 div()
                     .max_w(px(140.))
@@ -243,11 +246,11 @@ impl App {
                     .truncate()
                     .text_size(px(11.5))
                     .font_semibold()
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(p.text))
                     .child(screen.title()),
             )
             .child(div().flex_1().min_w_0())
-            .child(collapse_button(collapsed, cx))
+            .child(collapse_button(collapsed, &self.palette, cx))
             .child(self.notification_button(cx));
 
         TitleBar::new()
@@ -255,7 +258,7 @@ impl App {
             .flex_shrink_0()
             .pl(px(14.))
             .pr(px(8.))
-            .border_color(rgba(0xffffff0e))
+            .border_color(rgba(p.highlight))
             .bg(rgba(0x00000000))
             .child(line)
             .into_any_element()
@@ -279,8 +282,10 @@ impl App {
 
     fn ribbon_home(&mut self, metrics: RibbonMetrics, cx: &mut Context<Self>) -> AnyElement {
         let import_group = ribbon_group(
+            &self.palette,
             vec![
                 large_button(
+                    &self.palette,
                     "ribbon-import-copy",
                     "コピー取込",
                     IconName::Copy,
@@ -290,6 +295,7 @@ impl App {
                     |this, window, cx| this.open_import_dialog(ImportMode::Copy, window, cx),
                 ),
                 large_button(
+                    &self.palette,
                     "ribbon-import-move",
                     "移動取込",
                     IconName::Replace,
@@ -305,6 +311,7 @@ impl App {
         );
 
         let reload = large_button(
+            &self.palette,
             "ribbon-reload",
             "再読込",
             IconName::RefreshCw,
@@ -320,10 +327,11 @@ impl App {
                 cx.notify();
             },
         );
-        let library_group = ribbon_group(vec![reload], "ライブラリ", false, metrics);
+        let library_group = ribbon_group(&self.palette, vec![reload], "ライブラリ", false, metrics);
 
         let mut display_items = vec![self.card_size_selector(metrics, cx)];
         display_items.push(large_button(
+            &self.palette,
             "ribbon-toggle-inspector",
             "詳細パネル",
             IconName::PanelRight,
@@ -332,7 +340,7 @@ impl App {
             cx,
             |this, _, cx| this.toggle_inspector(cx),
         ));
-        let display_group = ribbon_group(display_items, "表示", false, metrics);
+        let display_group = ribbon_group(&self.palette, display_items, "表示", false, metrics);
 
         h_flex()
             .flex_shrink_0()
@@ -344,6 +352,7 @@ impl App {
     }
 
     fn card_size_selector(&mut self, metrics: RibbonMetrics, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
         let current = self.settings.ui_card_size;
         let mut row = h_flex().gap(px(2.)).items_center();
         for size in [
@@ -365,11 +374,11 @@ impl App {
                     .rounded(px(5.))
                     .border_1()
                     .border_color(if active {
-                        rgba(0x8bcbff29)
+                        rgba(with_alpha(p.accent, 0x29))
                     } else {
                         rgba(0x00000000)
                     })
-                    .when(active, |this| this.bg(rgba(0x8bcbff17)))
+                    .when(active, |this| this.bg(rgba(with_alpha(p.accent, 0x17))))
                     .text_size(px(9.))
                     .text_color(rgb(if active { TEXT } else { MUTED }))
                     .whitespace_nowrap()
@@ -385,8 +394,10 @@ impl App {
     fn ribbon_photo(&mut self, metrics: RibbonMetrics, cx: &mut Context<Self>) -> AnyElement {
         let has_selection = self.selected_photo.is_some();
         let select_group = ribbon_group(
+            &self.palette,
             vec![
                 large_button(
+                    &self.palette,
                     "ribbon-select-all",
                     "すべて選択",
                     IconName::Check,
@@ -400,6 +411,7 @@ impl App {
                     |this, _, cx| this.select_all_photos(cx),
                 ),
                 large_button(
+                    &self.palette,
                     "ribbon-clear-selection",
                     "選択解除",
                     IconName::Close,
@@ -419,8 +431,10 @@ impl App {
         );
 
         let organize_group = ribbon_group(
+            &self.palette,
             vec![
                 large_button(
+                    &self.palette,
                     "ribbon-trash",
                     "ゴミ箱へ",
                     IconName::Delete,
@@ -434,6 +448,7 @@ impl App {
                     |this, window, cx| this.trash_selected(window, cx),
                 ),
                 large_button(
+                    &self.palette,
                     "ribbon-manual-compress",
                     "圧縮",
                     IconName::Minimize,
@@ -463,8 +478,10 @@ impl App {
         let has_selection = !self.selected_action_ids().is_empty();
         let waiting = self.waiting_job_count;
         let run_group = ribbon_group(
+            &self.palette,
             vec![
                 large_button(
+                    &self.palette,
                     "ribbon-compress-folder",
                     "指定フォルダ",
                     IconName::FolderOpen,
@@ -474,6 +491,7 @@ impl App {
                     |this, _, cx| this.compress_selection_to_folder(cx),
                 ),
                 large_button(
+                    &self.palette,
                     "ribbon-compress-profile",
                     "プロファイル先",
                     IconName::FolderOpen,
@@ -483,6 +501,7 @@ impl App {
                     |this, _, cx| this.compress_selection_to_profile_folder(cx),
                 ),
                 large_button(
+                    &self.palette,
                     "ribbon-compress-clipboard",
                     "クリップボード",
                     IconName::Copy,
@@ -492,6 +511,7 @@ impl App {
                     |this, _, cx| this.compress_selection_to_clipboard(cx),
                 ),
                 large_button(
+                    &self.palette,
                     "ribbon-release-waiting",
                     "待機を圧縮",
                     IconName::Play,
@@ -522,7 +542,8 @@ impl App {
     }
 }
 
-fn collapse_button(collapsed: bool, cx: &mut Context<App>) -> AnyElement {
+fn collapse_button(collapsed: bool, palette: &Palette, cx: &mut Context<App>) -> AnyElement {
+    let p = palette;
     let icon = if collapsed {
         IconName::ChevronDown
     } else {
@@ -536,9 +557,12 @@ fn collapse_button(collapsed: bool, cx: &mut Context<App>) -> AnyElement {
         .items_center()
         .justify_center()
         .rounded(px(6.))
-        .text_color(rgb(MUTED_2))
+        .text_color(rgb(p.muted_2))
         .cursor_pointer()
-        .hover(|this| this.bg(rgba(0xffffff0a)).text_color(rgb(TEXT)))
+        .hover(|this| {
+            this.bg(rgba(with_alpha(p.text, 0x0a)))
+                .text_color(rgb(p.text))
+        })
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_double_click(|_, _, cx| cx.stop_propagation())
         .on_click(cx.listener(|this, _, _, cx| {
@@ -550,11 +574,13 @@ fn collapse_button(collapsed: bool, cx: &mut Context<App>) -> AnyElement {
 }
 
 fn ribbon_group(
+    palette: &Palette,
     items: Vec<AnyElement>,
     label: &'static str,
     grow: bool,
     metrics: RibbonMetrics,
 ) -> AnyElement {
+    let p = palette;
     h_flex()
         .flex_shrink_0()
         .when(grow, |this| this.flex_1().min_w_0())
@@ -564,7 +590,7 @@ fn ribbon_group(
         // the 1080 px minimum without a horizontal scroll surface.
         .px(px(6.))
         .border_r_1()
-        .border_color(rgba(0xffffff0d))
+        .border_color(rgba(with_alpha(p.text, 0x0d)))
         .child(
             v_flex()
                 .flex_1()
@@ -582,7 +608,7 @@ fn ribbon_group(
                     div()
                         .pl(px(2.))
                         .text_size(px(metrics.group_label))
-                        .text_color(rgb(MUTED_2))
+                        .text_color(rgb(p.muted_2))
                         .whitespace_nowrap()
                         .child(label),
                 ),
@@ -626,6 +652,7 @@ fn selection_look(enabled: bool) -> RibbonLook {
 }
 
 fn large_button(
+    palette: &Palette,
     id: &'static str,
     label: &'static str,
     icon: IconName,
@@ -634,14 +661,23 @@ fn large_button(
     cx: &mut Context<App>,
     on_click: impl Fn(&mut App, &mut Window, &mut Context<App>) + 'static,
 ) -> AnyElement {
+    let p = palette;
     let enabled = look.enabled();
     let active = look.active();
     let (bg, border, fg) = if !enabled {
-        (rgba(0x00000000), rgba(0x00000000), rgba(0x76819680))
+        (
+            rgba(0x00000000),
+            rgba(0x00000000),
+            rgba(with_alpha(p.muted_2, 0x80)),
+        )
     } else if active {
-        (rgba(0x8bcbff1a), rgba(0x8bcbff2e), rgb(TEXT))
+        (
+            rgba(with_alpha(p.accent, 0x1a)),
+            rgba(with_alpha(p.accent, 0x2e)),
+            rgb(p.text),
+        )
     } else {
-        (rgba(0x00000000), rgba(0x00000000), rgb(MUTED))
+        (rgba(0x00000000), rgba(0x00000000), rgb(p.muted))
     };
 
     let mut button = div()
@@ -665,9 +701,13 @@ fn large_button(
         .whitespace_nowrap()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .child(chrome_icon(icon).with_size(px(18.)).text_color(if enabled {
-            if active { rgb(BLUE) } else { rgba(0x8bcbffe0) }
+            if active {
+                rgb(p.accent)
+            } else {
+                rgba(with_alpha(p.accent, 0xe0))
+            }
         } else {
-            rgb(MUTED_2)
+            rgb(p.muted_2)
         }));
 
     if metrics.compact {
@@ -680,9 +720,9 @@ fn large_button(
         button = button
             .cursor_pointer()
             .hover(|this| {
-                this.border_color(rgba(0xffffff14))
-                    .bg(rgba(0xffffff0e))
-                    .text_color(rgb(TEXT))
+                this.border_color(rgba(p.highlight))
+                    .bg(rgba(p.highlight))
+                    .text_color(rgb(p.text))
             })
             .on_click(
                 cx.listener(move |this, _: &ClickEvent, window, cx| on_click(this, window, cx)),
