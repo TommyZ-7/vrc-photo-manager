@@ -218,8 +218,13 @@ impl App {
     fn refresh_live(&mut self, cx: &mut Context<Self>) {
         let count = self.db.count_photos();
         let revision = self.db.library_revision();
-        if let Ok(stats) = self.db.stats() {
+        let revision_value = revision.as_ref().ok().copied();
+        if let Some(revision) = revision_value
+            && revision != self.stats_revision
+            && let Ok(stats) = self.db.stats()
+        {
             self.stats = stats;
+            self.stats_revision = revision;
         }
         self.reload_job_state(cx);
         self.refresh_monitor();
@@ -231,7 +236,7 @@ impl App {
         // Path rebinds and replacement status changes keep the same photo
         // count. The daemon bumps this revision so the UI can invalidate its
         // page cache even when `count_photos` is unchanged.
-        if let Ok(revision) = revision
+        if let Some(revision) = revision_value
             && revision != self.last_library_revision
         {
             if self.screen == Screen::Photos {
@@ -365,10 +370,17 @@ impl App {
         if self.profile_index >= self.profiles.len() {
             self.profile_index = 0;
         }
-        self.stats = self.db.stats().unwrap_or_else(|error| {
-            tracing::warn!(%error, "cannot load library stats");
-            LibraryStats::default()
-        });
+        match self.db.stats() {
+            Ok(stats) => {
+                self.stats = stats;
+                self.stats_revision = self.db.library_revision().unwrap_or(-1);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "cannot load library stats");
+                self.stats = LibraryStats::default();
+                self.stats_revision = -1;
+            }
+        }
         self.compressed_ids = self
             .db
             .compressed_photo_ids()

@@ -13,6 +13,7 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use vrc_photo_core::db::Db;
 use vrc_photo_core::model::Photo;
 
 use crate::app::App;
@@ -20,7 +21,8 @@ use crate::app::Screen;
 use crate::app::cli::log_timing;
 use crate::app::daemon::open_path;
 use crate::state::photo_browser::{
-    PAGE_SIZE, anchor_photo_id, first_visible_photo, list_scroll_top, row_for_photo, visible_month,
+    PAGE_SIZE, PhotoIndex, anchor_photo_id, first_visible_photo, list_scroll_top, row_for_photo,
+    visible_month,
 };
 use crate::state::preview::preview_placeholder_label;
 use crate::state::viewer::ViewerOpenSource;
@@ -100,7 +102,7 @@ impl App {
         let (month, month_count) = if total == 0 {
             ("写真なし".to_string(), 0)
         } else {
-            let (month, count) = visible_month(entries, first_visible);
+            let (month, count) = visible_month(&self.library.index, first_visible);
             (format_captured_month(month), count)
         };
 
@@ -148,7 +150,6 @@ impl App {
         if count <= 1 {
             return div().into_any_element();
         }
-        let ids = self.selected_ids.clone();
         h_flex()
             .flex_shrink_0()
             .h(px(36.))
@@ -182,7 +183,7 @@ impl App {
                     .small()
                     .primary()
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_manual_compression(ids.clone(), cx)
+                        this.open_manual_compression_for_selection(cx)
                     })),
             )
             .with_animation(
@@ -470,6 +471,11 @@ impl App {
 
     /// Loads at most two pages for the grid, then inserts them unless the
     /// index was replaced while the query was running.
+    ///
+    /// The query runs on the background executor through a read-only
+    /// connection so a page boundary reached while scrolling does not stall
+    /// the UI thread. In-memory demo databases have no second handle to open
+    /// and keep the small synchronous path.
     fn load_pages(
         &mut self,
         search: bool,
@@ -496,23 +502,60 @@ impl App {
         if requests.is_empty() {
             return;
         }
-        let page_start = Instant::now();
-        let photos = match self.db.photos_by_ids(&ids) {
-            Ok(photos) => photos,
-            Err(error) => {
-                tracing::error!(%error, "photos_by_ids failed");
-                {
-                    let browser = self.browser_mut(search);
-                    for (page, _, _) in &requests {
-                        browser.fail_page(*page, generation);
-                    }
+
+        let Some(path) = self.db.path().map(std::path::Path::to_path_buf) else {
+            match self.db.photos_by_ids(&ids) {
+                Ok(photos) => {
+                    self.apply_loaded_pages(search, generation, index, requests, photos, cx)
                 }
-                self.note_library_error("一部の写真を読み込めませんでした".to_string(), cx);
-                cx.notify();
-                return;
+                Err(error) => self.fail_page_load(search, generation, requests, error, cx),
             }
+            return;
         };
-        log_timing("photos_by_ids", page_start);
+
+        cx.spawn(async move |this, cx| {
+            let background_ids = ids.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let page_start = Instant::now();
+                    let result =
+                        Db::open_read_only(&path).and_then(|db| db.photos_by_ids(&background_ids));
+                    log_timing("photos_by_ids", page_start);
+                    result
+                })
+                .await;
+            this.update(cx, |this, cx| match result {
+                Ok(photos) => {
+                    this.apply_loaded_pages(search, generation, index, requests, photos, cx)
+                }
+                // A read-only handle can fail on a locked or WAL-only
+                // database. Fall back to the live connection rather than
+                // leaving placeholders up.
+                Err(_) => match this.db.photos_by_ids(&ids) {
+                    Ok(photos) => {
+                        this.apply_loaded_pages(search, generation, index, requests, photos, cx)
+                    }
+                    Err(error) => this.fail_page_load(search, generation, requests, error, cx),
+                },
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn apply_loaded_pages(
+        &mut self,
+        search: bool,
+        generation: u64,
+        index: Arc<PhotoIndex>,
+        requests: Vec<(usize, usize, usize)>,
+        photos: Vec<Photo>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.browser_mut(search).generation != generation {
+            return;
+        }
         let mut by_id: HashMap<i64, Photo> =
             photos.into_iter().map(|photo| (photo.id, photo)).collect();
         let mut short_page = false;
@@ -546,6 +589,28 @@ impl App {
         cx.notify();
     }
 
+    fn fail_page_load(
+        &mut self,
+        search: bool,
+        generation: u64,
+        requests: Vec<(usize, usize, usize)>,
+        error: vrc_photo_core::error::CoreError,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::error!(%error, "photos_by_ids failed");
+        if self.browser_mut(search).generation != generation {
+            return;
+        }
+        {
+            let browser = self.browser_mut(search);
+            for (page, _, _) in &requests {
+                browser.fail_page(*page, generation);
+            }
+        }
+        self.note_library_error("一部の写真を読み込めませんでした".to_string(), cx);
+        cx.notify();
+    }
+
     fn photo_card(
         &mut self,
         photo: &Photo,
@@ -555,7 +620,7 @@ impl App {
     ) -> AnyElement {
         let p = self.palette;
         let id = photo.id;
-        let selected = self.selected_ids.contains(&id);
+        let selected = self.selected_ids.contains(id);
         let primary = self.selected == Some(id);
         let compressed = self.compressed_ids.contains(&id);
         let duplicate = self.duplicate_ids.contains(&id);
@@ -1139,13 +1204,9 @@ impl App {
                     })),
             )
             .child({
-                let compress_ids = if self.selected_ids.is_empty() {
-                    vec![id]
-                } else {
-                    self.selected_ids.clone()
-                };
-                let label = if compress_ids.len() > 1 {
-                    format!("{} 件を圧縮", compress_ids.len())
+                let count = self.selected_ids.len();
+                let label = if count > 1 {
+                    format!("{count} 件を圧縮")
                 } else {
                     "圧縮".to_string()
                 };
@@ -1154,7 +1215,7 @@ impl App {
                     .small()
                     .w_full()
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.open_manual_compression(compress_ids.clone(), cx)
+                        this.open_manual_compression_for_photo(id, cx)
                     }))
             });
 

@@ -187,31 +187,6 @@ pub(crate) fn step_index(current: usize, len: usize, delta: isize) -> usize {
     (base.saturating_add(delta)).clamp(0, len as isize - 1) as usize
 }
 
-/// IDs between `anchor` and `target` in index order, inclusive. The anchor
-/// and target must both still exist in the current snapshot.
-pub(crate) fn selection_range(ids: &[i64], anchor: i64, target: i64) -> Option<Vec<i64>> {
-    let anchor = ids.iter().position(|id| *id == anchor)?;
-    let target = ids.iter().position(|id| *id == target)?;
-    let (start, end) = if anchor <= target {
-        (anchor, target)
-    } else {
-        (target, anchor)
-    };
-    Some(ids[start..=end].to_vec())
-}
-
-/// Adds `id` to the selection or removes it, returning whether it is selected
-/// afterwards.
-pub(crate) fn toggle_selected_id(ids: &mut Vec<i64>, id: i64) -> bool {
-    if let Some(index) = ids.iter().position(|selected| *selected == id) {
-        ids.remove(index);
-        false
-    } else {
-        ids.push(id);
-        true
-    }
-}
-
 pub(crate) fn moved_profile_order(
     ids: &[String],
     index: usize,
@@ -1149,25 +1124,6 @@ mod tests {
             medium.card_width,
             photo_card_width(search_available_width(1440.0, true), medium.columns),
         );
-    }
-
-    #[test]
-    fn selection_range_includes_both_ends_in_index_order() {
-        let ids = [10, 20, 30, 40];
-        assert_eq!(selection_range(&ids, 20, 40), Some(vec![20, 30, 40]));
-        assert_eq!(selection_range(&ids, 40, 20), Some(vec![20, 30, 40]));
-        assert_eq!(selection_range(&ids, 30, 30), Some(vec![30]));
-        assert_eq!(selection_range(&ids, 99, 20), None);
-        assert_eq!(selection_range(&ids, 20, 99), None);
-    }
-
-    #[test]
-    fn toggle_selected_id_adds_once_and_removes() {
-        let mut ids = Vec::new();
-        assert!(toggle_selected_id(&mut ids, 7));
-        assert_eq!(ids, vec![7]);
-        assert!(!toggle_selected_id(&mut ids, 7));
-        assert!(ids.is_empty());
     }
 
     #[test]

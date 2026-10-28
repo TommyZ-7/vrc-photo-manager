@@ -18,8 +18,7 @@ use crate::app::demo::demo_thumb_path;
 use crate::app::{App, Screen};
 use crate::state::photo_browser::PhotoBrowser;
 use crate::state::preview::{preview_cache_dir, preview_key, should_request_preview};
-use crate::state::thumbnail::{decode_thumbnail, make_render_image, preview_render_image};
-use crate::ui::theme::{selection_range, toggle_selected_id};
+use crate::state::thumbnail::{decode_thumbnail, make_render_image, rgba_to_bgra};
 
 impl App {
     /// Reloads the metadata for a photo without decoding its 1200 px preview.
@@ -132,8 +131,7 @@ impl App {
 
     pub(crate) fn select_photo(&mut self, id: i64, cx: &mut Context<Self>) {
         let select_start = Instant::now();
-        self.selected_ids.clear();
-        self.selected_ids.push(id);
+        self.selected_ids.replace([id]);
         self.selection_anchor = Some(id);
         self.set_primary_photo(id, cx);
         log_timing("select_photo", select_start);
@@ -227,7 +225,7 @@ impl App {
                             None => preview::decode_preview(&source),
                         };
                         log_timing("preview decode", start);
-                        decoded
+                        decoded.map(rgba_to_bgra)
                     })
                     .await;
                 this.update(cx, |this, cx| {
@@ -237,7 +235,7 @@ impl App {
                         .as_ref()
                         .is_some_and(|photo| preview_key(photo) == key);
                     if current && let Some(rgba) = decoded {
-                        this.preview = Some(preview_render_image(rgba));
+                        this.preview = Some(make_render_image(rgba));
                         this.preview_key = Some(key);
                     }
                     this.pump_preview(cx);
@@ -283,14 +281,14 @@ impl App {
     }
 
     fn toggle_photo_selection(&mut self, id: i64, cx: &mut Context<Self>) {
-        if toggle_selected_id(&mut self.selected_ids, id) {
+        if self.selected_ids.toggle(id) {
             self.selection_anchor = Some(id);
             self.set_primary_photo(id, cx);
         } else if self.selection_anchor == Some(id) {
-            self.selection_anchor = self.selected_ids.last().copied();
+            self.selection_anchor = self.selected_ids.last();
         }
-        if self.selected == Some(id) && !self.selected_ids.contains(&id) {
-            if let Some(next) = self.selected_ids.last().copied() {
+        if self.selected == Some(id) && !self.selected_ids.contains(id) {
+            if let Some(next) = self.selected_ids.last() {
                 self.set_primary_photo(next, cx);
             } else {
                 self.clear_selection(cx);
@@ -309,29 +307,22 @@ impl App {
     }
 
     fn select_photo_range(&mut self, id: i64, add: bool, cx: &mut Context<Self>) {
-        let ids: Vec<i64> = self
-            .photo_browser()
-            .index
-            .entries
-            .iter()
-            .map(|entry| entry.id)
-            .collect();
+        let index = self.photo_browser().index.clone();
         let Some(anchor) = self.selection_anchor else {
             self.select_photo(id, cx);
             return;
         };
-        let Some(range) = selection_range(&ids, anchor, id) else {
+        let Some(entries) = index.range_between(anchor, id) else {
             self.select_photo(id, cx);
             return;
         };
         if add {
-            for selected in range {
-                if !self.selected_ids.contains(&selected) {
-                    self.selected_ids.push(selected);
-                }
+            for entry in entries {
+                self.selected_ids.insert(entry.id);
             }
         } else {
-            self.selected_ids = range;
+            self.selected_ids
+                .replace(entries.iter().map(|entry| entry.id));
         }
         self.set_primary_photo(id, cx);
         cx.notify();
@@ -379,7 +370,7 @@ impl App {
             .filter(|selected| ids.contains(selected))
             .unwrap_or(ids[0]);
         self.selection_anchor = Some(ids[0]);
-        self.selected_ids = ids;
+        self.selected_ids.replace(ids);
         self.set_primary_photo(primary, cx);
         cx.notify();
     }
@@ -390,7 +381,7 @@ impl App {
         if self.selected_ids.is_empty() {
             self.selected.into_iter().collect()
         } else {
-            self.selected_ids.clone()
+            self.selected_ids.to_vec()
         }
     }
 
@@ -562,7 +553,7 @@ impl App {
                     if self.selected == Some(id) {
                         self.selected = None;
                     }
-                    self.selected_ids.retain(|selected| *selected != id);
+                    self.selected_ids.remove(id);
                     self.selection_anchor = None;
                     if self
                         .selected_photo

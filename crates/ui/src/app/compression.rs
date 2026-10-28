@@ -62,6 +62,28 @@ impl App {
         cx.notify();
     }
 
+    /// Opens the compression modal for the current multi-selection. The IDs
+    /// are read at click time so rendering never clones the selection.
+    pub(crate) fn open_manual_compression_for_selection(&mut self, cx: &mut Context<Self>) {
+        let ids = self.selected_action_ids();
+        self.open_manual_compression(ids, cx);
+    }
+
+    /// Inspector shortcut: use the multi-selection when one exists, otherwise
+    /// fall back to the photo shown in the inspector.
+    pub(crate) fn open_manual_compression_for_photo(
+        &mut self,
+        photo_id: i64,
+        cx: &mut Context<Self>,
+    ) {
+        let ids = if self.selected_ids.is_empty() {
+            vec![photo_id]
+        } else {
+            self.selected_ids.to_vec()
+        };
+        self.open_manual_compression(ids, cx);
+    }
+
     pub(crate) fn open_manual_compression(&mut self, photo_ids: Vec<i64>, cx: &mut Context<Self>) {
         let mut ids = Vec::new();
         for id in photo_ids {
