@@ -44,7 +44,8 @@ use crate::ui::actions::{
 };
 use crate::ui::chrome::{ChromeLayout, chrome_layout};
 use crate::ui::notifications::{ToastSpec, toast_flush_needed};
-use crate::ui::theme::{GLASS_WINDOW, WORKSPACE_GAP, WORKSPACE_PAD};
+use crate::ui::palette::{apply_component_theme, resolve};
+use crate::ui::theme::{GLASS_WINDOW, Palette, WORKSPACE_GAP, WORKSPACE_PAD};
 use crate::update_view;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -184,6 +185,7 @@ pub struct App {
     pub(crate) manual_compress: Option<ManualCompressionDialog>,
     pub(crate) stats: LibraryStats,
     pub(crate) settings: AppSettings,
+    pub(crate) palette: Palette,
     pub(crate) update: update_view::UpdateState,
     pub(crate) jobs: Vec<CompressionJob>,
     pub(crate) waiting_jobs: Vec<CompressionJob>,
@@ -287,6 +289,10 @@ impl App {
         let health_token = std::env::var("VRC_PHOTO_HEALTH_TOKEN").ok();
         let updating = health_token.is_some();
         let initial_settings = AppSettings::load(&db).unwrap_or_default();
+        let initial_palette = resolve(
+            &initial_settings.ui_theme_main,
+            &initial_settings.ui_theme_accent,
+        );
         let initial_library_revision = db.library_revision().unwrap_or(0);
         cx.set_reduce_motion(initial_settings.ui_reduce_motion);
         let world_input = cx.new(|cx| InputState::new(window, cx).placeholder("ワールド名 / ID"));
@@ -471,6 +477,7 @@ impl App {
             manual_compress: None,
             stats: LibraryStats::default(),
             settings: AppSettings::default(),
+            palette: initial_palette,
             update: update_view::UpdateState::new(health_token, database_ok, demo, db_path),
             jobs: Vec::new(),
             waiting_jobs: Vec::new(),
@@ -520,6 +527,7 @@ impl App {
         };
         app.ensure_profiles();
         app.reload_all(true, cx);
+        apply_component_theme(app.palette, cx);
         if let Some(message) = message {
             if database_ok {
                 app.toast_warning(message, cx);

@@ -10,6 +10,8 @@ use gpui_kit::{Bounds, Pixels, Size, Window, point, px, size};
 use vrc_photo_core::model::{CompressionFormat, CompressionProfile};
 use vrc_photo_core::settings::CardSize;
 
+pub(crate) use crate::ui::palette::{Palette, lerp_color};
+
 pub(crate) const BG: u32 = 0x07090d;
 pub(crate) const PANEL: u32 = 0x121722;
 pub(crate) const PANEL_2: u32 = 0x1a2130;
@@ -152,16 +154,6 @@ pub(crate) fn average_bgra(bytes: &[u8]) -> u32 {
     let green = (green / count) as u32;
     let red = (red / count) as u32;
     (red << 16) | (green << 8) | blue
-}
-
-pub(crate) fn lerp_color(from: u32, to: u32, t: f32) -> u32 {
-    let t = t.clamp(0.0, 1.0);
-    let channel = |shift: u32| {
-        let from = ((from >> shift) & 0xff) as f32;
-        let to = ((to >> shift) & 0xff) as f32;
-        (((from + (to - from) * t).round() as u32) & 0xff) << shift
-    };
-    channel(16) | channel(8) | channel(0)
 }
 
 pub(crate) fn cubic_bezier(t: f64, p1: f64, p2: f64) -> f64 {

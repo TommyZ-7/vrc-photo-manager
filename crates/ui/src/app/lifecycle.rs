@@ -20,6 +20,7 @@ use crate::state::photo_browser::{
     anchor_photo_id, apply_library_index, list_scroll_top, sync_search_mirror,
 };
 use crate::ui::notifications::{FailureNotice, failure_transition};
+use crate::ui::palette::{apply_component_theme, resolve};
 use crate::ui::shell::screen_direction;
 
 /// Current daemon scan progress, shown by the sidebar status card and the
@@ -392,6 +393,11 @@ impl App {
             AppSettings::default()
         });
         cx.set_reduce_motion(self.settings.ui_reduce_motion);
+        let palette = resolve(&self.settings.ui_theme_main, &self.settings.ui_theme_accent);
+        if palette != self.palette {
+            self.palette = palette;
+            apply_component_theme(self.palette, cx);
+        }
         self.refresh_monitor();
         if let Some(id) = self.selected {
             self.load_selected_meta(id);

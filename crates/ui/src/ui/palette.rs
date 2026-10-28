@@ -6,8 +6,8 @@
 //! [`Palette`] owned by `App`; this module is the only place that spells a
 //! colour literal for UI surfaces.
 
-use gpui_kit::component::{Theme, ThemeMode};
-use gpui_kit::{App, rgb, transparent_black};
+use gpui_kit::component::{Edges, Theme, ThemeMode};
+use gpui_kit::{Anchor, App, px, rgb, rgba, transparent_black};
 
 /// The three colour families offered for both selectors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -855,6 +855,15 @@ pub(crate) fn apply_component_theme(palette: Palette, cx: &mut App) {
         theme.colors.scrollbar = rgb(palette.border_strong).into();
         theme.colors.scrollbar_thumb = rgb(palette.muted_2).into();
         theme.colors.scrollbar_thumb_hover = rgb(palette.muted).into();
+        theme.overlay = rgba(palette.scrim).into();
+        theme.notification.placement = Anchor::BottomRight;
+        theme.notification.width = px(340.);
+        theme.notification.margins = Edges {
+            top: px(16.),
+            right: px(16.),
+            bottom: px(16.),
+            left: px(16.),
+        };
     });
     // Root paints `tokens.background` across the window. Keep it transparent
     // so the window glass reaches the compositor; `colors.background` stays
