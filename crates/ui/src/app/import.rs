@@ -16,7 +16,9 @@ use gpui_kit::*;
 use vrc_photo_core::importer::{
     self, ImportIssue, ImportIssueKind, ImportMode, ImportProgress, ImportRename, ImportResult,
 };
+use vrc_photo_core::linker;
 use vrc_photo_core::model::DaemonCommand;
+use vrc_photo_core::scanner;
 use vrc_photo_core::scanner::ScanFailure;
 use vrc_photo_core::settings::AppSettings;
 
@@ -463,9 +465,18 @@ impl App {
             tracing::warn!(%error, "cannot save photo roots after import");
             append_scan_error(report, format!("取り込み先の設定を保存できません: {error}"));
         }
-        if let Err(error) = self.db.add_root(&dest_string, "managed") {
-            tracing::warn!(%error, "cannot register import destination");
-            append_scan_error(report, format!("取り込み先を登録できません: {error}"));
+        let root_id = match self.db.add_root(&dest_string, "managed") {
+            Ok(id) => id,
+            Err(error) => {
+                tracing::warn!(%error, "cannot register import destination");
+                append_scan_error(report, format!("取り込み先を登録できません: {error}"));
+                return;
+            }
+        };
+        if self.demo {
+            // Demo mode never starts the daemon; keep the small synchronous
+            // index so importing into the sample library still works.
+            self.index_demo_import_destination(root_id, report, cx);
             return;
         }
         // The daemon may not have watched the new import destination yet.
@@ -489,6 +500,31 @@ impl App {
                     format!("取り込み先のスキャンを要求できません: {error}"),
                 );
             }
+        }
+    }
+
+    fn index_demo_import_destination(
+        &mut self,
+        root_id: i64,
+        report: &mut ImportReportView,
+        cx: &mut Context<Self>,
+    ) {
+        match scanner::scan_and_index(&self.db, root_id, &report.dest) {
+            Ok(scan) => report.scan_failures.extend(scan.failures),
+            Err(error) => {
+                tracing::warn!(%error, "cannot scan import destination");
+                append_scan_error(report, format!("取り込み先をスキャンできません: {error}"));
+                return;
+            }
+        }
+        if let Err(error) = linker::relink_unlinked(&self.db, 1000) {
+            tracing::warn!(%error, "cannot link imported photos");
+            append_scan_error(report, format!("写真の紐付けに失敗しました: {error}"));
+        }
+        if !self.reload_library(true, cx)
+            && let Some(error) = self.library_error.clone()
+        {
+            append_scan_error(report, error);
         }
     }
 
