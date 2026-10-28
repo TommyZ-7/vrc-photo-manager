@@ -4,6 +4,7 @@
 //! Rendering stays in `ui::library`; these methods only touch App fields and
 //! background decode queues.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -19,6 +20,14 @@ use crate::app::{App, Screen};
 use crate::state::photo_browser::PhotoBrowser;
 use crate::state::preview::{preview_cache_dir, preview_key, should_request_preview};
 use crate::state::thumbnail::{decode_thumbnail, make_render_image, rgba_to_bgra};
+
+#[derive(Debug)]
+enum TrashOutcome {
+    Removed,
+    Promoted,
+    Skipped,
+    Failed(String),
+}
 
 impl App {
     /// Reloads the metadata for a photo without decoding its 1200 px preview.
@@ -494,18 +503,109 @@ impl App {
                 .cancel_text("キャンセル")
                 .on_ok(move |_, _, cx| {
                     entity.update(cx, |this, cx| {
-                        for id in &ids {
-                            this.trash_photo(*id, cx);
-                        }
+                        this.trash_photos(ids.clone(), cx);
                     });
                     true
                 })
         });
     }
 
-    fn trash_photo(&mut self, id: i64, cx: &mut Context<Self>) {
+    /// Applies a trash batch: one revision bump, one index rebuild, and one
+    /// side-panel refresh instead of repeating them for every photo.
+    fn trash_photos(&mut self, ids: Vec<i64>, cx: &mut Context<Self>) {
+        let mut removed = HashSet::new();
+        let mut promoted = HashSet::new();
+        let mut failures: Vec<String> = Vec::new();
+        for id in ids {
+            match self.trash_photo(id) {
+                TrashOutcome::Removed => {
+                    removed.insert(id);
+                }
+                TrashOutcome::Promoted => {
+                    promoted.insert(id);
+                }
+                TrashOutcome::Skipped => {}
+                TrashOutcome::Failed(error) => failures.push(error),
+            }
+        }
+
+        let changed = !removed.is_empty() || !promoted.is_empty();
+        if changed {
+            let revision = match self.db.bump_library_revision() {
+                Ok(revision) => Some(revision),
+                Err(error) => {
+                    tracing::warn!(%error, "cannot bump library revision after trash");
+                    None
+                }
+            };
+            self.library.remove_photos(&removed);
+            self.search_view.remove_photos(&removed);
+            if !promoted.is_empty() {
+                // Kept cards now display the promoted derivative.
+                self.library.invalidate_pages();
+                self.search_view.invalidate_pages();
+            }
+            for id in &removed {
+                self.thumbnails.unpin(*id);
+            }
+            self.selected_ids.remove_all(&removed);
+            if self
+                .selection_anchor
+                .is_some_and(|anchor| removed.contains(&anchor))
+            {
+                self.selection_anchor = None;
+            }
+            if self
+                .selected
+                .is_some_and(|selected| removed.contains(&selected))
+            {
+                self.selected = None;
+            }
+            if self
+                .selected_photo
+                .as_ref()
+                .is_some_and(|photo| removed.contains(&photo.id))
+            {
+                self.selected_photo = None;
+                self.selected_players.clear();
+                self.selected_tags.clear();
+                self.selected_derivatives.clear();
+                self.preview = None;
+            }
+            if self.note_edit_id.is_some_and(|id| removed.contains(&id)) {
+                self.note_edit_id = None;
+            }
+            self.reload_aux(cx);
+            if let Some(revision) = revision {
+                // The local snapshot already reflects the deletions; claim
+                // the revision so the next poll does not re-query 100k rows.
+                self.last_library_revision = revision;
+            }
+
+            let moved = removed.len() + promoted.len();
+            let mut message = format!("{moved} 枚をゴミ箱へ移動しました");
+            if !promoted.is_empty() {
+                message.push_str(&format!("（{} 枚は圧縮版を表示中）", promoted.len()));
+            }
+            self.toast_success(message, cx);
+        }
+
+        if !failures.is_empty() {
+            let detail = if failures.len() == 1 {
+                format!(": {}", failures[0])
+            } else {
+                format!("（{} 件）", failures.len())
+            };
+            self.toast_error(format!("ゴミ箱へ移動できませんでした{detail}"), cx);
+        }
+        cx.notify();
+    }
+
+    /// Moves one photo to the OS trash and updates its row. Side panels and
+    /// the index are refreshed once by the batch caller.
+    fn trash_photo(&mut self, id: i64) -> TrashOutcome {
         let Some(photo) = self.db.photo_by_id(id).ok().flatten() else {
-            return;
+            return TrashOutcome::Skipped;
         };
         let effective_path = photo.effective_path().to_string();
         let replaced = photo.is_replaced();
@@ -528,9 +628,8 @@ impl App {
         if let Some(derivative) = &derivative_to_promote
             && let Err(error) = self.db.set_replaced(id, derivative.id)
         {
-            self.toast_error(format!("圧縮版を表示に設定できません: {error}"), cx);
-            cx.notify();
-            return;
+            tracing::warn!(%error, photo_id = id, "cannot promote compressed derivative");
+            return TrashOutcome::Failed(format!("圧縮版を表示に設定できません: {error}"));
         }
 
         match trash::delete(&effective_path) {
@@ -538,46 +637,23 @@ impl App {
                 if derivative_to_promote.is_some() {
                     // The row stays visible with the compressed derivative as
                     // its display asset.
-                    let _ = self.db.bump_library_revision();
-                    self.reload_library(true, cx);
-                    self.toast_success("元画像をゴミ箱へ移動しました（圧縮版を表示中）", cx);
+                    TrashOutcome::Promoted
                 } else {
                     if let Err(error) = self.db.mark_missing(id) {
                         tracing::warn!(%error, photo_id = id, "cannot mark trashed photo missing");
                     }
                     let _ = self.db.clear_display_derivative(id);
-                    let _ = self.db.bump_library_revision();
-                    self.library.remove_photo(id);
-                    self.search_view.remove_photo(id);
-                    self.thumbnails.unpin(id);
-                    if self.selected == Some(id) {
-                        self.selected = None;
-                    }
-                    self.selected_ids.remove(id);
-                    self.selection_anchor = None;
-                    if self
-                        .selected_photo
-                        .as_ref()
-                        .is_some_and(|photo| photo.id == id)
-                    {
-                        self.selected_photo = None;
-                        self.selected_players.clear();
-                        self.selected_tags.clear();
-                        self.selected_derivatives.clear();
-                        self.preview = None;
-                    }
-                    self.toast_success("写真をゴミ箱へ移動しました", cx);
-                    self.reload_aux(cx);
+                    TrashOutcome::Removed
                 }
             }
             Err(error) => {
                 if derivative_to_promote.is_some() {
                     let _ = self.db.restore_present(id);
                 }
-                self.toast_error(format!("ゴミ箱へ移動できません: {error}"), cx);
+                tracing::warn!(%error, photo_id = id, "cannot move photo to trash");
+                TrashOutcome::Failed(format!("ゴミ箱へ移動できません: {error}"))
             }
         }
-        cx.notify();
     }
 
     fn commit_tags(&mut self, photo_id: i64, tags: Vec<String>, cx: &mut Context<Self>) {

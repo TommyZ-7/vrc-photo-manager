@@ -367,7 +367,7 @@ pub struct SessionPlayer {
 /// Maximum number of user retries per compression job.
 pub const MAX_JOB_RETRIES: i64 = 3;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CompressionJob {
     pub id: String,
     pub photo_id: i64,
@@ -496,7 +496,7 @@ pub struct PhotoFilter {
     pub sort: Option<PhotoSort>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct LibraryStats {
     pub photo_count: i64,
     pub total_bytes: u64,

@@ -70,6 +70,14 @@ impl PhotoSelection {
         true
     }
 
+    pub(crate) fn remove_all(&mut self, ids: &HashSet<i64>) {
+        if ids.is_empty() {
+            return;
+        }
+        self.ids.retain(|id| !ids.contains(id));
+        self.members.retain(|id| !ids.contains(id));
+    }
+
     /// Adds `id` when missing or removes it when present. Returns whether it
     /// is selected afterwards.
     pub(crate) fn toggle(&mut self, id: i64) -> bool {
@@ -85,6 +93,7 @@ impl PhotoSelection {
 #[cfg(test)]
 mod tests {
     use super::PhotoSelection;
+    use std::collections::HashSet;
 
     #[test]
     fn replace_preserves_order_and_drops_duplicates() {
@@ -111,6 +120,18 @@ mod tests {
         assert!(!selection.remove(2));
         assert_eq!(selection.to_vec(), vec![1, 3]);
         assert!(!selection.contains(2));
+    }
+
+    #[test]
+    fn remove_all_drops_a_batch_in_one_pass() {
+        let mut selection = PhotoSelection::default();
+        selection.replace([1, 2, 3, 4]);
+        let removed: HashSet<i64> = [2, 4].into_iter().collect();
+        selection.remove_all(&removed);
+        assert_eq!(selection.to_vec(), vec![1, 3]);
+        assert!(selection.contains(1));
+        assert!(!selection.contains(2));
+        assert!(!selection.contains(4));
     }
 
     #[test]
