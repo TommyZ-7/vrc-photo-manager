@@ -634,13 +634,7 @@ impl App {
         );
 
         let label_from = if was_active { p.text } else { p.muted };
-        let label_to = if active {
-            p.text
-        } else if hovered {
-            p.text
-        } else {
-            p.muted
-        };
+        let label_to = if active || hovered { p.text } else { p.muted };
         let label_block = h_flex()
             .min_w_0()
             .items_center()

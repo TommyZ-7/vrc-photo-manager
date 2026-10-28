@@ -651,6 +651,7 @@ fn selection_look(enabled: bool) -> RibbonLook {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn large_button(
     palette: &Palette,
     id: &'static str,
