@@ -32,17 +32,43 @@ pub(crate) struct PhotoIndex {
     pub(crate) entries: Vec<PhotoIndexEntry>,
     pub(crate) total: usize,
     pub(crate) years: Vec<YearBucket>,
+    /// Photo count per local capture month. The gallery header needs the
+    /// count for the month at the top of the viewport on every scroll-driven
+    /// render; scanning the 100k-entry index there was measurable work.
+    months: HashMap<i32, usize>,
 }
 
 impl PhotoIndex {
     pub(crate) fn new(entries: Vec<PhotoIndexEntry>) -> Self {
         let total = entries.len();
         let years = build_year_buckets(&entries);
+        let mut months: HashMap<i32, usize> = HashMap::new();
+        for entry in &entries {
+            *months.entry(entry.captured_month).or_insert(0) += 1;
+        }
         Self {
             entries,
             total,
             years,
+            months,
         }
+    }
+
+    pub(crate) fn month_count(&self, month: i32) -> usize {
+        self.months.get(&month).copied().unwrap_or(0)
+    }
+
+    /// Entries between `anchor` and `target` in index order, inclusive.
+    /// Returns `None` when either id is no longer in the snapshot.
+    pub(crate) fn range_between(&self, anchor: i64, target: i64) -> Option<&[PhotoIndexEntry]> {
+        let anchor = self.row_of_id(anchor)?;
+        let target = self.row_of_id(target)?;
+        let (start, end) = if anchor <= target {
+            (anchor, target)
+        } else {
+            (target, anchor)
+        };
+        Some(&self.entries[start..=end])
     }
 
     /// Position of `id` in the ordered snapshot, if it is still present.
@@ -75,16 +101,12 @@ pub(crate) fn first_visible_photo(
 /// The gallery header follows the scroll position, not the first entry in the
 /// index, so the month label always describes the cards at the top of the
 /// viewport.
-pub(crate) fn visible_month(entries: &[PhotoIndexEntry], first_visible: usize) -> (i32, usize) {
-    let Some(entry) = entries.get(first_visible) else {
+pub(crate) fn visible_month(index: &PhotoIndex, first_visible: usize) -> (i32, usize) {
+    let Some(entry) = index.entries.get(first_visible) else {
         return (0, 0);
     };
     let month = entry.captured_month;
-    let count = entries
-        .iter()
-        .filter(|entry| entry.captured_month == month)
-        .count();
-    (month, count)
+    (month, index.month_count(month))
 }
 
 /// Photo at the top-left of the first visible row.
@@ -619,15 +641,30 @@ mod tests {
 
     #[test]
     fn visible_month_follows_the_first_visible_row() {
-        let entries = vec![
+        let index = PhotoIndex::new(vec![
             index_entry(1, 202610),
             index_entry(2, 202610),
             index_entry(3, 202609),
             index_entry(4, 202609),
-        ];
-        assert_eq!(visible_month(&entries, 0), (202610, 2));
-        assert_eq!(visible_month(&entries, 2), (202609, 2));
-        assert_eq!(visible_month(&entries, 99), (0, 0));
+        ]);
+        assert_eq!(index.month_count(202610), 2);
+        assert_eq!(index.month_count(202609), 2);
+        assert_eq!(index.month_count(202501), 0);
+        assert_eq!(visible_month(&index, 0), (202610, 2));
+        assert_eq!(visible_month(&index, 2), (202609, 2));
+        assert_eq!(visible_month(&index, 3), (202609, 2));
+        assert_eq!(visible_month(&index, 99), (0, 0));
+    }
+
+    #[test]
+    fn range_between_returns_entries_in_index_order() {
+        let index = PhotoIndex::new((1..=5).map(|id| index_entry(id, 202601)).collect());
+        let range = index.range_between(4, 2).expect("range");
+        assert_eq!(
+            range.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+            vec![2, 3, 4]
+        );
+        assert!(index.range_between(4, 99).is_none());
     }
 
     #[test]

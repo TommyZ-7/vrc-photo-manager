@@ -1,7 +1,7 @@
 //! Thumbnail LRU cache and the background decode / image conversion helpers
 //! shared by the photo grid and the preview viewer.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -23,7 +23,10 @@ const THUMB_IN_FLIGHT: usize = 4;
 pub(crate) struct ThumbnailCache {
     images: HashMap<i64, Arc<RenderImage>>,
     colors: HashMap<i64, u32>,
-    lru: VecDeque<i64>,
+    /// Monotonic access tick per cached id. `get` updates a single entry
+    /// instead of scanning an order list for every visible card.
+    recency: HashMap<i64, u64>,
+    clock: u64,
     pending: HashSet<i64>,
     failed: HashSet<i64>,
     pub(crate) pinned: Option<i64>,
@@ -83,25 +86,23 @@ impl ThumbnailCache {
     }
 
     fn touch(&mut self, id: i64) {
-        if let Some(index) = self.lru.iter().position(|entry| *entry == id) {
-            self.lru.remove(index);
-        }
-        self.lru.push_back(id);
+        self.clock = self.clock.wrapping_add(1);
+        self.recency.insert(id, self.clock);
     }
 
     fn evict(&mut self) {
         while self.images.len() > THUMB_CACHE_ENTRIES {
-            let Some(id) = self.lru.pop_front() else {
+            let Some((&victim, _)) = self
+                .recency
+                .iter()
+                .filter(|(id, _)| Some(**id) != self.pinned)
+                .min_by_key(|(_, tick)| **tick)
+            else {
                 break;
             };
-            // Rotate the pinned entry instead of dropping it. All cached
-            // images own an LRU slot, so this always terminates.
-            if Some(id) == self.pinned {
-                self.lru.push_back(id);
-                continue;
-            }
-            self.images.remove(&id);
-            self.colors.remove(&id);
+            self.images.remove(&victim);
+            self.colors.remove(&victim);
+            self.recency.remove(&victim);
         }
     }
 }
@@ -148,7 +149,7 @@ pub(crate) fn decode_thumbnail(
             }
         }
     };
-    let mut buffer = match vrc_photo_core::image_decode::decode_image(&path) {
+    let buffer = match vrc_photo_core::image_decode::decode_image(&path) {
         Some(image) => image.to_rgba8(),
         None => {
             tracing::warn!(
@@ -159,9 +160,7 @@ pub(crate) fn decode_thumbnail(
             return None;
         }
     };
-    for pixel in buffer.pixels_mut() {
-        pixel.0.swap(0, 2);
-    }
+    let buffer = rgba_to_bgra(buffer);
     let color = average_bgra(buffer.as_raw());
     Some((color, buffer))
 }
@@ -172,12 +171,14 @@ pub(crate) fn make_render_image(rgba: image::RgbaImage) -> Arc<RenderImage> {
     Arc::new(RenderImage::new(SmallVec::from_elem(frame, 1)))
 }
 
-/// Swaps RGBA to the BGRA order GPUI's `RenderImage` expects.
-pub(crate) fn preview_render_image(mut rgba: image::RgbaImage) -> Arc<RenderImage> {
+/// Swaps RGBA to the BGRA order GPUI's `RenderImage` expects. Call this on the
+/// background executor so a full preview does not spend its pixel loop on the
+/// UI thread.
+pub(crate) fn rgba_to_bgra(mut rgba: image::RgbaImage) -> image::RgbaImage {
     for pixel in rgba.pixels_mut() {
         pixel.0.swap(0, 2);
     }
-    make_render_image(rgba)
+    rgba
 }
 
 #[cfg(test)]
@@ -187,6 +188,29 @@ mod tests {
     fn test_render_image() -> Arc<RenderImage> {
         let frame = image::Frame::new(image::RgbaImage::new(1, 1));
         Arc::new(RenderImage::new(SmallVec::from_elem(frame, 1)))
+    }
+
+    #[test]
+    fn rgba_to_bgra_swaps_the_red_and_blue_channels() {
+        let source = image::RgbaImage::from_pixel(1, 1, image::Rgba([10, 20, 30, 40]));
+        let converted = rgba_to_bgra(source);
+        assert_eq!(converted.get_pixel(0, 0).0, [30, 20, 10, 40]);
+    }
+
+    #[test]
+    fn thumbnail_cache_get_refreshes_recency() {
+        let mut cache = ThumbnailCache::default();
+        for id in 1..=THUMB_CACHE_ENTRIES as i64 {
+            assert!(cache.begin(id));
+            cache.insert(id, test_render_image(), 0);
+        }
+        // Touch the oldest entry, then overflow the cache. The entry after it
+        // must be evicted instead.
+        assert!(cache.get(1).is_some());
+        assert!(cache.begin(999));
+        cache.insert(999, test_render_image(), 0);
+        assert!(cache.get(1).is_some());
+        assert!(cache.get(2).is_none());
     }
 
     #[test]

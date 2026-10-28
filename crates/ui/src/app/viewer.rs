@@ -256,6 +256,13 @@ impl App {
             .take()
             .unwrap_or_else(|| self.photo_grid_focus.clone());
         window.focus(&focus, cx);
+        // The shell is not mounted under the opaque quick-look overlay, so
+        // retry once the close frame has rebuilt the grid's focus tree.
+        cx.defer_in(window, move |this, window, cx| {
+            if !this.quick_look_open {
+                window.focus(&focus, cx);
+            }
+        });
         cx.notify();
     }
 
@@ -502,12 +509,22 @@ impl App {
         id: i64,
         _source: ViewerOpenSource,
     ) -> Option<(ViewerOpenSource, Bounds<Pixels>)> {
-        let card = current_tagged_bounds(
-            self.card_image_bounds.borrow().get(&id).copied(),
-            self.render_epoch,
-        );
-        let inspector =
-            current_tagged_bounds(*self.inspector_preview_bounds.borrow(), self.render_epoch);
+        let card_entry = self.card_image_bounds.borrow().get(&id).copied();
+        let inspector_entry = *self.inspector_preview_bounds.borrow();
+        // The shell is not rebuilt while the opaque viewer is open, so the
+        // bounds captured in the opening frame are still the card positions.
+        // They are used when the viewer closes.
+        let (card, inspector) = if self.quick_look_open {
+            (
+                card_entry.map(|(_, bounds)| bounds),
+                inspector_entry.map(|(_, bounds)| bounds),
+            )
+        } else {
+            (
+                current_tagged_bounds(card_entry, self.render_epoch),
+                current_tagged_bounds(inspector_entry, self.render_epoch),
+            )
+        };
         // The morph always starts from the grid card. The inspector preview is
         // only a fallback for a card that is scrolled out of view.
         let chosen = preferred_bounds(true, card, inspector)?;

@@ -36,6 +36,7 @@ use crate::app::import::{ImportDialogState, ImportReportView};
 use crate::app::lifecycle::ScanProgressView;
 use crate::state::photo_browser::{CountDebounce, PhotoBrowser, PhotoIndex};
 use crate::state::preview::{PreviewKey, PreviewQueue};
+use crate::state::selection::PhotoSelection;
 use crate::state::thumbnail::ThumbnailCache;
 use crate::state::viewer::{ViewerBoxState, ViewerMorph, ViewerOpenSource, ViewerPanelState};
 use crate::ui::actions::{
@@ -136,9 +137,9 @@ pub struct App {
     pub(crate) count_debounce: CountDebounce,
     pub(crate) selected: Option<i64>,
     /// Multi-selection in the current photo tab. `selected` is the primary
-    /// item used by the inspector and viewer. An empty list means nothing is
-    /// selected; otherwise the primary is always included.
-    pub(crate) selected_ids: Vec<i64>,
+    /// item used by the inspector and viewer. An empty selection means nothing
+    /// is selected; otherwise the primary is always included.
+    pub(crate) selected_ids: PhotoSelection,
     pub(crate) selection_anchor: Option<i64>,
     pub(crate) selected_photo: Option<Photo>,
     pub(crate) selected_players: Vec<PhotoPlayer>,
@@ -184,6 +185,8 @@ pub struct App {
     pub(crate) _profile_output_subscription: Subscription,
     pub(crate) manual_compress: Option<ManualCompressionDialog>,
     pub(crate) stats: LibraryStats,
+    /// Library revision the cached stats were computed for.
+    pub(crate) stats_revision: i64,
     pub(crate) settings: AppSettings,
     pub(crate) palette: Palette,
     pub(crate) update: update_view::UpdateState,
@@ -197,6 +200,9 @@ pub struct App {
     pub(crate) failed_job_names: HashMap<i64, String>,
     pub(crate) import_report: Option<ImportReportView>,
     pub(crate) import_dialog: Option<ImportDialogState>,
+    /// Last time the import progress rebuilt the window. The importer reports
+    /// once per file, so notifications are coalesced to ~20 fps.
+    pub(crate) last_import_progress_notify: Option<Instant>,
     pub(crate) monitor_world: Option<String>,
     pub(crate) monitor_instance: Option<String>,
     pub(crate) monitor_players: Vec<String>,
@@ -246,6 +252,21 @@ pub(crate) fn any_overlay_open(
     quick_look_open || manual_compression_open || import_dialog_open || notification_modal_open
 }
 
+/// The quick-look overlay paints an opaque full-window surface, so the shell
+/// underneath is invisible. Skipping it keeps viewer navigation from rebuilding
+/// the sidebar, gallery header, and inspector on every notify.
+pub(crate) fn should_render_shell(quick_look_open: bool) -> bool {
+    !quick_look_open
+}
+
+/// Drops card-bounds entries older than the frame before `epoch`. Cards insert
+/// their bounds while painting the current frame, so the previous frame must
+/// survive until the replacement is painted.
+pub(crate) fn retain_recent_bounds(map: &mut HashMap<i64, BoundsFrame>, epoch: u64) {
+    let oldest = epoch.wrapping_sub(1);
+    map.retain(|_, (frame, _)| *frame >= oldest);
+}
+
 /// A repeated library failure must not stack identical toasts on every page
 /// load; only a new error message warrants a new notification.
 pub(crate) fn should_notify_library_error(current: Option<&str>, next: &str) -> bool {
@@ -276,6 +297,12 @@ impl App {
                 "ライブラリを読み込めませんでした。通知から再読込できます",
                 cx,
             );
+        }
+    }
+
+    fn prune_card_image_bounds(&mut self) {
+        if let Ok(mut bounds) = self.card_image_bounds.try_borrow_mut() {
+            retain_recent_bounds(&mut bounds, self.render_epoch);
         }
     }
 
@@ -430,7 +457,7 @@ impl App {
             library_error: None,
             count_debounce: CountDebounce::default(),
             selected: None,
-            selected_ids: Vec::new(),
+            selected_ids: PhotoSelection::default(),
             selection_anchor: None,
             selected_photo: None,
             selected_players: Vec::new(),
@@ -476,6 +503,7 @@ impl App {
             _profile_output_subscription: profile_output_subscription,
             manual_compress: None,
             stats: LibraryStats::default(),
+            stats_revision: -1,
             settings: AppSettings::default(),
             palette: initial_palette,
             update: update_view::UpdateState::new(health_token, database_ok, demo, db_path),
@@ -489,6 +517,7 @@ impl App {
             failed_job_names: HashMap::new(),
             import_report: None,
             import_dialog: None,
+            last_import_progress_notify: None,
             monitor_world: None,
             monitor_instance: None,
             monitor_players: Vec::new(),
@@ -591,39 +620,7 @@ impl Render for App {
             });
         }
         self.guard_viewer_selection(window, cx);
-        let viewport = window.viewport_size();
-        let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
-        let mut layout: ChromeLayout = chrome_layout(
-            f32::from(viewport.width),
-            f32::from(viewport.height),
-            client_inset,
-            self.sidebar_collapsed,
-        );
-        if self.ribbon_collapsed {
-            // The collapsed body still has its target height for the expand
-            // animation, but the content area can use that space.
-            layout.content_height += layout.ribbon_height;
-        }
-        let main = v_flex()
-            .flex_1()
-            .min_w_0()
-            .h_full()
-            .gap(px(WORKSPACE_GAP))
-            .child(self.chrome(layout, cx))
-            .child(v_flex().flex_1().min_h_0().child(self.content(window, cx)));
-        // The padding and gaps belong to the shell, not the window root:
-        // overlays must use the full window coordinate space (the viewer's
-        // morph bounds and centering are captured/computed there).
-        let shell = h_flex()
-            .relative()
-            .size_full()
-            .p(px(WORKSPACE_PAD))
-            .gap(px(WORKSPACE_GAP))
-            .child(self.sidebar(layout.content_height, cx))
-            .child(main)
-            .child(self.nav_tooltip())
-            .child(self.rail_toggle(cx));
-        let root = h_flex()
+        let mut root = h_flex()
             .relative()
             .size_full()
             .bg(rgba(self.palette.glass))
@@ -653,23 +650,53 @@ impl Render for App {
             }))
             .on_action(cx.listener(|this, _: &QuickLookPrevFocus, window, cx| {
                 this.cycle_quick_look_focus(true, window, cx)
-            }))
-            .child(shell);
-        let root = if self.quick_look_open {
-            root.child(self.quick_look(window, cx))
+            }));
+        if should_render_shell(self.quick_look_open) {
+            // Entries captured while the opaque viewer was open stay valid
+            // until the close morph has read them.
+            self.prune_card_image_bounds();
+            let viewport = window.viewport_size();
+            let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
+            let mut layout: ChromeLayout = chrome_layout(
+                f32::from(viewport.width),
+                f32::from(viewport.height),
+                client_inset,
+                self.sidebar_collapsed,
+            );
+            if self.ribbon_collapsed {
+                // The collapsed body still has its target height for the expand
+                // animation, but the content area can use that space.
+                layout.content_height += layout.ribbon_height;
+            }
+            let main = v_flex()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .gap(px(WORKSPACE_GAP))
+                .child(self.chrome(layout, cx))
+                .child(v_flex().flex_1().min_h_0().child(self.content(window, cx)));
+            // The padding and gaps belong to the shell, not the window root:
+            // overlays must use the full window coordinate space (the viewer's
+            // morph bounds and centering are captured/computed there).
+            let shell = h_flex()
+                .relative()
+                .size_full()
+                .p(px(WORKSPACE_PAD))
+                .gap(px(WORKSPACE_GAP))
+                .child(self.sidebar(layout.content_height, cx))
+                .child(main)
+                .child(self.nav_tooltip())
+                .child(self.rail_toggle(cx));
+            root = root.child(shell);
+            if self.manual_compress.is_some() {
+                root = root.child(self.manual_compression_overlay(window, cx));
+            }
+            if self.import_dialog.is_some() {
+                root = root.child(self.import_modal_overlay(cx));
+            }
         } else {
-            root
-        };
-        let root = if self.manual_compress.is_some() {
-            root.child(self.manual_compression_overlay(window, cx))
-        } else {
-            root
-        };
-        let root = if self.import_dialog.is_some() {
-            root.child(self.import_modal_overlay(cx))
-        } else {
-            root
-        };
+            root = root.child(self.quick_look(window, cx));
+        }
         let root = root.child(self.viewer_morph_view.clone());
         if self.notification_modal_open {
             root.child(self.notification_modal(window, cx))
@@ -681,8 +708,28 @@ impl Render for App {
 
 #[cfg(test)]
 mod tests {
-    use super::{any_overlay_open, should_notify_library_error};
+    use super::{
+        any_overlay_open, retain_recent_bounds, should_notify_library_error, should_render_shell,
+    };
     use crate::ui::notifications::{FailureNotice, failure_transition};
+    use gpui_kit::{Bounds, point, px, size};
+
+    #[test]
+    fn stale_card_bounds_are_pruned_but_the_previous_frame_survives() {
+        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(10.), px(10.)));
+        let mut map = std::collections::HashMap::new();
+        map.insert(1, (7, bounds));
+        map.insert(2, (6, bounds));
+        retain_recent_bounds(&mut map, 8);
+        assert!(map.contains_key(&1));
+        assert!(!map.contains_key(&2));
+    }
+
+    #[test]
+    fn the_hidden_shell_is_not_rebuilt_while_quick_look_is_open() {
+        assert!(!should_render_shell(true));
+        assert!(should_render_shell(false));
+    }
 
     #[test]
     fn overlay_guard_covers_the_viewer_and_both_modals() {

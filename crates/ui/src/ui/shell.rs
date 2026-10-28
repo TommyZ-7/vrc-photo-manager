@@ -13,9 +13,7 @@ use gpui_kit::*;
 use vrc_photo_core::importer::ImportProgress;
 use vrc_photo_ipc::ScanPhase as IpcScanPhase;
 
-use crate::app::import::{
-    ImportDialogPhase, ImportDialogState, ImportReportView, import_issue_counts,
-};
+use crate::app::import::{ImportDialogPhase, ImportDialogState, ImportReportView};
 use crate::app::lifecycle::ScanProgressView;
 use crate::app::{App, Screen, SidebarStatusTab};
 use crate::ui::components::status_progress_bar;
@@ -878,7 +876,7 @@ fn import_card_status(
             tone: StatusTone::Idle,
         };
     };
-    let (failed, partial) = import_issue_counts(&report.issues);
+    let (failed, partial) = report.issue_counts();
     let scan_failed = import_scan_failure_count(report);
     let failed_total = failed + scan_failed;
     if !report.remaining.is_empty() {
@@ -990,7 +988,7 @@ fn import_attention(
         return Some(StatusTone::Running);
     }
     let report = report?;
-    let (failed, partial) = import_issue_counts(&report.issues);
+    let (failed, partial) = report.issue_counts();
     if failed > 0 || import_scan_failure_count(report) > 0 {
         Some(StatusTone::Failed)
     } else if !report.remaining.is_empty() || partial > 0 {
@@ -1078,6 +1076,7 @@ mod tests {
         ImportDialogOrigin, ImportDialogPhase, ImportDialogState, ImportReportView,
     };
     use crate::app::lifecycle::ScanProgressView;
+    use std::cell::Cell;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
@@ -1159,6 +1158,7 @@ mod tests {
             cancelled: false,
             scan_failures: Vec::new(),
             scan_error: None,
+            issue_counts: Cell::new(None),
         }
     }
     fn import_dialog_fixture() -> ImportDialogState {

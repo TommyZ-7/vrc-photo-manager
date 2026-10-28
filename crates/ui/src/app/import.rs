@@ -4,11 +4,12 @@
 //! Rendering stays in `ui::import`; these methods only touch App fields and the
 //! importer/scanner services.
 
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui_kit::component::notification::NotificationType;
 use gpui_kit::*;
@@ -40,6 +41,26 @@ pub(crate) struct ImportReportView {
     pub(crate) cancelled: bool,
     pub(crate) scan_failures: Vec<ScanFailure>,
     pub(crate) scan_error: Option<String>,
+    /// Cached `(failed, partial)` counts. Reports can carry thousands of
+    /// issues and the sidebar status card is rebuilt on every render; recount
+    /// only after a merge mutates `issues`.
+    pub(crate) issue_counts: Cell<Option<(usize, usize)>>,
+}
+
+impl ImportReportView {
+    pub(crate) fn issue_counts(&self) -> (usize, usize) {
+        if let Some(counts) = self.issue_counts.get() {
+            return counts;
+        }
+        let counts = import_issue_counts(&self.issues);
+        self.issue_counts.set(Some(counts));
+        counts
+    }
+
+    /// Discards the cached counts after `issues` was modified.
+    fn invalidate_issue_counts(&mut self) {
+        self.issue_counts.set(None);
+    }
 }
 
 #[derive(Clone)]
@@ -123,6 +144,14 @@ pub(crate) struct ImportDialogState {
 enum ImportRunMessage {
     Progress(ImportProgress),
     Finished(Result<ImportResult, String>),
+}
+
+/// The importer reports once per file. A large folder import would otherwise
+/// rebuild the whole window for every copied photo.
+const IMPORT_PROGRESS_NOTIFY_INTERVAL: Duration = Duration::from_millis(50);
+
+pub(crate) fn should_notify_import_progress(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|last| now.saturating_duration_since(last) >= IMPORT_PROGRESS_NOTIFY_INTERVAL)
 }
 
 impl App {
@@ -221,6 +250,7 @@ impl App {
         }
         let total = files.len();
         let cancel = Arc::new(AtomicBool::new(false));
+        self.last_import_progress_notify = None;
         dialog.error = None;
         dialog.phase = ImportDialogPhase::Running {
             progress: ImportProgress {
@@ -293,7 +323,11 @@ impl App {
         {
             *current = progress;
         }
-        cx.notify();
+        let now = Instant::now();
+        if should_notify_import_progress(self.last_import_progress_notify, now) {
+            self.last_import_progress_notify = Some(now);
+            cx.notify();
+        }
     }
 
     pub(crate) fn finish_import_run(
@@ -357,6 +391,7 @@ impl App {
                             cancelled: result.cancelled,
                             scan_failures: Vec::new(),
                             scan_error: None,
+                            issue_counts: Cell::new(None),
                         }
                     }
                     ImportDialogOrigin::Retry { report, sources } => {
@@ -372,7 +407,7 @@ impl App {
                     self.index_import_destination(&mut report, cx);
                 }
                 let summary = import_summary(&report);
-                let (failed, partial) = import_issue_counts(&report.issues);
+                let (failed, partial) = report.issue_counts();
                 let scan_failed =
                     report.scan_failures.len() + usize::from(report.scan_error.is_some());
                 let tone = if failed == 0
@@ -664,6 +699,7 @@ fn merge_retry_report(
     });
     merged.issues.extend(result.issues);
     merged.renamed.extend(result.renamed);
+    merged.invalidate_issue_counts();
     merged
 }
 
@@ -674,6 +710,7 @@ fn merge_resume_report(previous: &ImportReportView, result: ImportResult) -> Imp
     merged.processed += result.processed;
     merged.issues.extend(result.issues);
     merged.renamed.extend(result.renamed);
+    merged.invalidate_issue_counts();
     let consumed = result.processed.min(previous.remaining.len());
     merged.remaining = previous.remaining.iter().skip(consumed).cloned().collect();
     merged.cancelled = !merged.remaining.is_empty();
@@ -681,7 +718,7 @@ fn merge_resume_report(previous: &ImportReportView, result: ImportResult) -> Imp
 }
 
 fn import_summary(report: &ImportReportView) -> String {
-    let (failed, _) = import_issue_counts(&report.issues);
+    let (failed, _) = report.issue_counts();
     let mut details = Vec::new();
     if report.skipped > 0 {
         details.push(format!("{} 枚スキップ", report.skipped));
@@ -708,18 +745,47 @@ fn import_summary(report: &ImportReportView) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ImportDialogOrigin, ImportDialogPhase, ImportDialogState, ImportReportView,
-        add_photo_root_and_save, import_remaining, import_should_index, import_summary,
-        merge_resume_report, merge_retry_report, reserve_import_dialog,
+        IMPORT_PROGRESS_NOTIFY_INTERVAL, ImportDialogOrigin, ImportDialogPhase, ImportDialogState,
+        ImportReportView, add_photo_root_and_save, import_remaining, import_should_index,
+        import_summary, merge_resume_report, merge_retry_report, reserve_import_dialog,
+        should_notify_import_progress,
     };
     use crate::ui::import::retryable_sources;
     use std::cell::Cell;
     use std::path::{Path, PathBuf};
+    use std::time::{Duration, Instant};
     use vrc_photo_core::importer::{
         ImportIssue, ImportIssueKind, ImportMode, ImportRename, ImportResult,
     };
     use vrc_photo_core::scanner::ScanFailure;
     use vrc_photo_core::settings::AppSettings;
+
+    #[test]
+    fn import_progress_notifications_are_throttled() {
+        let start = Instant::now();
+        assert!(should_notify_import_progress(None, start));
+        assert!(!should_notify_import_progress(
+            Some(start),
+            start + Duration::from_millis(49)
+        ));
+        assert!(should_notify_import_progress(
+            Some(start),
+            start + IMPORT_PROGRESS_NOTIFY_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn report_issue_counts_are_cached_and_invalidated_on_change() {
+        let mut report = ImportReportView {
+            issues: vec![non_retryable_issue("/a.png"), partial_issue("/b.png")],
+            ..import_report_fixture()
+        };
+        assert_eq!(report.issue_counts(), (1, 1));
+
+        report.issues.push(non_retryable_issue("/c.png"));
+        report.invalidate_issue_counts();
+        assert_eq!(report.issue_counts(), (2, 1));
+    }
 
     #[test]
     fn failed_import_root_save_is_retried_until_it_succeeds() {
@@ -766,6 +832,7 @@ mod tests {
             cancelled: false,
             scan_failures: Vec::new(),
             scan_error: None,
+            issue_counts: Cell::new(None),
         }
     }
     #[test]

@@ -298,6 +298,13 @@ impl Db {
         // mode), and read-only connections may reject these writes.
         let _ = conn.pragma_update(None, "journal_mode", "WAL");
         let _ = conn.pragma_update(None, "synchronous", "NORMAL");
+        // Library snapshots and the stats aggregates scan six figures of rows
+        // on a regular cadence. Keep a larger page cache and avoid spilling
+        // ORDER BY temp b-trees to disk. These are per-connection hints; read-
+        // only handles accept them, in-memory databases ignore mmap.
+        let _ = conn.pragma_update(None, "cache_size", -65_536i64);
+        let _ = conn.pragma_update(None, "mmap_size", 268_435_456i64);
+        let _ = conn.pragma_update(None, "temp_store", "MEMORY");
         Ok(())
     }
 
@@ -2683,6 +2690,21 @@ mod tests {
         let matches = db.photo_index_text(&PhotoTextFilter::default()).unwrap();
         eprintln!("photo_index_text 100k: {:?}", start.elapsed());
         assert_eq!(matches.len(), 100_000);
+    }
+
+    #[test]
+    fn connections_use_a_large_page_cache_and_memory_temp_store() {
+        let db = Db::open_in_memory().unwrap();
+        let cache_size: i64 = db
+            .conn
+            .pragma_query_value(None, "cache_size", |row| row.get(0))
+            .unwrap();
+        assert_eq!(cache_size, -65_536);
+        let temp_store: i64 = db
+            .conn
+            .pragma_query_value(None, "temp_store", |row| row.get(0))
+            .unwrap();
+        assert_eq!(temp_store, 2);
     }
 
     #[test]
