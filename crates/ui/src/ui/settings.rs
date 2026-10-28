@@ -523,11 +523,7 @@ impl App {
         };
         let mut rows = v_flex().gap(px(8.));
         for chunk in items.chunks(6) {
-            let mut row = h_flex()
-                .w_full()
-                .items_center()
-                .justify_between()
-                .gap(px(8.));
+            let mut row = h_flex().items_center().gap(px(8.));
             for &(id, label, swatch, selected) in chunk {
                 row = row.child(self.theme_swatch(axis, id, label, swatch, selected, cx));
             }
