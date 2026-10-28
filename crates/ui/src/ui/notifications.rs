@@ -92,6 +92,11 @@ pub(crate) fn toast_flush_needed(pending: usize, scheduled: bool) -> bool {
     pending > 0 && !scheduled
 }
 
+/// The notification modal must not stack over another modal.
+pub(crate) fn notification_modal_allowed(import_open: bool, manual_open: bool) -> bool {
+    !import_open && !manual_open
+}
+
 fn notification_for(spec: &ToastSpec, entity: WeakEntity<App>) -> Notification {
     let mut note = Notification::new()
         .message(spec.message.clone())
@@ -192,13 +197,13 @@ impl App {
         if self.notification_modal_open {
             return;
         }
-        if self.import_dialog.is_some() {
+        if !notification_modal_allowed(self.import_dialog.is_some(), self.manual_compress.is_some())
+        {
             // Actionable toasts are painted above the import dialog. Do not
             // stack a second modal over it; keep focus in the import trap.
-            window.focus(&self.import_dialog_focus, cx);
-            return;
-        }
-        if self.manual_compress.is_some() {
+            if self.import_dialog.is_some() {
+                window.focus(&self.import_dialog_focus, cx);
+            }
             return;
         }
         self.notification_return_focus = window.focused(cx);
@@ -652,7 +657,9 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{NotificationSection, notification_sections, toast_flush_needed};
+    use super::{
+        NotificationSection, notification_modal_allowed, notification_sections, toast_flush_needed,
+    };
 
     #[test]
     fn notification_sections_follow_the_action_order() {
@@ -673,5 +680,12 @@ mod tests {
         assert!(!toast_flush_needed(0, false));
         assert!(toast_flush_needed(1, false));
         assert!(!toast_flush_needed(1, true));
+    }
+
+    #[test]
+    fn notification_modal_never_stacks_over_another_modal() {
+        assert!(notification_modal_allowed(false, false));
+        assert!(!notification_modal_allowed(true, false));
+        assert!(!notification_modal_allowed(false, true));
     }
 }
