@@ -10,45 +10,7 @@ use gpui_kit::{Bounds, Pixels, Size, Window, point, px, size};
 use vrc_photo_core::model::{CompressionFormat, CompressionProfile};
 use vrc_photo_core::settings::CardSize;
 
-pub(crate) use crate::ui::palette::{Palette, lerp_color, mix, with_alpha};
-
-pub(crate) const BG: u32 = 0x07090d;
-pub(crate) const PANEL: u32 = 0x121722;
-pub(crate) const PANEL_2: u32 = 0x1a2130;
-/// Legacy sidebar fill, superseded by the opaque `PANEL_SIDEBAR` card. Kept as
-/// a named token for callers that still reference the original palette.
-#[allow(dead_code)]
-pub(crate) const SIDEBAR: u32 = 0x0d1119;
-
-// Window glass and the ambient backdrop. The low byte is the alpha channel, so
-// these are used with `rgba()`; the values follow the design spec §9.1 and the
-// fractional alphas are rounded to the nearest 8-bit channel.
-pub(crate) const GLASS_WINDOW: u32 = 0x0a101c61; // rgba(10,16,28,0.38)
-
-// Opaque panel surfaces. Every card, sidebar, header, and inner row keeps the
-// ambient glass behind it instead of letting it show through. Tokens that no
-// screen consumes yet keep `dead_code` allows until they are adopted.
-pub(crate) const PANEL_SIDEBAR: u32 = 0x0b111b;
-#[allow(dead_code)]
-pub(crate) const PANEL_SIDEBAR_DEEP: u32 = 0x080d15;
-pub(crate) const PANEL_HEADER: u32 = 0x101725;
-pub(crate) const PANEL_CARD: u32 = 0x0d1420;
-pub(crate) const PANEL_INNER: u32 = 0x111927;
-#[allow(dead_code)]
-pub(crate) const PANEL_INNER_DEEP: u32 = 0x0c1320;
-pub(crate) const PANEL_DEEP: u32 = 0x0a1019;
-#[allow(dead_code)]
-pub(crate) const PANEL_RAISED: u32 = 0x172132;
-pub(crate) const BORDER: u32 = 0x232b38;
-pub(crate) const BORDER_STRONG: u32 = 0x364256;
-pub(crate) const TEXT: u32 = 0xeef3fb;
-pub(crate) const MUTED: u32 = 0xa3adbd;
-pub(crate) const MUTED_2: u32 = 0x768196;
-pub(crate) const BLUE: u32 = 0x66b3ff;
-pub(crate) const ACCENT_SOFT: u32 = 0x1a2f47;
-pub(crate) const GREEN: u32 = 0x5eead4;
-pub(crate) const AMBER: u32 = 0xfbbf24;
-pub(crate) const RED: u32 = 0xfb7185;
+pub(crate) use crate::ui::palette::{Palette, lerp_color, with_alpha};
 
 pub(crate) const SIDEBAR_EXPANDED: f32 = 238.0;
 pub(crate) const SIDEBAR_COLLAPSED: f32 = 78.0;
@@ -609,17 +571,6 @@ pub(crate) fn card_size_label(size: CardSize) -> &'static str {
         .into_iter()
         .find_map(|(option, label)| (option == size).then_some(label))
         .unwrap_or("中")
-}
-
-pub(crate) fn scene_color(world: &str) -> u32 {
-    let mut hash = 0u32;
-    for byte in world.as_bytes() {
-        hash = hash.wrapping_mul(31).wrapping_add(*byte as u32);
-    }
-    const PALETTE: [u32; 8] = [
-        0x1d2a4a, 0x3a1d2b, 0x123b3b, 0x3b2a14, 0x2a1b3d, 0x1d3320, 0x243447, 0x151a33,
-    ];
-    PALETTE[hash as usize % PALETTE.len()]
 }
 
 pub(crate) fn format_label(format: &CompressionFormat) -> String {
@@ -1283,27 +1234,5 @@ mod tests {
         assert!((f32::from(open.center().x) - 410.0).abs() < 0.01);
         assert!((f32::from(open.center().y) - 428.0).abs() < 0.01);
         assert!(closed.size.width > open.size.width);
-    }
-
-    #[test]
-    fn glass_and_panel_tokens_follow_the_spec() {
-        // Translucent tokens pack the spec's alpha into the low byte, so the
-        // spec's fractional alphas survive within one 8-bit step.
-        let alpha = |token: u32| (token & 0xff) as f32 / 255.0;
-        let close = |value: f32, expected: f32| assert!((value - expected).abs() <= 1.0 / 255.0);
-
-        close(alpha(GLASS_WINDOW), 0.38);
-        assert_eq!(GLASS_WINDOW >> 8, 0x0a101c);
-
-        // Panels are opaque: they are used with `rgb()` and never carry a
-        // window-glass alpha.
-        assert_eq!(PANEL_SIDEBAR, 0x0b111b);
-        assert_eq!(PANEL_SIDEBAR_DEEP, 0x080d15);
-        assert_eq!(PANEL_HEADER, 0x101725);
-        assert_eq!(PANEL_CARD, 0x0d1420);
-        assert_eq!(PANEL_INNER, 0x111927);
-        assert_eq!(PANEL_INNER_DEEP, 0x0c1320);
-        assert_eq!(PANEL_DEEP, 0x0a1019);
-        assert_eq!(PANEL_RAISED, 0x172132);
     }
 }

@@ -380,7 +380,7 @@ impl App {
                     })
                     .when(active, |this| this.bg(rgba(with_alpha(p.accent, 0x17))))
                     .text_size(px(9.))
-                    .text_color(rgb(if active { TEXT } else { MUTED }))
+                    .text_color(rgb(if active { p.text } else { p.muted }))
                     .whitespace_nowrap()
                     .cursor_pointer()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())

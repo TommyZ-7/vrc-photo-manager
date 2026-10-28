@@ -448,8 +448,8 @@ impl App {
         if !report.remaining.is_empty() {
             badges = badges.child(self.badge(
                 &format!("未処理 {}", report.remaining.len()),
-                AMBER,
-                0x2b2210,
+                p.amber,
+                p.amber_soft,
             ));
         }
         if scan_failed > 0 {

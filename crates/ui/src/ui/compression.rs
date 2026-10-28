@@ -122,8 +122,8 @@ impl App {
                             .p(px(12.))
                             .gap(px(6.))
                             .rounded(px(12.))
-                            .bg(rgb(if active { ACCENT_SOFT } else { PANEL_INNER }))
-                            .border_color(rgb(if active { BLUE } else { BORDER }))
+                            .bg(rgb(if active { p.accent_soft } else { p.panel_inner }))
+                            .border_color(rgb(if active { p.accent } else { p.border }))
                             .cursor_pointer()
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.profile_index = index;
@@ -140,16 +140,24 @@ impl App {
                                             .truncate()
                                             .text_size(px(12.))
                                             .font_semibold()
-                                            .text_color(rgb(if active { BLUE } else { MUTED }))
+                                            .text_color(rgb(if active {
+                                                p.accent
+                                            } else {
+                                                p.muted
+                                            }))
                                             .child(title),
                                     )
                                     .child(self.badge(
                                         if auto { "自動" } else { "手動" },
-                                        if auto { GREEN } else { MUTED },
-                                        if auto { 0x112a22 } else { PANEL_2 },
+                                        if auto { p.green } else { p.muted },
+                                        if auto { p.green_soft } else { p.panel_2 },
                                     ))
                                     .when(profile.clipboard, |this| {
-                                        this.child(self.badge("クリップボード", BLUE, 0x14283d))
+                                        this.child(self.badge(
+                                            "クリップボード",
+                                            p.accent,
+                                            p.accent_soft,
+                                        ))
                                     })
                                     .child(
                                         div()
@@ -162,9 +170,9 @@ impl App {
                                             .rounded(px(6.))
                                             .text_size(px(11.))
                                             .text_color(rgb(if index == 0 {
-                                                MUTED_2
+                                                p.muted_2
                                             } else {
-                                                MUTED
+                                                p.muted
                                             }))
                                             .when(index > 0, |this| {
                                                 this.cursor_pointer()
@@ -190,9 +198,9 @@ impl App {
                                             .rounded(px(6.))
                                             .text_size(px(11.))
                                             .text_color(rgb(if index + 1 == profile_count {
-                                                MUTED_2
+                                                p.muted_2
                                             } else {
-                                                MUTED
+                                                p.muted
                                             }))
                                             .when(index + 1 < profile_count, |this| {
                                                 this.cursor_pointer()
@@ -211,7 +219,7 @@ impl App {
                             .child(
                                 div()
                                     .text_size(px(10.))
-                                    .text_color(rgb(if active { MUTED } else { MUTED_2 }))
+                                    .text_color(rgb(if active { p.muted } else { p.muted_2 }))
                                     .child(meta),
                             )
                     })),
@@ -323,7 +331,7 @@ impl App {
                             .text_color(rgb(p.text))
                             .child(profile.name.clone()),
                     )
-                    .child(self.badge(&format_label(&profile.format), BLUE, 0x14283d))
+                    .child(self.badge(&format_label(&profile.format), p.accent, p.accent_soft))
                     .child(div().flex_1())
                     .child(
                         Button::new("duplicate-profile")
@@ -939,29 +947,29 @@ impl App {
                     .when(self.active_job_count > 0, |this| {
                         this.child(self.badge(
                             &format!("未完了 {}", self.active_job_count),
-                            BLUE,
+                            p.accent,
                             0x14283d,
                         ))
                     })
                     .when(self.waiting_job_count > 0, |this| {
                         this.child(self.badge(
                             &format!("未実行 {}", self.waiting_job_count),
-                            AMBER,
+                            p.amber,
                             0x2a2412,
                         ))
                     })
                     .when(self.waiting_job_count > 0, |this| {
                         this.child(if self.settings.auto_compress_keep_original {
-                            self.badge("自動: 元画像を保持", GREEN, 0x112a22)
+                            self.badge("自動: 元画像を保持", p.green, p.green_soft)
                         } else {
-                            self.badge("自動: 元画像を置換", RED, 0x2a1414)
+                            self.badge("自動: 元画像を置換", p.red, p.red_soft)
                         })
                     })
                     .when(self.failed_job_count > 0, |this| {
                         this.child(self.badge(
                             &format!("失敗 {}", self.failed_job_count),
-                            RED,
-                            0x2a1414,
+                            p.red,
+                            p.red_soft,
                         ))
                     })
                     .child(div().flex_1())
@@ -1109,7 +1117,7 @@ impl App {
                         h_flex()
                             .items_center()
                             .gap(px(8.))
-                            .child(self.badge("失敗", RED, 0x2a1414))
+                            .child(self.badge("失敗", p.red, p.red_soft))
                             .child(
                                 div()
                                     .flex_1()

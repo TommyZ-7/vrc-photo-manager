@@ -627,19 +627,19 @@ impl App {
                 if hovered && !active {
                     return el.text_color(rgb(p.text));
                 }
-                let from = if was_active { BLUE } else { MUTED };
-                let to = if active { BLUE } else { MUTED };
+                let from = if was_active { p.accent } else { p.muted };
+                let to = if active { p.accent } else { p.muted };
                 el.text_color(rgb(lerp_color(from, to, t)))
             },
         );
 
-        let label_from = if was_active { p.text } else { MUTED };
+        let label_from = if was_active { p.text } else { p.muted };
         let label_to = if active {
             p.text
         } else if hovered {
-            TEXT
+            p.text
         } else {
-            MUTED
+            p.muted
         };
         let label_block = h_flex()
             .min_w_0()
@@ -665,8 +665,8 @@ impl App {
                                 if hovered && !active {
                                     return el.text_color(rgb(p.text));
                                 }
-                                let from = if was_active { BLUE } else { MUTED_2 };
-                                let to = if active { BLUE } else { MUTED_2 };
+                                let from = if was_active { p.accent } else { p.muted_2 };
+                                let to = if active { p.accent } else { p.muted_2 };
                                 el.text_color(rgb(lerp_color(from, to, t)))
                             },
                         ),
@@ -1084,7 +1084,6 @@ mod tests {
         ImportDialogOrigin, ImportDialogPhase, ImportDialogState, ImportReportView,
     };
     use crate::app::lifecycle::ScanProgressView;
-    use crate::ui::theme::{AMBER, BLUE, GREEN, MUTED_2, RED};
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;

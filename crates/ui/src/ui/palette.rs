@@ -987,6 +987,43 @@ mod tests {
     }
 
     #[test]
+    fn no_hardcoded_palette_colors_outside_palette() {
+        use std::path::Path;
+
+        fn collect(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).expect("read source directory") {
+                let path = entry.expect("source entry").path();
+                if path.is_dir() {
+                    collect(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        collect(&src, &mut files);
+        for file in files {
+            if file.ends_with("ui/palette.rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&file).expect("read source file");
+            for (index, line) in text.lines().enumerate() {
+                let bad = line.contains("rgb(0x")
+                    || (line.contains("rgba(0x") && !line.contains("rgba(0x00000000)"));
+                assert!(
+                    !bad,
+                    "{}:{}: hardcoded palette colour: {}",
+                    file.display(),
+                    index + 1,
+                    line.trim()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn scene_color_follows_the_family() {
         for main in main_colors() {
             let palette = resolve(main.id, "sky");
