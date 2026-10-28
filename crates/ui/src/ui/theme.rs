@@ -66,9 +66,11 @@ pub(crate) const INSPECTOR_SHORT_PREVIEW_HEIGHT: f32 = 118.0;
 /// Shell padding: 14px around the window and between the sidebar, header, and
 /// content column.
 pub(crate) const WORKSPACE_PAD: f32 = 14.0;
-pub(crate) const WORKSPACE_GAP: f32 = 14.0;
+pub(crate) const WORKSPACE_GAP: f32 = 10.0;
 /// Inner-screen gap between the gallery and inspector cards.
 pub(crate) const CARD_GAP: f32 = 12.0;
+/// Gap between the library gallery and the inspector column.
+pub(crate) const INSPECTOR_GAP: f32 = 8.0;
 pub(crate) const GALLERY_HEADER_HEIGHT: f32 = 42.0;
 pub(crate) const GALLERY_PAD_X: f32 = 12.0;
 pub(crate) const GALLERY_PAD_TOP: f32 = 10.0;
@@ -369,7 +371,11 @@ pub(crate) fn grid_available_width(
     } else {
         inspector_column_width(window_width)
     };
-    let card_gap = if inspector_collapsed { 0.0 } else { CARD_GAP };
+    let card_gap = if inspector_collapsed {
+        0.0
+    } else {
+        INSPECTOR_GAP
+    };
     let gallery = window_width
         - WORKSPACE_PAD * 2.0
         - sidebar_width(sidebar_collapsed)
@@ -867,10 +873,12 @@ mod tests {
             let gallery_height = height - WORKSPACE_PAD * 2.0 - WORKSPACE_GAP - chrome;
             let body_height =
                 gallery_height - GALLERY_HEADER_HEIGHT - GALLERY_PAD_TOP - GALLERY_PAD_BOTTOM;
+            // The trailing row gap does not have to fit; only the three
+            // visible rows and the gaps between them do.
+            let visible_rows = metrics.row_height * 3.0 - CARD_ROW_GAP;
             assert!(
-                metrics.row_height * 3.0 <= body_height + 1.0,
-                "width={width} rows={} body={body_height}",
-                metrics.row_height * 3.0
+                visible_rows <= body_height,
+                "width={width} rows={visible_rows} body={body_height}"
             );
         }
     }
@@ -903,11 +911,11 @@ mod tests {
 
     #[test]
     fn grid_available_width_matches_the_shell_padding() {
-        assert_eq!(grid_available_width(1440.0, false, false), 806.0);
-        assert_eq!(grid_available_width(1280.0, false, false), 668.0);
-        assert_eq!(grid_available_width(1080.0, false, false), 490.0);
-        assert_eq!(grid_available_width(1440.0, true, false), 966.0);
-        assert_eq!(search_available_width(1280.0, false), 654.0);
+        assert_eq!(grid_available_width(1440.0, false, false), 814.0);
+        assert_eq!(grid_available_width(1280.0, false, false), 676.0);
+        assert_eq!(grid_available_width(1080.0, false, false), 498.0);
+        assert_eq!(grid_available_width(1440.0, true, false), 974.0);
+        assert_eq!(search_available_width(1280.0, false), 658.0);
         assert_eq!(grid_columns(0.0, MIN_CARD_WIDTH), 1);
     }
 
@@ -1098,17 +1106,17 @@ mod tests {
 
     #[test]
     fn search_available_width_drops_to_the_filter_panel_width() {
-        assert_eq!(search_available_width(1280.0, false), 654.0);
-        assert_eq!(search_available_width(1440.0, false), 814.0);
-        assert_eq!(search_available_width(1080.0, false), 454.0);
-        assert_eq!(search_available_width(1280.0, true), 814.0);
+        assert_eq!(search_available_width(1280.0, false), 658.0);
+        assert_eq!(search_available_width(1440.0, false), 818.0);
+        assert_eq!(search_available_width(1080.0, false), 458.0);
+        assert_eq!(search_available_width(1280.0, true), 818.0);
         assert_eq!(search_available_width(200.0, false), 0.0);
     }
 
     #[test]
     fn search_grid_metrics_use_the_library_card_geometry() {
         for (width, columns, available) in
-            [(1280.0, 3, 654.0), (1440.0, 4, 814.0), (1080.0, 2, 454.0)]
+            [(1280.0, 3, 658.0), (1440.0, 4, 818.0), (1080.0, 2, 458.0)]
         {
             let metrics = search_grid_metrics(width, false, CardSize::Medium, true, true);
             assert_eq!(metrics.columns, columns, "width {width}");

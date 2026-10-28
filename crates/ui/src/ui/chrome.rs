@@ -62,7 +62,7 @@ pub(crate) fn ribbon_metrics(window_height: f32) -> RibbonMetrics {
 /// Below this header width the labelled ribbon no longer fits beside the
 /// remaining controls. The compact ribbon keeps the same commands as icons
 /// with tooltips so nothing clips and there is no horizontal scrollbar.
-pub(crate) const RIBBON_LABELS_MIN_WIDTH: f32 = 1000.0;
+pub(crate) const RIBBON_LABELS_MIN_WIDTH: f32 = 1004.0;
 
 /// Chrome values derived from the window's content extent.
 ///

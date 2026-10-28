@@ -42,7 +42,7 @@ impl App {
         }
         let mut layout = h_flex().flex_1().min_h_0();
         if !self.inspector_collapsed {
-            layout = layout.gap(px(CARD_GAP));
+            layout = layout.gap(px(INSPECTOR_GAP));
         }
         screen
             .child(
