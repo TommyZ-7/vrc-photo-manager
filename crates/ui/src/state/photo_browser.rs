@@ -236,8 +236,10 @@ pub(crate) struct PhotoBrowser {
     pub(crate) scroll: UniformListScrollHandle,
     pub(crate) columns: usize,
     /// Row height of the current card layout, used when clamping after a
-    /// removal. `photo_grid` refreshes it from the display settings.
+    /// removal. The gallery refreshes it from the display settings.
     pub(crate) row_height: f32,
+    /// Top photo the gallery should keep anchored when the layout changes.
+    pub(crate) pending_anchor: Option<i64>,
     pub(crate) generation: u64,
     pub(crate) labels_generation: u64,
     pub(crate) labels: Option<Arc<YearRailLabels>>,
@@ -257,6 +259,7 @@ impl PhotoBrowser {
             columns: 1,
             // The first grid render replaces this with the current layout.
             row_height: photo_row_height(MIN_CARD_WIDTH, true, true),
+            pending_anchor: None,
             generation: 0,
             labels_generation: 0,
             labels: None,
@@ -270,6 +273,7 @@ impl PhotoBrowser {
         self.generation = self.generation.wrapping_add(1);
         self.pages.clear();
         self.labels = None;
+        self.pending_anchor = None;
         self.rail_drag.set(false);
         self.rail_hover.set(false);
     }

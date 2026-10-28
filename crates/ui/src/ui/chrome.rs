@@ -535,9 +535,9 @@ impl App {
 
     fn photo_browser_empty(&self) -> bool {
         if self.screen == Screen::Search {
-            self.search_view.index.entries.is_empty()
+            self.search_view.borrow().index.entries.is_empty()
         } else {
-            self.library.index.entries.is_empty()
+            self.library.borrow().index.entries.is_empty()
         }
     }
 }

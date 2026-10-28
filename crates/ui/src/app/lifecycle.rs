@@ -252,8 +252,8 @@ impl App {
         if let Ok(revision) = self.db.library_revision() {
             self.last_library_revision = revision;
         }
-        self.library.invalidate_pages();
-        self.search_view.invalidate_pages();
+        self.library.borrow_mut().invalidate_pages();
+        self.search_view.borrow_mut().invalidate_pages();
         self.reload_compression_aux(cx);
         if self.screen != Screen::Photos {
             self.mark_library_dirty();
@@ -363,7 +363,7 @@ impl App {
         // Only compare counts when the query succeeds; treating a transient
         // error as zero used to blank the whole library.
         if let Some(count) = count {
-            if count != self.library.index.total as i64 {
+            if count != self.library.borrow().index.total as i64 {
                 // A burst of files arriving from the daemon must not rebuild
                 // the 100k-entry index on every three-second tick. Wait until
                 // the observed count has been stable for a quiet period.
@@ -528,8 +528,8 @@ impl App {
     pub(crate) fn apply_palette(&mut self, palette: Palette, cx: &mut Context<Self>) {
         self.palette = palette;
         apply_component_theme(palette, cx);
-        self.library.labels = None;
-        self.search_view.labels = None;
+        self.library.borrow_mut().labels = None;
+        self.search_view.borrow_mut().labels = None;
         self.viewer_morph_view
             .update(cx, |view, cx| view.set_palette(palette, cx));
         cx.notify();
@@ -546,11 +546,12 @@ impl App {
     /// when the snapshot was replaced.
     pub(crate) fn reload_library(&mut self, preserve_anchor: bool, cx: &mut Context<Self>) -> bool {
         let anchor = preserve_anchor.then(|| {
+            let browser = self.library.borrow();
             anchor_photo_id(
-                &self.library.index,
-                list_scroll_top(&self.library.scroll),
-                self.library.columns,
-                self.library.row_height,
+                &browser.index,
+                list_scroll_top(&browser.scroll),
+                browser.columns,
+                browser.row_height,
             )
         });
         let anchor = anchor.flatten();
@@ -558,7 +559,7 @@ impl App {
         let index_start = Instant::now();
         let result = self.db.photo_index(PhotoSort::Newest);
         log_timing("photo_index", index_start);
-        let error = apply_library_index(&mut self.library, result);
+        let error = apply_library_index(&mut self.library.borrow_mut(), result);
         if let Some(error) = error {
             self.note_library_error(error, cx);
             // Leave the mounted view and side panels untouched; the next
@@ -568,21 +569,21 @@ impl App {
 
         self.library_error = None;
         self.library_dirty = false;
-        let columns = self.library.columns.max(1);
-        if let Some(row) = anchor.and_then(|id| self.library.index.row_of_id(id)) {
-            self.library
-                .scroll
-                .scroll_to_item_strict(row / columns, ScrollStrategy::Top);
+        let (columns, scroll) = {
+            let browser = self.library.borrow();
+            (browser.columns.max(1), browser.scroll.clone())
+        };
+        if let Some(row) = anchor.and_then(|id| self.library.borrow().index.row_of_id(id)) {
+            scroll.scroll_to_item_strict(row / columns, ScrollStrategy::Top);
         } else {
-            self.library
-                .scroll
-                .scroll_to_item_strict(0, ScrollStrategy::Top);
+            scroll.scroll_to_item_strict(0, ScrollStrategy::Top);
         }
 
         // An active result set stays mounted until the user clears it or runs
         // a new search; the inactive mirror only needs the fresh snapshot.
         if !self.search_active {
-            self.search_view.replace_index(self.library.index.clone());
+            let index = self.library.borrow().index.clone();
+            self.search_view.borrow_mut().replace_index(index);
         }
         self.reload_aux(cx);
         true
@@ -625,7 +626,9 @@ impl App {
             if self.library_dirty {
                 self.reload_library(true, cx);
             } else {
-                sync_search_mirror(&mut self.search_view, &self.library);
+                let mut search = self.search_view.borrow_mut();
+                let library = self.library.borrow();
+                sync_search_mirror(&mut search, &library);
             }
         }
         cx.notify();

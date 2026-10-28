@@ -11,7 +11,7 @@ pub(crate) mod viewer;
 
 pub(crate) use cli::LaunchOptions;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -45,6 +45,7 @@ use crate::ui::actions::{
     QuickLookPrevFocus, ToggleInspector, ToggleSidebar, ViewerNextPhoto, ViewerPreviousPhoto,
 };
 use crate::ui::chrome::{ChromeLayout, chrome_layout};
+use crate::ui::gallery::GalleryView;
 use crate::ui::notifications::{ToastSpec, toast_flush_needed};
 use crate::ui::palette::resolve;
 use crate::ui::theme::{Palette, WORKSPACE_GAP, WORKSPACE_PAD};
@@ -101,7 +102,12 @@ pub struct App {
     pub(crate) ribbon_collapsed: bool,
     pub(crate) ribbon_epoch: u64,
     pub(crate) render_epoch: u64,
-    pub(crate) card_image_bounds: CardBoundsMap,
+    pub(crate) library_bounds: CardBoundsMap,
+    pub(crate) search_bounds: CardBoundsMap,
+    /// Frame counters for the gallery-owned card bounds. Scroll repaints the
+    /// grid without re-rendering App, so App's render epoch cannot tag them.
+    pub(crate) library_bounds_epoch: Rc<Cell<u64>>,
+    pub(crate) search_bounds_epoch: Rc<Cell<u64>>,
     pub(crate) inspector_preview_bounds: InspectorBounds,
     pub(crate) viewer_morph: Option<ViewerMorph>,
     pub(crate) viewer_morph_view: Entity<crate::ui::viewer::ViewerMorphView>,
@@ -127,8 +133,10 @@ pub struct App {
     /// replacement status changes do not alter the photo count, so the count
     /// alone cannot tell the grid to rebuild.
     pub(crate) last_library_revision: i64,
-    pub(crate) library: PhotoBrowser,
-    pub(crate) search_view: PhotoBrowser,
+    pub(crate) library: Rc<RefCell<PhotoBrowser>>,
+    pub(crate) search_view: Rc<RefCell<PhotoBrowser>>,
+    pub(crate) library_gallery: Entity<GalleryView>,
+    pub(crate) search_gallery: Entity<GalleryView>,
     /// The library index changed while another screen was mounted; the next
     /// visit to Photos rebuilds it.
     pub(crate) library_dirty: bool,
@@ -148,7 +156,7 @@ pub struct App {
     pub(crate) selected_derivatives: Vec<Derivative>,
     pub(crate) compressed_ids: HashSet<i64>,
     pub(crate) duplicate_ids: HashSet<i64>,
-    pub(crate) thumbnails: ThumbnailCache,
+    pub(crate) thumbnails: Rc<RefCell<ThumbnailCache>>,
     pub(crate) thumbnail_notify_pending: bool,
     pub(crate) photo_grid_focus: FocusHandle,
     pub(crate) import_dialog_focus: FocusHandle,
@@ -226,8 +234,6 @@ pub struct App {
     pub(crate) search_request: u64,
     pub(crate) applied_search: Option<PhotoTextFilter>,
     pub(crate) pending_search_anchor: Option<i64>,
-    pub(crate) pending_layout_anchor_library: Option<i64>,
-    pub(crate) pending_layout_anchor_search: Option<i64>,
     pub(crate) search_refresh_pending: bool,
     pub(crate) search_favorite: bool,
     pub(crate) search_days: Option<i64>,
@@ -302,12 +308,6 @@ impl App {
                 "ライブラリを読み込めませんでした。通知から再読込できます",
                 cx,
             );
-        }
-    }
-
-    fn prune_card_image_bounds(&mut self) {
-        if let Ok(mut bounds) = self.card_image_bounds.try_borrow_mut() {
-            retain_recent_bounds(&mut bounds, self.render_epoch);
         }
     }
 
@@ -406,6 +406,36 @@ impl App {
         let notification_close_focus = cx.focus_handle();
         let notification_modal_focus = cx.focus_handle();
         let empty_index = Arc::new(PhotoIndex::new(Vec::new()));
+        let library_bounds = Rc::new(RefCell::new(HashMap::new()));
+        let search_bounds = Rc::new(RefCell::new(HashMap::new()));
+        let library_bounds_epoch = Rc::new(Cell::new(0));
+        let search_bounds_epoch = Rc::new(Cell::new(0));
+        let library = Rc::new(RefCell::new(PhotoBrowser::new(empty_index.clone())));
+        let search_view = Rc::new(RefCell::new(PhotoBrowser::new(empty_index)));
+        let thumbnails = Rc::new(RefCell::new(ThumbnailCache::default()));
+        let app_entity = cx.entity();
+        let library_gallery = cx.new(|cx| {
+            GalleryView::new(
+                app_entity.clone(),
+                false,
+                library.clone(),
+                thumbnails.clone(),
+                library_bounds.clone(),
+                library_bounds_epoch.clone(),
+                cx,
+            )
+        });
+        let search_gallery = cx.new(|cx| {
+            GalleryView::new(
+                app_entity,
+                true,
+                search_view.clone(),
+                thumbnails.clone(),
+                search_bounds.clone(),
+                search_bounds_epoch.clone(),
+                cx,
+            )
+        });
         let mut app = Self {
             db,
             screen: Screen::Photos,
@@ -420,7 +450,10 @@ impl App {
             ribbon_collapsed: initial_settings.ui_ribbon_collapsed,
             ribbon_epoch: 0,
             render_epoch: 0,
-            card_image_bounds: Rc::new(RefCell::new(HashMap::new())),
+            library_bounds,
+            search_bounds,
+            library_bounds_epoch,
+            search_bounds_epoch,
             inspector_preview_bounds: Rc::new(RefCell::new(None)),
             viewer_morph: None,
             viewer_morph_view: cx.new(|_| crate::ui::viewer::ViewerMorphView::new(initial_palette)),
@@ -456,8 +489,10 @@ impl App {
             daemon_paused: false,
             scan_progress: None,
             last_library_revision: initial_library_revision,
-            library: PhotoBrowser::new(empty_index.clone()),
-            search_view: PhotoBrowser::new(empty_index),
+            library,
+            search_view,
+            library_gallery,
+            search_gallery,
             library_dirty: false,
             library_error: None,
             count_debounce: CountDebounce::default(),
@@ -470,7 +505,7 @@ impl App {
             selected_derivatives: Vec::new(),
             compressed_ids: HashSet::new(),
             duplicate_ids: HashSet::new(),
-            thumbnails: ThumbnailCache::default(),
+            thumbnails,
             thumbnail_notify_pending: false,
             photo_grid_focus,
             import_dialog_focus,
@@ -543,8 +578,6 @@ impl App {
             search_request: 0,
             applied_search: None,
             pending_search_anchor: None,
-            pending_layout_anchor_library: None,
-            pending_layout_anchor_search: None,
             search_refresh_pending: false,
             search_favorite: false,
             search_days: Some(7),
@@ -571,7 +604,7 @@ impl App {
                 app.toast_error(message, cx);
             }
         }
-        if app.library_error.is_none() && app.library.index.total == 0 {
+        if app.library_error.is_none() && app.library.borrow().index.total == 0 {
             app.toast_info(
                 "写真がありません。VRChatの写真フォルダを設定するか、--demo で起動してください。",
                 cx,
@@ -580,7 +613,14 @@ impl App {
         if let Some(notice) = app.update.notice() {
             app.toast_info(notice.message.clone(), cx);
         }
-        if let Some(id) = app.library.index.entries.first().map(|entry| entry.id) {
+        let first_photo_id = app
+            .library
+            .borrow()
+            .index
+            .entries
+            .first()
+            .map(|entry| entry.id);
+        if let Some(id) = first_photo_id {
             app.select_photo(id, cx);
             // The grid is not mounted until the first frame, so focus it once
             // the initial render has attached it to the focus tree.
@@ -659,9 +699,6 @@ impl Render for App {
                 this.cycle_quick_look_focus(true, window, cx)
             }));
         if should_render_shell(self.quick_look_open) {
-            // Entries captured while the opaque viewer was open stay valid
-            // until the close morph has read them.
-            self.prune_card_image_bounds();
             let viewport = window.viewport_size();
             let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
             let mut layout: ChromeLayout = chrome_layout(
