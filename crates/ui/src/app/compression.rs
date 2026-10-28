@@ -4,6 +4,7 @@
 //! Rendering stays in `ui::compression`; these methods only touch App fields and
 //! the compression queue.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use gpui_kit::component::WindowExt;
@@ -62,6 +63,20 @@ impl App {
         cx.notify();
     }
 
+    /// Deduplicates ids and drops rows that no longer exist with chunked
+    /// queries instead of one `photo_by_id` per selected photo.
+    fn existing_photo_ids(&self, photo_ids: Vec<i64>) -> Vec<i64> {
+        let mut seen = HashSet::with_capacity(photo_ids.len());
+        let unique: Vec<i64> = photo_ids
+            .into_iter()
+            .filter(|id| seen.insert(*id))
+            .collect();
+        self.db
+            .photos_by_ids(&unique)
+            .map(|photos| photos.into_iter().map(|photo| photo.id).collect())
+            .unwrap_or_default()
+    }
+
     /// Opens the compression modal for the current multi-selection. The IDs
     /// are read at click time so rendering never clones the selection.
     pub(crate) fn open_manual_compression_for_selection(&mut self, cx: &mut Context<Self>) {
@@ -85,15 +100,7 @@ impl App {
     }
 
     pub(crate) fn open_manual_compression(&mut self, photo_ids: Vec<i64>, cx: &mut Context<Self>) {
-        let mut ids = Vec::new();
-        for id in photo_ids {
-            if ids.contains(&id) {
-                continue;
-            }
-            if self.db.photo_by_id(id).ok().flatten().is_some() {
-                ids.push(id);
-            }
-        }
+        let ids = self.existing_photo_ids(photo_ids);
         if ids.is_empty() {
             self.toast_error("先に写真を選択してください", cx);
             cx.notify();
@@ -192,12 +199,7 @@ impl App {
         folder: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let mut ids = Vec::new();
-        for id in photo_ids {
-            if !ids.contains(&id) && self.db.photo_by_id(id).ok().flatten().is_some() {
-                ids.push(id);
-            }
-        }
+        let ids = self.existing_photo_ids(photo_ids);
         if ids.is_empty() {
             self.toast_error("先に写真を選択してください", cx);
             cx.notify();

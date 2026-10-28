@@ -18,13 +18,11 @@ use vrc_photo_core::importer::{
 };
 use vrc_photo_core::linker;
 use vrc_photo_core::model::DaemonCommand;
+use vrc_photo_core::scanner;
 use vrc_photo_core::scanner::ScanFailure;
 use vrc_photo_core::settings::AppSettings;
-use vrc_photo_core::{preview, scanner, thumbnail};
 
 use crate::app::App;
-use crate::app::cli::log_timing;
-use crate::state::preview::{PreviewKey, preview_cache_dir, preview_key};
 use crate::ui::import::retryable_sources;
 
 #[derive(Clone)]
@@ -450,9 +448,11 @@ impl App {
         cx.notify();
     }
 
-    /// Registers, scans, and links the import destination, then rebuilds the
-    /// library. Indexing failures stay on the report instead of aborting the
-    /// UI, so the imported files and per-file issues remain visible.
+    /// Registers the import destination and asks the daemon to rescan it.
+    ///
+    /// Indexing, linking, and thumbnail generation stay in the daemon: doing
+    /// that work here blocked the UI thread for seconds on a large import and
+    /// duplicated the daemon's own post-scan work.
     pub(crate) fn index_import_destination(
         &mut self,
         report: &mut ImportReportView,
@@ -473,26 +473,48 @@ impl App {
                 return;
             }
         };
-        match scanner::scan_and_index(&self.db, root_id, &report.dest) {
-            Ok(scan) => {
-                report.scan_failures.extend(scan.failures);
-                let mut preview_jobs = Vec::new();
-                for id in &scan.new_ids {
-                    let Ok(Some(photo)) = self.db.photo_by_id(*id) else {
-                        continue;
-                    };
-                    preview_jobs.push((preview_key(&photo), PathBuf::from(photo.effective_path())));
-                    if let Err(error) =
-                        thumbnail::ensure_thumbnail(*id, Path::new(photo.effective_path()))
-                    {
-                        tracing::warn!(%error, %id, "cannot generate thumbnail after import");
-                    }
+        if self.demo {
+            // Demo mode never starts the daemon; keep the small synchronous
+            // index so importing into the sample library still works.
+            self.index_demo_import_destination(root_id, report, cx);
+            return;
+        }
+        // The daemon may not have watched the new import destination yet.
+        // A rescan makes it reload settings and rebuild its recursive
+        // watchers; it also indexes the new files and generates thumbnails
+        // with its own workers. The scan-finished event drives the UI reload.
+        match self.db.request_daemon_command(DaemonCommand::Rescan) {
+            Ok(_) => {
+                self.send_wake_commands(cx);
+                if !self.ipc_connected {
+                    self.toast_warning(
+                        "デーモンに接続できないため、取り込み先のスキャンは起動後に行われます",
+                        cx,
+                    );
                 }
-                self.warm_previews(preview_jobs, cx);
             }
+            Err(error) => {
+                tracing::warn!(%error, "cannot request rescan for import destination");
+                append_scan_error(
+                    report,
+                    format!("取り込み先のスキャンを要求できません: {error}"),
+                );
+            }
+        }
+    }
+
+    fn index_demo_import_destination(
+        &mut self,
+        root_id: i64,
+        report: &mut ImportReportView,
+        cx: &mut Context<Self>,
+    ) {
+        match scanner::scan_and_index(&self.db, root_id, &report.dest) {
+            Ok(scan) => report.scan_failures.extend(scan.failures),
             Err(error) => {
                 tracing::warn!(%error, "cannot scan import destination");
                 append_scan_error(report, format!("取り込み先をスキャンできません: {error}"));
+                return;
             }
         }
         if let Err(error) = linker::relink_unlinked(&self.db, 1000) {
@@ -504,46 +526,6 @@ impl App {
         {
             append_scan_error(report, error);
         }
-        // The daemon may not have watched the new import destination yet.
-        // A rescan makes it reload settings and rebuild its recursive watchers.
-        match self.db.request_daemon_command(DaemonCommand::Rescan) {
-            Ok(_) => self.send_wake_commands(cx),
-            Err(error) => {
-                tracing::warn!(%error, "cannot request rescan for import destination");
-            }
-        }
-    }
-
-    /// Generates preview cache entries for newly imported photos without
-    /// blocking the import report or the library reload.
-    pub(crate) fn warm_previews(
-        &mut self,
-        jobs: Vec<(PreviewKey, PathBuf)>,
-        cx: &mut Context<Self>,
-    ) {
-        if jobs.is_empty() {
-            return;
-        }
-        let cache_dir = preview_cache_dir(
-            self.demo,
-            self.demo_assets
-                .as_ref()
-                .map(|assets| assets.preview_dir.clone()),
-            preview::previews_dir(),
-        );
-        let Some(cache_dir) = cache_dir else {
-            return;
-        };
-        cx.background_executor()
-            .spawn(async move {
-                for (key, source) in jobs {
-                    let start = Instant::now();
-                    let _ =
-                        preview::ensure_preview_in(key.photo_id, key.variant, &source, &cache_dir);
-                    log_timing("preview warm", start);
-                }
-            })
-            .detach();
     }
 
     /// Opens the import modal in retry mode for the retryable failed sources.

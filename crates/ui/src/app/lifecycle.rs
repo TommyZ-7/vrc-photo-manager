@@ -10,7 +10,7 @@ use gpui_kit::*;
 use vrc_photo_core::model::{LibraryStats, PhotoSort, QueueStatus};
 use vrc_photo_core::settings::AppSettings;
 use vrc_photo_ipc::{
-    Endpoint, Event as IpcEvent, Request as IpcRequest, ScanPhase as IpcScanPhase,
+    Endpoint, Event as IpcEvent, JobStatus, Request as IpcRequest, ScanPhase as IpcScanPhase,
 };
 
 use crate::app::cli::log_timing;
@@ -35,19 +35,14 @@ pub(crate) struct ScanProgressView {
     pub(crate) roots: usize,
 }
 
-impl App {
-    pub(crate) fn start_auto_refresh(&mut self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor().timer(Duration::from_secs(3)).await;
-                if this.update(cx, |this, cx| this.refresh_live(cx)).is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
-    }
+/// True when a live snapshot was collected before a revision the UI has
+/// already applied. Revisions are monotonic; an older observation must not
+/// trigger a reload or count comparison.
+pub(crate) fn is_stale_revision(observed: Option<i64>, current: i64) -> bool {
+    observed.is_some_and(|observed| observed < current)
+}
 
+impl App {
     pub(crate) fn start_ipc(&mut self, cx: &mut Context<Self>) {
         let Some(data_dir) = vrc_photo_core::data_dir() else {
             return;
@@ -137,8 +132,12 @@ impl App {
                 self.scan_progress = None;
                 self.refresh_live(cx);
             }
-            IpcEvent::CompressionProgress { .. } => {
-                self.refresh_live(cx);
+            IpcEvent::CompressionProgress { status, .. } => {
+                let library_changed = matches!(
+                    status,
+                    JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
+                );
+                self.schedule_compression_refresh(library_changed, cx);
             }
             IpcEvent::DaemonErrorChanged { .. } => {
                 self.reload_job_state(cx);
@@ -215,7 +214,80 @@ impl App {
         .detach();
     }
 
-    fn refresh_live(&mut self, cx: &mut Context<Self>) {
+    /// Coalesces compression progress into one refresh per 250 ms. The daemon
+    /// reports once at job start and once at completion; a batch of 1,000 jobs
+    /// used to rebuild the 100k index once per completion.
+    fn schedule_compression_refresh(&mut self, library_changed: bool, cx: &mut Context<Self>) {
+        self.compression_library_refresh_pending |= library_changed;
+        if self.compression_refresh_scheduled {
+            return;
+        }
+        self.compression_refresh_scheduled = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(250))
+                .await;
+            this.update(cx, |this, cx| {
+                this.compression_refresh_scheduled = false;
+                if this.compression_library_refresh_pending {
+                    this.compression_library_refresh_pending = false;
+                    this.refresh_after_compression(cx);
+                } else {
+                    this.reload_job_state(cx);
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Compression changes photo metadata (display derivative, replaced
+    /// status) but not the id set or order, so the index snapshot stays valid.
+    /// Invalidate the page cache and refresh the side panels instead of
+    /// re-querying the 100k-row index.
+    fn refresh_after_compression(&mut self, cx: &mut Context<Self>) {
+        // Claim the revision before the (short) metadata reload so a poll
+        // that lands mid-refresh does not start a full index reload.
+        if let Ok(revision) = self.db.library_revision() {
+            self.last_library_revision = revision;
+        }
+        self.library.invalidate_pages();
+        self.search_view.invalidate_pages();
+        self.reload_compression_aux(cx);
+        if self.screen != Screen::Photos {
+            self.mark_library_dirty();
+        }
+        cx.notify();
+    }
+
+    /// The subset of `reload_aux` that compression can change. Duplicate
+    /// hashes, settings, and the session monitor are untouched by a job.
+    fn reload_compression_aux(&mut self, cx: &mut Context<Self>) {
+        match self.db.stats() {
+            Ok(stats) => {
+                self.stats = stats;
+                self.stats_revision = self.db.library_revision().unwrap_or(-1);
+            }
+            Err(error) => tracing::warn!(%error, "cannot load library stats"),
+        }
+        self.compressed_ids = self
+            .db
+            .compressed_photo_ids()
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "cannot load compressed photo ids");
+                Vec::new()
+            })
+            .into_iter()
+            .collect();
+        self.reload_job_state(cx);
+        if let Some(id) = self.selected {
+            self.load_selected_meta(id);
+            self.refresh_stale_preview(cx);
+        }
+    }
+
+    pub(crate) fn refresh_live(&mut self, cx: &mut Context<Self>) {
         let count = self.db.count_photos();
         let revision = self.db.library_revision();
         let revision_value = revision.as_ref().ok().copied();
@@ -236,30 +308,61 @@ impl App {
         // Path rebinds and replacement status changes keep the same photo
         // count. The daemon bumps this revision so the UI can invalidate its
         // page cache even when `count_photos` is unchanged.
-        if let Some(revision) = revision_value
-            && revision != self.last_library_revision
+        self.apply_library_change(revision_value, count.ok(), cx);
+        cx.notify();
+    }
+
+    /// Applies a revision/count observation from the live poller. Returns true
+    /// when the visible library was rebuilt or a search was re-run.
+    pub(crate) fn apply_library_change(
+        &mut self,
+        revision: Option<i64>,
+        count: Option<i64>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let mut changed = false;
+        // A snapshot can be collected just before the UI bumps the revision
+        // (trash, compression). Revisions are monotonic, so ignore an older
+        // observation instead of reacting to it as a new change.
+        if is_stale_revision(revision, self.last_library_revision) {
+            return false;
+        }
+        // A terminal compression refresh was already scheduled for this
+        // revision. Its light path invalidates pages and reloads the side
+        // panels without re-querying the 100k index; let it consume the
+        // revision instead of racing it with a full reload.
+        let compression_refresh_pending = self.compression_library_refresh_pending;
+        if let Some(revision) = revision
+            && revision > self.last_library_revision
+            && !compression_refresh_pending
         {
             if self.screen == Screen::Photos {
                 if self.reload_library(true, cx) {
                     self.last_library_revision = revision;
                     self.count_debounce.reset();
+                    changed = true;
                 } else {
                     self.mark_library_dirty();
                 }
             } else {
                 self.last_library_revision = revision;
                 self.mark_library_dirty();
+                if let Some(id) = self.selected {
+                    self.load_selected_meta(id);
+                    self.refresh_stale_preview(cx);
+                }
                 if self.screen == Screen::Search
                     && let Some(filter) = self.applied_search.clone()
                 {
                     self.start_search(filter, cx);
+                    changed = true;
                 }
             }
         }
 
         // Only compare counts when the query succeeds; treating a transient
         // error as zero used to blank the whole library.
-        if let Ok(count) = count {
+        if let Some(count) = count {
             if count != self.library.index.total as i64 {
                 // A burst of files arriving from the daemon must not rebuild
                 // the 100k-entry index on every three-second tick. Wait until
@@ -272,12 +375,13 @@ impl App {
                     && self.reload_library(true, cx)
                 {
                     self.count_debounce.reset();
+                    changed = true;
                 }
             } else {
                 self.count_debounce.reset();
             }
         }
-        cx.notify();
+        changed
     }
 
     pub(crate) fn reload_job_state(&mut self, cx: &mut Context<Self>) {
@@ -311,15 +415,17 @@ impl App {
             Ok(jobs) => self.failed_jobs = jobs,
             Err(error) => tracing::warn!(%error, "cannot load failed compression jobs"),
         }
-        self.failed_job_names.clear();
-        for job in &self.failed_jobs {
-            if self.failed_job_names.contains_key(&job.photo_id) {
-                continue;
-            }
-            if let Ok(Some(photo)) = self.db.photo_by_id(job.photo_id) {
-                self.failed_job_names.insert(job.photo_id, photo.file_name);
-            }
-        }
+        let failed_ids: Vec<i64> = self.failed_jobs.iter().map(|job| job.photo_id).collect();
+        self.failed_job_names = self
+            .db
+            .photos_by_ids(&failed_ids)
+            .map(|photos| {
+                photos
+                    .into_iter()
+                    .map(|photo| (photo.id, photo.file_name))
+                    .collect()
+            })
+            .unwrap_or_default();
         let daemon_count = match self.db.daemon_errors() {
             Ok(errors) => {
                 let count = errors.len();
@@ -582,5 +688,18 @@ impl App {
             window.focus(&focus_handle, cx);
         });
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_stale_revision;
+
+    #[test]
+    fn only_older_live_revisions_are_stale() {
+        assert!(is_stale_revision(Some(4), 5));
+        assert!(!is_stale_revision(Some(5), 5));
+        assert!(!is_stale_revision(Some(6), 5));
+        assert!(!is_stale_revision(None, 5));
     }
 }

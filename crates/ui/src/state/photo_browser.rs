@@ -274,19 +274,35 @@ impl PhotoBrowser {
         self.rail_hover.set(false);
     }
 
-    /// Drops a photo from this snapshot without notifying the caller.
-    ///
-    /// The page cache and scroll position refer to the old row layout, so the
-    /// cache is cleared and a scroll that now points past the last row is
-    /// clamped to it.
-    pub(crate) fn remove_photo(&mut self, id: i64) {
-        let Some(position) = self.index.row_of_id(id) else {
-            return;
-        };
-        let mut entries = self.index.entries.clone();
-        entries.remove(position);
-        self.replace_index(Arc::new(PhotoIndex::new(entries)));
+    /// Invalidates the decoded page cache without replacing the index. Used
+    /// when photo rows changed (compression replacement, rebinds) but the set
+    /// and order of ids did not.
+    pub(crate) fn invalidate_pages(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.pages.clear();
+    }
 
+    /// Removes a batch of photos with a single index rebuild and page-cache
+    /// clear. Bulk trash used to rebuild the whole snapshot once per photo.
+    pub(crate) fn remove_photos(&mut self, ids: &HashSet<i64>) {
+        if ids.is_empty() {
+            return;
+        }
+        let entries: Vec<PhotoIndexEntry> = self
+            .index
+            .entries
+            .iter()
+            .filter(|entry| !ids.contains(&entry.id))
+            .copied()
+            .collect();
+        if entries.len() == self.index.total {
+            return;
+        }
+        self.replace_index(Arc::new(PhotoIndex::new(entries)));
+        self.clamp_scroll_after_removal();
+    }
+
+    fn clamp_scroll_after_removal(&mut self) {
         let columns = self.columns.max(1);
         let rows = self.index.total.div_ceil(columns);
         if rows == 0 {
@@ -693,7 +709,7 @@ mod tests {
         let mut browser = PhotoBrowser::new(Arc::new(PhotoIndex::new(entries)));
         let generation = browser.generation;
         browser.insert_page(0, vec![test_photo(1)], generation);
-        browser.remove_photo(2);
+        browser.remove_photos(&HashSet::from([2]));
         assert_eq!(browser.index.total, 2);
         assert_eq!(browser.index.years[0].count, 1);
         assert_eq!(browser.index.years[1].count, 1);
@@ -701,7 +717,52 @@ mod tests {
         assert_eq!(browser.index.row_of_id(1), Some(0));
         assert_eq!(browser.index.row_of_id(2), None);
         // Removing an id that is already gone is a no-op.
-        browser.remove_photo(2);
+        browser.remove_photos(&HashSet::from([2]));
+        assert_eq!(browser.index.total, 2);
+    }
+
+    #[test]
+    fn invalidating_pages_keeps_the_index_and_rejects_stale_loads() {
+        let mut browser =
+            PhotoBrowser::new(Arc::new(PhotoIndex::new(vec![index_entry(1, 202601)])));
+        let generation = browser.generation;
+        browser.insert_page(0, vec![test_photo(1)], generation);
+        assert!(browser.pages.get_page(0).is_some());
+
+        browser.invalidate_pages();
+        assert_eq!(browser.index.total, 1);
+        assert!(browser.pages.get_page(0).is_none());
+        assert_ne!(browser.generation, generation);
+
+        // A page load that started before the invalidation must not resurrect.
+        browser.insert_page(0, vec![test_photo(1)], generation);
+        assert!(browser.pages.get_page(0).is_none());
+    }
+
+    #[test]
+    fn removing_several_photos_rebuilds_the_index_once() {
+        let entries = vec![
+            index_entry(1, 202601),
+            index_entry(2, 202601),
+            index_entry(3, 202512),
+            index_entry(4, 202512),
+        ];
+        let mut browser = PhotoBrowser::new(Arc::new(PhotoIndex::new(entries)));
+        let generation = browser.generation;
+        browser.insert_page(0, vec![test_photo(1)], generation);
+
+        let removed: HashSet<i64> = [1, 3].into_iter().collect();
+        browser.remove_photos(&removed);
+
+        assert_eq!(browser.index.total, 2);
+        assert_eq!(browser.index.row_of_id(2), Some(0));
+        assert_eq!(browser.index.row_of_id(4), Some(1));
+        assert_eq!(browser.index.month_count(202601), 1);
+        assert_eq!(browser.index.month_count(202512), 1);
+        assert!(browser.pages.get_page(0).is_none());
+
+        // Removing ids that are already gone is a no-op.
+        browser.remove_photos(&removed);
         assert_eq!(browser.index.total, 2);
     }
 
@@ -716,7 +777,7 @@ mod tests {
             .borrow_mut()
             .base_handle
             .set_offset(point(px(0.), px(-TEST_ROW_HEIGHT * 10.0)));
-        browser.remove_photo(1);
+        browser.remove_photos(&HashSet::from([1]));
 
         let state = browser.scroll.0.borrow();
         let deferred = state.deferred_scroll_to_item.expect("scroll clamp");

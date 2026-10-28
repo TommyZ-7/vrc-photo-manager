@@ -4,6 +4,7 @@ pub(crate) mod daemon;
 pub(crate) mod demo;
 pub(crate) mod import;
 pub(crate) mod lifecycle;
+pub(crate) mod live;
 pub(crate) mod photos;
 pub(crate) mod search;
 pub(crate) mod viewer;
@@ -203,6 +204,10 @@ pub struct App {
     /// Last time the import progress rebuilt the window. The importer reports
     /// once per file, so notifications are coalesced to ~20 fps.
     pub(crate) last_import_progress_notify: Option<Instant>,
+    /// A compression refresh timer is already scheduled.
+    pub(crate) compression_refresh_scheduled: bool,
+    /// The pending compression refresh must also invalidate library pages.
+    pub(crate) compression_library_refresh_pending: bool,
     pub(crate) monitor_world: Option<String>,
     pub(crate) monitor_instance: Option<String>,
     pub(crate) monitor_players: Vec<String>,
@@ -518,6 +523,8 @@ impl App {
             import_report: None,
             import_dialog: None,
             last_import_progress_notify: None,
+            compression_refresh_scheduled: false,
+            compression_library_refresh_pending: false,
             monitor_world: None,
             monitor_instance: None,
             monitor_players: Vec::new(),
