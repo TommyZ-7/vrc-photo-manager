@@ -8,6 +8,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::switch::Switch;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::prelude::StatefulInteractiveElement as _;
@@ -21,8 +22,8 @@ use crate::state::photo_browser::{anchor_photo_id, list_scroll_top};
 use crate::ui::components::compression_policy_warning;
 use crate::ui::components::glass_panel;
 use crate::ui::palette::{
-    Family, accent_colors, find_accent, find_main, main_colors, preview_accent, preview_main,
-    readable_on, resolve,
+    accent_colors, find_accent, find_main, main_colors, preview_accent, preview_main, readable_on,
+    resolve,
 };
 use crate::ui::theme::*;
 
@@ -466,6 +467,7 @@ impl App {
     fn theme_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.palette;
         glass_panel(&self.palette)
+            .w_full()
             .flex()
             .flex_col()
             .p(px(14.))
@@ -490,60 +492,58 @@ impl App {
 
     fn theme_axis(&self, axis: ThemeAxis, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.palette;
-        let mut groups = v_flex().gap(px(8.)).child(
-            div()
-                .text_size(px(12.))
-                .font_medium()
-                .text_color(rgb(p.text))
-                .child(axis.title()),
-        );
-        for family in [Family::Dark, Family::Light, Family::Pastel] {
-            let mut row = h_flex().flex_wrap().gap(px(4.));
-            match axis {
-                ThemeAxis::Main => {
-                    for color in main_colors().iter().filter(|color| color.family == family) {
-                        row = row.child(self.theme_chip(
-                            axis,
-                            color.id,
-                            color.label,
-                            preview_main(color),
-                            find_main(&self.settings.ui_theme_main).id == color.id,
-                            cx,
-                        ));
-                    }
-                }
-                ThemeAxis::Accent => {
-                    for color in accent_colors()
-                        .iter()
-                        .filter(|color| color.family == family)
-                    {
-                        row = row.child(self.theme_chip(
-                            axis,
-                            color.id,
-                            color.label,
-                            preview_accent(color),
-                            find_accent(&self.settings.ui_theme_accent).id == color.id,
-                            cx,
-                        ));
-                    }
-                }
-            }
-            groups = groups.child(
-                v_flex()
-                    .gap(px(4.))
-                    .child(
-                        div()
-                            .text_size(px(9.))
-                            .text_color(rgb(p.muted_2))
-                            .child(family.label()),
+        let selected_main = find_main(&self.settings.ui_theme_main).id;
+        let selected_accent = find_accent(&self.settings.ui_theme_accent).id;
+        let items: Vec<(&'static str, &'static str, u32, bool)> = match axis {
+            ThemeAxis::Main => main_colors()
+                .iter()
+                .map(|color| {
+                    (
+                        color.id,
+                        color.label,
+                        preview_main(color),
+                        selected_main == color.id,
                     )
-                    .child(row),
-            );
+                })
+                .collect(),
+            ThemeAxis::Accent => accent_colors()
+                .iter()
+                .map(|color| {
+                    (
+                        color.id,
+                        color.label,
+                        preview_accent(color),
+                        selected_accent == color.id,
+                    )
+                })
+                .collect(),
+        };
+        let mut rows = v_flex().w_full().gap(px(8.));
+        for chunk in items.chunks(6) {
+            let mut row = h_flex()
+                .w_full()
+                .items_center()
+                .justify_between()
+                .gap(px(8.));
+            for &(id, label, swatch, selected) in chunk {
+                row = row.child(self.theme_swatch(axis, id, label, swatch, selected, cx));
+            }
+            rows = rows.child(row);
         }
-        groups
+        v_flex()
+            .w_full()
+            .gap(px(8.))
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .font_medium()
+                    .text_color(rgb(p.text))
+                    .child(axis.title()),
+            )
+            .child(rows)
     }
 
-    fn theme_chip(
+    fn theme_swatch(
         &self,
         axis: ThemeAxis,
         id: &'static str,
@@ -555,24 +555,20 @@ impl App {
         let p = self.palette;
         div()
             .id(SharedString::from(format!("theme-{}-{id}", axis.key())))
+            .size(px(30.))
+            .flex_shrink_0()
             .flex()
             .items_center()
-            .gap(px(6.))
-            .px(px(6.))
-            .py(px(4.))
-            .rounded(px(8.))
+            .justify_center()
+            .rounded_full()
             .border_2()
             .border_color(if selected {
                 rgb(p.accent_border)
             } else {
                 rgba(0x00000000)
             })
-            .bg(if selected {
-                rgb(p.accent_soft)
-            } else {
-                rgba(0x00000000)
-            })
             .cursor_pointer()
+            .tooltip(move |window, cx| Tooltip::new(label).build(window, cx))
             .hover(move |this| this.bg(rgb(p.panel_inner)))
             .on_click(cx.listener(move |this, _, _, cx| match axis {
                 ThemeAxis::Main => this.set_main_theme(id, cx),
@@ -580,12 +576,12 @@ impl App {
             }))
             .child(
                 div()
-                    .size(px(26.))
+                    .size(px(24.))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
                     .justify_center()
-                    .rounded(px(5.))
+                    .rounded_full()
                     .bg(rgb(swatch))
                     .border_1()
                     .border_color(rgba(with_alpha(p.text, 0x24)))
@@ -598,12 +594,6 @@ impl App {
                                 .child("✓"),
                         )
                     }),
-            )
-            .child(
-                div()
-                    .text_size(px(10.))
-                    .text_color(rgb(if selected { p.text } else { p.muted }))
-                    .child(label),
             )
     }
 

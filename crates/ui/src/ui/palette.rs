@@ -18,14 +18,6 @@ pub(crate) enum Family {
 }
 
 impl Family {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Dark => "黒系",
-            Self::Light => "白系",
-            Self::Pastel => "パステルカラー系",
-        }
-    }
-
     pub(crate) fn is_dark(self) -> bool {
         matches!(self, Self::Dark)
     }
@@ -38,6 +30,8 @@ pub(crate) struct MainColor {
     pub(crate) family: Family,
     pub(crate) hue: f32,
     pub(crate) tint: f32,
+    /// Small lightness offset applied after the family template is retinted.
+    pub(crate) lightness: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -99,6 +93,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
         family: Family::Dark,
         hue: 220.0,
         tint: 1.0,
+        lightness: 0.0,
     },
     MainColor {
         id: "midnight",
@@ -106,6 +101,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
         family: Family::Dark,
         hue: 228.0,
         tint: 1.15,
+        lightness: 0.0,
     },
     MainColor {
         id: "forest",
@@ -113,6 +109,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
         family: Family::Dark,
         hue: 155.0,
         tint: 0.85,
+        lightness: 0.0,
     },
     MainColor {
         id: "plum",
@@ -120,6 +117,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
         family: Family::Dark,
         hue: 285.0,
         tint: 0.90,
+        lightness: 0.0,
     },
     MainColor {
         id: "wine",
@@ -127,6 +125,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
         family: Family::Dark,
         hue: 350.0,
         tint: 0.85,
+        lightness: 0.0,
     },
     MainColor {
         id: "sepia",
@@ -134,48 +133,55 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
         family: Family::Dark,
         hue: 35.0,
         tint: 0.80,
+        lightness: 0.0,
     },
     MainColor {
         id: "paper",
         label: "ペーパー",
         family: Family::Light,
         hue: 220.0,
-        tint: 1.0,
+        tint: 1.00,
+        lightness: 0.0,
     },
     MainColor {
         id: "ivory",
         label: "アイボリー",
         family: Family::Light,
         hue: 45.0,
-        tint: 0.45,
+        tint: 1.20,
+        lightness: 0.016,
     },
     MainColor {
         id: "mist",
         label: "ミスト",
         family: Family::Light,
         hue: 205.0,
-        tint: 0.55,
+        tint: 1.65,
+        lightness: -0.005,
     },
     MainColor {
         id: "sage",
         label: "セージ",
         family: Family::Light,
         hue: 145.0,
-        tint: 0.40,
+        tint: 1.50,
+        lightness: -0.016,
     },
     MainColor {
         id: "blush",
         label: "ブラッシュ",
         family: Family::Light,
         hue: 345.0,
-        tint: 0.35,
+        tint: 1.40,
+        lightness: 0.009,
     },
     MainColor {
         id: "cloud",
         label: "クラウド",
         family: Family::Light,
         hue: 260.0,
-        tint: 0.35,
+        tint: 1.50,
+        lightness: -0.009,
     },
     MainColor {
         id: "sakura",
@@ -183,6 +189,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
         family: Family::Pastel,
         hue: 345.0,
         tint: 0.95,
+        lightness: 0.0,
     },
     MainColor {
         id: "lavender",
@@ -190,6 +197,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
         family: Family::Pastel,
         hue: 265.0,
         tint: 0.85,
+        lightness: 0.0,
     },
     MainColor {
         id: "mint",
@@ -197,6 +205,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
         family: Family::Pastel,
         hue: 155.0,
         tint: 0.85,
+        lightness: 0.0,
     },
     MainColor {
         id: "sky",
@@ -204,6 +213,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
         family: Family::Pastel,
         hue: 205.0,
         tint: 1.0,
+        lightness: 0.0,
     },
     MainColor {
         id: "peach",
@@ -211,6 +221,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
         family: Family::Pastel,
         hue: 25.0,
         tint: 0.95,
+        lightness: 0.0,
     },
     MainColor {
         id: "lemon",
@@ -218,6 +229,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
         family: Family::Pastel,
         hue: 50.0,
         tint: 0.85,
+        lightness: 0.0,
     },
 ];
 
@@ -492,25 +504,27 @@ pub(crate) fn resolve(main_id: &str, accent_id: &str) -> Palette {
     let main = find_main(main_id);
     let accent = find_accent(accent_id);
     let base = template_for(main.family);
-    let exact = (main.tint - 1.0).abs() < f32::EPSILON && (main.hue - base.hue).abs() < 0.5;
+    let exact = (main.tint - 1.0).abs() < f32::EPSILON
+        && main.lightness.abs() < f32::EPSILON
+        && (main.hue - base.hue).abs() < 0.5;
     let template = if exact {
         base
     } else {
         Template {
-            bg: retint(base.bg, main.hue, main.tint),
+            bg: retint(base.bg, main.hue, main.tint, main.lightness),
             glass: base.glass,
-            panel: retint(base.panel, main.hue, main.tint),
-            panel_2: retint(base.panel_2, main.hue, main.tint),
-            panel_sidebar: retint(base.panel_sidebar, main.hue, main.tint),
-            panel_header: retint(base.panel_header, main.hue, main.tint),
-            panel_card: retint(base.panel_card, main.hue, main.tint),
-            panel_inner: retint(base.panel_inner, main.hue, main.tint),
-            panel_deep: retint(base.panel_deep, main.hue, main.tint),
-            border: retint(base.border, main.hue, main.tint),
-            border_strong: retint(base.border_strong, main.hue, main.tint),
-            text: retint(base.text, main.hue, main.tint),
-            muted: retint(base.muted, main.hue, main.tint),
-            muted_2: retint(base.muted_2, main.hue, main.tint),
+            panel: retint(base.panel, main.hue, main.tint, main.lightness),
+            panel_2: retint(base.panel_2, main.hue, main.tint, main.lightness),
+            panel_sidebar: retint(base.panel_sidebar, main.hue, main.tint, main.lightness),
+            panel_header: retint(base.panel_header, main.hue, main.tint, main.lightness),
+            panel_card: retint(base.panel_card, main.hue, main.tint, main.lightness),
+            panel_inner: retint(base.panel_inner, main.hue, main.tint, main.lightness),
+            panel_deep: retint(base.panel_deep, main.hue, main.tint, main.lightness),
+            border: retint(base.border, main.hue, main.tint, main.lightness),
+            border_strong: retint(base.border_strong, main.hue, main.tint, main.lightness),
+            text: retint(base.text, main.hue, main.tint, main.lightness),
+            muted: retint(base.muted, main.hue, main.tint, main.lightness),
+            muted_2: retint(base.muted_2, main.hue, main.tint, main.lightness),
             ..base
         }
     };
@@ -545,7 +559,7 @@ pub(crate) fn resolve(main_id: &str, accent_id: &str) -> Palette {
         template.glass
     } else {
         with_alpha(
-            retint(template.glass >> 8, main.hue, main.tint),
+            retint(template.glass >> 8, main.hue, main.tint, main.lightness),
             (template.glass & 0xff) as u8,
         )
     };
@@ -657,10 +671,13 @@ fn best_text(fill: u32) -> u32 {
 
 pub(crate) fn preview_main(color: &MainColor) -> u32 {
     let base = template_for(color.family);
-    if (color.tint - 1.0).abs() < f32::EPSILON && (color.hue - base.hue).abs() < 0.5 {
+    if (color.tint - 1.0).abs() < f32::EPSILON
+        && color.lightness.abs() < f32::EPSILON
+        && (color.hue - base.hue).abs() < 0.5
+    {
         base.panel_2
     } else {
-        retint(base.panel_2, color.hue, color.tint)
+        retint(base.panel_2, color.hue, color.tint, color.lightness)
     }
 }
 
@@ -668,9 +685,13 @@ pub(crate) fn preview_accent(color: &AccentColor) -> u32 {
     hsl_to_rgb(color.hue, color.saturation, color.lightness)
 }
 
-fn retint(color: u32, hue: f32, tint: f32) -> u32 {
+fn retint(color: u32, hue: f32, tint: f32, lightness_offset: f32) -> u32 {
     let (_, saturation, lightness) = rgb_to_hsl(color);
-    hsl_to_rgb(hue, (saturation * tint).clamp(0.0, 1.0), lightness)
+    hsl_to_rgb(
+        hue,
+        (saturation * tint).clamp(0.0, 1.0),
+        (lightness + lightness_offset).clamp(0.0, 1.0),
+    )
 }
 
 pub(crate) fn hsl_to_rgb(hue: f32, saturation: f32, lightness: f32) -> u32 {
@@ -1035,8 +1056,32 @@ mod tests {
         assert_eq!(palette.glass & 0xff, 0x61);
         assert_eq!(
             palette.glass >> 8,
-            retint(DARK_TEMPLATE.glass >> 8, 155.0, 0.85)
+            retint(DARK_TEMPLATE.glass >> 8, 155.0, 0.85, 0.0)
         );
+    }
+
+    #[test]
+    fn light_family_previews_are_distinct() {
+        let light: Vec<&MainColor> = main_colors()
+            .iter()
+            .filter(|color| color.family == Family::Light)
+            .collect();
+        for i in 0..light.len() {
+            for j in (i + 1)..light.len() {
+                let a = preview_main(light[i]);
+                let b = preview_main(light[j]);
+                let distance_sq = (((a >> 16) & 0xff) as f32 - ((b >> 16) & 0xff) as f32).powi(2)
+                    + (((a >> 8) & 0xff) as f32 - ((b >> 8) & 0xff) as f32).powi(2)
+                    + ((a & 0xff) as f32 - (b & 0xff) as f32).powi(2);
+                let distance = distance_sq.sqrt();
+                assert!(
+                    distance >= 5.0,
+                    "{} and {} are too similar: {distance}",
+                    light[i].id,
+                    light[j].id
+                );
+            }
+        }
     }
 
     #[test]

@@ -200,17 +200,23 @@ pub(crate) struct AccentColor {
 | `wine` | ワイン | dark | 350 | 0.85 |
 | `sepia` | セピア | dark | 35 | 0.80 |
 | `paper` | ペーパー | light | 220 | 1.00 |
-| `ivory` | アイボリー | light | 45 | 0.45 |
-| `mist` | ミスト | light | 205 | 0.55 |
-| `sage` | セージ | light | 145 | 0.40 |
-| `blush` | ブラッシュ | light | 345 | 0.35 |
-| `cloud` | クラウド | light | 260 | 0.35 |
+| `ivory` | アイボリー | light | 45 | 1.20 |
+| `mist` | ミスト | light | 205 | 1.65 |
+| `sage` | セージ | light | 145 | 1.50 |
+| `blush` | ブラッシュ | light | 345 | 1.40 |
+| `cloud` | クラウド | light | 260 | 1.50 |
 | `sakura` | さくら | pastel | 345 | 0.95 |
 | `lavender` | ラベンダー | pastel | 265 | 0.85 |
 | `mint` | ミント | pastel | 155 | 0.85 |
 | `sky` | スカイ | pastel | 205 | 1.00 |
 | `peach` | ピーチ | pastel | 25 | 0.95 |
 | `lemon` | レモン | pastel | 50 | 0.85 |
+
+Light-family colours also apply a small lightness offset after retinting:
+ivory `+1.6%`, mist `-0.5%`, sage `-1.6%`, blush `+0.9%`, cloud `-0.9%`
+(paper stays exact). This keeps the six white-family backgrounds visibly
+distinct without leaving the light range; `light_family_previews_are_distinct`
+pins a minimum RGB distance of 5.
 
 #### Accent colours
 
@@ -492,29 +498,30 @@ A new card at the top of the Settings screen, above "ライブラリ":
 ```
 ┌ テーマ ────────────────────────────────────────────┐
 │ メインカラー（背景・パネル）                        │
-│  黒系   [■ チャコール] [■ ミッドナイト] ...         │
-│  白系   [□ ペーパー] [□ アイボリー] ...             │
-│  パステル [■ さくら] [■ ラベンダー] ...             │
-│                                                     │
+│  ●  ●  ●  ●  ●  ●                                  │
+│  ●  ●  ●  ●  ●  ●                                  │
+│  ●  ●  ●  ●  ●  ●                                  │
 │ サブカラー（アクセント）                            │
-│  黒系 / 白系 / パステル ...                         │
-│                                                     │
+│  ●  ●  ●  ●  ●  ●                                  │
+│  ●  ●  ●  ●  ●  ●                                  │
+│  ●  ●  ●  ●  ●  ●                                  │
 │ ※サブカラーは背景とのコントラストに合わせて         │
 │   明度を自動調整します                              │
 └─────────────────────────────────────────────────────┘
 ```
 
-- Each option is a clickable chip: a 26 px rounded square filled with the
-  entry's preview colour plus its label. Selected entries get a 2 px
-  `accent_border` ring and a check mark whose colour is `on_accent` (or
-  black/white chosen by contrast for main colours).
+- Each option is a 30 px circle (24 px fill + 2 px ring) with no inline name
+  and no family headings. Hovering shows a tooltip with the colour name.
+  Selected entries get a 2 px `accent_border` ring and a check mark whose
+  colour is `readable_on(swatch)`.
 - Main preview = the retinted `panel_2`, for every family. It is light enough
   in dark themes and tinted enough in light/pastel themes to distinguish the
   six colours; `panel_card` would render all light swatches as pure white and
   all dark swatches as near-black. Accent preview = the entry's raw base
   colour.
-- Layout: `h_flex().flex_wrap()` with three labelled groups per axis, so the
-  grid reflows on narrow windows. 6 chips per group.
+- Layout: rows of six circles with `w_full()` + `justify_between()`, and a
+  `w_full()` theme card, so each axis uses the full settings width. The
+  catalog order (dark, light, pastel) is kept without headings.
 - Clicking applies immediately and saves; there is no Apply button. A save
   failure restores the previous selection and reports through the existing
   message/toast path.
