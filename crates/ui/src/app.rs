@@ -44,7 +44,7 @@ use crate::ui::actions::{
 };
 use crate::ui::chrome::{ChromeLayout, chrome_layout};
 use crate::ui::notifications::{ToastSpec, toast_flush_needed};
-use crate::ui::palette::{apply_component_theme, resolve};
+use crate::ui::palette::resolve;
 use crate::ui::theme::{Palette, WORKSPACE_GAP, WORKSPACE_PAD};
 use crate::update_view;
 
@@ -527,7 +527,7 @@ impl App {
         };
         app.ensure_profiles();
         app.reload_all(true, cx);
-        apply_component_theme(app.palette, cx);
+        app.apply_palette(app.palette, cx);
         if let Some(message) = message {
             if database_ok {
                 app.toast_warning(message, cx);

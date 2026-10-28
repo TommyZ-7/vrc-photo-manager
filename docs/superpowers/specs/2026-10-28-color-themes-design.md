@@ -249,7 +249,8 @@ All maths is pure and unit-testable. Implement in `palette.rs`:
 - `mix(base, color, weight) -> u32`: `weight` is the share of `color`
   (`mix(panel_card, accent, 0.17)` is 17 % accent, 83 % card). This wraps the
   existing `lerp_color(base, color, weight)` and is moved here.
-- `with_alpha(color, a: u8) -> u32` (pack the low byte)
+- `with_alpha(color, a: u8) -> u32` (packs an opaque `0xRRGGBB` into
+  `0xRRGGBBAA`; callers never pass an already-packed colour)
 
 #### Main palette: template + retint
 
@@ -336,7 +337,9 @@ Retint rules:
 3. Keep lightness. Convert back to RGB.
 4. `line_soft`, `highlight`, `shadow`, `scrim` are neutral overlays: keep them
    except `shadow`/`scrim`, which may take the new hue at their existing alpha.
-5. `glass` is the retinted `bg` with the template's alpha byte.
+5. `glass` is the template glass RGB retinted, with its alpha byte kept.
+   (The dark default must stay `0x0a101c61`; deriving from `bg` would change
+   the default window tint.)
 6. Run the contrast guards below on text, muted tones, borders, and accent.
 
 The light and pastel templates are deliberately authored with dark text and
@@ -432,10 +435,11 @@ every change:
      `None`, so no highlight-theme override is needed.
    - buttons: `button` = `panel_2`, `button_hover` = `accent_soft`,
      `button_active` = `accent_soft_hover`, `button_foreground` = `text`,
-     `button_primary` = `accent_fill`,
-     `button_primary_hover` = `accent_fill` mixed 10 % toward `on_accent`,
-     `button_primary_active` = the same at 18 %,
-     `button_primary_foreground` = `on_accent`,
+     `button_primary` = `accent_fill`. Hover and active move the fill away
+     from the mid-tone (8 % / 14 % toward white when `on_accent` is dark,
+     toward black when it is white) so one foreground can pass 4.5:1 on all
+     three states; that shared foreground is the best of black/white against
+     the base, hover, and active fills.
      `primary` = `accent_fill`, `primary_foreground` = `on_accent`.
    - semantics: `danger`/`warning`/`success` and their buttons =
      `red`/`amber`/`green` with `*_soft` backgrounds.

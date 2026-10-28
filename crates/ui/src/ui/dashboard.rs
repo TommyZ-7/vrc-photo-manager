@@ -195,9 +195,9 @@ impl App {
         let ipc_detail = ipc_status_label(self.ipc_connected, self.ipc_error.as_deref());
         let ipc_color = if self.ipc_connected { p.green } else { p.red };
         let ipc_bg = if self.ipc_connected {
-            0x112a22
+            p.green_soft
         } else {
-            0x2a1414
+            p.red_soft
         };
         let scan = self.scan_progress;
         let armed = self.daemon_shutdown_armed;

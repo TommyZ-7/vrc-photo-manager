@@ -219,7 +219,7 @@ impl App {
                             .child(
                                 div()
                                     .text_size(px(10.))
-                                    .text_color(rgb(if active { p.muted } else { p.muted_2 }))
+                                    .text_color(rgb(if active { p.text } else { p.muted_2 }))
                                     .child(meta),
                             )
                     })),
@@ -948,14 +948,14 @@ impl App {
                         this.child(self.badge(
                             &format!("未完了 {}", self.active_job_count),
                             p.accent,
-                            0x14283d,
+                            p.accent_soft,
                         ))
                     })
                     .when(self.waiting_job_count > 0, |this| {
                         this.child(self.badge(
                             &format!("未実行 {}", self.waiting_job_count),
                             p.amber,
-                            0x2a2412,
+                            p.amber_soft,
                         ))
                     })
                     .when(self.waiting_job_count > 0, |this| {

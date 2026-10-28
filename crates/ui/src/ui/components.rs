@@ -34,7 +34,7 @@ pub(crate) struct ButtonState {
 /// Opaque panel surface.
 ///
 /// The window background is the only glass surface in the refit, so cards must
-/// stand on their own fill: solid `PANEL_CARD`, a 1px border, a top inset
+/// stand on their own fill: solid `palette.panel_card`, a 1px border, a top inset
 /// highlight, and a weak drop shadow. There is deliberately no element-level
 /// blur or translucent fill here.
 pub(crate) fn glass_panel(palette: &Palette) -> Div {
@@ -43,7 +43,7 @@ pub(crate) fn glass_panel(palette: &Palette) -> Div {
         .rounded(px(18.))
         .bg(rgb(p.panel_card))
         .border_1()
-        // BORDER from the spec: rgba(255,255,255,0.105).
+        // The spec's soft border: 10.5% white in the dark template.
         .border_color(rgba(p.line_soft))
         .shadow(vec![
             // Spec card shadow: 0 18px 44px rgba(0,0,0,0.28).

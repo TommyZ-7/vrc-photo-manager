@@ -20,7 +20,7 @@ use crate::state::photo_browser::{
     anchor_photo_id, apply_library_index, list_scroll_top, sync_search_mirror,
 };
 use crate::ui::notifications::{FailureNotice, failure_transition};
-use crate::ui::palette::{apply_component_theme, resolve};
+use crate::ui::palette::{Palette, apply_component_theme, resolve};
 use crate::ui::shell::screen_direction;
 
 /// Current daemon scan progress, shown by the sidebar status card and the
@@ -403,6 +403,18 @@ impl App {
             self.load_selected_meta(id);
             self.refresh_stale_preview(cx);
         }
+    }
+
+    /// Applies a resolved palette to the app, the component widgets, and the
+    /// caches that bake colours into shaped text or morph state.
+    pub(crate) fn apply_palette(&mut self, palette: Palette, cx: &mut Context<Self>) {
+        self.palette = palette;
+        apply_component_theme(palette, cx);
+        self.library.labels = None;
+        self.search_view.labels = None;
+        self.viewer_morph_view
+            .update(cx, |view, cx| view.set_palette(palette, cx));
+        cx.notify();
     }
 
     /// Rebuilds the ordered library snapshot and its page cache.

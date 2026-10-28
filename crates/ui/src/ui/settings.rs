@@ -21,8 +21,8 @@ use crate::state::photo_browser::{anchor_photo_id, list_scroll_top};
 use crate::ui::components::compression_policy_warning;
 use crate::ui::components::glass_panel;
 use crate::ui::palette::{
-    Family, accent_colors, apply_component_theme, find_accent, find_main, main_colors,
-    preview_accent, preview_main, readable_on, resolve,
+    Family, accent_colors, find_accent, find_main, main_colors, preview_accent, preview_main,
+    readable_on, resolve,
 };
 use crate::ui::theme::*;
 
@@ -386,7 +386,7 @@ impl App {
                                             .rounded(px(8.))
                                             .bg(rgb(p.red_soft))
                                             .border_1()
-                                            .border_color(rgba(p.red_border))
+                                            .border_color(rgb(p.red_border))
                                             .text_size(px(10.))
                                             .text_color(rgb(p.red))
                                             .child(warning),
@@ -507,7 +507,7 @@ impl App {
                             color.id,
                             color.label,
                             preview_main(color),
-                            self.settings.ui_theme_main == color.id,
+                            find_main(&self.settings.ui_theme_main).id == color.id,
                             cx,
                         ));
                     }
@@ -522,7 +522,7 @@ impl App {
                             color.id,
                             color.label,
                             preview_accent(color),
-                            self.settings.ui_theme_accent == color.id,
+                            find_accent(&self.settings.ui_theme_accent).id == color.id,
                             cx,
                         ));
                     }
@@ -561,7 +561,7 @@ impl App {
             .px(px(6.))
             .py(px(4.))
             .rounded(px(8.))
-            .border_1()
+            .border_2()
             .border_color(if selected {
                 rgb(p.accent_border)
             } else {
@@ -580,7 +580,7 @@ impl App {
             }))
             .child(
                 div()
-                    .size(px(18.))
+                    .size(px(26.))
                     .flex_shrink_0()
                     .flex()
                     .items_center()
@@ -592,7 +592,7 @@ impl App {
                     .when(selected, |this| {
                         this.child(
                             div()
-                                .text_size(px(10.))
+                                .text_size(px(12.))
                                 .font_semibold()
                                 .text_color(rgb(readable_on(swatch)))
                                 .child("✓"),
@@ -605,16 +605,6 @@ impl App {
                     .text_color(rgb(if selected { p.text } else { p.muted }))
                     .child(label),
             )
-    }
-
-    fn apply_theme_change(&mut self, cx: &mut Context<Self>) {
-        apply_component_theme(self.palette, cx);
-        self.library.labels = None;
-        self.search_view.labels = None;
-        let palette = self.palette;
-        self.viewer_morph_view
-            .update(cx, |view, cx| view.set_palette(palette, cx));
-        cx.notify();
     }
 
     pub(crate) fn set_main_theme(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -634,7 +624,7 @@ impl App {
             cx.notify();
             return;
         }
-        self.apply_theme_change(cx);
+        self.apply_palette(self.palette, cx);
     }
 
     pub(crate) fn set_accent_theme(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -654,7 +644,7 @@ impl App {
             cx.notify();
             return;
         }
-        self.apply_theme_change(cx);
+        self.apply_palette(self.palette, cx);
     }
 
     pub(crate) fn set_max_fps(&mut self, fps: u32, cx: &mut Context<Self>) {

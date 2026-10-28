@@ -387,7 +387,8 @@ pub(crate) fn find_accent(id: &str) -> &'static AccentColor {
     ACCENT_COLORS
         .iter()
         .find(|color| color.id == id)
-        .unwrap_or(&ACCENT_COLORS[12])
+        .or_else(|| ACCENT_COLORS.iter().find(|color| color.id == "sky"))
+        .expect("default accent")
 }
 
 #[derive(Clone, Copy)]
@@ -524,7 +525,7 @@ pub(crate) fn resolve(main_id: &str, accent_id: &str) -> Palette {
 
     let base_accent = hsl_to_rgb(accent.hue, accent.saturation, accent.lightness);
     let (accent_color, accent_soft, accent_soft_hover) =
-        safe_tone(base_accent, panel_card, &surfaces, 0.17, 0.26);
+        safe_tone(base_accent, panel_card, &surfaces, 0.17);
     let accent_fill = if contrast_ratio(base_accent, panel_card) >= 1.3 {
         base_accent
     } else {
@@ -533,34 +534,18 @@ pub(crate) fn resolve(main_id: &str, accent_id: &str) -> Palette {
     let accent_border = ensure_contrast(base_accent, panel_card, 3.0);
     let on_accent = best_text(accent_fill);
 
-    let (green, green_soft, _) = safe_tone(
-        hsl_to_rgb(170.6, 0.769, 0.643),
-        panel_card,
-        &surfaces,
-        0.15,
-        0.15,
-    );
-    let (amber, amber_soft, _) = safe_tone(
-        hsl_to_rgb(42.9, 0.96, 0.563),
-        panel_card,
-        &surfaces,
-        0.15,
-        0.15,
-    );
-    let (red, red_soft, _) = safe_tone(
-        hsl_to_rgb(351.0, 0.94, 0.714),
-        panel_card,
-        &surfaces,
-        0.15,
-        0.15,
-    );
+    let (green, green_soft, _) =
+        safe_tone(hsl_to_rgb(170.6, 0.769, 0.643), panel_card, &surfaces, 0.15);
+    let (amber, amber_soft, _) =
+        safe_tone(hsl_to_rgb(42.9, 0.96, 0.563), panel_card, &surfaces, 0.15);
+    let (red, red_soft, _) = safe_tone(hsl_to_rgb(351.0, 0.94, 0.714), panel_card, &surfaces, 0.15);
     let red_border = mix(panel_card, red, 0.30);
 
     let glass = if exact {
         template.glass
     } else {
         with_alpha(
-            retint(template.glass & 0xffffff, main.hue, main.tint),
+            retint(template.glass >> 8, main.hue, main.tint),
             (template.glass & 0xff) as u8,
         )
     };
@@ -602,13 +587,7 @@ pub(crate) fn resolve(main_id: &str, accent_id: &str) -> Palette {
     }
 }
 
-fn safe_tone(
-    base: u32,
-    panel_card: u32,
-    surfaces: &[u32],
-    soft_weight: f32,
-    _hover_weight: f32,
-) -> (u32, u32, u32) {
+fn safe_tone(base: u32, panel_card: u32, surfaces: &[u32], soft_weight: f32) -> (u32, u32, u32) {
     let mut color = ensure_contrast_vs_all(base, surfaces, 4.5);
     let mut soft = mix(panel_card, color, soft_weight);
     let mut hover = mix(panel_card, color, 0.26);
@@ -643,6 +622,27 @@ fn ensure_contrast_vs_all(fg: u32, backgrounds: &[u32], min: f32) -> u32 {
 
 pub(crate) fn readable_on(fill: u32) -> u32 {
     best_text(fill)
+}
+
+fn best_on_all(fills: &[u32]) -> u32 {
+    for candidate in [0x101418, 0xffffff] {
+        let minimum = fills
+            .iter()
+            .map(|fill| contrast_ratio(candidate, *fill))
+            .fold(21.0_f32, f32::min);
+        if minimum >= 4.5 {
+            return candidate;
+        }
+    }
+    let dark = fills
+        .iter()
+        .map(|fill| contrast_ratio(0x101418, *fill))
+        .fold(21.0_f32, f32::min);
+    let light = fills
+        .iter()
+        .map(|fill| contrast_ratio(0xffffff, *fill))
+        .fold(21.0_f32, f32::min);
+    if dark >= light { 0x101418 } else { 0xffffff }
 }
 
 fn best_text(fill: u32) -> u32 {
@@ -787,7 +787,7 @@ pub(crate) fn mix(base: u32, color: u32, weight: f32) -> u32 {
 }
 
 pub(crate) fn with_alpha(color: u32, alpha: u8) -> u32 {
-    (color & 0xffffff00) | u32::from(alpha)
+    ((color & 0x00ff_ffff) << 8) | u32::from(alpha)
 }
 
 impl Palette {
@@ -829,6 +829,8 @@ pub(crate) fn apply_component_theme(palette: Palette, cx: &mut App) {
         theme.colors.accent = rgb(palette.accent_soft).into();
         theme.colors.accent_foreground = rgb(palette.accent).into();
         theme.colors.link = rgb(palette.accent).into();
+        theme.colors.link_hover = rgb(palette.accent).into();
+        theme.colors.link_active = rgb(palette.accent).into();
         theme.colors.list = rgb(palette.panel_card).into();
         theme.colors.list_hover = rgb(palette.panel_inner).into();
         theme.colors.list_active = rgb(palette.accent_soft).into();
@@ -836,26 +838,66 @@ pub(crate) fn apply_component_theme(palette: Palette, cx: &mut App) {
         theme.colors.list_even = rgb(palette.panel_2).into();
         theme.colors.list_head = rgb(palette.panel_header).into();
         theme.colors.button = rgb(palette.panel_2).into();
-        theme.colors.button_hover = rgb(palette.panel_inner).into();
-        theme.colors.button_active = rgb(palette.panel).into();
+        theme.colors.button_hover = rgb(palette.accent_soft).into();
+        theme.colors.button_active = rgb(palette.accent_soft_hover).into();
         theme.colors.button_foreground = rgb(palette.text).into();
+        let primary_target = if palette.on_accent == 0x101418 {
+            0xffffff
+        } else {
+            0x000000
+        };
+        let primary_hover = mix(palette.accent_fill, primary_target, 0.08);
+        let primary_active = mix(palette.accent_fill, primary_target, 0.14);
+        let primary_foreground = best_on_all(&[palette.accent_fill, primary_hover, primary_active]);
         theme.colors.button_primary = rgb(palette.accent_fill).into();
-        theme.colors.button_primary_hover =
-            rgb(mix(palette.accent_fill, palette.on_accent, 0.10)).into();
-        theme.colors.button_primary_active =
-            rgb(mix(palette.accent_fill, palette.on_accent, 0.18)).into();
-        theme.colors.button_primary_foreground = rgb(palette.on_accent).into();
+        theme.colors.button_primary_hover = rgb(primary_hover).into();
+        theme.colors.button_primary_active = rgb(primary_active).into();
+        theme.colors.button_primary_foreground = rgb(primary_foreground).into();
         theme.colors.primary = rgb(palette.accent_fill).into();
-        theme.colors.primary_foreground = rgb(palette.on_accent).into();
+        theme.colors.primary_foreground = rgb(primary_foreground).into();
         theme.colors.danger = rgb(palette.red).into();
+        theme.colors.danger_foreground = rgb(best_text(palette.red)).into();
         theme.colors.warning = rgb(palette.amber).into();
+        theme.colors.warning_foreground = rgb(best_text(palette.amber)).into();
         theme.colors.success = rgb(palette.green).into();
+        theme.colors.success_foreground = rgb(best_text(palette.green)).into();
         theme.colors.button_danger = rgb(palette.red).into();
-        theme.colors.button_danger_foreground = rgb(best_text(palette.red)).into();
+        let danger_target = if best_text(palette.red) == 0x101418 {
+            0xffffff
+        } else {
+            0x000000
+        };
+        let danger_hover = mix(palette.red, danger_target, 0.08);
+        let danger_active = mix(palette.red, danger_target, 0.14);
+        theme.colors.button_danger_hover = rgb(danger_hover).into();
+        theme.colors.button_danger_active = rgb(danger_active).into();
+        theme.colors.button_danger_foreground =
+            rgb(best_on_all(&[palette.red, danger_hover, danger_active])).into();
+        let warning_target = if best_text(palette.amber) == 0x101418 {
+            0xffffff
+        } else {
+            0x000000
+        };
+        let warning_hover = mix(palette.amber, warning_target, 0.08);
+        let warning_active = mix(palette.amber, warning_target, 0.14);
         theme.colors.button_warning = rgb(palette.amber).into();
-        theme.colors.button_warning_foreground = rgb(best_text(palette.amber)).into();
+        theme.colors.button_warning_hover = rgb(warning_hover).into();
+        theme.colors.button_warning_active = rgb(warning_active).into();
+        theme.colors.button_warning_foreground =
+            rgb(best_on_all(&[palette.amber, warning_hover, warning_active])).into();
+        let success_target = if best_text(palette.green) == 0x101418 {
+            0xffffff
+        } else {
+            0x000000
+        };
+        let success_hover = mix(palette.green, success_target, 0.08);
+        let success_active = mix(palette.green, success_target, 0.14);
         theme.colors.button_success = rgb(palette.green).into();
-        theme.colors.button_success_foreground = rgb(best_text(palette.green)).into();
+        theme.colors.button_success_hover = rgb(success_hover).into();
+        theme.colors.button_success_active = rgb(success_active).into();
+        theme.colors.button_success_foreground =
+            rgb(best_on_all(&[palette.green, success_hover, success_active])).into();
+        theme.colors.drag_border = rgb(palette.accent_border).into();
         theme.colors.scrollbar = rgb(palette.border_strong).into();
         theme.colors.scrollbar_thumb = rgb(palette.muted_2).into();
         theme.colors.scrollbar_thumb_hover = rgb(palette.muted).into();
@@ -871,7 +913,9 @@ pub(crate) fn apply_component_theme(palette: Palette, cx: &mut App) {
     });
     // Root paints `tokens.background` across the window. Keep it transparent
     // so the window glass reaches the compositor; `colors.background` stays
-    // opaque because light-mode inputs use it as their fill.
+    // opaque because light-mode inputs use it as their fill. This cannot move
+    // inside `update`: its reconcile step copies a token-only edit back to
+    // `colors.background`.
     Theme::global_mut(cx).tokens.background = transparent_black().into();
 }
 
@@ -902,6 +946,12 @@ mod tests {
         assert!((contrast_ratio(0x000000, 0xffffff) - 21.0).abs() < 0.01);
         assert!((contrast_ratio(0xffffff, 0xffffff) - 1.0).abs() < 0.001);
         assert!(contrast_ratio(0x66b3ff, 0x0d1420) > 4.5);
+    }
+
+    #[test]
+    fn with_alpha_packs_rgb_and_alpha() {
+        assert_eq!(with_alpha(0x112233, 0x44), 0x1122_3344);
+        assert_eq!(with_alpha(0x66b3ff, 0x47), 0x66b3_ff47);
     }
 
     #[test]
@@ -937,6 +987,12 @@ mod tests {
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), 18);
+        let mut accent_ids: Vec<&str> = accent_colors().iter().map(|color| color.id).collect();
+        accent_ids.sort_unstable();
+        accent_ids.dedup();
+        assert_eq!(accent_ids.len(), 18);
+        assert!(main_colors().iter().all(|color| !color.label.is_empty()));
+        assert!(accent_colors().iter().all(|color| !color.label.is_empty()));
     }
 
     #[test]
@@ -950,6 +1006,13 @@ mod tests {
     #[test]
     fn default_matches_current_palette() {
         let palette = resolve("charcoal", "sky");
+        assert_eq!(palette.bg, 0x07090d);
+        assert_eq!(palette.glass, 0x0a101c61);
+        assert_eq!(palette.panel, 0x121722);
+        assert_eq!(palette.panel_2, 0x1a2130);
+        assert_eq!(palette.panel_deep, 0x0a1019);
+        assert_eq!(palette.border, 0x232b38);
+        assert_eq!(palette.border_strong, 0x364256);
         assert_eq!(palette.panel_card, 0x0d1420);
         assert_eq!(palette.panel_header, 0x101725);
         assert_eq!(palette.panel_sidebar, 0x0b111b);
@@ -964,6 +1027,16 @@ mod tests {
         assert!((r as i32 - 0x1a).abs() <= 4);
         assert!((g as i32 - 0x2f).abs() <= 4);
         assert!((b as i32 - 0x47).abs() <= 4);
+    }
+
+    #[test]
+    fn non_template_glass_keeps_rgb_and_alpha() {
+        let palette = resolve("forest", "sky");
+        assert_eq!(palette.glass & 0xff, 0x61);
+        assert_eq!(
+            palette.glass >> 8,
+            retint(DARK_TEMPLATE.glass >> 8, 155.0, 0.85)
+        );
     }
 
     #[test]
@@ -984,6 +1057,17 @@ mod tests {
                 assert_contrast(palette.amber, palette.amber_soft, 4.5, &label);
                 assert_contrast(palette.green, palette.green_soft, 4.5, &label);
                 assert_contrast(palette.on_accent, palette.accent_fill, 4.5, &label);
+                let target = if palette.on_accent == 0x101418 {
+                    0xffffff
+                } else {
+                    0x000000
+                };
+                let hover = mix(palette.accent_fill, target, 0.08);
+                let active = mix(palette.accent_fill, target, 0.14);
+                let primary_fg = best_on_all(&[palette.accent_fill, hover, active]);
+                assert_contrast(primary_fg, palette.accent_fill, 4.5, &label);
+                assert_contrast(primary_fg, hover, 4.5, &label);
+                assert_contrast(primary_fg, active, 4.5, &label);
                 assert_contrast(palette.border, palette.panel_card, 1.2, &label);
                 assert_contrast(palette.border_strong, palette.panel_card, 1.8, &label);
             }
@@ -1009,19 +1093,33 @@ mod tests {
         let mut files = Vec::new();
         collect(&src, &mut files);
         for file in files {
-            if file.ends_with("ui/palette.rs") {
+            if file.ends_with("ui/palette.rs") || file.ends_with("app/demo.rs") {
                 continue;
             }
             let text = std::fs::read_to_string(&file).expect("read source file");
             for (index, line) in text.lines().enumerate() {
-                let bad = line.contains("rgb(0x")
-                    || (line.contains("rgba(0x") && !line.contains("rgba(0x00000000)"));
+                let without_transparent = line.replace("rgba(0x00000000)", "");
+                let bad_rgb = without_transparent.contains("rgb(0x")
+                    || without_transparent.contains("rgba(0x");
+                let packed = [
+                    "p.glass",
+                    "p.line_soft",
+                    "p.highlight",
+                    "p.shadow",
+                    "p.scrim",
+                ];
+                let bad_rgba =
+                    line.contains("rgba(p.") && !packed.iter().any(|field| line.contains(field));
+                let trimmed = line.trim();
+                let bad_raw = trimmed.starts_with("0x")
+                    && !trimmed.starts_with("0x00000000")
+                    && trimmed.len() >= 8;
                 assert!(
-                    !bad,
+                    !(bad_rgb || bad_rgba || bad_raw),
                     "{}:{}: hardcoded palette colour: {}",
                     file.display(),
                     index + 1,
-                    line.trim()
+                    trimmed
                 );
             }
         }
@@ -1035,7 +1133,7 @@ mod tests {
             if main.family == Family::Dark {
                 assert!(lightness < 0.25, "{}: {lightness}", main.id);
             } else {
-                assert!(lightness > 0.75, "{}: {lightness}", main.id);
+                assert!(lightness > 0.80, "{}: {lightness}", main.id);
             }
         }
     }

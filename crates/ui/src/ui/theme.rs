@@ -1,8 +1,7 @@
-//! Theme tokens, layout metrics, and the pure presentation helpers shared by
-//! every screen.
+//! Layout metrics and the pure presentation helpers shared by every screen.
 //!
-//! Keeping the values here means a screen never re-declares a colour, a width,
-//! or a motion duration, and the layout maths stays testable without a window.
+//! Runtime colours live in [`crate::ui::palette`]; keeping widths and motion
+//! durations here means the layout maths stays testable without a window.
 
 use std::time::{Duration, Instant};
 

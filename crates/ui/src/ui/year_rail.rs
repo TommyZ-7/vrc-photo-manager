@@ -369,7 +369,9 @@ impl Element for YearRail {
                 point(marker.origin.x - px(1.), marker.origin.y - px(1.)),
                 size(marker.size.width + px(2.), marker.size.height + px(2.)),
             );
-            window.paint_quad(fill(ring, rgba(with_alpha(p.text, 0x2e))).corner_radii(px(4.)));
+            window.paint_quad(
+                fill(ring, rgba(with_alpha(p.border_strong, 0x2e))).corner_radii(px(4.)),
+            );
             window.paint_quad(
                 fill(marker, rgba(with_alpha(p.panel_header, 0xf2))).corner_radii(px(3.)),
             );

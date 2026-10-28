@@ -672,7 +672,7 @@ impl App {
                     .left(px(9.))
                     .size(px(19.))
                     .rounded_full()
-                    .bg(rgb(p.accent))
+                    .bg(rgb(p.accent_fill))
                     .border_2()
                     .border_color(rgb(p.bg))
                     .flex()
@@ -737,9 +737,9 @@ impl App {
             .rounded(px(card_radius))
             .border_1()
             .border_color(if primary {
-                rgba(p.accent)
+                rgb(p.accent)
             } else if selected {
-                rgba(p.accent_border)
+                rgb(p.accent_border)
             } else {
                 rgba(p.line_soft)
             })

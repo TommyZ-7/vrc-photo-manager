@@ -206,9 +206,9 @@ impl App {
             .justify_center()
             .border_1()
             .border_color(rgba(with_alpha(p.on_accent, 0x30)))
-            .bg(rgb(p.accent))
+            .bg(rgb(p.accent_fill))
             .shadow(vec![
-                BoxShadow::new(px(0.), px(3.), rgba(with_alpha(p.accent, 0x47)).into())
+                BoxShadow::new(px(0.), px(3.), rgba(with_alpha(p.accent_fill, 0x47)).into())
                     .blur_radius(px(9.)),
                 BoxShadow::new(px(0.), px(1.), rgba(with_alpha(p.on_accent, 0x66)).into())
                     .inset()

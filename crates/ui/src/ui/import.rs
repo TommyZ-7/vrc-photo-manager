@@ -128,7 +128,7 @@ impl App {
                                 .rounded(px(8.))
                                 .bg(rgb(p.red_soft))
                                 .border_1()
-                                .border_color(rgba(p.red_border))
+                                .border_color(rgb(p.red_border))
                                 .text_size(px(10.))
                                 .text_color(rgb(p.red))
                                 .child(error),
@@ -460,7 +460,7 @@ impl App {
                     .rounded(px(8.))
                     .bg(rgb(p.red_soft))
                     .border_1()
-                    .border_color(rgba(p.red_border))
+                    .border_color(rgb(p.red_border))
                     .text_size(px(10.))
                     .text_color(rgb(p.red))
                     .child(error),
