@@ -295,17 +295,7 @@ impl App {
         let retryable = retryable_sources(&report.issues);
         let mode = import_mode_label(report.mode);
         let dest = report.dest.to_string_lossy().to_string();
-        let scan_failed = report.scan_failures.len();
-        let failed_issues: Vec<&ImportIssue> = report
-            .issues
-            .iter()
-            .filter(|issue| issue.kind == ImportIssueKind::Failed)
-            .collect();
-        let partial_issues: Vec<&ImportIssue> = report
-            .issues
-            .iter()
-            .filter(|issue| issue.kind == ImportIssueKind::PartialMove)
-            .collect();
+        let scan_failed = report.scan_failures.len() + usize::from(report.scan_error.is_some());
 
         let mut panel = v_flex()
             .flex_shrink_0()
@@ -411,8 +401,32 @@ impl App {
                     }),
             );
 
+        panel = panel.child(self.import_report_details(report));
+        panel
+            .with_animation(
+                "import-report",
+                Animation::new(MOTION_BASE)
+                    .with_easing(ease_motion)
+                    .with_max_fps(self.motion_fps()),
+                |el, t| el.opacity(t).relative().top(px(-8.0 * (1.0 - t))),
+            )
+            .into_any_element()
+    }
+    pub(crate) fn import_report_details(&self, report: &ImportReportView) -> AnyElement {
+        let failed_issues: Vec<&ImportIssue> = report
+            .issues
+            .iter()
+            .filter(|issue| issue.kind == ImportIssueKind::Failed)
+            .collect();
+        let partial_issues: Vec<&ImportIssue> = report
+            .issues
+            .iter()
+            .filter(|issue| issue.kind == ImportIssueKind::PartialMove)
+            .collect();
+
+        let mut body = v_flex().w_full();
         if !failed_issues.is_empty() {
-            panel = panel.child(
+            body = body.child(
                 v_flex()
                     .px(px(16.))
                     .py(px(8.))
@@ -448,7 +462,7 @@ impl App {
         }
 
         if !partial_issues.is_empty() {
-            panel = panel.child(
+            body = body.child(
                 v_flex()
                     .px(px(16.))
                     .py(px(8.))
@@ -496,7 +510,7 @@ impl App {
         }
 
         if !report.renamed.is_empty() {
-            panel = panel.child(
+            body = body.child(
                 v_flex()
                     .px(px(16.))
                     .py(px(8.))
@@ -535,7 +549,7 @@ impl App {
         }
 
         if !report.scan_failures.is_empty() {
-            panel = panel.child(
+            body = body.child(
                 v_flex()
                     .px(px(16.))
                     .py(px(8.))
@@ -564,7 +578,7 @@ impl App {
         }
 
         if let Some(error) = report.scan_error.clone() {
-            panel = panel.child(
+            body = body.child(
                 div()
                     .mx(px(16.))
                     .my(px(8.))
@@ -578,16 +592,7 @@ impl App {
                     .child(error),
             );
         }
-
-        panel
-            .with_animation(
-                "import-report",
-                Animation::new(MOTION_BASE)
-                    .with_easing(ease_motion)
-                    .with_max_fps(self.motion_fps()),
-                |el, t| el.opacity(t).relative().top(px(-8.0 * (1.0 - t))),
-            )
-            .into_any_element()
+        body.into_any_element()
     }
 }
 

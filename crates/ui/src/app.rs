@@ -38,8 +38,8 @@ use crate::state::preview::{PreviewKey, PreviewQueue};
 use crate::state::thumbnail::ThumbnailCache;
 use crate::state::viewer::{ViewerBoxState, ViewerMorph, ViewerOpenSource, ViewerPanelState};
 use crate::ui::actions::{
-    CloseQuickLook, FocusSearch, OpenQuickLook, QuickLookNextFocus, QuickLookPrevFocus,
-    ToggleInspector, ToggleSidebar, ViewerNextPhoto, ViewerPreviousPhoto,
+    CloseNotifications, CloseQuickLook, FocusSearch, OpenQuickLook, QuickLookNextFocus,
+    QuickLookPrevFocus, ToggleInspector, ToggleSidebar, ViewerNextPhoto, ViewerPreviousPhoto,
 };
 use crate::ui::chrome::{ChromeLayout, RibbonTab, chrome_layout, default_ribbon_tab};
 use crate::ui::notifications::{FailureNotice, ToastSpec, failure_transition};
@@ -224,6 +224,11 @@ pub struct App {
     pub(crate) window_handle: AnyWindowHandle,
     pub(crate) pending_toasts: Vec<ToastSpec>,
     pub(crate) toasts_ready: bool,
+    pub(crate) notification_modal_open: bool,
+    pub(crate) notification_modal_epoch: u64,
+    pub(crate) import_report_expanded: bool,
+    pub(crate) notification_return_focus: Option<FocusHandle>,
+    pub(crate) notification_close_focus: FocusHandle,
     pub(crate) demo: bool,
     pub(crate) demo_assets: Option<DemoAssets>,
 }
@@ -235,8 +240,9 @@ pub(crate) fn any_overlay_open(
     quick_look_open: bool,
     manual_compression_open: bool,
     import_dialog_open: bool,
+    notification_modal_open: bool,
 ) -> bool {
-    quick_look_open || manual_compression_open || import_dialog_open
+    quick_look_open || manual_compression_open || import_dialog_open || notification_modal_open
 }
 
 impl App {
@@ -250,6 +256,7 @@ impl App {
             self.quick_look_open,
             self.manual_compress.is_some(),
             self.import_dialog.is_some(),
+            self.notification_modal_open,
         )
     }
 
@@ -341,6 +348,7 @@ impl App {
         let quick_look_note_edit_focus = cx.focus_handle();
         let quick_look_note_save_focus = cx.focus_handle();
         let quick_look_note_cancel_focus = cx.focus_handle();
+        let notification_close_focus = cx.focus_handle();
         let empty_index = Arc::new(PhotoIndex::new(Vec::new()));
         let window_handle = window.window_handle();
         let mut app = Self {
@@ -487,6 +495,11 @@ impl App {
             window_handle,
             pending_toasts: Vec::new(),
             toasts_ready: false,
+            notification_modal_open: false,
+            notification_modal_epoch: 0,
+            import_report_expanded: false,
+            notification_return_focus: None,
+            notification_close_focus,
             demo,
             demo_assets,
         };
@@ -592,6 +605,9 @@ impl Render for App {
             .font_family("Noto Sans JP")
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
             .on_action(cx.listener(|this, _: &ToggleInspector, _, cx| this.toggle_inspector(cx)))
+            .on_action(cx.listener(|this, _: &CloseNotifications, window, cx| {
+                this.close_notification_modal(window, cx)
+            }))
             .on_action(
                 cx.listener(|this, _: &FocusSearch, window, cx| this.focus_search(window, cx)),
             )
@@ -629,7 +645,12 @@ impl Render for App {
         } else {
             root
         };
-        root.child(self.viewer_morph_view.clone())
+        let root = root.child(self.viewer_morph_view.clone());
+        if self.notification_modal_open {
+            root.child(self.notification_modal(window, cx))
+        } else {
+            root
+        }
     }
 }
 
@@ -639,10 +660,11 @@ mod tests {
 
     #[test]
     fn overlay_guard_covers_the_viewer_and_both_modals() {
-        assert!(!any_overlay_open(false, false, false));
-        assert!(any_overlay_open(true, false, false));
-        assert!(any_overlay_open(false, true, false));
-        assert!(any_overlay_open(false, false, true));
+        assert!(!any_overlay_open(false, false, false, false));
+        assert!(any_overlay_open(true, false, false, false));
+        assert!(any_overlay_open(false, true, false, false));
+        assert!(any_overlay_open(false, false, true, false));
+        assert!(any_overlay_open(false, false, false, true));
     }
 
     #[test]

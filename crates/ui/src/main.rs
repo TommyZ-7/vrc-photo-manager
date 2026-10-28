@@ -7,8 +7,9 @@ use crate::app::App;
 use crate::app::cli::{parse_args, process_start, timing_enabled};
 use crate::app::daemon::run_background_supervisor;
 use crate::ui::actions::{
-    CloseQuickLook, FocusSearch, OpenQuickLook, QuickLookNextFocus, QuickLookPrevFocus,
-    ToggleInspector, ToggleSidebar, ViewerNextPhoto, ViewerPreviousPhoto, register_global_actions,
+    CloseNotifications, CloseQuickLook, FocusSearch, OpenQuickLook, QuickLookNextFocus,
+    QuickLookPrevFocus, ToggleInspector, ToggleSidebar, ViewerNextPhoto, ViewerPreviousPhoto,
+    register_global_actions,
 };
 
 mod app;
@@ -68,6 +69,7 @@ fn main() {
                 KeyBinding::new("space", OpenQuickLook, Some("photo_grid")),
                 KeyBinding::new("enter", OpenQuickLook, Some("photo_grid")),
                 KeyBinding::new("escape", CloseQuickLook, Some("quick_look")),
+                KeyBinding::new("escape", CloseNotifications, Some("notification_modal")),
                 KeyBinding::new("left", ViewerPreviousPhoto, Some("viewer_nav")),
                 KeyBinding::new("right", ViewerNextPhoto, Some("viewer_nav")),
                 KeyBinding::new("tab", QuickLookNextFocus, Some("quick_look")),

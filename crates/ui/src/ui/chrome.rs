@@ -383,34 +383,7 @@ impl App {
             .child(status_pill)
             .when(show_sync, |this| this.child(sync_label))
             .child(collapse_button(collapsed, cx))
-            .child(
-                div()
-                    .id("titlebar-notifications")
-                    .relative()
-                    .flex_shrink_0()
-                    .size(px(26.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(6.))
-                    .text_color(rgb(MUTED_2))
-                    .child(chrome_icon(IconName::Bell).with_size(px(14.)))
-                    .when(self.message.is_some(), |this| {
-                        this.child(
-                            div()
-                                .absolute()
-                                .top(px(5.))
-                                .right(px(5.))
-                                .size(px(4.))
-                                .rounded_full()
-                                .bg(rgb(AMBER))
-                                .shadow(vec![
-                                    BoxShadow::new(px(0.), px(0.), rgba(0xf4c878cc).into())
-                                        .blur_radius(px(6.)),
-                                ]),
-                        )
-                    }),
-            );
+            .child(self.notification_button(cx));
 
         TitleBar::new()
             .h(px(46.))
