@@ -1,6 +1,6 @@
 //! Quick-look viewer overlay and the thumbnail-to-viewer morph transition.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
@@ -12,6 +12,19 @@ use crate::state::preview::preview_placeholder_label;
 use crate::state::viewer::{ViewerMorph, morph_image_plan};
 use crate::ui::components::{ButtonState, ButtonTone};
 use crate::ui::theme::*;
+
+/// Opacity and horizontal offset for the outgoing and incoming photos during a
+/// viewer step. Returned as `(previous_opacity, previous_offset,
+/// current_opacity, current_offset)`.
+pub(crate) fn viewer_nav_frame(t: f32, direction: f32) -> (f32, f32, f32, f32) {
+    let t = t.clamp(0.0, 1.0);
+    (
+        1.0 - t,
+        -direction * VIEWER_NAV_SLIDE * t,
+        t,
+        direction * VIEWER_NAV_SLIDE * (1.0 - t),
+    )
+}
 
 impl App {
     pub(crate) fn quick_look(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -114,17 +127,16 @@ impl App {
         let box_state = self.viewer_box;
         let nav_epoch = self.viewer_nav_epoch;
         let nav_direction = self.viewer_nav_direction;
-        let nav_t = if nav_epoch == 0 {
-            1.0
+        let nav_duration = if nav_epoch == 0 || cx.reduce_motion() {
+            Duration::ZERO
         } else {
-            viewer_nav_progress(
-                self.viewer_nav_started_at,
-                Instant::now(),
-                cx.reduce_motion(),
-            )
+            MOTION_BASE
         };
-        let previous_preview = self.previous_preview.clone();
-        let current_preview = self.preview.clone();
+        let previous_image = self.previous_preview.clone();
+        let current_image = self
+            .preview
+            .clone()
+            .or_else(|| self.thumbnails.get(photo.id));
         let (start_w, start_h) = box_state.size_at(0.0, viewport);
 
         let mut image_frame = div()
@@ -139,39 +151,53 @@ impl App {
             .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()));
 
         if nav_epoch > 0
-            && nav_t < 1.0
-            && let Some(previous) = previous_preview
+            && let Some(previous) = previous_image
         {
-            image_frame = image_frame.child(
-                gpui_kit::img(previous)
-                    .object_fit(ObjectFit::Contain)
-                    .size_full()
-                    .rounded(px(10.))
-                    .opacity(1.0 - nav_t)
-                    .relative()
-                    .left(px(-nav_direction * VIEWER_NAV_SLIDE * nav_t)),
-            );
+            let previous = gpui_kit::img(previous)
+                .object_fit(ObjectFit::Contain)
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .rounded(px(10.))
+                .with_animation(
+                    ("viewer-nav-previous", nav_epoch),
+                    Animation::new(nav_duration)
+                        .with_easing(ease_motion)
+                        .with_max_fps(self.motion_fps()),
+                    move |el, t| {
+                        let (opacity, offset, _, _) = viewer_nav_frame(t, nav_direction);
+                        el.opacity(opacity).left(px(offset))
+                    },
+                );
+            image_frame = image_frame.child(previous);
         }
 
-        let current_offset = if nav_epoch == 0 {
-            0.0
-        } else {
-            nav_direction * VIEWER_NAV_SLIDE * (1.0 - nav_t)
-        };
-        if let Some(preview) = current_preview {
-            image_frame = image_frame.child(
-                gpui_kit::img(preview)
-                    .object_fit(ObjectFit::Contain)
-                    .size_full()
-                    .rounded(px(10.))
-                    .opacity(if nav_epoch == 0 { 1.0 } else { nav_t })
-                    .relative()
-                    .left(px(current_offset)),
-            );
+        if let Some(image) = current_image {
+            let current = gpui_kit::img(image)
+                .object_fit(ObjectFit::Contain)
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .rounded(px(10.))
+                .with_animation(
+                    ("viewer-nav-current", nav_epoch),
+                    Animation::new(nav_duration)
+                        .with_easing(ease_motion)
+                        .with_max_fps(self.motion_fps()),
+                    move |el, t| {
+                        let (_, _, opacity, offset) = viewer_nav_frame(t, nav_direction);
+                        el.opacity(opacity).left(px(offset))
+                    },
+                );
+            image_frame = image_frame.child(current);
         } else {
             image_frame = image_frame.child(
                 div()
                     .absolute()
+                    .top_0()
+                    .left_0()
                     .size_full()
                     .flex()
                     .items_center()
@@ -199,17 +225,6 @@ impl App {
             .viewer_morph
             .as_ref()
             .is_some_and(|morph| !morph.closing);
-        let nav_driver = div().size(px(0.)).with_animation(
-            ("viewer-nav-driver", nav_epoch),
-            Animation::new(if nav_epoch == 0 {
-                Duration::ZERO
-            } else {
-                MOTION_BASE
-            })
-            .with_easing(ease_motion)
-            .with_max_fps(self.motion_fps()),
-            |el, _| el,
-        );
         let image_area = div()
             .id("viewer-image-area")
             .relative()
@@ -223,7 +238,6 @@ impl App {
             .p(px(VIEWER_PAD))
             .opacity(if opening_morph { 0.0 } else { 1.0 })
             .on_click(cx.listener(|this, _, window, cx| this.close_quick_look(window, cx)))
-            .child(nav_driver)
             .child(image_frame);
 
         let mut details_panel = v_flex().h_full().flex_shrink_0().overflow_hidden();
@@ -404,5 +418,27 @@ impl Render for ViewerMorphView {
             .when_some(backdrop, |this, backdrop| this.child(backdrop))
             .child(frame)
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::viewer_nav_frame;
+    use crate::ui::theme::VIEWER_NAV_SLIDE;
+
+    #[test]
+    fn viewer_nav_frame_hits_both_ends() {
+        assert_eq!(
+            viewer_nav_frame(0.0, 1.0),
+            (1.0, 0.0, 0.0, VIEWER_NAV_SLIDE)
+        );
+        assert_eq!(
+            viewer_nav_frame(1.0, 1.0),
+            (0.0, -VIEWER_NAV_SLIDE, 1.0, 0.0)
+        );
+        assert_eq!(
+            viewer_nav_frame(0.0, -1.0),
+            (1.0, 0.0, 0.0, -VIEWER_NAV_SLIDE)
+        );
     }
 }

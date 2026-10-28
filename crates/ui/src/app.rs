@@ -106,7 +106,6 @@ pub struct App {
     pub(crate) viewer_return_source: Option<ViewerOpenSource>,
     pub(crate) viewer_nav_epoch: u64,
     pub(crate) viewer_nav_direction: f32,
-    pub(crate) viewer_nav_started_at: Instant,
     pub(crate) viewer_open_started_at: Instant,
     pub(crate) viewer_box: ViewerBoxState,
     pub(crate) viewer_panel: ViewerPanelState,
@@ -391,7 +390,6 @@ impl App {
             viewer_return_source: None,
             viewer_nav_epoch: 0,
             viewer_nav_direction: 1.0,
-            viewer_nav_started_at: Instant::now(),
             viewer_open_started_at: Instant::now(),
             viewer_box: ViewerBoxState {
                 epoch: 0,

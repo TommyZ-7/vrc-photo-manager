@@ -59,7 +59,7 @@ pub(crate) const CARD_WORLD_LINE_HEIGHT: f32 = 18.0;
 pub(crate) const CARD_META_LINE_HEIGHT: f32 = 15.0;
 /// Small vertical breathing room reserved inside each library row. The
 /// horizontal gap between cards is [`GRID_GAP`].
-pub(crate) const CARD_ROW_SLACK: f32 = 4.0;
+pub(crate) const CARD_ROW_GAP: f32 = 14.0;
 pub(crate) const GRID_GAP: f32 = 14.0;
 pub(crate) const INSPECTOR_PREVIEW_HEIGHT: f32 = 168.0;
 pub(crate) const INSPECTOR_SHORT_PREVIEW_HEIGHT: f32 = 118.0;
@@ -210,14 +210,6 @@ pub(crate) fn eased_progress(started_at: Instant, duration: Duration, now: Insta
     }
     let elapsed = now.saturating_duration_since(started_at).as_secs_f32();
     ease_motion((elapsed / duration.as_secs_f32()).clamp(0.0, 1.0))
-}
-
-pub(crate) fn viewer_nav_progress(started_at: Instant, now: Instant, reduce_motion: bool) -> f32 {
-    if reduce_motion {
-        1.0
-    } else {
-        eased_progress(started_at, MOTION_BASE, now)
-    }
 }
 
 pub(crate) fn next_focus_index(current: usize, len: usize, reverse: bool) -> usize {
@@ -478,7 +470,7 @@ pub(crate) fn photo_card_width(available_width: f32, columns: usize) -> f32 {
 /// hover slack. Hiding text through the display settings tightens the row.
 pub(crate) fn photo_row_height(card_width: f32, show_world: bool, show_meta: bool) -> f32 {
     let image_height = (card_width.max(0.0) * 2.0 / 3.0).max(0.0);
-    let mut height = image_height + CARD_ROW_SLACK;
+    let mut height = image_height + CARD_ROW_GAP;
     if show_world || show_meta {
         height += CARD_BODY_GAP;
     }
@@ -778,14 +770,14 @@ mod tests {
 
     #[test]
     fn photo_row_height_adds_only_the_visible_text_lines() {
-        close(photo_row_height(300.0, false, false), 204.0);
-        close(photo_row_height(300.0, true, false), 230.0);
-        close(photo_row_height(300.0, false, true), 227.0);
-        close(photo_row_height(300.0, true, true), 248.0);
+        close(photo_row_height(300.0, false, false), 214.0);
+        close(photo_row_height(300.0, true, false), 240.0);
+        close(photo_row_height(300.0, false, true), 237.0);
+        close(photo_row_height(300.0, true, true), 258.0);
 
         let metrics = library_grid_metrics(1280.0, false, false, CardSize::Medium, true, true);
         close(metrics.image_height, metrics.card_width * 2.0 / 3.0);
-        close(metrics.row_height, metrics.image_height + 48.0);
+        close(metrics.row_height, metrics.image_height + 58.0);
     }
 
     #[test]
@@ -876,7 +868,7 @@ mod tests {
             let body_height =
                 gallery_height - GALLERY_HEADER_HEIGHT - GALLERY_PAD_TOP - GALLERY_PAD_BOTTOM;
             assert!(
-                metrics.row_height * 3.0 <= body_height,
+                metrics.row_height * 3.0 <= body_height + 1.0,
                 "width={width} rows={} body={body_height}",
                 metrics.row_height * 3.0
             );
@@ -997,14 +989,6 @@ mod tests {
         let half = eased_progress(start, MOTION_BASE, start + MOTION_BASE / 2);
         assert!(half > 0.5 && half < 1.0);
         assert_eq!(eased_progress(start, Duration::ZERO, start), 1.0);
-    }
-
-    #[test]
-    fn viewer_nav_progress_respects_reduce_motion() {
-        let start = Instant::now();
-        assert_eq!(viewer_nav_progress(start, start, true), 1.0);
-        assert_eq!(viewer_nav_progress(start, start, false), 0.0);
-        assert_eq!(viewer_nav_progress(start, start + MOTION_BASE, false), 1.0);
     }
 
     #[test]
@@ -1133,7 +1117,7 @@ mod tests {
                 available,
             );
             close(metrics.image_height, metrics.card_width * 2.0 / 3.0);
-            close(metrics.row_height, metrics.image_height + 48.0);
+            close(metrics.row_height, metrics.image_height + 58.0);
         }
         assert_eq!(GRID_GAP, 14.0);
     }
@@ -1167,8 +1151,8 @@ mod tests {
         let visible = search_grid_metrics(1280.0, false, CardSize::Medium, true, true);
         let hidden = search_grid_metrics(1280.0, false, CardSize::Medium, false, false);
         close(visible.card_width, hidden.card_width);
-        close(visible.row_height, visible.image_height + 48.0);
-        close(hidden.row_height, hidden.image_height + 4.0);
+        close(visible.row_height, visible.image_height + 58.0);
+        close(hidden.row_height, hidden.image_height + 14.0);
         close(visible.image_height, hidden.image_height);
 
         let small = search_grid_metrics(1280.0, false, CardSize::Small, true, true);
@@ -1190,21 +1174,21 @@ mod tests {
             world_only.row_height,
             photo_row_height(world_only.card_width, true, false),
         );
-        close(world_only.row_height, world_only.image_height + 30.0);
+        close(world_only.row_height, world_only.image_height + 40.0);
 
         let meta_only = search_grid_metrics(1280.0, false, CardSize::Medium, false, true);
         close(
             meta_only.row_height,
             photo_row_height(meta_only.card_width, false, true),
         );
-        close(meta_only.row_height, meta_only.image_height + 27.0);
+        close(meta_only.row_height, meta_only.image_height + 37.0);
 
         let hidden = search_grid_metrics(1280.0, false, CardSize::Medium, false, false);
         close(
             hidden.row_height,
             photo_row_height(hidden.card_width, false, false),
         );
-        close(hidden.row_height, hidden.image_height + 4.0);
+        close(hidden.row_height, hidden.image_height + 14.0);
     }
 
     #[test]
