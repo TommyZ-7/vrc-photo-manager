@@ -614,7 +614,8 @@ impl Render for App {
             .gap(px(WORKSPACE_GAP))
             .child(self.sidebar(layout.content_height, cx))
             .child(main)
-            .child(self.nav_tooltip());
+            .child(self.nav_tooltip())
+            .child(self.rail_toggle(cx));
         let root = h_flex()
             .relative()
             .size_full()

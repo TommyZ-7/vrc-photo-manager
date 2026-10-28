@@ -59,39 +59,10 @@ pub(crate) fn ribbon_metrics(window_height: f32) -> RibbonMetrics {
     }
 }
 
-/// §8.2: the ribbon's right-hand status note disappears at 1180 px and below.
-pub(crate) const NARROW_CHROME_WIDTH: f32 = 1180.0;
-
 /// Below this header width the labelled ribbon no longer fits beside the
-/// status note. The compact ribbon keeps the same commands as icons with
-/// tooltips so nothing clips and there is no horizontal scrollbar.
+/// remaining controls. The compact ribbon keeps the same commands as icons
+/// with tooltips so nothing clips and there is no horizontal scrollbar.
 pub(crate) const RIBBON_LABELS_MIN_WIDTH: f32 = 1000.0;
-
-/// The titlebar's compact sync readout hides with the ribbon status note so
-/// the screen crumb, notification indicator, and window controls keep their
-/// room at narrow widths.
-pub(crate) fn titlebar_sync_visible(window_width: f32) -> bool {
-    window_width > NARROW_CHROME_WIDTH
-}
-
-/// Compact sync text for the 46px titlebar. The full `daemon_sync_label`
-/// (including the supervisor) stays on the Dashboard; the titlebar only needs
-/// the age or transport state.
-pub(crate) fn titlebar_sync_label(
-    age_secs: Option<i64>,
-    _supervisor: Option<&str>,
-    ipc_connected: bool,
-    demo: bool,
-) -> String {
-    if demo {
-        return "デモ".to_string();
-    }
-    match age_secs.filter(|age| *age < 20) {
-        Some(age) => format!("{age}秒前"),
-        None if ipc_connected => "IPC".to_string(),
-        None => "停止".to_string(),
-    }
-}
 
 /// Chrome values derived from the window's content extent.
 ///
@@ -105,7 +76,6 @@ pub(crate) struct ChromeLayout {
     pub(crate) content_height: f32,
     pub(crate) ribbon_height: f32,
     pub(crate) ribbon_metrics: RibbonMetrics,
-    pub(crate) sync_visible: bool,
 }
 
 pub(crate) fn chrome_layout(
@@ -126,7 +96,6 @@ pub(crate) fn chrome_layout(
         content_height,
         ribbon_height: ribbon_height(content_height),
         ribbon_metrics,
-        sync_visible: titlebar_sync_visible(content_width),
     }
 }
 
@@ -136,8 +105,6 @@ pub(crate) fn chrome_layout(
 /// list in sync with every icon passed to [`chrome_icon`].
 const CHROME_ICONS: &[IconName] = &[
     IconName::Asterisk,
-    IconName::Calendar,
-    IconName::Bell,
     IconName::ChevronDown,
     IconName::ChevronUp,
     IconName::Copy,
@@ -176,7 +143,7 @@ impl App {
     /// Header card: titlebar line plus the ribbon body. Sits above the
     /// transparent content area with a 14px gap.
     pub(crate) fn chrome(&mut self, layout: ChromeLayout, cx: &mut Context<Self>) -> AnyElement {
-        let titlebar = self.titlebar(layout.sync_visible, cx);
+        let titlebar = self.titlebar(cx);
         let collapsed = self.ribbon_collapsed;
         let epoch = self.ribbon_epoch;
         let body_height = layout.ribbon_height;
@@ -224,7 +191,7 @@ impl App {
             .into_any_element()
     }
 
-    fn titlebar(&mut self, show_sync: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn titlebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let screen = self.screen;
 
         let app_glyph = div()
@@ -249,62 +216,7 @@ impl App {
                     .text_color(rgb(0xffffff)),
             );
 
-        let (daemon_tone, daemon_label, daemon_border, daemon_bg) = if self.demo_assets.is_some() {
-            (BLUE, "デモモード", rgba(0x8bcbff29), rgba(0x8bcbff0e))
-        } else if !self.daemon_active {
-            (MUTED_2, "デーモン停止", rgba(0xffffff14), rgba(0xffffff08))
-        } else if self.daemon_paused {
-            (AMBER, "一時停止中", rgba(0xf4c87829), rgba(0xf4c87812))
-        } else {
-            (GREEN, "デーモン稼働中", rgba(0x7ee2b829), rgba(0x7ee2b80e))
-        };
         let collapsed = self.ribbon_collapsed;
-
-        let status_pill = h_flex()
-            .flex_shrink_0()
-            .h(px(22.))
-            .px(px(8.))
-            .gap(px(6.))
-            .items_center()
-            .rounded_full()
-            .border_1()
-            .border_color(daemon_border)
-            .bg(daemon_bg)
-            .child(div().size(px(4.)).rounded_full().bg(rgb(daemon_tone)))
-            .child(
-                div()
-                    .text_size(px(8.5))
-                    .text_color(rgb(daemon_tone))
-                    .whitespace_nowrap()
-                    .child(daemon_label),
-            );
-
-        let sync = titlebar_sync_label(
-            self.daemon_age_secs,
-            self.daemon_supervisor.as_deref(),
-            self.ipc_connected,
-            self.demo_assets.is_some(),
-        );
-        let sync_label = h_flex()
-            .min_w_0()
-            .max_w(px(96.))
-            .gap(px(4.))
-            .items_center()
-            .child(
-                chrome_icon(IconName::Calendar)
-                    .with_size(px(11.))
-                    .text_color(rgb(MUTED_2)),
-            )
-            .child(
-                div()
-                    .min_w_0()
-                    .max_w(px(96.))
-                    .truncate()
-                    .font_family("monospace")
-                    .text_size(px(7.5))
-                    .text_color(rgb(MUTED_2))
-                    .child(sync),
-            );
 
         let line = h_flex()
             .flex_1()
@@ -334,8 +246,6 @@ impl App {
                     .child(screen.title()),
             )
             .child(div().flex_1().min_w_0())
-            .child(status_pill)
-            .when(show_sync, |this| this.child(sync_label))
             .child(collapse_button(collapsed, cx))
             .child(self.notification_button(cx));
 
@@ -780,10 +690,7 @@ fn large_button(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CHROME_ICONS, chrome_layout, is_bundled, ribbon_height, ribbon_metrics,
-        titlebar_sync_label, titlebar_sync_visible,
-    };
+    use super::{CHROME_ICONS, chrome_layout, is_bundled, ribbon_height, ribbon_metrics};
 
     #[test]
     fn ribbon_height_switches_at_760() {
@@ -849,23 +756,6 @@ mod tests {
     }
 
     #[test]
-    fn titlebar_sync_hides_at_1180() {
-        assert!(!titlebar_sync_visible(1180.0));
-        assert!(titlebar_sync_visible(1181.0));
-    }
-
-    #[test]
-    fn titlebar_sync_label_stays_compact() {
-        assert_eq!(titlebar_sync_label(Some(5), None, true, false), "5秒前");
-        assert_eq!(titlebar_sync_label(None, None, true, false), "IPC");
-        assert_eq!(titlebar_sync_label(None, None, false, false), "停止");
-        assert_eq!(
-            titlebar_sync_label(None, Some("systemd"), true, true),
-            "デモ"
-        );
-    }
-
-    #[test]
     fn chrome_layout_uses_the_content_extent() {
         // The requested 1080x700 is the content size; X11 reports the outer
         // 1120x740 window, and the 20 px CSD inset on each edge is removed.
@@ -876,14 +766,12 @@ mod tests {
         let mut expected_metrics = ribbon_metrics(700.0);
         expected_metrics.compact = true;
         assert_eq!(minimum.ribbon_metrics, expected_metrics);
-        assert!(!minimum.sync_visible);
 
-        // 1280x820 content keeps the regular ribbon and sync readout.
+        // 1280x820 content keeps the regular ribbon.
         let regular = chrome_layout(1320.0, 860.0, 20.0, false);
         assert_eq!(regular.content_width, 1280.0);
         assert_eq!(regular.content_height, 820.0);
         assert_eq!(regular.ribbon_height, 68.0);
-        assert!(regular.sync_visible);
 
         let large = chrome_layout(1480.0, 940.0, 20.0, false);
         assert_eq!(large.content_width, 1440.0);
@@ -894,7 +782,5 @@ mod tests {
     fn chrome_layout_thresholds_sit_on_the_content_edge() {
         assert_eq!(chrome_layout(1200.0, 760.0, 0.0, false).ribbon_height, 62.0);
         assert_eq!(chrome_layout(1200.0, 761.0, 0.0, false).ribbon_height, 68.0);
-        assert!(!chrome_layout(1180.0, 820.0, 0.0, false).sync_visible);
-        assert!(chrome_layout(1181.0, 820.0, 0.0, false).sync_visible);
     }
 }

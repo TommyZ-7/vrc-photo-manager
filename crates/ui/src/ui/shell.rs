@@ -83,18 +83,10 @@ impl App {
                     .blur_radius(px(0.)),
             ])
             .child(
-                h_flex()
-                    .h(px(34.))
-                    .px(px(2.))
-                    .items_center()
-                    .when(collapsed, |this| this.justify_center())
-                    .child(self.sidebar_toggle_button(cx)),
-            )
-            .child(div().h(px(12.)))
-            .child(
                 v_flex()
                     .relative()
                     .w_full()
+                    .pr(px(18.))
                     .gap(px(NAV_ITEM_GAP))
                     .child(self.nav_highlight())
                     .child(self.nav_item(
@@ -161,26 +153,6 @@ impl App {
             })
             .when(collapsed, |this| this.child(self.sidebar_compact_stats()))
             .child(
-                h_flex()
-                    .h(px(26.))
-                    .gap(px(7.))
-                    .items_center()
-                    .when(collapsed, |this| this.justify_center())
-                    .when(!collapsed, |this| this.px(px(9.)))
-                    .child(
-                        div()
-                            .size(px(6.))
-                            .rounded_full()
-                            .bg(rgb(if !self.daemon_active {
-                                MUTED_2
-                            } else if self.daemon_paused {
-                                AMBER
-                            } else {
-                                GREEN
-                            })),
-                    ),
-            )
-            .child(
                 div()
                     .h(px(20.))
                     .flex()
@@ -215,8 +187,9 @@ impl App {
         .into_any_element()
     }
 
-    fn sidebar_toggle_button(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn rail_toggle(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let collapsed = self.sidebar_collapsed;
+        let epoch = self.sidebar_motion_epoch;
         let icon = if collapsed {
             IconName::ChevronRight
         } else {
@@ -227,14 +200,37 @@ impl App {
         } else {
             "サイドバーを最小化 (Ctrl+B)"
         };
-        Button::new("sidebar-toggle")
-            .ghost()
-            .icon(icon)
-            .tooltip(tooltip)
-            .size(px(28.))
-            .rounded(px(8.))
-            .text_color(rgb(MUTED))
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)))
+        let (from_left, top) = rail_toggle_origin(!collapsed);
+        let (to_left, _) = rail_toggle_origin(collapsed);
+
+        div()
+            .absolute()
+            .top(px(top))
+            .left(px(from_left))
+            .child(
+                Button::new("sidebar-toggle")
+                    .ghost()
+                    .icon(icon)
+                    .tooltip(tooltip)
+                    .size(px(24.))
+                    .rounded_full()
+                    .bg(rgb(0x131923))
+                    .border_1()
+                    .border_color(rgb(BORDER_STRONG))
+                    .text_color(rgb(MUTED))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
+            )
+            .with_animation(
+                ("rail-toggle", epoch),
+                Animation::new(if epoch == 0 {
+                    Duration::ZERO
+                } else {
+                    Duration::from_millis(440)
+                })
+                .with_easing(ease_motion)
+                .with_max_fps(self.motion_fps()),
+                move |el, t| el.left(px(from_left + (to_left - from_left) * t)),
+            )
             .into_any_element()
     }
 
@@ -743,11 +739,12 @@ impl App {
             return div().absolute().into_any_element();
         };
         let index = nav_index(screen);
+        let (left, top) = nav_tooltip_origin(index);
 
         div()
             .absolute()
-            .left(px(100.))
-            .top(px(76.0 + nav_item_top(index)))
+            .left(px(left - 4.0))
+            .top(px(top))
             .px(px(8.))
             .py(px(5.))
             .rounded(px(7.))
@@ -763,7 +760,7 @@ impl App {
                 Animation::new(MOTION_FAST)
                     .with_easing(ease_motion)
                     .with_max_fps(self.motion_fps()),
-                move |el, t| el.opacity(t).relative().left(px(-4.0 * (1.0 - t))),
+                move |el, t| el.opacity(t).left(px(left - 4.0 + 4.0 * t)),
             )
             .into_any_element()
     }
@@ -1034,6 +1031,25 @@ fn nav_item_top(index: usize) -> f32 {
     index as f32 * (NAV_ITEM_HEIGHT + NAV_ITEM_GAP)
 }
 
+/// Screen-space origin of the collapsed-sidebar tooltip. The menu starts at
+/// the sidebar's top padding (there is no in-flow toggle row), so the tooltip
+/// tracks the item top plus half of its height.
+pub(crate) fn nav_tooltip_origin(index: usize) -> (f32, f32) {
+    (
+        WORKSPACE_PAD + sidebar_width(true) + 8.0,
+        WORKSPACE_PAD + 16.0 + nav_item_top(index) + 8.5,
+    )
+}
+
+/// Screen-space origin of the floating rail toggle. It straddles the sidebar's
+/// right edge like the v0.7.0 control.
+pub(crate) fn rail_toggle_origin(sidebar_collapsed: bool) -> (f32, f32) {
+    (
+        WORKSPACE_PAD + sidebar_width(sidebar_collapsed) - 12.0,
+        WORKSPACE_PAD + 18.0,
+    )
+}
+
 fn nav_bar_left(collapsed: bool) -> f32 {
     if collapsed { 5.0 } else { -1.0 }
 }
@@ -1051,8 +1067,8 @@ mod tests {
     use super::{
         NAV_ITEM_GAP, NAV_ITEM_HEIGHT, StatusTone, compression_attention, compression_card_status,
         import_attention, import_card_status, import_running_progress, nav_index, nav_item_top,
-        running_job_count, scan_attention, scan_card_status, scan_progress_label,
-        scan_progress_ratio, screen_direction,
+        nav_tooltip_origin, rail_toggle_origin, running_job_count, scan_attention,
+        scan_card_status, scan_progress_label, scan_progress_ratio, screen_direction,
     };
     use crate::app::Screen;
     use crate::app::import::{
@@ -1083,6 +1099,18 @@ mod tests {
         assert_eq!(nav_item_top(0), 0.0);
         assert_eq!(nav_item_top(1), NAV_ITEM_HEIGHT + NAV_ITEM_GAP);
         assert_eq!(nav_item_top(4), 4.0 * (NAV_ITEM_HEIGHT + NAV_ITEM_GAP));
+    }
+
+    #[test]
+    fn nav_tooltip_origin_follows_the_top_aligned_menu() {
+        assert_eq!(nav_tooltip_origin(0), (100.0, 38.5));
+        assert_eq!(nav_tooltip_origin(1), (100.0, 81.5));
+    }
+
+    #[test]
+    fn rail_toggle_origin_straddles_the_sidebar_edge() {
+        assert_eq!(rail_toggle_origin(false), (240.0, 32.0));
+        assert_eq!(rail_toggle_origin(true), (80.0, 32.0));
     }
 
     #[test]
