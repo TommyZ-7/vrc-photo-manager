@@ -393,7 +393,7 @@ impl App {
                     .child(status.detail.clone()),
             );
         if let Some(ratio) = ratio {
-            body = body.child(status_progress_bar(ratio));
+            body = body.child(status_progress_bar(&self.palette, ratio));
         }
 
         let footer = match tab {

@@ -24,6 +24,7 @@ use crate::ui::theme::*;
 
 impl App {
     pub(crate) fn settings_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.palette;
         let autostart_hint =
             autostart_description(self.daemon_active, self.daemon_supervisor.as_deref());
         h_flex()
@@ -41,7 +42,7 @@ impl App {
                     .track_scroll(&self.settings_scroll)
                     .gap(px(CARD_GAP))
                     .child(
-                        glass_panel()
+                        glass_panel(&self.palette)
                             .flex()
                             .flex_col()
                             .p(px(14.))
@@ -51,7 +52,7 @@ impl App {
                                 div()
                                     .text_size(px(13.))
                                     .font_semibold()
-                                    .text_color(rgb(TEXT))
+                                    .text_color(rgb(p.text))
                                     .child("ライブラリ"),
                             )
                             .child(
@@ -161,13 +162,13 @@ impl App {
                                     .child(
                                         div()
                                             .text_size(px(10.))
-                                            .text_color(rgb(MUTED_2))
+                                            .text_color(rgb(p.muted_2))
                                             .child("保存時に再スキャンを要求します（停止中なら起動後に実行）"),
                                     ),
                             ),
                     )
                     .child(
-                        glass_panel()
+                        glass_panel(&self.palette)
                             .flex()
                             .flex_col()
                             .p(px(14.))
@@ -177,7 +178,7 @@ impl App {
                                 div()
                                     .text_size(px(13.))
                                     .font_semibold()
-                                    .text_color(rgb(TEXT))
+                                    .text_color(rgb(p.text))
                                     .child("表示（ライブラリ・検索）"),
                             )
                             .child(self.setting_switch(
@@ -214,7 +215,7 @@ impl App {
                             ))
                     )
                     .child(
-                        glass_panel()
+                        glass_panel(&self.palette)
                             .flex()
                             .flex_col()
                             .p(px(14.))
@@ -224,7 +225,7 @@ impl App {
                                 div()
                                     .text_size(px(13.))
                                     .font_semibold()
-                                    .text_color(rgb(TEXT))
+                                    .text_color(rgb(p.text))
                                     .child("パフォーマンス"),
                             )
                             .child(
@@ -233,13 +234,13 @@ impl App {
                                     .child(
                                         div()
                                             .text_size(px(12.))
-                                            .text_color(rgb(TEXT))
+                                            .text_color(rgb(p.text))
                                             .child("アニメーションの最大FPS"),
                                     )
                                     .child(
                                         div()
                                             .text_size(px(10.))
-                                            .text_color(rgb(MUTED_2))
+                                            .text_color(rgb(p.muted_2))
                                             .child("0（無制限）はモニタのリフレッシュレートまで描画します"),
                                     )
                                     .child(
@@ -267,16 +268,16 @@ impl App {
                                                         .py(px(5.))
                                                         .rounded(px(8.))
                                                         .bg(if active {
-                                                            rgb(ACCENT_SOFT)
+                                                            rgb(p.accent_soft)
                                                         } else {
                                                             rgba(0x00000000)
                                                         })
                                                         .text_size(px(11.))
                                                         .font_medium()
                                                         .text_color(if active {
-                                                            rgb(BLUE)
+                                                            rgb(p.accent)
                                                         } else {
-                                                            rgb(MUTED)
+                                                            rgb(p.muted)
                                                         })
                                                         .cursor_pointer()
                                                         .on_click(cx.listener(
@@ -291,7 +292,7 @@ impl App {
                             ),
                     )
                     .child(
-                        glass_panel()
+                        glass_panel(&self.palette)
                             .flex()
                             .flex_col()
                             .p(px(14.))
@@ -301,7 +302,7 @@ impl App {
                                 div()
                                     .text_size(px(13.))
                                     .font_semibold()
-                                    .text_color(rgb(TEXT))
+                                    .text_color(rgb(p.text))
                                     .child("起動と圧縮"),
                             )
                             .child(self.setting_switch(
@@ -356,11 +357,11 @@ impl App {
                                         div()
                                             .p(px(12.))
                                             .rounded(px(8.))
-                                            .bg(rgb(0x2a1414))
+                                            .bg(rgb(p.red_soft))
                                             .border_1()
-                                            .border_color(rgba(0xfb718533))
+                                            .border_color(rgba(p.red_border))
                                             .text_size(px(10.))
-                                            .text_color(rgb(RED))
+                                            .text_color(rgb(p.red))
                                             .child(warning),
                                     )
                                 },
@@ -376,13 +377,13 @@ impl App {
                                             .child(
                                                 div()
                                                     .text_size(px(12.))
-                                                    .text_color(rgb(TEXT))
+                                                    .text_color(rgb(p.text))
                                                     .child("アニメーションを減らす"),
                                             )
                                             .child(
                                                 div()
                                                     .text_size(px(10.))
-                                                    .text_color(rgb(MUTED_2))
+                                                    .text_color(rgb(p.muted_2))
                                                     .child(
                                                         "画面遷移とカードの動きを抑制します",
                                                     ),
@@ -416,7 +417,7 @@ impl App {
                             .child(
                                 div()
                                     .text_size(px(10.))
-                                    .text_color(rgb(MUTED_2))
+                                    .text_color(rgb(p.muted_2))
                                     .child(format!(
                                         "言語: {} · サムネイルキャッシュ: {} MB",
                                         self.settings.language, self.settings.thumbnail_cache_mb

@@ -86,7 +86,7 @@ impl App {
     }
 
     fn session_card(&self) -> impl IntoElement {
-        glass_panel()
+        glass_panel(&self.palette)
             .flex()
             .flex_col()
             .flex_shrink_0()
@@ -131,7 +131,7 @@ impl App {
     }
 
     fn monitor_paths_card(&self) -> impl IntoElement {
-        glass_panel()
+        glass_panel(&self.palette)
             .flex()
             .flex_col()
             .flex_shrink_0()
@@ -203,7 +203,7 @@ impl App {
             "監視を一時停止"
         };
 
-        let mut card = glass_panel()
+        let mut card = glass_panel(&self.palette)
             .flex()
             .flex_col()
             .flex_shrink_0()
@@ -290,7 +290,7 @@ impl App {
     }
 
     pub(crate) fn daemon_error_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut card = glass_panel()
+        let mut card = glass_panel(&self.palette)
             .flex()
             .flex_col()
             .flex_shrink_0()
@@ -395,7 +395,7 @@ impl App {
 
     pub(crate) fn log_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let dir = logs_dir();
-        let mut card = glass_panel()
+        let mut card = glass_panel(&self.palette)
             .flex()
             .flex_col()
             .flex_shrink_0()

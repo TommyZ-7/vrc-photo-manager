@@ -281,7 +281,7 @@ impl App {
         if rows == 0 {
             let empty = if search {
                 if self.search_active {
-                    glass_panel()
+                    glass_panel(&self.palette)
                         .p(px(20.))
                         .text_size(px(12.))
                         .text_color(rgb(MUTED))
@@ -837,7 +837,7 @@ impl App {
                 .h_full()
                 .flex_shrink_0()
                 .child(
-                    glass_panel()
+                    glass_panel(&self.palette)
                         .flex_1()
                         .w(px(card_width))
                         .rounded(px(17.))

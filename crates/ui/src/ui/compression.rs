@@ -72,7 +72,7 @@ impl App {
             .child(self.profile_list_card(cx))
             .child(match profile {
                 Some(profile) => self.profile_editor(&profile, window, cx).into_any_element(),
-                None => glass_panel()
+                None => glass_panel(&self.palette)
                     .flex()
                     .flex_1()
                     .min_h_0()
@@ -90,7 +90,7 @@ impl App {
     /// profile cards in a scroll body.
     fn profile_list_card(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let profile_count = self.profiles.len();
-        glass_panel()
+        glass_panel(&self.palette)
             .flex()
             .flex_col()
             .w(px(COMPRESSION_PROFILE_WIDTH))
@@ -112,7 +112,7 @@ impl App {
                         let auto = profile.auto_enabled;
                         let title = profile.name.clone();
                         let meta = profile_summary(profile);
-                        glass_panel()
+                        glass_panel(&self.palette)
                             .id(SharedString::from(format!("profile-{index}")))
                             .flex()
                             .flex_col()
@@ -289,7 +289,7 @@ impl App {
             Some(dir) if Path::new(dir).is_absolute() => "絶対パス".to_string(),
             Some(_) => "相対パス: 元画像のフォルダ基準".to_string(),
         };
-        glass_panel()
+        glass_panel(&self.palette)
             .flex()
             .flex_col()
             .flex_1()
@@ -901,7 +901,7 @@ impl App {
 
     pub(crate) fn queue_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let retryable_jobs = self.failed_jobs.iter().any(job_retry_available);
-        glass_panel()
+        glass_panel(&self.palette)
             .flex()
             .flex_col()
             .flex_1()

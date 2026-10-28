@@ -55,6 +55,7 @@ impl App {
             let id = profile.id.clone();
             let selected = profile.id == dialog.profile_id;
             manual_option_row(
+                &self.palette,
                 SharedString::from(format!("manual-profile-{}", profile.id)),
                 profile.name.clone(),
                 profile_summary(&profile),
@@ -70,6 +71,7 @@ impl App {
         });
 
         let folder_row = manual_option_row(
+            &self.palette,
             "manual-output-folder",
             "指定したフォルダに出力",
             "実行のたびに出力先を選びます",
@@ -84,6 +86,7 @@ impl App {
         }));
 
         let profile_row = manual_option_row(
+            &self.palette,
             "manual-output-profile",
             "プロファイル指定のフォルダに出力",
             profile_description,
@@ -99,6 +102,7 @@ impl App {
 
         let clipboard_enabled = manual_output_available(count, ManualOutputTarget::Clipboard);
         let clipboard_row = manual_option_row(
+            &self.palette,
             "manual-output-clipboard",
             "クリップボードに出力",
             if clipboard_enabled {
@@ -119,6 +123,7 @@ impl App {
         });
 
         let keep_row = manual_option_row(
+            &self.palette,
             "manual-keep-original",
             "元画像を保持",
             "圧縮版を別ファイルで出力します",
@@ -132,6 +137,7 @@ impl App {
             cx.notify();
         }));
         let trash_row = manual_option_row(
+            &self.palette,
             "manual-trash-original",
             "元画像をゴミ箱へ移動",
             "圧縮に成功した場合だけOSゴミ箱へ移動します",
@@ -279,7 +285,7 @@ impl App {
                     .on_click(cx.listener(|this, _, _, cx| this.confirm_manual_compression(cx))),
             );
 
-        let panel = dialog_panel()
+        let panel = dialog_panel(&self.palette)
             .id("manual-compression-panel")
             .w(px(580.))
             .h(px(max_height))

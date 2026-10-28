@@ -36,7 +36,7 @@ impl App {
         let mode = import_mode_label(dialog.mode);
         let dest = dialog.dest.to_string_lossy().to_string();
 
-        let mut panel = dialog_panel()
+        let mut panel = dialog_panel(&self.palette)
             .id("import-dialog-panel")
             .w(px(560.))
             .gap(px(16.))

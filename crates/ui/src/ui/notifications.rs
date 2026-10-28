@@ -234,6 +234,7 @@ impl App {
     }
 
     pub(crate) fn notification_button(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
         let attention = self.notification_attention();
         div()
             .relative()
@@ -245,7 +246,7 @@ impl App {
                     .tooltip("通知")
                     .size(px(26.))
                     .rounded(px(6.))
-                    .text_color(rgb(MUTED_2))
+                    .text_color(rgb(p.muted_2))
                     .on_click(
                         cx.listener(|this, _, window, cx| this.open_notification_modal(window, cx)),
                     ),
@@ -258,9 +259,9 @@ impl App {
                         .right(px(5.))
                         .size(px(4.))
                         .rounded_full()
-                        .bg(rgb(AMBER))
+                        .bg(rgb(p.amber))
                         .shadow(vec![
-                            BoxShadow::new(px(0.), px(0.), rgba(0xf4c878cc).into())
+                            BoxShadow::new(px(0.), px(0.), rgba(with_alpha(p.amber, 0xcc)).into())
                                 .blur_radius(px(6.)),
                         ]),
                 )
@@ -273,6 +274,7 @@ impl App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let p = self.palette;
         if !self.notification_modal_open {
             return div().into_any_element();
         }
@@ -310,7 +312,7 @@ impl App {
                 div()
                     .p(px(16.))
                     .text_size(px(11.))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(p.muted))
                     .child("対応が必要な通知はありません")
                     .into_any_element(),
             );
@@ -341,7 +343,7 @@ impl App {
             .items_center()
             .justify_center()
             .p(px(24.))
-            .bg(rgba(0x05070acc))
+            .bg(rgba(p.scrim))
             .key_context("notification_modal")
             .occlude()
             .on_click(cx.listener(|this, _, window, cx| {
@@ -358,12 +360,11 @@ impl App {
                     .overflow_hidden()
                     .rounded(px(20.))
                     .border_1()
-                    .border_color(rgba(0xffffff1b))
-                    .bg(rgb(PANEL_DEEP))
+                    .border_color(rgba(p.line_soft))
+                    .bg(rgb(p.panel_deep))
                     .shadow(vec![
-                        BoxShadow::new(px(0.), px(24.), rgba(0x00000066).into())
-                            .blur_radius(px(56.)),
-                        BoxShadow::new(px(0.), px(1.), rgba(0xffffff10).into())
+                        BoxShadow::new(px(0.), px(24.), rgba(p.shadow).into()).blur_radius(px(56.)),
+                        BoxShadow::new(px(0.), px(1.), rgba(with_alpha(p.text, 0x10)).into())
                             .inset()
                             .blur_radius(px(0.)),
                     ])
@@ -376,17 +377,17 @@ impl App {
                             .gap(px(9.))
                             .items_center()
                             .border_b_1()
-                            .border_color(rgba(0xffffff14))
+                            .border_color(rgba(p.highlight))
                             .child(
                                 Icon::new(IconName::Bell)
                                     .with_size(px(16.))
-                                    .text_color(rgb(BLUE)),
+                                    .text_color(rgb(p.accent)),
                             )
                             .child(
                                 div()
                                     .text_size(px(14.))
                                     .font_semibold()
-                                    .text_color(rgb(TEXT))
+                                    .text_color(rgb(p.text))
                                     .child("通知"),
                             )
                             .child(div().flex_1())
@@ -418,6 +419,7 @@ impl App {
         report: &ImportReportView,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let p = self.palette;
         let (failed, partial) = import_issue_counts(&report.issues);
         let retryable = retryable_sources(&report.issues);
         let scan_failed = report.scan_failures.len() + usize::from(report.scan_error.is_some());
@@ -427,17 +429,21 @@ impl App {
 
         let mut badges = h_flex().flex_wrap().gap(px(6.));
         badges = badges
-            .child(self.badge(&format!("取込 {}", report.imported), GREEN, 0x102a24))
-            .child(self.badge(&format!("スキップ {}", report.skipped), MUTED, PANEL_2));
+            .child(self.badge(&format!("取込 {}", report.imported), p.green, p.green_soft))
+            .child(self.badge(&format!("スキップ {}", report.skipped), p.muted, p.panel_2));
         if failed > 0 {
-            badges = badges.child(self.badge(&format!("失敗 {failed}"), RED, 0x2a1414));
+            badges = badges.child(self.badge(&format!("失敗 {failed}"), p.red, p.red_soft));
         }
         if partial > 0 {
-            badges = badges.child(self.badge(&format!("部分移動 {partial}"), AMBER, 0x2b2210));
+            badges =
+                badges.child(self.badge(&format!("部分移動 {partial}"), p.amber, p.amber_soft));
         }
         if !report.renamed.is_empty() {
-            badges =
-                badges.child(self.badge(&format!("連番 {}", report.renamed.len()), BLUE, 0x14283d));
+            badges = badges.child(self.badge(
+                &format!("連番 {}", report.renamed.len()),
+                p.accent,
+                p.accent_soft,
+            ));
         }
         if !report.remaining.is_empty() {
             badges = badges.child(self.badge(
@@ -448,7 +454,7 @@ impl App {
         }
         if scan_failed > 0 {
             badges =
-                badges.child(self.badge(&format!("スキャン失敗 {scan_failed}"), RED, 0x2a1414));
+                badges.child(self.badge(&format!("スキャン失敗 {scan_failed}"), p.red, p.red_soft));
         }
 
         let mut actions = h_flex().flex_wrap().gap(px(6.));
@@ -507,9 +513,9 @@ impl App {
             .p(px(14.))
             .gap(px(10.))
             .rounded(px(14.))
-            .bg(rgb(PANEL))
+            .bg(rgb(p.panel))
             .border_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(p.border))
             .child(
                 h_flex()
                     .gap(px(8.))
@@ -518,17 +524,17 @@ impl App {
                         div()
                             .text_size(px(12.))
                             .font_semibold()
-                            .text_color(rgb(TEXT))
+                            .text_color(rgb(p.text))
                             .child("取り込み結果"),
                     )
-                    .child(self.badge(mode, BLUE, 0x14283d))
+                    .child(self.badge(mode, p.accent, p.accent_soft))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .truncate()
                             .text_size(px(10.))
-                            .text_color(rgb(MUTED_2))
+                            .text_color(rgb(p.muted_2))
                             .child(dest),
                     ),
             )
@@ -541,24 +547,25 @@ impl App {
     }
 
     fn library_notification(&self, error: &str, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
         v_flex()
             .p(px(14.))
             .gap(px(10.))
             .rounded(px(14.))
-            .bg(rgb(PANEL))
+            .bg(rgb(p.panel))
             .border_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(p.border))
             .child(
                 div()
                     .text_size(px(12.))
                     .font_semibold()
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(p.text))
                     .child("ライブラリ"),
             )
             .child(
                 div()
                     .text_size(px(11.))
-                    .text_color(rgb(RED))
+                    .text_color(rgb(p.red))
                     .child(error.to_string()),
             )
             .child(
@@ -574,24 +581,25 @@ impl App {
     }
 
     fn compression_notification(&self, count: i64, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
         v_flex()
             .p(px(14.))
             .gap(px(10.))
             .rounded(px(14.))
-            .bg(rgb(PANEL))
+            .bg(rgb(p.panel))
             .border_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(p.border))
             .child(
                 div()
                     .text_size(px(12.))
                     .font_semibold()
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(p.text))
                     .child("圧縮"),
             )
             .child(
                 div()
                     .text_size(px(11.))
-                    .text_color(rgb(AMBER))
+                    .text_color(rgb(p.amber))
                     .child(format!("{count} 件の失敗があります")),
             )
             .child(
@@ -621,24 +629,25 @@ impl App {
     }
 
     fn daemon_notification(&self, count: usize, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
         v_flex()
             .p(px(14.))
             .gap(px(10.))
             .rounded(px(14.))
-            .bg(rgb(PANEL))
+            .bg(rgb(p.panel))
             .border_1()
-            .border_color(rgb(BORDER))
+            .border_color(rgb(p.border))
             .child(
                 div()
                     .text_size(px(12.))
                     .font_semibold()
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(p.text))
                     .child("デーモン"),
             )
             .child(
                 div()
                     .text_size(px(11.))
-                    .text_color(rgb(AMBER))
+                    .text_color(rgb(p.amber))
                     .child(format!("{count} 件の処理エラーがあります")),
             )
             .child(

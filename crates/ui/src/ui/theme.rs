@@ -10,7 +10,7 @@ use gpui_kit::{Bounds, Pixels, Size, Window, point, px, size};
 use vrc_photo_core::model::{CompressionFormat, CompressionProfile};
 use vrc_photo_core::settings::CardSize;
 
-pub(crate) use crate::ui::palette::{Palette, lerp_color};
+pub(crate) use crate::ui::palette::{Palette, lerp_color, mix, with_alpha};
 
 pub(crate) const BG: u32 = 0x07090d;
 pub(crate) const PANEL: u32 = 0x121722;

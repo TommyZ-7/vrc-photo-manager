@@ -946,7 +946,7 @@ impl App {
         let busy = self.update.busy();
         let (status, fg, bg) = phase.badge();
 
-        let mut card = glass_panel()
+        let mut card = glass_panel(&self.palette)
             .flex()
             .flex_col()
             .flex_shrink_0()

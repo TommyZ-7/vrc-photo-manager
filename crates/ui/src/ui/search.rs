@@ -37,7 +37,7 @@ impl App {
         let total = self.search_view.index.total;
         let count = format!("{total} 枚");
         let selection = (self.selected_ids.len() > 1).then(|| self.selection_bar(cx));
-        let mut card = glass_panel()
+        let mut card = glass_panel(&self.palette)
             .flex()
             .flex_col()
             .flex_1()
@@ -101,7 +101,7 @@ impl App {
     }
 
     fn search_filter_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        glass_panel()
+        glass_panel(&self.palette)
             .flex()
             .flex_col()
             .w(px(SEARCH_FILTER_WIDTH))
