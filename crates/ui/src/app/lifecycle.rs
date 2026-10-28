@@ -35,6 +35,13 @@ pub(crate) struct ScanProgressView {
     pub(crate) roots: usize,
 }
 
+/// True when a live snapshot was collected before a revision the UI has
+/// already applied. Revisions are monotonic; an older observation must not
+/// trigger a reload or count comparison.
+pub(crate) fn is_stale_revision(observed: Option<i64>, current: i64) -> bool {
+    observed.is_some_and(|observed| observed < current)
+}
+
 impl App {
     pub(crate) fn start_ipc(&mut self, cx: &mut Context<Self>) {
         let Some(data_dir) = vrc_photo_core::data_dir() else {
@@ -314,13 +321,19 @@ impl App {
         cx: &mut Context<Self>,
     ) -> bool {
         let mut changed = false;
+        // A snapshot can be collected just before the UI bumps the revision
+        // (trash, compression). Revisions are monotonic, so ignore an older
+        // observation instead of reacting to it as a new change.
+        if is_stale_revision(revision, self.last_library_revision) {
+            return false;
+        }
         // A terminal compression refresh was already scheduled for this
         // revision. Its light path invalidates pages and reloads the side
         // panels without re-querying the 100k index; let it consume the
         // revision instead of racing it with a full reload.
         let compression_refresh_pending = self.compression_library_refresh_pending;
         if let Some(revision) = revision
-            && revision != self.last_library_revision
+            && revision > self.last_library_revision
             && !compression_refresh_pending
         {
             if self.screen == Screen::Photos {
@@ -675,5 +688,18 @@ impl App {
             window.focus(&focus_handle, cx);
         });
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_stale_revision;
+
+    #[test]
+    fn only_older_live_revisions_are_stale() {
+        assert!(is_stale_revision(Some(4), 5));
+        assert!(!is_stale_revision(Some(5), 5));
+        assert!(!is_stale_revision(Some(6), 5));
+        assert!(!is_stale_revision(None, 5));
     }
 }
