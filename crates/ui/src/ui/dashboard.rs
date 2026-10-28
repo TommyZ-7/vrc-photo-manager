@@ -476,17 +476,19 @@ impl App {
 
     pub(crate) fn open_logs_folder(&mut self, cx: &mut Context<Self>) {
         let Some(dir) = logs_dir() else {
-            self.message = Some("ログフォルダを特定できません".to_string());
+            self.toast_error("ログフォルダを特定できません", cx);
             cx.notify();
             return;
         };
         let result = std::fs::create_dir_all(&dir)
             .map_err(|error| error.to_string())
             .and_then(|()| open_path(&dir));
-        self.message = Some(match result {
-            Ok(()) => format!("ログフォルダを開きました: {}", dir.display()),
-            Err(error) => format!("ログフォルダを開けません: {error}"),
-        });
+        match result {
+            Ok(()) => {
+                self.toast_success(format!("ログフォルダを開きました: {}", dir.display()), cx)
+            }
+            Err(error) => self.toast_error(format!("ログフォルダを開けません: {error}"), cx),
+        }
         cx.notify();
     }
 }

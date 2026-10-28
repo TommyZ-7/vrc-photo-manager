@@ -118,9 +118,10 @@ impl App {
                                                         != previous.managed_dir;
                                                 if let Err(error) = this.settings.save(&this.db) {
                                                     this.settings = previous;
-                                                    this.message = Some(format!(
-                                                        "設定を保存できません: {error}"
-                                                    ));
+                                                    this.toast_error(
+                                                        format!("設定を保存できません: {error}"),
+                                                        cx,
+                                                    );
                                                     tracing::warn!(
                                                         %error,
                                                         "cannot save path settings"
@@ -138,18 +139,21 @@ impl App {
                                                     if requested.is_ok() {
                                                         this.send_wake_commands(cx);
                                                     }
-                                                    this.message = Some(match requested {
-                                                        Ok(_) => "保存しました。デーモンに再スキャンを要求しました（停止中なら起動後に実行）".to_string(),
-                                                        Err(error) => {
-                                                            tracing::warn!(
-                                                                %error,
-                                                                "cannot request daemon rescan"
-                                                            );
-                                                            "保存しました。デーモン再起動後に反映されます。".to_string()
-                                                        }
-                                                    });
+                                                    this.toast_success(
+                                                        match requested {
+                                                            Ok(_) => "保存しました。デーモンに再スキャンを要求しました（停止中なら起動後に実行）",
+                                                            Err(error) => {
+                                                                tracing::warn!(
+                                                                    %error,
+                                                                    "cannot request daemon rescan"
+                                                                );
+                                                                "保存しました。デーモン再起動後に反映されます。"
+                                                            }
+                                                        },
+                                                        cx,
+                                                    );
                                                 } else {
-                                                    this.message = Some("保存しました。".to_string());
+                                                    this.toast_success("保存しました。", cx);
                                                 }
                                                 cx.notify();
                                             })),

@@ -45,7 +45,6 @@ impl App {
             self.set_viewer_morph(None, cx);
             self.viewer_morph_epoch = self.viewer_morph_epoch.wrapping_add(1);
         }
-        self.message = None;
         self.note_edit_id = None;
         self.quick_look_return_focus = window.focused(cx);
         self.quick_look_photo_ids = self.viewer_source_ids();

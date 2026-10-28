@@ -226,23 +226,14 @@ impl App {
             .child(nav_driver)
             .child(image_frame);
 
-        let message = self.message.clone();
         let mut details_panel = v_flex().h_full().flex_shrink_0().overflow_hidden();
         if details_open {
-            let mut body = v_flex()
+            let body = v_flex()
                 .id("viewer-details-body")
                 .h_full()
                 .p(px(16.))
                 .gap(px(10.))
                 .overflow_y_scrollbar();
-            if let Some(message) = message {
-                body = body.child(
-                    div()
-                        .text_size(px(10.))
-                        .text_color(rgb(AMBER))
-                        .child(message),
-                );
-            }
             let body = body.child(self.detail_body(&photo, cx)).with_animation(
                 ("viewer-details-body", self.quick_look_details_epoch),
                 Animation::new(if self.quick_look_details_epoch == 0 {

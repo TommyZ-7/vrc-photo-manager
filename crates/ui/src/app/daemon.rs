@@ -197,14 +197,17 @@ impl App {
         match self.db.request_daemon_command(DaemonCommand::Rescan) {
             Ok(_) => {
                 self.send_wake_commands(cx);
-                self.message = Some(if self.ipc_connected {
-                    "再スキャンを要求しました。デーモンが処理します。".to_string()
-                } else {
-                    "再スキャンを要求しました。デーモン起動後に実行されます。".to_string()
-                });
+                self.toast_info(
+                    if self.ipc_connected {
+                        "再スキャンを要求しました。デーモンが処理します。"
+                    } else {
+                        "再スキャンを要求しました。デーモン起動後に実行されます。"
+                    },
+                    cx,
+                );
             }
             Err(error) => {
-                self.message = Some(format!("再スキャンを要求できません: {error}"));
+                self.toast_error(format!("再スキャンを要求できません: {error}"), cx);
             }
         }
         cx.notify();
@@ -212,7 +215,7 @@ impl App {
 
     pub(crate) fn toggle_daemon_pause(&mut self, cx: &mut Context<Self>) {
         if !self.ipc_connected {
-            self.message = Some("デーモン停止中です".to_string());
+            self.toast_warning("デーモン停止中です", cx);
             cx.notify();
             return;
         }
@@ -232,13 +235,13 @@ impl App {
 
     pub(crate) fn toggle_daemon_shutdown(&mut self, cx: &mut Context<Self>) {
         if !self.ipc_connected {
-            self.message = Some("デーモン停止中です".to_string());
+            self.toast_warning("デーモン停止中です", cx);
             cx.notify();
             return;
         }
         if !self.daemon_shutdown_armed {
             self.daemon_shutdown_armed = true;
-            self.message = Some("もう一度「デーモンを終了」を押すと終了します".to_string());
+            self.toast_warning("もう一度「デーモンを終了」を押すと終了します", cx);
             cx.notify();
             return;
         }
@@ -257,11 +260,9 @@ impl App {
         cx: &mut Context<Self>,
     ) {
         match self.db.request_daemon_command(command) {
-            Ok(true) => {
-                self.message = Some("再試行を要求しました。デーモンが処理します。".to_string())
-            }
-            Ok(false) => self.message = Some("すでに再試行を要求済みです。".to_string()),
-            Err(error) => self.message = Some(format!("再試行を要求できません: {error}")),
+            Ok(true) => self.toast_info("再試行を要求しました。デーモンが処理します。", cx),
+            Ok(false) => self.toast_info("すでに再試行を要求済みです。", cx),
+            Err(error) => self.toast_error(format!("再試行を要求できません: {error}"), cx),
         }
         self.send_wake_commands(cx);
         cx.notify();

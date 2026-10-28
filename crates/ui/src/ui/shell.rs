@@ -18,7 +18,6 @@ use crate::app::import::{
 };
 use crate::app::lifecycle::ScanProgressView;
 use crate::app::{App, Screen, SidebarStatusTab};
-use crate::ui::chrome::message_strip_visible;
 use crate::ui::components::status_progress_bar;
 use crate::ui::import::import_progress_ratio;
 use crate::ui::theme::*;
@@ -399,92 +398,91 @@ impl App {
             body = body.child(status_progress_bar(ratio));
         }
 
-        let footer =
-            match tab {
-                SidebarStatusTab::Compression => {
-                    let mut row = h_flex().items_center().h(px(24.)).gap(px(6.));
-                    if self.waiting_job_count > 0 {
-                        row = row.child(
-                            Button::new("sidebar-status-release-waiting")
-                                .label("未実行を開始")
-                                .small()
-                                .primary()
-                                .tooltip("未実行のジョブをすべて圧縮します")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.request_release_waiting_jobs(window, cx)
-                                })),
-                        );
-                    }
-                    if self.failed_job_count > 0 {
-                        row = row.child(
-                            Button::new("sidebar-status-retry-failed")
-                                .label("再試行")
-                                .small()
-                                .ghost()
-                                .tooltip("上限内の失敗ジョブを再試行します")
-                                .on_click(
-                                    cx.listener(|this, _, _, cx| this.retry_all_failed_jobs(cx)),
-                                ),
-                        );
-                    }
-                    if self.waiting_job_count == 0 && self.failed_job_count == 0 {
-                        row = row.child(
-                            Button::new("sidebar-status-open-queue")
-                                .label("キューを開く")
-                                .small()
-                                .ghost()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.switch_screen(Screen::Dashboard, cx)
-                                })),
-                        );
-                    }
-                    row
+        let footer = match tab {
+            SidebarStatusTab::Compression => {
+                let mut row = h_flex().items_center().h(px(24.)).gap(px(6.));
+                if self.waiting_job_count > 0 {
+                    row = row.child(
+                        Button::new("sidebar-status-release-waiting")
+                            .label("未実行を開始")
+                            .small()
+                            .primary()
+                            .tooltip("未実行のジョブをすべて圧縮します")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.request_release_waiting_jobs(window, cx)
+                            })),
+                    );
                 }
-                SidebarStatusTab::Import => {
-                    h_flex()
-                        .items_center()
-                        .h(px(24.))
-                        .gap(px(6.))
-                        .child(if import_has_report {
-                            Button::new("sidebar-status-import-result")
-                                .label("結果を見る")
-                                .small()
-                                .ghost()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.switch_screen(Screen::Photos, cx)
-                                }))
-                        } else {
-                            Button::new("sidebar-status-photos")
-                                .label("写真を開く")
-                                .small()
-                                .ghost()
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.switch_screen(Screen::Photos, cx)
-                                }))
-                        })
-                }
-                SidebarStatusTab::Scan => {
-                    let can_rescan =
-                        self.scan_progress.is_none() && self.daemon_active && !self.daemon_paused;
-                    let button = if can_rescan {
-                        Button::new("sidebar-status-rescan")
-                            .label("再スキャン")
+                if self.failed_job_count > 0 {
+                    row = row.child(
+                        Button::new("sidebar-status-retry-failed")
+                            .label("再試行")
                             .small()
                             .ghost()
-                            .tooltip("デーモンに再スキャンを要求します")
-                            .on_click(cx.listener(|this, _, _, cx| this.request_daemon_rescan(cx)))
-                    } else {
-                        Button::new("sidebar-status-dashboard")
-                            .label("ダッシュボード")
+                            .tooltip("上限内の失敗ジョブを再試行します")
+                            .on_click(cx.listener(|this, _, _, cx| this.retry_all_failed_jobs(cx))),
+                    );
+                }
+                if self.waiting_job_count == 0 && self.failed_job_count == 0 {
+                    row = row.child(
+                        Button::new("sidebar-status-open-queue")
+                            .label("キューを開く")
                             .small()
                             .ghost()
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.switch_screen(Screen::Dashboard, cx)
-                            }))
-                    };
-                    h_flex().items_center().h(px(24.)).gap(px(6.)).child(button)
+                            })),
+                    );
                 }
-            };
+                row
+            }
+            SidebarStatusTab::Import => {
+                h_flex()
+                    .items_center()
+                    .h(px(24.))
+                    .gap(px(6.))
+                    .child(if import_has_report {
+                        Button::new("sidebar-status-import-result")
+                            .label("結果を見る")
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_notification_modal(window, cx)
+                            }))
+                    } else {
+                        Button::new("sidebar-status-photos")
+                            .label("写真を開く")
+                            .small()
+                            .ghost()
+                            .on_click(
+                                cx.listener(|this, _, _, cx| {
+                                    this.switch_screen(Screen::Photos, cx)
+                                }),
+                            )
+                    })
+            }
+            SidebarStatusTab::Scan => {
+                let can_rescan =
+                    self.scan_progress.is_none() && self.daemon_active && !self.daemon_paused;
+                let button = if can_rescan {
+                    Button::new("sidebar-status-rescan")
+                        .label("再スキャン")
+                        .small()
+                        .ghost()
+                        .tooltip("デーモンに再スキャンを要求します")
+                        .on_click(cx.listener(|this, _, _, cx| this.request_daemon_rescan(cx)))
+                } else {
+                    Button::new("sidebar-status-dashboard")
+                        .label("ダッシュボード")
+                        .small()
+                        .ghost()
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.switch_screen(Screen::Dashboard, cx)),
+                        )
+                };
+                h_flex().items_center().h(px(24.)).gap(px(6.)).child(button)
+            }
+        };
 
         v_flex()
             .flex_shrink_0()
@@ -770,128 +768,7 @@ impl App {
             .into_any_element()
     }
 
-    /// One compact row per failure domain. Detail text stays on the target
-    /// screen so the bar never truncates the actual reason.
-    fn global_alerts(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let import_failed = self
-            .import_report
-            .as_ref()
-            .map(|report| import_issue_counts(&report.issues).0)
-            .unwrap_or(0);
-        alert_summaries(
-            self.failed_job_count,
-            self.daemon_errors.len(),
-            import_failed,
-        )
-        .into_iter()
-        .enumerate()
-        .map(|(index, (target, message))| {
-            let (id, action) = match target {
-                Screen::Photos => ("alert-photos", "写真を開く"),
-                Screen::Compression => ("alert-compression", "圧縮を開く"),
-                Screen::Search => ("alert-search", "検索を開く"),
-                Screen::Dashboard => ("alert-dashboard", "ダッシュボードを開く"),
-                Screen::Settings => ("alert-settings", "設定を開く"),
-            };
-            h_flex()
-                .flex_shrink_0()
-                .w_full()
-                .items_center()
-                .gap(px(10.))
-                .px(px(26.))
-                .py(px(8.))
-                .bg(rgb(PANEL))
-                .border_b_1()
-                .border_color(rgb(BORDER))
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .w(px(6.))
-                        .h(px(6.))
-                        .rounded_full()
-                        .bg(rgb(RED)),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(11.))
-                        .text_color(rgb(RED))
-                        .child(message),
-                )
-                .child(
-                    Button::new(id)
-                        .label(action)
-                        .small()
-                        .ghost()
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.switch_screen(target, cx);
-                        })),
-                )
-                .with_animation(
-                    ("global-alert", index),
-                    Animation::new(MOTION_BASE)
-                        .with_easing(ease_motion)
-                        .with_max_fps(self.motion_fps()),
-                    |el, t| el.opacity(t).relative().top(px(-8.0 * (1.0 - t))),
-                )
-                .into_any_element()
-        })
-        .collect()
-    }
-
-    /// Slim persistent row for `App.message` when the ribbon cannot show it.
-    /// Unlike a toast it stays until the user dismisses it or an action
-    /// replaces it; failure details remain on their own screens.
-    fn message_strip(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let message = self.message.clone().unwrap_or_default();
-        h_flex()
-            .flex_shrink_0()
-            .w_full()
-            .items_center()
-            .gap(px(10.))
-            .px(px(26.))
-            .py(px(7.))
-            .bg(rgb(PANEL_INNER))
-            .border_b_1()
-            .border_color(rgb(BORDER))
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .size(px(6.))
-                    .rounded_full()
-                    .bg(rgb(AMBER)),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_size(px(11.))
-                    .text_color(rgb(AMBER))
-                    .child(message),
-            )
-            .child(
-                Button::new("message-dismiss")
-                    .label("閉じる")
-                    .small()
-                    .ghost()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.message = None;
-                        cx.notify();
-                    })),
-            )
-            .into_any_element()
-    }
-
     pub(crate) fn content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
-        let content_width =
-            window_content_extent(f32::from(window.viewport_size().width), client_inset);
-        let message_strip = (self.message.is_some()
-            && message_strip_visible(self.ribbon_collapsed, self.active_ribbon_tab, content_width))
-        .then(|| self.message_strip(cx));
         let screen = match self.screen {
             Screen::Photos => self.photos_screen(window, cx).into_any_element(),
             Screen::Compression => self.compression_screen(window, cx).into_any_element(),
@@ -912,44 +789,10 @@ impl App {
             enter,
             move |el, t| el.relative().left(px(direction * SCREEN_SLIDE * (1.0 - t))),
         );
-        v_flex()
-            .flex_1()
-            .min_h_0()
-            .children(self.global_alerts(cx))
-            .children(message_strip)
-            .child(screen)
-            .into_any_element()
+        v_flex().flex_1().min_h_0().child(screen).into_any_element()
     }
 }
 
-/// Compact, ordered summaries of every failure that deserves a global alert.
-/// The target screen owns the detail, so the bar only carries the count.
-fn alert_summaries(
-    failed_jobs: i64,
-    daemon_errors: usize,
-    import_failed: usize,
-) -> Vec<(Screen, String)> {
-    let mut rows = Vec::new();
-    if failed_jobs > 0 {
-        rows.push((
-            Screen::Dashboard,
-            format!("圧縮に {failed_jobs} 件の失敗があります"),
-        ));
-    }
-    if daemon_errors > 0 {
-        rows.push((
-            Screen::Dashboard,
-            format!("デーモンで {daemon_errors} 件の処理エラーがあります"),
-        ));
-    }
-    if import_failed > 0 {
-        rows.push((
-            Screen::Photos,
-            format!("取り込みで {import_failed} 件失敗しました"),
-        ));
-    }
-    rows
-}
 pub(crate) fn scan_progress_label(progress: &ScanProgressView) -> String {
     match progress.phase {
         IpcScanPhase::Walking => format!(
@@ -1206,10 +1049,10 @@ pub(crate) fn screen_direction(from: Screen, to: Screen) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        NAV_ITEM_GAP, NAV_ITEM_HEIGHT, StatusTone, alert_summaries, compression_attention,
-        compression_card_status, import_attention, import_card_status, import_running_progress,
-        nav_index, nav_item_top, running_job_count, scan_attention, scan_card_status,
-        scan_progress_label, scan_progress_ratio, screen_direction,
+        NAV_ITEM_GAP, NAV_ITEM_HEIGHT, StatusTone, compression_attention, compression_card_status,
+        import_attention, import_card_status, import_running_progress, nav_index, nav_item_top,
+        running_job_count, scan_attention, scan_card_status, scan_progress_label,
+        scan_progress_ratio, screen_direction,
     };
     use crate::app::Screen;
     use crate::app::import::{
@@ -1226,21 +1069,6 @@ mod tests {
     use vrc_photo_core::scanner::ScanFailure;
     use vrc_photo_ipc::ScanPhase as IpcScanPhase;
 
-    #[test]
-    fn alert_summaries_follow_priority_order() {
-        let rows = alert_summaries(2, 1, 3);
-        assert_eq!(rows[0].0, Screen::Dashboard);
-        assert!(rows[0].1.contains("2"));
-        assert_eq!(rows[1].0, Screen::Dashboard);
-        assert_eq!(rows[2].0, Screen::Photos);
-        assert!(alert_summaries(0, 0, 0).is_empty());
-    }
-
-    #[test]
-    fn dashboard_replaces_the_monitor_screen() {
-        assert_eq!(Screen::Dashboard.title(), "ダッシュボード");
-        assert_eq!(alert_summaries(0, 1, 0)[0].0, Screen::Dashboard);
-    }
     #[test]
     fn nav_index_matches_sidebar_order() {
         assert_eq!(nav_index(Screen::Photos), 0);

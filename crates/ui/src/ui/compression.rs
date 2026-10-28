@@ -246,7 +246,7 @@ impl App {
                         };
                         if let Err(error) = this.db.save_profile(&profile) {
                             tracing::warn!(%error, "cannot add compression profile");
-                            this.message = Some(format!("プロファイルを追加できません: {error}"));
+                            this.toast_error(format!("プロファイルを追加できません: {error}"), cx);
                         }
                         this.profiles = this.db.list_profiles().unwrap_or_else(|error| {
                             tracing::warn!(%error, "cannot reload compression profiles");

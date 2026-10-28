@@ -34,8 +34,6 @@ impl App {
     }
 
     fn search_results_card(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let message = self.message.clone().or_else(|| self.library_error.clone());
-        let has_message = message.is_some();
         let total = self.search_view.index.total;
         let count = format!("{total} 枚");
         let selection = (self.selected_ids.len() > 1).then(|| self.selection_bar(cx));
@@ -87,18 +85,7 @@ impl App {
                                 .child("検索中…"),
                         )
                     })
-                    .when_some(message, |this, message| {
-                        this.child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(px(10.))
-                                .text_color(rgb(AMBER))
-                                .child(message),
-                        )
-                    })
-                    .when(!has_message, |this| this.child(div().flex_1())),
+                    .child(div().flex_1()),
             );
         if let Some(selection) = selection {
             card = card.child(

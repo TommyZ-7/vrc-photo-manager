@@ -17,22 +17,6 @@ use vrc_photo_core::settings::CardSize;
 use crate::app::{App, Screen};
 use crate::ui::theme::*;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RibbonTab {
-    Home,
-    Photo,
-    Compression,
-}
-
-/// Default tab used by the message-strip visibility rule on a screen switch.
-/// The ribbon itself shows every group, so this no longer selects a page.
-pub(crate) fn default_ribbon_tab(screen: Screen) -> RibbonTab {
-    match screen {
-        Screen::Compression => RibbonTab::Compression,
-        _ => RibbonTab::Home,
-    }
-}
-
 /// Compact ribbon height. Short windows trade 6px for the gallery.
 pub(crate) fn ribbon_height(window_height: f32) -> f32 {
     if window_height <= 760.0 { 62.0 } else { 68.0 }
@@ -83,10 +67,6 @@ pub(crate) const NARROW_CHROME_WIDTH: f32 = 1180.0;
 /// tooltips so nothing clips and there is no horizontal scrollbar.
 pub(crate) const RIBBON_LABELS_MIN_WIDTH: f32 = 1000.0;
 
-pub(crate) fn ribbon_status_visible(window_width: f32) -> bool {
-    window_width > NARROW_CHROME_WIDTH
-}
-
 /// The titlebar's compact sync readout hides with the ribbon status note so
 /// the screen crumb, notification indicator, and window controls keep their
 /// room at narrow widths.
@@ -113,15 +93,6 @@ pub(crate) fn titlebar_sync_label(
     }
 }
 
-/// True when `App.message` needs the persistent strip above the screen because
-/// the ribbon cannot show it: the body is collapsed, the Photo tab has no
-/// status group, or the right-hand slot is hidden at narrow widths. Home and
-/// Compression keep using the ribbon slot when it is visible, so a message is
-/// never rendered twice.
-pub(crate) fn message_strip_visible(collapsed: bool, tab: RibbonTab, content_width: f32) -> bool {
-    collapsed || tab == RibbonTab::Photo || !ribbon_status_visible(content_width)
-}
-
 /// Chrome values derived from the window's content extent.
 ///
 /// X11 client-side decorations report the outer window through
@@ -134,7 +105,6 @@ pub(crate) struct ChromeLayout {
     pub(crate) content_height: f32,
     pub(crate) ribbon_height: f32,
     pub(crate) ribbon_metrics: RibbonMetrics,
-    pub(crate) status_visible: bool,
     pub(crate) sync_visible: bool,
 }
 
@@ -156,21 +126,7 @@ pub(crate) fn chrome_layout(
         content_height,
         ribbon_height: ribbon_height(content_height),
         ribbon_metrics,
-        status_visible: ribbon_status_visible(content_width),
         sync_visible: titlebar_sync_visible(content_width),
-    }
-}
-
-/// Number of photos reflected in the ribbon's status note.
-pub(crate) fn ribbon_selection_label(selected: usize, total: i64, bytes: u64) -> String {
-    if selected == 0 {
-        format!("{} 枚 / {}", format_count(total), format_bytes(bytes))
-    } else {
-        format!(
-            "選択中 {selected} 枚 · {} 枚 / {}",
-            format_count(total),
-            format_bytes(bytes)
-        )
     }
 }
 
@@ -190,8 +146,6 @@ const CHROME_ICONS: &[IconName] = &[
     IconName::FolderOpen,
     IconName::RotateCw,
     IconName::PanelRight,
-    IconName::GalleryVerticalEnd,
-    IconName::CircleAlert,
     IconName::Check,
     IconName::Close,
     IconName::Star,
@@ -397,7 +351,6 @@ impl App {
     }
 
     fn ribbon_body(&mut self, layout: ChromeLayout, cx: &mut Context<Self>) -> AnyElement {
-        let show_status = layout.status_visible;
         let metrics = layout.ribbon_metrics;
         h_flex()
             .w_full()
@@ -407,18 +360,13 @@ impl App {
             // The three groups must fit at 1080 px; the shell design forbids a
             // horizontal scrollbar anywhere in the ribbon.
             .overflow_hidden()
-            .child(self.ribbon_home(show_status, metrics, cx))
+            .child(self.ribbon_home(metrics, cx))
             .child(self.ribbon_photo(metrics, cx))
             .child(self.ribbon_compression(metrics, cx))
             .into_any_element()
     }
 
-    fn ribbon_home(
-        &mut self,
-        show_status: bool,
-        metrics: RibbonMetrics,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn ribbon_home(&mut self, metrics: RibbonMetrics, cx: &mut Context<Self>) -> AnyElement {
         let import_group = ribbon_group(
             vec![
                 large_button(
@@ -481,35 +429,12 @@ impl App {
         }
         let display_group = ribbon_group(display_items, "表示", false, metrics);
 
-        let status = self.message.clone().unwrap_or_else(|| {
-            ribbon_selection_label(
-                self.selected_ids.len(),
-                self.stats.photo_count,
-                self.stats.total_bytes,
-            )
-        });
-        let status_group = ribbon_group(
-            vec![status_note(
-                if self.message.is_some() {
-                    IconName::CircleAlert
-                } else {
-                    IconName::GalleryVerticalEnd
-                },
-                status,
-                self.message.is_some(),
-            )],
-            "現在の状態",
-            true,
-            metrics,
-        );
-
         h_flex()
             .flex_shrink_0()
             .items_stretch()
             .child(import_group)
             .child(library_group)
             .child(display_group)
-            .when(show_status, |this| this.child(status_group))
             .into_any_element()
     }
 
@@ -853,53 +778,12 @@ fn large_button(
     button.into_any_element()
 }
 
-fn status_note(icon: IconName, text: String, warning: bool) -> AnyElement {
-    h_flex()
-        .flex_1()
-        .min_w_0()
-        .justify_end()
-        .gap(px(6.))
-        .items_center()
-        .child(
-            chrome_icon(icon)
-                .with_size(px(13.))
-                .text_color(rgb(if warning { AMBER } else { MUTED_2 })),
-        )
-        .child(
-            div()
-                .min_w_0()
-                .truncate()
-                .text_size(px(10.))
-                .text_color(rgb(if warning { AMBER } else { MUTED }))
-                .child(text),
-        )
-        .into_any_element()
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        CHROME_ICONS, RibbonTab, chrome_layout, default_ribbon_tab, is_bundled,
-        message_strip_visible, ribbon_height, ribbon_metrics, ribbon_selection_label,
-        ribbon_status_visible, titlebar_sync_label, titlebar_sync_visible,
+        CHROME_ICONS, chrome_layout, is_bundled, ribbon_height, ribbon_metrics,
+        titlebar_sync_label, titlebar_sync_visible,
     };
-    use crate::app::Screen;
-
-    #[test]
-    fn goal_screen_owns_the_compression_tab() {
-        assert_eq!(
-            default_ribbon_tab(Screen::Compression),
-            RibbonTab::Compression
-        );
-        for screen in [
-            Screen::Photos,
-            Screen::Search,
-            Screen::Dashboard,
-            Screen::Settings,
-        ] {
-            assert_eq!(default_ribbon_tab(screen), RibbonTab::Home, "{screen:?}");
-        }
-    }
 
     #[test]
     fn ribbon_height_switches_at_760() {
@@ -965,9 +849,7 @@ mod tests {
     }
 
     #[test]
-    fn status_note_hides_at_1180() {
-        assert!(!ribbon_status_visible(1180.0));
-        assert!(ribbon_status_visible(1181.0));
+    fn titlebar_sync_hides_at_1180() {
         assert!(!titlebar_sync_visible(1180.0));
         assert!(titlebar_sync_visible(1181.0));
     }
@@ -984,25 +866,6 @@ mod tests {
     }
 
     #[test]
-    fn message_strip_covers_slots_the_ribbon_cannot_show() {
-        // Wide Home/Compression keep the message in the ribbon status slot.
-        assert!(!message_strip_visible(false, RibbonTab::Home, 1440.0));
-        assert!(!message_strip_visible(
-            false,
-            RibbonTab::Compression,
-            1280.0
-        ));
-        // The Photo page has no status group at any width.
-        assert!(message_strip_visible(false, RibbonTab::Photo, 1440.0));
-        // A collapsed ribbon hides the whole body, including the slot.
-        assert!(message_strip_visible(true, RibbonTab::Home, 1440.0));
-        // The status slot disappears at 1180 and below.
-        assert!(message_strip_visible(false, RibbonTab::Home, 1180.0));
-        assert!(message_strip_visible(false, RibbonTab::Compression, 1080.0));
-        assert!(!message_strip_visible(false, RibbonTab::Home, 1181.0));
-    }
-
-    #[test]
     fn chrome_layout_uses_the_content_extent() {
         // The requested 1080x700 is the content size; X11 reports the outer
         // 1120x740 window, and the 20 px CSD inset on each edge is removed.
@@ -1013,39 +876,25 @@ mod tests {
         let mut expected_metrics = ribbon_metrics(700.0);
         expected_metrics.compact = true;
         assert_eq!(minimum.ribbon_metrics, expected_metrics);
-        assert!(!minimum.status_visible);
         assert!(!minimum.sync_visible);
 
-        // 1280x820 content keeps the regular ribbon and status readout.
+        // 1280x820 content keeps the regular ribbon and sync readout.
         let regular = chrome_layout(1320.0, 860.0, 20.0, false);
         assert_eq!(regular.content_width, 1280.0);
         assert_eq!(regular.content_height, 820.0);
         assert_eq!(regular.ribbon_height, 68.0);
-        assert!(regular.status_visible);
         assert!(regular.sync_visible);
 
         let large = chrome_layout(1480.0, 940.0, 20.0, false);
         assert_eq!(large.content_width, 1440.0);
         assert_eq!(large.ribbon_height, 68.0);
-        assert!(large.status_visible);
     }
 
     #[test]
     fn chrome_layout_thresholds_sit_on_the_content_edge() {
         assert_eq!(chrome_layout(1200.0, 760.0, 0.0, false).ribbon_height, 62.0);
         assert_eq!(chrome_layout(1200.0, 761.0, 0.0, false).ribbon_height, 68.0);
-        assert!(!chrome_layout(1180.0, 820.0, 0.0, false).status_visible);
-        assert!(chrome_layout(1181.0, 820.0, 0.0, false).status_visible);
         assert!(!chrome_layout(1180.0, 820.0, 0.0, false).sync_visible);
         assert!(chrome_layout(1181.0, 820.0, 0.0, false).sync_visible);
-    }
-
-    #[test]
-    fn selection_status_handles_empty_and_multiple() {
-        assert_eq!(ribbon_selection_label(0, 2418, 0), "2,418 枚 / 0 B");
-        assert_eq!(
-            ribbon_selection_label(3, 2418, 1_048_576),
-            "選択中 3 枚 · 2,418 枚 / 1.0 MB"
-        );
     }
 }

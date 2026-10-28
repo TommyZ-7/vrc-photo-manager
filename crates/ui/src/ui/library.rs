@@ -36,23 +36,9 @@ impl App {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let selection = (self.selected_ids.len() > 1).then(|| self.selection_bar(cx));
-        let import_panel = self
-            .import_report
-            .clone()
-            .map(|report| self.import_report_panel(&report, cx));
-        let library_error = self
-            .library_error
-            .clone()
-            .map(|error| self.library_error_row(error, cx));
         let mut screen = v_flex().flex_1().min_h_0().gap(px(CARD_GAP));
         if let Some(selection) = selection {
             screen = screen.child(selection);
-        }
-        if let Some(import_panel) = import_panel {
-            screen = screen.child(import_panel);
-        }
-        if let Some(library_error) = library_error {
-            screen = screen.child(library_error);
         }
         let mut layout = h_flex().flex_1().min_h_0();
         if !self.inspector_collapsed {
@@ -202,48 +188,6 @@ impl App {
                     .with_easing(ease_motion)
                     .with_max_fps(self.motion_fps()),
                 |el, t| el.h(px(36.0 * t)).opacity(t),
-            )
-            .into_any_element()
-    }
-
-    /// Slim inline failure row above the gallery. The message keeps its full
-    /// text; detail is never truncated into the ribbon status slot.
-    fn library_error_row(&mut self, error: String, cx: &mut Context<Self>) -> AnyElement {
-        h_flex()
-            .flex_shrink_0()
-            .mx(px(GALLERY_PAD_X))
-            .px(px(14.))
-            .py(px(9.))
-            .gap(px(10.))
-            .items_center()
-            .rounded(px(12.))
-            .bg(rgb(PANEL))
-            .border_1()
-            .border_color(rgb(BORDER))
-            .child(
-                div()
-                    .flex_shrink_0()
-                    .w(px(6.))
-                    .h(px(6.))
-                    .rounded_full()
-                    .bg(rgb(RED)),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(px(11.))
-                    .text_color(rgb(RED))
-                    .child(error),
-            )
-            .child(
-                Button::new("library-reload-banner")
-                    .label("再読込")
-                    .small()
-                    .primary()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.reload_library(true, cx);
-                    })),
             )
             .into_any_element()
     }
@@ -558,7 +502,7 @@ impl App {
                         browser.fail_page(*page, generation);
                     }
                 }
-                self.library_error = Some("一部の写真を読み込めませんでした".to_string());
+                self.note_library_error("一部の写真を読み込めませんでした".to_string(), cx);
                 cx.notify();
                 return;
             }
@@ -592,7 +536,7 @@ impl App {
             }
         }
         if short_page {
-            self.library_error = Some("一部の写真を読み込めませんでした".to_string());
+            self.note_library_error("一部の写真を読み込めませんでした".to_string(), cx);
         }
         cx.notify();
     }
@@ -1290,7 +1234,7 @@ impl App {
                     Ok(()) => this.load_selected_meta(id),
                     Err(error) => {
                         tracing::warn!(%error, photo_id = id, "cannot update favorite");
-                        this.message = Some(format!("お気に入りを更新できません: {error}"));
+                        this.toast_error(format!("お気に入りを更新できません: {error}"), cx);
                     }
                 }
                 cx.notify();
@@ -1330,7 +1274,7 @@ impl App {
                     .filter(|parent| !parent.as_os_str().is_empty())
                     .unwrap_or(path);
                 if let Err(error) = open_path(folder) {
-                    this.message = Some(format!("フォルダを開けません: {error}"));
+                    this.toast_error(format!("フォルダを開けません: {error}"), cx);
                 }
                 cx.notify();
             },

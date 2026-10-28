@@ -11,9 +11,7 @@ use gpui_kit::*;
 use vrc_photo_core::importer::{ImportIssue, ImportIssueKind, ImportMode, ImportProgress};
 
 use crate::app::App;
-use crate::app::import::{
-    ImportDialogOrigin, ImportDialogPhase, ImportReportView, import_issue_counts,
-};
+use crate::app::import::{ImportDialogOrigin, ImportDialogPhase, ImportReportView};
 use crate::ui::components::dialog_panel;
 use crate::ui::theme::*;
 
@@ -286,132 +284,6 @@ impl App {
             .into_any_element()
     }
 
-    pub(crate) fn import_report_panel(
-        &self,
-        report: &ImportReportView,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let (failed, partial) = import_issue_counts(&report.issues);
-        let retryable = retryable_sources(&report.issues);
-        let mode = import_mode_label(report.mode);
-        let dest = report.dest.to_string_lossy().to_string();
-        let scan_failed = report.scan_failures.len() + usize::from(report.scan_error.is_some());
-
-        let mut panel = v_flex()
-            .flex_shrink_0()
-            .mx(px(GALLERY_PAD_X))
-            .rounded(px(14.))
-            .bg(rgb(PANEL))
-            .border_1()
-            .border_color(rgb(BORDER))
-            .child(
-                h_flex()
-                    .px(px(16.))
-                    .py(px(10.))
-                    .gap(px(10.))
-                    .items_center()
-                    .border_b_1()
-                    .border_color(rgb(BORDER))
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .font_semibold()
-                            .text_color(rgb(TEXT))
-                            .child("取り込み結果"),
-                    )
-                    .child(self.badge(mode, BLUE, 0x14283d))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(10.))
-                            .text_color(rgb(MUTED_2))
-                            .child(dest),
-                    )
-                    .when(!retryable.is_empty(), |this| {
-                        let button = Button::new("import-retry-failed")
-                            .label("失敗分を再試行")
-                            .small();
-                        let button = if report.remaining.is_empty() {
-                            button.primary()
-                        } else {
-                            button.ghost()
-                        };
-                        this.child(button.on_click(
-                            cx.listener(|this, _, window, cx| this.open_retry_dialog(window, cx)),
-                        ))
-                    })
-                    .when(!report.remaining.is_empty(), |this| {
-                        this.child(
-                            Button::new("import-resume")
-                                .label(format!("残り {} 件を再開", report.remaining.len()))
-                                .small()
-                                .primary()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.open_resume_dialog(window, cx)
-                                })),
-                        )
-                    })
-                    .child(
-                        Button::new("import-report-close")
-                            .label("閉じる")
-                            .small()
-                            .ghost()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.import_report = None;
-                                cx.notify();
-                            })),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .px(px(16.))
-                    .py(px(8.))
-                    .gap(px(8.))
-                    .items_center()
-                    .child(self.badge(&format!("取込 {}", report.imported), GREEN, 0x102a24))
-                    .child(self.badge(&format!("スキップ {}", report.skipped), MUTED, PANEL_2))
-                    .when(failed > 0, |this| {
-                        this.child(self.badge(&format!("失敗 {failed}"), RED, 0x2a1414))
-                    })
-                    .when(partial > 0, |this| {
-                        this.child(self.badge(&format!("部分移動 {partial}"), AMBER, 0x2b2210))
-                    })
-                    .when(!report.renamed.is_empty(), |this| {
-                        this.child(self.badge(
-                            &format!("連番 {}", report.renamed.len()),
-                            BLUE,
-                            0x14283d,
-                        ))
-                    })
-                    .when(!report.remaining.is_empty(), |this| {
-                        this.child(self.badge(
-                            &format!("未処理 {}", report.remaining.len()),
-                            AMBER,
-                            0x2b2210,
-                        ))
-                    })
-                    .when(scan_failed > 0, |this| {
-                        this.child(self.badge(
-                            &format!("スキャン失敗 {scan_failed}"),
-                            RED,
-                            0x2a1414,
-                        ))
-                    }),
-            );
-
-        panel = panel.child(self.import_report_details(report));
-        panel
-            .with_animation(
-                "import-report",
-                Animation::new(MOTION_BASE)
-                    .with_easing(ease_motion)
-                    .with_max_fps(self.motion_fps()),
-                |el, t| el.opacity(t).relative().top(px(-8.0 * (1.0 - t))),
-            )
-            .into_any_element()
-    }
     pub(crate) fn import_report_details(&self, report: &ImportReportView) -> AnyElement {
         let failed_issues: Vec<&ImportIssue> = report
             .issues
@@ -621,9 +493,8 @@ pub(crate) fn import_progress_label(progress: &ImportProgress) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        import_issue_counts, import_progress_label, import_progress_ratio, retryable_sources,
-    };
+    use super::{import_progress_label, import_progress_ratio, retryable_sources};
+    use crate::app::import::import_issue_counts;
     use std::path::PathBuf;
     use vrc_photo_core::importer::{ImportIssue, ImportIssueKind, ImportProgress};
 

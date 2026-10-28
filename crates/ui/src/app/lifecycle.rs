@@ -5,6 +5,7 @@
 
 use std::time::{Duration, Instant};
 
+use gpui_kit::component::notification::NotificationType;
 use gpui_kit::*;
 use vrc_photo_core::model::{LibraryStats, PhotoSort, QueueStatus};
 use vrc_photo_core::settings::AppSettings;
@@ -18,7 +19,7 @@ use crate::ipc_bridge;
 use crate::state::photo_browser::{
     anchor_photo_id, apply_library_index, list_scroll_top, sync_search_mirror,
 };
-use crate::ui::chrome::default_ribbon_tab;
+use crate::ui::notifications::{FailureNotice, failure_transition};
 use crate::ui::shell::screen_direction;
 
 /// Current daemon scan progress, shown by the sidebar status card and the
@@ -139,7 +140,7 @@ impl App {
                 self.refresh_live(cx);
             }
             IpcEvent::DaemonErrorChanged { .. } => {
-                self.reload_job_state();
+                self.reload_job_state(cx);
             }
             IpcEvent::StatusChanged { status } => {
                 self.apply_daemon_status(status);
@@ -177,13 +178,13 @@ impl App {
     ) {
         if !self.ipc_connected {
             if let Some(message) = failure {
-                self.message = Some(message);
+                self.toast_error(message, cx);
             }
             cx.notify();
             return;
         }
         let Some(endpoint) = self.ipc_endpoint.clone() else {
-            self.message = Some("IPCの接続先を解決できません".to_string());
+            self.toast_error("IPCの接続先を解決できません", cx);
             cx.notify();
             return;
         };
@@ -196,12 +197,14 @@ impl App {
                 match result {
                     Ok(_) => {
                         if let Some(message) = success {
-                            this.message = Some(message);
+                            this.toast_success(message, cx);
                         }
                     }
                     Err(error) => {
-                        this.message =
-                            Some(failure.unwrap_or_else(|| ipc_bridge::error_message(&error)));
+                        this.toast_error(
+                            failure.unwrap_or_else(|| ipc_bridge::error_message(&error)),
+                            cx,
+                        );
                     }
                 }
                 cx.notify();
@@ -217,7 +220,7 @@ impl App {
         if let Ok(stats) = self.db.stats() {
             self.stats = stats;
         }
-        self.reload_job_state();
+        self.reload_job_state(cx);
         self.refresh_monitor();
         if let Some(id) = self.selected {
             self.load_selected_meta(id);
@@ -271,7 +274,7 @@ impl App {
         cx.notify();
     }
 
-    pub(crate) fn reload_job_state(&mut self) {
+    pub(crate) fn reload_job_state(&mut self, cx: &mut Context<Self>) {
         match self.db.list_jobs(20) {
             Ok(jobs) => self.jobs = jobs,
             Err(error) => tracing::warn!(%error, "cannot load recent compression jobs"),
@@ -306,6 +309,22 @@ impl App {
             }
         }
         self.daemon_errors = self.db.daemon_errors().unwrap_or_default();
+        let next = (self.failed_job_count, self.daemon_errors.len());
+        for notice in failure_transition(self.failure_baseline, next) {
+            match notice {
+                FailureNotice::Compression { count } => self.toast_actionable(
+                    NotificationType::Error,
+                    format!("圧縮に {count} 件の失敗があります"),
+                    cx,
+                ),
+                FailureNotice::Daemon { count } => self.toast_actionable(
+                    NotificationType::Error,
+                    format!("デーモンで {count} 件の処理エラーがあります"),
+                    cx,
+                ),
+            }
+        }
+        self.failure_baseline = Some(next);
     }
 
     pub(crate) fn ensure_profiles(&mut self) {
@@ -346,7 +365,7 @@ impl App {
             })
             .into_iter()
             .collect();
-        self.reload_job_state();
+        self.reload_job_state(cx);
         self.settings = AppSettings::load(&self.db).unwrap_or_else(|error| {
             tracing::warn!(%error, "cannot load app settings");
             AppSettings::default()
@@ -384,7 +403,7 @@ impl App {
         log_timing("photo_index", index_start);
         let error = apply_library_index(&mut self.library, result);
         if let Some(error) = error {
-            self.library_error = Some(error);
+            self.note_library_error(error, cx);
             // Leave the mounted view and side panels untouched; the next
             // successful reload repopulates them.
             return false;
@@ -429,7 +448,6 @@ impl App {
             self.nav_epoch = self.nav_epoch.wrapping_add(1);
             self.screen_direction = screen_direction(self.screen, screen);
             self.screen_epoch = self.screen_epoch.wrapping_add(1);
-            self.active_ribbon_tab = default_ribbon_tab(screen);
         }
         // The two photo grids have separate snapshots, so a selection made in
         // one tab cannot stay meaningful in the other. Keep it when visiting

@@ -552,7 +552,7 @@ impl App {
     pub(crate) fn start_update_check(&mut self, manual: bool, cx: &mut Context<Self>) {
         if self.update.busy() {
             if manual {
-                self.message = Some("更新を確認しています".to_string());
+                self.toast_info("更新を確認しています", cx);
                 cx.notify();
             }
             return;
@@ -590,7 +590,7 @@ impl App {
                 (false, Some(update)) => UpdatePhase::Available(update),
                 _ => UpdatePhase::Error(format!("更新確認スレッドを開始できません: {error}")),
             };
-            self.message = Some("更新を確認できませんでした".to_string());
+            self.toast_error("更新を確認できませんでした", cx);
             cx.notify();
         }
     }
@@ -601,9 +601,9 @@ impl App {
                 "AppImageの場所に書き込めないため更新できません。書き込み可能な場所へ移動してください"
                     .to_string(),
             );
-            self.message = Some(
-                "AppImageの場所に書き込めないため更新できません。書き込み可能な場所へ移動してください"
-                    .to_string(),
+            self.toast_error(
+                "AppImageの場所に書き込めないため更新できません。書き込み可能な場所へ移動してください",
+                cx,
             );
             cx.notify();
             return;
@@ -682,7 +682,7 @@ impl App {
         if let Err(error) = spawned {
             self.update.phase =
                 UpdatePhase::Error(format!("ダウンロードを開始できません: {error}"));
-            self.message = Some("更新ファイルをダウンロードできませんでした".to_string());
+            self.toast_error("更新ファイルをダウンロードできませんでした", cx);
             cx.notify();
         }
     }
@@ -722,9 +722,9 @@ impl App {
             return;
         };
         if !appimage_writable(&self.update.install) {
-            self.message = Some(
-                "AppImageの場所に書き込めないため更新できません。書き込み可能な場所へ移動してください"
-                    .to_string(),
+            self.toast_error(
+                "AppImageの場所に書き込めないため更新できません。書き込み可能な場所へ移動してください",
+                cx,
             );
             cx.notify();
             return;
@@ -735,29 +735,31 @@ impl App {
             self.daemon_active,
             self.ipc_connected,
         ) {
-            self.message = Some(if self.daemon_active && !self.ipc_connected {
-                "デーモンに接続できないため更新できません。デーモンを停止してから再試行してください"
-                    .to_string()
+            if self.daemon_active && !self.ipc_connected {
+                self.toast_error(
+                    "デーモンに接続できないため更新できません。デーモンを停止してから再試行してください",
+                    cx,
+                );
             } else {
-                "このインストール形式では自動更新を適用できません".to_string()
-            });
+                self.toast_warning("このインストール形式では自動更新を適用できません", cx);
+            }
             cx.notify();
             return;
         }
         if let Some(data_dir) = self.update.data_dir.as_deref()
             && vrc_photo_update::helper::apply_in_progress(&UpdatePaths::new(data_dir))
         {
-            self.message = Some("別の更新処理が進行中です".to_string());
+            self.toast_warning("別の更新処理が進行中です", cx);
             cx.notify();
             return;
         }
         let Some(data_dir) = self.update.data_dir.clone() else {
-            self.message = Some("データディレクトリを特定できません".to_string());
+            self.toast_error("データディレクトリを特定できません", cx);
             cx.notify();
             return;
         };
         let Ok(current_exe) = std::env::current_exe() else {
-            self.message = Some("現在の実行ファイルを特定できません".to_string());
+            self.toast_error("現在の実行ファイルを特定できません", cx);
             cx.notify();
             return;
         };
@@ -766,7 +768,7 @@ impl App {
             Err(error) => {
                 let message = format!("現在の作業ディレクトリを特定できません: {error}");
                 self.update.phase = UpdatePhase::Error(message.clone());
-                self.message = Some(message);
+                self.toast_error(message, cx);
                 cx.notify();
                 return;
             }
@@ -777,7 +779,7 @@ impl App {
             InstallKind::AppImage { path } => (ApplyKind::AppImage, path.clone()),
             InstallKind::WindowsCurrentUser { .. } => (ApplyKind::Windows, current_exe.clone()),
             _ => {
-                self.message = Some("このインストール形式では自動更新を適用できません".to_string());
+                self.toast_warning("このインストール形式では自動更新を適用できません", cx);
                 cx.notify();
                 return;
             }
@@ -830,7 +832,7 @@ impl App {
                     Err(error) => {
                         let message = update_error_message(&error);
                         this.update.phase = UpdatePhase::Error(message.clone());
-                        this.message = Some(message);
+                        this.toast_error(message, cx);
                         if this.daemon_active {
                             let _ = spawn_daemon_process();
                         }
@@ -848,7 +850,7 @@ impl App {
             return;
         }
         if let Err(error) = self.update.write_health_marker() {
-            self.message = Some(format!("更新の起動確認を記録できません: {error}"));
+            self.toast_error(format!("更新の起動確認を記録できません: {error}"), cx);
             tracing::error!(%error, "cannot write update health marker");
             cx.notify();
             return;
@@ -856,7 +858,7 @@ impl App {
         if !self.demo
             && let Err(error) = spawn_daemon_process()
         {
-            self.message = Some(format!("デーモンを起動できません: {error}"));
+            self.toast_error(format!("デーモンを起動できません: {error}"), cx);
         }
         cx.notify();
     }
@@ -873,24 +875,25 @@ impl App {
                 match &result {
                     Ok(Some(update)) => {
                         if !manual {
-                            self.message.get_or_insert_with(|| {
+                            self.toast_info(
                                 format!(
                                     "アップデート v{} があります（設定 → アップデート）",
                                     update.version
-                                )
-                            });
+                                ),
+                                cx,
+                            );
                         } else {
-                            self.message = Some(format!("v{} が利用可能です", update.version));
+                            self.toast_info(format!("v{} が利用可能です", update.version), cx);
                         }
                     }
                     Ok(None) => {
                         if manual {
-                            self.message = Some("最新のバージョンです".to_string());
+                            self.toast_success("最新のバージョンです", cx);
                         }
                     }
                     Err(message) => {
                         if manual {
-                            self.message = Some(message.clone());
+                            self.toast_error(message.clone(), cx);
                         } else {
                             tracing::warn!(%message, "automatic update check failed");
                         }
@@ -917,15 +920,16 @@ impl App {
                         update: update.clone(),
                         staged,
                     };
-                    self.message = Some(
-                        "ダウンロードと署名検証が完了しました。再起動して更新できます".to_string(),
+                    self.toast_success(
+                        "ダウンロードと署名検証が完了しました。再起動して更新できます",
+                        cx,
                     );
                     cx.notify();
                 }
             }
             UpdateMessage::DownloadFailed(message) => {
                 self.update.phase = UpdatePhase::Error(message.clone());
-                self.message = Some(message);
+                self.toast_error(message, cx);
                 cx.notify();
             }
         }
@@ -1097,7 +1101,10 @@ impl App {
                         .ghost()
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if let Err(error) = open_path(Path::new(&url)) {
-                                this.message = Some(format!("リリースノートを開けません: {error}"));
+                                this.toast_error(
+                                    format!("リリースノートを開けません: {error}"),
+                                    cx,
+                                );
                                 cx.notify();
                             }
                         })),

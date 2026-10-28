@@ -434,7 +434,7 @@ impl App {
         let note = normalize_note(&value);
         if let Err(error) = self.db.set_note(id, note) {
             tracing::warn!(%error, photo_id = id, "cannot save photo note");
-            self.message = Some(format!("メモを保存できません: {error}"));
+            self.toast_error(format!("メモを保存できません: {error}"), cx);
             cx.notify();
             return;
         }
@@ -534,7 +534,7 @@ impl App {
         if let Some(derivative) = &derivative_to_promote
             && let Err(error) = self.db.set_replaced(id, derivative.id)
         {
-            self.message = Some(format!("圧縮版を表示に設定できません: {error}"));
+            self.toast_error(format!("圧縮版を表示に設定できません: {error}"), cx);
             cx.notify();
             return;
         }
@@ -546,8 +546,7 @@ impl App {
                     // its display asset.
                     let _ = self.db.bump_library_revision();
                     self.reload_library(true, cx);
-                    self.message =
-                        Some("元画像をゴミ箱へ移動しました（圧縮版を表示中）".to_string());
+                    self.toast_success("元画像をゴミ箱へ移動しました（圧縮版を表示中）", cx);
                 } else {
                     if let Err(error) = self.db.mark_missing(id) {
                         tracing::warn!(%error, photo_id = id, "cannot mark trashed photo missing");
@@ -573,7 +572,7 @@ impl App {
                         self.selected_derivatives.clear();
                         self.preview = None;
                     }
-                    self.message = Some("写真をゴミ箱へ移動しました".to_string());
+                    self.toast_success("写真をゴミ箱へ移動しました", cx);
                     self.reload_aux(cx);
                 }
             }
@@ -581,7 +580,7 @@ impl App {
                 if derivative_to_promote.is_some() {
                     let _ = self.db.restore_present(id);
                 }
-                self.message = Some(format!("ゴミ箱へ移動できません: {error}"));
+                self.toast_error(format!("ゴミ箱へ移動できません: {error}"), cx);
             }
         }
         cx.notify();
@@ -590,7 +589,7 @@ impl App {
     fn commit_tags(&mut self, photo_id: i64, tags: Vec<String>, cx: &mut Context<Self>) {
         if let Err(error) = self.db.set_photo_tags(photo_id, &tags) {
             tracing::warn!(%error, photo_id, "cannot save photo tags");
-            self.message = Some(format!("タグを保存できません: {error}"));
+            self.toast_error(format!("タグを保存できません: {error}"), cx);
             cx.notify();
             return;
         }
@@ -608,7 +607,7 @@ impl App {
             Ok(tags) => tags,
             Err(error) => {
                 tracing::warn!(%error, photo_id, "cannot load photo tags");
-                self.message = Some(format!("タグを読み込めません: {error}"));
+                self.toast_error(format!("タグを読み込めません: {error}"), cx);
                 cx.notify();
                 return;
             }
@@ -624,7 +623,7 @@ impl App {
             Ok(tags) => tags,
             Err(error) => {
                 tracing::warn!(%error, photo_id, "cannot load photo tags");
-                self.message = Some(format!("タグを読み込めません: {error}"));
+                self.toast_error(format!("タグを読み込めません: {error}"), cx);
                 cx.notify();
                 return;
             }

@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
+use gpui_kit::component::notification::NotificationType;
 use gpui_kit::component::*;
 use gpui_kit::*;
 use vrc_photo_core::db::Db;
@@ -41,8 +42,8 @@ use crate::ui::actions::{
     CloseNotifications, CloseQuickLook, FocusSearch, OpenQuickLook, QuickLookNextFocus,
     QuickLookPrevFocus, ToggleInspector, ToggleSidebar, ViewerNextPhoto, ViewerPreviousPhoto,
 };
-use crate::ui::chrome::{ChromeLayout, RibbonTab, chrome_layout, default_ribbon_tab};
-use crate::ui::notifications::{FailureNotice, ToastSpec, failure_transition};
+use crate::ui::chrome::{ChromeLayout, chrome_layout};
+use crate::ui::notifications::ToastSpec;
 use crate::ui::theme::{GLASS_WINDOW, WORKSPACE_GAP, WORKSPACE_PAD};
 use crate::update_view;
 
@@ -94,7 +95,6 @@ pub struct App {
     /// Last section the user jumped to. Sections near the bottom cannot always
     /// reach the top of the column, so the highlight falls back to this when
     /// the scroll position alone would point at an earlier section.
-    pub(crate) active_ribbon_tab: RibbonTab,
     pub(crate) ribbon_collapsed: bool,
     pub(crate) ribbon_epoch: u64,
     pub(crate) render_epoch: u64,
@@ -220,7 +220,6 @@ pub struct App {
     pub(crate) search_favorite: bool,
     pub(crate) search_days: Option<i64>,
     pub(crate) daemon_shutdown_armed: bool,
-    pub(crate) message: Option<String>,
     pub(crate) window_handle: AnyWindowHandle,
     pub(crate) pending_toasts: Vec<ToastSpec>,
     pub(crate) toasts_ready: bool,
@@ -229,6 +228,7 @@ pub struct App {
     pub(crate) import_report_expanded: bool,
     pub(crate) notification_return_focus: Option<FocusHandle>,
     pub(crate) notification_close_focus: FocusHandle,
+    pub(crate) failure_baseline: Option<(i64, usize)>,
     pub(crate) demo: bool,
     pub(crate) demo_assets: Option<DemoAssets>,
 }
@@ -245,6 +245,12 @@ pub(crate) fn any_overlay_open(
     quick_look_open || manual_compression_open || import_dialog_open || notification_modal_open
 }
 
+/// A repeated library failure must not stack identical toasts on every page
+/// load; only a new error message warrants a new notification.
+pub(crate) fn should_notify_library_error(current: Option<&str>, next: &str) -> bool {
+    current != Some(next)
+}
+
 impl App {
     /// Animation frame cap from settings. `0` disables throttling.
     pub(crate) fn motion_fps(&self) -> f32 {
@@ -258,6 +264,18 @@ impl App {
             self.import_dialog.is_some(),
             self.notification_modal_open,
         )
+    }
+
+    pub(crate) fn note_library_error(&mut self, error: String, cx: &mut Context<Self>) {
+        let notify = should_notify_library_error(self.library_error.as_deref(), &error);
+        self.library_error = Some(error);
+        if notify {
+            self.toast_actionable(
+                NotificationType::Error,
+                "ライブラリを読み込めませんでした。通知から再読込できます",
+                cx,
+            );
+        }
     }
 
     pub(crate) fn new(
@@ -362,7 +380,6 @@ impl App {
             screen_epoch: 0,
             screen_direction: 1.0,
             settings_scroll: ScrollHandle::new(),
-            active_ribbon_tab: default_ribbon_tab(Screen::Photos),
             ribbon_collapsed: initial_settings.ui_ribbon_collapsed,
             ribbon_epoch: 0,
             render_epoch: 0,
@@ -491,7 +508,6 @@ impl App {
             search_favorite: false,
             search_days: Some(7),
             daemon_shutdown_armed: false,
-            message: None,
             window_handle,
             pending_toasts: Vec::new(),
             toasts_ready: false,
@@ -500,6 +516,7 @@ impl App {
             import_report_expanded: false,
             notification_return_focus: None,
             notification_close_focus,
+            failure_baseline: None,
             demo,
             demo_assets,
         };
@@ -656,7 +673,8 @@ impl Render for App {
 
 #[cfg(test)]
 mod tests {
-    use super::{FailureNotice, any_overlay_open, failure_transition};
+    use super::{any_overlay_open, should_notify_library_error};
+    use crate::ui::notifications::{FailureNotice, failure_transition};
 
     #[test]
     fn overlay_guard_covers_the_viewer_and_both_modals() {
@@ -665,6 +683,13 @@ mod tests {
         assert!(any_overlay_open(false, true, false, false));
         assert!(any_overlay_open(false, false, true, false));
         assert!(any_overlay_open(false, false, false, true));
+    }
+
+    #[test]
+    fn should_notify_library_error_only_reports_changes() {
+        assert!(should_notify_library_error(None, "boom"));
+        assert!(!should_notify_library_error(Some("boom"), "boom"));
+        assert!(should_notify_library_error(Some("boom"), "different"));
     }
 
     #[test]
