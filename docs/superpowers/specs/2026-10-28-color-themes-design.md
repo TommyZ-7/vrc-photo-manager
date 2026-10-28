@@ -199,7 +199,7 @@ pub(crate) struct AccentColor {
 | `plum` | プラム | dark | 285 | 0.90 |
 | `wine` | ワイン | dark | 350 | 0.85 |
 | `sepia` | セピア | dark | 35 | 0.80 |
-| `paper` | ペーパー | light | 220 | 0.25 |
+| `paper` | ペーパー | light | 220 | 1.00 |
 | `ivory` | アイボリー | light | 45 | 0.45 |
 | `mist` | ミスト | light | 205 | 0.55 |
 | `sage` | セージ | light | 145 | 0.40 |
@@ -281,7 +281,7 @@ byte-exact. Light and pastel are hand-authored once, then hue-rotated.
 | muted | `0xa3adbd` |
 | muted_2 | `0x768196` |
 | shadow | `0x00000047` |
-| scrim | `0x0000008c` |
+| scrim | `0x05070acc` |
 
 **Light template (`paper`, hue 220, low saturation)**
 
@@ -304,7 +304,7 @@ byte-exact. Light and pastel are hand-authored once, then hue-rotated.
 | muted | `0x4b5563` |
 | muted_2 | `0x6b7688` |
 | shadow | `0x0f172a1f` |
-| scrim | `0x0b0f1a66` |
+| scrim | `0x05070a59` |
 
 **Pastel template (`sky`, hue 205)**
 
@@ -327,7 +327,7 @@ byte-exact. Light and pastel are hand-authored once, then hue-rotated.
 | muted | `0x43586a` |
 | muted_2 | `0x64798c` |
 | shadow | `0x0b12201f` |
-| scrim | `0x0b122059` |
+| scrim | `0x05070a59` |
 
 Retint rules:
 
@@ -478,7 +478,8 @@ mains:
   and a `p.border_strong` ring; it no longer assumes a dark pill.
 - Modal scrims (`import`, manual compression, dialogs) use `p.scrim`. A black
   scrim is still correct in light themes; only its strength follows the
-  family (0.55 dark, 0.35 light/pastel).
+  family (0.80 dark, 0.35 light/pastel; the dark value keeps the darker
+  backdrops added with the notification work).
 
 ### 5. Settings UI
 
