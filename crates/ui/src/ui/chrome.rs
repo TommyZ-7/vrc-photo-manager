@@ -105,6 +105,7 @@ pub(crate) fn chrome_layout(
 /// list in sync with every icon passed to [`chrome_icon`].
 const CHROME_ICONS: &[IconName] = &[
     IconName::Asterisk,
+    IconName::Bell,
     IconName::ChevronDown,
     IconName::ChevronUp,
     IconName::Copy,

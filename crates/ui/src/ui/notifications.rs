@@ -6,6 +6,7 @@
 //! the failure actions that are specific to this application.
 
 use gpui_kit::assets::IconName;
+use gpui_kit::base::FocusTrapElement as _;
 use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::notification::{Notification, NotificationType};
@@ -86,6 +87,11 @@ pub(crate) fn notification_sections(
     sections
 }
 
+/// Whether a render should schedule the deferred toast flush.
+pub(crate) fn toast_flush_needed(pending: usize, scheduled: bool) -> bool {
+    pending > 0 && !scheduled
+}
+
 fn notification_for(spec: &ToastSpec, entity: WeakEntity<App>) -> Notification {
     let mut note = Notification::new()
         .message(spec.message.clone())
@@ -159,24 +165,13 @@ impl App {
     }
 
     fn enqueue_toast(&mut self, spec: ToastSpec, cx: &mut Context<Self>) {
-        if !self.toasts_ready {
-            self.pending_toasts.push(spec);
-            cx.notify();
-            return;
-        }
-        self.push_toast_now(spec, cx);
+        // Always queue. Pushing directly from an event handler would re-enter
+        // the window update that is currently dispatching the event.
+        self.pending_toasts.push(spec);
+        cx.notify();
     }
 
-    fn push_toast_now(&mut self, spec: ToastSpec, cx: &mut Context<Self>) {
-        let entity = cx.entity().downgrade();
-        let note = notification_for(&spec, entity);
-        let handle = self.window_handle;
-        let _ = handle.update(cx, |_, window, cx| {
-            window.push_notification(note, cx);
-        });
-    }
-
-    /// Drains toasts produced before the component Root plugin was mounted.
+    /// Drains queued toasts after the current window update has finished.
     pub(crate) fn flush_pending_toasts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let pending = std::mem::take(&mut self.pending_toasts);
         for spec in pending {
@@ -197,11 +192,20 @@ impl App {
         if self.notification_modal_open {
             return;
         }
+        if self.import_dialog.is_some() {
+            // Actionable toasts are painted above the import dialog. Do not
+            // stack a second modal over it; keep focus in the import trap.
+            window.focus(&self.import_dialog_focus, cx);
+            return;
+        }
+        if self.manual_compress.is_some() {
+            return;
+        }
         self.notification_return_focus = window.focused(cx);
         self.notification_modal_open = true;
         self.notification_modal_epoch = self.notification_modal_epoch.wrapping_add(1);
         self.import_report_expanded = false;
-        let focus = self.notification_close_focus.clone();
+        let focus = self.notification_modal_focus.clone();
         cx.defer_in(window, move |this, window, cx| {
             if this.notification_modal_open {
                 window.focus(&focus, cx);
@@ -341,6 +345,8 @@ impl App {
             .child(
                 v_flex()
                     .id("notification-modal-card")
+                    .track_focus(&self.notification_modal_focus)
+                    .focus_trap("notification-modal", &self.notification_modal_focus)
                     .w(px(720.))
                     .max_w(relative(1.0))
                     .max_h(px(max_height))
@@ -646,7 +652,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{NotificationSection, notification_sections};
+    use super::{NotificationSection, notification_sections, toast_flush_needed};
 
     #[test]
     fn notification_sections_follow_the_action_order() {
@@ -660,5 +666,12 @@ mod tests {
             ]
         );
         assert!(notification_sections(false, false, 0, 0).is_empty());
+    }
+
+    #[test]
+    fn toast_flush_is_scheduled_once_for_a_non_empty_queue() {
+        assert!(!toast_flush_needed(0, false));
+        assert!(toast_flush_needed(1, false));
+        assert!(!toast_flush_needed(1, true));
     }
 }

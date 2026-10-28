@@ -24,6 +24,7 @@ use crate::ui::theme::*;
 
 const NAV_ITEM_HEIGHT: f32 = 40.0;
 const NAV_ITEM_GAP: f32 = 3.0;
+const NAV_TOGGLE_GUTTER: f32 = 18.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StatusTone {
@@ -86,7 +87,7 @@ impl App {
                 v_flex()
                     .relative()
                     .w_full()
-                    .pr(px(18.))
+                    .pr(px(NAV_TOGGLE_GUTTER))
                     .gap(px(NAV_ITEM_GAP))
                     .child(self.nav_highlight())
                     .child(self.nav_item(
@@ -533,7 +534,7 @@ impl App {
         let pill = div()
             .absolute()
             .left_0()
-            .right_0()
+            .right(px(NAV_TOGGLE_GUTTER))
             .h(px(NAV_ITEM_HEIGHT))
             .rounded(px(11.))
             .bg(rgb(ACCENT_SOFT))
@@ -1036,7 +1037,7 @@ fn nav_item_top(index: usize) -> f32 {
 /// tracks the item top plus half of its height.
 pub(crate) fn nav_tooltip_origin(index: usize) -> (f32, f32) {
     (
-        WORKSPACE_PAD + sidebar_width(true) + 8.0,
+        WORKSPACE_PAD + sidebar_width(true) + 20.0,
         WORKSPACE_PAD + 16.0 + nav_item_top(index) + 8.5,
     )
 }
@@ -1103,8 +1104,8 @@ mod tests {
 
     #[test]
     fn nav_tooltip_origin_follows_the_top_aligned_menu() {
-        assert_eq!(nav_tooltip_origin(0), (100.0, 38.5));
-        assert_eq!(nav_tooltip_origin(1), (100.0, 81.5));
+        assert_eq!(nav_tooltip_origin(0), (112.0, 38.5));
+        assert_eq!(nav_tooltip_origin(1), (112.0, 81.5));
     }
 
     #[test]

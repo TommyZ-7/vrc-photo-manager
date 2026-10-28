@@ -291,10 +291,16 @@ impl App {
             Ok(jobs) => self.waiting_jobs = jobs,
             Err(error) => tracing::warn!(%error, "cannot load waiting compression jobs"),
         }
-        match self.db.count_jobs(QueueStatus::Failed) {
-            Ok(count) => self.failed_job_count = count,
-            Err(error) => tracing::warn!(%error, "cannot count failed compression jobs"),
-        }
+        let failed_count = match self.db.count_jobs(QueueStatus::Failed) {
+            Ok(count) => {
+                self.failed_job_count = count;
+                Some(count)
+            }
+            Err(error) => {
+                tracing::warn!(%error, "cannot count failed compression jobs");
+                None
+            }
+        };
         match self.db.list_jobs_by_status(QueueStatus::Failed, 100) {
             Ok(jobs) => self.failed_jobs = jobs,
             Err(error) => tracing::warn!(%error, "cannot load failed compression jobs"),
@@ -308,23 +314,38 @@ impl App {
                 self.failed_job_names.insert(job.photo_id, photo.file_name);
             }
         }
-        self.daemon_errors = self.db.daemon_errors().unwrap_or_default();
-        let next = (self.failed_job_count, self.daemon_errors.len());
-        for notice in failure_transition(self.failure_baseline, next) {
-            match notice {
-                FailureNotice::Compression { count } => self.toast_actionable(
-                    NotificationType::Error,
-                    format!("圧縮に {count} 件の失敗があります"),
-                    cx,
-                ),
-                FailureNotice::Daemon { count } => self.toast_actionable(
-                    NotificationType::Error,
-                    format!("デーモンで {count} 件の処理エラーがあります"),
-                    cx,
-                ),
+        let daemon_count = match self.db.daemon_errors() {
+            Ok(errors) => {
+                let count = errors.len();
+                self.daemon_errors = errors;
+                Some(count)
             }
+            Err(error) => {
+                tracing::warn!(%error, "cannot load daemon errors");
+                None
+            }
+        };
+        // Only transition the baseline after both counts were read. A failed
+        // read would otherwise make pre-existing failures look new on the next
+        // successful refresh.
+        if let (Some(failed), Some(daemon)) = (failed_count, daemon_count) {
+            let next = (failed, daemon);
+            for notice in failure_transition(self.failure_baseline, next) {
+                match notice {
+                    FailureNotice::Compression { count } => self.toast_actionable(
+                        NotificationType::Error,
+                        format!("圧縮に {count} 件の失敗があります"),
+                        cx,
+                    ),
+                    FailureNotice::Daemon { count } => self.toast_actionable(
+                        NotificationType::Error,
+                        format!("デーモンで {count} 件の処理エラーがあります"),
+                        cx,
+                    ),
+                }
+            }
+            self.failure_baseline = Some(next);
         }
-        self.failure_baseline = Some(next);
     }
 
     pub(crate) fn ensure_profiles(&mut self) {

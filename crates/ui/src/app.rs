@@ -43,7 +43,7 @@ use crate::ui::actions::{
     QuickLookPrevFocus, ToggleInspector, ToggleSidebar, ViewerNextPhoto, ViewerPreviousPhoto,
 };
 use crate::ui::chrome::{ChromeLayout, chrome_layout};
-use crate::ui::notifications::ToastSpec;
+use crate::ui::notifications::{ToastSpec, toast_flush_needed};
 use crate::ui::theme::{GLASS_WINDOW, WORKSPACE_GAP, WORKSPACE_PAD};
 use crate::update_view;
 
@@ -219,14 +219,14 @@ pub struct App {
     pub(crate) search_favorite: bool,
     pub(crate) search_days: Option<i64>,
     pub(crate) daemon_shutdown_armed: bool,
-    pub(crate) window_handle: AnyWindowHandle,
     pub(crate) pending_toasts: Vec<ToastSpec>,
-    pub(crate) toasts_ready: bool,
+    pub(crate) toast_flush_scheduled: bool,
     pub(crate) notification_modal_open: bool,
     pub(crate) notification_modal_epoch: u64,
     pub(crate) import_report_expanded: bool,
     pub(crate) notification_return_focus: Option<FocusHandle>,
     pub(crate) notification_close_focus: FocusHandle,
+    pub(crate) notification_modal_focus: FocusHandle,
     pub(crate) failure_baseline: Option<(i64, usize)>,
     pub(crate) demo: bool,
     pub(crate) demo_assets: Option<DemoAssets>,
@@ -366,8 +366,8 @@ impl App {
         let quick_look_note_save_focus = cx.focus_handle();
         let quick_look_note_cancel_focus = cx.focus_handle();
         let notification_close_focus = cx.focus_handle();
+        let notification_modal_focus = cx.focus_handle();
         let empty_index = Arc::new(PhotoIndex::new(Vec::new()));
-        let window_handle = window.window_handle();
         let mut app = Self {
             db,
             screen: Screen::Photos,
@@ -506,14 +506,14 @@ impl App {
             search_favorite: false,
             search_days: Some(7),
             daemon_shutdown_armed: false,
-            window_handle,
             pending_toasts: Vec::new(),
-            toasts_ready: false,
+            toast_flush_scheduled: false,
             notification_modal_open: false,
             notification_modal_epoch: 0,
             import_report_expanded: false,
             notification_return_focus: None,
             notification_close_focus,
+            notification_modal_focus,
             failure_baseline: None,
             demo,
             demo_assets,
@@ -575,9 +575,10 @@ impl App {
 impl Render for App {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.render_epoch = self.render_epoch.wrapping_add(1);
-        if !self.toasts_ready {
-            self.toasts_ready = true;
+        if toast_flush_needed(self.pending_toasts.len(), self.toast_flush_scheduled) {
+            self.toast_flush_scheduled = true;
             cx.defer_in(window, |this, window, cx| {
+                this.toast_flush_scheduled = false;
                 this.flush_pending_toasts(window, cx);
             });
         }

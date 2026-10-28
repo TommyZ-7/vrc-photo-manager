@@ -372,8 +372,14 @@ impl App {
                     self.index_import_destination(&mut report, cx);
                 }
                 let summary = import_summary(&report);
-                let (failed, _) = import_issue_counts(&report.issues);
-                let tone = if failed == 0 && report.remaining.is_empty() {
+                let (failed, partial) = import_issue_counts(&report.issues);
+                let scan_failed =
+                    report.scan_failures.len() + usize::from(report.scan_error.is_some());
+                let tone = if failed == 0
+                    && partial == 0
+                    && scan_failed == 0
+                    && report.remaining.is_empty()
+                {
                     NotificationType::Success
                 } else {
                     NotificationType::Warning
