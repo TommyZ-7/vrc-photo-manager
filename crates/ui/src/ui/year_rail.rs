@@ -17,7 +17,7 @@ use crate::state::year_rail::{
     rail_press_allowed, rail_row_at, rail_scroll_offset, rail_text_run, rail_track_hit_bounds,
     rail_y, visible_year_buckets,
 };
-use crate::ui::theme::{MUTED_2, PANEL_2, TEXT};
+use crate::ui::theme::{Palette, with_alpha};
 
 /// Snap distance around a year label for click-to-jump on the rail.
 const RAIL_YEAR_HIT_SLOP: f32 = 8.0;
@@ -33,7 +33,7 @@ pub(crate) struct YearRailLabels {
 }
 
 impl YearRailLabels {
-    pub(crate) fn build(index: &PhotoIndex, window: &mut Window) -> Self {
+    pub(crate) fn build(index: &PhotoIndex, window: &mut Window, palette: &Palette) -> Self {
         let text_system = window.text_system();
         let mut years = Vec::with_capacity(index.years.len());
         let mut current_years = Vec::with_capacity(index.years.len());
@@ -42,13 +42,13 @@ impl YearRailLabels {
             years.push(text_system.shape_line(
                 text.clone(),
                 px(10.),
-                &[rail_text_run(text.len(), MUTED_2)],
+                &[rail_text_run(text.len(), palette.muted_2)],
                 None,
             ));
             current_years.push(text_system.shape_line(
                 text.clone(),
                 px(10.),
-                &[rail_text_run(text.len(), TEXT)],
+                &[rail_text_run(text.len(), palette.text)],
                 None,
             ));
         }
@@ -64,7 +64,7 @@ impl YearRailLabels {
                 text_system.shape_line(
                     text.clone(),
                     px(10.),
-                    &[rail_text_run(text.len(), TEXT)],
+                    &[rail_text_run(text.len(), palette.text)],
                     None,
                 ),
             );
@@ -92,6 +92,7 @@ pub(crate) struct YearRail {
     row_height: f32,
     drag_active: Rc<Cell<bool>>,
     hovered: Rc<Cell<bool>>,
+    palette: Palette,
 }
 
 impl YearRail {
@@ -107,6 +108,7 @@ impl YearRail {
         row_height: f32,
         drag_active: Rc<Cell<bool>>,
         hovered: Rc<Cell<bool>>,
+        palette: Palette,
     ) -> Self {
         Self {
             id,
@@ -117,6 +119,7 @@ impl YearRail {
             row_height,
             drag_active,
             hovered,
+            palette,
         }
     }
 
@@ -255,6 +258,7 @@ impl Element for YearRail {
         window: &mut Window,
         cx: &mut gpui_kit::App,
     ) {
+        let p = self.palette;
         let total = self.index.total;
         if total == 0 {
             return;
@@ -276,7 +280,7 @@ impl Element for YearRail {
                         point(track_x - px(1.), bounds.top() + px(RAIL_TOP_PAD)),
                         size(px(2.), px(usable)),
                     ),
-                    rgba(0xffffff14),
+                    rgba(p.line_soft),
                 )
                 .corner_radii(px(1.)),
             );
@@ -297,9 +301,9 @@ impl Element for YearRail {
         for bucket in &self.index.years {
             let y = bounds.top() + px(rail_y(bucket.display_row, total, height));
             let color = if bucket.year == current_year {
-                rgb(TEXT)
+                rgb(p.text)
             } else {
-                rgba(0xffffff30)
+                rgba(with_alpha(p.text, 0x30))
             };
             window.paint_quad(
                 fill(
@@ -342,7 +346,9 @@ impl Element for YearRail {
         let pill_center = bounds.top() + px(pill_y);
         if expanded {
             let pill_bounds = rail_pill_bounds(bounds, pill_y);
-            window.paint_quad(fill(pill_bounds, rgba((PANEL_2 << 8) | 0xf0)).corner_radii(px(9.)));
+            window.paint_quad(
+                fill(pill_bounds, rgba(with_alpha(p.panel_header, 0xf0))).corner_radii(px(9.)),
+            );
             if let Some(line) = labels.months.get(&month) {
                 line.paint(
                     point(
@@ -363,8 +369,10 @@ impl Element for YearRail {
                 point(marker.origin.x - px(1.), marker.origin.y - px(1.)),
                 size(marker.size.width + px(2.), marker.size.height + px(2.)),
             );
-            window.paint_quad(fill(ring, rgba(0xffffff2e)).corner_radii(px(4.)));
-            window.paint_quad(fill(marker, rgba(0x05070af2)).corner_radii(px(3.)));
+            window.paint_quad(fill(ring, rgba(with_alpha(p.text, 0x2e))).corner_radii(px(4.)));
+            window.paint_quad(
+                fill(marker, rgba(with_alpha(p.panel_header, 0xf2))).corner_radii(px(3.)),
+            );
         }
 
         let gutter_hitbox = hitboxes.gutter.clone();

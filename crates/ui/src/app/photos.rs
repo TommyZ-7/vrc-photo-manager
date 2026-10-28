@@ -19,7 +19,7 @@ use crate::app::{App, Screen};
 use crate::state::photo_browser::PhotoBrowser;
 use crate::state::preview::{preview_cache_dir, preview_key, should_request_preview};
 use crate::state::thumbnail::{decode_thumbnail, make_render_image, preview_render_image};
-use crate::ui::theme::{BG, PANEL_DEEP, scene_color, selection_range, toggle_selected_id};
+use crate::ui::theme::{selection_range, toggle_selected_id};
 
 impl App {
     /// Reloads the metadata for a photo without decoding its 1200 px preview.
@@ -395,16 +395,17 @@ impl App {
     }
 
     pub(crate) fn color_for(&self, photo: &Photo) -> u32 {
-        self.thumbnails
-            .color(photo.id)
-            .unwrap_or_else(|| scene_color(photo.world_name.as_deref().unwrap_or("")))
+        self.thumbnails.color(photo.id).unwrap_or_else(|| {
+            self.palette
+                .scene_color(photo.world_name.as_deref().unwrap_or(""))
+        })
     }
 
     pub(crate) fn selected_color(&self) -> u32 {
         self.selected_photo
             .as_ref()
             .map(|photo| self.color_for(photo))
-            .unwrap_or(BG)
+            .unwrap_or(self.palette.bg)
     }
 
     pub(crate) fn begin_note_edit(
@@ -488,12 +489,13 @@ impl App {
             format!("{count} 枚をOSゴミ箱へ移動します。この操作は元に戻せません。")
         };
         let entity = cx.entity();
+        let panel_deep = self.palette.panel_deep;
         window.open_alert_dialog(cx, move |alert, _, _| {
             let entity = entity.clone();
             let ids = ids.clone();
             alert
                 .title(title)
-                .bg(rgb(PANEL_DEEP))
+                .bg(rgb(panel_deep))
                 .description(description.clone())
                 .confirm()
                 .ok_text("ゴミ箱へ")

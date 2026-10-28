@@ -54,6 +54,7 @@ impl App {
     }
 
     fn gallery_card(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
         v_flex()
             .relative()
             .flex_1()
@@ -62,12 +63,12 @@ impl App {
             .h_full()
             .overflow_hidden()
             .rounded(px(17.))
-            .bg(rgb(PANEL_CARD))
+            .bg(rgb(p.panel_card))
             .border_1()
-            .border_color(rgba(0xffffff1b))
+            .border_color(rgba(p.line_soft))
             .shadow(vec![
-                BoxShadow::new(px(0.), px(18.), rgba(0x00000047).into()).blur_radius(px(44.)),
-                BoxShadow::new(px(0.), px(1.), rgba(0xffffff14).into())
+                BoxShadow::new(px(0.), px(18.), rgba(p.shadow).into()).blur_radius(px(44.)),
+                BoxShadow::new(px(0.), px(1.), rgba(p.highlight).into())
                     .inset()
                     .blur_radius(px(0.)),
             ])
@@ -77,6 +78,7 @@ impl App {
     }
 
     fn gallery_header(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
         let entries = &self.library.index.entries;
         let total = entries.len();
         let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
@@ -109,7 +111,7 @@ impl App {
             .gap(px(8.))
             .items_center()
             .border_b_1()
-            .border_color(rgba(0xffffff14))
+            .border_color(rgba(p.highlight))
             .child(
                 h_flex()
                     .min_w_0()
@@ -120,7 +122,7 @@ impl App {
                             .whitespace_nowrap()
                             .text_size(px(12.))
                             .font_semibold()
-                            .text_color(rgb(TEXT))
+                            .text_color(rgb(p.text))
                             .child(month),
                     )
                     .child(
@@ -128,7 +130,7 @@ impl App {
                             .whitespace_nowrap()
                             .font_family("monospace")
                             .text_size(px(10.))
-                            .text_color(rgb(MUTED_2))
+                            .text_color(rgb(p.muted_2))
                             .child(format!(
                                 "{}枚 / {}",
                                 format_count(month_count as i64),
@@ -141,6 +143,7 @@ impl App {
     }
 
     pub(crate) fn selection_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
         let count = self.selected_ids.len();
         if count <= 1 {
             return div().into_any_element();
@@ -155,14 +158,14 @@ impl App {
             .px(px(14.))
             .py(px(8.))
             .rounded(px(12.))
-            .bg(rgb(ACCENT_SOFT))
+            .bg(rgb(p.accent_soft))
             .border_1()
-            .border_color(rgba(0xffffff14))
+            .border_color(rgba(p.highlight))
             .child(
                 div()
                     .text_size(px(11.))
                     .font_medium()
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(p.text))
                     .child(format!("{count} 件選択中")),
             )
             .child(div().flex_1())
@@ -203,6 +206,7 @@ impl App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let p = self.palette;
         let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
         let width = window_content_extent(f32::from(window.viewport_size().width), client_inset);
         let pending = if search {
@@ -263,7 +267,7 @@ impl App {
         {
             // Shaping is expensive, so do it once per index snapshot instead
             // of on every render or paint frame.
-            let labels = Arc::new(YearRailLabels::build(&browser.index, window));
+            let labels = Arc::new(YearRailLabels::build(&browser.index, window, &p));
             browser.labels = Some(labels.clone());
             browser.labels_generation = browser.generation;
             labels
@@ -281,10 +285,10 @@ impl App {
         if rows == 0 {
             let empty = if search {
                 if self.search_active {
-                    glass_panel(&self.palette)
+                    glass_panel(&p)
                         .p(px(20.))
                         .text_size(px(12.))
-                        .text_color(rgb(MUTED))
+                        .text_color(rgb(p.muted))
                         .child("条件に一致する写真がありません")
                         .into_any_element()
                 } else {
@@ -298,17 +302,17 @@ impl App {
                     .max_w(px(560.))
                     .p(px(20.))
                     .rounded(px(18.))
-                    .bg(rgb(PANEL))
+                    .bg(rgb(p.panel))
                     .border_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(p.border))
                     .text_size(px(12.))
-                    .text_color(rgb(RED))
+                    .text_color(rgb(p.red))
                     .child(error)
                     .child(
                         div()
                             .pt(px(4.))
                             .text_size(px(10.))
-                            .text_color(rgb(MUTED_2))
+                            .text_color(rgb(p.muted_2))
                             .child("リボンの「再読込」で再試行できます。"),
                     )
                     .into_any_element()
@@ -318,11 +322,11 @@ impl App {
                     .max_w(px(560.))
                     .p(px(20.))
                     .rounded(px(18.))
-                    .bg(rgb(PANEL))
+                    .bg(rgb(p.panel))
                     .border_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(rgb(p.border))
                     .text_size(px(12.))
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(p.muted))
                     .child(
                         "写真がありません。VRChatの写真フォルダを設定するか、--demo でサンプルを表示できます。",
                     )
@@ -391,7 +395,7 @@ impl App {
                                 ));
                             }
                             None => {
-                                line = line.child(grid_placeholder(image_height, card_width));
+                                line = line.child(grid_placeholder(&p, image_height, card_width));
                             }
                         }
                     }
@@ -446,6 +450,7 @@ impl App {
                         row_height,
                         rail_drag,
                         rail_hover,
+                        p,
                     )),
             );
         }
@@ -548,6 +553,7 @@ impl App {
         card_width: Option<f32>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let p = self.palette;
         let id = photo.id;
         let selected = self.selected_ids.contains(&id);
         let primary = self.selected == Some(id);
@@ -619,13 +625,13 @@ impl App {
         );
         if show_status {
             let status_color = if replaced {
-                BLUE
+                p.accent
             } else if duplicate {
-                MUTED
+                p.muted
             } else if compressed {
-                GREEN
+                p.green
             } else {
-                AMBER
+                p.amber
             };
             thumb = thumb.child(
                 h_flex()
@@ -635,9 +641,9 @@ impl App {
                     .px(px(6.))
                     .py(px(3.))
                     .rounded(px(6.))
-                    .bg(rgb(PANEL_DEEP))
+                    .bg(rgb(p.panel_deep))
                     .border_1()
-                    .border_color(rgba(0xffffff1a))
+                    .border_color(rgba(p.line_soft))
                     .gap(px(5.))
                     .items_center()
                     .child(div().size(px(5.)).rounded_full().bg(rgb(status_color)))
@@ -666,15 +672,15 @@ impl App {
                     .left(px(9.))
                     .size(px(19.))
                     .rounded_full()
-                    .bg(rgb(BLUE))
+                    .bg(rgb(p.accent))
                     .border_2()
-                    .border_color(rgb(0x07090d))
+                    .border_color(rgb(p.bg))
                     .flex()
                     .items_center()
                     .justify_center()
                     .text_size(px(11.))
                     .font_semibold()
-                    .text_color(rgb(0x071018))
+                    .text_color(rgb(p.on_accent))
                     .child("✓"),
             )
         });
@@ -686,9 +692,9 @@ impl App {
                     .right(px(9.))
                     .size(px(7.))
                     .rounded_full()
-                    .bg(rgb(AMBER))
+                    .bg(rgb(p.amber))
                     .shadow(vec![
-                        BoxShadow::new(px(0.), px(0.), rgba(0x00000080).into()).blur_radius(px(3.)),
+                        BoxShadow::new(px(0.), px(0.), rgba(p.shadow).into()).blur_radius(px(3.)),
                     ]),
             )
         });
@@ -705,7 +711,7 @@ impl App {
                     .text_size(px(12.))
                     .line_height(relative(1.5))
                     .font_semibold()
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(p.text))
                     .truncate()
                     .child(world),
             );
@@ -716,7 +722,7 @@ impl App {
                     .min_w_0()
                     .text_size(px(10.))
                     .line_height(relative(1.5))
-                    .text_color(rgb(MUTED_2))
+                    .text_color(rgb(p.muted_2))
                     .truncate()
                     .child(meta),
             );
@@ -731,21 +737,22 @@ impl App {
             .rounded(px(card_radius))
             .border_1()
             .border_color(if primary {
-                rgba(0x66b3ff)
+                rgba(p.accent)
             } else if selected {
-                rgba(0x9fcaff)
+                rgba(p.accent_border)
             } else {
-                rgba(0xffffff16)
+                rgba(p.line_soft)
             })
-            .bg(rgb(PANEL_DEEP))
+            .bg(rgb(p.panel_deep))
             .cursor_pointer()
             .when(!primary && !selected, |this| {
-                this.hover(|this| this.border_color(rgba(0xffffff30)))
+                this.hover(|this| this.border_color(rgba(with_alpha(p.text, 0x30))))
             })
             .child(thumb);
         if selected {
             card = card.shadow(vec![
-                BoxShadow::new(px(0.), px(8.), rgba(0x66b3ff4d).into()).blur_radius(px(24.)),
+                BoxShadow::new(px(0.), px(8.), rgba(with_alpha(p.accent, 0x4d)).into())
+                    .blur_radius(px(24.)),
             ]);
         }
         if has_info {
@@ -824,6 +831,7 @@ impl App {
     }
 
     fn inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
         let viewport = window.viewport_size();
         let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
         let content_width = window_content_extent(f32::from(viewport.width), client_inset);
@@ -837,7 +845,7 @@ impl App {
                 .h_full()
                 .flex_shrink_0()
                 .child(
-                    glass_panel(&self.palette)
+                    glass_panel(&p)
                         .flex_1()
                         .w(px(card_width))
                         .rounded(px(17.))
@@ -850,13 +858,13 @@ impl App {
                             div()
                                 .text_size(px(12.))
                                 .font_medium()
-                                .text_color(rgb(TEXT))
+                                .text_color(rgb(p.text))
                                 .child("写真を選択してください"),
                         )
                         .child(
                             div()
                                 .text_size(px(10.))
-                                .text_color(rgb(MUTED_2))
+                                .text_color(rgb(p.muted_2))
                                 .child("ライブラリから写真を選ぶと、ここに情報が表示されます。"),
                         ),
                 )
@@ -882,7 +890,7 @@ impl App {
             div()
                 .text_size(px(10.))
                 .font_semibold()
-                .text_color(rgb(MUTED_2))
+                .text_color(rgb(p.muted_2))
                 .child(label)
         };
         let pill = |text: String| {
@@ -890,11 +898,11 @@ impl App {
                 .px(px(7.))
                 .py(px(2.))
                 .rounded_full()
-                .bg(rgba(0xffffff0f))
+                .bg(rgba(with_alpha(p.text, 0x0f)))
                 .border_1()
-                .border_color(rgba(0xffffff12))
+                .border_color(rgba(with_alpha(p.text, 0x12)))
                 .text_size(px(10.))
-                .text_color(rgb(MUTED))
+                .text_color(rgb(p.muted))
                 .child(text)
         };
 
@@ -906,10 +914,10 @@ impl App {
             .overflow_hidden()
             .rounded(px(18.))
             .border_1()
-            .border_color(rgba(0xffffff14))
+            .border_color(rgba(p.highlight))
             .bg(rgb(current_color))
             .shadow(vec![
-                BoxShadow::new(px(0.), px(22.), rgba(0x00000073).into()).blur_radius(px(48.)),
+                BoxShadow::new(px(0.), px(22.), rgba(p.shadow).into()).blur_radius(px(48.)),
             ]);
 
         // 1. Solid tint, lerped from the previous photo's average color only
@@ -944,8 +952,8 @@ impl App {
                 .rounded(px(inner_corner_radius(18.0, 1.0)))
                 .bg(linear_gradient(
                     180.,
-                    linear_color_stop(rgba(0x090d13cc), 0.),
-                    linear_color_stop(rgba(0x090d13f7), 1.),
+                    linear_color_stop(rgba(with_alpha(p.bg, 0xcc)), 0.),
+                    linear_color_stop(rgba(with_alpha(p.bg, 0xf7)), 1.),
                 )),
         );
 
@@ -968,10 +976,10 @@ impl App {
             .overflow_hidden()
             .rounded(px(12.))
             .border_1()
-            .border_color(rgba(0xffffff1f))
+            .border_color(rgba(with_alpha(p.text, 0x1f)))
             .bg(rgb(current_color))
             .shadow(vec![
-                BoxShadow::new(px(0.), px(16.), rgba(0x000000a6).into()).blur_radius(px(32.)),
+                BoxShadow::new(px(0.), px(16.), rgba(p.shadow).into()).blur_radius(px(32.)),
             ]);
         if let Some(preview) = current_preview.as_ref() {
             preview_frame = preview_frame.child(image_layer(preview.clone()));
@@ -986,7 +994,7 @@ impl App {
                     .items_center()
                     .justify_center()
                     .text_size(px(10.))
-                    .text_color(rgb(MUTED_2))
+                    .text_color(rgb(p.muted_2))
                     .child(label),
             );
         }
@@ -1013,14 +1021,14 @@ impl App {
                 div()
                     .text_size(px(10.))
                     .font_semibold()
-                    .text_color(rgb(MUTED_2))
+                    .text_color(rgb(p.muted_2))
                     .child("選択中"),
             )
             .child(
                 div()
                     .text_size(px(10.))
                     .font_family("monospace")
-                    .text_color(rgb(MUTED_2))
+                    .text_color(rgb(p.muted_2))
                     .child("Space で開く"),
             );
 
@@ -1032,7 +1040,7 @@ impl App {
                     .min_w_0()
                     .text_size(px(17.))
                     .font_semibold()
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(p.text))
                     .truncate()
                     .child(world.clone()),
             )
@@ -1041,22 +1049,22 @@ impl App {
                     .min_w_0()
                     .text_size(px(10.))
                     .font_family("monospace")
-                    .text_color(rgb(MUTED_2))
+                    .text_color(rgb(p.muted_2))
                     .truncate()
                     .child(photo.captured_at_local.clone()),
             );
 
         let mut badges = h_flex().flex_wrap().gap(px(5.));
         if photo.world_name.is_some() {
-            badges = badges.child(self.badge("文脈あり", BLUE, 0x14283d));
+            badges = badges.child(self.badge("文脈あり", p.accent, p.accent_soft));
         }
         if photo.is_favorite {
-            badges = badges.child(self.badge("★ お気に入り", AMBER, 0x2a2111));
+            badges = badges.child(self.badge("★ お気に入り", p.amber, p.amber_soft));
         }
         if compressed {
-            badges = badges.child(self.badge("圧縮済", GREEN, 0x102a24));
+            badges = badges.child(self.badge("圧縮済", p.green, p.green_soft));
         } else {
-            badges = badges.child(self.badge("未圧縮", AMBER, 0x2a2111));
+            badges = badges.child(self.badge("未圧縮", p.amber, p.amber_soft));
         }
 
         let meta = v_flex()
@@ -1177,6 +1185,7 @@ impl App {
         photo: &Photo,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let p = self.palette;
         let id = photo.id;
         let world = photo
             .world_name
@@ -1196,7 +1205,7 @@ impl App {
             div()
                 .text_size(px(10.))
                 .font_semibold()
-                .text_color(rgb(MUTED_2))
+                .text_color(rgb(p.muted_2))
                 .child(label)
         };
         let pill = |text: String| {
@@ -1204,11 +1213,11 @@ impl App {
                 .px(px(7.))
                 .py(px(2.))
                 .rounded_full()
-                .bg(rgba(0xffffff0f))
+                .bg(rgba(with_alpha(p.text, 0x0f)))
                 .border_1()
-                .border_color(rgba(0xffffff12))
+                .border_color(rgba(with_alpha(p.text, 0x12)))
                 .text_size(px(10.))
-                .text_color(rgb(MUTED))
+                .text_color(rgb(p.muted))
                 .child(text)
         };
 
@@ -1349,7 +1358,7 @@ impl App {
                     .min_w_0()
                     .text_size(px(24.))
                     .font_semibold()
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(p.text))
                     .truncate()
                     .child(world.clone()),
             )
@@ -1363,7 +1372,7 @@ impl App {
                             .min_w_0()
                             .text_size(px(10.))
                             .font_family("monospace")
-                            .text_color(rgb(MUTED_2))
+                            .text_color(rgb(p.muted_2))
                             .truncate()
                             .child(photo.captured_at_local.clone()),
                     )
@@ -1437,7 +1446,7 @@ impl App {
                         this.child(
                             div()
                                 .text_size(px(10.))
-                                .text_color(rgb(MUTED_2))
+                                .text_color(rgb(p.muted_2))
                                 .child("まだ圧縮されていません"),
                         )
                     })
@@ -1445,7 +1454,7 @@ impl App {
                         h_flex()
                             .gap(px(8.))
                             .text_size(px(10.))
-                            .text_color(rgb(MUTED))
+                            .text_color(rgb(p.muted))
                             .child(derivative.format.to_uppercase())
                             .child(format_bytes(derivative.file_size))
                             .child(div().min_w_0().truncate().child(derivative.path.clone()))
@@ -1474,7 +1483,7 @@ impl App {
                                     .child(
                                         div()
                                             .text_size(px(10.))
-                                            .text_color(rgb(MUTED_2))
+                                            .text_color(rgb(p.muted_2))
                                             .child("Esc でキャンセル"),
                                     ),
                             )
@@ -1484,11 +1493,11 @@ impl App {
                             div()
                                 .p(px(8.))
                                 .rounded(px(8.))
-                                .bg(rgb(PANEL))
+                                .bg(rgb(p.panel))
                                 .border_1()
-                                .border_color(rgb(BORDER))
+                                .border_color(rgb(p.border))
                                 .text_size(px(10.))
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(p.muted))
                                 .child(
                                     note.clone()
                                         .unwrap_or_else(|| "メモはまだありません".to_string()),
@@ -1508,14 +1517,15 @@ impl App {
 }
 /// Stands in for a photo whose page has not loaded yet. Matches the card's
 /// current image height so the uniform row never changes height.
-fn grid_placeholder(image_height: f32, card_width: Option<f32>) -> AnyElement {
+fn grid_placeholder(palette: &Palette, image_height: f32, card_width: Option<f32>) -> AnyElement {
+    let p = palette;
     let mut placeholder = div()
         .min_w_0()
         .h(px(image_height))
         .rounded(px(13.))
-        .bg(rgb(PANEL_DEEP))
+        .bg(rgb(p.panel_deep))
         .border_1()
-        .border_color(rgba(0xffffff16));
+        .border_color(rgba(p.line_soft));
     placeholder = match card_width {
         Some(width) => placeholder.w(px(width)).flex_shrink_0(),
         None => placeholder.flex_1(),

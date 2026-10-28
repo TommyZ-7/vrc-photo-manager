@@ -34,6 +34,7 @@ impl App {
     }
 
     fn search_results_card(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
         let total = self.search_view.index.total;
         let count = format!("{total} 枚");
         let selection = (self.selected_ids.len() > 1).then(|| self.selection_bar(cx));
@@ -54,7 +55,7 @@ impl App {
                     .gap(px(8.))
                     .items_center()
                     .border_b_1()
-                    .border_color(rgba(0xffffff14))
+                    .border_color(rgba(p.highlight))
                     .child(
                         h_flex()
                             .flex_shrink_0()
@@ -65,14 +66,14 @@ impl App {
                                     .whitespace_nowrap()
                                     .text_size(px(12.))
                                     .font_semibold()
-                                    .text_color(rgb(TEXT))
+                                    .text_color(rgb(p.text))
                                     .child(count),
                             )
                             .child(
                                 div()
                                     .whitespace_nowrap()
                                     .text_size(px(10.))
-                                    .text_color(rgb(MUTED_2))
+                                    .text_color(rgb(p.muted_2))
                                     .child("検索結果"),
                             ),
                     )
@@ -81,7 +82,7 @@ impl App {
                             div()
                                 .flex_shrink_0()
                                 .text_size(px(10.))
-                                .text_color(rgb(AMBER))
+                                .text_color(rgb(p.amber))
                                 .child("検索中…"),
                         )
                     })
@@ -101,6 +102,7 @@ impl App {
     }
 
     fn search_filter_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
         glass_panel(&self.palette)
             .flex()
             .flex_col()
@@ -116,13 +118,13 @@ impl App {
                 div()
                     .text_size(px(13.))
                     .font_semibold()
-                    .text_color(rgb(TEXT))
+                    .text_color(rgb(p.text))
                     .child("絞り込み"),
             )
             .child(
                 div()
                     .text_size(px(10.))
-                    .text_color(rgb(MUTED_2))
+                    .text_color(rgb(p.muted_2))
                     .child("カテゴリ間はAND、カテゴリ内はOR"),
             )
             .child(self.filter_field("ワールド", Input::new(&self.world_input)))
@@ -134,7 +136,7 @@ impl App {
                     .child(
                         div()
                             .text_size(px(10.))
-                            .text_color(rgb(MUTED_2))
+                            .text_color(rgb(p.muted_2))
                             .child("日時"),
                     )
                     .child(
@@ -153,7 +155,7 @@ impl App {
                     .child(
                         div()
                             .text_size(px(12.))
-                            .text_color(rgb(MUTED))
+                            .text_color(rgb(p.muted))
                             .child("お気に入りのみ"),
                     )
                     .child(div().flex_1())
