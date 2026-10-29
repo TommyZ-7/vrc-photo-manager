@@ -17,7 +17,7 @@ use vrc_photo_core::linker;
 use vrc_photo_core::log_parser::LogIngestor;
 use vrc_photo_core::model::{
     CompressionJob, CompressionProfile, DaemonCommand, DaemonOperation, DeletionReason,
-    DeletionRequest, Photo, PhotoStatus, QueueStatus,
+    DeletionRequest, Derivative, Photo, PhotoStatus, QueueStatus,
 };
 use vrc_photo_core::photo_filename::is_source_photo;
 use vrc_photo_core::scanner::{
@@ -1635,14 +1635,36 @@ fn enqueue_auto_jobs(db: &Db, new_ids: &[i64], keep_original: bool, immediate: b
 }
 
 /// Keeps a photo visible when its original file was deleted manually but a
-/// completed compression output remains. The newest existing derivative wins.
+/// completed compression output remains. Uses the same deterministic profile
+/// preference as replacement jobs.
 fn promote_display_derivative(db: &Db, photo: &Photo) -> Result<bool> {
-    for derivative in db.derivatives_for_photo(photo.id)? {
-        if Path::new(&derivative.path).is_file() {
-            return Ok(db.set_replaced(photo.id, derivative.id)?);
-        }
-    }
-    Ok(false)
+    let derivatives = db.derivatives_for_photo(photo.id)?;
+    let profiles = db.list_profiles()?;
+    let Some(preferred) = preferred_display_derivative(&derivatives, &profiles) else {
+        return Ok(false);
+    };
+    Ok(db.set_replaced(photo.id, preferred.id)?)
+}
+
+/// Picks the derivative to show for a photo. Profiles are ordered by
+/// `sort_order`, so the later profile in `list_profiles()` wins. Unknown
+/// profiles rank below known ones and fall back to the larger derivative id.
+/// Only files that still exist are candidates.
+fn preferred_display_derivative<'a>(
+    derivatives: &'a [Derivative],
+    profiles: &[CompressionProfile],
+) -> Option<&'a Derivative> {
+    derivatives
+        .iter()
+        .filter(|derivative| Path::new(&derivative.path).is_file())
+        .max_by_key(|derivative| {
+            (
+                profiles
+                    .iter()
+                    .position(|profile| profile.id == derivative.profile_id),
+                derivative.id,
+            )
+        })
 }
 
 fn thumbnail_loop(
@@ -1758,6 +1780,16 @@ fn run_deletions_once(db: &Arc<Mutex<Db>>) -> Result<usize> {
     };
     let mut executed = 0;
     for pending in requests {
+        if pending.reason == DeletionReason::Unknown {
+            let db = db.lock().unwrap();
+            db.block_deletion(pending.id, "unknown_reason", None)?;
+            tracing::warn!(
+                request = pending.id,
+                photo_id = pending.photo_id,
+                "unknown deletion reason; request blocked"
+            );
+            continue;
+        }
         let blocked = {
             let db = db.lock().unwrap();
             db.block_deletion_if_jobs_failed(pending.id)?
@@ -1785,6 +1817,9 @@ fn run_deletions_once(db: &Arc<Mutex<Db>>) -> Result<usize> {
 }
 
 fn execute_deletion(db: &Arc<Mutex<Db>>, request: &DeletionRequest) -> Result<()> {
+    if request.reason == DeletionReason::Unknown {
+        anyhow::bail!("unknown deletion reason");
+    }
     let (photo, targets) = {
         let db = db.lock().unwrap();
         let Some(photo) = db.photo_by_id(request.photo_id)? else {
@@ -1794,10 +1829,8 @@ fn execute_deletion(db: &Arc<Mutex<Db>>, request: &DeletionRequest) -> Result<()
         };
         let derivatives = db.derivatives_for_photo(photo.id)?;
         if request.reason == DeletionReason::AutoReplace && !request.force {
-            let valid = derivatives
-                .iter()
-                .find(|derivative| Path::new(&derivative.path).is_file());
-            let Some(valid) = valid else {
+            let profiles = db.list_profiles()?;
+            let Some(valid) = preferred_display_derivative(&derivatives, &profiles) else {
                 db.block_deletion(request.id, "missing_asset", None)?;
                 return Err(anyhow::anyhow!(
                     "replacement derivative is missing; refusing to delete the original"
@@ -1971,7 +2004,7 @@ fn process_job(db: &Arc<Mutex<Db>>, job: &CompressionJob) -> Result<()> {
         anyhow::bail!("compressed output is missing or empty");
     }
     let db = db.lock().unwrap();
-    let derivative_id = db.add_derivative(
+    db.add_derivative(
         photo.id,
         &result.output_path.to_string_lossy(),
         result.format.as_str(),
@@ -1983,7 +2016,11 @@ fn process_job(db: &Arc<Mutex<Db>>, job: &CompressionJob) -> Result<()> {
     )?;
     let current_status = db.photo_by_id(photo.id)?.map(|row| row.status);
     if job.policy == "replace" && current_status != Some(PhotoStatus::Deleting) {
-        if !db.set_replaced(photo.id, derivative_id)? {
+        let derivatives = db.derivatives_for_photo(photo.id)?;
+        let profiles = db.list_profiles()?;
+        let preferred = preferred_display_derivative(&derivatives, &profiles)
+            .context("no displayable derivative after compression")?;
+        if !db.set_replaced(photo.id, preferred.id)? {
             anyhow::bail!("derivative was not attached to the photo");
         }
         db.request_deletion(&[photo.id], DeletionReason::AutoReplace, false)?;
@@ -3110,6 +3147,195 @@ mod tests {
     }
 
     #[test]
+    fn preferred_display_derivative_uses_profile_order_then_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.webp");
+        let second = dir.path().join("second.webp");
+        std::fs::write(&first, b"a").unwrap();
+        std::fs::write(&second, b"b").unwrap();
+        let derivative = |id: i64, profile: &str, path: &Path| vrc_photo_core::model::Derivative {
+            id,
+            photo_id: 1,
+            path: path.to_string_lossy().to_string(),
+            format: "webp".to_string(),
+            width: 16,
+            height: 10,
+            file_size: 1,
+            profile_id: profile.to_string(),
+            policy: "replace".to_string(),
+            created_at: String::new(),
+        };
+        let derivatives = vec![
+            derivative(2, "second", &second),
+            derivative(1, "first", &first),
+        ];
+        let profiles = vec![
+            CompressionProfile {
+                id: "first".to_string(),
+                ..CompressionProfile::default()
+            },
+            CompressionProfile {
+                id: "second".to_string(),
+                ..CompressionProfile::default()
+            },
+        ];
+
+        let picked = preferred_display_derivative(&derivatives, &profiles).unwrap();
+        assert_eq!(picked.id, 2);
+
+        // Unknown profiles rank below known ones; among themselves the larger id wins.
+        let unknown = vec![
+            derivative(5, "gone", &first),
+            derivative(7, "gone", &second),
+            derivative(9, "gone", &first),
+        ];
+        let picked = preferred_display_derivative(&unknown, &profiles).unwrap();
+        assert_eq!(picked.id, 9);
+    }
+
+    #[test]
+    fn ready_deletion_after_more_than_hundred_blocked_requests_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let db = Db::open(dir.path().join("library.db")).unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let mut request_ids = Vec::new();
+
+        for index in 0..=100i64 {
+            let name = format!("p{index:03}.png");
+            let photo_id = db
+                .upsert_photo(&vrc_photo_core::model::NewPhoto {
+                    root_id: root,
+                    rel_path: name.clone(),
+                    abs_path: format!("/photos/{name}"),
+                    file_name: name,
+                    captured_at_utc: 1_700_000_000 + index,
+                    captured_at_local: "2026-10-21 21:14:03".to_string(),
+                    tz_offset_sec: 9 * 3600,
+                    width: 16,
+                    height: 10,
+                    file_size: 10,
+                    mtime: 1_700_000_000 + index,
+                    blake3: None,
+                })
+                .unwrap();
+            if index < 100 {
+                db.enqueue_job(photo_id, "missing-profile", "keep").unwrap();
+            }
+            let request = db
+                .request_deletion(&[photo_id], DeletionReason::Manual, false)
+                .unwrap()[0];
+            request_ids.push(request);
+        }
+
+        daemon.process_deletions().unwrap();
+
+        let ready = db
+            .deletion_request_by_id(request_ids[100])
+            .unwrap()
+            .unwrap();
+        assert_eq!(ready.status, DeletionStatus::Completed);
+        for request_id in &request_ids[..100] {
+            let pending = db.deletion_request_by_id(*request_id).unwrap().unwrap();
+            assert_eq!(pending.status, DeletionStatus::Pending);
+        }
+    }
+
+    #[test]
+    fn unknown_deletion_reason_is_blocked_without_deleting() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let original = dir
+            .path()
+            .join("photos/VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&original);
+        daemon.run_once().unwrap();
+
+        let db = Db::open(dir.path().join("library.db")).unwrap();
+        let photo = db
+            .photo_by_path(original.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        db.connection()
+            .execute(
+                "INSERT INTO deletion_requests(photo_id, reason, status, force, requested_at) \
+                 VALUES (?1, 'future_reason', 'pending', 0, ?2)",
+                (photo.id, chrono::Utc::now().to_rfc3339()),
+            )
+            .unwrap();
+
+        daemon.process_deletions().unwrap();
+
+        assert!(original.exists(), "unknown reason must not delete files");
+        let request = db.active_deletion_request(photo.id).unwrap().unwrap();
+        assert_eq!(
+            request.reason,
+            vrc_photo_core::model::DeletionReason::Unknown
+        );
+        assert_eq!(request.status, DeletionStatus::Blocked);
+        assert_eq!(request.blocked_reason.as_deref(), Some("unknown_reason"));
+    }
+
+    #[test]
+    fn auto_replace_keeps_the_preferred_display_derivative() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = multi_profile_test_daemon(&dir);
+        let db_path = dir.path().join("library.db");
+        let original = original_path(&dir);
+        write_photo(&original);
+        {
+            let db = Db::open(&db_path).unwrap();
+            add_replace_profiles(&db);
+        }
+        daemon.run_once().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        let photo = db
+            .photo_by_path(original.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        let lossless_path = dir.path().join("lossless.webp");
+        let lossy_path = dir.path().join("lossy.webp");
+        std::fs::write(&lossless_path, b"lossless").unwrap();
+        std::fs::write(&lossy_path, b"lossy").unwrap();
+        let lossless = db
+            .add_derivative(
+                photo.id,
+                lossless_path.to_str().unwrap(),
+                "webp",
+                16,
+                10,
+                8,
+                "lossless",
+                "replace",
+            )
+            .unwrap();
+        // Inserted second, so the old "newest derivative" rule would pick it.
+        let lossy = db
+            .add_derivative(
+                photo.id,
+                lossy_path.to_str().unwrap(),
+                "webp",
+                16,
+                10,
+                5,
+                "lossy",
+                "replace",
+            )
+            .unwrap();
+        db.set_replaced(photo.id, lossless).unwrap();
+        db.request_deletion(&[photo.id], DeletionReason::AutoReplace, false)
+            .unwrap();
+
+        daemon.process_deletions().unwrap();
+
+        let photo = db.photo_by_id(photo.id).unwrap().unwrap();
+        assert_eq!(photo.display_derivative_id, Some(lossless));
+        assert_ne!(photo.display_derivative_id, Some(lossy));
+        assert!(lossless_path.is_file());
+    }
+
+    #[test]
     fn multi_profile_replace_is_worker_count_independent() {
         for workers in 1usize..=4 {
             let dir = tempfile::tempdir().unwrap();
@@ -3157,6 +3383,14 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(completed, 1, "workers={workers}");
+
+            let display_id = photo.display_derivative_id.expect("display derivative");
+            let display = derivatives
+                .iter()
+                .find(|derivative| derivative.id == display_id)
+                .expect("display derivative row");
+            assert_eq!(display.profile_id, "lossless", "workers={workers}");
+            assert!(Path::new(&display.path).is_file(), "workers={workers}");
 
             let lossless = derivatives
                 .iter()
@@ -3871,6 +4105,69 @@ mod tests {
         assert_eq!(photo.display_derivative_id, Some(derivative_id));
         assert_eq!(photo.effective_path(), compressed.to_str().unwrap());
         assert_eq!(db.count_photos().unwrap(), 1);
+    }
+
+    #[test]
+    fn missing_original_promotes_the_preferred_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let db_path = dir.path().join("library.db");
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir.clone()), Some(log_dir)).unwrap();
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+
+        let original = photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&original);
+        daemon.dirty_paths.push(original.clone());
+        daemon.index_dirty_paths().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        add_replace_profiles(&db);
+        let photo = db
+            .photo_by_path(original.to_str().unwrap())
+            .unwrap()
+            .expect("indexed");
+        let lossless_path = dir.path().join("derivatives/lossless.webp");
+        let lossy_path = dir.path().join("derivatives/lossy.webp");
+        std::fs::create_dir_all(lossless_path.parent().unwrap()).unwrap();
+        std::fs::write(&lossless_path, b"lossless").unwrap();
+        std::fs::write(&lossy_path, b"lossy").unwrap();
+        let lossless = db
+            .add_derivative(
+                photo.id,
+                lossless_path.to_str().unwrap(),
+                "webp",
+                16,
+                10,
+                8,
+                "lossless",
+                "keep",
+            )
+            .unwrap();
+        // Newer derivative row and later completion order, lower profile order.
+        let lossy = db
+            .add_derivative(
+                photo.id,
+                lossy_path.to_str().unwrap(),
+                "webp",
+                16,
+                10,
+                5,
+                "lossy",
+                "keep",
+            )
+            .unwrap();
+
+        std::fs::remove_file(&original).unwrap();
+        daemon.dirty_paths.push(original.clone());
+        daemon.index_dirty_paths().unwrap();
+
+        let photo = db.photo_by_id(photo.id).unwrap().unwrap();
+        assert_eq!(photo.display_derivative_id, Some(lossless));
+        assert_ne!(photo.display_derivative_id, Some(lossy));
+        assert!(lossless_path.is_file());
     }
 
     #[test]

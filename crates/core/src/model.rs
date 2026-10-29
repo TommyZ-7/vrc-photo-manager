@@ -398,6 +398,8 @@ pub struct CompressionJob {
 pub enum DeletionReason {
     AutoReplace,
     Manual,
+    /// A reason written by a newer version. Never safe to execute.
+    Unknown,
 }
 
 impl DeletionReason {
@@ -405,6 +407,7 @@ impl DeletionReason {
         match self {
             Self::AutoReplace => "auto_replace",
             Self::Manual => "manual",
+            Self::Unknown => "unknown",
         }
     }
 
@@ -495,6 +498,8 @@ impl JobStatusCounts {
 pub struct DeletionJobSummary {
     pub compression: JobStatusCounts,
     pub send: JobStatusCounts,
+    /// Distinct selected photos with at least one unfinished or failed job.
+    pub affected_photos: i64,
 }
 
 impl DeletionJobSummary {

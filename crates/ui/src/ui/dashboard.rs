@@ -8,14 +8,16 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use vrc_photo_core::logging::{DAEMON_LOG_FILE, UI_LOG_FILE, logs_dir};
-use vrc_photo_core::model::{DeletionReason, DeletionStatus};
+use vrc_photo_core::model::DeletionStatus;
 
 use crate::app::App;
 use crate::app::daemon::{
     daemon_operation_label, daemon_state_label, daemon_sync_label, format_timestamp,
     ipc_status_label, open_path,
 };
-use crate::app::deletion::{deletion_blocked_label, deletion_reason_label, deletion_status_label};
+use crate::app::deletion::{
+    deletion_actions, deletion_blocked_label, deletion_reason_label, deletion_status_label,
+};
 use crate::ui::components::glass_panel;
 use crate::ui::shell::{scan_progress_label, scan_progress_ratio};
 use crate::ui::theme::*;
@@ -231,13 +233,7 @@ impl App {
                 DeletionStatus::Running => (p.accent, p.accent_soft),
                 _ => (p.amber, p.amber_soft),
             };
-            let can_cancel = request.reason == DeletionReason::Manual
-                && request.started_at.is_none()
-                && (request.status == DeletionStatus::Pending
-                    || request.status == DeletionStatus::Blocked);
-            let retryable = request.status == DeletionStatus::Blocked
-                && request.blocked_reason.as_deref() != Some("job_failed");
-            let forceable = request.status == DeletionStatus::Blocked;
+            let actions = deletion_actions(request);
             let blocked = deletion_blocked_label(request);
             let row = v_flex()
                 .gap(px(6.))
@@ -291,7 +287,7 @@ impl App {
                         .flex_wrap()
                         .items_center()
                         .gap(px(6.))
-                        .when(can_cancel, |this| {
+                        .when(actions.can_cancel, |this| {
                             this.child(
                                 Button::new(SharedString::from(format!("cancel-deletion-{id}")))
                                     .label("取消")
@@ -302,7 +298,7 @@ impl App {
                                     })),
                             )
                         })
-                        .when(retryable, |this| {
+                        .when(actions.retryable, |this| {
                             this.child(
                                 Button::new(SharedString::from(format!("retry-deletion-{id}")))
                                     .label("再試行")
@@ -313,7 +309,7 @@ impl App {
                                     })),
                             )
                         })
-                        .when(forceable, |this| {
+                        .when(actions.forceable, |this| {
                             this.child(
                                 Button::new(SharedString::from(format!("force-deletion-{id}")))
                                     .label("強制削除")
