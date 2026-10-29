@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -16,8 +16,8 @@ use vrc_photo_core::hashing;
 use vrc_photo_core::linker;
 use vrc_photo_core::log_parser::LogIngestor;
 use vrc_photo_core::model::{
-    CompressionJob, CompressionProfile, DaemonCommand, DaemonOperation, Photo, PhotoStatus,
-    QueueStatus,
+    CompressionJob, CompressionProfile, DaemonCommand, DaemonOperation, DeletionReason,
+    DeletionRequest, Photo, PhotoStatus, QueueStatus,
 };
 use vrc_photo_core::photo_filename::is_source_photo;
 use vrc_photo_core::scanner::{
@@ -159,6 +159,7 @@ pub struct Daemon {
     thumbnail_tx: Option<mpsc::Sender<i64>>,
     thumbnail_handle: Option<JoinHandle<()>>,
     hash_handle: Option<JoinHandle<()>>,
+    deletion_handle: Option<JoinHandle<()>>,
     last_autostart_check: std::time::Instant,
     last_settings_check: std::time::Instant,
     last_heartbeat: std::time::Instant,
@@ -175,6 +176,8 @@ impl Daemon {
     ) -> Result<Self> {
         let db_path = db_path.as_ref().to_path_buf();
         let db = Db::open(&db_path).context("cannot open library database")?;
+        db.reset_running_deletions()
+            .context("cannot recover interrupted deletions")?;
         let mut settings = AppSettings::load(&db).context("cannot load settings")?;
         if let Some(path) = photo_dir {
             settings.photo_roots = vec![path.to_string_lossy().to_string()];
@@ -240,6 +243,7 @@ impl Daemon {
             thumbnail_tx: None,
             thumbnail_handle: None,
             hash_handle: None,
+            deletion_handle: None,
             last_autostart_check: std::time::Instant::now(),
             last_settings_check: Instant::now() - Duration::from_secs(2),
             last_heartbeat: std::time::Instant::now() - Duration::from_secs(10),
@@ -466,6 +470,7 @@ impl Daemon {
         self.ingest_logs()?;
         self.link_unlinked()?;
         self.refresh_status()?;
+        self.process_deletions()?;
         Ok(())
     }
 
@@ -492,6 +497,14 @@ impl Daemon {
             }
         }
         self.stop_workers();
+        self.process_deletions()?;
+        Ok(())
+    }
+
+    /// Executes every deletion that has no remaining job blocker. The
+    /// background thread calls the same routine on a timer.
+    pub fn process_deletions(&mut self) -> Result<()> {
+        run_deletions_once(&self.db)?;
         Ok(())
     }
 
@@ -1377,6 +1390,16 @@ impl Daemon {
                 .expect("cannot spawn photo hash worker");
             self.hash_handle = Some(handle);
         }
+        if self.deletion_handle.is_none() {
+            let db = self.db.clone();
+            let running = self.running.clone();
+            let jobs = self.jobs.clone();
+            let handle = thread::Builder::new()
+                .name("deletion-executor".to_string())
+                .spawn(move || deletion_loop(db, running, jobs))
+                .expect("cannot spawn deletion worker");
+            self.deletion_handle = Some(handle);
+        }
         if !self.workers.is_empty() {
             return;
         }
@@ -1407,6 +1430,11 @@ impl Daemon {
             && handle.join().is_err()
         {
             tracing::error!("photo hash worker panicked");
+        }
+        if let Some(handle) = self.deletion_handle.take()
+            && handle.join().is_err()
+        {
+            tracing::error!("deletion worker panicked");
         }
         for (index, handle) in self.workers.drain(..).enumerate() {
             if handle.join().is_err() {
@@ -1673,6 +1701,115 @@ fn hash_loop(db: Arc<Mutex<Db>>, running: Arc<AtomicBool>) {
     }
 }
 
+fn deletion_loop(db: Arc<Mutex<Db>>, running: Arc<AtomicBool>, jobs: Arc<JobSignal>) {
+    let mut seen_generation = 0;
+    while running.load(Ordering::Relaxed) {
+        if let Err(error) = run_deletions_once(&db) {
+            tracing::error!(%error, "deletion executor failed");
+        }
+        jobs.wait(&mut seen_generation, Duration::from_millis(500));
+    }
+}
+
+/// Claims and executes every pending deletion whose jobs are terminal. A
+/// dependency failure blocks the request instead of busy-polling it; a file
+/// failure blocks it until the user retries or forces.
+fn run_deletions_once(db: &Arc<Mutex<Db>>) -> Result<usize> {
+    let requests = {
+        let db = db.lock().unwrap();
+        db.pending_deletion_requests(100)?
+    };
+    let mut executed = 0;
+    for request in requests {
+        let blockers = {
+            let db = db.lock().unwrap();
+            db.deletion_blockers(request.photo_id)?
+        };
+        if blockers.active > 0 {
+            continue;
+        }
+        if blockers.failed > 0 && !request.force {
+            if request.blocked_reason.as_deref() != Some("job_failed") {
+                let db = db.lock().unwrap();
+                db.block_deletion(request.id, "job_failed", None)?;
+            }
+            continue;
+        }
+        let claimed = {
+            let db = db.lock().unwrap();
+            db.claim_deletion(request.id)?
+        };
+        if claimed {
+            match execute_deletion(db, &request) {
+                Ok(()) => executed += 1,
+                Err(error) => tracing::error!(
+                    request = request.id,
+                    photo_id = request.photo_id,
+                    %error,
+                    "deletion failed"
+                ),
+            }
+        }
+    }
+    Ok(executed)
+}
+
+fn execute_deletion(db: &Arc<Mutex<Db>>, request: &DeletionRequest) -> Result<()> {
+    let (photo, targets) = {
+        let db = db.lock().unwrap();
+        let Some(photo) = db.photo_by_id(request.photo_id)? else {
+            db.complete_deletion(request.id)?;
+            db.bump_library_revision()?;
+            return Ok(());
+        };
+        let mut targets = Vec::new();
+        let mut seen = HashSet::new();
+        if request.reason == DeletionReason::Manual {
+            for derivative in db.derivatives_for_photo(photo.id)? {
+                if seen.insert(derivative.path.clone()) {
+                    targets.push(PathBuf::from(derivative.path));
+                }
+            }
+        }
+        if seen.insert(photo.abs_path.clone()) {
+            targets.push(PathBuf::from(&photo.abs_path));
+        }
+        (photo, targets)
+    };
+
+    for path in targets {
+        if !path.is_file() {
+            continue;
+        }
+        if let Err(error) = trash::delete(&path)
+            && path.exists()
+        {
+            let db = db.lock().unwrap();
+            db.block_deletion(request.id, "file_error", Some(&error.to_string()))?;
+            return Err(anyhow::anyhow!(
+                "cannot move {} to trash: {error}",
+                path.display()
+            ));
+        }
+    }
+
+    {
+        let db = db.lock().unwrap();
+        if request.reason == DeletionReason::Manual {
+            db.complete_manual_deletion(photo.id)?;
+        }
+        db.complete_deletion(request.id)?;
+        db.bump_library_revision()?;
+    }
+    tracing::info!(
+        request = request.id,
+        photo_id = photo.id,
+        reason = request.reason.as_str(),
+        "deletion completed"
+    );
+    Ok(())
+}
+
 fn worker_loop(
     db: Arc<Mutex<Db>>,
     running: Arc<AtomicBool>,
@@ -1766,10 +1903,13 @@ fn process_job(db: &Arc<Mutex<Db>>, job: &CompressionJob) -> Result<()> {
     {
         profile.output_dir = Some(output_dir.to_string());
     }
-    let source_path = PathBuf::from(photo.effective_path());
-    let previous_display = photo.display_derivative_id;
+    let source_path = if Path::new(&photo.abs_path).is_file() {
+        PathBuf::from(&photo.abs_path)
+    } else {
+        PathBuf::from(photo.effective_path())
+    };
     if photo.blake3.is_none()
-        && photo.display_derivative_id.is_none()
+        && source_path == Path::new(&photo.abs_path)
         && let Ok(Some(hash)) = hashing::file_blake3(&source_path)
     {
         db.lock().unwrap().set_photo_blake3(photo.id, &hash)?;
@@ -1794,27 +1934,12 @@ fn process_job(db: &Arc<Mutex<Db>>, job: &CompressionJob) -> Result<()> {
         &profile.id,
         &job.policy,
     )?;
-    if job.policy == "replace" {
+    let current_status = db.photo_by_id(photo.id)?.map(|row| row.status);
+    if job.policy == "replace" && current_status != Some(PhotoStatus::Deleting) {
         if !db.set_replaced(photo.id, derivative_id)? {
             anyhow::bail!("derivative was not attached to the photo");
         }
-        if let Err(error) = trash::delete(&source_path) {
-            // The database is the source of truth and the source still
-            // exists, so undo the optimistic replacement.
-            let restore_error = if let Some(previous) = previous_display {
-                db.set_replaced(photo.id, previous).map(|_| ())
-            } else {
-                db.restore_present(photo.id)
-            };
-            if let Err(restore_error) = restore_error {
-                tracing::error!(
-                    photo_id = photo.id,
-                    %restore_error,
-                    "cannot restore replaced state after trash failure"
-                );
-            }
-            return Err(anyhow::anyhow!("cannot move original to trash: {error}"));
-        }
+        db.request_deletion(&[photo.id], DeletionReason::AutoReplace, false)?;
     }
     db.update_job(
         &job.id,
@@ -1823,6 +1948,9 @@ fn process_job(db: &Arc<Mutex<Db>>, job: &CompressionJob) -> Result<()> {
         None,
         Some(&result.output_path.to_string_lossy()),
     )?;
+    if let Err(error) = db.resume_blocked_deletions_for_photo(photo.id) {
+        tracing::warn!(photo_id = photo.id, %error, "cannot resume blocked deletion");
+    }
     db.bump_library_revision()?;
     tracing::info!(
         photo = %source_path.display(),
@@ -1886,6 +2014,7 @@ fn read_new_lines(path: &Path, offset: i64) -> Result<(Vec<(String, i64)>, i64)>
 mod tests {
     use super::*;
     use std::io::Write;
+    use vrc_photo_core::model::DeletionStatus;
 
     #[test]
     fn reads_only_complete_lines_with_offsets() {
@@ -2510,6 +2639,339 @@ mod tests {
         let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
         daemon.set_ipc_endpoint(None);
         daemon
+    }
+
+    fn original_path(dir: &tempfile::TempDir) -> PathBuf {
+        dir.path()
+            .join("photos/VRChat_2026-10-21_21-24-00.000_4x3.png")
+    }
+
+    fn replace_test_daemon(dir: &tempfile::TempDir) -> Daemon {
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        write_photo(&original_path(dir));
+        let db_path = dir.path().join("library.db");
+        add_auto_profile(&db_path);
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        daemon.set_ipc_endpoint(None);
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+        save_daemon_settings(&daemon, |settings| {
+            settings.auto_compress_backlog = true;
+            settings.auto_compress_keep_original = false;
+            settings.auto_compress_immediate = true;
+        });
+        daemon
+    }
+
+    fn manual_test_daemon(dir: &tempfile::TempDir) -> Daemon {
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        write_photo(&original_path(dir));
+        let db_path = dir.path().join("library.db");
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        daemon.set_ipc_endpoint(None);
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+        daemon
+    }
+
+    fn multi_profile_test_daemon(dir: &tempfile::TempDir) -> Daemon {
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let db_path = dir.path().join("library.db");
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        daemon.set_ipc_endpoint(None);
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+        daemon
+    }
+
+    fn write_gradient_photo(path: &Path) {
+        let image = image::RgbaImage::from_fn(64, 64, |x, y| {
+            image::Rgba([(x * 4) as u8, (y * 4) as u8, ((x + y) * 2) as u8, 255])
+        });
+        image.save(path).unwrap();
+    }
+
+    fn add_replace_profiles(db: &Db) {
+        db.save_profile(&CompressionProfile {
+            id: "lossy".to_string(),
+            name: "lossy".to_string(),
+            auto_enabled: true,
+            format: vrc_photo_core::model::CompressionFormat::Webp,
+            quality: 10,
+            lossless: false,
+            resize_enabled: false,
+            output_dir: Some("lossy".to_string()),
+            suffix: "_lossy".to_string(),
+            ..CompressionProfile::default()
+        })
+        .unwrap();
+        db.save_profile(&CompressionProfile {
+            id: "lossless".to_string(),
+            name: "lossless".to_string(),
+            auto_enabled: true,
+            format: vrc_photo_core::model::CompressionFormat::Webp,
+            lossless: true,
+            resize_enabled: false,
+            output_dir: Some("lossless".to_string()),
+            suffix: "_lossless".to_string(),
+            ..CompressionProfile::default()
+        })
+        .unwrap();
+    }
+
+    fn wait_until_idle(db: &Arc<Mutex<Db>>, timeout: Duration) {
+        let started = Instant::now();
+        loop {
+            let (active, waiting) = {
+                let db = db.lock().unwrap();
+                (
+                    db.count_active_jobs().unwrap(),
+                    db.count_jobs(QueueStatus::Waiting).unwrap(),
+                )
+            };
+            if active == 0 && waiting == 0 {
+                return;
+            }
+            assert!(
+                started.elapsed() < timeout,
+                "jobs did not finish within {timeout:?}"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn replace_job_queues_deletion_instead_of_trashing_immediately() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = replace_test_daemon(&dir);
+        daemon.run_once().unwrap();
+
+        // Drive one job directly so the assertion sees the state between job
+        // completion and deletion execution.
+        let job = {
+            let db = daemon.db.lock().unwrap();
+            db.next_pending_job().unwrap().unwrap()
+        };
+        process_job(&daemon.db, &job).unwrap();
+
+        let db = Db::open(dir.path().join("library.db")).unwrap();
+        let photo = db
+            .photo_by_path(original_path(&dir).to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(photo.status, PhotoStatus::Replaced);
+        assert!(
+            original_path(&dir).exists(),
+            "the original survives until the request runs"
+        );
+        let request = db.active_deletion_request(photo.id).unwrap().unwrap();
+        assert_eq!(request.reason, DeletionReason::AutoReplace);
+        assert_eq!(request.status, DeletionStatus::Pending);
+
+        daemon.process_deletions().unwrap();
+        assert!(!original_path(&dir).exists());
+        assert_eq!(db.derivatives_for_photo(photo.id).unwrap().len(), 1);
+        assert!(db.active_deletion_request(photo.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn deletion_waits_for_every_job_of_the_photo() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = replace_test_daemon(&dir);
+        daemon.run_once().unwrap();
+        let db = Db::open(dir.path().join("library.db")).unwrap();
+        let photo = db
+            .photo_by_path(original_path(&dir).to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        db.save_profile(&CompressionProfile {
+            id: "second".to_string(),
+            name: "Second".to_string(),
+            ..CompressionProfile::default()
+        })
+        .unwrap();
+        db.enqueue_job(photo.id, "second", "keep").unwrap();
+        db.request_deletion(&[photo.id], DeletionReason::Manual, false)
+            .unwrap();
+
+        daemon.process_deletions().unwrap();
+        assert!(
+            original_path(&dir).exists(),
+            "pending job must block deletion"
+        );
+        daemon.compress_pending().unwrap();
+        daemon.process_deletions().unwrap();
+        assert!(!original_path(&dir).exists());
+        assert_eq!(
+            db.photo_by_id(photo.id).unwrap().unwrap().status,
+            PhotoStatus::Missing
+        );
+    }
+
+    #[test]
+    fn manual_deletion_removes_derivatives_and_marks_photo_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = replace_test_daemon(&dir);
+        daemon.run_once().unwrap();
+        daemon.compress_pending().unwrap();
+        daemon.process_deletions().unwrap();
+
+        let db = Db::open(dir.path().join("library.db")).unwrap();
+        let photo = db
+            .photo_by_path(original_path(&dir).to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        let derivative = db.derivatives_for_photo(photo.id).unwrap()[0].path.clone();
+        db.request_deletion(&[photo.id], DeletionReason::Manual, false)
+            .unwrap();
+        daemon.process_deletions().unwrap();
+
+        assert!(!original_path(&dir).exists());
+        assert!(!Path::new(&derivative).exists());
+        let photo = db.photo_by_id(photo.id).unwrap().unwrap();
+        assert_eq!(photo.status, PhotoStatus::Missing);
+        assert!(db.derivatives_for_photo(photo.id).unwrap().is_empty());
+        assert_eq!(db.count_photos().unwrap(), 0);
+    }
+
+    #[test]
+    fn deletion_recovers_after_partial_file_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = manual_test_daemon(&dir);
+        daemon.run_once().unwrap();
+        let db = Db::open(dir.path().join("library.db")).unwrap();
+        let photo = db
+            .photo_by_path(original_path(&dir).to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        let request = db
+            .request_deletion(&[photo.id], DeletionReason::Manual, false)
+            .unwrap()[0];
+        db.claim_deletion(request).unwrap();
+        std::fs::remove_file(original_path(&dir)).unwrap();
+
+        assert_eq!(db.reset_running_deletions().unwrap(), 1);
+        daemon.process_deletions().unwrap();
+        assert!(db.active_deletion_request(photo.id).unwrap().is_none());
+        assert_eq!(
+            db.photo_by_id(photo.id).unwrap().unwrap().status,
+            PhotoStatus::Missing
+        );
+    }
+
+    #[test]
+    fn multi_profile_replace_is_worker_count_independent() {
+        for workers in [1usize, 4] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut daemon = multi_profile_test_daemon(&dir);
+            let db_path = dir.path().join("library.db");
+            {
+                let db = Db::open(&db_path).unwrap();
+                add_replace_profiles(&db);
+            }
+            save_daemon_settings(&daemon, |settings| {
+                settings.auto_compress_backlog = true;
+                settings.auto_compress_keep_original = false;
+                settings.auto_compress_immediate = true;
+            });
+            let original = original_path(&dir);
+            write_gradient_photo(&original);
+            let expected = vrc_photo_core::image_decode::decode_image(&original)
+                .unwrap()
+                .to_rgba8();
+            daemon.run_once().unwrap();
+            daemon.settings.compression_workers = workers;
+            daemon.start_workers();
+            wait_until_idle(&daemon.db, Duration::from_secs(15));
+            daemon.stop_workers();
+            daemon.process_deletions().unwrap();
+
+            let db = Db::open(&db_path).unwrap();
+            let photo = db
+                .photo_by_path(original.to_str().unwrap())
+                .unwrap()
+                .unwrap();
+            let derivatives = db.derivatives_for_photo(photo.id).unwrap();
+            assert_eq!(derivatives.len(), 2, "workers={workers}");
+            assert!(derivatives.iter().all(|d| Path::new(&d.path).is_file()));
+            assert!(!original.exists(), "workers={workers}");
+            assert_eq!(photo.status, PhotoStatus::Replaced);
+            assert_eq!(db.count_jobs(QueueStatus::Completed).unwrap(), 2);
+            assert_eq!(db.count_jobs(QueueStatus::Failed).unwrap(), 0);
+            let completed: i64 = db
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM deletion_requests WHERE status = 'completed'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(completed, 1, "workers={workers}");
+
+            let lossless = derivatives
+                .iter()
+                .find(|d| d.profile_id == "lossless")
+                .unwrap();
+            let actual = vrc_photo_core::image_decode::decode_image(Path::new(&lossless.path))
+                .unwrap()
+                .to_rgba8();
+            assert_eq!(
+                actual, expected,
+                "workers={workers}: second job read a derivative"
+            );
+        }
+    }
+
+    #[test]
+    fn failed_job_blocks_deletion_until_retry_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = multi_profile_test_daemon(&dir);
+        let db_path = dir.path().join("library.db");
+        {
+            let db = Db::open(&db_path).unwrap();
+            add_replace_profiles(&db);
+            std::fs::write(dir.path().join("photos/lossy"), b"not a directory").unwrap();
+        }
+        save_daemon_settings(&daemon, |settings| {
+            settings.auto_compress_backlog = true;
+            settings.auto_compress_keep_original = false;
+            settings.auto_compress_immediate = true;
+        });
+        let original = original_path(&dir);
+        write_gradient_photo(&original);
+        daemon.run_once().unwrap();
+        daemon.compress_pending().unwrap();
+        daemon.process_deletions().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        let photo = db
+            .photo_by_path(original.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(original.exists(), "a failed job must keep the original");
+        assert_eq!(photo.status, PhotoStatus::Replaced);
+        let request = db.active_deletion_request(photo.id).unwrap().unwrap();
+        assert_eq!(request.status, DeletionStatus::Blocked);
+        assert_eq!(request.blocked_reason.as_deref(), Some("job_failed"));
+
+        std::fs::remove_file(dir.path().join("photos/lossy")).unwrap();
+        let failed = db.list_jobs_by_status(QueueStatus::Failed, 10).unwrap();
+        assert_eq!(failed.len(), 1);
+        db.retry_job(&failed[0].id).unwrap();
+        drop(db);
+        daemon.compress_pending().unwrap();
+        daemon.process_deletions().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        assert!(!original.exists());
+        assert!(db.active_deletion_request(photo.id).unwrap().is_none());
+        assert_eq!(db.count_jobs(QueueStatus::Failed).unwrap(), 0);
     }
 
     #[test]
