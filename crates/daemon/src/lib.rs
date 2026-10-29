@@ -17,7 +17,7 @@ use vrc_photo_core::linker;
 use vrc_photo_core::log_parser::LogIngestor;
 use vrc_photo_core::model::{
     CompressionJob, CompressionProfile, DaemonCommand, DaemonOperation, DeletionReason,
-    DeletionRequest, Photo, PhotoStatus, QueueStatus,
+    DeletionRequest, Derivative, Photo, PhotoStatus, QueueStatus,
 };
 use vrc_photo_core::photo_filename::is_source_photo;
 use vrc_photo_core::scanner::{
@@ -1645,6 +1645,27 @@ fn promote_display_derivative(db: &Db, photo: &Photo) -> Result<bool> {
     Ok(false)
 }
 
+/// Picks the derivative to show for a photo. Profiles are ordered by
+/// `sort_order`, so the later profile in `list_profiles()` wins. Unknown
+/// profiles rank below known ones and fall back to the larger derivative id.
+/// Only files that still exist are candidates.
+fn preferred_display_derivative<'a>(
+    derivatives: &'a [Derivative],
+    profiles: &[CompressionProfile],
+) -> Option<&'a Derivative> {
+    derivatives
+        .iter()
+        .filter(|derivative| Path::new(&derivative.path).is_file())
+        .max_by_key(|derivative| {
+            (
+                profiles
+                    .iter()
+                    .position(|profile| profile.id == derivative.profile_id),
+                derivative.id,
+            )
+        })
+}
+
 fn thumbnail_loop(
     db: Arc<Mutex<Db>>,
     running: Arc<AtomicBool>,
@@ -1807,10 +1828,8 @@ fn execute_deletion(db: &Arc<Mutex<Db>>, request: &DeletionRequest) -> Result<()
         };
         let derivatives = db.derivatives_for_photo(photo.id)?;
         if request.reason == DeletionReason::AutoReplace && !request.force {
-            let valid = derivatives
-                .iter()
-                .find(|derivative| Path::new(&derivative.path).is_file());
-            let Some(valid) = valid else {
+            let profiles = db.list_profiles()?;
+            let Some(valid) = preferred_display_derivative(&derivatives, &profiles) else {
                 db.block_deletion(request.id, "missing_asset", None)?;
                 return Err(anyhow::anyhow!(
                     "replacement derivative is missing; refusing to delete the original"
@@ -1984,7 +2003,7 @@ fn process_job(db: &Arc<Mutex<Db>>, job: &CompressionJob) -> Result<()> {
         anyhow::bail!("compressed output is missing or empty");
     }
     let db = db.lock().unwrap();
-    let derivative_id = db.add_derivative(
+    db.add_derivative(
         photo.id,
         &result.output_path.to_string_lossy(),
         result.format.as_str(),
@@ -1996,7 +2015,11 @@ fn process_job(db: &Arc<Mutex<Db>>, job: &CompressionJob) -> Result<()> {
     )?;
     let current_status = db.photo_by_id(photo.id)?.map(|row| row.status);
     if job.policy == "replace" && current_status != Some(PhotoStatus::Deleting) {
-        if !db.set_replaced(photo.id, derivative_id)? {
+        let derivatives = db.derivatives_for_photo(photo.id)?;
+        let profiles = db.list_profiles()?;
+        let preferred = preferred_display_derivative(&derivatives, &profiles)
+            .context("no displayable derivative after compression")?;
+        if !db.set_replaced(photo.id, preferred.id)? {
             anyhow::bail!("derivative was not attached to the photo");
         }
         db.request_deletion(&[photo.id], DeletionReason::AutoReplace, false)?;
@@ -3123,6 +3146,54 @@ mod tests {
     }
 
     #[test]
+    fn preferred_display_derivative_uses_profile_order_then_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.webp");
+        let second = dir.path().join("second.webp");
+        std::fs::write(&first, b"a").unwrap();
+        std::fs::write(&second, b"b").unwrap();
+        let derivative =
+            |id: i64, profile: &str, path: &Path| vrc_photo_core::model::Derivative {
+                id,
+                photo_id: 1,
+                path: path.to_string_lossy().to_string(),
+                format: "webp".to_string(),
+                width: 16,
+                height: 10,
+                file_size: 1,
+                profile_id: profile.to_string(),
+                policy: "replace".to_string(),
+                created_at: String::new(),
+            };
+        let derivatives = vec![
+            derivative(2, "second", &second),
+            derivative(1, "first", &first),
+        ];
+        let profiles = vec![
+            CompressionProfile {
+                id: "first".to_string(),
+                ..CompressionProfile::default()
+            },
+            CompressionProfile {
+                id: "second".to_string(),
+                ..CompressionProfile::default()
+            },
+        ];
+
+        let picked = preferred_display_derivative(&derivatives, &profiles).unwrap();
+        assert_eq!(picked.id, 2);
+
+        // Unknown profiles rank below known ones; among themselves the larger id wins.
+        let unknown = vec![
+            derivative(5, "gone", &first),
+            derivative(7, "gone", &second),
+            derivative(9, "gone", &first),
+        ];
+        let picked = preferred_display_derivative(&unknown, &profiles).unwrap();
+        assert_eq!(picked.id, 9);
+    }
+
+    #[test]
     fn ready_deletion_after_more_than_hundred_blocked_requests_runs() {
         let dir = tempfile::tempdir().unwrap();
         let mut daemon = test_daemon(&dir);
@@ -3200,6 +3271,65 @@ mod tests {
     }
 
     #[test]
+    fn auto_replace_keeps_the_preferred_display_derivative() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = multi_profile_test_daemon(&dir);
+        let db_path = dir.path().join("library.db");
+        let original = original_path(&dir);
+        write_photo(&original);
+        {
+            let db = Db::open(&db_path).unwrap();
+            add_replace_profiles(&db);
+        }
+        daemon.run_once().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        let photo = db
+            .photo_by_path(original.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        let lossless_path = dir.path().join("lossless.webp");
+        let lossy_path = dir.path().join("lossy.webp");
+        std::fs::write(&lossless_path, b"lossless").unwrap();
+        std::fs::write(&lossy_path, b"lossy").unwrap();
+        let lossless = db
+            .add_derivative(
+                photo.id,
+                lossless_path.to_str().unwrap(),
+                "webp",
+                16,
+                10,
+                8,
+                "lossless",
+                "replace",
+            )
+            .unwrap();
+        // Inserted second, so the old "newest derivative" rule would pick it.
+        let lossy = db
+            .add_derivative(
+                photo.id,
+                lossy_path.to_str().unwrap(),
+                "webp",
+                16,
+                10,
+                5,
+                "lossy",
+                "replace",
+            )
+            .unwrap();
+        db.set_replaced(photo.id, lossless).unwrap();
+        db.request_deletion(&[photo.id], DeletionReason::AutoReplace, false)
+            .unwrap();
+
+        daemon.process_deletions().unwrap();
+
+        let photo = db.photo_by_id(photo.id).unwrap().unwrap();
+        assert_eq!(photo.display_derivative_id, Some(lossless));
+        assert_ne!(photo.display_derivative_id, Some(lossy));
+        assert!(lossless_path.is_file());
+    }
+
+    #[test]
     fn multi_profile_replace_is_worker_count_independent() {
         for workers in 1usize..=4 {
             let dir = tempfile::tempdir().unwrap();
@@ -3247,6 +3377,14 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(completed, 1, "workers={workers}");
+
+            let display_id = photo.display_derivative_id.expect("display derivative");
+            let display = derivatives
+                .iter()
+                .find(|derivative| derivative.id == display_id)
+                .expect("display derivative row");
+            assert_eq!(display.profile_id, "lossless", "workers={workers}");
+            assert!(Path::new(&display.path).is_file(), "workers={workers}");
 
             let lossless = derivatives
                 .iter()
