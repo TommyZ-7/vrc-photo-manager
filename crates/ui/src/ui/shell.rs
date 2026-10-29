@@ -52,7 +52,12 @@ pub(crate) struct CardStatus {
 }
 
 impl App {
-    pub(crate) fn sidebar(&mut self, content_height: f32, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn sidebar(
+        &mut self,
+        window: &Window,
+        content_height: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let p = self.palette;
         let collapsed = self.sidebar_collapsed;
         let update_badge = self.update.nav_badge();
@@ -89,16 +94,25 @@ impl App {
                     .relative()
                     .w_full()
                     .gap(px(NAV_ITEM_GAP))
-                    .child(self.nav_highlight())
+                    .child(self.nav_highlight(window, cx))
                     .child(self.nav_item(
+                        window,
                         "写真",
                         Screen::Photos,
                         IconName::GalleryVerticalEnd,
                         Some(photo_count.clone()),
                         cx,
                     ))
-                    .child(self.nav_item("検索", Screen::Search, IconName::Search, None, cx))
                     .child(self.nav_item(
+                        window,
+                        "検索",
+                        Screen::Search,
+                        IconName::Search,
+                        None,
+                        cx,
+                    ))
+                    .child(self.nav_item(
+                        window,
                         "圧縮",
                         Screen::Compression,
                         IconName::Minimize,
@@ -106,6 +120,7 @@ impl App {
                         cx,
                     ))
                     .child(self.nav_item(
+                        window,
                         "ダッシュボード",
                         Screen::Dashboard,
                         IconName::LayoutDashboard,
@@ -113,6 +128,7 @@ impl App {
                         cx,
                     ))
                     .child(self.nav_item(
+                        window,
                         "設定",
                         Screen::Settings,
                         IconName::Settings,
@@ -178,7 +194,7 @@ impl App {
                 Duration::from_millis(440)
             })
             .with_easing(ease_motion)
-            .with_max_fps(self.motion_fps()),
+            .with_max_fps(self.motion_fps(window, cx)),
             move |el, t| {
                 let from = sidebar_width(!collapsed);
                 let to = sidebar_width(collapsed);
@@ -188,7 +204,7 @@ impl App {
         .into_any_element()
     }
 
-    pub(crate) fn rail_toggle(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn rail_toggle(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let p = self.palette;
         let collapsed = self.sidebar_collapsed;
         let epoch = self.sidebar_motion_epoch;
@@ -230,7 +246,7 @@ impl App {
                     Duration::from_millis(440)
                 })
                 .with_easing(ease_motion)
-                .with_max_fps(self.motion_fps()),
+                .with_max_fps(self.motion_fps(window, cx)),
                 move |el, t| el.left(px(from_left + (to_left - from_left) * t)),
             )
             .into_any_element()
@@ -518,7 +534,7 @@ impl App {
             .into_any_element()
     }
 
-    fn nav_highlight(&self) -> AnyElement {
+    fn nav_highlight(&self, window: &Window, cx: &Context<Self>) -> AnyElement {
         let p = self.palette;
         let collapsed = self.sidebar_collapsed;
         let nav_epoch = self.nav_epoch;
@@ -532,7 +548,7 @@ impl App {
         let vertical_anim = || {
             Animation::new(vertical_duration)
                 .with_easing(ease_motion)
-                .with_max_fps(self.motion_fps())
+                .with_max_fps(self.motion_fps(window, cx))
         };
 
         let pill = div()
@@ -555,7 +571,7 @@ impl App {
             MOTION_SLOW
         })
         .with_easing(ease_motion)
-        .with_max_fps(self.motion_fps());
+        .with_max_fps(self.motion_fps(window, cx));
         let bar = div()
             .absolute()
             .left_0()
@@ -594,6 +610,7 @@ impl App {
 
     fn nav_item(
         &mut self,
+        window: &Window,
         label: &'static str,
         screen: Screen,
         icon: IconName,
@@ -615,7 +632,7 @@ impl App {
         let color_anim = || {
             Animation::new(MOTION_FAST)
                 .with_easing(ease_motion)
-                .with_max_fps(self.motion_fps())
+                .with_max_fps(self.motion_fps(window, cx))
         };
 
         let icon_element = Icon::new(icon).with_size(px(17.)).with_animation(
@@ -668,7 +685,7 @@ impl App {
                 SharedString::from(format!("sidebar-label-{label}-{epoch}")),
                 Animation::new(reveal_duration)
                     .with_easing(ease_motion)
-                    .with_max_fps(self.motion_fps()),
+                    .with_max_fps(self.motion_fps(window, cx)),
                 move |el, t| {
                     el.w(px(sidebar_reveal_width(collapsed, t)))
                         .opacity(if collapsed { 1.0 - t } else { t })
@@ -685,7 +702,7 @@ impl App {
             MOTION_SLOW
         })
         .with_easing(ease_motion)
-        .with_max_fps(self.motion_fps());
+        .with_max_fps(self.motion_fps(window, cx));
         let content = h_flex()
             .w_full()
             .items_center()
@@ -731,7 +748,7 @@ impl App {
             .into_any_element()
     }
 
-    pub(crate) fn nav_tooltip(&self) -> AnyElement {
+    pub(crate) fn nav_tooltip(&self, window: &Window, cx: &Context<Self>) -> AnyElement {
         let p = self.palette;
         let Some(screen) = self.hovered_nav.filter(|_| self.sidebar_collapsed) else {
             // Keep the empty slot out of the root flex flow; an in-flow
@@ -760,7 +777,7 @@ impl App {
                 ("nav-tooltip", index),
                 Animation::new(MOTION_FAST)
                     .with_easing(ease_motion)
-                    .with_max_fps(self.motion_fps()),
+                    .with_max_fps(self.motion_fps(window, cx)),
                 move |el, t| el.opacity(t).left(px(left - 4.0 + 4.0 * t)),
             )
             .into_any_element()
@@ -780,7 +797,7 @@ impl App {
             MOTION_BASE
         })
         .with_easing(ease_motion)
-        .with_max_fps(self.motion_fps());
+        .with_max_fps(self.motion_fps(window, cx));
         let direction = self.screen_direction;
         let screen = v_flex().flex_1().min_h_0().child(screen).with_animation(
             ("screen-enter", self.screen_epoch),

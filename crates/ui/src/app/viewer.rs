@@ -21,7 +21,7 @@ use crate::ui::theme::{
 
 impl App {
     fn set_viewer_morph(&mut self, morph: Option<ViewerMorph>, cx: &mut Context<Self>) {
-        let max_fps = self.motion_fps();
+        let max_fps = self.settings.ui_max_fps;
         self.viewer_morph = morph.clone();
         self.viewer_morph_view.update(cx, |view, cx| {
             view.set_morph(morph, max_fps, cx);

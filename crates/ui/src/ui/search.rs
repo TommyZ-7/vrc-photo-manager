@@ -33,11 +33,11 @@ impl App {
             .into_any_element()
     }
 
-    fn search_results_card(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn search_results_card(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = self.palette;
         let total = self.search_view.borrow().index.total;
         let count = format!("{total} 枚");
-        let selection = (self.selected_ids.len() > 1).then(|| self.selection_bar(cx));
+        let selection = (self.selected_ids.len() > 1).then(|| self.selection_bar(window, cx));
         let mut card = glass_panel(&self.palette)
             .flex()
             .flex_col()
