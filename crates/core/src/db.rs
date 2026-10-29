@@ -1731,11 +1731,14 @@ impl Db {
         Ok(blockers)
     }
 
-    /// Pending requests the executor can try now. Known reasons with an active
-    /// compression job are skipped so they cannot starve ready requests behind
-    /// the row limit, while unknown reasons are always returned so they can be
-    /// blocked immediately. Requests with failed jobs stay in the list: the
-    /// executor still needs to transition them to `blocked`.
+    /// Pending requests the executor can try now, ordered so manual requests
+    /// come first: a manual deletion must not wait behind any auto_replace
+    /// backlog, and the row limit must not hide it. Each group keeps
+    /// `requested_at` order. Known reasons with an active compression job are
+    /// skipped so they cannot starve ready requests behind the row limit,
+    /// while unknown reasons are always returned so they can be blocked
+    /// immediately. Requests with failed jobs stay in the list: the executor
+    /// still needs to transition them to `blocked`.
     pub fn pending_deletion_requests(&self, limit: i64) -> Result<Vec<DeletionRequest>> {
         let sql = "SELECT dr.id, dr.photo_id, p.file_name, dr.reason, dr.status, dr.force, \
                 dr.blocked_reason, dr.error, dr.requested_at, dr.started_at, dr.finished_at \
@@ -1748,7 +1751,7 @@ impl Db {
                        WHERE j.status IN ('waiting', 'pending', 'processing') \
                    ) \
                ) \
-             ORDER BY dr.requested_at, dr.id LIMIT ?1";
+             ORDER BY (dr.reason = 'manual') DESC, dr.requested_at, dr.id LIMIT ?1";
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map(params![limit.max(1)], row_to_deletion_request)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -3101,6 +3104,86 @@ mod tests {
             "unknown reasons must be returned even while jobs are active"
         );
         assert!(!pending.iter().any(|request| request.id == blocked_request));
+    }
+
+    #[test]
+    fn pending_deletion_requests_prefer_manual_over_older_backlog() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let auto_old = db
+            .upsert_photo(&sample_photo(root, "/photos/auto-old.png", 1_700_000_000))
+            .unwrap();
+        let auto_new = db
+            .upsert_photo(&sample_photo(root, "/photos/auto-new.png", 1_700_000_001))
+            .unwrap();
+        let manual_earlier = db
+            .upsert_photo(&sample_photo(
+                root,
+                "/photos/manual-earlier.png",
+                1_700_000_002,
+            ))
+            .unwrap();
+        let manual_later = db
+            .upsert_photo(&sample_photo(
+                root,
+                "/photos/manual-later.png",
+                1_700_000_003,
+            ))
+            .unwrap();
+
+        let auto_old_request = db
+            .request_deletion(&[auto_old], DeletionReason::AutoReplace, false)
+            .unwrap()[0];
+        let auto_new_request = db
+            .request_deletion(&[auto_new], DeletionReason::AutoReplace, false)
+            .unwrap()[0];
+        let manual_earlier_request = db
+            .request_deletion(&[manual_earlier], DeletionReason::Manual, false)
+            .unwrap()[0];
+        let manual_later_request = db
+            .request_deletion(&[manual_later], DeletionReason::Manual, false)
+            .unwrap()[0];
+
+        for (request, requested_at) in [
+            (auto_old_request, "2026-10-21T00:00:01Z"),
+            (auto_new_request, "2026-10-21T00:00:02Z"),
+            (manual_earlier_request, "2026-10-21T00:00:03Z"),
+            (manual_later_request, "2026-10-21T00:00:04Z"),
+        ] {
+            db.connection()
+                .execute(
+                    "UPDATE deletion_requests SET requested_at = ?1 WHERE id = ?2",
+                    params![requested_at, request],
+                )
+                .unwrap();
+        }
+
+        // A manual request must enter the row window even when older backlog
+        // already fills it.
+        let window = db.pending_deletion_requests(2).unwrap();
+        let ids = |requests: &[DeletionRequest]| {
+            requests
+                .iter()
+                .map(|request| request.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(&window),
+            vec![manual_earlier_request, manual_later_request],
+            "manual requests must preempt an older auto_replace backlog"
+        );
+
+        // Both groups keep requested_at order.
+        let pending = db.pending_deletion_requests(4).unwrap();
+        assert_eq!(
+            ids(&pending),
+            vec![
+                manual_earlier_request,
+                manual_later_request,
+                auto_old_request,
+                auto_new_request
+            ]
+        );
     }
 
     #[test]
