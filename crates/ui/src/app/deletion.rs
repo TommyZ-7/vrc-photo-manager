@@ -26,7 +26,9 @@ pub(crate) fn deletion_status_label(status: DeletionStatus) -> &'static str {
 
 pub(crate) fn deletion_blocked_label(request: &DeletionRequest) -> Option<String> {
     match request.blocked_reason.as_deref() {
-        Some("job_failed") => Some("圧縮ジョブの失敗で保留中".to_string()),
+        Some("job_failed") => {
+            Some("圧縮ジョブの失敗で保留中（圧縮画面で再試行してください）".to_string())
+        }
         Some("file_error") => Some(format!(
             "ファイルをゴミ箱へ移動できませんでした{}",
             request
@@ -35,6 +37,7 @@ pub(crate) fn deletion_blocked_label(request: &DeletionRequest) -> Option<String
                 .map(|error| format!(": {error}"))
                 .unwrap_or_default()
         )),
+        Some("missing_asset") => Some("表示用の圧縮版が見つからないため保留中".to_string()),
         _ => None,
     }
 }
@@ -50,7 +53,7 @@ impl App {
                 self.reload_aux(cx);
                 self.toast_success("削除待ちを取り消しました", cx);
             }
-            Ok(false) => self.toast_warning("削除は既に実行中です", cx),
+            Ok(false) => self.toast_warning("この削除は取り消せません", cx),
             Err(error) => {
                 tracing::warn!(%error, request = id, "cannot cancel deletion");
                 self.toast_error(format!("削除待ちを取り消せません: {error}"), cx);
@@ -149,7 +152,7 @@ mod tests {
         request.blocked_reason = Some("job_failed".to_string());
         assert_eq!(
             deletion_blocked_label(&request).as_deref(),
-            Some("圧縮ジョブの失敗で保留中")
+            Some("圧縮ジョブの失敗で保留中（圧縮画面で再試行してください）")
         );
         request.blocked_reason = Some("file_error".to_string());
         request.error = Some("permission denied".to_string());
@@ -158,6 +161,8 @@ mod tests {
                 .unwrap()
                 .contains("permission denied")
         );
+        request.blocked_reason = Some("missing_asset".to_string());
+        assert!(deletion_blocked_label(&request).unwrap().contains("圧縮版"));
     }
 
     fn sample_request(status: DeletionStatus) -> DeletionRequest {
