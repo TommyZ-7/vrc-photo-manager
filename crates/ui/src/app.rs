@@ -31,7 +31,7 @@ use vrc_photo_core::settings::AppSettings;
 use vrc_photo_ipc::Endpoint;
 
 use crate::app::cli::{log_timing, process_start, timing_enabled};
-use crate::app::compression::ManualCompressionDialog;
+use crate::app::compression::{ManualCompressionDialog, profile_name_update};
 use crate::app::daemon::spawn_daemon_process;
 use crate::app::demo::{DemoAssets, open_database};
 use crate::app::import::{ImportDialogState, ImportReportView};
@@ -189,6 +189,15 @@ pub struct App {
     pub(crate) previous_color: Option<u32>,
     pub(crate) profiles: Vec<CompressionProfile>,
     pub(crate) profile_index: usize,
+    pub(crate) profile_name_input: Entity<InputState>,
+    pub(crate) _profile_name_subscription: Subscription,
+    /// Profile whose name the input currently mirrors. Set when the editor
+    /// changes selection so trim/normalization only rewrites the field then.
+    pub(crate) profile_name_editing_id: Option<String>,
+    pub(crate) profile_name_error: Option<String>,
+    /// Requests the editor to restore the persisted name on the next render,
+    /// after Enter or when focus leaves the field.
+    pub(crate) profile_name_reset_pending: bool,
     pub(crate) profile_suffix_input: Entity<InputState>,
     pub(crate) _profile_suffix_subscription: Subscription,
     pub(crate) profile_output_input: Entity<InputState>,
@@ -385,6 +394,55 @@ impl App {
                 .placeholder("取り込み先フォルダ")
                 .default_value(initial_settings.import_dir().display().to_string())
         });
+        let profile_name_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("例: SNS共有用"));
+        let profile_name_subscription = cx.subscribe(
+            &profile_name_input,
+            |this, input, event: &InputEvent, cx| match event {
+                InputEvent::Change => {
+                    let raw = input.read(cx).value().to_string();
+                    let Some(id) = this.profile_name_editing_id.clone() else {
+                        return;
+                    };
+                    let Some(current) = this
+                        .profiles
+                        .iter()
+                        .find(|profile| profile.id == id)
+                        .map(|profile| profile.name.clone())
+                    else {
+                        return;
+                    };
+                    match profile_name_update(&raw, &current) {
+                        Ok(Some(name)) => {
+                            if this.profile_name_error.take().is_some() {
+                                cx.notify();
+                            }
+                            this.edit_profile_by_id(&id, |profile| profile.name = name, cx);
+                        }
+                        Ok(None) => {
+                            if this.profile_name_error.take().is_some() {
+                                cx.notify();
+                            }
+                        }
+                        Err(error) => {
+                            let message = error.message();
+                            if this.profile_name_error.as_deref() != Some(message.as_str()) {
+                                this.profile_name_error = Some(message);
+                                cx.notify();
+                            }
+                        }
+                    }
+                }
+                // Valid edits are already saved on Change. Enter and blur
+                // restore the stored value so trims and rejected names do not
+                // linger in the field.
+                InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                    this.profile_name_reset_pending = true;
+                    cx.notify();
+                }
+                InputEvent::Focus => {}
+            },
+        );
         let profile_suffix_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("例: _webp"));
         let profile_suffix_subscription = cx.subscribe(
@@ -564,6 +622,11 @@ impl App {
             previous_color: None,
             profiles: Vec::new(),
             profile_index: 0,
+            profile_name_input,
+            _profile_name_subscription: profile_name_subscription,
+            profile_name_editing_id: None,
+            profile_name_error: None,
+            profile_name_reset_pending: false,
             profile_suffix_input,
             _profile_suffix_subscription: profile_suffix_subscription,
             profile_output_input,
