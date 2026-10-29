@@ -1647,7 +1647,7 @@ fn promote_display_derivative(db: &Db, photo: &Photo) -> Result<bool> {
 }
 
 /// Picks the derivative to show for a photo. Profiles are ordered by
-/// `sort_order`, so the later profile in `list_profiles()` wins. Unknown
+/// `sort_order`, so the first profile in `list_profiles()` wins. Unknown
 /// profiles rank below known ones and fall back to the larger derivative id.
 /// Only files that still exist are candidates.
 fn preferred_display_derivative<'a>(
@@ -1661,7 +1661,8 @@ fn preferred_display_derivative<'a>(
             (
                 profiles
                     .iter()
-                    .position(|profile| profile.id == derivative.profile_id),
+                    .position(|profile| profile.id == derivative.profile_id)
+                    .map(std::cmp::Reverse),
                 derivative.id,
             )
         })
@@ -3168,6 +3169,8 @@ mod tests {
         let derivatives = vec![
             derivative(2, "second", &second),
             derivative(1, "first", &first),
+            // Unknown profiles rank below known ones even with a larger id.
+            derivative(3, "gone", &first),
         ];
         let profiles = vec![
             CompressionProfile {
@@ -3181,7 +3184,7 @@ mod tests {
         ];
 
         let picked = preferred_display_derivative(&derivatives, &profiles).unwrap();
-        assert_eq!(picked.id, 2);
+        assert_eq!(picked.id, 1);
 
         // Unknown profiles rank below known ones; among themselves the larger id wins.
         let unknown = vec![
@@ -3298,19 +3301,6 @@ mod tests {
         let lossy_path = dir.path().join("lossy.webp");
         std::fs::write(&lossless_path, b"lossless").unwrap();
         std::fs::write(&lossy_path, b"lossy").unwrap();
-        let lossless = db
-            .add_derivative(
-                photo.id,
-                lossless_path.to_str().unwrap(),
-                "webp",
-                16,
-                10,
-                8,
-                "lossless",
-                "replace",
-            )
-            .unwrap();
-        // Inserted second, so the old "newest derivative" rule would pick it.
         let lossy = db
             .add_derivative(
                 photo.id,
@@ -3323,6 +3313,19 @@ mod tests {
                 "replace",
             )
             .unwrap();
+        // Larger derivative id, but second in the profile list.
+        let lossless = db
+            .add_derivative(
+                photo.id,
+                lossless_path.to_str().unwrap(),
+                "webp",
+                16,
+                10,
+                8,
+                "lossless",
+                "replace",
+            )
+            .unwrap();
         db.set_replaced(photo.id, lossless).unwrap();
         db.request_deletion(&[photo.id], DeletionReason::AutoReplace, false)
             .unwrap();
@@ -3330,9 +3333,9 @@ mod tests {
         daemon.process_deletions().unwrap();
 
         let photo = db.photo_by_id(photo.id).unwrap().unwrap();
-        assert_eq!(photo.display_derivative_id, Some(lossless));
-        assert_ne!(photo.display_derivative_id, Some(lossy));
-        assert!(lossless_path.is_file());
+        assert_eq!(photo.display_derivative_id, Some(lossy));
+        assert_ne!(photo.display_derivative_id, Some(lossless));
+        assert!(lossy_path.is_file());
     }
 
     #[test]
@@ -3389,7 +3392,7 @@ mod tests {
                 .iter()
                 .find(|derivative| derivative.id == display_id)
                 .expect("display derivative row");
-            assert_eq!(display.profile_id, "lossless", "workers={workers}");
+            assert_eq!(display.profile_id, "lossy", "workers={workers}");
             assert!(Path::new(&display.path).is_file(), "workers={workers}");
 
             let lossless = derivatives
@@ -4134,19 +4137,6 @@ mod tests {
         std::fs::create_dir_all(lossless_path.parent().unwrap()).unwrap();
         std::fs::write(&lossless_path, b"lossless").unwrap();
         std::fs::write(&lossy_path, b"lossy").unwrap();
-        let lossless = db
-            .add_derivative(
-                photo.id,
-                lossless_path.to_str().unwrap(),
-                "webp",
-                16,
-                10,
-                8,
-                "lossless",
-                "keep",
-            )
-            .unwrap();
-        // Newer derivative row and later completion order, lower profile order.
         let lossy = db
             .add_derivative(
                 photo.id,
@@ -4159,15 +4149,28 @@ mod tests {
                 "keep",
             )
             .unwrap();
+        // Larger derivative id, but second in the profile list.
+        let lossless = db
+            .add_derivative(
+                photo.id,
+                lossless_path.to_str().unwrap(),
+                "webp",
+                16,
+                10,
+                8,
+                "lossless",
+                "keep",
+            )
+            .unwrap();
 
         std::fs::remove_file(&original).unwrap();
         daemon.dirty_paths.push(original.clone());
         daemon.index_dirty_paths().unwrap();
 
         let photo = db.photo_by_id(photo.id).unwrap().unwrap();
-        assert_eq!(photo.display_derivative_id, Some(lossless));
-        assert_ne!(photo.display_derivative_id, Some(lossy));
-        assert!(lossless_path.is_file());
+        assert_eq!(photo.display_derivative_id, Some(lossy));
+        assert_ne!(photo.display_derivative_id, Some(lossless));
+        assert!(lossy_path.is_file());
     }
 
     #[test]
