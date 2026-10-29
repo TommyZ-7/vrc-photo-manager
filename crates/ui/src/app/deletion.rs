@@ -39,7 +39,35 @@ pub(crate) fn deletion_blocked_label(request: &DeletionRequest) -> Option<String
                 .unwrap_or_default()
         )),
         Some("missing_asset") => Some("表示用の圧縮版が見つからないため保留中".to_string()),
+        Some("unknown_reason") => Some(
+            "新しいバージョンで追加された削除理由のため保留中。アプリを更新してください"
+                .to_string(),
+        ),
         _ => None,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DeletionActions {
+    pub can_cancel: bool,
+    pub retryable: bool,
+    pub forceable: bool,
+}
+
+/// Actions that can make progress for a request. Unknown reasons are blocked
+/// before execution regardless of `force`, so retry and force would loop
+/// without deleting anything.
+pub(crate) fn deletion_actions(request: &DeletionRequest) -> DeletionActions {
+    let unknown = request.reason == DeletionReason::Unknown;
+    DeletionActions {
+        can_cancel: request.reason == DeletionReason::Manual
+            && request.started_at.is_none()
+            && (request.status == DeletionStatus::Pending
+                || request.status == DeletionStatus::Blocked),
+        retryable: request.status == DeletionStatus::Blocked
+            && request.blocked_reason.as_deref() != Some("job_failed")
+            && !unknown,
+        forceable: request.status == DeletionStatus::Blocked && !unknown,
     }
 }
 
@@ -130,8 +158,41 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{deletion_blocked_label, deletion_reason_label, deletion_status_label};
+    use super::{
+        DeletionActions, deletion_actions, deletion_blocked_label, deletion_reason_label,
+        deletion_status_label,
+    };
     use vrc_photo_core::model::{DeletionReason, DeletionRequest, DeletionStatus};
+
+    #[test]
+    fn unknown_reason_is_visible_and_hides_unusable_actions() {
+        let mut request = sample_request(DeletionStatus::Blocked);
+        request.reason = DeletionReason::Unknown;
+        request.blocked_reason = Some("unknown_reason".to_string());
+        assert_eq!(
+            deletion_blocked_label(&request).as_deref(),
+            Some("新しいバージョンで追加された削除理由のため保留中。アプリを更新してください")
+        );
+        assert_eq!(
+            deletion_actions(&request),
+            DeletionActions {
+                can_cancel: false,
+                retryable: false,
+                forceable: false,
+            }
+        );
+
+        let mut manual = sample_request(DeletionStatus::Blocked);
+        manual.blocked_reason = Some("file_error".to_string());
+        assert_eq!(
+            deletion_actions(&manual),
+            DeletionActions {
+                can_cancel: true,
+                retryable: true,
+                forceable: true,
+            }
+        );
+    }
 
     #[test]
     fn deletion_labels_cover_every_status_and_reason() {
