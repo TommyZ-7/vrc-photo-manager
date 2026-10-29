@@ -387,6 +387,122 @@ pub struct CompressionJob {
     pub finished_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeletionReason {
+    AutoReplace,
+    Manual,
+}
+
+impl DeletionReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AutoReplace => "auto_replace",
+            Self::Manual => "manual",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "auto_replace" => Some(Self::AutoReplace),
+            "manual" => Some(Self::Manual),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeletionStatus {
+    Pending,
+    Blocked,
+    Running,
+    Completed,
+    Cancelled,
+}
+
+impl DeletionStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Blocked => "blocked",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "blocked" => Self::Blocked,
+            "running" => Self::Running,
+            "completed" => Self::Completed,
+            "cancelled" => Self::Cancelled,
+            _ => Self::Pending,
+        }
+    }
+
+    pub fn is_active(self) -> bool {
+        matches!(self, Self::Pending | Self::Blocked | Self::Running)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeletionRequest {
+    pub id: i64,
+    pub photo_id: i64,
+    pub photo_name: String,
+    pub reason: DeletionReason,
+    pub status: DeletionStatus,
+    pub force: bool,
+    pub blocked_reason: Option<String>,
+    pub error: Option<String>,
+    pub requested_at: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeletionBlockers {
+    pub active: i64,
+    pub failed: i64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct JobStatusCounts {
+    pub waiting: i64,
+    pub pending: i64,
+    pub processing: i64,
+    pub failed: i64,
+}
+
+impl JobStatusCounts {
+    pub fn unfinished(self) -> i64 {
+        self.waiting + self.pending + self.processing
+    }
+
+    pub fn total(self) -> i64 {
+        self.unfinished() + self.failed
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeletionJobSummary {
+    pub compression: JobStatusCounts,
+    pub send: JobStatusCounts,
+}
+
+impl DeletionJobSummary {
+    pub fn needs_warning(self) -> bool {
+        self.compression.total() + self.send.total() > 0
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeletionCounts {
+    pub pending: i64,
+    pub blocked: i64,
+    pub running: i64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DaemonOperation {
     Scan,
@@ -555,5 +671,17 @@ mod tests {
         let decoded: CompressionProfile = serde_json::from_str(&json).unwrap();
 
         assert_eq!(decoded.resize_mode, ResizeMode::Always);
+    }
+
+    #[test]
+    fn deletion_status_and_reason_round_trip() {
+        assert_eq!(DeletionStatus::parse("blocked"), DeletionStatus::Blocked);
+        assert!(DeletionStatus::Running.is_active());
+        assert!(!DeletionStatus::Completed.is_active());
+        assert_eq!(
+            DeletionReason::parse("auto_replace"),
+            Some(DeletionReason::AutoReplace)
+        );
+        assert_eq!(DeletionReason::Manual.as_str(), "manual");
     }
 }

@@ -223,6 +223,28 @@ CREATE INDEX IF NOT EXISTS idx_photos_move_match
 
 const SCHEMA_V6_JOB_OUTPUT_DIR: &str = "ALTER TABLE compression_jobs ADD COLUMN output_dir TEXT;";
 
+const SCHEMA_V7_DELETION: &str = r#"
+CREATE TABLE IF NOT EXISTS deletion_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+    reason TEXT NOT NULL,
+    status TEXT NOT NULL,
+    force INTEGER NOT NULL DEFAULT 0,
+    blocked_reason TEXT,
+    error TEXT,
+    requested_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_deletion_requests_active
+    ON deletion_requests(photo_id)
+    WHERE status IN ('pending', 'blocked', 'running');
+
+CREATE INDEX IF NOT EXISTS idx_deletion_requests_status
+    ON deletion_requests(status, requested_at);
+"#;
+
 const PHOTO_SELECT: &str = "p.id, p.root_id, p.rel_path, p.abs_path, p.file_name, \
     p.captured_at_utc, p.captured_at_local, p.tz_offset_sec, p.width, p.height, \
     p.file_size, p.mtime, p.blake3, p.status, p.is_favorite, p.note, \
@@ -345,6 +367,9 @@ impl Db {
         if version < 6 {
             self.migrate_v6()?;
         }
+        if version < 7 {
+            self.migrate_v7()?;
+        }
         Ok(())
     }
 
@@ -435,6 +460,27 @@ impl Db {
             params![now_string()],
         )?;
         tx.pragma_update(None, "user_version", 6)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Adds the durable deletion queue. The table and indexes use
+    /// `IF NOT EXISTS`, so the transaction is safe to retry after a crash
+    /// between the DDL and `user_version`.
+    fn migrate_v7(&self) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version >= 7 {
+            tx.commit()?;
+            return Ok(());
+        }
+
+        tx.execute_batch(SCHEMA_V7_DELETION)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (7, ?1)",
+            params![now_string()],
+        )?;
+        tx.pragma_update(None, "user_version", 7)?;
         tx.commit()?;
         Ok(())
     }
@@ -2189,7 +2235,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
         let has_output_dir: bool = db
             .conn
             .query_row(
@@ -2203,13 +2249,43 @@ mod tests {
     }
 
     #[test]
+    fn migration_v7_adds_deletion_requests() {
+        let db = Db::open_in_memory().unwrap();
+        let version: i64 = db
+            .connection()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 7);
+        let table: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'table' AND name = 'deletion_requests'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table, 1);
+        let index: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_deletion_requests_active'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(index, 1);
+    }
+
+    #[test]
     fn migration_adds_captured_id_index() {
         let db = Db::open_in_memory().unwrap();
         let version: i64 = db
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
 
         let recorded: i64 = db
             .conn
@@ -2252,7 +2328,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
         let retry_column: i64 = db
             .conn
             .query_row(
@@ -2319,7 +2395,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
 
         let jobs = db.list_jobs(10).unwrap();
         assert_eq!(jobs.len(), 1);
@@ -2352,7 +2428,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
         assert_eq!(db.list_jobs(10).unwrap()[0].retry_count, 2);
 
         let tables: i64 = db
