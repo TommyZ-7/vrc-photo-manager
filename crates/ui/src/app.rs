@@ -23,8 +23,8 @@ use gpui_kit::component::*;
 use gpui_kit::*;
 use vrc_photo_core::db::Db;
 use vrc_photo_core::model::{
-    CompressionJob, CompressionProfile, DaemonError, Derivative, LibraryStats, Photo, PhotoPlayer,
-    PhotoTextFilter,
+    CompressionJob, CompressionProfile, DaemonError, DeletionCounts, DeletionRequest, Derivative,
+    LibraryStats, Photo, PhotoPlayer, PhotoTextFilter,
 };
 use vrc_photo_core::settings::AppSettings;
 use vrc_photo_ipc::Endpoint;
@@ -207,6 +207,9 @@ pub struct App {
     pub(crate) failed_job_count: i64,
     pub(crate) failed_jobs: Vec<CompressionJob>,
     pub(crate) failed_job_names: HashMap<i64, String>,
+    pub(crate) deletion_requests: Vec<DeletionRequest>,
+    pub(crate) deletion_counts: DeletionCounts,
+    pub(crate) deletion_baseline: Option<(i64, i64)>,
     pub(crate) import_report: Option<ImportReportView>,
     pub(crate) import_dialog: Option<ImportDialogState>,
     /// Last time the import progress rebuilt the window. The importer reports
@@ -590,6 +593,9 @@ impl App {
             notification_return_focus: None,
             notification_close_focus,
             notification_modal_focus,
+            deletion_requests: Vec::new(),
+            deletion_counts: DeletionCounts::default(),
+            deletion_baseline: None,
             failure_baseline: None,
             demo,
             demo_assets,

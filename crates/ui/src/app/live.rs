@@ -14,11 +14,13 @@ use chrono::Utc;
 use gpui_kit::component::notification::NotificationType;
 use gpui_kit::*;
 use vrc_photo_core::db::Db;
-use vrc_photo_core::model::{CompressionJob, DaemonError, LibraryStats, QueueStatus};
+use vrc_photo_core::model::{
+    CompressionJob, DaemonError, DeletionCounts, DeletionRequest, LibraryStats, QueueStatus,
+};
 
 use crate::app::App;
 use crate::app::daemon::daemon_liveness;
-use crate::ui::notifications::{FailureNotice, failure_transition};
+use crate::ui::notifications::{FailureNotice, deletion_blocked_transition, failure_transition};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
 
@@ -28,7 +30,14 @@ struct LiveSnapshot {
     photo_count: Option<i64>,
     stats: Option<LibraryStats>,
     jobs: JobSnapshot,
+    deletions: DeletionSnapshot,
     monitor: MonitorSnapshot,
+}
+
+#[derive(Default)]
+struct DeletionSnapshot {
+    requests: Vec<DeletionRequest>,
+    counts: DeletionCounts,
 }
 
 #[derive(Default)]
@@ -149,6 +158,23 @@ impl App {
             notify = true;
         }
 
+        if self.deletion_requests != snapshot.deletions.requests
+            || self.deletion_counts != snapshot.deletions.counts
+        {
+            self.deletion_requests = snapshot.deletions.requests;
+            self.deletion_counts = snapshot.deletions.counts;
+            notify = true;
+        }
+        let next_deletions = (self.deletion_counts.pending, self.deletion_counts.blocked);
+        if let Some(blocked) = deletion_blocked_transition(self.deletion_baseline, next_deletions) {
+            self.toast_warning(
+                format!("{blocked} 件の削除が保留されています。ダッシュボードを確認してください"),
+                cx,
+            );
+            notify = true;
+        }
+        self.deletion_baseline = Some(next_deletions);
+
         // Only transition the baseline after both counts were read. A failed
         // read would otherwise make pre-existing failures look new later.
         if let (Some(failed), Some(daemon)) = (failed_count, daemon_count) {
@@ -214,7 +240,15 @@ fn collect_live_snapshot(db: &Db, stats_revision: i64) -> LiveSnapshot {
         photo_count,
         stats,
         jobs: collect_jobs(db),
+        deletions: collect_deletions(db),
         monitor: collect_monitor(db),
+    }
+}
+
+fn collect_deletions(db: &Db) -> DeletionSnapshot {
+    DeletionSnapshot {
+        requests: db.active_deletion_requests(20).unwrap_or_default(),
+        counts: db.deletion_counts().unwrap_or_default(),
     }
 }
 
@@ -283,7 +317,7 @@ fn collect_monitor(db: &Db) -> MonitorSnapshot {
 mod tests {
     use super::collect_live_snapshot;
     use vrc_photo_core::db::Db;
-    use vrc_photo_core::model::NewPhoto;
+    use vrc_photo_core::model::{DeletionReason, NewPhoto};
 
     fn seed_photo(db: &Db) -> i64 {
         let root = db.add_root("/photos", "reference").unwrap();
@@ -312,6 +346,18 @@ mod tests {
         assert_eq!(snapshot.photo_count, Some(1));
         assert!(snapshot.stats.is_some());
         assert!(snapshot.jobs.daemon_errors.is_some());
+    }
+
+    #[test]
+    fn snapshot_reports_deletion_counts_and_requests() {
+        let db = Db::open_in_memory().unwrap();
+        let id = seed_photo(&db);
+        db.request_deletion(&[id], DeletionReason::Manual, false)
+            .unwrap();
+        let snapshot = collect_live_snapshot(&db, -1);
+        assert_eq!(snapshot.deletions.counts.pending, 1);
+        assert_eq!(snapshot.deletions.requests.len(), 1);
+        assert_eq!(snapshot.deletions.requests[0].photo_id, id);
     }
 
     #[test]

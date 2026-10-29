@@ -55,6 +55,16 @@ pub(crate) fn failure_transition(
     notices
 }
 
+/// Returns the blocked-deletion count when it grew since `previous`. The
+/// first snapshot seeds the baseline silently, like `failure_transition`.
+pub(crate) fn deletion_blocked_transition(
+    previous: Option<(i64, i64)>,
+    next: (i64, i64),
+) -> Option<i64> {
+    let (_, previous_blocked) = previous?;
+    (next.1 > previous_blocked).then_some(next.1)
+}
+
 /// The action-required blocks shown by the notification modal, in display
 /// order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -667,8 +677,17 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{
-        NotificationSection, notification_modal_allowed, notification_sections, toast_flush_needed,
+        NotificationSection, deletion_blocked_transition, notification_modal_allowed,
+        notification_sections, toast_flush_needed,
     };
+
+    #[test]
+    fn blocked_deletion_transition_notifies_only_on_increase() {
+        assert_eq!(deletion_blocked_transition(None, (2, 1)), None);
+        assert_eq!(deletion_blocked_transition(Some((2, 1)), (3, 1)), None);
+        assert_eq!(deletion_blocked_transition(Some((3, 1)), (3, 2)), Some(2));
+        assert_eq!(deletion_blocked_transition(Some((3, 2)), (3, 1)), None);
+    }
 
     #[test]
     fn notification_sections_follow_the_action_order() {
