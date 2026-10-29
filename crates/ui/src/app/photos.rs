@@ -72,12 +72,17 @@ impl App {
             Some(assets) => demo_thumb_path(assets, id),
             None => thumbnail::thumbnail_path(id).unwrap_or_default(),
         };
+        let cache_dir = if self.demo_assets.is_none() {
+            thumbnail::thumbnails_dir()
+        } else {
+            None
+        };
         cx.spawn(async move |this, cx| {
             let decoded = cx
                 .background_executor()
                 .spawn(async move {
                     let decode_start = Instant::now();
-                    let decoded = decode_thumbnail(id, &cache_path, &source);
+                    let decoded = decode_thumbnail(id, &cache_path, &source, cache_dir.as_deref());
                     log_timing("thumbnail decode", decode_start);
                     decoded
                 })

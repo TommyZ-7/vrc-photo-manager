@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -40,6 +40,9 @@ const PARSER_VERSION: &str = "1";
 const MAX_SKIPPED_DETAILS: usize = 5;
 const SCAN_INTERVAL: Duration = Duration::from_millis(500);
 const LOG_INTERVAL: Duration = Duration::from_millis(750);
+const THUMBNAIL_PRUNE_BATCH: usize = 128;
+const THUMBNAIL_PRUNE_IDLE: Duration = Duration::from_millis(500);
+const THUMBNAIL_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Default)]
 pub struct DaemonStatus {
@@ -166,6 +169,7 @@ pub struct Daemon {
     last_heartbeat: std::time::Instant,
     last_asset_check: Instant,
     thumbnail_dir: PathBuf,
+    thumbnail_cache_limit: Arc<AtomicU64>,
     last_errors: HashMap<DaemonOperation, String>,
 }
 
@@ -233,6 +237,9 @@ impl Daemon {
         let tray_enabled = settings.tray;
         let thumbnail_dir = vrc_photo_core::thumbnail::thumbnails_dir()
             .unwrap_or_else(|| PathBuf::from("thumbnails"));
+        let thumbnail_cache_limit = Arc::new(AtomicU64::new(thumbnail_cache_limit_bytes(
+            settings.thumbnail_cache_mb,
+        )));
         let last_errors = db
             .daemon_errors()
             .context("cannot load daemon errors")?
@@ -281,6 +288,7 @@ impl Daemon {
             last_heartbeat: std::time::Instant::now() - Duration::from_secs(10),
             last_asset_check: Instant::now() - Duration::from_secs(30),
             thumbnail_dir,
+            thumbnail_cache_limit,
             last_errors,
         })
     }
@@ -421,6 +429,10 @@ impl Daemon {
         if settings.autostart != self.settings.autostart {
             self.apply_autostart(settings.autostart);
         }
+        self.thumbnail_cache_limit.store(
+            thumbnail_cache_limit_bytes(settings.thumbnail_cache_mb),
+            Ordering::Relaxed,
+        );
         self.settings = settings;
         Ok(())
     }
@@ -499,6 +511,10 @@ impl Daemon {
                 }
             }
         }
+        prune_thumbnail_cache(
+            &self.thumbnail_dir,
+            self.thumbnail_cache_limit.load(Ordering::Relaxed),
+        );
         self.ingest_logs()?;
         self.link_unlinked()?;
         self.refresh_status()?;
@@ -1262,9 +1278,10 @@ impl Daemon {
         }
     }
 
-    /// Applies the compression switches without touching paths or restarting
-    /// watchers. The UI saves these immediately; a running daemon must not keep
-    /// enqueuing with the previous keep/replace or immediate policy.
+    /// Applies the compression switches and thumbnail cache limit without
+    /// touching paths or restarting watchers. The UI saves these immediately;
+    /// a running daemon must not keep enqueuing with the previous policy or
+    /// prune with a stale cache limit.
     fn refresh_compression_settings(&mut self) {
         let loaded = {
             let db = self.db.lock().unwrap();
@@ -1277,6 +1294,10 @@ impl Daemon {
         self.settings.auto_compress_backlog = settings.auto_compress_backlog;
         self.settings.auto_compress_immediate = settings.auto_compress_immediate;
         self.settings.auto_compress_keep_original = settings.auto_compress_keep_original;
+        self.thumbnail_cache_limit.store(
+            thumbnail_cache_limit_bytes(settings.thumbnail_cache_mb),
+            Ordering::Relaxed,
+        );
     }
 
     fn apply_autostart(&self, enabled: bool) {
@@ -1397,9 +1418,10 @@ impl Daemon {
             let db = self.db.clone();
             let running = self.running.clone();
             let cache_dir = self.thumbnail_dir.clone();
+            let cache_limit = self.thumbnail_cache_limit.clone();
             let handle = thread::Builder::new()
                 .name("thumbnails".to_string())
-                .spawn(move || thumbnail_loop(db, running, rx, cache_dir))
+                .spawn(move || thumbnail_loop(db, running, rx, cache_dir, cache_limit))
                 .expect("cannot spawn thumbnail worker");
             self.thumbnail_tx = Some(tx.clone());
             self.thumbnail_handle = Some(handle);
@@ -1668,14 +1690,101 @@ fn preferred_display_derivative<'a>(
         })
 }
 
+struct ThumbnailPruneSchedule {
+    batch: usize,
+    interval: Duration,
+    generated: usize,
+    last_prune: Instant,
+}
+
+impl ThumbnailPruneSchedule {
+    fn new(batch: usize, interval: Duration) -> Self {
+        Self {
+            batch,
+            interval,
+            generated: 0,
+            last_prune: Instant::now(),
+        }
+    }
+
+    fn note_generated(&mut self) -> bool {
+        self.generated += 1;
+        if self.generated >= self.batch {
+            self.note_pruned();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn periodic_due(&mut self) -> bool {
+        if self.last_prune.elapsed() < self.interval {
+            return false;
+        }
+        self.note_pruned();
+        true
+    }
+
+    fn has_pending(&self) -> bool {
+        self.generated > 0
+    }
+
+    fn note_pruned(&mut self) {
+        self.generated = 0;
+        self.last_prune = Instant::now();
+    }
+}
+
+fn thumbnail_cache_limit_bytes(megabytes: u64) -> u64 {
+    megabytes.saturating_mul(1024 * 1024)
+}
+
+fn prune_thumbnail_cache(cache_dir: &Path, limit_bytes: u64) {
+    if limit_bytes == 0 {
+        return;
+    }
+    match thumbnail::prune_thumbnails_in(cache_dir, limit_bytes) {
+        Ok(report) if report.removed_files > 0 => tracing::info!(
+            removed_files = report.removed_files,
+            removed_bytes = report.removed_bytes,
+            remaining_bytes = report.remaining_bytes,
+            limit_bytes,
+            dir = %cache_dir.display(),
+            "pruned thumbnail cache"
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::warn!(
+            %error,
+            dir = %cache_dir.display(),
+            "cannot prune thumbnail cache"
+        ),
+    }
+}
+
 fn thumbnail_loop(
     db: Arc<Mutex<Db>>,
     running: Arc<AtomicBool>,
     rx: Receiver<i64>,
     cache_dir: PathBuf,
+    cache_limit: Arc<AtomicU64>,
 ) {
+    let mut last_limit = cache_limit.load(Ordering::Relaxed);
+    let mut schedule = ThumbnailPruneSchedule::new(THUMBNAIL_PRUNE_BATCH, THUMBNAIL_PRUNE_INTERVAL);
+    prune_thumbnail_cache(&cache_dir, last_limit);
+    schedule.note_pruned();
+
     while running.load(Ordering::Relaxed) {
-        match rx.recv_timeout(Duration::from_millis(500)) {
+        let limit = cache_limit.load(Ordering::Relaxed);
+        if limit != last_limit {
+            last_limit = limit;
+            schedule.note_pruned();
+            prune_thumbnail_cache(&cache_dir, limit);
+        }
+        if schedule.periodic_due() {
+            last_limit = cache_limit.load(Ordering::Relaxed);
+            prune_thumbnail_cache(&cache_dir, last_limit);
+        }
+        match rx.recv_timeout(THUMBNAIL_PRUNE_IDLE) {
             Ok(id) => {
                 let path = {
                     let db = db.lock().unwrap();
@@ -1685,8 +1794,15 @@ fn thumbnail_loop(
                         .map(|photo| photo.effective_path().to_string())
                 };
                 if let Some(path) = path {
+                    let cache_path = cache_dir.join(format!("{id}.webp"));
+                    let generated = !cache_path.is_file();
                     match thumbnail::ensure_thumbnail_in(id, Path::new(&path), &cache_dir) {
-                        Ok(Some(_)) => {}
+                        Ok(Some(_)) => {
+                            if generated && schedule.note_generated() {
+                                last_limit = cache_limit.load(Ordering::Relaxed);
+                                prune_thumbnail_cache(&cache_dir, last_limit);
+                            }
+                        }
                         Ok(None) => tracing::debug!(
                             photo_id = id,
                             path = %path,
@@ -1701,7 +1817,13 @@ fn thumbnail_loop(
                     }
                 }
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if schedule.has_pending() {
+                    schedule.note_pruned();
+                    last_limit = cache_limit.load(Ordering::Relaxed);
+                    prune_thumbnail_cache(&cache_dir, last_limit);
+                }
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
@@ -2099,6 +2221,7 @@ fn read_new_lines(path: &Path, offset: i64) -> Result<(Vec<(String, i64)>, i64)>
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::time::SystemTime;
     use vrc_photo_core::model::DeletionStatus;
 
     #[test]
@@ -2829,6 +2952,139 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    fn wait_for(mut condition: impl FnMut() -> bool, timeout: Duration) {
+        let started = Instant::now();
+        while !condition() {
+            assert!(
+                started.elapsed() < timeout,
+                "condition was not met within {timeout:?}"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn write_thumbnail_cache_entry(path: &Path, bytes: usize, modified: SystemTime) {
+        std::fs::write(path, vec![0u8; bytes]).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+    }
+
+    #[test]
+    fn startup_prunes_thumbnail_cache_to_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let cache = dir.path().join("thumbnails");
+        std::fs::create_dir_all(&cache).unwrap();
+        let now = SystemTime::now();
+        for (id, age) in [(1, 30), (2, 20), (3, 10)] {
+            write_thumbnail_cache_entry(
+                &cache.join(format!("{id}.webp")),
+                600_000,
+                now - Duration::from_secs(age),
+            );
+        }
+        save_daemon_settings(&daemon, |settings| settings.thumbnail_cache_mb = 1);
+        daemon.refresh_compression_settings();
+        daemon.set_thumbnail_dir(cache.clone());
+
+        daemon.start_workers();
+        wait_for(
+            || !cache.join("1.webp").exists() && !cache.join("2.webp").exists(),
+            Duration::from_secs(5),
+        );
+        assert!(cache.join("3.webp").exists());
+        daemon.stop_workers();
+    }
+
+    #[test]
+    fn run_once_prunes_thumbnail_cache_after_direct_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let cache = dir.path().join("thumbnails");
+        std::fs::create_dir_all(&cache).unwrap();
+        let now = SystemTime::now();
+        for (id, age) in [(1, 30), (2, 20), (3, 10)] {
+            write_thumbnail_cache_entry(
+                &cache.join(format!("{id}.webp")),
+                600_000,
+                now - Duration::from_secs(age),
+            );
+        }
+        save_daemon_settings(&daemon, |settings| settings.thumbnail_cache_mb = 1);
+        daemon.refresh_compression_settings();
+        daemon.set_thumbnail_dir(cache.clone());
+        write_photo(
+            &dir.path()
+                .join("photos/VRChat_2026-10-21_21-24-00.000_4x3.png"),
+        );
+
+        daemon.run_once().unwrap();
+
+        assert!(!cache.join("1.webp").exists());
+        assert!(!cache.join("2.webp").exists());
+        assert!(cache.join("3.webp").exists());
+    }
+
+    #[test]
+    fn thumbnail_prune_schedule_fires_after_a_batch() {
+        let mut schedule = ThumbnailPruneSchedule::new(2, Duration::from_secs(3600));
+
+        assert!(!schedule.note_generated());
+        assert!(schedule.note_generated());
+        assert!(!schedule.has_pending());
+    }
+
+    #[test]
+    fn thumbnail_prune_schedule_fires_when_the_interval_elapses() {
+        let mut schedule = ThumbnailPruneSchedule::new(128, Duration::from_millis(5));
+
+        assert!(!schedule.periodic_due());
+        thread::sleep(Duration::from_millis(10));
+        assert!(schedule.periodic_due());
+    }
+
+    #[test]
+    fn thumbnail_prune_schedule_resets_pending_after_an_idle_prune() {
+        let mut schedule = ThumbnailPruneSchedule::new(128, Duration::from_secs(3600));
+
+        assert!(!schedule.note_generated());
+        assert!(schedule.has_pending());
+        schedule.note_pruned();
+        assert!(!schedule.has_pending());
+    }
+
+    #[test]
+    fn live_thumbnail_limit_change_prunes_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let cache = dir.path().join("thumbnails");
+        std::fs::create_dir_all(&cache).unwrap();
+        let now = SystemTime::now();
+        for (id, age) in [(1, 30), (2, 20), (3, 10)] {
+            write_thumbnail_cache_entry(
+                &cache.join(format!("{id}.webp")),
+                600_000,
+                now - Duration::from_secs(age),
+            );
+        }
+        daemon.set_thumbnail_dir(cache.clone());
+        daemon.start_workers();
+        assert!(cache.join("1.webp").exists());
+
+        save_daemon_settings(&daemon, |settings| settings.thumbnail_cache_mb = 1);
+        daemon.refresh_compression_settings();
+        wait_for(
+            || !cache.join("1.webp").exists() && !cache.join("2.webp").exists(),
+            Duration::from_secs(5),
+        );
+        assert!(cache.join("3.webp").exists());
+        daemon.stop_workers();
     }
 
     #[test]

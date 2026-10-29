@@ -2,7 +2,7 @@
 //! shared by the photo grid and the preview viewer.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui_kit::RenderImage;
@@ -109,47 +109,103 @@ impl ThumbnailCache {
 
 /// Decodes a thumbnail on a background thread. Returns the average color in
 /// RGB and the RGBA buffer with channels already swapped to BGRA.
+///
+/// With `cache_dir`, the core resolves or regenerates the file and a cache hit
+/// is marked as recently used for LRU eviction. Without it, `cache_path` is
+/// read-only (demo mode or an explicit asset path).
 pub(crate) fn decode_thumbnail(
     id: i64,
     cache_path: &Path,
     source: &Path,
+    cache_dir: Option<&Path>,
 ) -> Option<(u32, image::RgbaImage)> {
-    let cached = cache_path.is_file()
-        && std::fs::metadata(cache_path)
-            .map(|meta| meta.len() > 0)
-            .unwrap_or_else(|error| {
-                tracing::debug!(
-                    %error,
-                    path = %cache_path.display(),
-                    "cannot read thumbnail cache metadata"
-                );
-                false
-            });
-    let path = if cached {
-        cache_path.to_path_buf()
-    } else {
-        match thumbnail::ensure_thumbnail(id, source) {
-            Ok(Some(path)) => path,
-            Ok(None) => {
-                tracing::debug!(
-                    photo_id = id,
-                    path = %source.display(),
-                    "thumbnail source is missing or cannot be decoded"
-                );
-                return None;
-            }
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    photo_id = id,
-                    path = %source.display(),
-                    "cannot generate thumbnail"
-                );
-                return None;
+    decode_thumbnail_with(
+        id,
+        cache_path,
+        source,
+        cache_dir,
+        thumbnail::ensure_thumbnail_in,
+        decode_thumbnail_file,
+    )
+}
+
+fn decode_thumbnail_with<Ensure, Decode>(
+    id: i64,
+    cache_path: &Path,
+    source: &Path,
+    cache_dir: Option<&Path>,
+    ensure_thumbnail: Ensure,
+    decode_thumbnail_file: Decode,
+) -> Option<(u32, image::RgbaImage)>
+where
+    Ensure: Fn(i64, &Path, &Path) -> vrc_photo_core::error::Result<Option<PathBuf>>,
+    Decode: Fn(i64, &Path) -> Option<(u32, image::RgbaImage)>,
+{
+    let path = match cache_dir {
+        Some(cache_dir) => {
+            let had_cache = cache_path.is_file();
+            let path = match ensure_thumbnail(id, source, cache_dir) {
+                Ok(Some(path)) => path,
+                Ok(None) => {
+                    tracing::debug!(
+                        photo_id = id,
+                        path = %source.display(),
+                        "thumbnail source is missing or cannot be decoded"
+                    );
+                    return None;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        photo_id = id,
+                        path = %source.display(),
+                        "cannot generate thumbnail"
+                    );
+                    return None;
+                }
+            };
+            match decode_thumbnail_file(id, &path) {
+                Some(decoded) => {
+                    if had_cache {
+                        thumbnail::refresh_thumbnail_access(&path);
+                    }
+                    return Some(decoded);
+                }
+                None if !path.is_file() => match ensure_thumbnail(id, source, cache_dir) {
+                    Ok(Some(path)) => path,
+                    Ok(None) => {
+                        tracing::debug!(
+                            photo_id = id,
+                            path = %source.display(),
+                            "thumbnail source disappeared during decode"
+                        );
+                        return None;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            photo_id = id,
+                            path = %source.display(),
+                            "cannot regenerate thumbnail"
+                        );
+                        return None;
+                    }
+                },
+                None => return None,
             }
         }
+        None => {
+            if !cache_path.is_file() {
+                return None;
+            }
+            cache_path.to_path_buf()
+        }
     };
-    let buffer = match vrc_photo_core::image_decode::decode_image(&path) {
+    decode_thumbnail_file(id, &path)
+}
+
+fn decode_thumbnail_file(id: i64, path: &Path) -> Option<(u32, image::RgbaImage)> {
+    let buffer = match vrc_photo_core::image_decode::decode_image(path) {
         Some(image) => image.to_rgba8(),
         None => {
             tracing::warn!(
@@ -274,6 +330,100 @@ mod tests {
     }
 
     #[test]
+    fn decode_thumbnail_regenerates_a_removed_cache_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("thumbnails");
+        let source = dir.path().join("source.png");
+        image::RgbaImage::from_pixel(128, 80, image::Rgba([200, 100, 50, 255]))
+            .save(&source)
+            .unwrap();
+        let cache_path = cache.join("7.webp");
+
+        let first = decode_thumbnail(7, &cache_path, &source, Some(&cache)).expect("generated");
+        assert!(cache_path.is_file());
+        std::fs::remove_file(&cache_path).unwrap();
+        let second = decode_thumbnail(7, &cache_path, &source, Some(&cache)).expect("regenerated");
+        assert!(cache_path.is_file());
+        assert_eq!(first.0, second.0);
+    }
+
+    #[test]
+    fn decode_thumbnail_refreshes_cached_access_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("thumbnails");
+        let source = dir.path().join("source.png");
+        image::RgbaImage::from_pixel(32, 32, image::Rgba([10, 20, 30, 255]))
+            .save(&source)
+            .unwrap();
+        let cache_path = cache.join("8.webp");
+        decode_thumbnail(8, &cache_path, &source, Some(&cache)).expect("generated");
+        let stale = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60);
+        std::fs::File::options()
+            .write(true)
+            .open(&cache_path)
+            .unwrap()
+            .set_modified(stale)
+            .unwrap();
+        let before = std::fs::metadata(&cache_path).unwrap().modified().unwrap();
+
+        decode_thumbnail(8, &cache_path, &source, Some(&cache)).expect("cached");
+
+        assert!(std::fs::metadata(&cache_path).unwrap().modified().unwrap() > before);
+    }
+
+    #[test]
+    fn decode_thumbnail_retries_after_the_resolved_file_disappears() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.webp");
+        let regenerated = dir.path().join("regenerated.webp");
+        std::fs::write(&regenerated, b"not decoded here").unwrap();
+        let calls = std::cell::Cell::new(0);
+        let ensure = |_id: i64, _source: &Path, _cache: &Path| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                Ok(Some(missing.clone()))
+            } else {
+                Ok(Some(regenerated.clone()))
+            }
+        };
+        let decode = |_id: i64, path: &Path| {
+            if path == missing {
+                None
+            } else {
+                Some((0x112233, image::RgbaImage::new(1, 1)))
+            }
+        };
+
+        let decoded = decode_thumbnail_with(
+            1,
+            &missing,
+            Path::new("/no/such/source.png"),
+            Some(dir.path()),
+            ensure,
+            decode,
+        )
+        .expect("retried thumbnail");
+
+        assert_eq!(decoded.0, 0x112233);
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn decode_thumbnail_without_cache_dir_does_not_generate() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert!(
+            decode_thumbnail(
+                99,
+                &dir.path().join("missing.png"),
+                Path::new("/no/such/source.png"),
+                None,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn decode_thumbnail_uses_the_cached_file_and_swaps_channels() {
         let dir = std::env::temp_dir().join(format!("vrc-photo-ui-decode-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -282,7 +432,7 @@ mod tests {
             .save(&cache_path)
             .unwrap();
         let (color, rgba) =
-            decode_thumbnail(7, &cache_path, &dir.join("missing-source.png")).unwrap();
+            decode_thumbnail(7, &cache_path, &dir.join("missing-source.png"), None).unwrap();
         assert_eq!(color, 0x0a141e);
         assert_eq!(&rgba.as_raw()[..4], &[30, 20, 10, 255]);
         let _ = std::fs::remove_dir_all(&dir);
