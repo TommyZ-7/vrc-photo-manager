@@ -1,6 +1,7 @@
 pub(crate) mod cli;
 pub(crate) mod compression;
 pub(crate) mod daemon;
+pub(crate) mod deletion;
 pub(crate) mod demo;
 pub(crate) mod import;
 pub(crate) mod lifecycle;
