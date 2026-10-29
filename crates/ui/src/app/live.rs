@@ -30,11 +30,11 @@ struct LiveSnapshot {
     photo_count: Option<i64>,
     stats: Option<LibraryStats>,
     jobs: JobSnapshot,
-    deletions: DeletionSnapshot,
+    deletions: Option<DeletionSnapshot>,
     monitor: MonitorSnapshot,
 }
 
-#[derive(Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 struct DeletionSnapshot {
     requests: Vec<DeletionRequest>,
     counts: DeletionCounts,
@@ -158,22 +158,25 @@ impl App {
             notify = true;
         }
 
-        if self.deletion_requests != snapshot.deletions.requests
-            || self.deletion_counts != snapshot.deletions.counts
+        if let Some((deletions, blocked, next_baseline)) =
+            deletion_update(self.deletion_baseline, snapshot.deletions)
         {
-            self.deletion_requests = snapshot.deletions.requests;
-            self.deletion_counts = snapshot.deletions.counts;
-            notify = true;
+            if self.deletion_requests != deletions.requests
+                || self.deletion_counts != deletions.counts
+            {
+                self.deletion_requests = deletions.requests;
+                self.deletion_counts = deletions.counts;
+                notify = true;
+            }
+            if let Some(blocked) = blocked {
+                self.toast_warning(
+                    format!("{blocked} 件の削除が保留されています。ダッシュボードを確認してください"),
+                    cx,
+                );
+                notify = true;
+            }
+            self.deletion_baseline = Some(next_baseline);
         }
-        let next_deletions = (self.deletion_counts.pending, self.deletion_counts.blocked);
-        if let Some(blocked) = deletion_blocked_transition(self.deletion_baseline, next_deletions) {
-            self.toast_warning(
-                format!("{blocked} 件の削除が保留されています。ダッシュボードを確認してください"),
-                cx,
-            );
-            notify = true;
-        }
-        self.deletion_baseline = Some(next_deletions);
 
         // Only transition the baseline after both counts were read. A failed
         // read would otherwise make pre-existing failures look new later.
@@ -245,11 +248,23 @@ fn collect_live_snapshot(db: &Db, stats_revision: i64) -> LiveSnapshot {
     }
 }
 
-fn collect_deletions(db: &Db) -> DeletionSnapshot {
-    DeletionSnapshot {
-        requests: db.active_deletion_requests(20).unwrap_or_default(),
-        counts: db.deletion_counts().unwrap_or_default(),
-    }
+fn collect_deletions(db: &Db) -> Option<DeletionSnapshot> {
+    Some(DeletionSnapshot {
+        requests: db.active_deletion_requests(20).ok()?,
+        counts: db.deletion_counts().ok()?,
+    })
+}
+
+/// Returns the snapshot to apply, the blocked count to announce, and the new
+/// baseline. `None` means the read failed and every previous value must stay.
+fn deletion_update(
+    baseline: Option<(i64, i64)>,
+    snapshot: Option<DeletionSnapshot>,
+) -> Option<(DeletionSnapshot, Option<i64>, (i64, i64))> {
+    let snapshot = snapshot?;
+    let next = (snapshot.counts.pending, snapshot.counts.blocked);
+    let blocked = deletion_blocked_transition(baseline, next);
+    Some((snapshot, blocked, next))
 }
 
 fn collect_jobs(db: &Db) -> JobSnapshot {
@@ -315,9 +330,38 @@ fn collect_monitor(db: &Db) -> MonitorSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::collect_live_snapshot;
+    use super::{DeletionSnapshot, collect_live_snapshot, deletion_update};
     use vrc_photo_core::db::Db;
     use vrc_photo_core::model::{DeletionReason, NewPhoto};
+
+    #[test]
+    fn deletion_update_keeps_the_baseline_when_the_snapshot_is_missing() {
+        assert!(deletion_update(Some((1, 2)), None).is_none());
+
+        let snapshot = DeletionSnapshot {
+            requests: Vec::new(),
+            counts: vrc_photo_core::model::DeletionCounts {
+                pending: 1,
+                blocked: 2,
+                running: 0,
+            },
+        };
+        let (_, blocked, baseline) = deletion_update(Some((0, 0)), Some(snapshot)).unwrap();
+        assert_eq!(blocked, Some(2));
+        assert_eq!(baseline, (1, 2));
+
+        let snapshot = DeletionSnapshot {
+            requests: Vec::new(),
+            counts: vrc_photo_core::model::DeletionCounts {
+                pending: 1,
+                blocked: 2,
+                running: 0,
+            },
+        };
+        let (_, blocked, baseline) = deletion_update(Some((1, 2)), Some(snapshot)).unwrap();
+        assert_eq!(blocked, None);
+        assert_eq!(baseline, (1, 2));
+    }
 
     fn seed_photo(db: &Db) -> i64 {
         let root = db.add_root("/photos", "reference").unwrap();
@@ -355,9 +399,10 @@ mod tests {
         db.request_deletion(&[id], DeletionReason::Manual, false)
             .unwrap();
         let snapshot = collect_live_snapshot(&db, -1);
-        assert_eq!(snapshot.deletions.counts.pending, 1);
-        assert_eq!(snapshot.deletions.requests.len(), 1);
-        assert_eq!(snapshot.deletions.requests[0].photo_id, id);
+        let deletions = snapshot.deletions.expect("deletion snapshot");
+        assert_eq!(deletions.counts.pending, 1);
+        assert_eq!(deletions.requests.len(), 1);
+        assert_eq!(deletions.requests[0].photo_id, id);
     }
 
     #[test]
