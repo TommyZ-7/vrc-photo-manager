@@ -1635,14 +1635,15 @@ fn enqueue_auto_jobs(db: &Db, new_ids: &[i64], keep_original: bool, immediate: b
 }
 
 /// Keeps a photo visible when its original file was deleted manually but a
-/// completed compression output remains. The newest existing derivative wins.
+/// completed compression output remains. Uses the same deterministic profile
+/// preference as replacement jobs.
 fn promote_display_derivative(db: &Db, photo: &Photo) -> Result<bool> {
-    for derivative in db.derivatives_for_photo(photo.id)? {
-        if Path::new(&derivative.path).is_file() {
-            return Ok(db.set_replaced(photo.id, derivative.id)?);
-        }
-    }
-    Ok(false)
+    let derivatives = db.derivatives_for_photo(photo.id)?;
+    let profiles = db.list_profiles()?;
+    let Some(preferred) = preferred_display_derivative(&derivatives, &profiles) else {
+        return Ok(false);
+    };
+    Ok(db.set_replaced(photo.id, preferred.id)?)
 }
 
 /// Picks the derivative to show for a photo. Profiles are ordered by
@@ -4104,6 +4105,69 @@ mod tests {
         assert_eq!(photo.display_derivative_id, Some(derivative_id));
         assert_eq!(photo.effective_path(), compressed.to_str().unwrap());
         assert_eq!(db.count_photos().unwrap(), 1);
+    }
+
+    #[test]
+    fn missing_original_promotes_the_preferred_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let db_path = dir.path().join("library.db");
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir.clone()), Some(log_dir)).unwrap();
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+
+        let original = photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&original);
+        daemon.dirty_paths.push(original.clone());
+        daemon.index_dirty_paths().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        add_replace_profiles(&db);
+        let photo = db
+            .photo_by_path(original.to_str().unwrap())
+            .unwrap()
+            .expect("indexed");
+        let lossless_path = dir.path().join("derivatives/lossless.webp");
+        let lossy_path = dir.path().join("derivatives/lossy.webp");
+        std::fs::create_dir_all(lossless_path.parent().unwrap()).unwrap();
+        std::fs::write(&lossless_path, b"lossless").unwrap();
+        std::fs::write(&lossy_path, b"lossy").unwrap();
+        let lossless = db
+            .add_derivative(
+                photo.id,
+                lossless_path.to_str().unwrap(),
+                "webp",
+                16,
+                10,
+                8,
+                "lossless",
+                "keep",
+            )
+            .unwrap();
+        // Newer derivative row and later completion order, lower profile order.
+        let lossy = db
+            .add_derivative(
+                photo.id,
+                lossy_path.to_str().unwrap(),
+                "webp",
+                16,
+                10,
+                5,
+                "lossy",
+                "keep",
+            )
+            .unwrap();
+
+        std::fs::remove_file(&original).unwrap();
+        daemon.dirty_paths.push(original.clone());
+        daemon.index_dirty_paths().unwrap();
+
+        let photo = db.photo_by_id(photo.id).unwrap().unwrap();
+        assert_eq!(photo.display_derivative_id, Some(lossless));
+        assert_ne!(photo.display_derivative_id, Some(lossy));
+        assert!(lossless_path.is_file());
     }
 
     #[test]
