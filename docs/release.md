@@ -30,6 +30,17 @@ git push origin v0.1.0
 - どの PR にも属さない直接 push のコミットは「その他の変更」として末尾に追記される
 - リリースを先に手動作成した場合も、publish ジョブがノート本文を自動生成の内容で上書きする（アセットは従来どおりアップロードされる）
 
+ラベルとカテゴリの対応（`.github/release.yml`）:
+
+| PR のラベル | カテゴリ |
+|---|---|
+| `enhancement` | ✨ Added |
+| `bug` | 🐛 Fixed |
+| 上記以外・ラベルなし | 🔧 Improved |
+| `duplicate` / `invalid` / `wontfix` | 掲載されない |
+
+- ラベルは PR 作成時に付ける（AGENTS.md §1 の規則）。マージ後に付けたラベルも、その PR を含むリリースのノートが生成される前であれば反映される
+
 ## 3. 生成物
 
 `cargo-packager` が `dist/` に以下を生成する。
