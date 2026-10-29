@@ -11,6 +11,10 @@
 - Direct push to `main` is forbidden. Work on feature branches
   (`feat/*`, `fix/*`, `docs/*`, `ci/*`, `chore/*`).
 - Basic flow: PR → `CI` green → merge into `main`.
+- Every PR must carry a release-notes label: `enhancement` for features,
+  `bug` for fixes. Release notes are generated from merged PRs and
+  categorized by label (`.github/release.yml`, §7); an unlabeled PR falls
+  into the catch-all category. Mapping details: `docs/release.md`.
 - Keep `main` always releasable. Never merge a broken state.
 - Releases are tag pushes only. Example: `git tag v0.2.0 && git push origin v0.2.0`
 - AI must not perform release operations (tag create/push, manual Release run,
