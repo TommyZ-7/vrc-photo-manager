@@ -158,7 +158,7 @@ systemctl --user add-wants default.target vrc-photo-daemon.service
 - サムネイルが出ない: デーモンのサムネイルワーカーが動いているか。`thumbnails/<id>.webp` が存在するか。
 - 生成に失敗する: 元画像が壊れている、または対応外の形式。
 - キャッシュを消したい: アプリ終了後に `thumbnails/` を削除する。再生成される。
-- 現状LRU削除は未実装。`thumbnail_cache_mb` は設定値のみ。
+- サムネイルはデーモンが起動時・生成後・約60秒ごとに `thumbnail_cache_mb` までLRU削除する。0は無制限。設定変更は再起動なしで反映される。
 
 ## 9. パッケージ
 
