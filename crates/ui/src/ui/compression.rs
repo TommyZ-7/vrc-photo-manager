@@ -13,11 +13,11 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use vrc_photo_core::model::{
-    CompressionFormat, CompressionJob, CompressionProfile, MAX_JOB_RETRIES, QueueStatus, ResizeMode,
+    CompressionFormat, CompressionJob, CompressionProfile, MAX_JOB_RETRIES, MAX_PROFILE_NAME_CHARS,
+    QueueStatus, ResizeMode,
 };
 
 use crate::app::App;
-use crate::app::compression::MAX_PROFILE_NAME_CHARS;
 use crate::ui::components::glass_panel;
 use crate::ui::theme::*;
 
@@ -284,14 +284,23 @@ impl App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        if self.profile_name_editing_id.as_deref() != Some(profile.id.as_str())
-            || self.profile_name_reset_pending
-        {
+        if self.profile_name_editing_id.as_deref() != Some(profile.id.as_str()) {
             let name = profile.name.clone();
             self.profile_name_input.update(cx, |input, cx| {
                 input.set_value(name, window, cx);
             });
             self.profile_name_editing_id = Some(profile.id.clone());
+            self.profile_name_reset_pending = false;
+            self.profile_name_error = None;
+        } else if self.profile_name_reset_pending {
+            // Enter/blur normalizes trims and rejected values. Avoid rewriting
+            // an unchanged field so its undo history and caret stay intact.
+            if self.profile_name_input.read(cx).value().as_ref() != profile.name.as_str() {
+                let name = profile.name.clone();
+                self.profile_name_input.update(cx, |input, cx| {
+                    input.set_value(name, window, cx);
+                });
+            }
             self.profile_name_reset_pending = false;
             self.profile_name_error = None;
         }
@@ -404,7 +413,6 @@ impl App {
                                     }),
                             ),
                     )
-                    .child(section_divider(&p))
                     .child(
                         h_flex()
                             .items_center()
@@ -1086,6 +1094,8 @@ impl App {
                     )
                     .child(
                         div()
+                            .max_w(px(160.))
+                            .truncate()
                             .text_size(px(10.))
                             .text_color(rgb(p.muted_2))
                             .child(profile_name),
@@ -1178,6 +1188,8 @@ impl App {
                             .when_some(profile_name, |this, name| {
                                 this.child(
                                     div()
+                                        .max_w(px(160.))
+                                        .truncate()
                                         .text_size(px(10.))
                                         .text_color(rgb(p.muted_2))
                                         .child(name),

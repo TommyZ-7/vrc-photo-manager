@@ -11,7 +11,7 @@ use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::*;
 use vrc_photo_core::compressor;
-use vrc_photo_core::model::{CompressionProfile, MAX_JOB_RETRIES};
+use vrc_photo_core::model::{CompressionProfile, MAX_JOB_RETRIES, MAX_PROFILE_NAME_CHARS};
 
 use crate::app::App;
 use crate::ui::components::release_confirmation;
@@ -28,10 +28,6 @@ pub(crate) fn manual_output_available(photo_count: usize, target: ManualOutputTa
     target != ManualOutputTarget::Clipboard || photo_count == 1
 }
 
-/// Profile names are identifiers in the UI, not database keys. The editor
-/// caps their length to keep cards, menus, and job rows from breaking.
-pub(crate) const MAX_PROFILE_NAME_CHARS: usize = 100;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProfileNameError {
     Empty,
@@ -39,10 +35,12 @@ pub(crate) enum ProfileNameError {
 }
 
 impl ProfileNameError {
-    pub(crate) fn message(self) -> &'static str {
+    pub(crate) fn message(self) -> String {
         match self {
-            Self::Empty => "名前を入力してください",
-            Self::TooLong => "名前は100文字以内で入力してください",
+            Self::Empty => "名前を入力してください".to_string(),
+            Self::TooLong => {
+                format!("名前は{MAX_PROFILE_NAME_CHARS}文字以内で入力してください")
+            }
         }
     }
 }
@@ -58,6 +56,16 @@ pub(crate) fn normalize_profile_name(raw: &str) -> Result<String, ProfileNameErr
         return Err(ProfileNameError::TooLong);
     }
     Ok(trimmed.to_string())
+}
+
+/// Returns the name to persist when the editor text is valid and differs from
+/// the stored name. Invalid or unchanged text must leave the database alone.
+pub(crate) fn profile_name_update(
+    raw: &str,
+    current: &str,
+) -> Result<Option<String>, ProfileNameError> {
+    let name = normalize_profile_name(raw)?;
+    Ok((name != current).then_some(name))
 }
 
 #[derive(Debug, Clone)]
@@ -397,7 +405,26 @@ impl App {
         edit: impl FnOnce(&mut CompressionProfile),
         cx: &mut Context<Self>,
     ) {
-        if let Some(profile) = self.profiles.get_mut(self.profile_index) {
+        if let Some(id) = self
+            .profiles
+            .get(self.profile_index)
+            .map(|profile| profile.id.clone())
+        {
+            self.edit_profile_by_id(&id, edit, cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    /// Edits a profile by id so a deferred input event cannot land on whichever
+    /// profile happens to be selected by the time it is delivered.
+    pub(crate) fn edit_profile_by_id(
+        &mut self,
+        id: &str,
+        edit: impl FnOnce(&mut CompressionProfile),
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(profile) = self.profiles.iter_mut().find(|profile| profile.id == id) {
             edit(profile);
             let profile = profile.clone();
             if let Err(error) = self.db.save_profile(&profile) {
@@ -637,7 +664,8 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{
-        ManualOutputTarget, ProfileNameError, manual_output_available, normalize_profile_name,
+        MAX_PROFILE_NAME_CHARS, ManualOutputTarget, ProfileNameError, manual_output_available,
+        normalize_profile_name, profile_name_update,
     };
 
     #[test]
@@ -682,8 +710,32 @@ mod tests {
     }
 
     #[test]
+    fn profile_name_updates_only_changed_valid_values() {
+        assert_eq!(
+            profile_name_update("  SNS共有用  ", "アーカイブ用"),
+            Ok(Some("SNS共有用".to_string()))
+        );
+        assert_eq!(
+            profile_name_update(" アーカイブ用 ", "アーカイブ用"),
+            Ok(None)
+        );
+        assert_eq!(
+            profile_name_update("   ", "アーカイブ用"),
+            Err(ProfileNameError::Empty)
+        );
+        assert_eq!(
+            profile_name_update(&"あ".repeat(MAX_PROFILE_NAME_CHARS + 1), "アーカイブ用"),
+            Err(ProfileNameError::TooLong)
+        );
+    }
+
+    #[test]
     fn profile_name_errors_explain_how_to_fix_the_value() {
         assert!(ProfileNameError::Empty.message().contains("入力"));
-        assert!(ProfileNameError::TooLong.message().contains("100"));
+        assert!(
+            ProfileNameError::TooLong
+                .message()
+                .contains(&MAX_PROFILE_NAME_CHARS.to_string())
+        );
     }
 }

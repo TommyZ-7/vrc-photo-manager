@@ -31,7 +31,7 @@ use vrc_photo_core::settings::AppSettings;
 use vrc_photo_ipc::Endpoint;
 
 use crate::app::cli::{log_timing, process_start, timing_enabled};
-use crate::app::compression::{ManualCompressionDialog, normalize_profile_name};
+use crate::app::compression::{ManualCompressionDialog, profile_name_update};
 use crate::app::daemon::spawn_daemon_process;
 use crate::app::demo::{DemoAssets, open_database};
 use crate::app::import::{ImportDialogState, ImportReportView};
@@ -378,21 +378,31 @@ impl App {
             |this, input, event: &InputEvent, cx| match event {
                 InputEvent::Change => {
                     let raw = input.read(cx).value().to_string();
-                    match normalize_profile_name(&raw) {
-                        Ok(name) => {
+                    let Some(id) = this.profile_name_editing_id.clone() else {
+                        return;
+                    };
+                    let Some(current) = this
+                        .profiles
+                        .iter()
+                        .find(|profile| profile.id == id)
+                        .map(|profile| profile.name.clone())
+                    else {
+                        return;
+                    };
+                    match profile_name_update(&raw, &current) {
+                        Ok(Some(name)) => {
                             if this.profile_name_error.take().is_some() {
                                 cx.notify();
                             }
-                            let changed = this
-                                .profiles
-                                .get(this.profile_index)
-                                .is_some_and(|profile| profile.name != name);
-                            if changed {
-                                this.edit_profile(|profile| profile.name = name, cx);
+                            this.edit_profile_by_id(&id, |profile| profile.name = name, cx);
+                        }
+                        Ok(None) => {
+                            if this.profile_name_error.take().is_some() {
+                                cx.notify();
                             }
                         }
                         Err(error) => {
-                            let message = error.message().to_string();
+                            let message = error.message();
                             if this.profile_name_error.as_deref() != Some(message.as_str()) {
                                 this.profile_name_error = Some(message);
                                 cx.notify();

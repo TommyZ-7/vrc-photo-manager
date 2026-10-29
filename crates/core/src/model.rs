@@ -92,6 +92,10 @@ impl ResizeMode {
     }
 }
 
+/// Maximum profile-name length shown in the UI. Names are display-only, so
+/// this only keeps cards, menus, and job rows from breaking.
+pub const MAX_PROFILE_NAME_CHARS: usize = 100;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompressionProfile {
     pub id: String,
