@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::ButtonVariant;
+use gpui_kit::component::*;
 use gpui_kit::*;
-use vrc_photo_core::model::Photo;
+use vrc_photo_core::model::{DeletionJobSummary, DeletionReason, Photo};
 use vrc_photo_core::{preview, thumbnail};
 
 use crate::app::cli::log_timing;
@@ -473,48 +474,83 @@ impl App {
             return;
         }
         let count = ids.len();
-        let title = if count == 1 {
-            "写真をゴミ箱へ移動"
-        } else {
-            "選択した写真をゴミ箱へ移動"
-        };
+        let summary = self.db.deletion_job_summary(&ids).unwrap_or_default();
+        let warning_lines = deletion_warning_lines(&summary);
         let description = if count == 1 {
             self.selected_photo
                 .as_ref()
                 .map(|photo| {
                     format!(
-                        "「{}」をOSゴミ箱へ移動します。この操作は元に戻せません。",
+                        "「{}」を削除待ちに追加します。デーモンがOSゴミ箱へ移動します。",
                         photo.captured_at_local
                     )
                 })
-                .unwrap_or_else(|| "写真をOSゴミ箱へ移動します。".to_string())
+                .unwrap_or_else(|| {
+                    "写真を削除待ちに追加します。デーモンがOSゴミ箱へ移動します。".to_string()
+                })
         } else {
-            format!("{count} 枚をOSゴミ箱へ移動します。この操作は元に戻せません。")
+            format!("{count} 枚を削除待ちに追加します。デーモンがOSゴミ箱へ移動します。")
         };
         let entity = cx.entity();
         let panel_deep = self.palette.panel_deep;
+
+        if warning_lines.is_empty() {
+            window.open_alert_dialog(cx, move |alert, _, _| {
+                let entity = entity.clone();
+                let ids = ids.clone();
+                alert
+                    .title("写真を削除")
+                    .bg(rgb(panel_deep))
+                    .description(description.clone())
+                    .confirm()
+                    .ok_text("削除待ちに追加")
+                    .ok_variant(ButtonVariant::Danger)
+                    .cancel_text("キャンセル")
+                    .on_ok(move |_, _, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.request_trash_photos(ids.clone(), cx);
+                        });
+                        true
+                    })
+            });
+            return;
+        }
+
         window.open_alert_dialog(cx, move |alert, _, _| {
             let entity = entity.clone();
             let ids = ids.clone();
+            let lines = warning_lines.clone();
+            let content = v_flex()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .child(format!("{count} 枚に未完了のジョブがあります。")),
+                )
+                .children(
+                    lines
+                        .into_iter()
+                        .map(|line| div().text_size(px(11.)).child(line)),
+                );
             alert
-                .title(title)
+                .title("未完了のジョブがあります")
                 .bg(rgb(panel_deep))
-                .description(description.clone())
+                .description(content)
                 .confirm()
-                .ok_text("ゴミ箱へ")
+                .ok_text("削除待ちに追加")
                 .ok_variant(ButtonVariant::Danger)
                 .cancel_text("キャンセル")
                 .on_ok(move |_, _, cx| {
                     entity.update(cx, |this, cx| {
-                        this.trash_photos(ids.clone(), cx);
+                        this.request_trash_photos(ids.clone(), cx);
                     });
                     true
                 })
         });
     }
 
-    /// Applies a trash batch: one revision bump, one index rebuild, and one
-    /// side-panel refresh instead of repeating them for every photo.
+    /// Demo-only direct trash path. Real deletions go through the daemon
+    /// queue so dependent jobs can drain first.
     fn trash_photos(&mut self, ids: Vec<i64>, cx: &mut Context<Self>) {
         let mut removed = HashSet::new();
         let mut promoted = HashSet::new();
@@ -532,59 +568,8 @@ impl App {
             }
         }
 
-        let changed = !removed.is_empty() || !promoted.is_empty();
-        if changed {
-            let revision = match self.db.bump_library_revision() {
-                Ok(revision) => Some(revision),
-                Err(error) => {
-                    tracing::warn!(%error, "cannot bump library revision after trash");
-                    None
-                }
-            };
-            self.library.borrow_mut().remove_photos(&removed);
-            self.search_view.borrow_mut().remove_photos(&removed);
-            if !promoted.is_empty() {
-                // Kept cards now display the promoted derivative.
-                self.library.borrow_mut().invalidate_pages();
-                self.search_view.borrow_mut().invalidate_pages();
-            }
-            for id in &removed {
-                self.thumbnails.borrow_mut().unpin(*id);
-            }
-            self.selected_ids.remove_all(&removed);
-            if self
-                .selection_anchor
-                .is_some_and(|anchor| removed.contains(&anchor))
-            {
-                self.selection_anchor = None;
-            }
-            if self
-                .selected
-                .is_some_and(|selected| removed.contains(&selected))
-            {
-                self.selected = None;
-            }
-            if self
-                .selected_photo
-                .as_ref()
-                .is_some_and(|photo| removed.contains(&photo.id))
-            {
-                self.selected_photo = None;
-                self.selected_players.clear();
-                self.selected_tags.clear();
-                self.selected_derivatives.clear();
-                self.preview = None;
-            }
-            if self.note_edit_id.is_some_and(|id| removed.contains(&id)) {
-                self.note_edit_id = None;
-            }
-            self.reload_aux(cx);
-            if let Some(revision) = revision {
-                // The local snapshot already reflects the deletions; claim
-                // the revision so the next poll does not re-query 100k rows.
-                self.last_library_revision = revision;
-            }
-
+        if !removed.is_empty() || !promoted.is_empty() {
+            self.remove_photos_from_ui(&removed, !promoted.is_empty(), cx);
             let moved = removed.len() + promoted.len();
             let mut message = format!("{moved} 枚をゴミ箱へ移動しました");
             if !promoted.is_empty() {
@@ -602,6 +587,110 @@ impl App {
             self.toast_error(format!("ゴミ箱へ移動できませんでした{detail}"), cx);
         }
         cx.notify();
+    }
+
+    /// Adds a manual deletion request for real libraries. The photo disappears
+    /// immediately; the daemon trashes the files after its jobs drain.
+    pub(crate) fn request_trash_photos(&mut self, ids: Vec<i64>, cx: &mut Context<Self>) {
+        if self.demo {
+            self.trash_photos(ids, cx);
+            return;
+        }
+        let requested = match self
+            .db
+            .request_deletion(&ids, DeletionReason::Manual, false)
+        {
+            Ok(ids) => ids,
+            Err(error) => {
+                tracing::warn!(%error, "cannot request photo deletion");
+                self.toast_error(format!("削除を登録できません: {error}"), cx);
+                cx.notify();
+                return;
+            }
+        };
+        if requested.is_empty() {
+            self.toast_warning("削除できる写真がありません", cx);
+            cx.notify();
+            return;
+        }
+        let removed: HashSet<i64> = requested.iter().copied().collect();
+        self.remove_photos_from_ui(&removed, false, cx);
+        if self.daemon_active {
+            self.toast_success(
+                format!("{} 枚を削除待ちに追加しました", requested.len()),
+                cx,
+            );
+        } else {
+            self.toast_warning(
+                format!(
+                    "{} 枚を削除待ちに追加しました。デーモン起動後に実行されます",
+                    requested.len()
+                ),
+                cx,
+            );
+        }
+        self.send_wake_jobs(cx);
+        cx.notify();
+    }
+
+    /// Removes photos from the mounted views without rebuilding the whole
+    /// library index. The caller already changed the database.
+    fn remove_photos_from_ui(
+        &mut self,
+        removed: &HashSet<i64>,
+        promoted: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let revision = match self.db.bump_library_revision() {
+            Ok(revision) => Some(revision),
+            Err(error) => {
+                tracing::warn!(%error, "cannot bump library revision after trash");
+                None
+            }
+        };
+        self.library.borrow_mut().remove_photos(removed);
+        self.search_view.borrow_mut().remove_photos(removed);
+        if promoted {
+            // Kept cards now display the promoted derivative.
+            self.library.borrow_mut().invalidate_pages();
+            self.search_view.borrow_mut().invalidate_pages();
+        }
+        for id in removed {
+            self.thumbnails.borrow_mut().unpin(*id);
+        }
+        self.selected_ids.remove_all(removed);
+        if self
+            .selection_anchor
+            .is_some_and(|anchor| removed.contains(&anchor))
+        {
+            self.selection_anchor = None;
+        }
+        if self
+            .selected
+            .is_some_and(|selected| removed.contains(&selected))
+        {
+            self.selected = None;
+        }
+        if self
+            .selected_photo
+            .as_ref()
+            .is_some_and(|photo| removed.contains(&photo.id))
+        {
+            self.selected_photo = None;
+            self.selected_players.clear();
+            self.selected_tags.clear();
+            self.selected_derivatives.clear();
+            self.preview = None;
+        }
+        if self.note_edit_id.is_some_and(|id| removed.contains(&id)) {
+            self.note_edit_id = None;
+        }
+        self.reload_aux(cx);
+        if let Some(revision) = revision {
+            // The local snapshot already reflects the deletions; claim the
+            // revision so the next poll does not re-query 100k rows.
+            self.last_library_revision = revision;
+        }
     }
 
     /// Moves one photo to the OS trash and updates its row. Side panels and
@@ -708,6 +797,41 @@ impl App {
     }
 }
 
+/// Warning body for a manual deletion that still has jobs. An empty vector
+/// means the simple confirmation is enough.
+fn deletion_warning_lines(summary: &DeletionJobSummary) -> Vec<String> {
+    if !summary.needs_warning() {
+        return Vec::new();
+    }
+    vec![
+        job_status_line("圧縮", summary.compression),
+        job_status_line("送信", summary.send),
+        "・全ジョブの完了後に削除されます。".to_string(),
+        "・送信ジョブはキャンセルされます。".to_string(),
+        "・失敗したジョブがある場合、削除は保留され、通知されます。".to_string(),
+    ]
+}
+
+fn job_status_line(label: &str, counts: vrc_photo_core::model::JobStatusCounts) -> String {
+    if counts.total() == 0 {
+        return format!("{label}: なし");
+    }
+    let mut parts = Vec::new();
+    if counts.pending > 0 {
+        parts.push(format!("実行待ち {}", counts.pending));
+    }
+    if counts.processing > 0 {
+        parts.push(format!("処理中 {}", counts.processing));
+    }
+    if counts.waiting > 0 {
+        parts.push(format!("未実行 {}", counts.waiting));
+    }
+    if counts.failed > 0 {
+        parts.push(format!("失敗 {}", counts.failed));
+    }
+    format!("{label}: {}", parts.join(" / "))
+}
+
 /// Trims the outer whitespace of a note and treats an empty result as "no note".
 fn normalize_note(value: &str) -> Option<&str> {
     let trimmed = value.trim();
@@ -739,7 +863,8 @@ fn with_tag(tags: &[String], tag: &str) -> Option<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_note, with_tag, without_tag};
+    use super::{deletion_warning_lines, normalize_note, with_tag, without_tag};
+    use vrc_photo_core::model::{DeletionJobSummary, JobStatusCounts};
 
     #[test]
     fn notes_normalize_empty_to_none_and_trim_text() {
@@ -754,6 +879,42 @@ mod tests {
         let tags = vec!["alpha".to_string(), "beta".to_string()];
         assert_eq!(without_tag(&tags, "alpha"), Some(vec!["beta".to_string()]));
         assert_eq!(without_tag(&tags, "missing"), None);
+    }
+
+    #[test]
+    fn deletion_warning_lines_list_compression_and_send_counts() {
+        let summary = DeletionJobSummary {
+            compression: JobStatusCounts {
+                waiting: 2,
+                pending: 1,
+                processing: 1,
+                failed: 1,
+            },
+            send: JobStatusCounts::default(),
+        };
+        let lines = deletion_warning_lines(&summary);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("圧縮") && line.contains("失敗 1"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("送信") && line.contains("なし"))
+        );
+        assert!(lines.iter().any(|line| line.contains("全ジョブの完了後")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("送信ジョブはキャンセル"))
+        );
+        assert!(lines.iter().any(|line| line.contains("保留")));
+    }
+
+    #[test]
+    fn deletion_warning_lines_are_empty_without_jobs() {
+        assert!(deletion_warning_lines(&DeletionJobSummary::default()).is_empty());
     }
 
     #[test]

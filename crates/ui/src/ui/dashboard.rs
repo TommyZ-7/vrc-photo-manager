@@ -2,18 +2,20 @@
 //!
 //! Daemon commands live in `app::daemon`; screen dispatch lives in `ui::shell`.
 
-use gpui_kit::component::button::Button;
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use vrc_photo_core::logging::{DAEMON_LOG_FILE, UI_LOG_FILE, logs_dir};
+use vrc_photo_core::model::DeletionStatus;
 
 use crate::app::App;
 use crate::app::daemon::{
     daemon_operation_label, daemon_state_label, daemon_sync_label, format_timestamp,
     ipc_status_label, open_path,
 };
+use crate::app::deletion::{deletion_blocked_label, deletion_reason_label, deletion_status_label};
 use crate::ui::components::glass_panel;
 use crate::ui::shell::{scan_progress_label, scan_progress_ratio};
 use crate::ui::theme::*;
@@ -76,6 +78,9 @@ impl App {
                             .gap(px(CARD_GAP))
                             .overflow_y_scrollbar()
                             .child(self.daemon_card(cx))
+                            .when(!self.deletion_requests.is_empty(), |this| {
+                                this.child(self.deletion_card(cx))
+                            })
                             .when(!self.daemon_errors.is_empty(), |this| {
                                 this.child(self.daemon_error_card(cx))
                             })
@@ -171,6 +176,162 @@ impl App {
                             .unwrap_or_else(|| "ログフォルダ未設定".to_string()),
                     ),
             )
+    }
+
+    pub(crate) fn deletion_card(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.palette;
+        let requests = self.deletion_requests.clone();
+        let counts = self.deletion_counts;
+        let mut card = glass_panel(&self.palette)
+            .flex()
+            .flex_col()
+            .flex_shrink_0()
+            .p(px(14.))
+            .gap(px(10.))
+            .rounded(px(17.))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_semibold()
+                            .text_color(rgb(p.text))
+                            .child("削除待ち"),
+                    )
+                    .when(counts.pending > 0, |this| {
+                        this.child(self.badge(
+                            &format!("待機 {}", counts.pending),
+                            p.amber,
+                            p.amber_soft,
+                        ))
+                    })
+                    .when(counts.blocked > 0, |this| {
+                        this.child(self.badge(
+                            &format!("保留 {}", counts.blocked),
+                            p.red,
+                            p.red_soft,
+                        ))
+                    })
+                    .when(counts.running > 0, |this| {
+                        this.child(self.badge(
+                            &format!("実行中 {}", counts.running),
+                            p.accent,
+                            p.accent_soft,
+                        ))
+                    }),
+            );
+
+        for request in requests.iter().take(20) {
+            let id = request.id;
+            let status = deletion_status_label(request.status);
+            let (status_color, status_bg) = match request.status {
+                DeletionStatus::Blocked => (p.red, p.red_soft),
+                DeletionStatus::Running => (p.accent, p.accent_soft),
+                _ => (p.amber, p.amber_soft),
+            };
+            let can_cancel = request.status == DeletionStatus::Pending
+                || (request.status == DeletionStatus::Blocked && request.started_at.is_none());
+            let retryable = request.status == DeletionStatus::Blocked;
+            let forceable = request.status == DeletionStatus::Blocked
+                && request.blocked_reason.as_deref() == Some("job_failed");
+            let blocked = deletion_blocked_label(request);
+            let row = v_flex()
+                .gap(px(6.))
+                .p(px(10.))
+                .rounded(px(10.))
+                .bg(rgb(p.panel_2))
+                .border_1()
+                .border_color(rgb(p.border))
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(12.))
+                                .text_color(rgb(p.text))
+                                .child(request.photo_name.clone()),
+                        )
+                        .child(self.badge(status, status_color, status_bg)),
+                )
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(p.muted))
+                                .child(deletion_reason_label(request.reason)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(p.muted_2))
+                                .child(format_timestamp(&request.requested_at)),
+                        ),
+                )
+                .when_some(blocked, |this, detail| {
+                    this.child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(p.red))
+                            .child(detail),
+                    )
+                })
+                .child(
+                    h_flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(6.))
+                        .when(can_cancel, |this| {
+                            this.child(
+                                Button::new(SharedString::from(format!("cancel-deletion-{id}")))
+                                    .label("取消")
+                                    .small()
+                                    .ghost()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.cancel_deletion(id, cx);
+                                    })),
+                            )
+                        })
+                        .when(retryable, |this| {
+                            this.child(
+                                Button::new(SharedString::from(format!("retry-deletion-{id}")))
+                                    .label("再試行")
+                                    .small()
+                                    .ghost()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.retry_deletion(id, cx);
+                                    })),
+                            )
+                        })
+                        .when(forceable, |this| {
+                            this.child(
+                                Button::new(SharedString::from(format!("force-deletion-{id}")))
+                                    .label("強制削除")
+                                    .small()
+                                    .danger()
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.request_force_deletion(id, window, cx);
+                                    })),
+                            )
+                        }),
+                );
+            card = card.child(row);
+        }
+
+        card.child(
+            div()
+                .text_size(px(10.))
+                .text_color(rgb(p.muted_2))
+                .child("デーモンが依存ジョブの完了後にOSゴミ箱へ移動します"),
+        )
     }
 
     pub(crate) fn daemon_card(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
