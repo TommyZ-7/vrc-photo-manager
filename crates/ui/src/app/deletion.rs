@@ -11,6 +11,7 @@ pub(crate) fn deletion_reason_label(reason: DeletionReason) -> &'static str {
     match reason {
         DeletionReason::AutoReplace => "自動置換",
         DeletionReason::Manual => "手動削除",
+        DeletionReason::Unknown => "不明な理由",
     }
 }
 

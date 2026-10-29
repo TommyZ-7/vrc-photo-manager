@@ -1758,6 +1758,16 @@ fn run_deletions_once(db: &Arc<Mutex<Db>>) -> Result<usize> {
     };
     let mut executed = 0;
     for pending in requests {
+        if pending.reason == DeletionReason::Unknown {
+            let db = db.lock().unwrap();
+            db.block_deletion(pending.id, "unknown_reason", None)?;
+            tracing::warn!(
+                request = pending.id,
+                photo_id = pending.photo_id,
+                "unknown deletion reason; request blocked"
+            );
+            continue;
+        }
         let blocked = {
             let db = db.lock().unwrap();
             db.block_deletion_if_jobs_failed(pending.id)?
@@ -1785,6 +1795,9 @@ fn run_deletions_once(db: &Arc<Mutex<Db>>) -> Result<usize> {
 }
 
 fn execute_deletion(db: &Arc<Mutex<Db>>, request: &DeletionRequest) -> Result<()> {
+    if request.reason == DeletionReason::Unknown {
+        anyhow::bail!("unknown deletion reason");
+    }
     let (photo, targets) = {
         let db = db.lock().unwrap();
         let Some(photo) = db.photo_by_id(request.photo_id)? else {
@@ -3107,6 +3120,38 @@ mod tests {
         let request = db.active_deletion_request(photo.id).unwrap().unwrap();
         assert_eq!(request.status, DeletionStatus::Blocked);
         assert_eq!(request.blocked_reason.as_deref(), Some("missing_asset"));
+    }
+
+    #[test]
+    fn unknown_deletion_reason_is_blocked_without_deleting() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let original = dir
+            .path()
+            .join("photos/VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&original);
+        daemon.run_once().unwrap();
+
+        let db = Db::open(&dir.path().join("library.db")).unwrap();
+        let photo = db
+            .photo_by_path(original.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        db.connection()
+            .execute(
+                "INSERT INTO deletion_requests(photo_id, reason, status, force, requested_at) \
+                 VALUES (?1, 'future_reason', 'pending', 0, ?2)",
+                (photo.id, chrono::Utc::now().to_rfc3339()),
+            )
+            .unwrap();
+
+        daemon.process_deletions().unwrap();
+
+        assert!(original.exists(), "unknown reason must not delete files");
+        let request = db.active_deletion_request(photo.id).unwrap().unwrap();
+        assert_eq!(request.reason, vrc_photo_core::model::DeletionReason::Unknown);
+        assert_eq!(request.status, DeletionStatus::Blocked);
+        assert_eq!(request.blocked_reason.as_deref(), Some("unknown_reason"));
     }
 
     #[test]

@@ -1548,6 +1548,11 @@ impl Db {
         reason: DeletionReason,
         force: bool,
     ) -> Result<Vec<i64>> {
+        if reason == DeletionReason::Unknown {
+            return Err(CoreError::Invalid(
+                "cannot record an unknown deletion reason".to_string(),
+            ));
+        }
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let now = now_string();
         let mut request_ids = Vec::new();
@@ -2604,7 +2609,8 @@ fn row_to_deletion_request(row: &Row<'_>) -> rusqlite::Result<DeletionRequest> {
         id: row.get(0)?,
         photo_id: row.get(1)?,
         photo_name: row.get(2)?,
-        reason: DeletionReason::parse(&row.get::<_, String>(3)?).unwrap_or(DeletionReason::Manual),
+        reason: DeletionReason::parse(&row.get::<_, String>(3)?)
+            .unwrap_or(DeletionReason::Unknown),
         status: DeletionStatus::parse(&row.get::<_, String>(4)?),
         force: row.get::<_, i64>(5)? != 0,
         blocked_reason: row.get(6)?,
@@ -2945,6 +2951,28 @@ mod tests {
         assert_eq!(
             db.photo_by_id(id).unwrap().unwrap().status,
             PhotoStatus::Deleting
+        );
+    }
+
+    #[test]
+    fn unknown_deletion_reason_is_preserved_and_cannot_be_requested() {
+        let db = Db::open_in_memory().unwrap();
+        let id = seed_photo(&db);
+        db.connection()
+            .execute(
+                "INSERT INTO deletion_requests(photo_id, reason, status, force, requested_at) \
+                 VALUES (?1, 'future_reason', 'pending', 0, ?2)",
+                params![id, now_string()],
+            )
+            .unwrap();
+
+        let pending = db.pending_deletion_requests(10).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].reason, DeletionReason::Unknown);
+        assert_ne!(pending[0].reason, DeletionReason::Manual);
+        assert!(
+            db.request_deletion(&[id], DeletionReason::Unknown, false)
+                .is_err()
         );
     }
 

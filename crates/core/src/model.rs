@@ -398,6 +398,8 @@ pub struct CompressionJob {
 pub enum DeletionReason {
     AutoReplace,
     Manual,
+    /// A reason written by a newer version. Never safe to execute.
+    Unknown,
 }
 
 impl DeletionReason {
@@ -405,6 +407,7 @@ impl DeletionReason {
         match self {
             Self::AutoReplace => "auto_replace",
             Self::Manual => "manual",
+            Self::Unknown => "unknown",
         }
     }
 
