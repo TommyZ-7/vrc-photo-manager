@@ -2678,6 +2678,74 @@ mod tests {
         daemon
     }
 
+    fn multi_profile_test_daemon(dir: &tempfile::TempDir) -> Daemon {
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let db_path = dir.path().join("library.db");
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        daemon.set_ipc_endpoint(None);
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+        daemon
+    }
+
+    fn write_gradient_photo(path: &Path) {
+        let image = image::RgbaImage::from_fn(64, 64, |x, y| {
+            image::Rgba([(x * 4) as u8, (y * 4) as u8, ((x + y) * 2) as u8, 255])
+        });
+        image.save(path).unwrap();
+    }
+
+    fn add_replace_profiles(db: &Db) {
+        db.save_profile(&CompressionProfile {
+            id: "lossy".to_string(),
+            name: "lossy".to_string(),
+            auto_enabled: true,
+            format: vrc_photo_core::model::CompressionFormat::Webp,
+            quality: 10,
+            lossless: false,
+            resize_enabled: false,
+            output_dir: Some("lossy".to_string()),
+            suffix: "_lossy".to_string(),
+            ..CompressionProfile::default()
+        })
+        .unwrap();
+        db.save_profile(&CompressionProfile {
+            id: "lossless".to_string(),
+            name: "lossless".to_string(),
+            auto_enabled: true,
+            format: vrc_photo_core::model::CompressionFormat::Webp,
+            lossless: true,
+            resize_enabled: false,
+            output_dir: Some("lossless".to_string()),
+            suffix: "_lossless".to_string(),
+            ..CompressionProfile::default()
+        })
+        .unwrap();
+    }
+
+    fn wait_until_idle(db: &Arc<Mutex<Db>>, timeout: Duration) {
+        let started = Instant::now();
+        loop {
+            let (active, waiting) = {
+                let db = db.lock().unwrap();
+                (
+                    db.count_active_jobs().unwrap(),
+                    db.count_jobs(QueueStatus::Waiting).unwrap(),
+                )
+            };
+            if active == 0 && waiting == 0 {
+                return;
+            }
+            assert!(
+                started.elapsed() < timeout,
+                "jobs did not finish within {timeout:?}"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     #[test]
     fn replace_job_queues_deletion_instead_of_trashing_immediately() {
         let dir = tempfile::tempdir().unwrap();
@@ -2795,6 +2863,115 @@ mod tests {
             db.photo_by_id(photo.id).unwrap().unwrap().status,
             PhotoStatus::Missing
         );
+    }
+
+    #[test]
+    fn multi_profile_replace_is_worker_count_independent() {
+        for workers in [1usize, 4] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut daemon = multi_profile_test_daemon(&dir);
+            let db_path = dir.path().join("library.db");
+            {
+                let db = Db::open(&db_path).unwrap();
+                add_replace_profiles(&db);
+            }
+            save_daemon_settings(&daemon, |settings| {
+                settings.auto_compress_backlog = true;
+                settings.auto_compress_keep_original = false;
+                settings.auto_compress_immediate = true;
+            });
+            let original = original_path(&dir);
+            write_gradient_photo(&original);
+            let expected = vrc_photo_core::image_decode::decode_image(&original)
+                .unwrap()
+                .to_rgba8();
+            daemon.run_once().unwrap();
+            daemon.settings.compression_workers = workers;
+            daemon.start_workers();
+            wait_until_idle(&daemon.db, Duration::from_secs(15));
+            daemon.stop_workers();
+            daemon.process_deletions().unwrap();
+
+            let db = Db::open(&db_path).unwrap();
+            let photo = db
+                .photo_by_path(original.to_str().unwrap())
+                .unwrap()
+                .unwrap();
+            let derivatives = db.derivatives_for_photo(photo.id).unwrap();
+            assert_eq!(derivatives.len(), 2, "workers={workers}");
+            assert!(derivatives.iter().all(|d| Path::new(&d.path).is_file()));
+            assert!(!original.exists(), "workers={workers}");
+            assert_eq!(photo.status, PhotoStatus::Replaced);
+            assert_eq!(db.count_jobs(QueueStatus::Completed).unwrap(), 2);
+            assert_eq!(db.count_jobs(QueueStatus::Failed).unwrap(), 0);
+            let completed: i64 = db
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM deletion_requests WHERE status = 'completed'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(completed, 1, "workers={workers}");
+
+            let lossless = derivatives
+                .iter()
+                .find(|d| d.profile_id == "lossless")
+                .unwrap();
+            let actual = vrc_photo_core::image_decode::decode_image(Path::new(&lossless.path))
+                .unwrap()
+                .to_rgba8();
+            assert_eq!(
+                actual, expected,
+                "workers={workers}: second job read a derivative"
+            );
+        }
+    }
+
+    #[test]
+    fn failed_job_blocks_deletion_until_retry_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = multi_profile_test_daemon(&dir);
+        let db_path = dir.path().join("library.db");
+        {
+            let db = Db::open(&db_path).unwrap();
+            add_replace_profiles(&db);
+            std::fs::write(dir.path().join("photos/lossy"), b"not a directory").unwrap();
+        }
+        save_daemon_settings(&daemon, |settings| {
+            settings.auto_compress_backlog = true;
+            settings.auto_compress_keep_original = false;
+            settings.auto_compress_immediate = true;
+        });
+        let original = original_path(&dir);
+        write_gradient_photo(&original);
+        daemon.run_once().unwrap();
+        daemon.compress_pending().unwrap();
+        daemon.process_deletions().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        let photo = db
+            .photo_by_path(original.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(original.exists(), "a failed job must keep the original");
+        assert_eq!(photo.status, PhotoStatus::Replaced);
+        let request = db.active_deletion_request(photo.id).unwrap().unwrap();
+        assert_eq!(request.status, DeletionStatus::Blocked);
+        assert_eq!(request.blocked_reason.as_deref(), Some("job_failed"));
+
+        std::fs::remove_file(dir.path().join("photos/lossy")).unwrap();
+        let failed = db.list_jobs_by_status(QueueStatus::Failed, 10).unwrap();
+        assert_eq!(failed.len(), 1);
+        db.retry_job(&failed[0].id).unwrap();
+        drop(db);
+        daemon.compress_pending().unwrap();
+        daemon.process_deletions().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        assert!(!original.exists());
+        assert!(db.active_deletion_request(photo.id).unwrap().is_none());
+        assert_eq!(db.count_jobs(QueueStatus::Failed).unwrap(), 0);
     }
 
     #[test]
