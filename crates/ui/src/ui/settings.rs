@@ -54,6 +54,11 @@ impl App {
         let p = self.palette;
         let autostart_hint =
             autostart_description(self.daemon_active, self.daemon_supervisor.as_deref());
+        let cache_label = if self.settings.thumbnail_cache_mb == 0 {
+            "無制限".to_string()
+        } else {
+            format!("{} MB", self.settings.thumbnail_cache_mb)
+        };
         h_flex()
             .relative()
             .flex_1()
@@ -447,8 +452,8 @@ impl App {
                                     .text_size(px(10.))
                                     .text_color(rgb(p.muted_2))
                                     .child(format!(
-                                        "言語: {} · サムネイルキャッシュ: {} MB",
-                                        self.settings.language, self.settings.thumbnail_cache_mb
+                                        "言語: {} · サムネイルキャッシュ上限: {}",
+                                        self.settings.language, cache_label
                                     )),
                             ),
                     ),
