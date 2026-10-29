@@ -24,7 +24,11 @@ pub(crate) fn import_progress_ratio(progress: &ImportProgress) -> f32 {
 }
 
 impl App {
-    pub(crate) fn import_modal_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn import_modal_overlay(
+        &mut self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let p = self.palette;
         let Some(dialog) = self.import_dialog.as_ref() else {
             return div().into_any_element();
@@ -279,7 +283,7 @@ impl App {
                 "import-dialog",
                 Animation::new(MOTION_FAST)
                     .with_easing(ease_motion)
-                    .with_max_fps(self.motion_fps()),
+                    .with_max_fps(self.motion_fps(window, cx)),
                 |el, t| el.opacity(t),
             )
             .into_any_element()

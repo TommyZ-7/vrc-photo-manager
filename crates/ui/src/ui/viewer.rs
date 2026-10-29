@@ -7,7 +7,7 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::app::App;
+use crate::app::{App, effective_motion_fps};
 use crate::state::preview::preview_placeholder_label;
 use crate::state::viewer::{ViewerMorph, morph_image_plan};
 use crate::ui::components::{ButtonState, ButtonTone};
@@ -165,7 +165,7 @@ impl App {
                     ("viewer-nav-previous", nav_epoch),
                     Animation::new(nav_duration)
                         .with_easing(ease_motion)
-                        .with_max_fps(self.motion_fps()),
+                        .with_max_fps(self.motion_fps(window, cx)),
                     move |el, t| {
                         let (opacity, offset, _, _) = viewer_nav_frame(t, nav_direction);
                         el.opacity(opacity).left(px(offset))
@@ -186,7 +186,7 @@ impl App {
                     ("viewer-nav-current", nav_epoch),
                     Animation::new(nav_duration)
                         .with_easing(ease_motion)
-                        .with_max_fps(self.motion_fps()),
+                        .with_max_fps(self.motion_fps(window, cx)),
                     move |el, t| {
                         let (_, _, opacity, offset) = viewer_nav_frame(t, nav_direction);
                         el.opacity(opacity).left(px(offset))
@@ -215,7 +215,7 @@ impl App {
             ("viewer-box", box_state.epoch),
             Animation::new(box_state.duration)
                 .with_easing(ease_motion)
-                .with_max_fps(self.motion_fps()),
+                .with_max_fps(self.motion_fps(window, cx)),
             move |el, t| {
                 let (width, height) = box_state.size_at(t, viewport);
                 el.w(px(width)).h(px(height))
@@ -257,7 +257,7 @@ impl App {
                     MOTION_FAST
                 })
                 .with_easing(ease_motion)
-                .with_max_fps(self.motion_fps()),
+                .with_max_fps(self.motion_fps(window, cx)),
                 |el, t| el.opacity(t).relative().top(px(6.0 * (1.0 - t))),
             );
             // The details column stays a fixed-width dock so the image geometry
@@ -285,7 +285,7 @@ impl App {
             ("viewer-panel", panel_state.epoch),
             Animation::new(panel_state.duration)
                 .with_easing(ease_motion)
-                .with_max_fps(self.motion_fps()),
+                .with_max_fps(self.motion_fps(window, cx)),
             move |el, t| el.w(px(panel_state.width_at(t))).overflow_hidden(),
         );
 
@@ -314,7 +314,9 @@ impl App {
 
 pub(crate) struct ViewerMorphView {
     morph: Option<ViewerMorph>,
-    max_fps: f32,
+    /// Configured cap; resolved against the display in `render` so a cached
+    /// morph still follows the window's current refresh rate.
+    max_fps: u32,
     palette: Palette,
 }
 
@@ -322,7 +324,7 @@ impl ViewerMorphView {
     pub(crate) fn new(palette: Palette) -> Self {
         Self {
             morph: None,
-            max_fps: 60.0,
+            max_fps: 60,
             palette,
         }
     }
@@ -335,7 +337,7 @@ impl ViewerMorphView {
     pub(crate) fn set_morph(
         &mut self,
         morph: Option<ViewerMorph>,
-        max_fps: f32,
+        max_fps: u32,
         cx: &mut Context<Self>,
     ) {
         self.morph = morph;
@@ -345,8 +347,9 @@ impl ViewerMorphView {
 }
 
 impl Render for ViewerMorphView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.palette;
+        let max_fps = effective_motion_fps(self.max_fps, window.refresh_interval(cx));
         let Some(morph) = self.morph.as_ref() else {
             // An in-flow empty slot would still take a root flex gap and
             // narrow the main column by 14px.
@@ -383,7 +386,7 @@ impl Render for ViewerMorphView {
                 ("viewer-morph-frame", epoch),
                 Animation::new(MOTION_MORPH)
                     .with_easing(ease_motion)
-                    .with_max_fps(self.max_fps),
+                    .with_max_fps(max_fps),
                 move |el, t| {
                     let bounds = lerp_bounds(from, to, t);
                     let radius = start_radius + (end_radius - start_radius) * t;
@@ -411,7 +414,7 @@ impl Render for ViewerMorphView {
                     ("viewer-morph-backdrop", epoch),
                     Animation::new(MOTION_MORPH)
                         .with_easing(ease_motion)
-                        .with_max_fps(self.max_fps),
+                        .with_max_fps(max_fps),
                     move |el, t| el.opacity(backdrop_from * (1.0 - t)),
                 )
         });

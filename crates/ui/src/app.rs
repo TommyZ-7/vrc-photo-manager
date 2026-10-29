@@ -297,10 +297,33 @@ pub(crate) fn should_notify_library_error(current: Option<&str>, next: &str) -> 
     current != Some(next)
 }
 
+/// Frame cap handed to `Animation::with_max_fps` for the display the window
+/// is on.
+///
+/// A cap at or above the refresh rate can only add wake-up latency on top of
+/// the compositor's vsync, so it is delegated to the animation-frame path by
+/// returning `0`. A 1% margin keeps 60 in sync with 59.94Hz panels. `None`
+/// (the platform does not report an interval) keeps the configured cap.
+pub(crate) fn effective_motion_fps(configured: u32, refresh_interval: Option<Duration>) -> f32 {
+    if configured == 0 {
+        return 0.0;
+    }
+    let Some(interval) = refresh_interval else {
+        return configured as f32;
+    };
+    let seconds = interval.as_secs_f32();
+    if seconds > 0.0 && configured as f32 >= (1.0 / seconds) * 0.99 {
+        0.0
+    } else {
+        configured as f32
+    }
+}
+
 impl App {
-    /// Animation frame cap from settings. `0` disables throttling.
-    pub(crate) fn motion_fps(&self) -> f32 {
-        self.settings.ui_max_fps as f32
+    /// Animation frame cap from settings, resolved against the window's
+    /// display. `0` disables throttling.
+    pub(crate) fn motion_fps(&self, window: &Window, cx: &Context<Self>) -> f32 {
+        effective_motion_fps(self.settings.ui_max_fps, window.refresh_interval(cx))
     }
 
     pub(crate) fn overlay_open(&self) -> bool {
@@ -787,7 +810,7 @@ impl Render for App {
                 .min_w_0()
                 .h_full()
                 .gap(px(WORKSPACE_GAP))
-                .child(self.chrome(layout, cx))
+                .child(self.chrome(window, layout, cx))
                 .child(v_flex().flex_1().min_h_0().child(self.content(window, cx)));
             // The padding and gaps belong to the shell, not the window root:
             // overlays must use the full window coordinate space (the viewer's
@@ -797,16 +820,16 @@ impl Render for App {
                 .size_full()
                 .p(px(WORKSPACE_PAD))
                 .gap(px(WORKSPACE_GAP))
-                .child(self.sidebar(layout.content_height, cx))
+                .child(self.sidebar(window, layout.content_height, cx))
                 .child(main)
-                .child(self.nav_tooltip())
-                .child(self.rail_toggle(cx));
+                .child(self.nav_tooltip(window, cx))
+                .child(self.rail_toggle(window, cx));
             root = root.child(shell);
             if self.manual_compress.is_some() {
                 root = root.child(self.manual_compression_overlay(window, cx));
             }
             if self.import_dialog.is_some() {
-                root = root.child(self.import_modal_overlay(cx));
+                root = root.child(self.import_modal_overlay(window, cx));
             }
         } else {
             root = root.child(self.quick_look(window, cx));
@@ -823,10 +846,58 @@ impl Render for App {
 #[cfg(test)]
 mod tests {
     use super::{
-        any_overlay_open, retain_recent_bounds, should_notify_library_error, should_render_shell,
+        any_overlay_open, effective_motion_fps, retain_recent_bounds, should_notify_library_error,
+        should_render_shell,
     };
     use crate::ui::notifications::{FailureNotice, failure_transition};
     use gpui_kit::{Bounds, point, px, size};
+    use std::time::Duration;
+
+    fn refresh_rate(hz: f32) -> Option<Duration> {
+        Some(Duration::from_secs_f32(1.0 / hz))
+    }
+
+    #[test]
+    fn zero_keeps_animations_uncapped_on_every_display() {
+        for refresh in [
+            refresh_rate(59.94),
+            refresh_rate(60.0),
+            refresh_rate(120.0),
+            None,
+        ] {
+            assert_eq!(effective_motion_fps(0, refresh), 0.0);
+        }
+    }
+
+    #[test]
+    fn caps_below_the_refresh_rate_keep_the_timer_cap() {
+        assert_eq!(effective_motion_fps(30, refresh_rate(59.94)), 30.0);
+        assert_eq!(effective_motion_fps(30, refresh_rate(60.0)), 30.0);
+        assert_eq!(effective_motion_fps(30, refresh_rate(120.0)), 30.0);
+        assert_eq!(effective_motion_fps(60, refresh_rate(120.0)), 60.0);
+        assert_eq!(effective_motion_fps(120, refresh_rate(240.0)), 120.0);
+    }
+
+    #[test]
+    fn caps_at_or_above_the_refresh_rate_delegate_to_vsync() {
+        assert_eq!(effective_motion_fps(60, refresh_rate(60.0)), 0.0);
+        assert_eq!(effective_motion_fps(120, refresh_rate(60.0)), 0.0);
+        assert_eq!(effective_motion_fps(240, refresh_rate(60.0)), 0.0);
+        assert_eq!(effective_motion_fps(120, refresh_rate(120.0)), 0.0);
+        assert_eq!(effective_motion_fps(144, refresh_rate(120.0)), 0.0);
+    }
+
+    #[test]
+    fn sixty_matches_a_59_94_hz_panel() {
+        assert_eq!(effective_motion_fps(60, refresh_rate(59.94)), 0.0);
+    }
+
+    #[test]
+    fn an_unknown_refresh_rate_keeps_the_configured_cap() {
+        assert_eq!(effective_motion_fps(30, None), 30.0);
+        assert_eq!(effective_motion_fps(60, None), 60.0);
+        assert_eq!(effective_motion_fps(120, None), 120.0);
+    }
 
     #[test]
     fn stale_card_bounds_are_pruned_but_the_previous_frame_survives() {

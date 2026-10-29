@@ -418,7 +418,7 @@ impl App {
                 ("notification-modal", self.notification_modal_epoch),
                 Animation::new(MOTION_FAST)
                     .with_easing(ease_motion)
-                    .with_max_fps(self.motion_fps()),
+                    .with_max_fps(self.motion_fps(window, cx)),
                 |el, t| el.opacity(t),
             )
             .into_any_element()

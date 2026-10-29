@@ -143,7 +143,12 @@ fn chrome_icon(name: IconName) -> Icon {
 impl App {
     /// Header card: titlebar line plus the ribbon body. Sits above the
     /// transparent content area with a 14px gap.
-    pub(crate) fn chrome(&mut self, layout: ChromeLayout, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn chrome(
+        &mut self,
+        window: &Window,
+        layout: ChromeLayout,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let p = self.palette;
         let titlebar = self.titlebar(cx);
         let collapsed = self.ribbon_collapsed;
@@ -161,7 +166,7 @@ impl App {
                     Duration::from_millis(220)
                 })
                 .with_easing(ease_motion)
-                .with_max_fps(self.motion_fps()),
+                .with_max_fps(self.motion_fps(window, cx)),
                 move |el, t| {
                     let height = if collapsed {
                         body_height * (1.0 - t)

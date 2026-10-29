@@ -31,7 +31,7 @@ impl App {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let selection = (self.selected_ids.len() > 1).then(|| self.selection_bar(cx));
+        let selection = (self.selected_ids.len() > 1).then(|| self.selection_bar(window, cx));
         let mut screen = v_flex().flex_1().min_h_0().gap(px(CARD_GAP));
         if let Some(selection) = selection {
             screen = screen.child(selection);
@@ -49,7 +49,7 @@ impl App {
             .into_any_element()
     }
 
-    pub(crate) fn selection_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn selection_bar(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let p = self.palette;
         let count = self.selected_ids.len();
         if count <= 1 {
@@ -95,7 +95,7 @@ impl App {
                 "selection-bar",
                 Animation::new(MOTION_FAST)
                     .with_easing(ease_motion)
-                    .with_max_fps(self.motion_fps()),
+                    .with_max_fps(self.motion_fps(window, cx)),
                 |el, t| el.h(px(36.0 * t)).opacity(t),
             )
             .into_any_element()
@@ -263,7 +263,7 @@ impl App {
                     Duration::from_millis(300)
                 })
                 .with_easing(ease_motion)
-                .with_max_fps(self.motion_fps()),
+                .with_max_fps(self.motion_fps(window, cx)),
                 move |el, t| {
                     let from = if collapsed { column_width } else { 0.0 };
                     let to = if collapsed { 0.0 } else { column_width };
