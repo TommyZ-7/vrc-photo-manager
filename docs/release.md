@@ -23,6 +23,13 @@ git push origin v0.1.0
 
 タグpushでReleaseワークフローが走り、GitHub ReleaseにLinux 3形式とWindowsインストーラが添付される。
 
+### リリースノート
+
+- ノートは GitHub の自動生成（generate-notes API）で**マージ済み PR** から作られる。分類は `.github/release.yml` のカテゴリ定義に従う（`enhancement` → ✨ Added、`bug` → 🐛 Fixed、それ以外 → 🔧 Improved）。PR にラベルが付いていない場合は 🔧 Improved に入る
+- バージョン bump の PR 自体はノートに載らない
+- どの PR にも属さない直接 push のコミットは「その他の変更」として末尾に追記される
+- リリースを先に手動作成した場合も、publish ジョブがノート本文を自動生成の内容で上書きする（アセットは従来どおりアップロードされる）
+
 ## 3. 生成物
 
 `cargo-packager` が `dist/` に以下を生成する。
