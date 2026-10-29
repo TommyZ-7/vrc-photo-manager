@@ -68,7 +68,7 @@ PRAGMA busy_timeout = 5000;
 | file_size | INTEGER | バイト |
 | mtime | INTEGER | ファイル更新時刻（epoch秒） |
 | blake3 | TEXT | 元画像のBLAKE3。移動・改名・重複判定に使う。未計算はNULL |
-| status | TEXT | `present` / `replaced` / `missing` |
+| status | TEXT | `present` / `replaced` / `missing` / `deleting` |
 | is_favorite | INTEGER | 0/1 |
 | note | TEXT | メモ |
 | display_derivative_id | INTEGER FK | `replaced` のとき表示に使う `derivatives.id` |
@@ -88,6 +88,8 @@ idx_photos_favorite(is_favorite) WHERE is_favorite = 1
 idx_photos_blake3(blake3)
 idx_photos_move_match(status, file_size, captured_at_utc)
 ```
+
+`deleting` は手動削除の要求済みで、デーモンの実行待ち。`status IN ('present', 'replaced')` の可視クエリから外れ、行とメタデータは削除完了後も `missing` として残る。
 
 ### `worlds`
 
@@ -229,6 +231,36 @@ WHERE id = (
 RETURNING ...;
 ```
 
+### `deletion_requests`
+
+写真の削除要求。デーモンが依存ジョブのドレイン後に実行する。写真1枚につき同時に1件だけ active（`pending` / `blocked` / `running`）になれる。
+
+| 列 | 型 | 説明 |
+|---|---|---|
+| id | INTEGER PK | |
+| photo_id | INTEGER FK | `photos.id` |
+| reason | TEXT | `auto_replace` / `manual` |
+| status | TEXT | `pending` / `blocked` / `running` / `completed` / `cancelled` |
+| force | INTEGER | 1なら失敗ジョブを無視して実行 |
+| blocked_reason | TEXT | `job_failed` / `file_error` |
+| error | TEXT | ファイル移動などの失敗理由 |
+| requested_at / started_at / finished_at | TEXT | RFC3339 |
+
+制約・インデックス:
+
+```sql
+CREATE UNIQUE INDEX idx_deletion_requests_active
+    ON deletion_requests(photo_id)
+    WHERE status IN ('pending', 'blocked', 'running');
+CREATE INDEX idx_deletion_requests_status
+    ON deletion_requests(status, requested_at);
+```
+
+- `reason='manual'` は要求時に `photos.status='deleting'` にし、全派生ファイル→元画像→DB（`missing`）の順で実行する。
+- `reason='auto_replace'` は `replace` 圧縮成功後に作られ、元画像だけを削除する。写真は `replaced` のまま一覧に残る。
+- `pending` はジョブの完了待ち。`blocked` は失敗ジョブまたはファイル移動エラーで停止中。`running` は実行中で、デーモン起動時に `pending` へ戻す。
+- 依存ジョブの失敗で `blocked` になった要求は、その写真の全ジョブが成功／取消になると `pending` に戻る。ファイル移動エラーはユーザーの再試行または強制削除まで `blocked` のままにする。
+
 ### `daemon_errors`
 
 デーモンの現在の処理エラー。操作ごとに最大1行。
@@ -301,16 +333,19 @@ estimated_link, thumbnail_cache_mb, compression_workers
 ## 4. 不変条件
 
 1. `photos.abs_path` は一意。移動はBLAKE3またはファイル名・サイズ・寸法・撮影時刻の一致で同じ `id` に再結合する。コピーは別写真として残す。
-2. `photos.status='missing'` の写真はUI一覧に出さない。DBからは消さない。`replaced` は圧縮版を表示するため一覧に出す。
+2. `photos.status='missing'` と `'deleting'` の写真はUI一覧に出さない。DBからは消さない。`replaced` は圧縮版を表示するため一覧に出す。
 3. `photo_context` は写真ごとに1行。再紐付けはUPSERTで上書きする。
 4. `derivatives.path` は一意。圧縮出力は既存ファイルを上書きしない。
 5. `compression_jobs` は `pending` のものを1件ずつ原子的に取得する。`waiting` は取得せず、明示的な一括解放だけで `pending` に移す。`output_dir` が非NULLなら、プロファイルの `output_dir` より優先する。
-6. 写真削除はDB削除ではなく `status='missing'` とOSゴミ箱移動。圧縮版が残っている場合は `replaced` として表示を継続する。
+6. 手動削除はDB削除ではなく、派生ファイル→元画像のOSゴミ箱移動→`status='missing'`。行とメタデータは残す。自動置換の削除要求は元画像だけを対象にし、写真は `replaced` のまま残す。
 7. 生ログは保存しない。解析済みイベントのみ保存する。
 8. `daemon_errors` は操作（`scan` / `log` / `link`）ごとに1行だけ。解消したら削除する。
 9. `daemon_commands` は同名コマンドを重複して積まない。デーモンは取り出しと削除を同一トランザクションで行う。
-10. `library_revision` はデーモン側の一覧変更（追加・移動・削除・置換）で単調増加し、UIのページキャッシュ無効化に使う。
+10. `library_revision` はデーモン側の一覧変更（追加・移動・削除・置換・削除要求の取消）で単調増加し、UIのページキャッシュ無効化に使う。
 11. IPCの `wake_commands` はDBを変更しない。UIが積んだ `daemon_commands` をデーモンが即時取り出すための通知で、IPC側からコマンドを挿入しない。
+12. activeな `deletion_requests` がある写真には新しい圧縮ジョブを積まない。UIは要求をSQLiteに書き、`wake_jobs` でデーモンを起こすだけ。
+13. `deletion_requests` は1写真につきactive 1件。実行列はデーモン起動時に `pending` へ戻し、冪等なファイル手順で再開する。
+14. 強制削除（`force=1`）は `failed` を無視し、`waiting` / `pending` をキャンセルし、`processing` の完了を待つ。`processing` 中の入力ファイルを消さない。
 
 ## 5. タイムゾーンと時刻
 
@@ -331,6 +366,7 @@ estimated_link, thumbnail_cache_mb, compression_workers
 | 4 | `compression_jobs.retry_count`、`daemon_errors`、`daemon_commands` 追加 |
 | 5 | `photos.display_derivative_id`、表示対象インデックス、移動照合インデックス追加 |
 | 6 | `compression_jobs.output_dir` 追加 |
+| 7 | `deletion_requests` と active/status インデックス追加 |
 
 V4以降は `IMMEDIATE` トランザクションで適用する。UIとデーモンが同時に起動しても、書き込みロックで直列化し、`user_version` と列・テーブルの存在を再確認してから進めるため、中断後の再実行でも安全。
 

@@ -194,7 +194,8 @@ crates/ui/src/
 3. ワーカーはSQLiteの単一 `UPDATE ... RETURNING` で1件を原子的に `processing` にする。
 4. 圧縮結果を一時ファイルへ書き、サイズ検証後にリネームする。
 5. `derivatives` に生成物を記録し、ジョブを `completed` にする。開始・完了・失敗は `compression_progress` イベントでも配信する。
-6. `replace` の場合、検証後に元画像をOSゴミ箱へ移し、`photos.status='replaced'` にする。
+6. `replace` の場合、検証後に `photos.status='replaced'` にし、元画像の削除要求を `deletion_requests` に積む。実際の移動は削除エグゼキュータが全ジョブ完了後に行う。
+7. 各ジョブは元画像ファイルが存在する間は元画像を入力にする。表示用に差し替わった派生ファイルを入力にしない。
 
 ### 4.5 サムネイル
 
@@ -223,6 +224,17 @@ crates/ui/src/
    バージョンを確認する。失敗時は旧版へ戻して再起動する。
 7. 結果は `last-result.json` と `updater.log` に残る。UIは次回起動時に一度表示する。
 
+### 4.8 削除キュー
+
+1. UIは手動削除の `deletion_requests`（`reason='manual'`）を書き、`photos.status='deleting'`、`library_revision` 更新、`wake_jobs` を行う。UIはファイルを移動しない。
+2. 自動置換は圧縮ワーカーが `reason='auto_replace'` の要求を書く。写真は `replaced` のまま残る。
+3. デーモンの `deletion-executor` スレッドは `JobSignal` で起動し、`pending` の要求を読む。
+4. `waiting` / `pending` / `processing` のジョブが残っていれば待つ。`failed` が残り、`force=0` なら `blocked` にして理由を残す。
+5. 実行可能な要求を `pending` → `running` に原子的に変え、ファイルを移動する。手動削除は派生ファイル→元画像、自動置換は元画像だけ。存在しないパスはスキップする。
+6. 手動削除は派生行を削除し、写真を `missing` にする。自動置換は `replaced` を維持する。要求を `completed` にし、`library_revision` を更新する。
+7. 再起動時は `running` を `pending` に戻して同じ手順を再実行する。途中まで移動済みでも、欠けたパスをスキップして完了できる。
+8. `blocked` の取消・再試行・強制削除はダッシュボードから行う。強制削除は失敗を無視し、待機／実行待ちをキャンセルし、処理中の完了を待つ。
+
 ## 5. 並行性
 
 | 実行単位 | 役割 | 共有状態 |
@@ -236,11 +248,13 @@ crates/ui/src/
 | デーモン監視ループ | notifyポーリング、ログ追記、増分索引、UIコマンドの消化、wake待ち | `Arc<Mutex<Db>>` |
 | デーモンIPCサーバー | 接続ごとにスレッド。hello/status/wake/pause/shutdown/subscribeを処理 | `DaemonStatus`、`WakeSignal`、`JobSignal`、`EventBus` |
 | 圧縮ワーカー | 1〜4スレッド。ジョブを原子的に取得 | `Arc<Mutex<Db>>` |
+| 削除エグゼキュータ | 1スレッド。依存ジョブの完了後に要求を実行 | `Arc<Mutex<Db>>`、`JobSignal` |
 | サムネイルワーカー | 1スレッド。キューを順次処理 | `Arc<Mutex<Db>>` |
 | トレイ | Windowsメッセージポンプ / Linux StatusNotifierItem | `DaemonStatus` |
 
 - SQLiteはWALで読み書きを並行化する。書き込みは短く保つ。
 - 圧縮のエンコード中はDBロックを持たない（写真・プロファイルを読んでから解放し、完了後に再ロック）。
+- 削除のファイル移動中もDBロックを持たない。対象パスを読んで解放し、移動後に再ロックしてDBを更新する。
 - ジョブ取得は `UPDATE ... WHERE status='pending' RETURNING` で二重取得を防ぐ。
 - デーモンは `single-instance` で二重起動を防ぐ。
 
@@ -262,6 +276,7 @@ crates/ui/src/
 - 写真の索引に失敗しても、他の写真の処理は継続する。読めないディレクトリ・ファイルは `ScanReport.failures` に記録し、失敗したルートがある間はそのルートのmissing差分をスキップする。
 - ログの1行が壊れていても、その行だけスキップする。同じ行で3回失敗したらスキップし、詳細に残す。
 - 圧縮に失敗した場合、元画像は変更しない。ジョブは `failed` として理由を残し、ユーザー操作で最大3回まで再試行できる。
+- 削除は依存ジョブが失敗した場合に実行しない。要求は `blocked` として残り、ダッシュボードと通知に理由を出す。失敗ジョブの再試行成功で自動再開し、ユーザーは取消・再試行・強制削除を選べる。
 - 取り込みはファイル単位で継続する。コピー失敗は元パス付きで再試行でき、部分移動は移動先を取り込み済みとして警告する。
 - DBが壊れた場合は、ユーザーデータディレクトリの `library.db` をバックアップしてから再作成する（写真ファイルは削除しない）。
 - 生ログは保存しない。解析済みイベントのみ残す。
