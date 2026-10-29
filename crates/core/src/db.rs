@@ -2629,8 +2629,7 @@ fn row_to_deletion_request(row: &Row<'_>) -> rusqlite::Result<DeletionRequest> {
         id: row.get(0)?,
         photo_id: row.get(1)?,
         photo_name: row.get(2)?,
-        reason: DeletionReason::parse(&row.get::<_, String>(3)?)
-            .unwrap_or(DeletionReason::Unknown),
+        reason: DeletionReason::parse(&row.get::<_, String>(3)?).unwrap_or(DeletionReason::Unknown),
         status: DeletionStatus::parse(&row.get::<_, String>(4)?),
         force: row.get::<_, i64>(5)? != 0,
         blocked_reason: row.get(6)?,

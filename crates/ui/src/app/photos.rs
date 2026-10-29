@@ -523,11 +523,7 @@ impl App {
             let lines = warning_lines.clone();
             let content = v_flex()
                 .gap(px(6.))
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .child(heading.clone()),
-                )
+                .child(div().text_size(px(12.)).child(heading.clone()))
                 .children(
                     lines
                         .into_iter()

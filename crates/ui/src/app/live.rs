@@ -170,7 +170,9 @@ impl App {
             }
             if let Some(blocked) = blocked {
                 self.toast_warning(
-                    format!("{blocked} 件の削除が保留されています。ダッシュボードを確認してください"),
+                    format!(
+                        "{blocked} 件の削除が保留されています。ダッシュボードを確認してください"
+                    ),
                     cx,
                 );
                 notify = true;

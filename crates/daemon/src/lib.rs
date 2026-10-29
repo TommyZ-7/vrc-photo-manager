@@ -3152,19 +3152,18 @@ mod tests {
         let second = dir.path().join("second.webp");
         std::fs::write(&first, b"a").unwrap();
         std::fs::write(&second, b"b").unwrap();
-        let derivative =
-            |id: i64, profile: &str, path: &Path| vrc_photo_core::model::Derivative {
-                id,
-                photo_id: 1,
-                path: path.to_string_lossy().to_string(),
-                format: "webp".to_string(),
-                width: 16,
-                height: 10,
-                file_size: 1,
-                profile_id: profile.to_string(),
-                policy: "replace".to_string(),
-                created_at: String::new(),
-            };
+        let derivative = |id: i64, profile: &str, path: &Path| vrc_photo_core::model::Derivative {
+            id,
+            photo_id: 1,
+            path: path.to_string_lossy().to_string(),
+            format: "webp".to_string(),
+            width: 16,
+            height: 10,
+            file_size: 1,
+            profile_id: profile.to_string(),
+            policy: "replace".to_string(),
+            created_at: String::new(),
+        };
         let derivatives = vec![
             derivative(2, "second", &second),
             derivative(1, "first", &first),
@@ -3197,7 +3196,7 @@ mod tests {
     fn ready_deletion_after_more_than_hundred_blocked_requests_runs() {
         let dir = tempfile::tempdir().unwrap();
         let mut daemon = test_daemon(&dir);
-        let db = Db::open(&dir.path().join("library.db")).unwrap();
+        let db = Db::open(dir.path().join("library.db")).unwrap();
         let root = db.add_root("/photos", "reference").unwrap();
         let mut request_ids = Vec::new();
 
@@ -3230,7 +3229,10 @@ mod tests {
 
         daemon.process_deletions().unwrap();
 
-        let ready = db.deletion_request_by_id(request_ids[100]).unwrap().unwrap();
+        let ready = db
+            .deletion_request_by_id(request_ids[100])
+            .unwrap()
+            .unwrap();
         assert_eq!(ready.status, DeletionStatus::Completed);
         for request_id in &request_ids[..100] {
             let pending = db.deletion_request_by_id(*request_id).unwrap().unwrap();
@@ -3248,7 +3250,7 @@ mod tests {
         write_photo(&original);
         daemon.run_once().unwrap();
 
-        let db = Db::open(&dir.path().join("library.db")).unwrap();
+        let db = Db::open(dir.path().join("library.db")).unwrap();
         let photo = db
             .photo_by_path(original.to_str().unwrap())
             .unwrap()
@@ -3265,7 +3267,10 @@ mod tests {
 
         assert!(original.exists(), "unknown reason must not delete files");
         let request = db.active_deletion_request(photo.id).unwrap().unwrap();
-        assert_eq!(request.reason, vrc_photo_core::model::DeletionReason::Unknown);
+        assert_eq!(
+            request.reason,
+            vrc_photo_core::model::DeletionReason::Unknown
+        );
         assert_eq!(request.status, DeletionStatus::Blocked);
         assert_eq!(request.blocked_reason.as_deref(), Some("unknown_reason"));
     }
