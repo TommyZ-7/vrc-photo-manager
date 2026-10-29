@@ -1,0 +1,18 @@
+# Changelog categories for GitHub's automatic release notes.
+# Used by the generate-notes API in the Release workflow's publish job.
+changelog:
+  exclude:
+    labels:
+      - duplicate
+      - invalid
+      - wontfix
+  categories:
+    - title: "✨ Added"
+      labels:
+        - enhancement
+    - title: "🐛 Fixed"
+      labels:
+        - bug
+    - title: "🔧 Improved"
+      labels:
+        - "*"

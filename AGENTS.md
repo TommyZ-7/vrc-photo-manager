@@ -110,12 +110,14 @@ cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warni
   artifacts come from the tagged commit; do not simplify).
 - If the bundle vendors third-party runtimes, record provenance + ship
   required license notices (add a staging check in `release.yml`).
-- Release notes must compare with the previous `v*.*.*` tag.
-  `release.yml` auto-generates them from the `PREV...TAG` diff:
-  `✨ Added` (`feat:`), `🔧 Improved` (everything else), `🐛 Fixed` (`fix:`)
-  + `Full Changelog` compare link. Empty sections render as `- none`
-  (or localized equivalent). Keep the format on manual edits
-  (`gh release edit <tag> --notes-file <file>`).
+- Release notes compare with the previous `v*.*.*` tag and are
+  generated from merged PRs by GitHub's generate-notes API (categories
+  are defined in `.github/release.yml`: `enhancement` -> `✨ Added`,
+  `bug` -> `🐛 Fixed`, everything else -> `🔧 Improved`). The
+  version-bump PR itself is dropped, and commits that belong to no PR
+  are appended under `その他の変更`. The publish job regenerates and
+  overwrites the body even when the Release was created manually
+  beforehand.
 - Verify publication:
   `gh release view <tag> --json assets --jq '.assets[].name'` and body check
   `gh release view <tag> --json body --jq .body`
