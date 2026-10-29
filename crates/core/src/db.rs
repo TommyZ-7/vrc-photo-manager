@@ -1819,6 +1819,24 @@ impl Db {
         Ok(true)
     }
 
+    /// Finishes the database half of a manual deletion after every file step
+    /// succeeded. The photo row stays for metadata recovery; derivative rows
+    /// are removed because their files are in the OS trash.
+    pub fn complete_manual_deletion(&self, photo_id: i64) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        tx.execute(
+            "DELETE FROM derivatives WHERE photo_id = ?1",
+            params![photo_id],
+        )?;
+        tx.execute(
+            "UPDATE photos SET status = 'missing', display_derivative_id = NULL, updated_at = ?1 \
+             WHERE id = ?2 AND status = 'deleting'",
+            params![now_string(), photo_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn reset_running_deletions(&self) -> Result<usize> {
         let changed = self.conn.execute(
             "UPDATE deletion_requests SET status = 'pending', started_at = NULL \
