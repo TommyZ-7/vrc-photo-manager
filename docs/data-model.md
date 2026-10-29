@@ -242,7 +242,7 @@ RETURNING ...;
 | reason | TEXT | `auto_replace` / `manual` |
 | status | TEXT | `pending` / `blocked` / `running` / `completed` / `cancelled` |
 | force | INTEGER | 1なら失敗ジョブを無視して実行 |
-| blocked_reason | TEXT | `job_failed` / `file_error` |
+| blocked_reason | TEXT | `job_failed` / `file_error` / `missing_asset` |
 | error | TEXT | ファイル移動などの失敗理由 |
 | requested_at / started_at / finished_at | TEXT | RFC3339 |
 
@@ -257,9 +257,10 @@ CREATE INDEX idx_deletion_requests_status
 ```
 
 - `reason='manual'` は要求時に `photos.status='deleting'` にし、全派生ファイル→元画像→DB（`missing`）の順で実行する。
-- `reason='auto_replace'` は `replace` 圧縮成功後に作られ、元画像だけを削除する。写真は `replaced` のまま一覧に残る。
-- `pending` はジョブの完了待ち。`blocked` は失敗ジョブまたはファイル移動エラーで停止中。`running` は実行中で、デーモン起動時に `pending` へ戻す。
-- 依存ジョブの失敗で `blocked` になった要求は、その写真の全ジョブが成功／取消になると `pending` に戻る。ファイル移動エラーはユーザーの再試行または強制削除まで `blocked` のままにする。
+- `reason='auto_replace'` は `replace` 圧縮成功後に作られ、元画像だけを削除する。写真は `replaced` のまま一覧に残る。実行直前に表示用の圧縮版が実在するか再確認し、なければ元画像を残して `missing_asset` で保留する。
+- `pending` はジョブの完了待ち。`blocked` は失敗ジョブ、ファイル移動エラー、圧縮版消失で停止中。`running` は実行中で、デーモン起動時に `started_at` を保持したまま `pending` へ戻す。
+- 依存ジョブの失敗で `blocked` になった要求は、その写真の全ジョブが成功／取消になると `pending` に戻る。ファイル移動エラーと `missing_asset` はユーザーの再試行または強制削除まで `blocked` のままにする。
+- 取消は `reason='manual'` かつ `started_at IS NULL` の要求だけに許可する。自動置換の取消は、残っている置換ジョブが要求を再作成するため提供しない。
 
 ### `daemon_errors`
 
@@ -344,7 +345,7 @@ estimated_link, thumbnail_cache_mb, compression_workers
 10. `library_revision` はデーモン側の一覧変更（追加・移動・削除・置換・削除要求の取消）で単調増加し、UIのページキャッシュ無効化に使う。
 11. IPCの `wake_commands` はDBを変更しない。UIが積んだ `daemon_commands` をデーモンが即時取り出すための通知で、IPC側からコマンドを挿入しない。
 12. activeな `deletion_requests` がある写真には新しい圧縮ジョブを積まない。UIは要求をSQLiteに書き、`wake_jobs` でデーモンを起こすだけ。
-13. `deletion_requests` は1写真につきactive 1件。実行列はデーモン起動時に `pending` へ戻し、冪等なファイル手順で再開する。
+13. `deletion_requests` は1写真につきactive 1件。実行列はデーモン起動時に `started_at` を保持したまま `pending` へ戻し、冪等なファイル手順で再開する。activeな要求がある写真は、スキャン時の再結合（rebind）でも新しいパスに付け替えない。
 14. 強制削除（`force=1`）は `failed` を無視し、`waiting` / `pending` をキャンセルし、`processing` の完了を待つ。`processing` 中の入力ファイルを消さない。
 
 ## 5. タイムゾーンと時刻
