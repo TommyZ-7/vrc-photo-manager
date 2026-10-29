@@ -12,8 +12,9 @@ use crate::model::{
     CompressionJob, CompressionProfile, DaemonCommand, DaemonError, DaemonOperation,
     DeletionBlockers, DeletionCounts, DeletionJobSummary, DeletionReason, DeletionRequest,
     DeletionStatus, Derivative, JobStatusCounts, LibraryRoot, LibraryStats, MAX_JOB_RETRIES,
-    NewPhoto, Photo, PhotoContext, PhotoFilter, PhotoIndexEntry, PhotoPlayer, PhotoSort,
-    PhotoStatus, PhotoTextFilter, QueueStatus, Session, SessionPlayer, World,
+    MAX_PROFILE_NAME_CHARS, NewPhoto, Photo, PhotoContext, PhotoFilter, PhotoIndexEntry,
+    PhotoPlayer, PhotoSort, PhotoStatus, PhotoTextFilter, QueueStatus, Session, SessionPlayer,
+    World,
 };
 
 const SCHEMA_V1: &str = r#"
@@ -1391,6 +1392,22 @@ impl Db {
         Ok(())
     }
 
+    /// Generated copy names keep the source name readable but never exceed
+    /// the UI's display limit, even when the source is already at the cap.
+    fn copy_profile_name(source: &str, suffix: usize) -> String {
+        let ending = if suffix <= 1 {
+            " のコピー".to_string()
+        } else {
+            format!(" のコピー {suffix}")
+        };
+        let keep = MAX_PROFILE_NAME_CHARS
+            .saturating_sub(ending.chars().count())
+            .max(1);
+        let mut name: String = source.chars().take(keep).collect();
+        name.push_str(&ending);
+        name
+    }
+
     pub fn duplicate_profile(&self, id: &str) -> Result<CompressionProfile> {
         let tx = self.conn.unchecked_transaction()?;
         let ordered = {
@@ -1417,11 +1434,12 @@ impl Db {
             .position(|(stored_id, _)| stored_id == id)
             .ok_or_else(|| CoreError::NotFound(format!("compression profile {id}")))?;
 
-        let mut name = format!("{} のコピー", ordered[source_index].1.name);
-        let mut suffix = 2;
+        let source_name = ordered[source_index].1.name.clone();
+        let mut suffix = 1;
+        let mut name = Self::copy_profile_name(&source_name, suffix);
         while ordered.iter().any(|(_, profile)| profile.name == name) {
-            name = format!("{} のコピー {suffix}", ordered[source_index].1.name);
             suffix += 1;
+            name = Self::copy_profile_name(&source_name, suffix);
         }
 
         for (index, (stored_id, _)) in ordered.iter().enumerate() {
@@ -4149,6 +4167,57 @@ mod tests {
     }
 
     #[test]
+    fn save_profile_renames_the_name_column_and_json_together() {
+        let db = Db::open_in_memory().unwrap();
+        let mut saved = profile("p", "Old name");
+        db.save_profile(&saved).unwrap();
+
+        saved.name = "Archive".to_string();
+        db.save_profile(&saved).unwrap();
+
+        let (column, json): (String, String) = db
+            .connection()
+            .query_row(
+                "SELECT name, json FROM compression_profiles WHERE id = 'p'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(column, "Archive");
+        let stored: CompressionProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(stored.name, "Archive");
+        assert_eq!(db.list_profiles().unwrap()[0].name, "Archive");
+    }
+
+    #[test]
+    fn renamed_default_profile_survives_reopen_and_reseeding() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.db");
+        {
+            let db = Db::open(&path).unwrap();
+            let mut renamed = db.ensure_default_profiles().unwrap()[0].clone();
+            renamed.name = "アーカイブ用".to_string();
+            db.save_profile(&renamed).unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        let profiles = db.ensure_default_profiles().unwrap();
+        assert_eq!(profiles[0].name, "アーカイブ用");
+        assert_eq!(profiles.len(), 3);
+    }
+
+    #[test]
+    fn profiles_may_share_a_name() {
+        let db = Db::open_in_memory().unwrap();
+        db.save_profile(&profile("a", "同じ名前")).unwrap();
+        db.save_profile(&profile("b", "同じ名前")).unwrap();
+
+        let stored = db.list_profiles().unwrap();
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored[0].name, stored[1].name);
+    }
+
+    #[test]
     fn reorder_profiles_persists_and_rolls_back_bad_lists() {
         let db = Db::open_in_memory().unwrap();
         for (id, name) in [("c", "C"), ("a", "A"), ("b", "B")] {
@@ -4272,6 +4341,21 @@ mod tests {
             db.duplicate_profile("missing"),
             Err(CoreError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn duplicate_profile_caps_generated_names_at_the_ui_limit() {
+        let db = Db::open_in_memory().unwrap();
+        let source_name = "あ".repeat(MAX_PROFILE_NAME_CHARS);
+        db.save_profile(&profile("long", &source_name)).unwrap();
+
+        let first = db.duplicate_profile("long").unwrap();
+        assert_eq!(first.name.chars().count(), MAX_PROFILE_NAME_CHARS);
+        assert!(first.name.ends_with(" のコピー"));
+
+        let second = db.duplicate_profile("long").unwrap();
+        assert_eq!(second.name.chars().count(), MAX_PROFILE_NAME_CHARS);
+        assert!(second.name.ends_with(" のコピー 2"));
     }
 
     #[test]
