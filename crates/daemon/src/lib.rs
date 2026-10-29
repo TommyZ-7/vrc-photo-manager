@@ -1720,26 +1720,19 @@ fn run_deletions_once(db: &Arc<Mutex<Db>>) -> Result<usize> {
         db.pending_deletion_requests(100)?
     };
     let mut executed = 0;
-    for request in requests {
-        let blockers = {
+    for pending in requests {
+        let blocked = {
             let db = db.lock().unwrap();
-            db.deletion_blockers(request.photo_id)?
+            db.block_deletion_if_jobs_failed(pending.id)?
         };
-        if blockers.active > 0 {
-            continue;
-        }
-        if blockers.failed > 0 && !request.force {
-            if request.blocked_reason.as_deref() != Some("job_failed") {
-                let db = db.lock().unwrap();
-                db.block_deletion(request.id, "job_failed", None)?;
-            }
+        if blocked {
             continue;
         }
         let claimed = {
             let db = db.lock().unwrap();
-            db.claim_deletion(request.id)?
+            db.claim_deletion(pending.id)?
         };
-        if claimed {
+        if let Some(request) = claimed {
             match execute_deletion(db, &request) {
                 Ok(()) => executed += 1,
                 Err(error) => tracing::error!(
@@ -1762,10 +1755,27 @@ fn execute_deletion(db: &Arc<Mutex<Db>>, request: &DeletionRequest) -> Result<()
             db.bump_library_revision()?;
             return Ok(());
         };
+        let derivatives = db.derivatives_for_photo(photo.id)?;
+        if request.reason == DeletionReason::AutoReplace && !request.force {
+            let valid = derivatives
+                .iter()
+                .find(|derivative| Path::new(&derivative.path).is_file());
+            let Some(valid) = valid else {
+                db.block_deletion(request.id, "missing_asset", None)?;
+                return Err(anyhow::anyhow!(
+                    "replacement derivative is missing; refusing to delete the original"
+                ));
+            };
+            if photo.status != PhotoStatus::Replaced
+                || photo.display_derivative_id != Some(valid.id)
+            {
+                db.set_replaced(photo.id, valid.id)?;
+            }
+        }
         let mut targets = Vec::new();
         let mut seen = HashSet::new();
         if request.reason == DeletionReason::Manual {
-            for derivative in db.derivatives_for_photo(photo.id)? {
+            for derivative in derivatives {
                 if seen.insert(derivative.path.clone()) {
                     targets.push(PathBuf::from(derivative.path));
                 }
@@ -2845,19 +2855,42 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut daemon = manual_test_daemon(&dir);
         daemon.run_once().unwrap();
-        let db = Db::open(dir.path().join("library.db")).unwrap();
-        let photo = db
-            .photo_by_path(original_path(&dir).to_str().unwrap())
-            .unwrap()
-            .unwrap();
-        let request = db
-            .request_deletion(&[photo.id], DeletionReason::Manual, false)
-            .unwrap()[0];
-        db.claim_deletion(request).unwrap();
+        let db_path = dir.path().join("library.db");
+        let photo = {
+            let db = Db::open(&db_path).unwrap();
+            let photo = db
+                .photo_by_path(original_path(&dir).to_str().unwrap())
+                .unwrap()
+                .unwrap();
+            let request = db
+                .request_deletion(&[photo.id], DeletionReason::Manual, false)
+                .unwrap()[0];
+            assert!(db.claim_deletion(request).unwrap().is_some());
+            photo
+        };
         std::fs::remove_file(original_path(&dir)).unwrap();
+        drop(daemon);
 
-        assert_eq!(db.reset_running_deletions().unwrap(), 1);
+        // Reopen through the production path: the running request must return
+        // to pending while keeping the partial-execution marker.
+        let mut daemon = Daemon::open(
+            &db_path,
+            Some(dir.path().join("photos")),
+            Some(dir.path().join("logs")),
+        )
+        .unwrap();
+        daemon.set_ipc_endpoint(None);
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+        {
+            let db = Db::open(&db_path).unwrap();
+            let request = db.active_deletion_request(photo.id).unwrap().unwrap();
+            assert_eq!(request.status, DeletionStatus::Pending);
+            assert!(request.started_at.is_some());
+            assert!(!db.cancel_deletion(request.id).unwrap());
+        }
+
         daemon.process_deletions().unwrap();
+        let db = Db::open(&db_path).unwrap();
         assert!(db.active_deletion_request(photo.id).unwrap().is_none());
         assert_eq!(
             db.photo_by_id(photo.id).unwrap().unwrap().status,
@@ -2866,8 +2899,88 @@ mod tests {
     }
 
     #[test]
+    fn cancel_blocked_job_failed_manual_deletion_keeps_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = manual_test_daemon(&dir);
+        daemon.run_once().unwrap();
+        let db_path = dir.path().join("library.db");
+        let db = Db::open(&db_path).unwrap();
+        let photo = db
+            .photo_by_path(original_path(&dir).to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        let derivative_path = dir.path().join("photos/kept.webp");
+        std::fs::copy(original_path(&dir), &derivative_path).unwrap();
+        db.add_derivative(
+            photo.id,
+            derivative_path.to_str().unwrap(),
+            "webp",
+            16,
+            10,
+            std::fs::metadata(&derivative_path).unwrap().len(),
+            "p",
+            "keep",
+        )
+        .unwrap();
+        db.save_profile(&CompressionProfile {
+            id: "p".to_string(),
+            name: "P".to_string(),
+            ..CompressionProfile::default()
+        })
+        .unwrap();
+        let failed = db.enqueue_job(photo.id, "p", "keep").unwrap();
+        db.update_job(&failed, QueueStatus::Failed, 0.0, Some("boom"), None)
+            .unwrap();
+        let request = db
+            .request_deletion(&[photo.id], DeletionReason::Manual, false)
+            .unwrap()[0];
+        daemon.process_deletions().unwrap();
+        assert_eq!(
+            db.active_deletion_request(photo.id)
+                .unwrap()
+                .unwrap()
+                .status,
+            DeletionStatus::Blocked
+        );
+
+        assert!(db.cancel_deletion(request).unwrap());
+        assert!(original_path(&dir).exists());
+        assert!(derivative_path.exists());
+        assert_eq!(
+            db.photo_by_id(photo.id).unwrap().unwrap().status,
+            PhotoStatus::Present
+        );
+        assert!(db.active_deletion_request(photo.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn auto_replace_without_a_derivative_keeps_the_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = replace_test_daemon(&dir);
+        daemon.run_once().unwrap();
+        let job = {
+            let db = daemon.db.lock().unwrap();
+            db.next_pending_job().unwrap().unwrap()
+        };
+        process_job(&daemon.db, &job).unwrap();
+        let db = Db::open(dir.path().join("library.db")).unwrap();
+        let photo = db
+            .photo_by_path(original_path(&dir).to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        let derivative = db.derivatives_for_photo(photo.id).unwrap()[0].path.clone();
+        std::fs::remove_file(&derivative).unwrap();
+
+        daemon.process_deletions().unwrap();
+        assert!(original_path(&dir).exists(), "the only copy must survive");
+        let request = db.active_deletion_request(photo.id).unwrap().unwrap();
+        assert_eq!(request.status, DeletionStatus::Blocked);
+        assert_eq!(request.blocked_reason.as_deref(), Some("missing_asset"));
+    }
+
+    #[test]
     fn multi_profile_replace_is_worker_count_independent() {
-        for workers in [1usize, 4] {
+        for workers in 1usize..=4 {
             let dir = tempfile::tempdir().unwrap();
             let mut daemon = multi_profile_test_daemon(&dir);
             let db_path = dir.path().join("library.db");
