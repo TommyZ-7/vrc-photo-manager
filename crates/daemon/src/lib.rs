@@ -159,6 +159,7 @@ pub struct Daemon {
     thumbnail_tx: Option<mpsc::Sender<i64>>,
     thumbnail_handle: Option<JoinHandle<()>>,
     hash_handle: Option<JoinHandle<()>>,
+    owns_deletion_executor: bool,
     deletion_handle: Option<JoinHandle<()>>,
     last_autostart_check: std::time::Instant,
     last_settings_check: std::time::Instant,
@@ -180,9 +181,10 @@ impl Daemon {
         Self::open_inner(db_path, photo_dir, log_dir, true)
     }
 
-    /// Opens the daemon without resetting `running` deletions. Maintenance
-    /// commands use this when they do not own the single-instance lock,
-    /// because the live daemon may still be executing those requests.
+    /// Opens the daemon without deletion-executor ownership: `running`
+    /// deletions are not reset and [`Self::process_deletions`] is a no-op.
+    /// Maintenance commands use this when they do not own the single-instance
+    /// lock, because the live daemon may still be executing those requests.
     pub fn open_preserving_running_deletions(
         db_path: impl AsRef<Path>,
         photo_dir: Option<PathBuf>,
@@ -195,11 +197,11 @@ impl Daemon {
         db_path: impl AsRef<Path>,
         photo_dir: Option<PathBuf>,
         log_dir: Option<PathBuf>,
-        recover_running_deletions: bool,
+        owns_deletion_executor: bool,
     ) -> Result<Self> {
         let db_path = db_path.as_ref().to_path_buf();
         let db = Db::open(&db_path).context("cannot open library database")?;
-        if recover_running_deletions {
+        if owns_deletion_executor {
             db.reset_running_deletions()
                 .context("cannot recover interrupted deletions")?;
         } else {
@@ -272,6 +274,7 @@ impl Daemon {
             thumbnail_tx: None,
             thumbnail_handle: None,
             hash_handle: None,
+            owns_deletion_executor,
             deletion_handle: None,
             last_autostart_check: std::time::Instant::now(),
             last_settings_check: Instant::now() - Duration::from_secs(2),
@@ -531,8 +534,13 @@ impl Daemon {
     }
 
     /// Executes every deletion that has no remaining job blocker. The
-    /// background thread calls the same routine on a timer.
+    /// background thread calls the same routine on a timer. A process that
+    /// does not own the instance lock must leave deletion execution to the
+    /// owner so an interrupted maintenance run cannot strand a `running` row.
     pub fn process_deletions(&mut self) -> Result<()> {
+        if !self.owns_deletion_executor {
+            return Ok(());
+        }
         run_deletions_once(&self.db)?;
         Ok(())
     }
@@ -1419,7 +1427,7 @@ impl Daemon {
                 .expect("cannot spawn photo hash worker");
             self.hash_handle = Some(handle);
         }
-        if self.deletion_handle.is_none() {
+        if self.owns_deletion_executor && self.deletion_handle.is_none() {
             let db = self.db.clone();
             let running = self.running.clone();
             let jobs = self.jobs.clone();
@@ -2900,12 +2908,13 @@ mod tests {
 
         // A maintenance command opens the same database while the first
         // daemon still owns the running request.
-        let maintenance = Daemon::open_preserving_running_deletions(
+        let mut maintenance = Daemon::open_preserving_running_deletions(
             &db_path,
             Some(dir.path().join("photos")),
             Some(dir.path().join("logs")),
         )
         .unwrap();
+        maintenance.run_once().unwrap();
         {
             let db = Db::open(&db_path).unwrap();
             let request = db.active_deletion_request(photo.id).unwrap().unwrap();
@@ -2924,6 +2933,52 @@ mod tests {
         let db = Db::open(&db_path).unwrap();
         let request = db.active_deletion_request(photo.id).unwrap().unwrap();
         assert_eq!(request.status, DeletionStatus::Pending);
+    }
+
+    #[test]
+    fn preserving_open_leaves_pending_deletions_to_the_executor() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = manual_test_daemon(&dir);
+        daemon.run_once().unwrap();
+        let db_path = dir.path().join("library.db");
+        let photo = {
+            let db = Db::open(&db_path).unwrap();
+            let photo = db
+                .photo_by_path(original_path(&dir).to_str().unwrap())
+                .unwrap()
+                .unwrap();
+            db.request_deletion(&[photo.id], DeletionReason::Manual, false)
+                .unwrap();
+            photo
+        };
+
+        let mut maintenance = Daemon::open_preserving_running_deletions(
+            &db_path,
+            Some(dir.path().join("photos")),
+            Some(dir.path().join("logs")),
+        )
+        .unwrap();
+        maintenance.process_deletions().unwrap();
+        {
+            let db = Db::open(&db_path).unwrap();
+            let request = db.active_deletion_request(photo.id).unwrap().unwrap();
+            assert_eq!(request.status, DeletionStatus::Pending);
+        }
+        assert!(original_path(&dir).exists());
+
+        drop(maintenance);
+        drop(daemon);
+
+        let mut owner = Daemon::open(
+            &db_path,
+            Some(dir.path().join("photos")),
+            Some(dir.path().join("logs")),
+        )
+        .unwrap();
+        owner.process_deletions().unwrap();
+        assert!(!original_path(&dir).exists());
+        let db = Db::open(&db_path).unwrap();
+        assert!(db.active_deletion_request(photo.id).unwrap().is_none());
     }
 
     #[test]
