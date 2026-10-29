@@ -1731,19 +1731,22 @@ impl Db {
         Ok(blockers)
     }
 
-    /// Pending requests the executor can try now. Requests with an active
+    /// Pending requests the executor can try now. Known reasons with an active
     /// compression job are skipped so they cannot starve ready requests behind
-    /// the row limit. Requests with failed jobs stay in the list: the executor
-    /// still needs to transition them to `blocked`.
+    /// the row limit, while unknown reasons are always returned so they can be
+    /// blocked immediately. Requests with failed jobs stay in the list: the
+    /// executor still needs to transition them to `blocked`.
     pub fn pending_deletion_requests(&self, limit: i64) -> Result<Vec<DeletionRequest>> {
         let sql = "SELECT dr.id, dr.photo_id, p.file_name, dr.reason, dr.status, dr.force, \
                 dr.blocked_reason, dr.error, dr.requested_at, dr.started_at, dr.finished_at \
              FROM deletion_requests dr JOIN photos p ON p.id = dr.photo_id \
              WHERE dr.status = 'pending' \
-               AND NOT EXISTS ( \
-                   SELECT 1 FROM compression_jobs j \
-                   WHERE j.photo_id = dr.photo_id \
-                     AND j.status IN ('waiting', 'pending', 'processing') \
+               AND ( \
+                   dr.reason NOT IN ('auto_replace', 'manual') \
+                   OR dr.photo_id NOT IN ( \
+                       SELECT j.photo_id FROM compression_jobs j \
+                       WHERE j.status IN ('waiting', 'pending', 'processing') \
+                   ) \
                ) \
              ORDER BY dr.requested_at, dr.id LIMIT ?1";
         let mut stmt = self.conn.prepare(sql)?;
@@ -3067,20 +3070,37 @@ mod tests {
         let ready = db
             .upsert_photo(&sample_photo(root, "/photos/ready.png", 1_700_000_001))
             .unwrap();
+        let unknown = db
+            .upsert_photo(&sample_photo(root, "/photos/unknown.png", 1_700_000_002))
+            .unwrap();
         db.save_profile(&profile("p", "P")).unwrap();
 
         db.enqueue_job(blocked, "p", "keep").unwrap();
+        db.enqueue_job(unknown, "p", "keep").unwrap();
         let blocked_request = db
             .request_deletion(&[blocked], DeletionReason::Manual, false)
             .unwrap()[0];
         let ready_request = db
             .request_deletion(&[ready], DeletionReason::Manual, false)
             .unwrap()[0];
+        db.connection()
+            .execute(
+                "INSERT INTO deletion_requests(photo_id, reason, status, force, requested_at) \
+                 VALUES (?1, 'future_reason', 'pending', 0, ?2)",
+                params![unknown, now_string()],
+            )
+            .unwrap();
 
         let pending = db.pending_deletion_requests(10).unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].id, ready_request);
-        assert_ne!(pending[0].id, blocked_request);
+        assert_eq!(pending.len(), 2);
+        assert!(pending.iter().any(|request| request.id == ready_request));
+        assert!(
+            pending
+                .iter()
+                .any(|request| request.reason == DeletionReason::Unknown),
+            "unknown reasons must be returned even while jobs are active"
+        );
+        assert!(!pending.iter().any(|request| request.id == blocked_request));
     }
 
     #[test]
