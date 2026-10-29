@@ -11,6 +11,7 @@ on:
       - 'Packager.toml'
       - 'packaging/**'
       - '.github/workflows/release.yml'
+      - '.github/release.yml'
   workflow_dispatch:
 
 concurrency:
@@ -168,6 +169,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
         with:
@@ -197,7 +199,7 @@ jobs:
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
           case "$TAG" in
-            *-*)
+            *-*
               echo "prerelease tags are not supported by the stable update feed"
               exit 1
               ;;
@@ -249,39 +251,30 @@ jobs:
           TAG="${GITHUB_REF_NAME}"
           git fetch --tags --force
           PREV=$(git tag --list 'v*.*.*' --sort=-v:refname | grep -vxF "$TAG" | head -n1 || true)
+          # Release notes are generated from merged PRs by GitHub's
+          # generate-notes API; categories come from .github/release.yml.
           if [ -n "$PREV" ]; then
+            gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f tag_name="$TAG" -f previous_tag_name="$PREV" \
+              --jq '.body' > /tmp/release-notes.md
             RANGE="$PREV..$TAG"
-            TITLE_SUFFIX=" (changes since $PREV)"
-            COMPARE="**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV}...${TAG}"
           else
+            gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+              -f tag_name="$TAG" \
+              --jq '.body' > /tmp/release-notes.md
             RANGE="$TAG"
-            TITLE_SUFFIX=""
-            COMPARE="_First release._"
           fi
-          pick() { git log "$RANGE" --no-merges --pretty=format:'- %s (%h)' "$@" || true; }
-          ADDED=$(pick --grep='^feat' -i)
-          FIXED=$(pick --grep='^fix' -i)
-          IMPROVED=$(pick --invert-grep --grep='^feat' --grep='^fix' -i)
-          [ -n "$ADDED" ] || ADDED="- none"
-          [ -n "$FIXED" ] || FIXED="- none"
-          [ -n "$IMPROVED" ] || IMPROVED="- none"
-          cat > /tmp/release-notes.md <<NOTES
-          ## $TAG$TITLE_SUFFIX
-
-          ### ✨ Added
-          $ADDED
-
-          ### 🔧 Improved
-          $IMPROVED
-
-          ### 🐛 Fixed
-          $FIXED
-
-          ---
-          $COMPARE
-          NOTES
+          # The version-bump PR itself is not a user-facing change.
+          grep -v -E '^\* chore: release v[0-9]' /tmp/release-notes.md > /tmp/release-notes.tmp || true
+          mv /tmp/release-notes.tmp /tmp/release-notes.md
+          # Commits that belong to no PR (direct pushes) are listed separately.
+          OTHER=$(git log "$RANGE" --first-parent --no-merges --pretty=format:'- %s (%h)' | grep -v -E '\(#[0-9]+\)$' || true)
+          if [ -n "$OTHER" ]; then
+            printf '\n### その他の変更\n\n%s\n' "$OTHER" >> /tmp/release-notes.md
+          fi
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber
+            gh release edit "$TAG" --notes-file /tmp/release-notes.md
           else
             gh release create "$TAG" --title "$TAG" --notes-file /tmp/release-notes.md dist/*
           fi
