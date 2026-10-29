@@ -1,11 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use crate::error::{CoreError, Result};
 
 pub const THUMBNAIL_MAX: u32 = 256;
 const THUMBNAIL_QUALITY: f32 = 80.0;
+const ACCESS_REFRESH_AFTER: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ThumbnailCacheUsage {
@@ -144,6 +145,41 @@ fn collect_thumbnail_entries(cache_dir: &Path) -> std::io::Result<Vec<ThumbnailE
         });
     }
     Ok(entries)
+}
+
+/// Marks a cached thumbnail as recently used by refreshing its mtime.
+///
+/// Display paths call this on a cache hit. The daemon deliberately does not:
+/// its startup pass over every photo would otherwise promote the whole cache.
+pub fn refresh_thumbnail_access(path: &Path) {
+    let Ok(metadata) = fs::metadata(path) else {
+        return;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return;
+    };
+    let Ok(age) = SystemTime::now().duration_since(modified) else {
+        return;
+    };
+    if age < ACCESS_REFRESH_AFTER {
+        return;
+    }
+    match fs::OpenOptions::new().write(true).open(path) {
+        Ok(file) => {
+            if let Err(error) = file.set_modified(SystemTime::now()) {
+                tracing::debug!(
+                    %error,
+                    path = %path.display(),
+                    "cannot refresh thumbnail access time"
+                );
+            }
+        }
+        Err(error) => tracing::debug!(
+            %error,
+            path = %path.display(),
+            "cannot open thumbnail to refresh access time"
+        ),
+    }
 }
 
 /// Creates a 256px WebP thumbnail if it does not exist yet.
@@ -346,6 +382,34 @@ mod tests {
         assert_eq!(report.removed_files, 1);
         assert_eq!(report.remaining_bytes, 0);
         assert!(!dir.path().join("1.webp").exists());
+    }
+
+    #[test]
+    fn refresh_thumbnail_access_rewrites_a_stale_mtime() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("1.webp");
+        let stale = SystemTime::now() - Duration::from_secs(2 * 60 * 60);
+        write_cache_entry(&path, 10, stale);
+        let before = fs::metadata(&path).unwrap().modified().unwrap();
+
+        refresh_thumbnail_access(&path);
+
+        let after = fs::metadata(&path).unwrap().modified().unwrap();
+        assert!(after > before);
+    }
+
+    #[test]
+    fn refresh_thumbnail_access_leaves_a_recent_mtime_alone() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("1.webp");
+        let recent = SystemTime::now() - Duration::from_secs(5);
+        write_cache_entry(&path, 10, recent);
+        let before = fs::metadata(&path).unwrap().modified().unwrap();
+
+        refresh_thumbnail_access(&path);
+
+        let after = fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(after, before);
     }
 
     #[test]
