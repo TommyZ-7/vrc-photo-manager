@@ -169,15 +169,44 @@ pub struct Daemon {
 }
 
 impl Daemon {
+    /// Opens the daemon as the deletion executor. The caller must own the
+    /// single-instance lock so no other process can still be executing a
+    /// `running` deletion.
     pub fn open(
         db_path: impl AsRef<Path>,
         photo_dir: Option<PathBuf>,
         log_dir: Option<PathBuf>,
     ) -> Result<Self> {
+        Self::open_inner(db_path, photo_dir, log_dir, true)
+    }
+
+    /// Opens the daemon without resetting `running` deletions. Maintenance
+    /// commands use this when they do not own the single-instance lock,
+    /// because the live daemon may still be executing those requests.
+    pub fn open_preserving_running_deletions(
+        db_path: impl AsRef<Path>,
+        photo_dir: Option<PathBuf>,
+        log_dir: Option<PathBuf>,
+    ) -> Result<Self> {
+        Self::open_inner(db_path, photo_dir, log_dir, false)
+    }
+
+    fn open_inner(
+        db_path: impl AsRef<Path>,
+        photo_dir: Option<PathBuf>,
+        log_dir: Option<PathBuf>,
+        recover_running_deletions: bool,
+    ) -> Result<Self> {
         let db_path = db_path.as_ref().to_path_buf();
         let db = Db::open(&db_path).context("cannot open library database")?;
-        db.reset_running_deletions()
-            .context("cannot recover interrupted deletions")?;
+        if recover_running_deletions {
+            db.reset_running_deletions()
+                .context("cannot recover interrupted deletions")?;
+        } else {
+            tracing::debug!(
+                "preserving running deletions because this process does not own the executor lock"
+            );
+        }
         let mut settings = AppSettings::load(&db).context("cannot load settings")?;
         if let Some(path) = photo_dir {
             settings.photo_roots = vec![path.to_string_lossy().to_string()];
@@ -2848,6 +2877,53 @@ mod tests {
         assert_eq!(photo.status, PhotoStatus::Missing);
         assert!(db.derivatives_for_photo(photo.id).unwrap().is_empty());
         assert_eq!(db.count_photos().unwrap(), 0);
+    }
+
+    #[test]
+    fn maintenance_open_preserves_a_live_daemons_running_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = manual_test_daemon(&dir);
+        daemon.run_once().unwrap();
+        let db_path = dir.path().join("library.db");
+        let photo = {
+            let db = Db::open(&db_path).unwrap();
+            let photo = db
+                .photo_by_path(original_path(&dir).to_str().unwrap())
+                .unwrap()
+                .unwrap();
+            let request = db
+                .request_deletion(&[photo.id], DeletionReason::Manual, false)
+                .unwrap()[0];
+            assert!(db.claim_deletion(request).unwrap().is_some());
+            photo
+        };
+
+        // A maintenance command opens the same database while the first
+        // daemon still owns the running request.
+        let maintenance = Daemon::open_preserving_running_deletions(
+            &db_path,
+            Some(dir.path().join("photos")),
+            Some(dir.path().join("logs")),
+        )
+        .unwrap();
+        {
+            let db = Db::open(&db_path).unwrap();
+            let request = db.active_deletion_request(photo.id).unwrap().unwrap();
+            assert_eq!(request.status, DeletionStatus::Running);
+        }
+        drop(maintenance);
+        drop(daemon);
+
+        // Once no executor remains, the next normal startup recovers it.
+        let _recovered = Daemon::open(
+            &db_path,
+            Some(dir.path().join("photos")),
+            Some(dir.path().join("logs")),
+        )
+        .unwrap();
+        let db = Db::open(&db_path).unwrap();
+        let request = db.active_deletion_request(photo.id).unwrap().unwrap();
+        assert_eq!(request.status, DeletionStatus::Pending);
     }
 
     #[test]

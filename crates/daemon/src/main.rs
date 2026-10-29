@@ -54,29 +54,39 @@ fn main() -> Result<()> {
         .db
         .or_else(vrc_photo_core::default_db_path)
         .unwrap_or_else(|| PathBuf::from("vrc-photo-manager.db"));
-    let _instance = if args.once || args.compress_pending {
-        None
-    } else {
-        match single_instance::SingleInstance::new("vrc-photo-manager-daemon") {
-            Ok(instance) if instance.is_single() => Some(instance),
-            Ok(_) => {
-                eprintln!("vrc-photo-daemon is already running");
-                return Ok(());
-            }
-            Err(error) => {
-                tracing::warn!(%error, "cannot acquire single-instance lock; continuing");
-                None
-            }
+    let maintenance = args.once || args.compress_pending;
+    let instance = match single_instance::SingleInstance::new("vrc-photo-manager-daemon") {
+        Ok(instance) if instance.is_single() => Some(instance),
+        Ok(_) if maintenance => {
+            tracing::info!(
+                "another daemon owns the single-instance lock; preserving its running deletions"
+            );
+            None
+        }
+        Ok(_) => {
+            eprintln!("vrc-photo-daemon is already running");
+            return Ok(());
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "cannot acquire single-instance lock; continuing without deletion recovery"
+            );
+            None
         }
     };
 
-    let mut daemon = Daemon::open(db_path, args.photo_dir, args.log_dir)
-        .context("cannot start VRC Photo Manager daemon")?;
+    let mut daemon = if instance.is_some() {
+        Daemon::open(db_path, args.photo_dir, args.log_dir)
+    } else {
+        Daemon::open_preserving_running_deletions(db_path, args.photo_dir, args.log_dir)
+    }
+    .context("cannot start VRC Photo Manager daemon")?;
     if args.no_tray {
         daemon.set_tray_enabled(false);
     }
 
-    if args.once || args.compress_pending {
+    if maintenance {
         daemon.run_once()?;
         if args.compress_pending {
             daemon.compress_pending()?;
