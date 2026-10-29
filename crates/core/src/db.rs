@@ -2092,7 +2092,9 @@ impl Db {
         let changed = self.conn.execute(
             "UPDATE compression_jobs SET status = 'pending', progress = 0, error = NULL, \
                 started_at = NULL, finished_at = NULL, retry_count = retry_count + 1 \
-             WHERE id = ?1 AND status = 'failed' AND retry_count < ?2",
+             WHERE id = ?1 AND status = 'failed' AND retry_count < ?2 \
+               AND NOT EXISTS (SELECT 1 FROM deletion_requests dr \
+                   WHERE dr.photo_id = compression_jobs.photo_id AND dr.status = 'running')",
             params![id, MAX_JOB_RETRIES],
         )?;
         Ok(changed == 1)
@@ -2104,7 +2106,9 @@ impl Db {
         let changed = self.conn.execute(
             "UPDATE compression_jobs SET status = 'pending', progress = 0, error = NULL, \
                 started_at = NULL, finished_at = NULL, retry_count = retry_count + 1 \
-             WHERE status = 'failed' AND retry_count < ?1",
+             WHERE status = 'failed' AND retry_count < ?1 \
+               AND NOT EXISTS (SELECT 1 FROM deletion_requests dr \
+                   WHERE dr.photo_id = compression_jobs.photo_id AND dr.status = 'running')",
             params![MAX_JOB_RETRIES],
         )?;
         Ok(changed)
@@ -3028,6 +3032,32 @@ mod tests {
         assert_eq!(
             db.active_deletion_request(id).unwrap().unwrap().status,
             DeletionStatus::Pending
+        );
+    }
+
+    #[test]
+    fn retry_is_rejected_while_deletion_is_running() {
+        let db = Db::open_in_memory().unwrap();
+        let id = seed_photo(&db);
+        db.save_profile(&profile("p", "P")).unwrap();
+        let failed = db.enqueue_job(id, "p", "keep").unwrap();
+        db.update_job(&failed, QueueStatus::Failed, 0.0, Some("boom"), None)
+            .unwrap();
+        let request = db
+            .request_deletion(&[id], DeletionReason::Manual, false)
+            .unwrap()[0];
+        db.force_deletion(request).unwrap();
+        assert!(db.claim_deletion(request).unwrap());
+        assert!(!db.retry_job(&failed).unwrap());
+        assert_eq!(db.retry_failed_jobs().unwrap(), 0);
+        assert_eq!(
+            db.list_jobs(10)
+                .unwrap()
+                .into_iter()
+                .find(|job| job.id == failed)
+                .unwrap()
+                .status,
+            QueueStatus::Failed
         );
     }
 
