@@ -10,10 +10,10 @@ use rusqlite::{
 use crate::error::{CoreError, Result};
 use crate::model::{
     CompressionJob, CompressionProfile, DaemonCommand, DaemonError, DaemonOperation,
-    DeletionCounts, DeletionJobSummary, DeletionReason, DeletionRequest, DeletionStatus,
-    Derivative, JobStatusCounts, LibraryRoot, LibraryStats, MAX_JOB_RETRIES, NewPhoto, Photo,
-    PhotoContext, PhotoFilter, PhotoIndexEntry, PhotoPlayer, PhotoSort, PhotoStatus,
-    PhotoTextFilter, QueueStatus, Session, SessionPlayer, World,
+    DeletionBlockers, DeletionCounts, DeletionJobSummary, DeletionReason, DeletionRequest,
+    DeletionStatus, Derivative, JobStatusCounts, LibraryRoot, LibraryStats, MAX_JOB_RETRIES,
+    NewPhoto, Photo, PhotoContext, PhotoFilter, PhotoIndexEntry, PhotoPlayer, PhotoSort,
+    PhotoStatus, PhotoTextFilter, QueueStatus, Session, SessionPlayer, World,
 };
 
 const SCHEMA_V1: &str = r#"
@@ -1665,6 +1665,186 @@ impl Db {
         })
     }
 
+    /// Counts work that still blocks a deletion. The #142 outbox will add its
+    /// own active/failed counts here.
+    pub fn deletion_blockers(&self, photo_id: i64) -> Result<DeletionBlockers> {
+        let blockers = self.conn.query_row(
+            "SELECT \
+                (SELECT COUNT(*) FROM compression_jobs \
+                 WHERE photo_id = ?1 AND status IN ('waiting', 'pending', 'processing')), \
+                (SELECT COUNT(*) FROM compression_jobs \
+                 WHERE photo_id = ?1 AND status = 'failed')",
+            params![photo_id],
+            |row| {
+                Ok(DeletionBlockers {
+                    active: row.get(0)?,
+                    failed: row.get(1)?,
+                })
+            },
+        )?;
+        Ok(blockers)
+    }
+
+    pub fn pending_deletion_requests(&self, limit: i64) -> Result<Vec<DeletionRequest>> {
+        let sql = "SELECT dr.id, dr.photo_id, p.file_name, dr.reason, dr.status, dr.force, \
+                dr.blocked_reason, dr.error, dr.requested_at, dr.started_at, dr.finished_at \
+             FROM deletion_requests dr JOIN photos p ON p.id = dr.photo_id \
+             WHERE dr.status = 'pending' \
+             ORDER BY dr.requested_at, dr.id LIMIT ?1";
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows = stmt.query_map(params![limit.max(1)], row_to_deletion_request)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn claim_deletion(&self, request_id: i64) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE deletion_requests \
+             SET status = 'running', started_at = ?1, blocked_reason = NULL, error = NULL \
+             WHERE id = ?2 AND status = 'pending' \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM compression_jobs j \
+                   WHERE j.photo_id = deletion_requests.photo_id \
+                     AND j.status IN ('waiting', 'pending', 'processing') \
+               ) \
+               AND ( \
+                   force = 1 OR NOT EXISTS ( \
+                       SELECT 1 FROM compression_jobs j \
+                       WHERE j.photo_id = deletion_requests.photo_id \
+                         AND j.status = 'failed' \
+                   ) \
+               )",
+            params![now_string(), request_id],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn block_deletion(
+        &self,
+        request_id: i64,
+        reason: &str,
+        error: Option<&str>,
+    ) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE deletion_requests SET status = 'blocked', blocked_reason = ?1, error = ?2 \
+             WHERE id = ?3 AND status IN ('pending', 'blocked', 'running')",
+            params![reason, error, request_id],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn complete_deletion(&self, request_id: i64) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE deletion_requests \
+             SET status = 'completed', finished_at = ?1, blocked_reason = NULL, error = NULL \
+             WHERE id = ?2 AND status = 'running'",
+            params![now_string(), request_id],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn retry_deletion(&self, request_id: i64) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE deletion_requests \
+             SET status = 'pending', blocked_reason = NULL, error = NULL \
+             WHERE id = ?1 AND status = 'blocked'",
+            params![request_id],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Ignores failed jobs and cancels queued work. A running compression job
+    /// still has to finish before `claim_deletion` can advance.
+    pub fn force_deletion(&self, request_id: i64) -> Result<bool> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let request: Option<(i64, String)> = tx
+            .query_row(
+                "SELECT photo_id, status FROM deletion_requests WHERE id = ?1",
+                params![request_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((photo_id, status)) = request else {
+            return Ok(false);
+        };
+        if status != "pending" && status != "blocked" {
+            return Ok(false);
+        }
+        let now = now_string();
+        tx.execute(
+            "UPDATE deletion_requests \
+             SET force = 1, status = 'pending', blocked_reason = NULL, error = NULL \
+             WHERE id = ?1",
+            params![request_id],
+        )?;
+        tx.execute(
+            "UPDATE compression_jobs SET status = 'cancelled', progress = 0, finished_at = ?1 \
+             WHERE photo_id = ?2 AND status IN ('waiting', 'pending')",
+            params![now, photo_id],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn cancel_deletion(&self, request_id: i64) -> Result<bool> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let request: Option<(i64, String, String, Option<String>)> = tx
+            .query_row(
+                "SELECT photo_id, reason, status, started_at FROM deletion_requests WHERE id = ?1",
+                params![request_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let Some((photo_id, reason, status, started_at)) = request else {
+            return Ok(false);
+        };
+        if (status != "pending" && status != "blocked") || started_at.is_some() {
+            return Ok(false);
+        }
+        let now = now_string();
+        tx.execute(
+            "UPDATE deletion_requests SET status = 'cancelled', finished_at = ?1 WHERE id = ?2",
+            params![now, request_id],
+        )?;
+        if reason == "manual" {
+            tx.execute(
+                "UPDATE photos SET \
+                    status = CASE WHEN display_derivative_id IS NOT NULL \
+                                  THEN 'replaced' ELSE 'present' END, \
+                    updated_at = ?1 \
+                 WHERE id = ?2 AND status = 'deleting'",
+                params![now, photo_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn reset_running_deletions(&self) -> Result<usize> {
+        let changed = self.conn.execute(
+            "UPDATE deletion_requests SET status = 'pending', started_at = NULL \
+             WHERE status = 'running'",
+            [],
+        )?;
+        Ok(changed)
+    }
+
+    /// Returns a job-failure block to the queue once every job for the photo is
+    /// terminal success. File-error blocks stay blocked until the user retries.
+    pub fn resume_blocked_deletions_for_photo(&self, photo_id: i64) -> Result<usize> {
+        let changed = self.conn.execute(
+            "UPDATE deletion_requests \
+             SET status = 'pending', blocked_reason = NULL, error = NULL \
+             WHERE photo_id = ?1 AND status = 'blocked' AND blocked_reason = 'job_failed' \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM compression_jobs j \
+                   WHERE j.photo_id = ?1 \
+                     AND j.status IN ('waiting', 'pending', 'processing', 'failed') \
+               )",
+            params![photo_id],
+        )?;
+        Ok(changed)
+    }
+
     // ---------- compression jobs ----------
 
     pub fn enqueue_job(&self, photo_id: i64, profile_id: &str, policy: &str) -> Result<String> {
@@ -2681,6 +2861,156 @@ mod tests {
         assert_eq!(summary.compression.failed, 1);
         assert_eq!(summary.send.total(), 0);
         assert!(summary.needs_warning());
+    }
+
+    #[test]
+    fn claim_deletion_requires_no_active_jobs() {
+        let db = Db::open_in_memory().unwrap();
+        let id = seed_photo(&db);
+        db.save_profile(&profile("p", "P")).unwrap();
+        db.enqueue_job(id, "p", "keep").unwrap();
+        let request = db
+            .request_deletion(&[id], DeletionReason::Manual, false)
+            .unwrap()[0];
+        assert!(!db.claim_deletion(request).unwrap());
+        let job = db.next_pending_job().unwrap().unwrap();
+        db.update_job(&job.id, QueueStatus::Completed, 1.0, None, None)
+            .unwrap();
+        assert!(db.claim_deletion(request).unwrap());
+        assert_eq!(
+            db.active_deletion_request(id).unwrap().unwrap().status,
+            DeletionStatus::Running
+        );
+    }
+
+    #[test]
+    fn claim_deletion_blocks_failed_jobs_unless_forced() {
+        let db = Db::open_in_memory().unwrap();
+        let id = seed_photo(&db);
+        db.save_profile(&profile("p", "P")).unwrap();
+        let job = db.enqueue_job(id, "p", "keep").unwrap();
+        db.update_job(&job, QueueStatus::Failed, 0.0, Some("boom"), None)
+            .unwrap();
+        let request = db
+            .request_deletion(&[id], DeletionReason::Manual, false)
+            .unwrap()[0];
+        assert!(!db.claim_deletion(request).unwrap());
+        assert!(db.force_deletion(request).unwrap());
+        assert!(db.claim_deletion(request).unwrap());
+    }
+
+    #[test]
+    fn force_deletion_cancels_queued_but_not_processing_jobs() {
+        let db = Db::open_in_memory().unwrap();
+        let id = seed_photo(&db);
+        db.save_profile(&profile("p", "P")).unwrap();
+        let processing = db.enqueue_job(id, "p", "keep").unwrap();
+        let pending = db.enqueue_job(id, "p", "keep").unwrap();
+        let started = db.next_pending_job().unwrap().unwrap();
+        assert_eq!(started.id, processing);
+        let request = db
+            .request_deletion(&[id], DeletionReason::Manual, false)
+            .unwrap()[0];
+        db.force_deletion(request).unwrap();
+        let jobs = db.list_jobs(10).unwrap();
+        let by_id = |id: &str| jobs.iter().find(|job| job.id == id).unwrap();
+        assert_eq!(by_id(&pending).status, QueueStatus::Cancelled);
+        assert_eq!(by_id(&processing).status, QueueStatus::Processing);
+    }
+
+    #[test]
+    fn cancel_deletion_restores_visible_status_until_running() {
+        let db = Db::open_in_memory().unwrap();
+        let id = seed_photo(&db);
+        let request = db
+            .request_deletion(&[id], DeletionReason::Manual, false)
+            .unwrap()[0];
+        assert!(db.cancel_deletion(request).unwrap());
+        assert_eq!(
+            db.photo_by_id(id).unwrap().unwrap().status,
+            PhotoStatus::Present
+        );
+        assert!(db.active_deletion_request(id).unwrap().is_none());
+        let second = db
+            .request_deletion(&[id], DeletionReason::Manual, false)
+            .unwrap()[0];
+        db.claim_deletion(second).unwrap();
+        assert!(!db.cancel_deletion(second).unwrap());
+    }
+
+    #[test]
+    fn reset_running_deletions_makes_requests_retryable() {
+        let db = Db::open_in_memory().unwrap();
+        let id = seed_photo(&db);
+        let request = db
+            .request_deletion(&[id], DeletionReason::Manual, false)
+            .unwrap()[0];
+        db.claim_deletion(request).unwrap();
+        assert_eq!(db.reset_running_deletions().unwrap(), 1);
+        assert_eq!(
+            db.active_deletion_request(id).unwrap().unwrap().status,
+            DeletionStatus::Pending
+        );
+    }
+
+    #[test]
+    fn manual_request_is_rejected_while_a_request_is_running() {
+        let db = Db::open_in_memory().unwrap();
+        let id = seed_photo(&db);
+        let request = db
+            .request_deletion(&[id], DeletionReason::AutoReplace, false)
+            .unwrap()[0];
+        db.claim_deletion(request).unwrap();
+        let error = db
+            .request_deletion(&[id], DeletionReason::Manual, false)
+            .unwrap_err();
+        assert!(error.to_string().contains("running"));
+        assert_eq!(
+            db.active_deletion_request(id).unwrap().unwrap().reason,
+            DeletionReason::AutoReplace
+        );
+    }
+
+    #[test]
+    fn cancel_deletion_refuses_after_execution_started() {
+        let db = Db::open_in_memory().unwrap();
+        let id = seed_photo(&db);
+        let request = db
+            .request_deletion(&[id], DeletionReason::Manual, false)
+            .unwrap()[0];
+        db.claim_deletion(request).unwrap();
+        db.block_deletion(request, "file_error", Some("permission denied"))
+            .unwrap();
+        assert!(!db.cancel_deletion(request).unwrap());
+        assert_eq!(
+            db.active_deletion_request(id).unwrap().unwrap().status,
+            DeletionStatus::Blocked
+        );
+    }
+
+    #[test]
+    fn resume_blocked_deletion_waits_for_all_jobs() {
+        let db = Db::open_in_memory().unwrap();
+        let id = seed_photo(&db);
+        db.save_profile(&profile("p", "P")).unwrap();
+        let failed = db.enqueue_job(id, "p", "keep").unwrap();
+        db.update_job(&failed, QueueStatus::Failed, 0.0, Some("boom"), None)
+            .unwrap();
+        let request = db
+            .request_deletion(&[id], DeletionReason::Manual, false)
+            .unwrap()[0];
+        db.block_deletion(request, "job_failed", None).unwrap();
+        assert_eq!(db.resume_blocked_deletions_for_photo(id).unwrap(), 0);
+
+        db.retry_job(&failed).unwrap();
+        let retried = db.next_pending_job().unwrap().unwrap();
+        db.update_job(&retried.id, QueueStatus::Completed, 1.0, None, None)
+            .unwrap();
+        assert_eq!(db.resume_blocked_deletions_for_photo(id).unwrap(), 1);
+        assert_eq!(
+            db.active_deletion_request(id).unwrap().unwrap().status,
+            DeletionStatus::Pending
+        );
     }
 
     #[test]
