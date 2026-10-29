@@ -28,6 +28,38 @@ pub(crate) fn manual_output_available(photo_count: usize, target: ManualOutputTa
     target != ManualOutputTarget::Clipboard || photo_count == 1
 }
 
+/// Profile names are identifiers in the UI, not database keys. The editor
+/// caps their length to keep cards, menus, and job rows from breaking.
+pub(crate) const MAX_PROFILE_NAME_CHARS: usize = 100;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProfileNameError {
+    Empty,
+    TooLong,
+}
+
+impl ProfileNameError {
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Self::Empty => "名前を入力してください",
+            Self::TooLong => "名前は100文字以内で入力してください",
+        }
+    }
+}
+
+/// Trims a name typed in the editor and rejects values that must not be
+/// persisted. Duplicate names are allowed; references use the profile id.
+pub(crate) fn normalize_profile_name(raw: &str) -> Result<String, ProfileNameError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(ProfileNameError::Empty);
+    }
+    if trimmed.chars().count() > MAX_PROFILE_NAME_CHARS {
+        return Err(ProfileNameError::TooLong);
+    }
+    Ok(trimmed.to_string())
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ManualCompressionDialog {
     pub(crate) photo_ids: Vec<i64>,
@@ -604,7 +636,9 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{ManualOutputTarget, manual_output_available};
+    use super::{
+        ManualOutputTarget, ProfileNameError, manual_output_available, normalize_profile_name,
+    };
 
     #[test]
     fn clipboard_output_is_limited_to_one_photo() {
@@ -612,5 +646,44 @@ mod tests {
         assert!(!manual_output_available(2, ManualOutputTarget::Clipboard));
         assert!(manual_output_available(2, ManualOutputTarget::Folder));
         assert!(manual_output_available(2, ManualOutputTarget::Profile));
+    }
+
+    #[test]
+    fn profile_name_is_trimmed_before_saving() {
+        assert_eq!(
+            normalize_profile_name("  SNS共有用 \t").unwrap(),
+            "SNS共有用"
+        );
+        assert_eq!(
+            normalize_profile_name("アーカイブ用").unwrap(),
+            "アーカイブ用"
+        );
+    }
+
+    #[test]
+    fn profile_name_rejects_empty_and_whitespace_only_values() {
+        assert_eq!(normalize_profile_name(""), Err(ProfileNameError::Empty));
+        assert_eq!(
+            normalize_profile_name("   \t\n"),
+            Err(ProfileNameError::Empty)
+        );
+    }
+
+    #[test]
+    fn profile_name_accepts_100_characters_and_rejects_101() {
+        let at_limit = "あ".repeat(100);
+        assert_eq!(normalize_profile_name(&at_limit).unwrap(), at_limit);
+
+        let over_limit = "あ".repeat(101);
+        assert_eq!(
+            normalize_profile_name(&over_limit),
+            Err(ProfileNameError::TooLong)
+        );
+    }
+
+    #[test]
+    fn profile_name_errors_explain_how_to_fix_the_value() {
+        assert!(ProfileNameError::Empty.message().contains("入力"));
+        assert!(ProfileNameError::TooLong.message().contains("100"));
     }
 }

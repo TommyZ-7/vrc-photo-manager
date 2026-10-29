@@ -17,6 +17,7 @@ use vrc_photo_core::model::{
 };
 
 use crate::app::App;
+use crate::app::compression::MAX_PROFILE_NAME_CHARS;
 use crate::ui::components::glass_panel;
 use crate::ui::theme::*;
 
@@ -278,11 +279,30 @@ impl App {
     }
 
     fn profile_editor(
-        &self,
+        &mut self,
         profile: &CompressionProfile,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        if self.profile_name_editing_id.as_deref() != Some(profile.id.as_str())
+            || self.profile_name_reset_pending
+        {
+            let name = profile.name.clone();
+            self.profile_name_input.update(cx, |input, cx| {
+                input.set_value(name, window, cx);
+            });
+            self.profile_name_editing_id = Some(profile.id.clone());
+            self.profile_name_reset_pending = false;
+            self.profile_name_error = None;
+        }
+        let name_error = self.profile_name_error.clone();
+        let name_char_count = self
+            .profile_name_input
+            .read(cx)
+            .value()
+            .trim()
+            .chars()
+            .count();
         let p = self.palette;
         let profile_id = profile.id.clone();
         let clipboard_profile_id = profile.id.clone();
@@ -357,6 +377,34 @@ impl App {
                     .overflow_y_scrollbar()
                     .p(px(14.))
                     .gap(px(14.))
+                    .child(self.section_label("基本"))
+                    .child(
+                        v_flex()
+                            .gap(px(6.))
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(p.muted_2))
+                                    .child("プロファイル名"),
+                            )
+                            .child(Input::new(&self.profile_name_input).small())
+                            .child(
+                                div()
+                                    .text_size(px(9.5))
+                                    .text_color(rgb(if name_error.is_some() {
+                                        p.red
+                                    } else {
+                                        p.muted_2
+                                    }))
+                                    .child(match name_error {
+                                        Some(error) => error,
+                                        None => format!(
+                                            "前後の空白は保存時に除去されます · {name_char_count}/{MAX_PROFILE_NAME_CHARS}文字"
+                                        ),
+                                    }),
+                            ),
+                    )
+                    .child(section_divider(&p))
                     .child(
                         h_flex()
                             .items_center()

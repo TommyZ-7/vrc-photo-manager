@@ -4149,6 +4149,41 @@ mod tests {
     }
 
     #[test]
+    fn save_profile_renames_the_name_column_and_json_together() {
+        let db = Db::open_in_memory().unwrap();
+        let mut saved = profile("p", "Old name");
+        db.save_profile(&saved).unwrap();
+
+        saved.name = "Archive".to_string();
+        db.save_profile(&saved).unwrap();
+
+        let (column, json): (String, String) = db
+            .connection()
+            .query_row(
+                "SELECT name, json FROM compression_profiles WHERE id = 'p'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(column, "Archive");
+        let stored: CompressionProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(stored.name, "Archive");
+        assert_eq!(db.list_profiles().unwrap()[0].name, "Archive");
+    }
+
+    #[test]
+    fn renamed_default_profile_survives_reseeding() {
+        let db = Db::open_in_memory().unwrap();
+        let mut renamed = db.ensure_default_profiles().unwrap()[0].clone();
+        renamed.name = "アーカイブ用".to_string();
+        db.save_profile(&renamed).unwrap();
+
+        let profiles = db.ensure_default_profiles().unwrap();
+        assert_eq!(profiles[0].name, "アーカイブ用");
+        assert_eq!(profiles.len(), 3);
+    }
+
+    #[test]
     fn reorder_profiles_persists_and_rolls_back_bad_lists() {
         let db = Db::open_in_memory().unwrap();
         for (id, name) in [("c", "C"), ("a", "A"), ("b", "B")] {
