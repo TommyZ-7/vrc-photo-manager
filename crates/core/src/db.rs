@@ -802,6 +802,9 @@ impl Db {
                 "SELECT {PHOTO_SELECT}{PHOTO_FROM} \
                  WHERE p.blake3 = ?1 AND p.abs_path <> ?2 \
                    AND p.status IN ('present', 'replaced', 'missing') \
+                   AND NOT EXISTS (SELECT 1 FROM deletion_requests dr \
+                       WHERE dr.photo_id = p.id \
+                         AND dr.status IN ('pending', 'blocked', 'running')) \
                  ORDER BY p.id LIMIT 2"
             );
             let mut stmt = self.conn.prepare(&sql)?;
@@ -823,6 +826,9 @@ impl Db {
              WHERE p.abs_path <> ?1 AND p.file_name = ?2 AND p.file_size = ?3 \
                AND p.width = ?4 AND p.height = ?5 AND p.captured_at_utc = ?6 \
                AND p.status IN ('present', 'replaced', 'missing') \
+               AND NOT EXISTS (SELECT 1 FROM deletion_requests dr \
+                   WHERE dr.photo_id = p.id \
+                     AND dr.status IN ('pending', 'blocked', 'running')) \
              ORDER BY p.id LIMIT 2"
         );
         let mut stmt = self.conn.prepare(&sql)?;
@@ -876,7 +882,9 @@ impl Db {
             "UPDATE photos SET root_id = ?1, rel_path = ?2, abs_path = ?3, file_name = ?4, \
                 file_size = ?5, mtime = ?6, blake3 = COALESCE(?7, blake3), status = 'present', \
                 display_derivative_id = NULL, updated_at = ?8 \
-             WHERE id = ?9",
+             WHERE id = ?9 AND NOT EXISTS (SELECT 1 FROM deletion_requests dr \
+                 WHERE dr.photo_id = photos.id \
+                   AND dr.status IN ('pending', 'blocked', 'running'))",
             params![
                 photo.root_id,
                 photo.rel_path,
@@ -979,7 +987,11 @@ impl Db {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         let (compressed_count, derivative_bytes): (i64, i64) = self.conn.query_row(
-            "SELECT COUNT(DISTINCT photo_id), COALESCE(SUM(file_size), 0) FROM derivatives",
+            &format!(
+                "SELECT COUNT(DISTINCT d.photo_id), COALESCE(SUM(d.file_size), 0) \
+                 FROM derivatives d JOIN photos p ON p.id = d.photo_id \
+                 WHERE {VISIBLE_STATUS}"
+            ),
             [],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
@@ -1696,7 +1708,22 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    pub fn claim_deletion(&self, request_id: i64) -> Result<bool> {
+    pub fn deletion_request_by_id(&self, request_id: i64) -> Result<Option<DeletionRequest>> {
+        let sql = "SELECT dr.id, dr.photo_id, p.file_name, dr.reason, dr.status, dr.force, \
+                dr.blocked_reason, dr.error, dr.requested_at, dr.started_at, dr.finished_at \
+             FROM deletion_requests dr JOIN photos p ON p.id = dr.photo_id \
+             WHERE dr.id = ?1";
+        let mut stmt = self.conn.prepare(sql)?;
+        Ok(stmt
+            .query_row(params![request_id], row_to_deletion_request)
+            .optional()?)
+    }
+
+    /// Atomically claims a pending request and returns the current row. The
+    /// caller must execute from the returned object, not from an earlier
+    /// snapshot: a UI request may have upgraded `auto_replace` to `manual`
+    /// between the snapshot and this call.
+    pub fn claim_deletion(&self, request_id: i64) -> Result<Option<DeletionRequest>> {
         let changed = self.conn.execute(
             "UPDATE deletion_requests \
              SET status = 'running', started_at = ?1, blocked_reason = NULL, error = NULL \
@@ -1714,6 +1741,32 @@ impl Db {
                    ) \
                )",
             params![now_string(), request_id],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.deletion_request_by_id(request_id)
+    }
+
+    /// Atomically marks a pending request blocked when a failed job exists and
+    /// the request is not forced. Keeping this in SQL avoids acting on a stale
+    /// `force` value from the executor's snapshot.
+    pub fn block_deletion_if_jobs_failed(&self, request_id: i64) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE deletion_requests \
+             SET status = 'blocked', blocked_reason = 'job_failed', error = NULL \
+             WHERE id = ?1 AND status = 'pending' AND force = 0 \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM compression_jobs j \
+                   WHERE j.photo_id = deletion_requests.photo_id \
+                     AND j.status IN ('waiting', 'pending', 'processing') \
+               ) \
+               AND EXISTS ( \
+                   SELECT 1 FROM compression_jobs j \
+                   WHERE j.photo_id = deletion_requests.photo_id \
+                     AND j.status = 'failed' \
+               )",
+            params![request_id],
         )?;
         Ok(changed == 1)
     }
@@ -1797,7 +1850,10 @@ impl Db {
         let Some((photo_id, reason, status, started_at)) = request else {
             return Ok(false);
         };
-        if (status != "pending" && status != "blocked") || started_at.is_some() {
+        if reason != "manual"
+            || (status != "pending" && status != "blocked")
+            || started_at.is_some()
+        {
             return Ok(false);
         }
         let now = now_string();
@@ -1838,9 +1894,10 @@ impl Db {
     }
 
     pub fn reset_running_deletions(&self) -> Result<usize> {
+        // Keep started_at: it is the only evidence that a crash may have left
+        // some files already in the OS trash, and cancel must refuse then.
         let changed = self.conn.execute(
-            "UPDATE deletion_requests SET status = 'pending', started_at = NULL \
-             WHERE status = 'running'",
+            "UPDATE deletion_requests SET status = 'pending' WHERE status = 'running'",
             [],
         )?;
         Ok(changed)
@@ -2265,9 +2322,10 @@ impl Db {
     }
 
     pub fn compressed_photo_ids(&self) -> Result<Vec<i64>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT DISTINCT photo_id FROM derivatives")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT DISTINCT d.photo_id FROM derivatives d \
+                 JOIN photos p ON p.id = d.photo_id WHERE p.status IN ('present', 'replaced')",
+        )?;
         let rows = stmt.query_map([], |row| row.get(0))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -2728,6 +2786,8 @@ mod tests {
     fn deleting_photo_is_hidden_from_index_search_and_counts() {
         let db = Db::open_in_memory().unwrap();
         let id = seed_photo(&db);
+        db.add_derivative(id, "/photos/a.webp", "webp", 16, 10, 8, "p", "keep")
+            .unwrap();
         db.connection()
             .execute(
                 "UPDATE photos SET status = 'deleting' WHERE id = ?1",
@@ -2736,12 +2796,32 @@ mod tests {
             .unwrap();
         assert!(db.photo_index(PhotoSort::Newest).unwrap().is_empty());
         assert_eq!(db.count_photos().unwrap(), 0);
-        assert_eq!(db.stats().unwrap().photo_count, 0);
+        let stats = db.stats().unwrap();
+        assert_eq!(stats.photo_count, 0);
+        assert_eq!(stats.compressed_count, 0);
+        assert_eq!(stats.derivative_bytes, 0);
+        assert!(db.compressed_photo_ids().unwrap().is_empty());
         assert!(
             db.search_photos(&PhotoFilter::default())
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn rebind_candidate_skips_photos_with_active_deletion() {
+        let db = Db::open_in_memory().unwrap();
+        let id = seed_photo(&db);
+        db.set_photo_blake3(id, "hash").unwrap();
+        let photo = db.photo_by_id(id).unwrap().unwrap();
+        db.request_deletion(&[id], DeletionReason::Manual, false)
+            .unwrap();
+        let mut moved = photo_to_new(&photo);
+        moved.abs_path = "/photos/moved.png".to_string();
+        moved.rel_path = "moved.png".to_string();
+        moved.blake3 = Some("hash".to_string());
+        assert!(db.find_rebind_candidate(&moved).unwrap().is_none());
+        assert!(!db.rebind_photo(id, &moved).unwrap());
     }
 
     #[test]
@@ -2894,11 +2974,11 @@ mod tests {
         let request = db
             .request_deletion(&[id], DeletionReason::Manual, false)
             .unwrap()[0];
-        assert!(!db.claim_deletion(request).unwrap());
+        assert!(db.claim_deletion(request).unwrap().is_none());
         let job = db.next_pending_job().unwrap().unwrap();
         db.update_job(&job.id, QueueStatus::Completed, 1.0, None, None)
             .unwrap();
-        assert!(db.claim_deletion(request).unwrap());
+        assert!(db.claim_deletion(request).unwrap().is_some());
         assert_eq!(
             db.active_deletion_request(id).unwrap().unwrap().status,
             DeletionStatus::Running
@@ -2916,9 +2996,9 @@ mod tests {
         let request = db
             .request_deletion(&[id], DeletionReason::Manual, false)
             .unwrap()[0];
-        assert!(!db.claim_deletion(request).unwrap());
+        assert!(db.claim_deletion(request).unwrap().is_none());
         assert!(db.force_deletion(request).unwrap());
-        assert!(db.claim_deletion(request).unwrap());
+        assert!(db.claim_deletion(request).unwrap().is_some());
     }
 
     #[test]
@@ -2938,6 +3018,13 @@ mod tests {
         let by_id = |id: &str| jobs.iter().find(|job| job.id == id).unwrap();
         assert_eq!(by_id(&pending).status, QueueStatus::Cancelled);
         assert_eq!(by_id(&processing).status, QueueStatus::Processing);
+        assert!(
+            db.claim_deletion(request).unwrap().is_none(),
+            "the processing job must block the forced claim"
+        );
+        db.update_job(&processing, QueueStatus::Completed, 1.0, None, None)
+            .unwrap();
+        assert!(db.claim_deletion(request).unwrap().is_some());
     }
 
     #[test]
@@ -2956,8 +3043,43 @@ mod tests {
         let second = db
             .request_deletion(&[id], DeletionReason::Manual, false)
             .unwrap()[0];
-        db.claim_deletion(second).unwrap();
+        assert!(db.claim_deletion(second).unwrap().is_some());
         assert!(!db.cancel_deletion(second).unwrap());
+    }
+
+    #[test]
+    fn claim_deletion_returns_the_upgraded_request() {
+        let db = Db::open_in_memory().unwrap();
+        let id = seed_photo(&db);
+        let request = db
+            .request_deletion(&[id], DeletionReason::AutoReplace, false)
+            .unwrap()[0];
+        db.request_deletion(&[id], DeletionReason::Manual, false)
+            .unwrap();
+        let claimed = db.claim_deletion(request).unwrap().unwrap();
+        assert_eq!(claimed.reason, DeletionReason::Manual);
+        assert_eq!(claimed.status, DeletionStatus::Running);
+    }
+
+    #[test]
+    fn block_job_failed_uses_the_current_force_flag() {
+        let db = Db::open_in_memory().unwrap();
+        let id = seed_photo(&db);
+        db.save_profile(&profile("p", "P")).unwrap();
+        let job = db.enqueue_job(id, "p", "keep").unwrap();
+        db.update_job(&job, QueueStatus::Failed, 0.0, Some("boom"), None)
+            .unwrap();
+        let request = db
+            .request_deletion(&[id], DeletionReason::Manual, false)
+            .unwrap()[0];
+        assert!(db.block_deletion_if_jobs_failed(request).unwrap());
+        assert_eq!(
+            db.active_deletion_request(id).unwrap().unwrap().status,
+            DeletionStatus::Blocked
+        );
+        assert!(db.force_deletion(request).unwrap());
+        assert!(!db.block_deletion_if_jobs_failed(request).unwrap());
+        assert!(db.claim_deletion(request).unwrap().is_some());
     }
 
     #[test]
@@ -2967,8 +3089,28 @@ mod tests {
         let request = db
             .request_deletion(&[id], DeletionReason::Manual, false)
             .unwrap()[0];
-        db.claim_deletion(request).unwrap();
+        assert!(db.claim_deletion(request).unwrap().is_some());
         assert_eq!(db.reset_running_deletions().unwrap(), 1);
+        let reset = db.active_deletion_request(id).unwrap().unwrap();
+        assert_eq!(reset.status, DeletionStatus::Pending);
+        assert!(
+            reset.started_at.is_some(),
+            "restart must keep the partial-execution marker"
+        );
+        assert!(
+            !db.cancel_deletion(request).unwrap(),
+            "cancel must refuse after a started deletion"
+        );
+    }
+
+    #[test]
+    fn cancel_deletion_rejects_auto_replace_requests() {
+        let db = Db::open_in_memory().unwrap();
+        let id = seed_photo(&db);
+        let request = db
+            .request_deletion(&[id], DeletionReason::AutoReplace, false)
+            .unwrap()[0];
+        assert!(!db.cancel_deletion(request).unwrap());
         assert_eq!(
             db.active_deletion_request(id).unwrap().unwrap().status,
             DeletionStatus::Pending
@@ -2982,7 +3124,7 @@ mod tests {
         let request = db
             .request_deletion(&[id], DeletionReason::AutoReplace, false)
             .unwrap()[0];
-        db.claim_deletion(request).unwrap();
+        assert!(db.claim_deletion(request).unwrap().is_some());
         let error = db
             .request_deletion(&[id], DeletionReason::Manual, false)
             .unwrap_err();
@@ -3000,7 +3142,7 @@ mod tests {
         let request = db
             .request_deletion(&[id], DeletionReason::Manual, false)
             .unwrap()[0];
-        db.claim_deletion(request).unwrap();
+        assert!(db.claim_deletion(request).unwrap().is_some());
         db.block_deletion(request, "file_error", Some("permission denied"))
             .unwrap();
         assert!(!db.cancel_deletion(request).unwrap());
@@ -3047,7 +3189,7 @@ mod tests {
             .request_deletion(&[id], DeletionReason::Manual, false)
             .unwrap()[0];
         db.force_deletion(request).unwrap();
-        assert!(db.claim_deletion(request).unwrap());
+        assert!(db.claim_deletion(request).unwrap().is_some());
         assert!(!db.retry_job(&failed).unwrap());
         assert_eq!(db.retry_failed_jobs().unwrap(), 0);
         assert_eq!(
