@@ -108,6 +108,12 @@ cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warni
    commit and publishes the GitHub Release (monitor per §6).
 - The PR-time + tag-time double build is intentional (guarantees published
   artifacts come from the tagged commit; do not simplify).
+- On PRs the bundle jobs (`build` / `windows`) are gated by the `changes`
+  job: they run only when packaging-relevant files change (`packaging/**`,
+  `Packager.toml`, any `Cargo.toml`, `Cargo.lock`, or the Release workflow
+  files) or when the PR carries the `bundle-check` label. Otherwise they
+  are skipped, which is the expected state; code correctness is covered
+  by CI.
 - If the bundle vendors third-party runtimes, record provenance + ship
   required license notices (add a staging check in `release.yml`).
 - Release notes compare with the previous `v*.*.*` tag and are
