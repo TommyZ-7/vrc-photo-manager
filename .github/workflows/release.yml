@@ -4,14 +4,7 @@ on:
   push:
     tags: ['v*.*.*']
   pull_request:
-    paths:
-      - 'crates/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'Packager.toml'
-      - 'packaging/**'
-      - '.github/workflows/release.yml'
-      - '.github/release.yml'
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
 
 concurrency:
@@ -19,7 +12,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      bundle: ${{ steps.check.outputs.bundle }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: check
+        env:
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "bundle=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case ",${LABELS}," in
+            *",bundle-check,"*)
+              echo "bundle=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+          git fetch origin "${{ github.base_ref }}" --depth=1
+          FILES=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
+          echo "Changed files:"
+          echo "$FILES"
+          if echo "$FILES" | grep -qE '(^packaging/|^Packager\.toml$|(^|/)Cargo\.toml$|^Cargo\.lock$|^\.github/workflows/release\.yml$|^\.github/release\.yml$)'; then
+            echo "bundle=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "bundle=false" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: changes
+    if: needs.changes.outputs.bundle == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -54,8 +81,20 @@ jobs:
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Cache cargo-packager
+        id: packager-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-packager
+            ~/.cargo/bin/cargo-packager.exe
+          key: ${{ runner.os }}-cargo-packager-0.11.8
 
       - name: Install cargo-packager
+        if: steps.packager-cache.outputs.cache-hit != 'true'
         run: cargo install cargo-packager --locked --version 0.11.8
 
       - name: Build Linux packages
@@ -124,6 +163,8 @@ jobs:
           if-no-files-found: error
 
   windows:
+    needs: changes
+    if: needs.changes.outputs.bundle == 'true'
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -133,8 +174,20 @@ jobs:
 
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Cache cargo-packager
+        id: packager-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/cargo-packager
+            ~/.cargo/bin/cargo-packager.exe
+          key: ${{ runner.os }}-cargo-packager-0.11.8
 
       - name: Install cargo-packager
+        if: steps.packager-cache.outputs.cache-hit != 'true'
         run: cargo install cargo-packager --locked --version 0.11.8
 
       - name: Build Windows installer
