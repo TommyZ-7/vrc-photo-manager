@@ -229,10 +229,10 @@ crates/ui/src/
 1. UIは手動削除の `deletion_requests`（`reason='manual'`）を書き、`photos.status='deleting'`、`library_revision` 更新、`wake_jobs` を行う。UIはファイルを移動しない。
 2. 自動置換は圧縮ワーカーが `reason='auto_replace'` の要求を書く。写真は `replaced` のまま残る。
 3. デーモンの `deletion-executor` スレッドは `JobSignal` で起動し、`pending` の要求を読む。
-4. `waiting` / `pending` / `processing` のジョブが残っていれば待つ。`failed` が残り、`force=0` なら `blocked` にして理由を残す。
+4. `waiting` / `pending` / `processing` のジョブが残っていれば待つ。`failed` が残り、`force=0` なら `blocked` にして理由を残す。自動置換は実行直前に表示用の圧縮版が実在するか確認し、なければ `missing_asset` で保留する。
 5. 実行可能な要求を `pending` → `running` に原子的に変え、ファイルを移動する。手動削除は派生ファイル→元画像、自動置換は元画像だけ。存在しないパスはスキップする。
 6. 手動削除は派生行を削除し、写真を `missing` にする。自動置換は `replaced` を維持する。要求を `completed` にし、`library_revision` を更新する。
-7. 再起動時は `running` を `pending` に戻して同じ手順を再実行する。途中まで移動済みでも、欠けたパスをスキップして完了できる。
+7. 再起動時は `started_at` を保持したまま `running` を `pending` に戻して同じ手順を再実行する。途中まで移動済みでも、欠けたパスをスキップして完了できる。
 8. `blocked` の取消・再試行・強制削除はダッシュボードから行う。強制削除は失敗を無視し、待機／実行待ちをキャンセルし、処理中の完了を待つ。
 
 ## 5. 並行性
