@@ -3245,6 +3245,84 @@ mod tests {
     }
 
     #[test]
+    fn manual_deletion_preempts_an_older_auto_replace_backlog() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let db = Db::open(dir.path().join("library.db")).unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+
+        for index in 0..100i64 {
+            let name = format!("auto{index:03}.png");
+            let photo_id = db
+                .upsert_photo(&vrc_photo_core::model::NewPhoto {
+                    root_id: root,
+                    rel_path: name.clone(),
+                    abs_path: format!("/photos/{name}"),
+                    file_name: name,
+                    captured_at_utc: 1_700_000_000 + index,
+                    captured_at_local: "2026-10-21 21:14:03".to_string(),
+                    tz_offset_sec: 9 * 3600,
+                    width: 16,
+                    height: 10,
+                    file_size: 10,
+                    mtime: 1_700_000_000 + index,
+                    blake3: None,
+                })
+                .unwrap();
+            let request = db
+                .request_deletion(&[photo_id], DeletionReason::AutoReplace, false)
+                .unwrap()[0];
+            db.connection()
+                .execute(
+                    "UPDATE deletion_requests SET requested_at = ?1 WHERE id = ?2",
+                    ("2026-10-21T00:00:01Z", request),
+                )
+                .unwrap();
+        }
+
+        let manual_path = dir.path().join("photos/manual.png");
+        write_photo(&manual_path);
+        let manual_id = db
+            .upsert_photo(&vrc_photo_core::model::NewPhoto {
+                root_id: root,
+                rel_path: "manual.png".to_string(),
+                abs_path: manual_path.to_string_lossy().to_string(),
+                file_name: "manual.png".to_string(),
+                captured_at_utc: 1_700_000_500,
+                captured_at_local: "2026-10-21 21:14:03".to_string(),
+                tz_offset_sec: 9 * 3600,
+                width: 16,
+                height: 10,
+                file_size: 10,
+                mtime: 1_700_000_500,
+                blake3: None,
+            })
+            .unwrap();
+        let manual_request = db
+            .request_deletion(&[manual_id], DeletionReason::Manual, false)
+            .unwrap()[0];
+        db.connection()
+            .execute(
+                "UPDATE deletion_requests SET requested_at = ?1 WHERE id = ?2",
+                ("2026-10-21T00:00:02Z", manual_request),
+            )
+            .unwrap();
+
+        daemon.process_deletions().unwrap();
+
+        let request = db.deletion_request_by_id(manual_request).unwrap().unwrap();
+        assert_eq!(
+            request.status,
+            DeletionStatus::Completed,
+            "the manual deletion must not wait behind the auto_replace backlog"
+        );
+        assert!(
+            !manual_path.exists(),
+            "the manual deletion must remove the file"
+        );
+    }
+
+    #[test]
     fn unknown_deletion_reason_is_blocked_without_deleting() {
         let dir = tempfile::tempdir().unwrap();
         let mut daemon = test_daemon(&dir);
