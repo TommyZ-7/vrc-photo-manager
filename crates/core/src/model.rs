@@ -5,6 +5,7 @@ pub enum PhotoStatus {
     Present,
     Replaced,
     Missing,
+    Deleting,
 }
 
 impl PhotoStatus {
@@ -13,6 +14,7 @@ impl PhotoStatus {
             Self::Present => "present",
             Self::Replaced => "replaced",
             Self::Missing => "missing",
+            Self::Deleting => "deleting",
         }
     }
 
@@ -20,6 +22,7 @@ impl PhotoStatus {
         match value {
             "replaced" => Self::Replaced,
             "missing" => Self::Missing,
+            "deleting" => Self::Deleting,
             _ => Self::Present,
         }
     }

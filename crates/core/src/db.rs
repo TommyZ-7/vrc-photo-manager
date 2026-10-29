@@ -533,7 +533,17 @@ impl Db {
                 tz_offset_sec = excluded.tz_offset_sec, width = excluded.width, \
                 height = excluded.height, file_size = excluded.file_size, \
                 mtime = excluded.mtime, blake3 = COALESCE(excluded.blake3, photos.blake3), \
-                status = 'present', display_derivative_id = NULL, updated_at = excluded.updated_at \
+                status = CASE WHEN EXISTS ( \
+                    SELECT 1 FROM deletion_requests dr \
+                    WHERE dr.photo_id = photos.id \
+                      AND dr.status IN ('pending', 'blocked', 'running') \
+                ) THEN photos.status ELSE 'present' END, \
+                display_derivative_id = CASE WHEN EXISTS ( \
+                    SELECT 1 FROM deletion_requests dr \
+                    WHERE dr.photo_id = photos.id \
+                      AND dr.status IN ('pending', 'blocked', 'running') \
+                ) THEN photos.display_derivative_id ELSE NULL END, \
+                updated_at = excluded.updated_at \
              RETURNING id",
             params![
                 photo.root_id,
@@ -751,7 +761,9 @@ impl Db {
     /// original file is expected to be removed by the caller.
     pub fn set_replaced(&self, photo_id: i64, derivative_id: i64) -> Result<bool> {
         let changed = self.conn.execute(
-            "UPDATE photos SET display_derivative_id = ?1, status = 'replaced', updated_at = ?2 \
+            "UPDATE photos SET display_derivative_id = ?1, \
+                status = CASE WHEN status = 'deleting' THEN 'deleting' ELSE 'replaced' END, \
+                updated_at = ?2 \
              WHERE id = ?3 AND EXISTS (SELECT 1 FROM derivatives \
                  WHERE id = ?1 AND photo_id = photos.id)",
             params![derivative_id, now_string(), photo_id],
@@ -764,7 +776,7 @@ impl Db {
     pub fn restore_present(&self, photo_id: i64) -> Result<()> {
         self.conn.execute(
             "UPDATE photos SET display_derivative_id = NULL, status = 'present', \
-                updated_at = ?1 WHERE id = ?2",
+                updated_at = ?1 WHERE id = ?2 AND status <> 'deleting'",
             params![now_string(), photo_id],
         )?;
         Ok(())
@@ -2181,6 +2193,52 @@ mod tests {
         }
     }
 
+    fn seed_photo(db: &Db) -> i64 {
+        let root = db.add_root("/photos", "reference").unwrap();
+        db.upsert_photo(&NewPhoto {
+            root_id: root,
+            rel_path: "a.png".to_string(),
+            abs_path: "/photos/a.png".to_string(),
+            file_name: "a.png".to_string(),
+            captured_at_utc: 1_700_000_000,
+            captured_at_local: "2026-10-21 21:14:03".to_string(),
+            tz_offset_sec: 9 * 3600,
+            width: 16,
+            height: 10,
+            file_size: 10,
+            mtime: 1_700_000_000,
+            blake3: None,
+        })
+        .unwrap()
+    }
+
+    fn photo_to_new(photo: &Photo) -> NewPhoto {
+        NewPhoto {
+            root_id: photo.root_id,
+            rel_path: photo.rel_path.clone(),
+            abs_path: photo.abs_path.clone(),
+            file_name: photo.file_name.clone(),
+            captured_at_utc: photo.captured_at_utc,
+            captured_at_local: photo.captured_at_local.clone(),
+            tz_offset_sec: photo.tz_offset_sec,
+            width: photo.width,
+            height: photo.height,
+            file_size: photo.file_size,
+            mtime: photo.mtime,
+            blake3: photo.blake3.clone(),
+        }
+    }
+
+    fn insert_deletion_request(db: &Db, photo_id: i64, reason: &str, status: &str) {
+        db.connection()
+            .execute(
+                "INSERT INTO deletion_requests(photo_id, reason, status, requested_at) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![photo_id, reason, status, "2026-10-29T00:00:00+00:00"],
+            )
+            .unwrap();
+    }
+
     /// Builds a version-3 database file directly from the V1-V3 DDL with one
     /// failed compression job. When `retry_count` is set, the retry column is
     /// added too, simulating an upgrade interrupted after the ALTER.
@@ -2276,6 +2334,83 @@ mod tests {
             )
             .unwrap();
         assert_eq!(index, 1);
+    }
+
+    #[test]
+    fn deleting_photo_is_hidden_from_index_search_and_counts() {
+        let db = Db::open_in_memory().unwrap();
+        let id = seed_photo(&db);
+        db.connection()
+            .execute(
+                "UPDATE photos SET status = 'deleting' WHERE id = ?1",
+                params![id],
+            )
+            .unwrap();
+        assert!(db.photo_index(PhotoSort::Newest).unwrap().is_empty());
+        assert_eq!(db.count_photos().unwrap(), 0);
+        assert_eq!(db.stats().unwrap().photo_count, 0);
+        assert!(
+            db.search_photos(&PhotoFilter::default())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn upsert_preserves_deleting_status_while_a_request_is_active() {
+        let db = Db::open_in_memory().unwrap();
+        let id = seed_photo(&db);
+        insert_deletion_request(&db, id, "manual", "pending");
+        db.connection()
+            .execute(
+                "UPDATE photos SET status = 'deleting' WHERE id = ?1",
+                params![id],
+            )
+            .unwrap();
+        let photo = db.photo_by_id(id).unwrap().unwrap();
+        db.upsert_photo(&photo_to_new(&photo)).unwrap();
+        assert_eq!(
+            db.photo_by_id(id).unwrap().unwrap().status,
+            PhotoStatus::Deleting
+        );
+        assert_eq!(db.count_photos().unwrap(), 0);
+    }
+
+    #[test]
+    fn upsert_preserves_replaced_display_while_auto_deletion_is_active() {
+        let db = Db::open_in_memory().unwrap();
+        let id = seed_photo(&db);
+        let derivative = db
+            .add_derivative(id, "/photos/a_webp.webp", "webp", 16, 10, 8, "p", "replace")
+            .unwrap();
+        db.set_replaced(id, derivative).unwrap();
+        insert_deletion_request(&db, id, "auto_replace", "pending");
+        let photo = db.photo_by_id(id).unwrap().unwrap();
+        db.upsert_photo(&photo_to_new(&photo)).unwrap();
+        let photo = db.photo_by_id(id).unwrap().unwrap();
+        assert_eq!(photo.status, PhotoStatus::Replaced);
+        assert_eq!(photo.display_derivative_id, Some(derivative));
+    }
+
+    #[test]
+    fn set_replaced_does_not_unhide_a_deleting_photo() {
+        let db = Db::open_in_memory().unwrap();
+        let id = seed_photo(&db);
+        let derivative = db
+            .add_derivative(id, "/photos/a_webp.webp", "webp", 16, 10, 8, "p", "replace")
+            .unwrap();
+        insert_deletion_request(&db, id, "manual", "pending");
+        db.connection()
+            .execute(
+                "UPDATE photos SET status = 'deleting' WHERE id = ?1",
+                params![id],
+            )
+            .unwrap();
+        assert!(db.set_replaced(id, derivative).unwrap());
+        let photo = db.photo_by_id(id).unwrap().unwrap();
+        assert_eq!(photo.status, PhotoStatus::Deleting);
+        assert_eq!(photo.display_derivative_id, Some(derivative));
+        assert_eq!(db.count_photos().unwrap(), 0);
     }
 
     #[test]
