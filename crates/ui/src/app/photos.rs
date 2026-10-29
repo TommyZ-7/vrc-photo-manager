@@ -476,6 +476,7 @@ impl App {
         let count = ids.len();
         let summary = self.db.deletion_job_summary(&ids).unwrap_or_default();
         let warning_lines = deletion_warning_lines(&summary);
+        let heading = deletion_warning_heading(summary.affected_photos, count);
         let description = if count == 1 {
             self.selected_photo
                 .as_ref()
@@ -525,7 +526,7 @@ impl App {
                 .child(
                     div()
                         .text_size(px(12.))
-                        .child(format!("{count} 枚に未完了のジョブがあります。")),
+                        .child(heading.clone()),
                 )
                 .children(
                     lines
@@ -797,6 +798,17 @@ impl App {
     }
 }
 
+/// Warning heading for a manual deletion that still has jobs. The first count
+/// is the number of selected photos with jobs, not the whole selection.
+fn deletion_warning_heading(affected: i64, selected: usize) -> String {
+    let selected = selected as i64;
+    if affected < selected {
+        format!("{affected} 枚に未完了のジョブがあります（選択 {selected} 枚）。")
+    } else {
+        format!("{selected} 枚に未完了のジョブがあります。")
+    }
+}
+
 /// Warning body for a manual deletion that still has jobs. An empty vector
 /// means the simple confirmation is enough.
 fn deletion_warning_lines(summary: &DeletionJobSummary) -> Vec<String> {
@@ -863,8 +875,22 @@ fn with_tag(tags: &[String], tag: &str) -> Option<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{deletion_warning_lines, normalize_note, with_tag, without_tag};
+    use super::{
+        deletion_warning_heading, deletion_warning_lines, normalize_note, with_tag, without_tag,
+    };
     use vrc_photo_core::model::{DeletionJobSummary, JobStatusCounts};
+
+    #[test]
+    fn deletion_warning_heading_counts_only_photos_with_jobs() {
+        assert_eq!(
+            deletion_warning_heading(2, 5),
+            "2 枚に未完了のジョブがあります（選択 5 枚）。"
+        );
+        assert_eq!(
+            deletion_warning_heading(3, 3),
+            "3 枚に未完了のジョブがあります。"
+        );
+    }
 
     #[test]
     fn notes_normalize_empty_to_none_and_trim_text() {
@@ -891,6 +917,7 @@ mod tests {
                 failed: 1,
             },
             send: JobStatusCounts::default(),
+            affected_photos: 1,
         };
         let lines = deletion_warning_lines(&summary);
         assert!(

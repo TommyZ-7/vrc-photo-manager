@@ -1670,6 +1670,7 @@ impl Db {
     /// bucket stays empty until #142 adds the outbox.
     pub fn deletion_job_summary(&self, photo_ids: &[i64]) -> Result<DeletionJobSummary> {
         let mut compression = JobStatusCounts::default();
+        let mut affected_photos = 0;
         for chunk in photo_ids.chunks(500) {
             if chunk.is_empty() {
                 continue;
@@ -1693,10 +1694,20 @@ impl Db {
                     QueueStatus::Completed | QueueStatus::Cancelled => {}
                 }
             }
+            affected_photos += self.conn.query_row(
+                &format!(
+                    "SELECT COUNT(DISTINCT photo_id) FROM compression_jobs \
+                     WHERE photo_id IN ({placeholders}) \
+                       AND status IN ('waiting', 'pending', 'processing', 'failed')"
+                ),
+                params_from_iter(chunk.iter().copied()),
+                |row| row.get::<_, i64>(0),
+            )?;
         }
         Ok(DeletionJobSummary {
             compression,
             send: JobStatusCounts::default(),
+            affected_photos,
         })
     }
 
@@ -2691,6 +2702,25 @@ mod tests {
         .unwrap()
     }
 
+    fn seed_other_photo(db: &Db) -> i64 {
+        let root = db.add_root("/photos-b", "reference").unwrap();
+        db.upsert_photo(&NewPhoto {
+            root_id: root,
+            rel_path: "b.png".to_string(),
+            abs_path: "/photos-b/b.png".to_string(),
+            file_name: "b.png".to_string(),
+            captured_at_utc: 1_700_000_001,
+            captured_at_local: "2026-10-21 21:14:04".to_string(),
+            tz_offset_sec: 9 * 3600,
+            width: 16,
+            height: 10,
+            file_size: 10,
+            mtime: 1_700_000_001,
+            blake3: None,
+        })
+        .unwrap()
+    }
+
     fn photo_to_new(photo: &Photo) -> NewPhoto {
         NewPhoto {
             root_id: photo.root_id,
@@ -3017,7 +3047,15 @@ mod tests {
         assert_eq!(summary.compression.waiting, 1);
         assert_eq!(summary.compression.failed, 1);
         assert_eq!(summary.send.total(), 0);
+        assert_eq!(summary.affected_photos, 1);
         assert!(summary.needs_warning());
+
+        let other = seed_other_photo(&db);
+        let summary = db.deletion_job_summary(&[id, other]).unwrap();
+        assert_eq!(
+            summary.affected_photos, 1,
+            "photos without jobs are excluded"
+        );
     }
 
     #[test]

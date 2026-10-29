@@ -498,6 +498,8 @@ impl JobStatusCounts {
 pub struct DeletionJobSummary {
     pub compression: JobStatusCounts,
     pub send: JobStatusCounts,
+    /// Distinct selected photos with at least one unfinished or failed job.
+    pub affected_photos: i64,
 }
 
 impl DeletionJobSummary {
