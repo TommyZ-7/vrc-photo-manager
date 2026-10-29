@@ -1720,11 +1720,20 @@ impl Db {
         Ok(blockers)
     }
 
+    /// Pending requests the executor can try now. Requests with an active
+    /// compression job are skipped so they cannot starve ready requests behind
+    /// the row limit. Requests with failed jobs stay in the list: the executor
+    /// still needs to transition them to `blocked`.
     pub fn pending_deletion_requests(&self, limit: i64) -> Result<Vec<DeletionRequest>> {
         let sql = "SELECT dr.id, dr.photo_id, p.file_name, dr.reason, dr.status, dr.force, \
                 dr.blocked_reason, dr.error, dr.requested_at, dr.started_at, dr.finished_at \
              FROM deletion_requests dr JOIN photos p ON p.id = dr.photo_id \
              WHERE dr.status = 'pending' \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM compression_jobs j \
+                   WHERE j.photo_id = dr.photo_id \
+                     AND j.status IN ('waiting', 'pending', 'processing') \
+               ) \
              ORDER BY dr.requested_at, dr.id LIMIT ?1";
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map(params![limit.max(1)], row_to_deletion_request)?;
@@ -3009,6 +3018,32 @@ mod tests {
         assert_eq!(summary.compression.failed, 1);
         assert_eq!(summary.send.total(), 0);
         assert!(summary.needs_warning());
+    }
+
+    #[test]
+    fn pending_deletion_requests_skip_requests_with_active_jobs() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let blocked = db
+            .upsert_photo(&sample_photo(root, "/photos/blocked.png", 1_700_000_000))
+            .unwrap();
+        let ready = db
+            .upsert_photo(&sample_photo(root, "/photos/ready.png", 1_700_000_001))
+            .unwrap();
+        db.save_profile(&profile("p", "P")).unwrap();
+
+        db.enqueue_job(blocked, "p", "keep").unwrap();
+        let blocked_request = db
+            .request_deletion(&[blocked], DeletionReason::Manual, false)
+            .unwrap()[0];
+        let ready_request = db
+            .request_deletion(&[ready], DeletionReason::Manual, false)
+            .unwrap()[0];
+
+        let pending = db.pending_deletion_requests(10).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, ready_request);
+        assert_ne!(pending[0].id, blocked_request);
     }
 
     #[test]

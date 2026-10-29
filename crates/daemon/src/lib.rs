@@ -3123,6 +3123,51 @@ mod tests {
     }
 
     #[test]
+    fn ready_deletion_after_more_than_hundred_blocked_requests_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let db = Db::open(&dir.path().join("library.db")).unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let mut request_ids = Vec::new();
+
+        for index in 0..=100i64 {
+            let name = format!("p{index:03}.png");
+            let photo_id = db
+                .upsert_photo(&vrc_photo_core::model::NewPhoto {
+                    root_id: root,
+                    rel_path: name.clone(),
+                    abs_path: format!("/photos/{name}"),
+                    file_name: name,
+                    captured_at_utc: 1_700_000_000 + index,
+                    captured_at_local: "2026-10-21 21:14:03".to_string(),
+                    tz_offset_sec: 9 * 3600,
+                    width: 16,
+                    height: 10,
+                    file_size: 10,
+                    mtime: 1_700_000_000 + index,
+                    blake3: None,
+                })
+                .unwrap();
+            if index < 100 {
+                db.enqueue_job(photo_id, "missing-profile", "keep").unwrap();
+            }
+            let request = db
+                .request_deletion(&[photo_id], DeletionReason::Manual, false)
+                .unwrap()[0];
+            request_ids.push(request);
+        }
+
+        daemon.process_deletions().unwrap();
+
+        let ready = db.deletion_request_by_id(request_ids[100]).unwrap().unwrap();
+        assert_eq!(ready.status, DeletionStatus::Completed);
+        for request_id in &request_ids[..100] {
+            let pending = db.deletion_request_by_id(*request_id).unwrap().unwrap();
+            assert_eq!(pending.status, DeletionStatus::Pending);
+        }
+    }
+
+    #[test]
     fn unknown_deletion_reason_is_blocked_without_deleting() {
         let dir = tempfile::tempdir().unwrap();
         let mut daemon = test_daemon(&dir);
