@@ -42,6 +42,7 @@ const SCAN_INTERVAL: Duration = Duration::from_millis(500);
 const LOG_INTERVAL: Duration = Duration::from_millis(750);
 const THUMBNAIL_PRUNE_BATCH: usize = 128;
 const THUMBNAIL_PRUNE_IDLE: Duration = Duration::from_millis(500);
+const THUMBNAIL_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Default)]
 pub struct DaemonStatus {
@@ -510,6 +511,10 @@ impl Daemon {
                 }
             }
         }
+        prune_thumbnail_cache(
+            &self.thumbnail_dir,
+            self.thumbnail_cache_limit.load(Ordering::Relaxed),
+        );
         self.ingest_logs()?;
         self.link_unlinked()?;
         self.refresh_status()?;
@@ -1685,11 +1690,59 @@ fn preferred_display_derivative<'a>(
         })
 }
 
+struct ThumbnailPruneSchedule {
+    batch: usize,
+    interval: Duration,
+    generated: usize,
+    last_prune: Instant,
+}
+
+impl ThumbnailPruneSchedule {
+    fn new(batch: usize, interval: Duration) -> Self {
+        Self {
+            batch,
+            interval,
+            generated: 0,
+            last_prune: Instant::now(),
+        }
+    }
+
+    fn note_generated(&mut self) -> bool {
+        self.generated += 1;
+        if self.generated >= self.batch {
+            self.note_pruned();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn periodic_due(&mut self) -> bool {
+        if self.last_prune.elapsed() < self.interval {
+            return false;
+        }
+        self.note_pruned();
+        true
+    }
+
+    fn has_pending(&self) -> bool {
+        self.generated > 0
+    }
+
+    fn note_pruned(&mut self) {
+        self.generated = 0;
+        self.last_prune = Instant::now();
+    }
+}
+
 fn thumbnail_cache_limit_bytes(megabytes: u64) -> u64 {
     megabytes.saturating_mul(1024 * 1024)
 }
 
 fn prune_thumbnail_cache(cache_dir: &Path, limit_bytes: u64) {
+    if limit_bytes == 0 {
+        return;
+    }
     match thumbnail::prune_thumbnails_in(cache_dir, limit_bytes) {
         Ok(report) if report.removed_files > 0 => tracing::info!(
             removed_files = report.removed_files,
@@ -1716,15 +1769,20 @@ fn thumbnail_loop(
     cache_limit: Arc<AtomicU64>,
 ) {
     let mut last_limit = cache_limit.load(Ordering::Relaxed);
-    let mut processed_since_prune = 0usize;
+    let mut schedule = ThumbnailPruneSchedule::new(THUMBNAIL_PRUNE_BATCH, THUMBNAIL_PRUNE_INTERVAL);
     prune_thumbnail_cache(&cache_dir, last_limit);
+    schedule.note_pruned();
 
     while running.load(Ordering::Relaxed) {
         let limit = cache_limit.load(Ordering::Relaxed);
         if limit != last_limit {
             last_limit = limit;
-            processed_since_prune = 0;
+            schedule.note_pruned();
             prune_thumbnail_cache(&cache_dir, limit);
+        }
+        if schedule.periodic_due() {
+            last_limit = cache_limit.load(Ordering::Relaxed);
+            prune_thumbnail_cache(&cache_dir, last_limit);
         }
         match rx.recv_timeout(THUMBNAIL_PRUNE_IDLE) {
             Ok(id) => {
@@ -1740,13 +1798,9 @@ fn thumbnail_loop(
                     let generated = !cache_path.is_file();
                     match thumbnail::ensure_thumbnail_in(id, Path::new(&path), &cache_dir) {
                         Ok(Some(_)) => {
-                            if generated {
-                                processed_since_prune += 1;
-                                if processed_since_prune >= THUMBNAIL_PRUNE_BATCH {
-                                    processed_since_prune = 0;
-                                    last_limit = cache_limit.load(Ordering::Relaxed);
-                                    prune_thumbnail_cache(&cache_dir, last_limit);
-                                }
+                            if generated && schedule.note_generated() {
+                                last_limit = cache_limit.load(Ordering::Relaxed);
+                                prune_thumbnail_cache(&cache_dir, last_limit);
                             }
                         }
                         Ok(None) => tracing::debug!(
@@ -1764,8 +1818,8 @@ fn thumbnail_loop(
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if processed_since_prune > 0 {
-                    processed_since_prune = 0;
+                if schedule.has_pending() {
+                    schedule.note_pruned();
                     last_limit = cache_limit.load(Ordering::Relaxed);
                     prune_thumbnail_cache(&cache_dir, last_limit);
                 }
@@ -2946,6 +3000,63 @@ mod tests {
         );
         assert!(cache.join("3.webp").exists());
         daemon.stop_workers();
+    }
+
+    #[test]
+    fn run_once_prunes_thumbnail_cache_after_direct_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let cache = dir.path().join("thumbnails");
+        std::fs::create_dir_all(&cache).unwrap();
+        let now = SystemTime::now();
+        for (id, age) in [(1, 30), (2, 20), (3, 10)] {
+            write_thumbnail_cache_entry(
+                &cache.join(format!("{id}.webp")),
+                600_000,
+                now - Duration::from_secs(age),
+            );
+        }
+        save_daemon_settings(&daemon, |settings| settings.thumbnail_cache_mb = 1);
+        daemon.refresh_compression_settings();
+        daemon.set_thumbnail_dir(cache.clone());
+        write_photo(
+            &dir.path()
+                .join("photos/VRChat_2026-10-21_21-24-00.000_4x3.png"),
+        );
+
+        daemon.run_once().unwrap();
+
+        assert!(!cache.join("1.webp").exists());
+        assert!(!cache.join("2.webp").exists());
+        assert!(cache.join("3.webp").exists());
+    }
+
+    #[test]
+    fn thumbnail_prune_schedule_fires_after_a_batch() {
+        let mut schedule = ThumbnailPruneSchedule::new(2, Duration::from_secs(3600));
+
+        assert!(!schedule.note_generated());
+        assert!(schedule.note_generated());
+        assert!(!schedule.has_pending());
+    }
+
+    #[test]
+    fn thumbnail_prune_schedule_fires_when_the_interval_elapses() {
+        let mut schedule = ThumbnailPruneSchedule::new(128, Duration::from_millis(5));
+
+        assert!(!schedule.periodic_due());
+        thread::sleep(Duration::from_millis(10));
+        assert!(schedule.periodic_due());
+    }
+
+    #[test]
+    fn thumbnail_prune_schedule_resets_pending_after_an_idle_prune() {
+        let mut schedule = ThumbnailPruneSchedule::new(128, Duration::from_secs(3600));
+
+        assert!(!schedule.note_generated());
+        assert!(schedule.has_pending());
+        schedule.note_pruned();
+        assert!(!schedule.has_pending());
     }
 
     #[test]

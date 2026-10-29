@@ -2,7 +2,7 @@
 //! shared by the photo grid and the preview viewer.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use gpui_kit::RenderImage;
@@ -119,10 +119,32 @@ pub(crate) fn decode_thumbnail(
     source: &Path,
     cache_dir: Option<&Path>,
 ) -> Option<(u32, image::RgbaImage)> {
+    decode_thumbnail_with(
+        id,
+        cache_path,
+        source,
+        cache_dir,
+        thumbnail::ensure_thumbnail_in,
+        decode_thumbnail_file,
+    )
+}
+
+fn decode_thumbnail_with<Ensure, Decode>(
+    id: i64,
+    cache_path: &Path,
+    source: &Path,
+    cache_dir: Option<&Path>,
+    ensure_thumbnail: Ensure,
+    decode_thumbnail_file: Decode,
+) -> Option<(u32, image::RgbaImage)>
+where
+    Ensure: Fn(i64, &Path, &Path) -> vrc_photo_core::error::Result<Option<PathBuf>>,
+    Decode: Fn(i64, &Path) -> Option<(u32, image::RgbaImage)>,
+{
     let path = match cache_dir {
         Some(cache_dir) => {
             let had_cache = cache_path.is_file();
-            let path = match thumbnail::ensure_thumbnail_in(id, source, cache_dir) {
+            let path = match ensure_thumbnail(id, source, cache_dir) {
                 Ok(Some(path)) => path,
                 Ok(None) => {
                     tracing::debug!(
@@ -149,28 +171,26 @@ pub(crate) fn decode_thumbnail(
                     }
                     return Some(decoded);
                 }
-                None if !path.is_file() => {
-                    match thumbnail::ensure_thumbnail_in(id, source, cache_dir) {
-                        Ok(Some(path)) => path,
-                        Ok(None) => {
-                            tracing::debug!(
-                                photo_id = id,
-                                path = %source.display(),
-                                "thumbnail source disappeared during decode"
-                            );
-                            return None;
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                %error,
-                                photo_id = id,
-                                path = %source.display(),
-                                "cannot regenerate thumbnail"
-                            );
-                            return None;
-                        }
+                None if !path.is_file() => match ensure_thumbnail(id, source, cache_dir) {
+                    Ok(Some(path)) => path,
+                    Ok(None) => {
+                        tracing::debug!(
+                            photo_id = id,
+                            path = %source.display(),
+                            "thumbnail source disappeared during decode"
+                        );
+                        return None;
                     }
-                }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            photo_id = id,
+                            path = %source.display(),
+                            "cannot regenerate thumbnail"
+                        );
+                        return None;
+                    }
+                },
                 None => return None,
             }
         }
@@ -349,6 +369,58 @@ mod tests {
         decode_thumbnail(8, &cache_path, &source, Some(&cache)).expect("cached");
 
         assert!(std::fs::metadata(&cache_path).unwrap().modified().unwrap() > before);
+    }
+
+    #[test]
+    fn decode_thumbnail_retries_after_the_resolved_file_disappears() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.webp");
+        let regenerated = dir.path().join("regenerated.webp");
+        std::fs::write(&regenerated, b"not decoded here").unwrap();
+        let calls = std::cell::Cell::new(0);
+        let ensure = |_id: i64, _source: &Path, _cache: &Path| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                Ok(Some(missing.clone()))
+            } else {
+                Ok(Some(regenerated.clone()))
+            }
+        };
+        let decode = |_id: i64, path: &Path| {
+            if path == missing {
+                None
+            } else {
+                Some((0x112233, image::RgbaImage::new(1, 1)))
+            }
+        };
+
+        let decoded = decode_thumbnail_with(
+            1,
+            &missing,
+            Path::new("/no/such/source.png"),
+            Some(dir.path()),
+            ensure,
+            decode,
+        )
+        .expect("retried thumbnail");
+
+        assert_eq!(decoded.0, 0x112233);
+        assert_eq!(calls.get(), 2);
+    }
+
+    #[test]
+    fn decode_thumbnail_without_cache_dir_does_not_generate() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert!(
+            decode_thumbnail(
+                99,
+                &dir.path().join("missing.png"),
+                Path::new("/no/such/source.png"),
+                None,
+            )
+            .is_none()
+        );
     }
 
     #[test]
