@@ -41,6 +41,10 @@ const PARSER_VERSION: &str = "1";
 const MAX_SKIPPED_DETAILS: usize = 5;
 const SCAN_INTERVAL: Duration = Duration::from_millis(500);
 const LOG_INTERVAL: Duration = Duration::from_millis(750);
+/// How often the daemon re-reads the compression settings and thumbnail
+/// cache limit the UI saved. Runs on every loop iteration, paused or not,
+/// so a change is applied within roughly one interval plus one loop wait.
+const SETTINGS_INTERVAL: Duration = Duration::from_millis(500);
 const THUMBNAIL_PRUNE_BATCH: usize = 128;
 const THUMBNAIL_PRUNE_IDLE: Duration = Duration::from_millis(500);
 const THUMBNAIL_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
@@ -589,6 +593,7 @@ impl Daemon {
             if let Err(error) = self.poll_commands() {
                 tracing::error!(%error, "cannot handle daemon commands");
             }
+            self.refresh_periodic_settings();
             if self
                 .status
                 .lock()
@@ -623,14 +628,6 @@ impl Daemon {
                     tracing::warn!(%error, "cannot verify replaced photo assets");
                 }
                 self.last_asset_check = Instant::now();
-            }
-            if self.last_autostart_check.elapsed() >= Duration::from_secs(10) {
-                self.refresh_autostart_setting();
-                self.last_autostart_check = std::time::Instant::now();
-            }
-            if self.last_settings_check.elapsed() >= Duration::from_secs(2) {
-                self.refresh_compression_settings();
-                self.last_settings_check = Instant::now();
             }
             if self.last_heartbeat.elapsed() >= Duration::from_secs(10) {
                 self.write_heartbeat();
@@ -1251,6 +1248,20 @@ impl Daemon {
                 }
             }
             Err(error) => tracing::warn!(%error, "cannot lock database for supervisor"),
+        }
+    }
+
+    /// Runs the timed settings refreshes. Called on every main-loop
+    /// iteration, including while paused, so a settings change the UI saved
+    /// is applied promptly instead of waiting until the daemon resumes.
+    fn refresh_periodic_settings(&mut self) {
+        if self.last_settings_check.elapsed() >= SETTINGS_INTERVAL {
+            self.refresh_compression_settings();
+            self.last_settings_check = Instant::now();
+        }
+        if self.last_autostart_check.elapsed() >= Duration::from_secs(10) {
+            self.refresh_autostart_setting();
+            self.last_autostart_check = std::time::Instant::now();
         }
     }
 
@@ -1893,13 +1904,20 @@ fn run_deletions_once(db: &Arc<Mutex<Db>>) -> Result<usize> {
     let mut executed = 0;
     for pending in requests {
         if pending.reason == DeletionReason::Unknown {
-            let db = db.lock().unwrap();
-            db.block_deletion(pending.id, "unknown_reason", None)?;
-            tracing::warn!(
-                request = pending.id,
-                photo_id = pending.photo_id,
-                "unknown deletion reason; request blocked"
-            );
+            // The snapshot may be stale: the UI can upgrade the request to
+            // manual after collection. Only block when the stored reason is
+            // still unknown.
+            let blocked = {
+                let db = db.lock().unwrap();
+                db.block_deletion_if_unknown(pending.id)?
+            };
+            if blocked {
+                tracing::warn!(
+                    request = pending.id,
+                    photo_id = pending.photo_id,
+                    "unknown deletion reason; request blocked"
+                );
+            }
             continue;
         }
         let blocked = {
@@ -3773,6 +3791,53 @@ mod tests {
     }
 
     #[test]
+    fn unknown_reason_upgraded_to_manual_is_executed_not_blocked() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let original = dir
+            .path()
+            .join("photos/VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&original);
+        daemon.run_once().unwrap();
+
+        let db = Db::open(dir.path().join("library.db")).unwrap();
+        let photo = db
+            .photo_by_path(original.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        db.connection()
+            .execute(
+                "INSERT INTO deletion_requests(photo_id, reason, status, force, requested_at) \
+                 VALUES (?1, 'future_reason', 'pending', 0, ?2)",
+                (photo.id, chrono::Utc::now().to_rfc3339()),
+            )
+            .unwrap();
+        // The UI upgrades the request to manual before the executor acts on
+        // its snapshot of the unknown reason.
+        let request_id = db
+            .request_deletion(
+                &[photo.id],
+                vrc_photo_core::model::DeletionReason::Manual,
+                false,
+            )
+            .unwrap()[0];
+
+        daemon.process_deletions().unwrap();
+
+        assert!(
+            !original.exists(),
+            "the upgraded manual deletion must remove the file"
+        );
+        let request = db.deletion_request_by_id(request_id).unwrap().unwrap();
+        assert_eq!(
+            request.reason,
+            vrc_photo_core::model::DeletionReason::Manual
+        );
+        assert_eq!(request.status, DeletionStatus::Completed);
+        assert!(request.blocked_reason.is_none());
+    }
+
+    #[test]
     fn auto_replace_keeps_the_preferred_display_derivative() {
         let dir = tempfile::tempdir().unwrap();
         let mut daemon = multi_profile_test_daemon(&dir);
@@ -4390,6 +4455,32 @@ mod tests {
         assert_eq!(job.policy, "replace");
         assert_eq!(job.status, QueueStatus::Waiting);
         assert!(db.next_pending_job().unwrap().is_none());
+    }
+
+    #[test]
+    fn periodic_settings_refresh_applies_saved_thumbnail_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        save_daemon_settings(&daemon, |settings| settings.thumbnail_cache_mb = 1);
+        // The main loop calls this on every iteration, paused or not; make
+        // the refresh due as it is half a second after the previous one.
+        daemon.last_settings_check = Instant::now() - Duration::from_secs(5);
+        daemon.refresh_periodic_settings();
+        assert_eq!(
+            daemon.thumbnail_cache_limit.load(Ordering::Relaxed),
+            1024 * 1024
+        );
+    }
+
+    #[test]
+    fn periodic_settings_refresh_keeps_limit_until_due() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let before = daemon.thumbnail_cache_limit.load(Ordering::Relaxed);
+        save_daemon_settings(&daemon, |settings| settings.thumbnail_cache_mb = 1);
+        daemon.last_settings_check = Instant::now();
+        daemon.refresh_periodic_settings();
+        assert_eq!(daemon.thumbnail_cache_limit.load(Ordering::Relaxed), before);
     }
 
     #[test]

@@ -10,7 +10,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.9.0"
+version = "0.9.1"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/TommyZ7/vrc-photo-manager"
@@ -18,25 +18,26 @@ authors = ["TommyZ7"]
 
 [workspace.dependencies]
 anyhow = "1"
-base64 = "0.22"
+base64 = "0.23"
 blake3 = "1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
-dirs = "6"
+dirs = "7"
 hex = "0.4"
 interprocess = "2.4"
+mimalloc = "0.1"
 minisign-verify = "0.3"
 regex = "1"
 semver = "1"
-sha2 = "0.10"
-rusqlite = { version = "0.40", features = ["bundled"] }
+sha2 = "0.11"
+rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 png = "0.18"
-quick-xml = "0.41"
+quick-xml = "0.42"
 thiserror = "2"
 imgref = "1"
-jpegxl-rs = { version = "0.14", features = ["vendored"] }
+jpegxl-rs = { version = "0.16", features = ["vendored"] }
 ravif = { version = "0.13", default-features = false }
 rgb = { version = "0.8", features = ["bytemuck"] }
 webp = "0.3"
