@@ -256,10 +256,9 @@ fn encode_jxl(image: &DynamicImage, quality: u8, lossless: bool, speed: u8) -> R
         encoder
     };
 
-    let result: jpegxl_rs::encode::EncoderResult<u8> = encoder
+    encoder
         .encode(rgb.as_ref(), width, height)
-        .map_err(|error| CoreError::Invalid(format!("JXL encode failed: {error}")))?;
-    Ok(result.data)
+        .map_err(|error| CoreError::Invalid(format!("JXL encode failed: {error}")))
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
