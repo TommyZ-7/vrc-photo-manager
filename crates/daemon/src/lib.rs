@@ -488,10 +488,8 @@ impl Daemon {
                 self.link_unlinked()?;
             }
             DaemonCommand::Relink => self.link_unlinked()?,
-            // A targeted scan behaves like a rescan until the dedicated
-            // single-root path lands in the next task.
-            DaemonCommand::ScanRoot { .. } => {
-                self.scan_photos()?;
+            DaemonCommand::ScanRoot { path } => {
+                self.scan_root_photos(PathBuf::from(path))?;
                 self.link_unlinked()?;
             }
         }
@@ -811,14 +809,22 @@ impl Daemon {
     }
 
     fn scan_photos(&mut self) -> Result<ScanReport> {
-        self.begin_scan();
-        let result = self.scan_photos_inner();
+        let roots = self.settings.photo_roots();
+        self.scan_roots(roots, true)
+    }
+
+    fn scan_root_photos(&mut self, root: PathBuf) -> Result<ScanReport> {
+        self.scan_roots(vec![root], false)
+    }
+
+    fn scan_roots(&mut self, roots: Vec<PathBuf>, full_scan: bool) -> Result<ScanReport> {
+        self.begin_scan(roots.len());
+        let result = self.scan_roots_inner(roots, full_scan);
         self.finish_scan(&result);
         result
     }
 
-    fn begin_scan(&self) {
-        let roots = self.settings.photo_roots().len();
+    fn begin_scan(&self, roots: usize) {
         {
             let mut status = self.status.lock().unwrap();
             status.scanning = true;
@@ -860,14 +866,13 @@ impl Daemon {
         });
     }
 
-    fn scan_photos_inner(&mut self) -> Result<ScanReport> {
+    fn scan_roots_inner(&mut self, roots: Vec<PathBuf>, full_scan: bool) -> Result<ScanReport> {
         self.refresh_compression_settings();
         let mut report = ScanReport::default();
-        let roots = self.settings.photo_roots();
         let root_count = roots.len();
         if !roots.is_empty() {
             let db = self.db.lock().unwrap();
-            let initial_scan = db.count_photos()? == 0;
+            let initial_scan = full_scan && db.count_photos()? == 0;
             let mut changed = false;
             let mut missing_ids = Vec::new();
             for (index, root) in roots.into_iter().enumerate() {
@@ -934,9 +939,10 @@ impl Daemon {
                         }
                     }
                 }
-                changed |= root_report.indexed > 0;
+                changed |= root_report.modified > 0;
                 report.found += root_report.found;
                 report.indexed += root_report.indexed;
+                report.modified += root_report.modified;
                 report.skipped += root_report.skipped;
                 report.new_ids.extend(root_report.new_ids);
                 report.rebound_ids.extend(root_report.rebound_ids);
@@ -970,7 +976,7 @@ impl Daemon {
         }
         self.verify_replaced_assets()?;
         self.report_scan_outcome(&report)?;
-        if report.indexed > 0 {
+        if report.modified > 0 {
             self.link_unlinked()?;
         }
         if let Some(tx) = &self.thumbnail_tx {
@@ -4286,6 +4292,158 @@ mod tests {
             .unwrap();
         assert!(cancelled.finished_at.is_some());
         assert!(db.claim_deletion(request).unwrap().is_some());
+    }
+
+    #[test]
+    fn scan_root_command_scopes_missing_detection() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_a = dir.path().join("photos");
+        let root_b = dir.path().join("imported");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&root_b).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let b_path = root_b.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&b_path);
+        let db_path = dir.path().join("library.db");
+        let mut daemon = Daemon::open(&db_path, Some(root_a.clone()), Some(log_dir)).unwrap();
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+        save_daemon_settings(&daemon, |settings| {
+            settings
+                .photo_roots
+                .push(root_b.to_string_lossy().to_string());
+        });
+        {
+            let db = Db::open(&db_path).unwrap();
+            db.request_daemon_command(DaemonCommand::Rescan).unwrap();
+        }
+        daemon.poll_commands().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        assert_eq!(db.count_photos().unwrap(), 1);
+        std::fs::remove_file(&b_path).unwrap();
+        let a_path = root_a.join("VRChat_2026-10-21_21-25-00.000_4x3.png");
+        // Distinct pixels and dimensions keep this from being a rebind
+        // candidate for the removed B photo.
+        image::RgbaImage::from_pixel(8, 5, image::Rgba([1, 2, 3, 255]))
+            .save(&a_path)
+            .unwrap();
+        assert!(
+            db.request_daemon_scan_root(root_a.to_str().unwrap())
+                .unwrap()
+        );
+        daemon.poll_commands().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        assert_eq!(
+            db.photo_by_path(b_path.to_str().unwrap())
+                .unwrap()
+                .unwrap()
+                .status,
+            PhotoStatus::Present
+        );
+        assert!(
+            db.photo_by_path(a_path.to_str().unwrap())
+                .unwrap()
+                .is_some()
+        );
+
+        db.request_daemon_command(DaemonCommand::Rescan).unwrap();
+        daemon.poll_commands().unwrap();
+        assert_eq!(
+            db.photo_by_path(b_path.to_str().unwrap())
+                .unwrap()
+                .unwrap()
+                .status,
+            PhotoStatus::Missing
+        );
+    }
+
+    #[test]
+    fn scan_root_command_indexes_an_unconfigured_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let imported = dir.path().join("imported");
+        std::fs::create_dir_all(&imported).unwrap();
+        let path = imported.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&path);
+        {
+            let db = daemon.db.lock().unwrap();
+            db.request_daemon_scan_root(imported.to_str().unwrap())
+                .unwrap();
+        }
+        daemon.poll_commands().unwrap();
+
+        let db = daemon.db.lock().unwrap();
+        assert!(db.photo_by_path(path.to_str().unwrap()).unwrap().is_some());
+        assert_eq!(db.count_photos().unwrap(), 1);
+    }
+
+    #[test]
+    fn scan_root_command_enqueues_auto_jobs_without_backlog() {
+        let dir = tempfile::tempdir().unwrap();
+        let root_a = dir.path().join("photos");
+        let root_b = dir.path().join("imported");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&root_a).unwrap();
+        std::fs::create_dir_all(&root_b).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        write_photo(&root_b.join("VRChat_2026-10-21_21-24-00.000_4x3.png"));
+        let db_path = dir.path().join("library.db");
+        add_auto_profile(&db_path);
+        let mut daemon = Daemon::open(&db_path, Some(root_a), Some(log_dir)).unwrap();
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+        save_daemon_settings(&daemon, |settings| {
+            settings.auto_compress_backlog = false;
+            settings
+                .photo_roots
+                .push(root_b.to_string_lossy().to_string());
+        });
+        {
+            let db = Db::open(&db_path).unwrap();
+            db.request_daemon_scan_root(root_b.to_str().unwrap())
+                .unwrap();
+        }
+        daemon.poll_commands().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        assert_eq!(db.count_jobs(QueueStatus::Pending).unwrap(), 1);
+    }
+
+    #[test]
+    fn unchanged_rescan_does_not_bump_the_library_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        write_photo(
+            &dir.path()
+                .join("photos/VRChat_2026-10-21_21-14-03.221_4x3.png"),
+        );
+        daemon.run_once().unwrap();
+        let revision = {
+            let db = daemon.db.lock().unwrap();
+            db.library_revision().unwrap()
+        };
+        daemon.run_once().unwrap();
+        let db = daemon.db.lock().unwrap();
+        assert_eq!(db.library_revision().unwrap(), revision);
+    }
+
+    #[test]
+    fn scan_root_photos_reports_a_single_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        write_photo(
+            &dir.path()
+                .join("photos/VRChat_2026-10-21_21-14-03.221_4x3.png"),
+        );
+        let events = daemon.events.subscribe();
+        let root = dir.path().join("photos");
+        let report = daemon.scan_root_photos(root).unwrap();
+        assert_eq!(report.indexed, 1);
+        match events.try_recv().unwrap() {
+            Event::ScanStarted { roots } => assert_eq!(roots, 1),
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[test]
