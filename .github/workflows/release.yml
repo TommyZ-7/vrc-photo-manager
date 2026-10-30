@@ -34,7 +34,7 @@ jobs:
               exit 0
               ;;
           esac
-          git fetch origin "${{ github.base_ref }}" --depth=1
+          git fetch origin "${{ github.base_ref }}"
           FILES=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
           echo "Changed files:"
           echo "$FILES"
