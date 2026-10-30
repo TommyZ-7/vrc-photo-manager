@@ -41,6 +41,10 @@ const PARSER_VERSION: &str = "1";
 const MAX_SKIPPED_DETAILS: usize = 5;
 const SCAN_INTERVAL: Duration = Duration::from_millis(500);
 const LOG_INTERVAL: Duration = Duration::from_millis(750);
+/// How often the daemon re-reads the compression settings and thumbnail
+/// cache limit the UI saved. Runs on every loop iteration, paused or not,
+/// so a change is applied within roughly one interval plus one loop wait.
+const SETTINGS_INTERVAL: Duration = Duration::from_millis(500);
 const THUMBNAIL_PRUNE_BATCH: usize = 128;
 const THUMBNAIL_PRUNE_IDLE: Duration = Duration::from_millis(500);
 const THUMBNAIL_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
@@ -589,6 +593,7 @@ impl Daemon {
             if let Err(error) = self.poll_commands() {
                 tracing::error!(%error, "cannot handle daemon commands");
             }
+            self.refresh_periodic_settings();
             if self
                 .status
                 .lock()
@@ -623,14 +628,6 @@ impl Daemon {
                     tracing::warn!(%error, "cannot verify replaced photo assets");
                 }
                 self.last_asset_check = Instant::now();
-            }
-            if self.last_autostart_check.elapsed() >= Duration::from_secs(10) {
-                self.refresh_autostart_setting();
-                self.last_autostart_check = std::time::Instant::now();
-            }
-            if self.last_settings_check.elapsed() >= Duration::from_secs(2) {
-                self.refresh_compression_settings();
-                self.last_settings_check = Instant::now();
             }
             if self.last_heartbeat.elapsed() >= Duration::from_secs(10) {
                 self.write_heartbeat();
@@ -1251,6 +1248,20 @@ impl Daemon {
                 }
             }
             Err(error) => tracing::warn!(%error, "cannot lock database for supervisor"),
+        }
+    }
+
+    /// Runs the timed settings refreshes. Called on every main-loop
+    /// iteration, including while paused, so a settings change the UI saved
+    /// is applied promptly instead of waiting until the daemon resumes.
+    fn refresh_periodic_settings(&mut self) {
+        if self.last_settings_check.elapsed() >= SETTINGS_INTERVAL {
+            self.refresh_compression_settings();
+            self.last_settings_check = Instant::now();
+        }
+        if self.last_autostart_check.elapsed() >= Duration::from_secs(10) {
+            self.refresh_autostart_setting();
+            self.last_autostart_check = std::time::Instant::now();
         }
     }
 
@@ -4390,6 +4401,32 @@ mod tests {
         assert_eq!(job.policy, "replace");
         assert_eq!(job.status, QueueStatus::Waiting);
         assert!(db.next_pending_job().unwrap().is_none());
+    }
+
+    #[test]
+    fn periodic_settings_refresh_applies_saved_thumbnail_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        save_daemon_settings(&daemon, |settings| settings.thumbnail_cache_mb = 1);
+        // The main loop calls this on every iteration, paused or not; make
+        // the refresh due as it is half a second after the previous one.
+        daemon.last_settings_check = Instant::now() - Duration::from_secs(5);
+        daemon.refresh_periodic_settings();
+        assert_eq!(
+            daemon.thumbnail_cache_limit.load(Ordering::Relaxed),
+            1024 * 1024
+        );
+    }
+
+    #[test]
+    fn periodic_settings_refresh_keeps_limit_until_due() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let before = daemon.thumbnail_cache_limit.load(Ordering::Relaxed);
+        save_daemon_settings(&daemon, |settings| settings.thumbnail_cache_mb = 1);
+        daemon.last_settings_check = Instant::now();
+        daemon.refresh_periodic_settings();
+        assert_eq!(daemon.thumbnail_cache_limit.load(Ordering::Relaxed), before);
     }
 
     #[test]
