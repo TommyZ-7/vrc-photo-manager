@@ -291,7 +291,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{GenericImageView as _, Rgb, RgbImage, Rgba, RgbaImage};
+    use image::{GenericImageView as _, ImageBuffer, Rgb, RgbImage, Rgba, RgbaImage};
     use tempfile::tempdir;
 
     fn sample(path: &Path) {
@@ -350,6 +350,18 @@ mod tests {
         assert!(decoded.get_pixel(7, 0)[3] > 223, "opaque pixel lost alpha");
         assert!(decoded.get_pixel(0, 0)[0] > 200, "channel order changed");
         assert!(decoded.get_pixel(7, 0)[2] > 200, "channel order changed");
+    }
+
+    #[test]
+    fn sixteen_bit_images_use_the_conversion_paths() {
+        let image = DynamicImage::ImageRgb16(ImageBuffer::from_fn(8, 8, |x, y| {
+            Rgb([(x * 1000) as u16, (y * 1000) as u16, ((x + y) * 500) as u16])
+        }));
+
+        assert!(!encode_jpeg(&image, 80).unwrap().is_empty());
+        assert!(!encode_webp(&image, 80, false).unwrap().is_empty());
+        assert!(!encode_avif(&image, 60, false, 8).unwrap().is_empty());
+        assert!(!encode_jxl(&image, 80, false, 8).unwrap().is_empty());
     }
 
     #[test]
