@@ -16,6 +16,7 @@ async-channel = "2.5"
 chrono.workspace = true
 gpui-kit = { version = "=0.8.1", features = ["gpui-fast"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+mimalloc.workspace = true
 rfd = "0.17"
 semver.workspace = true
 smallvec = "1"
