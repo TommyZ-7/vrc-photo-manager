@@ -85,7 +85,7 @@ pub fn parse_xmp(xml: &str) -> Option<XmpMetadata> {
             Ok(Event::Start(element)) | Ok(Event::Empty(element)) => {
                 for attribute in element.attributes().flatten() {
                     let key = attribute.key.local_name();
-                    let key = std::str::from_utf8(key.as_ref()).ok();
+                    let key = Some(key.as_ref());
                     let value = attribute
                         .normalized_value(quick_xml::XmlVersion::Implicit1_0)
                         .ok()?
