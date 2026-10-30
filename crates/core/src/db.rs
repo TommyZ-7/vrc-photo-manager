@@ -275,6 +275,18 @@ pub struct Db {
     path: Option<PathBuf>,
 }
 
+/// The database state a rescan compares against a scanned file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PhotoScanState {
+    pub id: i64,
+    pub abs_path: String,
+    pub file_size: u64,
+    pub mtime: i64,
+    pub blake3: Option<String>,
+    pub status: PhotoStatus,
+    pub display_derivative_id: Option<i64>,
+}
+
 impl Db {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
@@ -747,6 +759,37 @@ impl Db {
             .prepare("SELECT id, abs_path FROM photos WHERE root_id = ?1 AND status = 'present'")?;
         let rows = stmt.query_map(params![root_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Fetches the row state a rescan needs for every path, in chunks that
+    /// stay under SQLite's variable limit. Missing paths are simply absent
+    /// from the map.
+    pub fn photo_scan_states(&self, paths: &[String]) -> Result<HashMap<String, PhotoScanState>> {
+        let mut states = HashMap::with_capacity(paths.len());
+        for chunk in paths.chunks(500) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT id, abs_path, file_size, mtime, blake3, status, display_derivative_id \
+                 FROM photos WHERE abs_path IN ({placeholders})"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(params_from_iter(chunk.iter()), |row| {
+                Ok(PhotoScanState {
+                    id: row.get(0)?,
+                    abs_path: row.get(1)?,
+                    file_size: row.get::<_, i64>(2)? as u64,
+                    mtime: row.get(3)?,
+                    blake3: row.get(4)?,
+                    status: PhotoStatus::parse(&row.get::<_, String>(5)?),
+                    display_derivative_id: row.get(6)?,
+                })
+            })?;
+            for state in rows {
+                let state = state?;
+                states.insert(state.abs_path.clone(), state);
+            }
+        }
+        Ok(states)
     }
 
     pub fn count_photos(&self) -> Result<i64> {
@@ -3995,6 +4038,47 @@ mod tests {
             missing.iter().map(|photo| photo.id).collect::<Vec<_>>(),
             vec![ids[500], ids[0]]
         );
+    }
+
+    #[test]
+    fn photo_scan_states_reads_all_chunks_with_metadata() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let mut paths = Vec::new();
+        let mut missing_id = 0;
+        for index in 0..501i64 {
+            let path = format!("/photos/{index:04}.png");
+            let id = db
+                .upsert_photo(&NewPhoto {
+                    root_id: root,
+                    rel_path: format!("{index:04}.png"),
+                    abs_path: path.clone(),
+                    file_name: format!("{index:04}.png"),
+                    captured_at_utc: 1_700_000_000 + index,
+                    captured_at_local: "2026-10-21 21:14:03".to_string(),
+                    tz_offset_sec: 0,
+                    width: 4,
+                    height: 3,
+                    file_size: 100 + index as u64,
+                    mtime: 200 + index,
+                    blake3: (index == 0).then(|| "hash".to_string()),
+                })
+                .unwrap();
+            if index == 500 {
+                missing_id = id;
+            }
+            paths.push(path);
+        }
+        db.mark_missing(missing_id).unwrap();
+
+        let states = db.photo_scan_states(&paths).unwrap();
+        assert_eq!(states.len(), 501);
+        let first = &states["/photos/0000.png"];
+        assert_eq!(first.file_size, 100);
+        assert_eq!(first.mtime, 200);
+        assert_eq!(first.blake3.as_deref(), Some("hash"));
+        assert_eq!(first.status, PhotoStatus::Present);
+        assert_eq!(states["/photos/0500.png"].status, PhotoStatus::Missing);
     }
 
     /// Seeds 100k synthetic rows in one transaction and measures the shipped
