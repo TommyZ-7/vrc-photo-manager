@@ -29,8 +29,8 @@ cargo test --workspace
 
 | ファイル | 内容 |
 |---|---|
-| `db.rs` | マイグレーション（V4の再実行を含む）、写真UPSERT、文脈/プレイヤー、検索、キューの原子的取得、写真単位のバッチ取得、強制削除判定、アクティブジョブのみのfailed化、`retry_count` と再試行上限、`daemon_errors` のUPSERT/削除、`daemon_commands` の重複排除と取り出し |
-| `scanner.rs` | フォルダ走査、単一ファイル索引、compressed除外、読めないファイル・ディレクトリの失敗記録、walking/indexing進捗コールバック |
+| `db.rs` | マイグレーション（V4の再実行・V8のpayload列を含む）、写真UPSERT、文脈/プレイヤー、検索、キューの原子的取得、写真単位のバッチ取得、強制削除判定、アクティブジョブのみのfailed化、`retry_count` と再試行上限、`daemon_errors` のUPSERT/削除、`daemon_commands` の重複排除と取り出し、`scan_root` payloadの往復、パス集合の一括状態取得 |
+| `scanner.rs` | フォルダ走査、単一ファイル索引、compressed除外、読めないファイル・ディレクトリの失敗記録、walking/indexing進捗コールバック、無変更写真のスキップ（再ハッシュなし）、変更ファイルの再索引、missingからの復帰、ネストルートのスキップ |
 | `photo_filename.rs` | VRChatファイル名、無効名、拡張子 |
 | `log_parser.rs` | イベント解析、セッション、入退室 |
 | `linker.rs` | ログ紐付け、XMPのみの紐付け |
@@ -76,6 +76,10 @@ cargo test --workspace
 - 不正なログフォルダで `log` エラーを記録し、正しいフォルダと `relog` で消える。
 - 失敗ジョブをDBで作り、再試行 → 圧縮 → 完了まで通す。
 - `daemon_commands` の処理で設定を再読込し、新しいルートの監視を張り直す。
+- `scan_root` が対象ルートだけを索引し、他ルートの写真をmissingにしないこと。
+- 設定に無い実在ディレクトリの `scan_root` が索引されること。
+- `scan_root` の新規写真が `auto_compress_backlog=false` でも自動圧縮に載ること。
+- 無変更の再スキャンで `library_revision` が上がらないこと。
 - `run_once` が処理前にコマンドを消化する。
 - IPCサーバーのhello/status、`wake_commands` がDBを触らずにwakeすること、`set_paused` の状態変更とイベント、`shutdown` のrunning/wake。
 - `scan_photos` のScanStarted / ScanProgress / ScanFinished、`set_paused` のStatusChanged、`daemon_errors` 変更イベントの重複抑止。
@@ -85,6 +89,8 @@ cargo test --workspace
 
 GPUIのウィンドウは開かず、表示に使う純粋関数だけを検証する。
 
+- revision / 件数の quiet デバウンスが連続変化を1回にまとめること。
+- `ScanFinished` の画面別ガード（Photos の変更なしは再読込しない、Search は再検索、他は dirty のみ）。
 - 通知バーの優先順位（圧縮 → デーモン → 取り込み）。
 - デーモン操作のラベルと再試行コマンドの対応。
 - 取り込み結果の失敗数・部分移動数の集計と、再試行対象（`Failed` かつ `retryable`）の抽出。
@@ -119,6 +125,9 @@ GPUIのウィンドウは開かず、表示に使う純粋関数だけを検証�
 - [ ] `compressed/` 内の生成物が写真として索引されない
 - [ ] 外部で削除した写真が一覧から消える
 - [ ] 同名・別パスの写真が別エントリになる
+- [ ] 大量の写真を取り込んでも、取り込み中に Photos 画面が操作できる
+- [ ] 取り込み完了後、取り込み先の新規写真だけが索引され、無変更の既存写真は再 upsert されない
+- [ ] 取り込み中に revision が連続変化しても、全件再読込が繰り返されない
 
 ### IPC
 
