@@ -78,7 +78,8 @@ impl App {
                 if let Err(error) = self.db.bump_library_revision() {
                     tracing::warn!(%error, "cannot bump library revision after deletion cancel");
                 }
-                self.reload_library(true, cx);
+                let revision = self.db.library_revision().ok();
+                self.apply_library_snapshot(revision, cx);
                 self.reload_aux(cx);
                 self.toast_success("削除待ちを取り消しました", cx);
             }
@@ -141,7 +142,8 @@ impl App {
                     tracing::warn!(%error, "cannot bump library revision after force deletion");
                 }
                 self.reload_job_state(cx);
-                self.reload_library(true, cx);
+                let revision = self.db.library_revision().ok();
+                self.apply_library_snapshot(revision, cx);
                 self.reload_aux(cx);
                 self.send_wake_jobs(cx);
                 self.toast_success("強制削除を開始しました", cx);

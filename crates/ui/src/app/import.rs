@@ -521,7 +521,8 @@ impl App {
             tracing::warn!(%error, "cannot link imported photos");
             append_scan_error(report, format!("写真の紐付けに失敗しました: {error}"));
         }
-        if !self.reload_library(true, cx)
+        let revision = self.db.library_revision().ok();
+        if !self.apply_library_snapshot(revision, cx)
             && let Some(error) = self.library_error.clone()
         {
             append_scan_error(report, error);

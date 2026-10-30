@@ -42,6 +42,10 @@ pub(crate) fn is_stale_revision(observed: Option<i64>, current: i64) -> bool {
     observed.is_some_and(|observed| observed < current)
 }
 
+/// Quiet period a revision or photo count must hold before the UI rebuilds the
+/// whole index. Import bursts bump both several times per second.
+const LIBRARY_QUIET_PERIOD: Duration = Duration::from_secs(2);
+
 impl App {
     pub(crate) fn start_ipc(&mut self, cx: &mut Context<Self>) {
         let Some(data_dir) = vrc_photo_core::data_dir() else {
@@ -131,6 +135,7 @@ impl App {
             IpcEvent::ScanFinished { .. } => {
                 self.scan_progress = None;
                 self.refresh_live(cx);
+                self.refresh_library_after_scan(cx);
             }
             IpcEvent::CompressionProgress { status, .. } => {
                 let library_changed = matches!(
@@ -252,6 +257,8 @@ impl App {
         if let Ok(revision) = self.db.library_revision() {
             self.last_library_revision = revision;
         }
+        self.revision_debounce.reset();
+        self.count_debounce.reset();
         self.library.borrow_mut().invalidate_pages();
         self.search_view.borrow_mut().invalidate_pages();
         self.reload_compression_aux(cx);
@@ -327,6 +334,7 @@ impl App {
         if is_stale_revision(revision, self.last_library_revision) {
             return false;
         }
+        let now = Instant::now();
         // A terminal compression refresh was already scheduled for this
         // revision. Its light path invalidates pages and reloads the side
         // panels without re-querying the 100k index; let it consume the
@@ -336,11 +344,28 @@ impl App {
             && revision > self.last_library_revision
             && !compression_refresh_pending
         {
-            if self.screen == Screen::Photos {
-                if self.reload_library(true, cx) {
-                    self.last_library_revision = revision;
-                    self.count_debounce.reset();
-                    changed = true;
+            let expensive = self.screen == Screen::Photos
+                || (self.screen == Screen::Search && self.applied_search.is_some());
+            if expensive {
+                // A burst of revisions must not rebuild the 100k-entry index
+                // on every poll tick. Wait until the revision has been stable
+                // for one quiet period.
+                if self
+                    .revision_debounce
+                    .observe(revision, now, LIBRARY_QUIET_PERIOD)
+                {
+                    if self.screen == Screen::Photos {
+                        if self.apply_library_snapshot(Some(revision), cx) {
+                            changed = true;
+                        }
+                    } else {
+                        self.last_library_revision = revision;
+                        self.revision_debounce.reset();
+                        if let Some(filter) = self.applied_search.clone() {
+                            self.start_search(filter, cx);
+                            changed = true;
+                        }
+                    }
                 } else {
                     self.mark_library_dirty();
                 }
@@ -350,12 +375,6 @@ impl App {
                 if let Some(id) = self.selected {
                     self.load_selected_meta(id);
                     self.refresh_stale_preview(cx);
-                }
-                if self.screen == Screen::Search
-                    && let Some(filter) = self.applied_search.clone()
-                {
-                    self.start_search(filter, cx);
-                    changed = true;
                 }
             }
         }
@@ -371,10 +390,9 @@ impl App {
                 if self.screen == Screen::Photos
                     && self
                         .count_debounce
-                        .observe(count, Instant::now(), Duration::from_secs(2))
-                    && self.reload_library(true, cx)
+                        .observe(count, now, LIBRARY_QUIET_PERIOD)
+                    && self.apply_library_snapshot(revision, cx)
                 {
-                    self.count_debounce.reset();
                     changed = true;
                 }
             } else {
@@ -382,6 +400,54 @@ impl App {
             }
         }
         changed
+    }
+
+    /// Rebuilds the visible library snapshot and records the revision that
+    /// triggered it. `observed_revision` must be read before the snapshot
+    /// query so a concurrent commit cannot be swallowed.
+    pub(crate) fn apply_library_snapshot(
+        &mut self,
+        observed_revision: Option<i64>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.reload_library(true, cx) {
+            self.mark_library_dirty();
+            return false;
+        }
+        if let Some(revision) = observed_revision {
+            self.last_library_revision = self.last_library_revision.max(revision);
+        }
+        self.count_debounce.reset();
+        self.revision_debounce.reset();
+        true
+    }
+
+    /// A finished scan is a natural end to a revision burst, so show its
+    /// result once immediately. Watcher batches after this point still go
+    /// through the quiet-period debounce.
+    fn refresh_library_after_scan(&mut self, cx: &mut Context<Self>) {
+        let revision = self.db.library_revision().ok();
+        match self.screen {
+            Screen::Photos => {
+                self.apply_library_snapshot(revision, cx);
+            }
+            Screen::Search if self.applied_search.is_some() => {
+                if let Some(revision) = revision {
+                    self.last_library_revision = self.last_library_revision.max(revision);
+                }
+                self.revision_debounce.reset();
+                self.count_debounce.reset();
+                if let Some(filter) = self.applied_search.clone() {
+                    self.start_search(filter, cx);
+                }
+            }
+            _ => {
+                if let Some(revision) = revision {
+                    self.last_library_revision = self.last_library_revision.max(revision);
+                }
+                self.mark_library_dirty();
+            }
+        }
     }
 
     pub(crate) fn reload_job_state(&mut self, cx: &mut Context<Self>) {
@@ -618,13 +684,15 @@ impl App {
         }
         self.screen = screen;
         if screen == Screen::Photos && self.library_dirty {
-            self.reload_library(true, cx);
+            let revision = self.db.library_revision().ok();
+            self.apply_library_snapshot(revision, cx);
         } else if screen == Screen::Search && !self.search_active {
             // The no-query mirror only needs a refresh when the library
             // snapshot changed while another screen was mounted. A dirty
             // library is rebuilt first so the mirror also sees new photos.
             if self.library_dirty {
-                self.reload_library(true, cx);
+                let revision = self.db.library_revision().ok();
+                self.apply_library_snapshot(revision, cx);
             } else {
                 let mut search = self.search_view.borrow_mut();
                 let library = self.library.borrow();
