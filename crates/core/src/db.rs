@@ -4094,7 +4094,11 @@ mod tests {
             batch.iter().map(|job| job.id.as_str()).collect::<Vec<_>>(),
             vec![first_a.as_str(), first_b.as_str()]
         );
-        assert!(batch.iter().all(|job| job.status == QueueStatus::Processing));
+        assert!(
+            batch
+                .iter()
+                .all(|job| job.status == QueueStatus::Processing)
+        );
         assert!(batch.iter().all(|job| job.started_at.is_some()));
 
         let next = db.next_pending_photo_jobs().unwrap();

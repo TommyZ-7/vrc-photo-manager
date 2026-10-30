@@ -2056,13 +2056,8 @@ fn worker_loop(
                 let message = error.to_string();
                 for job in &batch {
                     if let Ok(db) = db.lock()
-                        && let Err(update_error) = db.update_job(
-                            &job.id,
-                            QueueStatus::Failed,
-                            0.0,
-                            Some(&message),
-                            None,
-                        )
+                        && let Err(update_error) =
+                            db.update_job(&job.id, QueueStatus::Failed, 0.0, Some(&message), None)
                     {
                         tracing::error!(
                             job = %job.id,
@@ -2110,10 +2105,7 @@ struct JobOutcome {
 /// The source path is frozen before the first job, so a `replace` job cannot
 /// feed its derivative into a later job in the same batch. Individual job
 /// failures are recorded and do not stop the remaining jobs.
-fn process_photo_batch(
-    db: &Arc<Mutex<Db>>,
-    jobs: &[CompressionJob],
-) -> Result<Vec<JobOutcome>> {
+fn process_photo_batch(db: &Arc<Mutex<Db>>, jobs: &[CompressionJob]) -> Result<Vec<JobOutcome>> {
     let Some(first) = jobs.first() else {
         return Ok(Vec::new());
     };
