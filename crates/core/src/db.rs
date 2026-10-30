@@ -1832,6 +1832,21 @@ impl Db {
         Ok(changed == 1)
     }
 
+    /// Atomically marks a pending request blocked when its stored reason is
+    /// still not a known one. Keeping this in SQL avoids acting on a stale
+    /// snapshot: a request the UI upgraded to `manual` after the executor
+    /// collected it must not be blocked as `unknown_reason`.
+    pub fn block_deletion_if_unknown(&self, request_id: i64) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE deletion_requests \
+             SET status = 'blocked', blocked_reason = 'unknown_reason', error = NULL \
+             WHERE id = ?1 AND status = 'pending' \
+               AND reason NOT IN ('auto_replace', 'manual')",
+            params![request_id],
+        )?;
+        Ok(changed == 1)
+    }
+
     pub fn block_deletion(
         &self,
         request_id: i64,
@@ -3372,6 +3387,48 @@ mod tests {
         assert!(db.force_deletion(request).unwrap());
         assert!(!db.block_deletion_if_jobs_failed(request).unwrap());
         assert!(db.claim_deletion(request).unwrap().is_some());
+    }
+
+    #[test]
+    fn block_unknown_blocks_a_still_unknown_reason() {
+        let db = Db::open_in_memory().unwrap();
+        let id = seed_photo(&db);
+        db.connection()
+            .execute(
+                "INSERT INTO deletion_requests(photo_id, reason, status, force, requested_at) \
+                 VALUES (?1, 'future_reason', 'pending', 0, '2026-10-21T00:00:00Z')",
+                params![id],
+            )
+            .unwrap();
+        let request = db.active_deletion_request(id).unwrap().unwrap();
+        assert_eq!(request.reason, DeletionReason::Unknown);
+        assert!(db.block_deletion_if_unknown(request.id).unwrap());
+        let blocked = db.active_deletion_request(id).unwrap().unwrap();
+        assert_eq!(blocked.status, DeletionStatus::Blocked);
+        assert_eq!(blocked.blocked_reason.as_deref(), Some("unknown_reason"));
+    }
+
+    #[test]
+    fn block_unknown_skips_a_request_upgraded_to_manual() {
+        let db = Db::open_in_memory().unwrap();
+        let id = seed_photo(&db);
+        db.connection()
+            .execute(
+                "INSERT INTO deletion_requests(photo_id, reason, status, force, requested_at) \
+                 VALUES (?1, 'future_reason', 'pending', 0, '2026-10-21T00:00:00Z')",
+                params![id],
+            )
+            .unwrap();
+        let request = db.active_deletion_request(id).unwrap().unwrap();
+        // The UI upgrades the same request to manual after the executor's
+        // snapshot was taken; the conditional block must not touch it.
+        db.request_deletion(&[id], DeletionReason::Manual, false)
+            .unwrap();
+        assert!(!db.block_deletion_if_unknown(request.id).unwrap());
+        let current = db.active_deletion_request(id).unwrap().unwrap();
+        assert_eq!(current.reason, DeletionReason::Manual);
+        assert_eq!(current.status, DeletionStatus::Pending);
+        assert!(db.claim_deletion(request.id).unwrap().is_some());
     }
 
     #[test]
