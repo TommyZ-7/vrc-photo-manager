@@ -108,7 +108,44 @@ cargo test --workspace
 
 **重要**: WSLでは `cargo check` / `build` を並列・バックグラウンドで走らせると操作不能になることがある。1つずつ直列で実行する。
 
-## 6. コードの読み方
+## 6. 圧縮のメモリ・時間計測
+
+圧縮経路を変更したときは、release ビルドでピークメモリと複数プロファイルの処理時間を計測する。同じ入力画像・同じプロファイルを before / after で使う。
+
+### 6.1 入力画像
+
+4K（3840×2160）と 8K（7680×4320）の RGB / RGBA PNG を用意する。グラデーションなど再現可能な画像を使い、生成処理は計測対象のプロセス外で行う。
+
+### 6.2 ピークメモリ
+
+形式ごとに別プロセスで `compress_image` を1回実行し、子プロセスの最大RSSを記録する。GNU time が使える環境では `/usr/bin/time -v` の `Maximum resident set size`、使えない環境では `resource.getrusage(RUSAGE_CHILDREN).ru_maxrss` を読むラッパーを使う。
+
+- プロファイル: 品質60、速度8、リサイズなし
+- 対象: JPEG / WebP / AVIF / JPEG XL × 4K/8K × RGB/RGBA
+
+2026-10-30 の計測値（MB、AMD Ryzen 7 5700U / Linux 7.3.0-2-cachyos / release）:
+
+| 画像 | JPEG | WebP | AVIF | JXL |
+|---|---:|---:|---:|---:|
+| 4K RGB | 54.1 → 30.4 | 109.6 → 78.1 | 378.1 → 345.6 | 230.9 → 207.0 |
+| 4K RGBA | 62.1 → 38.3 | 117.6 → 86.0 | 385.9 → 321.8 | 238.9 → 238.7 |
+| 8K RGB | 198.5 → 103.4 | 420.4 → 292.9 | 1426.8 → 1305.3 | 456.9 → 364.3 |
+| 8K RGBA | 230.2 → 135.3 | 451.1 → 324.8 | 1458.3 → 1210.1 | 488.6 → 488.7 |
+
+AVIF は RGBA 経路を維持するため、RGB 入力でも RGBA への1回変換が残る。JXL の RGBA 入力は `to_rgb8` が必要なため削減しない。
+
+### 6.3 プロファイル2件の時間
+
+4K PNG に2プロファイルを適用し、`compression_workers = 1` で全ジョブが終端するまでの壁時計時間を3回計測して中央値を取る。
+
+| プロファイル | before | after |
+|---|---:|---:|
+| WebP q80 + JPEG q80 | 667.4 ms | 625.9 ms |
+| WebP q80 + AVIF q60 | 20.115 s | 20.232 s |
+
+AVIF はエンコード時間が支配的なため、デコード削減（約40ms）は WebP + JPEG のような軽い組み合わせで確認する。`compression_workers >= 2` では同一写真のプロファイルが直列になるため、壁時計時間が伸びる場合がある。ピークメモリと総仕事量を優先するトレードオフとして扱う。
+
+## 7. コードの読み方
 
 1. `crates/core/src/db.rs` — スキーマとDB API。
 2. `crates/core/src/scanner.rs` — 写真索引。
@@ -122,7 +159,7 @@ cargo test --workspace
 10. `crates/update/src/` — 署名付き更新確認、ダウンロード、適用ジョブ、ヘルパー。
 11. `crates/release-tool/src/` — Release時の署名と `latest.json` 生成。
 
-## 7. 変更時のルール
+## 8. 変更時のルール
 
 - `core` にUI/GPUI/プロセス依存を持ち込まない。
 - パスやDBの変更は `docs/data-model.md` と `docs/architecture.md` を同時に更新する。
@@ -130,7 +167,7 @@ cargo test --workspace
 - 破壊的変更（既存DBの列削除・意味変更）はしない。必要なら新テーブル＋コピー。
 - 生ログを保存する変更は、プライバシー影響をADRに残す。
 
-## 8. DBマイグレーションの追加
+## 9. DBマイグレーションの追加
 
 1. `db.rs` に `SCHEMA_V3` を追加。
 2. `migrate` に `if version < 3` を追加。
@@ -138,7 +175,7 @@ cargo test --workspace
 4. 既存DB（v2）からの起動テストを追加。
 5. `docs/data-model.md` のバージョン表を更新。
 
-## 9. デバッグ
+## 10. デバッグ
 
 ### ログ
 
@@ -168,7 +205,7 @@ sqlite3 ~/.local/share/vrc-photo-manager/library.db \
   "select id,file_name,status from photos order by id desc limit 10;"
 ```
 
-## 10. パッケージ
+## 11. パッケージ
 
 ```bash
 cargo install cargo-packager --locked --version 0.11.8
@@ -177,7 +214,7 @@ cargo packager --release
 
 `dist/` に deb / AppImage / pacman用ファイルが生成される。詳細は [release.md](release.md)。
 
-## 11. ブランチとPR
+## 12. ブランチとPR
 
 `AGENTS.md` のルールに従う。
 
