@@ -9,6 +9,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use image::DynamicImage;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use vrc_photo_core::compressor;
 use vrc_photo_core::db::Db;
@@ -523,28 +524,16 @@ impl Daemon {
     }
 
     pub fn compress_pending(&mut self) -> Result<()> {
-        self.start_workers();
         loop {
-            let job = {
+            let jobs = {
                 let db = self.db.lock().unwrap();
-                db.next_pending_job()?
+                db.next_pending_photo_jobs()?
             };
-            let Some(job) = job else {
+            if jobs.is_empty() {
                 break;
-            };
-            if let Err(error) = process_job(&self.db, &job) {
-                tracing::error!(job = %job.id, %error, "compression failed");
-                let db = self.db.lock().unwrap();
-                db.update_job(
-                    &job.id,
-                    QueueStatus::Failed,
-                    0.0,
-                    Some(&error.to_string()),
-                    None,
-                )?;
             }
+            process_photo_batch(&self.db, &jobs)?;
         }
-        self.stop_workers();
         self.process_deletions()?;
         Ok(())
     }
@@ -2021,50 +2010,75 @@ fn worker_loop(
 ) {
     let mut seen_generation = 0;
     while running.load(Ordering::Relaxed) {
-        let job = {
+        let batch = {
             let db = db.lock().unwrap();
-            db.next_pending_job().ok().flatten()
+            db.next_pending_photo_jobs().ok().unwrap_or_default()
         };
-        let Some(job) = job else {
+        if batch.is_empty() {
             // Poll first so a batch keeps all workers busy; the signal only
             // saves the 400 ms wait when the queue was empty.
             jobs.wait(&mut seen_generation, Duration::from_millis(400));
             continue;
-        };
-        publish_compression(&events, &job, JobStatus::Processing, 0.05, None);
-        if let Err(error) = process_job(&db, &job) {
-            tracing::error!(job = %job.id, %error, "compression failed");
-            match db.lock() {
-                Ok(db) => {
-                    if let Err(update_error) = db.update_job(
-                        &job.id,
-                        QueueStatus::Failed,
-                        0.0,
-                        Some(&error.to_string()),
-                        None,
-                    ) {
+        }
+        for job in &batch {
+            publish_compression(&events, job, JobStatus::Processing, 0.05, None);
+        }
+        match process_photo_batch(&db, &batch) {
+            Ok(outcomes) => {
+                for outcome in outcomes {
+                    match outcome.status {
+                        QueueStatus::Completed => publish_compression(
+                            &events,
+                            &outcome.job,
+                            JobStatus::Completed,
+                            1.0,
+                            None,
+                        ),
+                        QueueStatus::Cancelled => publish_compression(
+                            &events,
+                            &outcome.job,
+                            JobStatus::Cancelled,
+                            0.0,
+                            None,
+                        ),
+                        _ => publish_compression(
+                            &events,
+                            &outcome.job,
+                            JobStatus::Failed,
+                            0.0,
+                            outcome.error,
+                        ),
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::error!(%error, "compression batch failed");
+                let message = error.to_string();
+                for job in &batch {
+                    if let Ok(db) = db.lock()
+                        && let Err(update_error) = db.update_job(
+                            &job.id,
+                            QueueStatus::Failed,
+                            0.0,
+                            Some(&message),
+                            None,
+                        )
+                    {
                         tracing::error!(
                             job = %job.id,
                             %update_error,
                             "cannot record failed compression job"
                         );
                     }
+                    publish_compression(
+                        &events,
+                        job,
+                        JobStatus::Failed,
+                        0.0,
+                        Some(message.clone()),
+                    );
                 }
-                Err(lock_error) => tracing::error!(
-                    job = %job.id,
-                    %lock_error,
-                    "cannot lock database to record failed compression job"
-                ),
             }
-            publish_compression(
-                &events,
-                &job,
-                JobStatus::Failed,
-                0.0,
-                Some(error.to_string()),
-            );
-        } else {
-            publish_compression(&events, &job, JobStatus::Completed, 1.0, None);
         }
     }
 }
@@ -2085,27 +2099,33 @@ fn publish_compression(
     });
 }
 
-fn process_job(db: &Arc<Mutex<Db>>, job: &CompressionJob) -> Result<()> {
-    let (photo, mut profile) = {
-        let db = db.lock().unwrap();
-        let photo = db
-            .photo_by_id(job.photo_id)?
-            .context("photo no longer exists")?;
-        let profile = db
-            .list_profiles()?
-            .into_iter()
-            .find(|profile| profile.id == job.profile_id)
-            .context("compression profile no longer exists")?;
-        db.update_job(&job.id, QueueStatus::Processing, 0.05, None, None)?;
-        (photo, profile)
+struct JobOutcome {
+    job: CompressionJob,
+    status: QueueStatus,
+    error: Option<String>,
+}
+
+/// Processes every job for one photo after decoding the source once.
+///
+/// The source path is frozen before the first job, so a `replace` job cannot
+/// feed its derivative into a later job in the same batch. Individual job
+/// failures are recorded and do not stop the remaining jobs.
+fn process_photo_batch(
+    db: &Arc<Mutex<Db>>,
+    jobs: &[CompressionJob],
+) -> Result<Vec<JobOutcome>> {
+    let Some(first) = jobs.first() else {
+        return Ok(Vec::new());
     };
-    if let Some(output_dir) = job
-        .output_dir
-        .as_deref()
-        .filter(|dir| !dir.trim().is_empty())
-    {
-        profile.output_dir = Some(output_dir.to_string());
-    }
+    debug_assert!(jobs.iter().all(|job| job.photo_id == first.photo_id));
+
+    let photo = {
+        let db = db.lock().unwrap();
+        db.photo_by_id(first.photo_id)?
+    };
+    let Some(photo) = photo else {
+        return fail_batch(db, jobs, "photo no longer exists");
+    };
     let source_path = if Path::new(&photo.abs_path).is_file() {
         PathBuf::from(&photo.abs_path)
     } else {
@@ -2118,7 +2138,112 @@ fn process_job(db: &Arc<Mutex<Db>>, job: &CompressionJob) -> Result<()> {
         db.lock().unwrap().set_photo_blake3(photo.id, &hash)?;
     }
 
-    let result = compressor::compress_image(&source_path, &profile)?;
+    let Some(image) = vrc_photo_core::image_decode::decode_image(&source_path) else {
+        return fail_batch(
+            db,
+            jobs,
+            &format!("cannot decode {}", source_path.display()),
+        );
+    };
+
+    let mut outcomes = Vec::with_capacity(jobs.len());
+    for (index, job) in jobs.iter().enumerate() {
+        if index > 0 && db.lock().unwrap().photo_has_forced_deletion(photo.id)? {
+            for remaining in &jobs[index..] {
+                db.lock().unwrap().update_job(
+                    &remaining.id,
+                    QueueStatus::Cancelled,
+                    0.0,
+                    None,
+                    None,
+                )?;
+                outcomes.push(JobOutcome {
+                    job: remaining.clone(),
+                    status: QueueStatus::Cancelled,
+                    error: None,
+                });
+            }
+            break;
+        }
+        db.lock()
+            .unwrap()
+            .update_job(&job.id, QueueStatus::Processing, 0.05, None, None)?;
+        match process_decoded_job(db, &photo, &source_path, &image, job) {
+            Ok(()) => outcomes.push(JobOutcome {
+                job: job.clone(),
+                status: QueueStatus::Completed,
+                error: None,
+            }),
+            Err(error) => {
+                let message = error.to_string();
+                tracing::error!(job = %job.id, %error, "compression failed");
+                if let Err(update_error) = db.lock().unwrap().update_job(
+                    &job.id,
+                    QueueStatus::Failed,
+                    0.0,
+                    Some(&message),
+                    None,
+                ) {
+                    tracing::error!(
+                        job = %job.id,
+                        %update_error,
+                        "cannot record failed compression job"
+                    );
+                }
+                outcomes.push(JobOutcome {
+                    job: job.clone(),
+                    status: QueueStatus::Failed,
+                    error: Some(message),
+                });
+            }
+        }
+    }
+    Ok(outcomes)
+}
+
+fn fail_batch(
+    db: &Arc<Mutex<Db>>,
+    jobs: &[CompressionJob],
+    error: &str,
+) -> Result<Vec<JobOutcome>> {
+    let mut outcomes = Vec::with_capacity(jobs.len());
+    for job in jobs {
+        tracing::error!(job = %job.id, %error, "compression failed");
+        db.lock()
+            .unwrap()
+            .update_job(&job.id, QueueStatus::Failed, 0.0, Some(error), None)?;
+        outcomes.push(JobOutcome {
+            job: job.clone(),
+            status: QueueStatus::Failed,
+            error: Some(error.to_string()),
+        });
+    }
+    Ok(outcomes)
+}
+
+fn process_decoded_job(
+    db: &Arc<Mutex<Db>>,
+    photo: &Photo,
+    source_path: &Path,
+    image: &DynamicImage,
+    job: &CompressionJob,
+) -> Result<()> {
+    let mut profile = {
+        let db = db.lock().unwrap();
+        db.list_profiles()?
+            .into_iter()
+            .find(|profile| profile.id == job.profile_id)
+            .context("compression profile no longer exists")?
+    };
+    if let Some(output_dir) = job
+        .output_dir
+        .as_deref()
+        .filter(|dir| !dir.trim().is_empty())
+    {
+        profile.output_dir = Some(output_dir.to_string());
+    }
+
+    let result = compressor::compress_decoded(image, source_path, &profile)?;
     if !result.output_path.is_file()
         || std::fs::metadata(&result.output_path)
             .map(|meta| meta.len() == 0)
@@ -2166,6 +2291,20 @@ fn process_job(db: &Arc<Mutex<Db>>, job: &CompressionJob) -> Result<()> {
         "compressed"
     );
     Ok(())
+}
+
+#[cfg(test)]
+fn process_job(db: &Arc<Mutex<Db>>, job: &CompressionJob) -> Result<()> {
+    let mut outcomes = process_photo_batch(db, std::slice::from_ref(job))?;
+    let outcome = outcomes.pop().context("compression produced no outcome")?;
+    match outcome.status {
+        QueueStatus::Completed => Ok(()),
+        _ => Err(anyhow::anyhow!(
+            outcome
+                .error
+                .unwrap_or_else(|| "compression failed".to_string())
+        )),
+    }
 }
 
 fn latest_log_file(dir: &Path) -> Result<Option<PathBuf>> {
@@ -2903,6 +3042,26 @@ mod tests {
             image::Rgba([(x * 4) as u8, (y * 4) as u8, ((x + y) * 2) as u8, 255])
         });
         image.save(path).unwrap();
+    }
+
+    fn save_batch_profile(
+        db: &Db,
+        id: &str,
+        format: vrc_photo_core::model::CompressionFormat,
+        suffix: &str,
+        resize: Option<(u32, u32)>,
+    ) {
+        db.save_profile(&CompressionProfile {
+            id: id.to_string(),
+            name: id.to_string(),
+            format,
+            suffix: suffix.to_string(),
+            resize_enabled: resize.is_some(),
+            width: resize.map(|(w, _)| w).unwrap_or(3840),
+            height: resize.map(|(_, h)| h).unwrap_or(2160),
+            ..CompressionProfile::default()
+        })
+        .unwrap();
     }
 
     fn add_replace_profiles(db: &Db) {
@@ -3839,6 +3998,175 @@ mod tests {
             started.elapsed()
         );
         daemon.stop_workers();
+    }
+
+    #[test]
+    fn compress_pending_processes_every_profile_for_one_photo() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = manual_test_daemon(&dir);
+        daemon.run_once().unwrap();
+        let db = Db::open(dir.path().join("library.db")).unwrap();
+        let photo = db
+            .photo_by_path(original_path(&dir).to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        save_batch_profile(
+            &db,
+            "webp",
+            vrc_photo_core::model::CompressionFormat::Webp,
+            "_webp",
+            None,
+        );
+        save_batch_profile(
+            &db,
+            "jpeg",
+            vrc_photo_core::model::CompressionFormat::Jpeg,
+            "_jpeg",
+            None,
+        );
+        db.enqueue_job(photo.id, "webp", "keep").unwrap();
+        db.enqueue_job(photo.id, "jpeg", "keep").unwrap();
+
+        daemon.compress_pending().unwrap();
+
+        assert!(
+            daemon.running.load(Ordering::Relaxed),
+            "compress_pending must not start and stop the worker set"
+        );
+        assert!(daemon.workers.is_empty());
+        let db = Db::open(dir.path().join("library.db")).unwrap();
+        let jobs = db.list_jobs(10).unwrap();
+        assert_eq!(jobs.len(), 2);
+        assert!(jobs.iter().all(|job| job.status == QueueStatus::Completed));
+        assert_eq!(db.derivatives_for_photo(photo.id).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn batch_keeps_the_original_source_after_a_replace_job() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = manual_test_daemon(&dir);
+        daemon.run_once().unwrap();
+        let db = Db::open(dir.path().join("library.db")).unwrap();
+        let photo = db
+            .photo_by_path(original_path(&dir).to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        save_batch_profile(
+            &db,
+            "small",
+            vrc_photo_core::model::CompressionFormat::Webp,
+            "_small",
+            Some((8, 8)),
+        );
+        save_batch_profile(
+            &db,
+            "full",
+            vrc_photo_core::model::CompressionFormat::Webp,
+            "_full",
+            None,
+        );
+        db.enqueue_job(photo.id, "small", "replace").unwrap();
+        db.enqueue_job(photo.id, "full", "keep").unwrap();
+
+        daemon.compress_pending().unwrap();
+
+        let db = Db::open(dir.path().join("library.db")).unwrap();
+        let derivatives = db.derivatives_for_photo(photo.id).unwrap();
+        let small = derivatives
+            .iter()
+            .find(|derivative| derivative.profile_id == "small")
+            .unwrap();
+        let full = derivatives
+            .iter()
+            .find(|derivative| derivative.profile_id == "full")
+            .unwrap();
+        assert_eq!((small.width, small.height), (8, 5));
+        assert_eq!(
+            (full.width, full.height),
+            (16, 10),
+            "second job read the derivative"
+        );
+    }
+
+    #[test]
+    fn batch_continues_after_one_profile_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = manual_test_daemon(&dir);
+        daemon.run_once().unwrap();
+        let blocked = dir.path().join("photos/not-a-directory");
+        std::fs::write(&blocked, b"x").unwrap();
+        let db = Db::open(dir.path().join("library.db")).unwrap();
+        let photo = db
+            .photo_by_path(original_path(&dir).to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        save_batch_profile(
+            &db,
+            "good",
+            vrc_photo_core::model::CompressionFormat::Webp,
+            "_good",
+            None,
+        );
+        save_batch_profile(
+            &db,
+            "bad",
+            vrc_photo_core::model::CompressionFormat::Webp,
+            "_bad",
+            None,
+        );
+        db.enqueue_job(photo.id, "good", "keep").unwrap();
+        db.enqueue_job_with_output_dir(photo.id, "bad", "keep", Some(blocked.to_str().unwrap()))
+            .unwrap();
+
+        daemon.compress_pending().unwrap();
+
+        let db = Db::open(dir.path().join("library.db")).unwrap();
+        let jobs = db.list_jobs(10).unwrap();
+        let good = jobs.iter().find(|job| job.profile_id == "good").unwrap();
+        let bad = jobs.iter().find(|job| job.profile_id == "bad").unwrap();
+        assert_eq!(good.status, QueueStatus::Completed);
+        assert_eq!(bad.status, QueueStatus::Failed);
+        assert_eq!(db.derivatives_for_photo(photo.id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn forced_deletion_cancels_the_rest_of_the_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = manual_test_daemon(&dir);
+        daemon.run_once().unwrap();
+        let db = Db::open(dir.path().join("library.db")).unwrap();
+        let photo = db
+            .photo_by_path(original_path(&dir).to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        save_batch_profile(
+            &db,
+            "first",
+            vrc_photo_core::model::CompressionFormat::Webp,
+            "_first",
+            None,
+        );
+        save_batch_profile(
+            &db,
+            "second",
+            vrc_photo_core::model::CompressionFormat::Webp,
+            "_second",
+            None,
+        );
+        db.enqueue_job(photo.id, "first", "keep").unwrap();
+        db.enqueue_job(photo.id, "second", "keep").unwrap();
+        let jobs = db.next_pending_photo_jobs().unwrap();
+        assert_eq!(jobs.len(), 2);
+        let request = db
+            .request_deletion(&[photo.id], DeletionReason::Manual, false)
+            .unwrap()[0];
+        assert!(db.force_deletion(request).unwrap());
+
+        let outcomes = process_photo_batch(&daemon.db, &jobs).unwrap();
+
+        assert_eq!(outcomes[0].status, QueueStatus::Completed);
+        assert_eq!(outcomes[1].status, QueueStatus::Cancelled);
+        assert!(db.claim_deletion(request).unwrap().is_some());
     }
 
     #[test]
