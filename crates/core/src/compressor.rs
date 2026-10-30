@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -22,11 +23,11 @@ pub struct CompressionResult {
 pub fn compress_image(source: &Path, profile: &CompressionProfile) -> Result<CompressionResult> {
     let image = crate::image_decode::decode_image(source)
         .ok_or_else(|| CoreError::Invalid(format!("cannot decode {}", source.display())))?;
-    compress_decoded(image, source, profile)
+    compress_decoded(&image, source, profile)
 }
 
 pub fn compress_decoded(
-    image: DynamicImage,
+    image: &DynamicImage,
     source: &Path,
     profile: &CompressionProfile,
 ) -> Result<CompressionResult> {
@@ -52,28 +53,31 @@ pub fn compress_decoded(
     })
 }
 
-fn resize_for_profile(image: DynamicImage, profile: &CompressionProfile) -> DynamicImage {
+fn resize_for_profile<'a>(
+    image: &'a DynamicImage,
+    profile: &CompressionProfile,
+) -> Cow<'a, DynamicImage> {
     if !profile.resize_enabled || profile.width == 0 || profile.height == 0 {
-        return image;
+        return Cow::Borrowed(image);
     }
     if profile.resize_mode == ResizeMode::DownscaleOnly
         && image.width() <= profile.width
         && image.height() <= profile.height
     {
-        return image;
+        return Cow::Borrowed(image);
     }
     if profile.maintain_aspect {
-        image.resize(
+        Cow::Owned(image.resize(
             profile.width,
             profile.height,
             image::imageops::FilterType::Lanczos3,
-        )
+        ))
     } else {
-        image.resize_exact(
+        Cow::Owned(image.resize_exact(
             profile.width,
             profile.height,
             image::imageops::FilterType::Lanczos3,
-        )
+        ))
     }
 }
 
@@ -84,7 +88,7 @@ fn resize_for_profile(image: DynamicImage, profile: &CompressionProfile) -> Dyna
 pub fn render_clipboard_png(source: &Path, profile: &CompressionProfile) -> Result<Vec<u8>> {
     let image = crate::image_decode::decode_image(source)
         .ok_or_else(|| CoreError::Invalid(format!("cannot decode {}", source.display())))?;
-    let image = resize_for_profile(image, profile);
+    let image = resize_for_profile(&image, profile);
     let mut bytes = Vec::new();
     image
         .write_to(
@@ -163,21 +167,29 @@ fn encode(image: &DynamicImage, profile: &CompressionProfile) -> Result<Vec<u8>>
 }
 
 fn encode_jpeg(image: &DynamicImage, quality: u8) -> Result<Vec<u8>> {
-    let rgb = image.to_rgb8();
     let mut output = Vec::new();
     let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, quality);
-    encoder
-        .encode(
-            rgb.as_raw(),
-            rgb.width(),
-            rgb.height(),
-            image::ExtendedColorType::Rgb8,
-        )
-        .map_err(|error| CoreError::Invalid(format!("JPEG encode failed: {error}")))?;
+    match image {
+        DynamicImage::ImageRgb8(rgb) => encoder.encode_image(rgb),
+        DynamicImage::ImageRgba8(rgba) => encoder.encode_image(rgba),
+        _ => {
+            let rgb = image.to_rgb8();
+            encoder.encode_image(&rgb)
+        }
+    }
+    .map_err(|error| CoreError::Invalid(format!("JPEG encode failed: {error}")))?;
     Ok(output)
 }
 
 fn encode_webp(image: &DynamicImage, quality: u8, lossless: bool) -> Result<Vec<u8>> {
+    if let Ok(encoder) = webp::Encoder::from_image(image) {
+        let data = if lossless {
+            encoder.encode_lossless()
+        } else {
+            encoder.encode(quality as f32)
+        };
+        return Ok(data.to_vec());
+    }
     let rgba = image.to_rgba8();
     let encoder = webp::Encoder::from_rgba(rgba.as_raw(), rgba.width(), rgba.height());
     let data = if lossless {
@@ -189,18 +201,15 @@ fn encode_webp(image: &DynamicImage, quality: u8, lossless: bool) -> Result<Vec<
 }
 
 fn encode_avif(image: &DynamicImage, quality: u8, lossless: bool, speed: u8) -> Result<Vec<u8>> {
-    let rgba = image.to_rgba8();
-    let (width, height) = (rgba.width() as usize, rgba.height() as usize);
-    let pixels: Vec<rgb::RGBA8> = rgba
-        .pixels()
-        .map(|pixel| rgb::RGBA8 {
-            r: pixel[0],
-            g: pixel[1],
-            b: pixel[2],
-            a: pixel[3],
-        })
-        .collect();
-    let image_ref = imgref::Img::new(pixels.as_slice(), width, height);
+    // Keep the RGBA path so transparent VRChat screenshots retain alpha.
+    // Reusing the RGBA buffer avoids the extra Vec<RGBA8> copy.
+    let rgba: Cow<'_, [u8]> = match image.as_rgba8() {
+        Some(rgba) => Cow::Borrowed(rgba.as_raw()),
+        None => Cow::Owned(image.to_rgba8().into_raw()),
+    };
+    let (width, height) = (image.width() as usize, image.height() as usize);
+    let pixels: &[rgb::RGBA<u8>] = rgb::bytemuck::cast_slice(&rgba);
+    let image_ref = imgref::Img::new(pixels, width, height);
     // ravif has no true lossless switch; quality 100 is the closest available
     // setting. The UI labels this as "lossless (approx.)".
     let quality = if lossless { 100.0 } else { quality as f32 };
@@ -215,8 +224,11 @@ fn encode_avif(image: &DynamicImage, quality: u8, lossless: bool, speed: u8) -> 
 fn encode_jxl(image: &DynamicImage, quality: u8, lossless: bool, speed: u8) -> Result<Vec<u8>> {
     // jpegxl-rs currently drops alpha in this code path. Keep RGB so the
     // encoder is reliable; the UI warns that transparency is not preserved.
-    let rgb = image.to_rgb8();
-    let (width, height) = (rgb.width(), rgb.height());
+    let rgb: Cow<'_, [u8]> = match image.as_rgb8() {
+        Some(rgb) => Cow::Borrowed(rgb.as_raw()),
+        None => Cow::Owned(image.to_rgb8().into_raw()),
+    };
+    let (width, height) = (image.width(), image.height());
     let jxl_speed = match speed {
         1..=2 => jpegxl_rs::encode::EncoderSpeed::Tortoise,
         3 => jpegxl_rs::encode::EncoderSpeed::Kitten,
@@ -245,7 +257,7 @@ fn encode_jxl(image: &DynamicImage, quality: u8, lossless: bool, speed: u8) -> R
     };
 
     let result: jpegxl_rs::encode::EncoderResult<u8> = encoder
-        .encode(&rgb, width, height)
+        .encode(rgb.as_ref(), width, height)
         .map_err(|error| CoreError::Invalid(format!("JXL encode failed: {error}")))?;
     Ok(result.data)
 }
@@ -279,7 +291,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{GenericImageView as _, Rgba, RgbaImage};
+    use image::{GenericImageView as _, Rgb, RgbImage, Rgba, RgbaImage};
     use tempfile::tempdir;
 
     fn sample(path: &Path) {
@@ -294,6 +306,102 @@ mod tests {
             suffix: "_out".to_string(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn compress_decoded_can_use_the_same_image_twice() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("VRChat_2026-10-21_21-14-03.221_16x10.png");
+        sample(&source);
+        let image = crate::image_decode::decode_image(&source).unwrap();
+
+        let first = compress_decoded(&image, &source, &profile(CompressionFormat::Webp)).unwrap();
+        let second = compress_decoded(&image, &source, &profile(CompressionFormat::Webp)).unwrap();
+
+        assert!(first.output_path.is_file());
+        assert!(second.output_path.is_file());
+        assert_ne!(first.output_path, second.output_path);
+    }
+
+    #[test]
+    fn avif_keeps_transparency() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("alpha.png");
+        let image = RgbaImage::from_fn(8, 8, |x, _| {
+            if x < 4 {
+                Rgba([255, 0, 0, 0])
+            } else {
+                Rgba([0, 0, 255, 255])
+            }
+        });
+        image.save(&source).unwrap();
+        let mut profile = profile(CompressionFormat::Avif);
+        profile.lossless = true;
+
+        let result = compress_image(&source, &profile).unwrap();
+        let decoded = crate::image_decode::decode_image(&result.output_path)
+            .unwrap()
+            .to_rgba8();
+
+        assert!(
+            decoded.get_pixel(0, 0)[3] < 32,
+            "transparent pixel lost alpha"
+        );
+        assert!(decoded.get_pixel(7, 0)[3] > 223, "opaque pixel lost alpha");
+        assert!(decoded.get_pixel(0, 0)[0] > 200, "channel order changed");
+        assert!(decoded.get_pixel(7, 0)[2] > 200, "channel order changed");
+    }
+
+    #[test]
+    fn jpeg_rgba_fast_path_matches_rgb_conversion() {
+        let rgba = DynamicImage::ImageRgba8(RgbaImage::from_fn(8, 8, |x, y| {
+            Rgba([(x * 31) as u8, (y * 31) as u8, ((x + y) * 15) as u8, 255])
+        }));
+        let rgb = DynamicImage::ImageRgb8(rgba.to_rgb8());
+
+        assert_eq!(
+            encode_jpeg(&rgba, 85).unwrap(),
+            encode_jpeg(&rgb, 85).unwrap()
+        );
+    }
+
+    #[test]
+    fn webp_rgb_fast_path_matches_rgba_conversion() {
+        let rgb = DynamicImage::ImageRgb8(RgbImage::from_fn(8, 8, |x, y| {
+            Rgb([(x * 31) as u8, (y * 31) as u8, ((x + y) * 15) as u8])
+        }));
+        let rgba = DynamicImage::ImageRgba8(rgb.to_rgba8());
+
+        assert_eq!(
+            encode_webp(&rgb, 80, false).unwrap(),
+            encode_webp(&rgba, 80, false).unwrap()
+        );
+    }
+
+    #[test]
+    fn jxl_rgb_fast_path_matches_rgba_conversion() {
+        let rgb = DynamicImage::ImageRgb8(RgbImage::from_fn(8, 8, |x, y| {
+            Rgb([(x * 31) as u8, (y * 31) as u8, ((x + y) * 15) as u8])
+        }));
+        let rgba = DynamicImage::ImageRgba8(rgb.to_rgba8());
+
+        assert_eq!(
+            encode_jxl(&rgb, 80, false, 8).unwrap(),
+            encode_jxl(&rgba, 80, false, 8).unwrap()
+        );
+    }
+
+    #[test]
+    fn avif_rgba_fast_path_matches_rgb_conversion() {
+        let rgba = DynamicImage::ImageRgba8(RgbaImage::from_fn(8, 8, |x, y| {
+            Rgba([(x * 31) as u8, (y * 31) as u8, ((x + y) * 15) as u8, 255])
+        }));
+        let rgb = DynamicImage::ImageRgb8(rgba.to_rgb8());
+
+        assert_eq!(
+            encode_avif(&rgba, 60, false, 8).unwrap(),
+            encode_avif(&rgb, 60, false, 8).unwrap()
+        );
     }
 
     #[test]

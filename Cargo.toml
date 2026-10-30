@@ -38,7 +38,7 @@ thiserror = "2"
 imgref = "1"
 jpegxl-rs = { version = "0.14", features = ["vendored"] }
 ravif = { version = "0.13", default-features = false }
-rgb = "0.8"
+rgb = { version = "0.8", features = ["bytemuck"] }
 webp = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
