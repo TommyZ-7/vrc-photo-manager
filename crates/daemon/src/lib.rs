@@ -400,9 +400,10 @@ impl Daemon {
         self.reload_settings()?;
         self.restart_watchers();
         for command in commands {
-            if let Err(error) = self.run_command(command) {
-                tracing::error!(command = command.as_str(), %error, "daemon command failed");
-                let (operation, message) = match command {
+            let kind = command.as_str();
+            if let Err(error) = self.run_command(&command) {
+                tracing::error!(command = kind, %error, "daemon command failed");
+                let (operation, message) = match &command {
                     DaemonCommand::Rescan => (
                         DaemonOperation::Scan,
                         "写真フォルダの再スキャンに失敗しました",
@@ -413,6 +414,10 @@ impl Daemon {
                     DaemonCommand::Relink => {
                         (DaemonOperation::Link, "写真とログの紐付けに失敗しました")
                     }
+                    DaemonCommand::ScanRoot { .. } => (
+                        DaemonOperation::Scan,
+                        "写真フォルダの再スキャンに失敗しました",
+                    ),
                 };
                 if let Err(report_error) =
                     self.report_daemon_error(operation, message, Some(&error.to_string()))
@@ -472,7 +477,7 @@ impl Daemon {
 
     /// Runs one queued command. `poll_commands` records a failure under the
     /// command's operation.
-    fn run_command(&mut self, command: DaemonCommand) -> Result<()> {
+    fn run_command(&mut self, command: &DaemonCommand) -> Result<()> {
         match command {
             DaemonCommand::Rescan => {
                 self.scan_photos()?;
@@ -483,6 +488,12 @@ impl Daemon {
                 self.link_unlinked()?;
             }
             DaemonCommand::Relink => self.link_unlinked()?,
+            // A targeted scan behaves like a rescan until the dedicated
+            // single-root path lands in the next task.
+            DaemonCommand::ScanRoot { .. } => {
+                self.scan_photos()?;
+                self.link_unlinked()?;
+            }
         }
         Ok(())
     }

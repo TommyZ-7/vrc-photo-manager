@@ -247,6 +247,8 @@ CREATE INDEX IF NOT EXISTS idx_deletion_requests_status
     ON deletion_requests(status, requested_at);
 "#;
 
+const SCHEMA_V8_COMMAND_PAYLOAD: &str = "ALTER TABLE daemon_commands ADD COLUMN payload TEXT;";
+
 const PHOTO_SELECT: &str = "p.id, p.root_id, p.rel_path, p.abs_path, p.file_name, \
     p.captured_at_utc, p.captured_at_local, p.tz_offset_sec, p.width, p.height, \
     p.file_size, p.mtime, p.blake3, p.status, p.is_favorite, p.note, \
@@ -372,6 +374,9 @@ impl Db {
         if version < 7 {
             self.migrate_v7()?;
         }
+        if version < 8 {
+            self.migrate_v8()?;
+        }
         Ok(())
     }
 
@@ -483,6 +488,35 @@ impl Db {
             params![now_string()],
         )?;
         tx.pragma_update(None, "user_version", 7)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Adds the optional payload used by path-targeted daemon commands. The
+    /// column check makes the step safe to retry after a crash between the
+    /// ALTER and `user_version`.
+    fn migrate_v8(&self) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version >= 8 {
+            tx.commit()?;
+            return Ok(());
+        }
+
+        let has_payload: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('daemon_commands') \
+             WHERE name = 'payload')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_payload {
+            tx.execute_batch(SCHEMA_V8_COMMAND_PAYLOAD)?;
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (8, ?1)",
+            params![now_string()],
+        )?;
+        tx.pragma_update(None, "user_version", 8)?;
         tx.commit()?;
         Ok(())
     }
@@ -2390,14 +2424,28 @@ impl Db {
         Ok(errors)
     }
 
-    /// Inserts `command` unless the same command is already queued. Returns
-    /// whether a row was inserted.
+    /// Inserts `command` unless the same command and payload are already
+    /// queued. Returns whether a row was inserted.
     pub fn request_daemon_command(&self, command: DaemonCommand) -> Result<bool> {
+        let kind = command.as_str();
+        let payload = command.payload();
         let changed = self.conn.execute(
-            "INSERT INTO daemon_commands(command, created_at) \
-             SELECT ?1, ?2 WHERE NOT EXISTS \
-                (SELECT 1 FROM daemon_commands WHERE command = ?1)",
-            params![command.as_str(), now_string()],
+            "INSERT INTO daemon_commands(command, payload, created_at) \
+             SELECT ?1, ?2, ?3 WHERE NOT EXISTS \
+                (SELECT 1 FROM daemon_commands WHERE command = ?1 AND payload IS ?2)",
+            params![kind, payload, now_string()],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Queues a scan of one photo root. Multiple imports into the same root
+    /// collapse into one request; different roots stay separate.
+    pub fn request_daemon_scan_root(&self, path: &str) -> Result<bool> {
+        let changed = self.conn.execute(
+            "INSERT INTO daemon_commands(command, payload, created_at) \
+             SELECT 'scan_root', ?1, ?2 WHERE NOT EXISTS \
+                (SELECT 1 FROM daemon_commands WHERE command = 'scan_root' AND payload = ?1)",
+            params![path, now_string()],
         )?;
         Ok(changed == 1)
     }
@@ -2408,10 +2456,13 @@ impl Db {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let mut commands = Vec::new();
         {
-            let mut stmt = tx.prepare("SELECT command FROM daemon_commands ORDER BY id")?;
-            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            let mut stmt = tx.prepare("SELECT command, payload FROM daemon_commands ORDER BY id")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })?;
             for row in rows {
-                if let Some(command) = DaemonCommand::parse(&row?) {
+                let (command, payload) = row?;
+                if let Some(command) = DaemonCommand::parse(&command, payload.as_deref()) {
                     commands.push(command);
                 }
             }
@@ -2893,7 +2944,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
         let has_output_dir: bool = db
             .conn
             .query_row(
@@ -2913,7 +2964,7 @@ mod tests {
             .connection()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
         let table: i64 = db
             .connection()
             .query_row(
@@ -3559,7 +3610,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
 
         let recorded: i64 = db
             .conn
@@ -3602,7 +3653,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
         let retry_column: i64 = db
             .conn
             .query_row(
@@ -3669,7 +3720,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
 
         let jobs = db.list_jobs(10).unwrap();
         assert_eq!(jobs.len(), 1);
@@ -3702,7 +3753,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
         assert_eq!(db.list_jobs(10).unwrap()[0].retry_count, 2);
 
         let tables: i64 = db
@@ -4444,6 +4495,51 @@ mod tests {
         );
         assert!(db.take_daemon_commands().unwrap().is_empty());
         assert!(db.request_daemon_command(DaemonCommand::Relink).unwrap());
+    }
+
+    #[test]
+    fn daemon_scan_root_commands_deduplicate_per_path() {
+        let db = Db::open_in_memory().unwrap();
+        assert!(db.request_daemon_scan_root("/photos/imported").unwrap());
+        assert!(!db.request_daemon_scan_root("/photos/imported").unwrap());
+        assert!(db.request_daemon_scan_root("/photos/other").unwrap());
+
+        assert_eq!(
+            db.take_daemon_commands().unwrap(),
+            vec![
+                DaemonCommand::ScanRoot {
+                    path: "/photos/imported".into()
+                },
+                DaemonCommand::ScanRoot {
+                    path: "/photos/other".into()
+                },
+            ]
+        );
+        assert!(db.take_daemon_commands().unwrap().is_empty());
+    }
+
+    #[test]
+    fn migration_v8_adds_the_command_payload_column() {
+        let db = Db::open_in_memory().unwrap();
+        let has_payload: bool = db
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('daemon_commands') \
+                 WHERE name = 'payload')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(has_payload);
+
+        // A crash after ALTER but before user_version must be safe to retry.
+        db.conn.pragma_update(None, "user_version", 7).unwrap();
+        db.migrate_v8().unwrap();
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 8);
     }
 
     #[test]

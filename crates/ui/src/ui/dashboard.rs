@@ -512,9 +512,9 @@ impl App {
                                 )))
                                 .label("再試行")
                                 .small()
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| this.request_daemon_command(command, cx),
-                                )),
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.request_daemon_command(command.clone(), cx)
+                                })),
                             ),
                     )
                     .when_some(error.detail.clone(), |this, detail| {

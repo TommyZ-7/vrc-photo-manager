@@ -549,27 +549,42 @@ impl DaemonOperation {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DaemonCommand {
     Rescan,
     Relog,
     Relink,
+    ScanRoot { path: String },
 }
 
 impl DaemonCommand {
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::Rescan => "rescan",
             Self::Relog => "relog",
             Self::Relink => "relink",
+            Self::ScanRoot { .. } => "scan_root",
         }
     }
 
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
+    /// Payload persisted next to the command kind in `daemon_commands`.
+    pub fn payload(&self) -> Option<&str> {
+        match self {
+            Self::ScanRoot { path } => Some(path),
+            _ => None,
+        }
+    }
+
+    pub fn parse(command: &str, payload: Option<&str>) -> Option<Self> {
+        match command {
             "rescan" => Some(Self::Rescan),
             "relog" => Some(Self::Relog),
             "relink" => Some(Self::Relink),
+            "scan_root" => payload
+                .filter(|path| !path.is_empty())
+                .map(|path| Self::ScanRoot {
+                    path: path.to_string(),
+                }),
             _ => None,
         }
     }
@@ -695,5 +710,24 @@ mod tests {
             Some(DeletionReason::AutoReplace)
         );
         assert_eq!(DeletionReason::Manual.as_str(), "manual");
+    }
+
+    #[test]
+    fn scan_root_command_round_trips_its_payload() {
+        let command = DaemonCommand::ScanRoot {
+            path: "/photos/imported".to_string(),
+        };
+        assert_eq!(command.as_str(), "scan_root");
+        assert_eq!(command.payload(), Some("/photos/imported"));
+        assert_eq!(
+            DaemonCommand::parse("scan_root", Some("/photos/imported")),
+            Some(command)
+        );
+        assert_eq!(DaemonCommand::parse("scan_root", None), None);
+        assert_eq!(DaemonCommand::parse("scan_root", Some("")), None);
+        assert_eq!(
+            DaemonCommand::parse("rescan", None),
+            Some(DaemonCommand::Rescan)
+        );
     }
 }
