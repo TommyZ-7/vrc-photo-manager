@@ -8,14 +8,14 @@
 cargo test --workspace
 ```
 
-2026-10-24時点:
+2026-10-30時点:
 
-- `vrc-photo-core`: 81件（1件はignored）
-- `vrc-photo-daemon`: 44件
+- `vrc-photo-core`: 177件（1件はignored）
+- `vrc-photo-daemon`: 76件
 - `vrc-photo-ipc`: 12件
-- `vrc-photo-update`: 64件
+- `vrc-photo-update`: 73件
 - `vrc-photo-release-tool`: 5件
-- UI: 77件（GPUIを起動しない純粋ヘルパーとIPCブリッジの単体テスト）
+- UI: 228件（GPUIを起動しない純粋ヘルパーとIPCブリッジの単体テスト）
 
 ### ipcの主なテスト
 
@@ -29,13 +29,13 @@ cargo test --workspace
 
 | ファイル | 内容 |
 |---|---|
-| `db.rs` | マイグレーション（V4の再実行を含む）、写真UPSERT、文脈/プレイヤー、検索、キューの原子的取得、`retry_count` と再試行上限、`daemon_errors` のUPSERT/削除、`daemon_commands` の重複排除と取り出し |
+| `db.rs` | マイグレーション（V4の再実行を含む）、写真UPSERT、文脈/プレイヤー、検索、キューの原子的取得、写真単位のバッチ取得、強制削除判定、アクティブジョブのみのfailed化、`retry_count` と再試行上限、`daemon_errors` のUPSERT/削除、`daemon_commands` の重複排除と取り出し |
 | `scanner.rs` | フォルダ走査、単一ファイル索引、compressed除外、読めないファイル・ディレクトリの失敗記録、walking/indexing進捗コールバック |
 | `photo_filename.rs` | VRChatファイル名、無効名、拡張子 |
 | `log_parser.rs` | イベント解析、セッション、入退室 |
 | `linker.rs` | ログ紐付け、XMPのみの紐付け |
 | `metadata.rs` | XMP属性、PNG iTXtからの読み取り |
-| `compressor.rs` | WebP/JPEG、リサイズ、出力名衝突回避 |
+| `compressor.rs` | WebP/JPEG/AVIF/JXL、リサイズ、出力名衝突回避、AVIF透過、16bitフォールバック、高速経路と変換経路の一致、同一画像の再利用 |
 | `thumbnail.rs` | サムネイル生成、キャッシュ、存在しない元ファイル |
 | `importer.rs` | コピー、移動、衝突連番、非画像スキップ、ファイル単位の失敗継続、部分移動（コピー成功・元削除失敗） |
 | `settings.rs` | 設定JSONの往復、パス検出 |
@@ -65,6 +65,11 @@ cargo test --workspace
 - 最新ログファイルの選択。
 - 写真 + ログのE2E（索引 → 紐付け → 外部削除でmissing）。
 - 自動圧縮E2E（プロファイル → キュー → 圧縮 → derivative）。
+- 同一写真の複数プロファイルを1バッチで処理し、両方完了すること。
+- `replace` 後の後続ジョブが派生ファイルではなく元画像を読むこと（寸法で検証）。
+- 1プロファイル失敗時も同じ写真の他プロファイルが完了すること。
+- デコード失敗時にバッチ内の全ジョブが`failed`になること。
+- 強制削除で残りのバッチジョブが`cancelled`になり、削除が進むこと。
 - notify相当の増分索引。
 - 写真フォルダが見つからないときに `scan` エラーを記録し、フォルダ作成後の `rescan` で消える。
 - 失敗のあるルートスキャンでは、そのルートの写真をmissingにしない。
