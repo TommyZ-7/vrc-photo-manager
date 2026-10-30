@@ -2499,7 +2499,8 @@ impl Db {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let mut commands = Vec::new();
         {
-            let mut stmt = tx.prepare("SELECT command, payload FROM daemon_commands ORDER BY id")?;
+            let mut stmt =
+                tx.prepare("SELECT command, payload FROM daemon_commands ORDER BY id")?;
             let rows = stmt.query_map([], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
             })?;

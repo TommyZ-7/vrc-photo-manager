@@ -617,10 +617,7 @@ mod tests {
             .unwrap();
         let report = scan_and_index(&db, root_id, dir.path()).unwrap();
         assert_eq!(report.modified, 1);
-        let photo = db
-            .photo_by_path(path.to_str().unwrap())
-            .unwrap()
-            .unwrap();
+        let photo = db.photo_by_path(path.to_str().unwrap()).unwrap().unwrap();
         assert_eq!(photo.width, 8);
         assert_eq!(photo.file_size, std::fs::metadata(&path).unwrap().len());
     }
