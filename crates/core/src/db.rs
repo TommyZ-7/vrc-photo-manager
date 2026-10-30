@@ -1650,6 +1650,18 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// True when a forced deletion for the photo is waiting to run. The
+    /// compression batch uses this between jobs to cancel the remainder.
+    pub fn photo_has_forced_deletion(&self, photo_id: i64) -> Result<bool> {
+        let exists: i64 = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM deletion_requests \
+             WHERE photo_id = ?1 AND force = 1 AND status IN ('pending', 'blocked'))",
+            params![photo_id],
+            |row| row.get(0),
+        )?;
+        Ok(exists != 0)
+    }
+
     pub fn deletion_counts(&self) -> Result<DeletionCounts> {
         let (pending, blocked, running): (i64, i64, i64) = self.conn.query_row(
             "SELECT COALESCE(SUM(status = 'pending'), 0), \
@@ -2121,6 +2133,65 @@ impl Db {
             )
             .optional()?;
         Ok(job)
+    }
+
+    /// Claims every pending job for the photo owning the oldest pending job.
+    ///
+    /// The immediate transaction keeps the photo selection and the claim
+    /// atomic across connections (the daemon and a maintenance CLI can run
+    /// at the same time), so a claimer never sees an empty batch while
+    /// another connection still has pending work.
+    pub fn next_pending_photo_jobs(&self) -> Result<Vec<CompressionJob>> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let photo_id: Option<i64> = tx
+            .query_row(
+                "SELECT photo_id FROM compression_jobs WHERE status = 'pending' \
+                 ORDER BY created_at, rowid LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(photo_id) = photo_id else {
+            tx.commit()?;
+            return Ok(Vec::new());
+        };
+        let mut jobs = {
+            let mut stmt = tx.prepare(
+                "UPDATE compression_jobs SET status = 'processing', started_at = ?1 \
+                 WHERE status = 'pending' AND photo_id = ?2 \
+                 RETURNING id, photo_id, profile_id, status, progress, error, output_path, policy, output_dir, \
+                    retry_count, created_at, started_at, finished_at, rowid",
+            )?;
+            let rows = stmt.query_map(params![now_string(), photo_id], |row| {
+                Ok((row.get::<_, i64>(13)?, row_to_job(row)?))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        tx.commit()?;
+        jobs.sort_by_key(|(rowid, _)| *rowid);
+        Ok(jobs.into_iter().map(|(_, job)| job).collect())
+    }
+
+    /// Marks a pending or processing job failed. Terminal jobs are left
+    /// untouched and their current status is returned instead.
+    pub fn fail_job_if_active(&self, id: &str, error: &str) -> Result<Option<QueueStatus>> {
+        let changed = self.conn.execute(
+            "UPDATE compression_jobs SET status = 'failed', progress = 0, error = ?1, \
+                finished_at = ?2 WHERE id = ?3 AND status IN ('pending', 'processing')",
+            params![error, now_string(), id],
+        )?;
+        if changed == 1 {
+            return Ok(Some(QueueStatus::Failed));
+        }
+        let status = self
+            .conn
+            .query_row(
+                "SELECT status FROM compression_jobs WHERE id = ?1",
+                params![id],
+                |row| Ok(QueueStatus::parse(&row.get::<_, String>(0)?)),
+            )
+            .optional()?;
+        Ok(status)
     }
 
     pub fn update_job(
@@ -4025,6 +4096,103 @@ mod tests {
         )
         .unwrap();
         assert_eq!(db.count_jobs(QueueStatus::Completed).unwrap(), 1);
+    }
+
+    #[test]
+    fn next_pending_photo_jobs_claims_the_oldest_photos_jobs() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let first = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        let second = db
+            .upsert_photo(&sample_photo(root, "/photos/b.png", 200))
+            .unwrap();
+        db.save_profile(&profile("p", "P")).unwrap();
+        let first_a = db.enqueue_job(first, "p", "keep").unwrap();
+        let first_b = db.enqueue_job(first, "p", "keep").unwrap();
+        let waiting = db
+            .enqueue_job_with_status(first, "p", "keep", QueueStatus::Waiting)
+            .unwrap();
+        let second_a = db.enqueue_job(second, "p", "keep").unwrap();
+
+        let batch = db.next_pending_photo_jobs().unwrap();
+        assert_eq!(
+            batch.iter().map(|job| job.id.as_str()).collect::<Vec<_>>(),
+            vec![first_a.as_str(), first_b.as_str()]
+        );
+        assert!(
+            batch
+                .iter()
+                .all(|job| job.status == QueueStatus::Processing)
+        );
+        assert!(batch.iter().all(|job| job.started_at.is_some()));
+
+        let next = db.next_pending_photo_jobs().unwrap();
+        assert_eq!(next.len(), 1);
+        assert_eq!(next[0].id, second_a);
+        assert!(db.next_pending_photo_jobs().unwrap().is_empty());
+
+        let waiting = db
+            .list_jobs(10)
+            .unwrap()
+            .into_iter()
+            .find(|job| job.id == waiting)
+            .unwrap();
+        assert_eq!(waiting.status, QueueStatus::Waiting);
+    }
+
+    #[test]
+    fn photo_has_forced_deletion_tracks_the_force_flag() {
+        let db = Db::open_in_memory().unwrap();
+        let id = seed_photo(&db);
+        let request = db
+            .request_deletion(&[id], DeletionReason::Manual, false)
+            .unwrap()[0];
+
+        assert!(!db.photo_has_forced_deletion(id).unwrap());
+        assert!(db.force_deletion(request).unwrap());
+        assert!(db.photo_has_forced_deletion(id).unwrap());
+        db.block_deletion(request, "file_error", None).unwrap();
+        assert!(db.photo_has_forced_deletion(id).unwrap());
+    }
+
+    #[test]
+    fn fail_job_if_active_leaves_terminal_jobs_alone() {
+        let db = Db::open_in_memory().unwrap();
+        let id = seed_photo(&db);
+        db.save_profile(&profile("p", "P")).unwrap();
+        let first = db.enqueue_job(id, "p", "keep").unwrap();
+        let second = db.enqueue_job(id, "p", "keep").unwrap();
+        let third = db.enqueue_job(id, "p", "keep").unwrap();
+        let batch = db.next_pending_photo_jobs().unwrap();
+        assert_eq!(batch.len(), 3);
+        db.update_job(&first, QueueStatus::Completed, 1.0, None, None)
+            .unwrap();
+        db.update_job(&second, QueueStatus::Cancelled, 0.0, None, None)
+            .unwrap();
+
+        assert_eq!(
+            db.fail_job_if_active(&third, "boom").unwrap(),
+            Some(QueueStatus::Failed)
+        );
+        assert_eq!(
+            db.fail_job_if_active(&first, "late").unwrap(),
+            Some(QueueStatus::Completed)
+        );
+        assert_eq!(
+            db.fail_job_if_active(&second, "late").unwrap(),
+            Some(QueueStatus::Cancelled)
+        );
+        assert_eq!(db.fail_job_if_active("missing", "late").unwrap(), None);
+
+        let jobs = db.list_jobs(10).unwrap();
+        let by_id = |id: &str| jobs.iter().find(|job| job.id == id).unwrap();
+        assert_eq!(by_id(&first).status, QueueStatus::Completed);
+        assert!(by_id(&first).error.is_none());
+        assert_eq!(by_id(&second).status, QueueStatus::Cancelled);
+        assert_eq!(by_id(&third).status, QueueStatus::Failed);
+        assert_eq!(by_id(&third).error.as_deref(), Some("boom"));
     }
 
     #[test]
