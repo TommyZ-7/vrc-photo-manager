@@ -1893,13 +1893,20 @@ fn run_deletions_once(db: &Arc<Mutex<Db>>) -> Result<usize> {
     let mut executed = 0;
     for pending in requests {
         if pending.reason == DeletionReason::Unknown {
-            let db = db.lock().unwrap();
-            db.block_deletion(pending.id, "unknown_reason", None)?;
-            tracing::warn!(
-                request = pending.id,
-                photo_id = pending.photo_id,
-                "unknown deletion reason; request blocked"
-            );
+            // The snapshot may be stale: the UI can upgrade the request to
+            // manual after collection. Only block when the stored reason is
+            // still unknown.
+            let blocked = {
+                let db = db.lock().unwrap();
+                db.block_deletion_if_unknown(pending.id)?
+            };
+            if blocked {
+                tracing::warn!(
+                    request = pending.id,
+                    photo_id = pending.photo_id,
+                    "unknown deletion reason; request blocked"
+                );
+            }
             continue;
         }
         let blocked = {
@@ -3770,6 +3777,53 @@ mod tests {
         );
         assert_eq!(request.status, DeletionStatus::Blocked);
         assert_eq!(request.blocked_reason.as_deref(), Some("unknown_reason"));
+    }
+
+    #[test]
+    fn unknown_reason_upgraded_to_manual_is_executed_not_blocked() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let original = dir
+            .path()
+            .join("photos/VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&original);
+        daemon.run_once().unwrap();
+
+        let db = Db::open(dir.path().join("library.db")).unwrap();
+        let photo = db
+            .photo_by_path(original.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        db.connection()
+            .execute(
+                "INSERT INTO deletion_requests(photo_id, reason, status, force, requested_at) \
+                 VALUES (?1, 'future_reason', 'pending', 0, ?2)",
+                (photo.id, chrono::Utc::now().to_rfc3339()),
+            )
+            .unwrap();
+        // The UI upgrades the request to manual before the executor acts on
+        // its snapshot of the unknown reason.
+        let request_id = db
+            .request_deletion(
+                &[photo.id],
+                vrc_photo_core::model::DeletionReason::Manual,
+                false,
+            )
+            .unwrap()[0];
+
+        daemon.process_deletions().unwrap();
+
+        assert!(
+            !original.exists(),
+            "the upgraded manual deletion must remove the file"
+        );
+        let request = db.deletion_request_by_id(request_id).unwrap().unwrap();
+        assert_eq!(
+            request.reason,
+            vrc_photo_core::model::DeletionReason::Manual
+        );
+        assert_eq!(request.status, DeletionStatus::Completed);
+        assert!(request.blocked_reason.is_none());
     }
 
     #[test]
