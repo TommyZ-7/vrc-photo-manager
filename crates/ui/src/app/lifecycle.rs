@@ -46,6 +46,36 @@ pub(crate) fn is_stale_revision(observed: Option<i64>, current: i64) -> bool {
 /// whole index. Import bursts bump both several times per second.
 const LIBRARY_QUIET_PERIOD: Duration = Duration::from_secs(2);
 
+/// What a finished scan should refresh, based on the mounted screen and
+/// whether anything actually changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanRefresh {
+    None,
+    Snapshot,
+    Search,
+    Dirty,
+}
+
+fn scan_refresh_action(
+    screen: Screen,
+    has_applied_search: bool,
+    revision: Option<i64>,
+    last_revision: i64,
+    library_dirty: bool,
+) -> ScanRefresh {
+    match screen {
+        Screen::Photos => {
+            if library_dirty || revision.is_some_and(|revision| revision > last_revision) {
+                ScanRefresh::Snapshot
+            } else {
+                ScanRefresh::None
+            }
+        }
+        Screen::Search if has_applied_search => ScanRefresh::Search,
+        _ => ScanRefresh::Dirty,
+    }
+}
+
 impl App {
     pub(crate) fn start_ipc(&mut self, cx: &mut Context<Self>) {
         let Some(data_dir) = vrc_photo_core::data_dir() else {
@@ -410,7 +440,18 @@ impl App {
         observed_revision: Option<i64>,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !self.reload_library(true, cx) {
+        self.apply_library_snapshot_with_anchor(observed_revision, true, cx)
+    }
+
+    /// `apply_library_snapshot` with control over the scroll anchor. A root
+    /// change resets to the first row; every other caller keeps the anchor.
+    pub(crate) fn apply_library_snapshot_with_anchor(
+        &mut self,
+        observed_revision: Option<i64>,
+        preserve_anchor: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.reload_library(preserve_anchor, cx) {
             self.mark_library_dirty();
             return false;
         }
@@ -424,14 +465,22 @@ impl App {
 
     /// A finished scan is a natural end to a revision burst, so show its
     /// result once immediately. Watcher batches after this point still go
-    /// through the quiet-period debounce.
+    /// through the quiet-period debounce, and a no-op scan does not rebuild
+    /// the index at all.
     fn refresh_library_after_scan(&mut self, cx: &mut Context<Self>) {
         let revision = self.db.library_revision().ok();
-        match self.screen {
-            Screen::Photos => {
+        let action = scan_refresh_action(
+            self.screen,
+            self.applied_search.is_some(),
+            revision,
+            self.last_library_revision,
+            self.library_dirty,
+        );
+        match action {
+            ScanRefresh::Snapshot => {
                 self.apply_library_snapshot(revision, cx);
             }
-            Screen::Search if self.applied_search.is_some() => {
+            ScanRefresh::Search => {
                 if let Some(revision) = revision {
                     self.last_library_revision = self.last_library_revision.max(revision);
                 }
@@ -441,11 +490,15 @@ impl App {
                     self.start_search(filter, cx);
                 }
             }
-            _ => {
+            ScanRefresh::Dirty => {
                 if let Some(revision) = revision {
                     self.last_library_revision = self.last_library_revision.max(revision);
                 }
                 self.mark_library_dirty();
+            }
+            ScanRefresh::None => {
+                self.revision_debounce.reset();
+                self.count_debounce.reset();
             }
         }
     }
@@ -764,7 +817,8 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::is_stale_revision;
+    use super::{ScanRefresh, is_stale_revision, scan_refresh_action};
+    use crate::app::Screen;
 
     #[test]
     fn only_older_live_revisions_are_stale() {
@@ -772,5 +826,33 @@ mod tests {
         assert!(!is_stale_revision(Some(5), 5));
         assert!(!is_stale_revision(Some(6), 5));
         assert!(!is_stale_revision(None, 5));
+    }
+
+    #[test]
+    fn scan_finished_refresh_is_screen_aware_and_skips_no_ops() {
+        assert_eq!(
+            scan_refresh_action(Screen::Photos, false, Some(5), 5, false),
+            ScanRefresh::None
+        );
+        assert_eq!(
+            scan_refresh_action(Screen::Photos, false, Some(6), 5, false),
+            ScanRefresh::Snapshot
+        );
+        assert_eq!(
+            scan_refresh_action(Screen::Photos, false, Some(5), 5, true),
+            ScanRefresh::Snapshot
+        );
+        assert_eq!(
+            scan_refresh_action(Screen::Search, true, Some(5), 5, false),
+            ScanRefresh::Search
+        );
+        assert_eq!(
+            scan_refresh_action(Screen::Search, false, Some(5), 5, false),
+            ScanRefresh::Dirty
+        );
+        assert_eq!(
+            scan_refresh_action(Screen::Settings, false, Some(6), 5, false),
+            ScanRefresh::Dirty
+        );
     }
 }

@@ -584,7 +584,8 @@ impl App {
                     .small()
                     .primary()
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.reload_library(true, cx);
+                        let revision = this.db.library_revision().ok();
+                        this.apply_library_snapshot(revision, cx);
                     })),
             )
             .into_any_element()
