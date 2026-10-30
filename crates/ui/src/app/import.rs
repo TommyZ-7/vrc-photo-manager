@@ -17,7 +17,6 @@ use vrc_photo_core::importer::{
     self, ImportIssue, ImportIssueKind, ImportMode, ImportProgress, ImportRename, ImportResult,
 };
 use vrc_photo_core::linker;
-use vrc_photo_core::model::DaemonCommand;
 use vrc_photo_core::scanner;
 use vrc_photo_core::scanner::ScanFailure;
 use vrc_photo_core::settings::AppSettings;
@@ -480,10 +479,11 @@ impl App {
             return;
         }
         // The daemon may not have watched the new import destination yet.
-        // A rescan makes it reload settings and rebuild its recursive
-        // watchers; it also indexes the new files and generates thumbnails
-        // with its own workers. The scan-finished event drives the UI reload.
-        match self.db.request_daemon_command(DaemonCommand::Rescan) {
+        // A targeted scan makes the daemon reload settings and rebuild its
+        // recursive watchers, then index only this root and generate
+        // thumbnails with its own workers. The scan-finished event drives the
+        // UI reload.
+        match request_import_scan(&self.db, &report.dest) {
             Ok(_) => {
                 self.send_wake_commands(cx);
                 if !self.ipc_connected {
@@ -494,7 +494,7 @@ impl App {
                 }
             }
             Err(error) => {
-                tracing::warn!(%error, "cannot request rescan for import destination");
+                tracing::warn!(%error, "cannot request scan for import destination");
                 append_scan_error(
                     report,
                     format!("取り込み先のスキャンを要求できません: {error}"),
@@ -521,7 +521,8 @@ impl App {
             tracing::warn!(%error, "cannot link imported photos");
             append_scan_error(report, format!("写真の紐付けに失敗しました: {error}"));
         }
-        if !self.reload_library(true, cx)
+        let revision = self.db.library_revision().ok();
+        if !self.apply_library_snapshot(revision, cx)
             && let Some(error) = self.library_error.clone()
         {
             append_scan_error(report, error);
@@ -616,6 +617,14 @@ fn append_scan_error(report: &mut ImportReportView, message: String) {
 /// Adds `dest` to the settings roots and persists the change. A failed save
 /// restores the previous in-memory roots so a later retry attempts the save
 /// again instead of treating an unsaved path as persisted.
+/// Queues a scan of only the directory the import wrote to.
+pub(crate) fn request_import_scan(
+    db: &vrc_photo_core::Db,
+    dest: &Path,
+) -> vrc_photo_core::Result<bool> {
+    db.request_daemon_scan_root(&dest.to_string_lossy())
+}
+
 fn add_photo_root_and_save<E, F>(
     settings: &mut AppSettings,
     dest: &str,
@@ -729,8 +738,8 @@ mod tests {
     use super::{
         IMPORT_PROGRESS_NOTIFY_INTERVAL, ImportDialogOrigin, ImportDialogPhase, ImportDialogState,
         ImportReportView, add_photo_root_and_save, import_remaining, import_should_index,
-        import_summary, merge_resume_report, merge_retry_report, reserve_import_dialog,
-        should_notify_import_progress,
+        import_summary, merge_resume_report, merge_retry_report, request_import_scan,
+        reserve_import_dialog, should_notify_import_progress,
     };
     use crate::ui::import::retryable_sources;
     use std::cell::Cell;
@@ -741,6 +750,19 @@ mod tests {
     };
     use vrc_photo_core::scanner::ScanFailure;
     use vrc_photo_core::settings::AppSettings;
+
+    #[test]
+    fn import_scan_request_targets_the_destination_root() {
+        let db = vrc_photo_core::Db::open_in_memory().unwrap();
+        let dest = Path::new("/photos/imported");
+        assert!(request_import_scan(&db, dest).unwrap());
+        assert_eq!(
+            db.take_daemon_commands().unwrap(),
+            vec![vrc_photo_core::model::DaemonCommand::ScanRoot {
+                path: "/photos/imported".to_string(),
+            }]
+        );
+    }
 
     #[test]
     fn import_progress_notifications_are_throttled() {

@@ -325,7 +325,8 @@ impl App {
             cx,
             |this, _, cx| {
                 if matches!(this.screen, Screen::Photos | Screen::Search) {
-                    this.reload_library(true, cx);
+                    let revision = this.db.library_revision().ok();
+                    this.apply_library_snapshot(revision, cx);
                 } else {
                     this.reload_aux(cx);
                 }

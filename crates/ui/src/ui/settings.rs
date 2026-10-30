@@ -164,7 +164,11 @@ impl App {
                                                     return;
                                                 }
                                                 if root_changed {
-                                                    this.reload_library(false, cx);
+                                                    let revision =
+                                                        this.db.library_revision().ok();
+                                                    this.apply_library_snapshot_with_anchor(
+                                                        revision, false, cx,
+                                                    );
                                                 }
                                                 if paths_changed {
                                                     let requested = this

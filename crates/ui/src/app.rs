@@ -145,6 +145,9 @@ pub struct App {
     /// the Photos header.
     pub(crate) library_error: Option<String>,
     pub(crate) count_debounce: CountDebounce,
+    /// Quiet-period tracker for daemon revision bursts. A full index rebuild
+    /// waits until the revision has stopped moving for `LIBRARY_QUIET_PERIOD`.
+    pub(crate) revision_debounce: CountDebounce,
     pub(crate) selected: Option<i64>,
     /// Multi-selection in the current photo tab. `selected` is the primary
     /// item used by the inspector and viewer. An empty selection means nothing
@@ -581,6 +584,7 @@ impl App {
             library_dirty: false,
             library_error: None,
             count_debounce: CountDebounce::default(),
+            revision_debounce: CountDebounce::default(),
             selected: None,
             selected_ids: PhotoSelection::default(),
             selection_anchor: None,

@@ -480,76 +480,77 @@ impl App {
             );
         for error in &self.daemon_errors {
             let command = error.operation.retry_command();
-            card = card.child(
-                v_flex()
-                    .gap(px(8.))
-                    .p(px(12.))
-                    .rounded(px(10.))
-                    .bg(rgb(p.panel_2))
-                    .border_1()
-                    .border_color(rgb(p.border))
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(self.badge(
-                                daemon_operation_label(error.operation),
-                                p.red,
-                                p.red_soft,
-                            ))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_size(px(12.))
-                                    .text_color(rgb(p.red))
-                                    .child(error.message.clone()),
-                            )
-                            .child(
-                                Button::new(SharedString::from(format!(
-                                    "retry-daemon-{}",
-                                    error.operation.as_str()
-                                )))
-                                .label("再試行")
-                                .small()
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| this.request_daemon_command(command, cx),
-                                )),
-                            ),
-                    )
-                    .when_some(error.detail.clone(), |this, detail| {
-                        this.child(
-                            div()
-                                .w_full()
-                                .min_w_0()
-                                .p(px(8.))
-                                .rounded(px(8.))
-                                .bg(rgb(p.bg))
-                                .font_family("monospace")
-                                .whitespace_normal()
-                                .text_size(px(10.))
-                                .text_color(rgb(p.muted))
-                                .child(detail),
+            card =
+                card.child(
+                    v_flex()
+                        .gap(px(8.))
+                        .p(px(12.))
+                        .rounded(px(10.))
+                        .bg(rgb(p.panel_2))
+                        .border_1()
+                        .border_color(rgb(p.border))
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .child(self.badge(
+                                    daemon_operation_label(error.operation),
+                                    p.red,
+                                    p.red_soft,
+                                ))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_size(px(12.))
+                                        .text_color(rgb(p.red))
+                                        .child(error.message.clone()),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "retry-daemon-{}",
+                                        error.operation.as_str()
+                                    )))
+                                    .label("再試行")
+                                    .small()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.request_daemon_command(command.clone(), cx)
+                                    })),
+                                ),
                         )
-                    })
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap(px(12.))
-                            .child(
+                        .when_some(error.detail.clone(), |this, detail| {
+                            this.child(
                                 div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .p(px(8.))
+                                    .rounded(px(8.))
+                                    .bg(rgb(p.bg))
+                                    .font_family("monospace")
+                                    .whitespace_normal()
                                     .text_size(px(10.))
-                                    .text_color(rgb(p.muted_2))
-                                    .child(format!("検出回数 {}", error.attempts)),
+                                    .text_color(rgb(p.muted))
+                                    .child(detail),
                             )
-                            .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(p.muted_2))
-                                    .child(format_timestamp(&error.occurred_at)),
-                            ),
-                    ),
-            );
+                        })
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap(px(12.))
+                                .child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .text_color(rgb(p.muted_2))
+                                        .child(format!("検出回数 {}", error.attempts)),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .text_color(rgb(p.muted_2))
+                                        .child(format_timestamp(&error.occurred_at)),
+                                ),
+                        ),
+                );
         }
         card.when(!self.daemon_active, |this| {
             this.child(

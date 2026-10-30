@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use crate::db::Db;
 use crate::error::{CoreError, Result};
 use crate::hashing;
-use crate::model::NewPhoto;
+use crate::model::{NewPhoto, PhotoStatus};
 use crate::photo_filename::{
     from_modified_time, image_dimensions, is_source_photo, parse_photo_filename,
 };
@@ -62,6 +62,9 @@ pub struct ScanReport {
     pub found: usize,
     pub indexed: usize,
     pub skipped: usize,
+    /// Rows inserted, updated, or rebound by this scan. Unchanged photos are
+    /// counted in `indexed` but not here.
+    pub modified: usize,
     pub new_ids: Vec<i64>,
     pub rebound_ids: Vec<i64>,
     pub seen_paths: Vec<String>,
@@ -299,6 +302,11 @@ where
         failures,
         ..Default::default()
     };
+    let paths: Vec<String> = photos
+        .iter()
+        .map(|photo| photo.path.to_string_lossy().to_string())
+        .collect();
+    let states = db.photo_scan_states(&paths)?;
     let mut processed = 0;
     observe(ScanProgress {
         phase: ScanPhase::Indexing,
@@ -309,11 +317,31 @@ where
     for photo in photos {
         let path = photo.path.to_string_lossy().to_string();
         report.seen_paths.push(path.clone());
+        let existing = states.get(&path);
+        // A row that still matches the file on disk needs no write and no
+        // re-hash. `missing`, `replaced`, and `deleting` rows always fall
+        // through so their state is restored or preserved.
+        let unchanged = existing.is_some_and(|state| {
+            state.status == PhotoStatus::Present
+                && state.display_derivative_id.is_none()
+                && state.file_size == photo.file_size
+                && state.mtime == photo.mtime
+        });
+        if unchanged {
+            report.indexed += 1;
+            processed += 1;
+            observe(ScanProgress {
+                phase: ScanPhase::Indexing,
+                processed,
+                total: Some(total),
+                indexed: report.indexed,
+            });
+            continue;
+        }
         let photo_path = photo.path.clone();
         let mut new_photo = photo.into_new_photo(root_id);
-        let existing = db.photo_by_path(&path)?;
         let existed = existing.is_some();
-        new_photo.blake3 = match existing.as_ref() {
+        new_photo.blake3 = match existing {
             Some(existing)
                 if existing.blake3.is_some()
                     && existing.file_size == new_photo.file_size
@@ -332,6 +360,7 @@ where
             let old_path_exists = std::path::Path::new(&candidate.abs_path).exists();
             if !old_path_exists && db.rebind_photo(candidate.id, &new_photo)? {
                 report.indexed += 1;
+                report.modified += 1;
                 report.rebound_ids.push(candidate.id);
                 processed += 1;
                 observe(ScanProgress {
@@ -347,6 +376,7 @@ where
         match db.upsert_photo(&new_photo) {
             Ok(id) => {
                 report.indexed += 1;
+                report.modified += 1;
                 if !existed {
                     report.new_ids.push(id);
                 }
@@ -470,6 +500,7 @@ mod tests {
         let report = scan_and_index(&db, root_id, root).unwrap();
         assert_eq!(report.rebound_ids, vec![photo_id]);
         assert!(report.new_ids.is_empty());
+        assert_eq!(report.modified, 1);
         let photo = db.photo_by_id(photo_id).unwrap().unwrap();
         assert_eq!(photo.abs_path, new_path.to_string_lossy());
         assert_eq!(photo.status, PhotoStatus::Present);
@@ -515,6 +546,127 @@ mod tests {
         assert_eq!(report.failures.len(), 1);
         assert!(report.failures[0].path.ends_with("broken.png"));
         assert_eq!(db.count_photos().unwrap(), 1);
+    }
+
+    #[test]
+    fn unchanged_photo_is_skipped_without_rehashing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        write_png(&path);
+        let metadata = std::fs::metadata(&path).unwrap();
+        let mtime = metadata
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let db = Db::open_in_memory().unwrap();
+        let root_id = db
+            .add_root(dir.path().to_str().unwrap(), "reference")
+            .unwrap();
+        let id = db
+            .upsert_photo(&NewPhoto {
+                root_id,
+                rel_path: "VRChat_2026-10-21_21-14-03.221_4x3.png".to_string(),
+                abs_path: path.to_string_lossy().to_string(),
+                file_name: "VRChat_2026-10-21_21-14-03.221_4x3.png".to_string(),
+                captured_at_utc: 1_700_000_000,
+                captured_at_local: "2026-10-21 21:14:03".to_string(),
+                tz_offset_sec: 0,
+                width: 4,
+                height: 3,
+                file_size: metadata.len(),
+                mtime,
+                blake3: None,
+            })
+            .unwrap();
+        let before: String = db
+            .connection()
+            .query_row("SELECT updated_at FROM photos WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+
+        let report = scan_and_index(&db, root_id, dir.path()).unwrap();
+        assert_eq!(report.indexed, 1);
+        assert_eq!(report.modified, 0);
+        let photo = db.photo_by_id(id).unwrap().unwrap();
+        assert!(photo.blake3.is_none());
+        let after: String = db
+            .connection()
+            .query_row("SELECT updated_at FROM photos WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn changed_file_is_reindexed() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        write_png(&path);
+        let db = Db::open_in_memory().unwrap();
+        let root_id = db
+            .add_root(dir.path().to_str().unwrap(), "reference")
+            .unwrap();
+        scan_and_index(&db, root_id, dir.path()).unwrap();
+
+        image::RgbaImage::from_pixel(8, 3, image::Rgba([1, 2, 3, 255]))
+            .save(&path)
+            .unwrap();
+        let report = scan_and_index(&db, root_id, dir.path()).unwrap();
+        assert_eq!(report.modified, 1);
+        let photo = db.photo_by_path(path.to_str().unwrap()).unwrap().unwrap();
+        assert_eq!(photo.width, 8);
+        assert_eq!(photo.file_size, std::fs::metadata(&path).unwrap().len());
+    }
+
+    #[test]
+    fn a_reappearing_missing_photo_becomes_present() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        write_png(&path);
+        let db = Db::open_in_memory().unwrap();
+        let root_id = db
+            .add_root(dir.path().to_str().unwrap(), "reference")
+            .unwrap();
+        let first = scan_and_index(&db, root_id, dir.path()).unwrap();
+        db.mark_missing(first.new_ids[0]).unwrap();
+
+        let report = scan_and_index(&db, root_id, dir.path()).unwrap();
+        assert_eq!(report.modified, 1);
+        let photo = db.photo_by_id(first.new_ids[0]).unwrap().unwrap();
+        assert_eq!(photo.status, PhotoStatus::Present);
+    }
+
+    #[test]
+    fn nested_root_scan_skips_a_photo_owned_by_another_root() {
+        let dir = tempdir().unwrap();
+        let parent = dir.path();
+        let child = parent.join("2026");
+        std::fs::create_dir(&child).unwrap();
+        write_png(&child.join("VRChat_2026-10-21_21-14-03.221_4x3.png"));
+        let db = Db::open_in_memory().unwrap();
+        let child_id = db.add_root(child.to_str().unwrap(), "reference").unwrap();
+        let first = scan_and_index(&db, child_id, &child).unwrap();
+        let parent_id = db.add_root(parent.to_str().unwrap(), "reference").unwrap();
+
+        let report = scan_and_index(&db, parent_id, parent).unwrap();
+        assert_eq!(report.modified, 0);
+        assert_eq!(db.count_photos().unwrap(), 1);
+        assert_eq!(
+            db.photo_by_path(
+                child
+                    .join("VRChat_2026-10-21_21-14-03.221_4x3.png")
+                    .to_str()
+                    .unwrap()
+            )
+            .unwrap()
+            .unwrap()
+            .id,
+            first.new_ids[0]
+        );
     }
 
     #[cfg(unix)]

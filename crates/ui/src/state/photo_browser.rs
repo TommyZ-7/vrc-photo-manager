@@ -496,6 +496,18 @@ mod tests {
     }
 
     #[test]
+    fn revision_debounce_coalesces_a_burst() {
+        let mut debounce = CountDebounce::default();
+        let quiet = Duration::from_secs(2);
+        let start = Instant::now();
+        assert!(!debounce.observe(10, start, quiet));
+        assert!(!debounce.observe(11, start + Duration::from_secs(3), quiet));
+        assert!(!debounce.observe(12, start + Duration::from_secs(6), quiet));
+        assert!(debounce.observe(12, start + Duration::from_secs(9), quiet));
+        assert!(!debounce.observe(13, start + Duration::from_secs(12), quiet));
+    }
+
+    #[test]
     fn stale_generation_cannot_insert_or_fail_pages() {
         let mut browser =
             PhotoBrowser::new(Arc::new(PhotoIndex::new(vec![index_entry(1, 202601)])));
