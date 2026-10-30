@@ -21,6 +21,7 @@ chrono.workspace = true
 clap.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }
 interprocess.workspace = true
+mimalloc.workspace = true
 notify = "8"
 single-instance = "0.3"
 trash = "5"

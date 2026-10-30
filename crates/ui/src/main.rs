@@ -19,6 +19,11 @@ mod state;
 mod ui;
 mod update_view;
 
+/// mimalloc, so a freed compression peak is returned to the OS instead of
+/// staying resident for the life of the process.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() {
     if logging::init("vrc-photo-manager", "info,vrc_photo_manager=debug").is_none() {
         tracing::warn!("file logging is unavailable; using stderr only");

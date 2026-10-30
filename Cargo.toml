@@ -25,6 +25,7 @@ clap = { version = "4", features = ["derive"] }
 dirs = "6"
 hex = "0.4"
 interprocess = "2.4"
+mimalloc = "0.1"
 minisign-verify = "0.3"
 regex = "1"
 semver = "1"

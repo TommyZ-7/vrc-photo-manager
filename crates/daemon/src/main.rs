@@ -6,6 +6,11 @@ use vrc_photo_daemon::Daemon;
 
 mod logging;
 
+/// mimalloc, so a freed compression peak is returned to the OS instead of
+/// staying resident for the life of this long-running process.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Debug, Parser)]
 #[command(
     name = "vrc-photo-daemon",
