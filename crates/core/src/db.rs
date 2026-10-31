@@ -161,6 +161,8 @@ CREATE TABLE IF NOT EXISTS compression_jobs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON compression_jobs(status);
+CREATE INDEX IF NOT EXISTS idx_jobs_photo_profile
+    ON compression_jobs(photo_id, profile_id);
 
 CREATE TABLE IF NOT EXISTS log_imports (
     log_file TEXT PRIMARY KEY,
@@ -248,6 +250,9 @@ CREATE INDEX IF NOT EXISTS idx_deletion_requests_status
 "#;
 
 const SCHEMA_V8_COMMAND_PAYLOAD: &str = "ALTER TABLE daemon_commands ADD COLUMN payload TEXT;";
+
+const SCHEMA_V9_JOB_PHOTO_PROFILE_INDEX: &str = "CREATE INDEX IF NOT EXISTS idx_jobs_photo_profile \
+     ON compression_jobs(photo_id, profile_id);";
 
 const PHOTO_SELECT: &str = "p.id, p.root_id, p.rel_path, p.abs_path, p.file_name, \
     p.captured_at_utc, p.captured_at_local, p.tz_offset_sec, p.width, p.height, \
@@ -389,6 +394,9 @@ impl Db {
         if version < 8 {
             self.migrate_v8()?;
         }
+        if version < 9 {
+            self.migrate_v9()?;
+        }
         Ok(())
     }
 
@@ -529,6 +537,27 @@ impl Db {
             params![now_string()],
         )?;
         tx.pragma_update(None, "user_version", 8)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Adds the `(photo_id, profile_id)` index used by the automatic
+    /// compression dedup check. `IF NOT EXISTS` makes the step safe to retry
+    /// after a crash between the DDL and `user_version`.
+    fn migrate_v9(&self) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version >= 9 {
+            tx.commit()?;
+            return Ok(());
+        }
+
+        tx.execute_batch(SCHEMA_V9_JOB_PHOTO_PROFILE_INDEX)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (9, ?1)",
+            params![now_string()],
+        )?;
+        tx.pragma_update(None, "user_version", 9)?;
         tx.commit()?;
         Ok(())
     }
@@ -3022,7 +3051,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
         let has_output_dir: bool = db
             .conn
             .query_row(
@@ -3042,7 +3071,7 @@ mod tests {
             .connection()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
         let table: i64 = db
             .connection()
             .query_row(
@@ -3712,7 +3741,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
 
         let recorded: i64 = db
             .conn
@@ -3755,7 +3784,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
         let retry_column: i64 = db
             .conn
             .query_row(
@@ -3822,7 +3851,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
 
         let jobs = db.list_jobs(10).unwrap();
         assert_eq!(jobs.len(), 1);
@@ -3855,7 +3884,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
         assert_eq!(db.list_jobs(10).unwrap()[0].retry_count, 2);
 
         let tables: i64 = db
@@ -4710,6 +4739,38 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(version, 8);
+    }
+
+    #[test]
+    fn migration_v9_adds_the_job_photo_profile_index() {
+        let db = Db::open_in_memory().unwrap();
+        let index_sql: String = db
+            .conn
+            .query_row(
+                "SELECT sql FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_jobs_photo_profile'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let normalized = index_sql
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
+        assert!(
+            normalized.contains("on compression_jobs(photo_id, profile_id)"),
+            "{index_sql}"
+        );
+
+        // A crash after the DDL but before user_version must be safe to retry.
+        db.conn.pragma_update(None, "user_version", 8).unwrap();
+        db.migrate_v9().unwrap();
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 9);
     }
 
     #[test]
