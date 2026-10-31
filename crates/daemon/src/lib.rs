@@ -47,7 +47,6 @@ const LOG_INTERVAL: Duration = Duration::from_millis(750);
 const SETTINGS_INTERVAL: Duration = Duration::from_millis(500);
 const THUMBNAIL_PRUNE_BATCH: usize = 128;
 const THUMBNAIL_PRUNE_IDLE: Duration = Duration::from_millis(500);
-const THUMBNAIL_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Default)]
 pub struct DaemonStatus {
@@ -550,7 +549,7 @@ impl Daemon {
                 }
             }
         }
-        prune_thumbnail_cache(
+        let _ = prune_thumbnail_cache(
             &self.thumbnail_dir,
             self.thumbnail_cache_limit.load(Ordering::Relaxed),
         );
@@ -610,6 +609,10 @@ impl Daemon {
     }
 
     pub fn run(&mut self) -> Result<()> {
+        let _ = prune_thumbnail_cache(
+            &self.thumbnail_dir,
+            self.thumbnail_cache_limit.load(Ordering::Relaxed),
+        );
         self.start_ipc();
         if self.stopping() {
             self.shutdown();
@@ -1508,9 +1511,12 @@ impl Daemon {
             let running = self.running.clone();
             let cache_dir = self.thumbnail_dir.clone();
             let cache_limit = self.thumbnail_cache_limit.clone();
+            let external_bytes = self.thumbnail_external_bytes.clone();
             let handle = thread::Builder::new()
                 .name("thumbnails".to_string())
-                .spawn(move || thumbnail_loop(db, running, rx, cache_dir, cache_limit))
+                .spawn(move || {
+                    thumbnail_loop(db, running, rx, cache_dir, cache_limit, external_bytes)
+                })
                 .expect("cannot spawn thumbnail worker");
             self.thumbnail_tx = Some(tx.clone());
             self.thumbnail_handle = Some(handle);
@@ -1793,20 +1799,66 @@ fn preferred_display_derivative<'a>(
         })
 }
 
+/// Tracks the cache size between scans. `known_bytes` is `None` while the
+/// cache has not been measured yet, which forces the first prune decision to
+/// scan even when nothing was generated.
+struct ThumbnailCacheBudget {
+    limit_bytes: u64,
+    known_bytes: Option<u64>,
+}
+
+impl ThumbnailCacheBudget {
+    fn new(limit: u64) -> Self {
+        Self {
+            limit_bytes: limit,
+            known_bytes: None,
+        }
+    }
+
+    fn set_limit(&mut self, limit: u64) {
+        if limit == self.limit_bytes {
+            return;
+        }
+        self.limit_bytes = limit;
+        self.known_bytes = None;
+    }
+
+    fn note_generated(&mut self, bytes: u64) {
+        self.add(bytes);
+    }
+
+    fn note_external(&mut self, bytes: u64) {
+        self.add(bytes);
+    }
+
+    fn note_pruned(&mut self, report: &thumbnail::ThumbnailPruneReport) {
+        self.known_bytes = (self.limit_bytes > 0).then_some(report.remaining_bytes);
+    }
+
+    fn needs_prune(&self) -> bool {
+        self.limit_bytes > 0
+            && self
+                .known_bytes
+                .is_none_or(|known| known > self.limit_bytes)
+    }
+
+    fn add(&mut self, bytes: u64) {
+        if let Some(known) = self.known_bytes {
+            self.known_bytes = Some(known.saturating_add(bytes));
+        }
+    }
+}
+
 struct ThumbnailPruneSchedule {
     batch: usize,
-    interval: Duration,
     generated: usize,
-    last_prune: Instant,
 }
 
 impl ThumbnailPruneSchedule {
-    fn new(batch: usize, interval: Duration) -> Self {
+    fn new(batch: usize) -> Self {
         Self {
             batch,
-            interval,
             generated: 0,
-            last_prune: Instant::now(),
         }
     }
 
@@ -1820,21 +1872,12 @@ impl ThumbnailPruneSchedule {
         }
     }
 
-    fn periodic_due(&mut self) -> bool {
-        if self.last_prune.elapsed() < self.interval {
-            return false;
-        }
-        self.note_pruned();
-        true
-    }
-
     fn has_pending(&self) -> bool {
         self.generated > 0
     }
 
     fn note_pruned(&mut self) {
         self.generated = 0;
-        self.last_prune = Instant::now();
     }
 }
 
@@ -1842,25 +1885,38 @@ fn thumbnail_cache_limit_bytes(megabytes: u64) -> u64 {
     megabytes.saturating_mul(1024 * 1024)
 }
 
-fn prune_thumbnail_cache(cache_dir: &Path, limit_bytes: u64) {
+/// Prunes the cache when a limit is set. Returns the measurement from the
+/// scan so the worker can update its budget; `None` means the cache was not
+/// scanned (unlimited) or the scan failed.
+fn prune_thumbnail_cache(
+    cache_dir: &Path,
+    limit_bytes: u64,
+) -> Option<thumbnail::ThumbnailPruneReport> {
     if limit_bytes == 0 {
-        return;
+        return None;
     }
     match thumbnail::prune_thumbnails_in(cache_dir, limit_bytes) {
-        Ok(report) if report.removed_files > 0 => tracing::info!(
-            removed_files = report.removed_files,
-            removed_bytes = report.removed_bytes,
-            remaining_bytes = report.remaining_bytes,
-            limit_bytes,
-            dir = %cache_dir.display(),
-            "pruned thumbnail cache"
-        ),
-        Ok(_) => {}
-        Err(error) => tracing::warn!(
-            %error,
-            dir = %cache_dir.display(),
-            "cannot prune thumbnail cache"
-        ),
+        Ok(report) => {
+            if report.removed_files > 0 {
+                tracing::info!(
+                    removed_files = report.removed_files,
+                    removed_bytes = report.removed_bytes,
+                    remaining_bytes = report.remaining_bytes,
+                    limit_bytes,
+                    dir = %cache_dir.display(),
+                    "pruned thumbnail cache"
+                );
+            }
+            Some(report)
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                dir = %cache_dir.display(),
+                "cannot prune thumbnail cache"
+            );
+            None
+        }
     }
 }
 
@@ -1870,25 +1926,30 @@ fn thumbnail_loop(
     rx: Receiver<i64>,
     cache_dir: PathBuf,
     cache_limit: Arc<AtomicU64>,
+    external_bytes: Arc<AtomicU64>,
 ) {
-    let mut last_limit = cache_limit.load(Ordering::Relaxed);
-    let mut schedule = ThumbnailPruneSchedule::new(THUMBNAIL_PRUNE_BATCH, THUMBNAIL_PRUNE_INTERVAL);
-    prune_thumbnail_cache(&cache_dir, last_limit);
-    schedule.note_pruned();
+    let mut budget = ThumbnailCacheBudget::new(cache_limit.load(Ordering::Relaxed));
+    let mut schedule = ThumbnailPruneSchedule::new(THUMBNAIL_PRUNE_BATCH);
+    // Notifications that arrived before this worker started describe a cache
+    // that the startup scan is about to measure anyway.
+    external_bytes.swap(0, Ordering::Relaxed);
+    if let Some(report) = prune_thumbnail_cache(&cache_dir, budget.limit_bytes) {
+        budget.note_pruned(&report);
+    }
 
     while running.load(Ordering::Relaxed) {
         let limit = cache_limit.load(Ordering::Relaxed);
-        if limit != last_limit {
-            last_limit = limit;
+        if limit != budget.limit_bytes {
+            budget.set_limit(limit);
             schedule.note_pruned();
-            prune_thumbnail_cache(&cache_dir, limit);
-        }
-        if schedule.periodic_due() {
-            last_limit = cache_limit.load(Ordering::Relaxed);
-            prune_thumbnail_cache(&cache_dir, last_limit);
+            if let Some(report) = prune_thumbnail_cache(&cache_dir, limit) {
+                budget.note_pruned(&report);
+            }
         }
         match rx.recv_timeout(THUMBNAIL_PRUNE_IDLE) {
             Ok(id) => {
+                let external = external_bytes.swap(0, Ordering::Relaxed);
+                budget.note_external(external);
                 let path = {
                     let db = db.lock().unwrap();
                     db.photo_by_id(id)
@@ -1897,13 +1958,21 @@ fn thumbnail_loop(
                         .map(|photo| photo.effective_path().to_string())
                 };
                 if let Some(path) = path {
-                    let cache_path = cache_dir.join(format!("{id}.webp"));
-                    let generated = !cache_path.is_file();
-                    match thumbnail::ensure_thumbnail_in(id, Path::new(&path), &cache_dir) {
-                        Ok(Some(_)) => {
-                            if generated && schedule.note_generated() {
-                                last_limit = cache_limit.load(Ordering::Relaxed);
-                                prune_thumbnail_cache(&cache_dir, last_limit);
+                    match thumbnail::ensure_thumbnail_in_with_status(
+                        id,
+                        Path::new(&path),
+                        &cache_dir,
+                    ) {
+                        Ok(Some(ensured)) => {
+                            if ensured.created {
+                                budget.note_generated(ensured.bytes);
+                                if schedule.note_generated()
+                                    && budget.needs_prune()
+                                    && let Some(report) =
+                                        prune_thumbnail_cache(&cache_dir, budget.limit_bytes)
+                                {
+                                    budget.note_pruned(&report);
+                                }
                             }
                         }
                         Ok(None) => tracing::debug!(
@@ -1921,10 +1990,13 @@ fn thumbnail_loop(
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if schedule.has_pending() {
+                let external = external_bytes.swap(0, Ordering::Relaxed);
+                budget.note_external(external);
+                if (schedule.has_pending() || external > 0) && budget.needs_prune() {
                     schedule.note_pruned();
-                    last_limit = cache_limit.load(Ordering::Relaxed);
-                    prune_thumbnail_cache(&cache_dir, last_limit);
+                    if let Some(report) = prune_thumbnail_cache(&cache_dir, budget.limit_bytes) {
+                        budget.note_pruned(&report);
+                    }
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -3311,9 +3383,92 @@ mod tests {
         assert!(cache.join("3.webp").exists());
     }
 
+    fn report_with_remaining(bytes: u64) -> thumbnail::ThumbnailPruneReport {
+        thumbnail::ThumbnailPruneReport {
+            remaining_bytes: bytes,
+            ..thumbnail::ThumbnailPruneReport::default()
+        }
+    }
+
+    #[test]
+    fn thumbnail_budget_prunes_only_above_the_limit() {
+        let mut budget = ThumbnailCacheBudget::new(1000);
+        assert!(budget.needs_prune()); // 未計測
+        budget.note_pruned(&report_with_remaining(1000));
+        assert!(!budget.needs_prune());
+        budget.note_generated(1);
+        assert!(budget.needs_prune());
+    }
+
+    #[test]
+    fn thumbnail_budget_tracks_generation_external_growth_and_reset() {
+        let mut budget = ThumbnailCacheBudget::new(1000);
+        budget.note_pruned(&report_with_remaining(500));
+        budget.note_generated(200);
+        budget.note_external(100);
+        assert!(!budget.needs_prune());
+        budget.note_generated(300);
+        assert!(budget.needs_prune());
+        budget.note_pruned(&report_with_remaining(400));
+        assert!(!budget.needs_prune());
+    }
+
+    #[test]
+    fn thumbnail_budget_never_prunes_when_unlimited() {
+        let mut budget = ThumbnailCacheBudget::new(0);
+        budget.note_generated(10_000_000);
+        budget.note_external(10_000_000);
+        assert!(!budget.needs_prune());
+        budget.note_pruned(&report_with_remaining(0));
+        assert!(!budget.needs_prune());
+    }
+
+    #[test]
+    fn external_thumbnail_growth_prunes_over_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let cache = dir.path().join("thumbnails");
+        std::fs::create_dir_all(&cache).unwrap();
+        let now = SystemTime::now();
+        for (id, age) in [(1, 30), (2, 20), (3, 10)] {
+            write_thumbnail_cache_entry(
+                &cache.join(format!("{id}.webp")),
+                600_000,
+                now - Duration::from_secs(age),
+            );
+        }
+        save_daemon_settings(&daemon, |settings| settings.thumbnail_cache_mb = 2);
+        daemon.refresh_compression_settings();
+        daemon.set_thumbnail_dir(cache.clone());
+
+        daemon.start_workers();
+        // The startup pass discards notifications, so consume two pulses: the
+        // second one can only be handled by the idle branch after startup.
+        for _ in 0..2 {
+            daemon
+                .thumbnail_external_bytes
+                .fetch_add(1, Ordering::Relaxed);
+            wait_for(
+                || daemon.thumbnail_external_bytes.load(Ordering::Relaxed) == 0,
+                Duration::from_secs(5),
+            );
+        }
+        assert!(cache.join("1.webp").exists());
+
+        // The UI writes its own thumbnails; the notice reports bytes the
+        // daemon's generation counter never saw.
+        write_thumbnail_cache_entry(&cache.join("4.webp"), 1_000_000, now);
+        daemon
+            .thumbnail_external_bytes
+            .fetch_add(1_000_000, Ordering::Relaxed);
+        wait_for(|| !cache.join("1.webp").exists(), Duration::from_secs(5));
+        assert!(cache.join("3.webp").exists());
+        daemon.stop_workers();
+    }
+
     #[test]
     fn thumbnail_prune_schedule_fires_after_a_batch() {
-        let mut schedule = ThumbnailPruneSchedule::new(2, Duration::from_secs(3600));
+        let mut schedule = ThumbnailPruneSchedule::new(2);
 
         assert!(!schedule.note_generated());
         assert!(schedule.note_generated());
@@ -3321,17 +3476,8 @@ mod tests {
     }
 
     #[test]
-    fn thumbnail_prune_schedule_fires_when_the_interval_elapses() {
-        let mut schedule = ThumbnailPruneSchedule::new(128, Duration::from_millis(5));
-
-        assert!(!schedule.periodic_due());
-        thread::sleep(Duration::from_millis(10));
-        assert!(schedule.periodic_due());
-    }
-
-    #[test]
     fn thumbnail_prune_schedule_resets_pending_after_an_idle_prune() {
-        let mut schedule = ThumbnailPruneSchedule::new(128, Duration::from_secs(3600));
+        let mut schedule = ThumbnailPruneSchedule::new(128);
 
         assert!(!schedule.note_generated());
         assert!(schedule.has_pending());
