@@ -29,7 +29,7 @@ cargo test --workspace
 
 | ファイル | 内容 |
 |---|---|
-| `db.rs` | マイグレーション（V4の再実行・V8のpayload列を含む）、写真UPSERT、文脈/プレイヤー、検索、キューの原子的取得、写真単位のバッチ取得、強制削除判定、アクティブジョブのみのfailed化、`retry_count` と再試行上限、`daemon_errors` のUPSERT/削除、`daemon_commands` の重複排除と取り出し、`scan_root` payloadの往復、パス集合の一括状態取得 |
+| `db.rs` | マイグレーション（V4の再実行、V8のpayload列、V9の自動圧縮重複判定インデックスを含む）、写真UPSERT、文脈/プレイヤー、検索、キューの原子的取得、写真単位のバッチ取得、強制削除判定、アクティブジョブのみのfailed化、`retry_count` と再試行上限、`daemon_errors` のUPSERT/削除、`daemon_commands` の重複排除と取り出し、`scan_root` payloadの往復、パス集合の一括状態取得 |
 | `scanner.rs` | フォルダ走査、単一ファイル索引、compressed除外、読めないファイル・ディレクトリの失敗記録、walking/indexing進捗コールバック、無変更写真のスキップ（再ハッシュなし）、変更ファイルの再索引、missingからの復帰、ネストルートのスキップ |
 | `photo_filename.rs` | VRChatファイル名、無効名、拡張子 |
 | `log_parser.rs` | イベント解析、セッション、入退室 |
@@ -79,6 +79,10 @@ cargo test --workspace
 - `scan_root` が対象ルートだけを索引し、他ルートの写真をmissingにしないこと。
 - 設定に無い実在ディレクトリの `scan_root` が索引されること。
 - `scan_root` の新規写真が `auto_compress_backlog=false` でも自動圧縮に載ること。
+- 起動時に保留中の `scan_root` が初回フルスキャンより先に処理され、取り込み写真だけが自動圧縮に載り、既存ルートのバックログは載らないこと。
+- `ScanFinished` が `auto_enqueued` と対象ルートを運ぶこと。
+- 同じ写真・プロファイルの自動圧縮 enqueue が重複しないこと。
+- 有効かつ自動ONのプロファイルが無いときは自動圧縮 enqueue をしないこと。
 - 無変更の再スキャンで `library_revision` が上がらないこと。
 - `run_once` が処理前にコマンドを消化する。
 - IPCサーバーのhello/status、`wake_commands` がDBを触らずにwakeすること、`set_paused` の状態変更とイベント、`shutdown` のrunning/wake。
@@ -94,6 +98,8 @@ GPUIのウィンドウは開かず、表示に使う純粋関数だけを検証�
 - 通知バーの優先順位（圧縮 → デーモン → 取り込み）。
 - デーモン操作のラベルと再試行コマンドの対応。
 - 取り込み結果の失敗数・部分移動数の集計と、再試行対象（`Failed` かつ `retryable`）の抽出。
+- 取り込み結果の「自動圧縮 N」バッジが0件で非表示、1件以上で件数表示になること。
+- `ScanFinished` の対象ルートが取り込み先と一致するときだけ自動圧縮件数を加算すること。
 - 圧縮ジョブの再試行可否と `再試行 n/3` の表示（0回・2回・上限3回）。
 - タイムスタンプの `MM/DD HH:MM` 変換と生文字列フォールバック。
 - `daemon_liveness` がハートビートまたはIPC接続で稼働と判定すること。

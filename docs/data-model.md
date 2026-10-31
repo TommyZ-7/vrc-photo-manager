@@ -368,6 +368,8 @@ estimated_link, thumbnail_cache_mb, compression_workers
 | 5 | `photos.display_derivative_id`、表示対象インデックス、移動照合インデックス追加 |
 | 6 | `compression_jobs.output_dir` 追加 |
 | 7 | `deletion_requests` と active/status インデックス追加 |
+| 8 | `daemon_commands.payload` 追加 |
+| 9 | `idx_jobs_photo_profile` 追加（自動圧縮の重複判定用） |
 
 V4以降は `IMMEDIATE` トランザクションで適用する。UIとデーモンが同時に起動しても、書き込みロックで直列化し、`user_version` と列・テーブルの存在を再確認してから進めるため、中断後の再実行でも安全。
 
