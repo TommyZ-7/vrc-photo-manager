@@ -102,11 +102,12 @@ pub(crate) fn toast_flush_needed(pending: usize, scheduled: bool) -> bool {
     pending > 0 && !scheduled
 }
 
-/// The notification modal must not stack over another modal.
+/// Label for the import result badge; zero jobs stay hidden.
 fn auto_compress_badge_label(count: usize) -> Option<String> {
     (count > 0).then(|| format!("自動圧縮 {count}"))
 }
 
+/// The notification modal must not stack over another modal.
 pub(crate) fn notification_modal_allowed(import_open: bool, manual_open: bool) -> bool {
     !import_open && !manual_open
 }
@@ -523,7 +524,7 @@ impl App {
                         this.import_report = None;
                         this.import_report_expanded = false;
                         this.import_auto_compress_enqueued = 0;
-                        this.import_scan_pending = false;
+                        this.import_scan_target = None;
                         cx.notify();
                     })),
             );

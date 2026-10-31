@@ -149,7 +149,10 @@ mod tests {
             framing::write_message(
                 reader.get_mut(),
                 &ServerMessage::Event {
-                    event: Event::ScanStarted { roots: 1 },
+                    event: Event::ScanStarted {
+                        roots: 1,
+                        target: None,
+                    },
                 },
             )
             .unwrap();
@@ -166,7 +169,7 @@ mod tests {
             other => panic!("expected connected, got {other:?}"),
         }
         match rx.recv_blocking().unwrap() {
-            Incoming::Event(Event::ScanStarted { roots }) => assert_eq!(roots, 1),
+            Incoming::Event(Event::ScanStarted { roots, .. }) => assert_eq!(roots, 1),
             other => panic!("expected scan event, got {other:?}"),
         }
         drop(rx);

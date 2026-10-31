@@ -866,17 +866,19 @@ impl Daemon {
         full_scan: bool,
         initial_scan: Option<bool>,
     ) -> Result<ScanReport> {
-        self.begin_scan(roots.len());
+        let target =
+            (!full_scan && roots.len() == 1).then(|| roots[0].to_string_lossy().to_string());
+        self.begin_scan(roots.len(), target.clone());
         let result = self.scan_roots_inner(roots, full_scan, initial_scan);
         let (report_result, auto_enqueued) = match result {
             Ok((report, auto_enqueued)) => (Ok(report), auto_enqueued),
             Err(error) => (Err(error), 0),
         };
-        self.finish_scan(&report_result, auto_enqueued);
+        self.finish_scan(&report_result, auto_enqueued, target);
         report_result
     }
 
-    fn begin_scan(&self, roots: usize) {
+    fn begin_scan(&self, roots: usize, target: Option<String>) {
         {
             let mut status = self.status.lock().unwrap();
             status.scanning = true;
@@ -887,10 +889,15 @@ impl Daemon {
             status.scan_root = usize::from(roots > 0);
             status.scan_roots = roots;
         }
-        self.events.publish(Event::ScanStarted { roots });
+        self.events.publish(Event::ScanStarted { roots, target });
     }
 
-    fn finish_scan(&self, result: &Result<ScanReport>, auto_enqueued: usize) {
+    fn finish_scan(
+        &self,
+        result: &Result<ScanReport>,
+        auto_enqueued: usize,
+        target: Option<String>,
+    ) {
         let (found, indexed, skipped, failures, failed) = match result {
             Ok(report) => (
                 report.found,
@@ -916,6 +923,7 @@ impl Daemon {
             failures,
             failed,
             auto_enqueued,
+            target,
         });
     }
 
@@ -4583,7 +4591,7 @@ mod tests {
         daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
         daemon.set_ipc_endpoint(None);
         let events = daemon.events.subscribe();
-        daemon.scan_root_photos(photo_dir).unwrap();
+        daemon.scan_root_photos(photo_dir.clone()).unwrap();
 
         let mut finished = None;
         while let Ok(event) = events.try_recv() {
@@ -4592,7 +4600,14 @@ mod tests {
             }
         }
         match finished {
-            Some(Event::ScanFinished { auto_enqueued, .. }) => assert_eq!(auto_enqueued, 1),
+            Some(Event::ScanFinished {
+                auto_enqueued,
+                target,
+                ..
+            }) => {
+                assert_eq!(auto_enqueued, 1);
+                assert_eq!(target.as_deref(), Some(photo_dir.to_str().unwrap()));
+            }
             _ => panic!("scan did not finish"),
         }
     }
@@ -4657,7 +4672,7 @@ mod tests {
         let report = daemon.scan_root_photos(root).unwrap();
         assert_eq!(report.indexed, 1);
         match events.try_recv().unwrap() {
-            Event::ScanStarted { roots } => assert_eq!(roots, 1),
+            Event::ScanStarted { roots, .. } => assert_eq!(roots, 1),
             other => panic!("unexpected event: {other:?}"),
         }
     }

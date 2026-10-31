@@ -103,6 +103,9 @@ pub enum Operation {
 pub enum Event {
     ScanStarted {
         roots: usize,
+        /// Set when the scan targets one import root; `None` for full scans.
+        #[serde(default)]
+        target: Option<String>,
     },
     ScanProgress {
         phase: ScanPhase,
@@ -122,6 +125,9 @@ pub enum Event {
         /// an older daemon stays compatible with a newer UI.
         #[serde(default)]
         auto_enqueued: usize,
+        /// Set when the scan targets one import root; `None` for full scans.
+        #[serde(default)]
+        target: Option<String>,
     },
     CompressionProgress {
         job_id: String,
@@ -183,5 +189,25 @@ mod tests {
         };
         let json = serde_json::to_string(&value).unwrap();
         assert_eq!(serde_json::from_str::<ServerMessage>(&json).unwrap(), value);
+    }
+
+    #[test]
+    fn scan_finished_defaults_new_fields_for_older_daemons() {
+        let event: Event = serde_json::from_str(
+            r#"{"type":"scan_finished","found":1,"indexed":1,"skipped":0,"failures":0,"failed":false}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            event,
+            Event::ScanFinished {
+                found: 1,
+                indexed: 1,
+                skipped: 0,
+                failures: 0,
+                failed: false,
+                auto_enqueued: 0,
+                target: None,
+            }
+        );
     }
 }
