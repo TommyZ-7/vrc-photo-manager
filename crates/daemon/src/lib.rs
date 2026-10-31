@@ -3787,6 +3787,19 @@ mod tests {
             .photo_by_path(original.to_str().unwrap())
             .unwrap()
             .unwrap();
+        let derivative = dir.path().join("photos/kept.webp");
+        std::fs::write(&derivative, b"kept derivative").unwrap();
+        db.add_derivative(
+            photo.id,
+            derivative.to_str().unwrap(),
+            "webp",
+            16,
+            10,
+            std::fs::metadata(&derivative).unwrap().len(),
+            "p",
+            "keep",
+        )
+        .unwrap();
         db.connection()
             .execute(
                 "INSERT INTO deletion_requests(photo_id, reason, status, force, requested_at) \
@@ -3798,6 +3811,15 @@ mod tests {
         daemon.process_deletions().unwrap();
 
         assert!(original.exists(), "unknown reason must not delete files");
+        assert!(
+            derivative.exists(),
+            "unknown reason must not delete derivatives"
+        );
+        assert_eq!(
+            db.derivatives_for_photo(photo.id).unwrap().len(),
+            1,
+            "unknown reason must not drop the derivative row"
+        );
         let request = db.active_deletion_request(photo.id).unwrap().unwrap();
         assert_eq!(
             request.reason,

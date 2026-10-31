@@ -1755,8 +1755,10 @@ impl Db {
         })
     }
 
-    /// Counts compression jobs per status for the warning modal. The `send`
-    /// bucket stays empty until #142 adds the outbox.
+    /// Counts compression jobs per status for the warning modal. Unknown
+    /// statuses count as affected because `QueueStatus::parse` reports them as
+    /// pending in the body. The `send` bucket stays empty until #142 adds the
+    /// outbox.
     pub fn deletion_job_summary(&self, photo_ids: &[i64]) -> Result<DeletionJobSummary> {
         let mut compression = JobStatusCounts::default();
         let mut affected_photos = 0;
@@ -1787,7 +1789,7 @@ impl Db {
                 &format!(
                     "SELECT COUNT(DISTINCT photo_id) FROM compression_jobs \
                      WHERE photo_id IN ({placeholders}) \
-                       AND status IN ('waiting', 'pending', 'processing', 'failed')"
+                       AND status NOT IN ('completed', 'cancelled')"
                 ),
                 params_from_iter(chunk.iter().copied()),
                 |row| row.get::<_, i64>(0),
@@ -3241,6 +3243,30 @@ mod tests {
         assert_eq!(
             summary.affected_photos, 1,
             "photos without jobs are excluded"
+        );
+    }
+
+    #[test]
+    fn deletion_job_summary_counts_a_unknown_status_as_affected() {
+        let db = Db::open_in_memory().unwrap();
+        let id = seed_photo(&db);
+        db.save_profile(&profile("p", "P")).unwrap();
+        let job = db.enqueue_job(id, "p", "keep").unwrap();
+        db.connection()
+            .execute(
+                "UPDATE compression_jobs SET status = 'future_status' WHERE id = ?1",
+                params![job],
+            )
+            .unwrap();
+
+        let summary = db.deletion_job_summary(&[id]).unwrap();
+        assert_eq!(
+            summary.compression.pending, 1,
+            "unknown statuses parse as pending in the body"
+        );
+        assert_eq!(
+            summary.affected_photos, 1,
+            "the heading must not disagree with the body"
         );
     }
 

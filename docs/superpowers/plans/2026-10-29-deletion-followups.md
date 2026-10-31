@@ -2,6 +2,10 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Status: completed (2026-10-30).** All tasks were executed and merged in
+> PR #169. This document is a post-hoc record; the checkboxes record what was
+> done.
+
 **Goal:** Make the deferred-deletion flow deterministic and fail-closed: stable display derivative, no queue starvation, no baseline reset on read failure, unknown reasons blocked, and an accurate warning heading.
 
 **Architecture:** Core SQL/query changes first (#158, #156), then daemon selection logic (#155), then UI snapshot/heading fixes (#157, #160). Each task adds its regression test beside the existing tests in the same file. No schema migrations and no new dependencies.
@@ -44,7 +48,7 @@
 - Consumes: existing `DeletionReason`, `Db::request_deletion`, `Db::block_deletion`, `Db::pending_deletion_requests`.
 - Produces: `DeletionReason::Unknown`; `DeletionReason::as_str(Unknown) == "unknown"`; `DeletionReason::parse` still returns `None` for unknown strings.
 
-- [ ] **Step 1: Write the failing core test**
+- [x] **Step 1: Write the failing core test**
 
 Add to `crates/core/src/db.rs` tests (near `manual_request_upgrades_an_active_auto_request`):
 
@@ -74,12 +78,12 @@ fn unknown_deletion_reason_is_preserved_and_cannot_be_requested() {
 
 `now_string` is in scope via `use super::*`.
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cargo test -p vrc-photo-core unknown_deletion_reason_is_preserved_and_cannot_be_requested`
 Expected: FAIL (no `DeletionReason::Unknown` variant).
 
-- [ ] **Step 3: Implement the enum and guard**
+- [x] **Step 3: Implement the enum and guard**
 
 In `crates/core/src/model.rs` add the variant and strings:
 
@@ -133,12 +137,12 @@ In `crates/ui/src/app/deletion.rs` add:
 DeletionReason::Unknown => "不明な理由",
 ```
 
-- [ ] **Step 4: Run the core test to verify it passes**
+- [x] **Step 4: Run the core test to verify it passes**
 
 Run: `cargo test -p vrc-photo-core unknown_deletion_reason_is_preserved_and_cannot_be_requested`
 Expected: PASS.
 
-- [ ] **Step 5: Write the failing daemon regression test**
+- [x] **Step 5: Write the failing daemon regression test**
 
 Add to `crates/daemon/src/lib.rs` tests (near the missing-asset test):
 
@@ -176,12 +180,12 @@ fn unknown_deletion_reason_is_blocked_without_deleting() {
 
 Use the imports already present in the test module; if `rusqlite` is not imported there, call `vrc_photo_core`'s re-export or add `use rusqlite::params;` inside the test module (the daemon crate already depends on rusqlite).
 
-- [ ] **Step 6: Run the daemon test to verify it fails**
+- [x] **Step 6: Run the daemon test to verify it fails**
 
 Run: `cargo test -p vrc-photo-daemon unknown_deletion_reason_is_blocked_without_deleting`
 Expected: FAIL (request is treated as Manual and the original is trashed).
 
-- [ ] **Step 7: Implement the executor guard**
+- [x] **Step 7: Implement the executor guard**
 
 At the top of the loop in `run_deletions_once`, before `block_deletion_if_jobs_failed`:
 
@@ -206,12 +210,12 @@ if request.reason == DeletionReason::Unknown {
 }
 ```
 
-- [ ] **Step 8: Run both tests to verify they pass**
+- [x] **Step 8: Run both tests to verify they pass**
 
 Run: `cargo test -p vrc-photo-core unknown_deletion_reason` and `cargo test -p vrc-photo-daemon unknown_deletion_reason`
 Expected: PASS.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add crates/core/src/model.rs crates/core/src/db.rs crates/ui/src/app/deletion.rs crates/daemon/src/lib.rs
@@ -231,7 +235,7 @@ git commit -m "fix(core): fail closed on unknown deletion reasons"
 - Consumes: `compression_jobs.status`, `claim_deletion` readiness rule.
 - Produces: `Db::pending_deletion_requests(limit)` returns only requests that `claim_deletion` can claim (no `waiting`/`pending`/`processing` job for the photo), still ordered by `requested_at, id`. Requests with `failed` jobs are still returned so `block_deletion_if_jobs_failed` can transition them.
 
-- [ ] **Step 1: Write the failing core test**
+- [x] **Step 1: Write the failing core test**
 
 Add near `claim_deletion_requires_no_active_jobs`:
 
@@ -273,12 +277,12 @@ fn pending_deletion_requests_skip_requests_with_active_jobs() {
 }
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cargo test -p vrc-photo-core pending_deletion_requests_skip_requests_with_active_jobs`
 Expected: FAIL (returns 2 rows).
 
-- [ ] **Step 3: Update the SQL**
+- [x] **Step 3: Update the SQL**
 
 Replace the query in `pending_deletion_requests` with:
 
@@ -297,12 +301,12 @@ ORDER BY dr.requested_at, dr.id LIMIT ?1
 
 Add a doc comment: requests with failed jobs stay in this list so the executor can mark them blocked.
 
-- [ ] **Step 4: Run the core test to verify it passes**
+- [x] **Step 4: Run the core test to verify it passes**
 
 Run: `cargo test -p vrc-photo-core pending_deletion_requests_skip_requests_with_active_jobs`
 Expected: PASS.
 
-- [ ] **Step 5: Write the failing starvation test**
+- [x] **Step 5: Write the failing starvation test**
 
 Add to `crates/daemon/src/lib.rs` tests:
 
@@ -355,17 +359,17 @@ fn ready_deletion_after_more_than_hundred_blocked_requests_runs() {
 
 Note: the manual requests for the 100 blockers are recorded after the job, and the job keeps them unclaimable for the whole tick. Missing files are skipped by `execute_deletion`, which then completes the ready request.
 
-- [ ] **Step 6: Run it to verify it fails**
+- [x] **Step 6: Run it to verify it fails**
 
 Run: `cargo test -p vrc-photo-daemon ready_deletion_after_more_than_hundred_blocked_requests_runs`
 Expected: FAIL (the 101st request never leaves `Pending`).
 
-- [ ] **Step 7: Confirm the implementation from Step 3 fixes it**
+- [x] **Step 7: Confirm the implementation from Step 3 fixes it**
 
 Run: `cargo test -p vrc-photo-daemon ready_deletion_after_more_than_hundred_blocked_requests_runs`
 Expected: PASS.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add crates/core/src/db.rs crates/daemon/src/lib.rs
@@ -385,7 +389,7 @@ git commit -m "fix(core): skip active-job requests when claiming deletions"
 - Consumes: `db.derivatives_for_photo`, `db.list_profiles` (returns profiles in `sort_order` ascending order), `db.set_replaced`.
 - Produces: `fn preferred_display_derivative<'a>(derivatives: &'a [Derivative], profiles: &[CompressionProfile]) -> Option<&'a Derivative>`; returns the last-profile derivative with an existing file, falling back to the largest derivative id for unknown profiles.
 
-- [ ] **Step 1: Write the failing helper test**
+- [x] **Step 1: Write the failing helper test**
 
 Add to the daemon tests module:
 
@@ -438,12 +442,12 @@ fn preferred_display_derivative_uses_profile_order_then_id() {
 }
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cargo test -p vrc-photo-daemon preferred_display_derivative_uses_profile_order_then_id`
 Expected: FAIL (`preferred_display_derivative` not defined).
 
-- [ ] **Step 3: Implement the helper**
+- [x] **Step 3: Implement the helper**
 
 Add near `promote_display_derivative` and import `Derivative` from `vrc_photo_core::model`:
 
@@ -470,12 +474,12 @@ fn preferred_display_derivative<'a>(
 }
 ```
 
-- [ ] **Step 4: Run the helper test to verify it passes**
+- [x] **Step 4: Run the helper test to verify it passes**
 
 Run: `cargo test -p vrc-photo-daemon preferred_display_derivative_uses_profile_order_then_id`
 Expected: PASS.
 
-- [ ] **Step 5: Extend the existing worker-count regression test**
+- [x] **Step 5: Extend the existing worker-count regression test**
 
 In `multi_profile_replace_is_worker_count_independent`, after the `derivatives` assertions and before the lossless decode check, add:
 
@@ -489,12 +493,12 @@ assert_eq!(display.profile_id, "lossless", "workers={workers}");
 assert!(Path::new(&display.path).is_file(), "workers={workers}");
 ```
 
-- [ ] **Step 6: Run it to verify it fails**
+- [x] **Step 6: Run it to verify it fails**
 
 Run: `cargo test -p vrc-photo-daemon multi_profile_replace_is_worker_count_independent`
 Expected: FAIL intermittently or consistently for workers > 1 (display follows completion order).
 
-- [ ] **Step 7: Use the helper in `process_job`**
+- [x] **Step 7: Use the helper in `process_job`**
 
 Drop the now-unused `derivative_id` binding by calling `db.add_derivative(...)?;` directly, then replace the `set_replaced` call in the replace branch with:
 
@@ -508,7 +512,7 @@ if !db.set_replaced(photo.id, preferred.id)? {
 }
 ```
 
-- [ ] **Step 8: Use the helper in `execute_deletion`**
+- [x] **Step 8: Use the helper in `execute_deletion`**
 
 In the `AutoReplace && !force` branch, replace the `derivatives.iter().find(...)` selection with:
 
@@ -524,12 +528,12 @@ let Some(valid) = preferred_display_derivative(&derivatives, &profiles) else {
 
 Keep the existing `set_replaced` call and condition below it unchanged.
 
-- [ ] **Step 9: Run the daemon deletion/compression tests**
+- [x] **Step 9: Run the daemon deletion/compression tests**
 
 Run: `cargo test -p vrc-photo-daemon`
 Expected: PASS, including `multi_profile_replace_is_worker_count_independent` for workers 1–4.
 
-- [ ] **Step 10: Commit**
+- [x] **Step 10: Commit**
 
 ```bash
 git add crates/daemon/src/lib.rs
@@ -550,7 +554,7 @@ git commit -m "fix(daemon): pick the display derivative deterministically"
 - Consumes: `Db::active_deletion_requests`, `Db::deletion_counts`, `deletion_blocked_transition`.
 - Produces: `LiveSnapshot.deletions: Option<DeletionSnapshot>`; `collect_deletions(&Db) -> Option<DeletionSnapshot>`; `fn deletion_update(baseline: Option<(i64, i64)>, snapshot: Option<DeletionSnapshot>) -> Option<(DeletionSnapshot, Option<i64>, (i64, i64))>`.
 
-- [ ] **Step 1: Write the failing pure test**
+- [x] **Step 1: Write the failing pure test**
 
 Change the test module import to `use super::{DeletionSnapshot, collect_live_snapshot, deletion_update};`, then add:
 
@@ -585,12 +589,12 @@ fn deletion_update_keeps_the_baseline_when_the_snapshot_is_missing() {
 }
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cargo test -p vrc-photo-ui deletion_update_keeps_the_baseline_when_the_snapshot_is_missing`
 Expected: FAIL (`deletion_update` not defined; `deletions` is not optional).
 
-- [ ] **Step 3: Make the snapshot optional**
+- [x] **Step 3: Make the snapshot optional**
 
 In `crates/ui/src/app/live.rs`:
 
@@ -622,7 +626,7 @@ fn collect_deletions(db: &Db) -> Option<DeletionSnapshot> {
 }
 ```
 
-- [ ] **Step 4: Add the pure transition helper**
+- [x] **Step 4: Add the pure transition helper**
 
 ```rust
 /// Returns the snapshot to apply, the blocked count to announce, and the new
@@ -638,7 +642,7 @@ fn deletion_update(
 }
 ```
 
-- [ ] **Step 5: Rewrite the apply block**
+- [x] **Step 5: Rewrite the apply block**
 
 Update the existing `snapshot_reports_deletion_counts_and_requests` test to unwrap the optional snapshot:
 
@@ -673,12 +677,12 @@ if let Some((deletions, blocked, next_baseline)) =
 }
 ```
 
-- [ ] **Step 6: Run the UI tests**
+- [x] **Step 6: Run the UI tests**
 
 Run: `cargo test -p vrc-photo-ui deletion_update_keeps_the_baseline_when_the_snapshot_is_missing`
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/ui/src/app/live.rs
@@ -700,7 +704,7 @@ git commit -m "fix(ui): keep deletion baseline until a read succeeds"
 - Consumes: `compression_jobs.status`, selection ids.
 - Produces: `DeletionJobSummary.affected_photos: i64` (distinct photos with `waiting`/`pending`/`processing`/`failed` jobs); `fn deletion_warning_heading(affected: i64, selected: usize) -> String`.
 
-- [ ] **Step 1: Extend the failing core assertion**
+- [x] **Step 1: Extend the failing core assertion**
 
 In `deletion_job_summary_counts_each_status`, after the existing assertions:
 
@@ -735,12 +739,12 @@ fn seed_other_photo(db: &Db) -> i64 {
 }
 ```
 
-- [ ] **Step 2: Run it to verify it fails**
+- [x] **Step 2: Run it to verify it fails**
 
 Run: `cargo test -p vrc-photo-core deletion_job_summary_counts_each_status`
 Expected: FAIL (no `affected_photos` field).
 
-- [ ] **Step 3: Add the field and SQL count**
+- [x] **Step 3: Add the field and SQL count**
 
 In `model.rs`:
 
@@ -769,12 +773,12 @@ affected_photos += self.conn.query_row(
 
 Declare `let mut affected_photos = 0;` before the loop and return it in the struct. Update the struct literal test in `photos.rs` to include `affected_photos: 1`.
 
-- [ ] **Step 4: Run the core test to verify it passes**
+- [x] **Step 4: Run the core test to verify it passes**
 
 Run: `cargo test -p vrc-photo-core deletion_job_summary_counts_each_status`
 Expected: PASS.
 
-- [ ] **Step 5: Write the failing UI heading test**
+- [x] **Step 5: Write the failing UI heading test**
 
 In `crates/ui/src/app/photos.rs` tests, import `deletion_warning_heading` and add:
 
@@ -792,12 +796,12 @@ fn deletion_warning_heading_counts_only_photos_with_jobs() {
 }
 ```
 
-- [ ] **Step 6: Run it to verify it fails**
+- [x] **Step 6: Run it to verify it fails**
 
 Run: `cargo test -p vrc-photo-ui deletion_warning_heading_counts_only_photos_with_jobs`
 Expected: FAIL (helper not defined).
 
-- [ ] **Step 7: Implement the heading**
+- [x] **Step 7: Implement the heading**
 
 Add near `deletion_warning_lines`:
 
@@ -816,12 +820,12 @@ fn deletion_warning_heading(affected: i64, selected: usize) -> String {
 
 In `trash_selected`, compute `let heading = deletion_warning_heading(summary.affected_photos, count);` before building the closure and replace the inline `format!("{count} 枚に未完了のジョブがあります。")` with `heading`.
 
-- [ ] **Step 8: Run the UI tests**
+- [x] **Step 8: Run the UI tests**
 
 Run: `cargo test -p vrc-photo-ui deletion_warning`
 Expected: PASS.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 git add crates/core/src/model.rs crates/core/src/db.rs crates/ui/src/app/photos.rs
@@ -834,7 +838,7 @@ git commit -m "fix(ui): count only photos with jobs in the deletion warning"
 
 **Files:** none (verification only)
 
-- [ ] **Step 1: Format, lint, and test**
+- [x] **Step 1: Format, lint, and test**
 
 ```bash
 cargo fmt --all
@@ -845,7 +849,7 @@ cargo test --workspace
 
 Expected: all commands exit 0.
 
-- [ ] **Step 2: Commit any formatting fallout**
+- [x] **Step 2: Commit any formatting fallout**
 
 ```bash
 git add -u
@@ -854,7 +858,7 @@ git commit -m "chore: format deletion follow-up fixes"
 
 Skip when `git status` is clean.
 
-- [ ] **Step 3: Push and open the PR**
+- [x] **Step 3: Push and open the PR**
 
 ```bash
 git push -u origin fix/deletion-followups
@@ -868,7 +872,7 @@ gh pr create --title "fix: deletion review follow-ups (#155 #156 #157 #158 #160)
 - count only photos with jobs in the deletion warning"
 ```
 
-- [ ] **Step 4: Watch CI to green and merge**
+- [x] **Step 4: Watch CI to green and merge**
 
 Use the `ci-watch` skill (background polling). On success:
 

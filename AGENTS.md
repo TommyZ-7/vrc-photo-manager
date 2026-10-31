@@ -71,6 +71,8 @@ cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warni
 - Prefixes: `feat:`, `fix:`, `docs:`, `ci:`, `chore:`.
 - Docs-only changes are assumed to skip heavy CI. Do not mix code and docs
   in the same PR.
+- 計画ファイル (`docs/superpowers/plans/`) をコミットする場合、実行完了時に
+  チェックボックスを `- [x]` に更新する。
 
 ## 5. CI result check obligation
 
