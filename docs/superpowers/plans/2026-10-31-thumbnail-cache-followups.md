@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-31-thumbnail-cache-followups-design.md`
 
+**実行結果:** PR #225（CI run 41207229051、Linux test / Windows thumbnail test 成功）でマージ済み。
+
 ## Global Constraints
 
 - `thumbnail_cache_mb = 0` は無制限。削除も全走査もしない。
@@ -61,7 +63,7 @@
   - private `fn prune_thumbnails_with<Remove>(cache_dir: &Path, max_bytes: u64, remove: Remove) -> Result<ThumbnailPruneReport> where Remove: FnMut(&Path) -> std::io::Result<()>`
 - Consumes: 既存の `collect_thumbnail_entries`、`ThumbnailPruneReport`。
 
-- [ ] **Step 1: 生成状態の失敗テストを書く**
+- [x] **Step 1: 生成状態の失敗テストを書く**
 
 `creates_and_reuses_thumbnail` を拡張し、次の2テストを追加する。
 
@@ -79,21 +81,21 @@ fn ensure_reports_a_cache_hit_without_creation() {
 }
 ```
 
-- [ ] **Step 2: 失敗を確認する**
+- [x] **Step 2: 失敗を確認する**
 
 Run: `cargo test -p vrc-photo-core thumbnail::tests`
 Expected: `ensure_thumbnail_in_with_status` と `EnsuredThumbnail` が未定義でコンパイル失敗。
 
-- [ ] **Step 3: `EnsuredThumbnail` と `ensure_thumbnail_in_with_status` を実装する**
+- [x] **Step 3: `EnsuredThumbnail` と `ensure_thumbnail_in_with_status` を実装する**
 
 `ensure_thumbnail_in` の本体を `ensure_thumbnail_in_with_status` に移し、既存の `ensure_thumbnail_in` は `.map(|ensured| ensured.path)` を返すラッパーにする。生成成功時は `created: true`、既存ファイル利用時は `created: false`。`bytes` は既存なら `metadata.len()`、生成なら `encoded.len() as u64`。`ACCESS_REFRESH_AFTER` を `pub` にする。
 
-- [ ] **Step 4: テストが通ることを確認する**
+- [x] **Step 4: テストが通ることを確認する**
 
 Run: `cargo test -p vrc-photo-core thumbnail::tests`
 Expected: PASS。
 
-- [ ] **Step 5: 削除失敗の失敗テストを書く**
+- [x] **Step 5: 削除失敗の失敗テストを書く**
 
 `prune_thumbnails_with` を使うテストを追加する。
 
@@ -114,16 +116,16 @@ fn prune_reports_removal_failures_without_stopping_other_deletions() {
 }
 ```
 
-- [ ] **Step 6: 失敗を確認する**
+- [x] **Step 6: 失敗を確認する**
 
 Run: `cargo test -p vrc-photo-core thumbnail::tests`
 Expected: `prune_thumbnails_with` が未定義でコンパイル失敗。
 
-- [ ] **Step 7: `prune_thumbnails_with` を実装する**
+- [x] **Step 7: `prune_thumbnails_with` を実装する**
 
 `prune_thumbnails_in` は `prune_thumbnails_with(cache_dir, max_bytes, |path| fs::remove_file(path))` を呼ぶ。`remove` の `Err` は `tracing::debug!` を出して継続し、`removed_*` に数えない。成功時だけ `remaining` から引く。
 
-- [ ] **Step 8: プラットフォーム別テストを書く**
+- [x] **Step 8: プラットフォーム別テストを書く**
 
 ```rust
 #[cfg(unix)]
@@ -145,12 +147,12 @@ fn prune_retries_a_file_locked_by_another_handle() {
 }
 ```
 
-- [ ] **Step 9: テストが通ることを確認する**
+- [x] **Step 9: テストが通ることを確認する**
 
 Run: `cargo test -p vrc-photo-core thumbnail::tests`
 Expected: PASS（Windows 固有テストは Linux では未コンパイル）。
 
-- [ ] **Step 10: コミット**
+- [x] **Step 10: コミット**
 
 ```bash
 git add crates/core/src/thumbnail.rs
@@ -176,7 +178,7 @@ git commit -m "feat(core): report thumbnail creation and cover removal failures"
   - `Daemon.thumbnail_external_bytes: Arc<AtomicU64>`
 - Consumes: なし。
 
-- [ ] **Step 1: プロトコルの失敗テストを書く**
+- [x] **Step 1: プロトコルの失敗テストを書く**
 
 ```rust
 #[test]
@@ -191,16 +193,16 @@ fn thumbnails_generated_round_trips() {
 }
 ```
 
-- [ ] **Step 2: 失敗を確認する**
+- [x] **Step 2: 失敗を確認する**
 
 Run: `cargo test -p vrc-photo-ipc protocol::tests::thumbnails_generated_round_trips`
 Expected: `ThumbnailsGenerated` が未定義でコンパイル失敗。
 
-- [ ] **Step 3: プロトコルを実装する**
+- [x] **Step 3: プロトコルを実装する**
 
 `Request` に `ThumbnailsGenerated { files: u64, bytes: u64 }` を追加し、`PROTOCOL_VERSION` を 2 にする。
 
-- [ ] **Step 4: 受け口の失敗テストを書く**
+- [x] **Step 4: 受け口の失敗テストを書く**
 
 `ipc_server.rs` の `test_control()` に `thumbnail_external_bytes: Arc::new(AtomicU64::new(0))` を足し、次を追加する。
 
@@ -223,21 +225,21 @@ fn thumbnails_generated_adds_external_bytes() {
 }
 ```
 
-- [ ] **Step 5: 失敗を確認する**
+- [x] **Step 5: 失敗を確認する**
 
 Run: `cargo test -p vrc-photo-daemon thumbnails_generated_adds_external_bytes`
 Expected: `IpcControl` にフィールドがなくコンパイル失敗。
 
-- [ ] **Step 6: デーモン側の受け口を実装する**
+- [x] **Step 6: デーモン側の受け口を実装する**
 
 `Daemon` に `thumbnail_external_bytes: Arc<AtomicU64>` を追加し、`Daemon::new` で `Arc::new(AtomicU64::new(0))` を入れる。`start_ipc` の `IpcControl` に clone を渡す。`IpcControl` にフィールドを追加し、ハンドラで `fetch_add(bytes, Ordering::Relaxed)`、`tracing::debug!(files, bytes, "UI reported generated thumbnails")`、`Response::Ok` を返す。`bytes == 0` でも応答は `Ok`。
 
-- [ ] **Step 7: テストが通ることを確認する**
+- [x] **Step 7: テストが通ることを確認する**
 
 Run: `cargo test -p vrc-photo-ipc && cargo test -p vrc-photo-daemon thumbnails_generated_adds_external_bytes`
 Expected: PASS。
 
-- [ ] **Step 8: コミット**
+- [x] **Step 8: コミット**
 
 ```bash
 git add crates/ipc/src/lib.rs crates/ipc/src/protocol.rs crates/daemon/src/ipc_server.rs crates/daemon/src/lib.rs
@@ -262,7 +264,7 @@ git commit -m "feat(ipc): accept batched thumbnail generation notices"
   - `fn prune_thumbnail_cache(cache_dir: &Path, limit_bytes: u64) -> Option<thumbnail::ThumbnailPruneReport>`
   - `fn thumbnail_loop(db, running, rx, cache_dir, cache_limit, external_bytes: Arc<AtomicU64>)`
 
-- [ ] **Step 1: budget の失敗テストを書く**
+- [x] **Step 1: budget の失敗テストを書く**
 
 ```rust
 #[test]
@@ -301,21 +303,21 @@ fn thumbnail_budget_never_prunes_when_unlimited() {
 
 `report_with_remaining(bytes)` は `ThumbnailPruneReport { remaining_bytes: bytes, ..Default::default() }` を返すテストヘルパー。
 
-- [ ] **Step 2: 失敗を確認する**
+- [x] **Step 2: 失敗を確認する**
 
 Run: `cargo test -p vrc-photo-daemon thumbnail_budget_`
 Expected: `ThumbnailCacheBudget` が未定義でコンパイル失敗。
 
-- [ ] **Step 3: budget を実装する**
+- [x] **Step 3: budget を実装する**
 
 `known_bytes` が `None` のときは「未計測」として `limit > 0` なら `needs_prune() == true`。`set_limit` は値が変わったときだけ `known_bytes = None`。`note_pruned` は `limit > 0` なら `Some(report.remaining_bytes)`、0 なら `None`。加算は `saturating_add`。
 
-- [ ] **Step 4: budget テストが通ることを確認する**
+- [x] **Step 4: budget テストが通ることを確認する**
 
 Run: `cargo test -p vrc-photo-daemon thumbnail_budget_`
 Expected: PASS。
 
-- [ ] **Step 5: 外部通知で削除される失敗テストを書く**
+- [x] **Step 5: 外部通知で削除される失敗テストを書く**
 
 ```rust
 #[test]
@@ -328,12 +330,12 @@ fn external_thumbnail_growth_prunes_over_the_limit() {
 }
 ```
 
-- [ ] **Step 6: 失敗を確認する**
+- [x] **Step 6: 失敗を確認する**
 
 Run: `cargo test -p vrc-photo-daemon external_thumbnail_growth_prunes_over_the_limit`
 Expected: 外部バイト数が worker に渡っておらず削除されないため FAIL。
 
-- [ ] **Step 7: worker を budget ベースへ書き換える**
+- [x] **Step 7: worker を budget ベースへ書き換える**
 
 - `THUMBNAIL_PRUNE_INTERVAL` を削除する。
 - `ThumbnailPruneSchedule` から `interval`、`last_prune`、`periodic_due` を削除し、`new(batch: usize)` にする。
@@ -346,16 +348,16 @@ Expected: 外部バイト数が worker に渡っておらず削除されない�
 - `run()` の先頭（`start_ipc()` より前）で `prune_thumbnail_cache(&self.thumbnail_dir, limit)` を呼ぶ。
 - `start_workers` は `self.thumbnail_external_bytes.clone()` を worker に渡す。
 
-- [ ] **Step 8: 既存の schedule テストを更新する**
+- [x] **Step 8: 既存の schedule テストを更新する**
 
 `thumbnail_prune_schedule_fires_when_the_interval_elapses` を削除する。バッチ・アイドル・リセットの3テストは `new(batch)` に合わせる。
 
-- [ ] **Step 9: 全テストが通ることを確認する**
+- [x] **Step 9: 全テストが通ることを確認する**
 
 Run: `cargo test -p vrc-photo-daemon thumbnail`
 Expected: PASS。
 
-- [ ] **Step 10: コミット**
+- [x] **Step 10: コミット**
 
 ```bash
 git add crates/daemon/src/lib.rs
@@ -378,7 +380,7 @@ git commit -m "feat(daemon): track thumbnail cache growth without periodic scans
   - `ThumbnailCache::take_access_refreshes(&mut self) -> Vec<i64>`
   - `App::refresh_thumbnail_access(&self, ids: Vec<i64>, cx: &mut Context<Self>)`
 
-- [ ] **Step 1: 失敗テストを書く**
+- [x] **Step 1: 失敗テストを書く**
 
 ```rust
 #[test]
@@ -407,12 +409,12 @@ fn thumbnail_cache_insert_cancels_a_pending_disk_refresh() {
 }
 ```
 
-- [ ] **Step 2: 失敗を確認する**
+- [x] **Step 2: 失敗を確認する**
 
 Run: `cargo test -p vrc-photo-ui thumbnail_cache_queues_one_disk_refresh_per_hour`
 Expected: フィールドとメソッドがなくコンパイル失敗。
 
-- [ ] **Step 3: メモリ LRU を実装する**
+- [x] **Step 3: メモリ LRU を実装する**
 
 `ThumbnailCache` に `last_disk_refresh: HashMap<i64, Instant>` と `disk_refresh_due: HashSet<i64>` を追加する。
 
@@ -421,12 +423,12 @@ Expected: フィールドとメソッドがなくコンパイル失敗。
 - `evict`: 両方から victim を削除。
 - `take_access_refreshes`: `disk_refresh_due.drain().collect()`。
 
-- [ ] **Step 4: UI テストが通ることを確認する**
+- [x] **Step 4: UI テストが通ることを確認する**
 
 Run: `cargo test -p vrc-photo-ui thumbnail_cache_`
 Expected: PASS。
 
-- [ ] **Step 5: 描画後の回収とバックグラウンド更新を実装する**
+- [x] **Step 5: 描画後の回収とバックグラウンド更新を実装する**
 
 `gallery.rs` のリスト描画クロージャで、行構築後に
 `list_shared.thumbnails.borrow_mut().take_access_refreshes()` を呼ぶ。
@@ -454,12 +456,12 @@ pub(crate) fn refresh_thumbnail_access(&self, ids: Vec<i64>, cx: &mut Context<Se
 }
 ```
 
-- [ ] **Step 6: ワークスペースの UI テストが通ることを確認する**
+- [x] **Step 6: ワークスペースの UI テストが通ることを確認する**
 
 Run: `cargo test -p vrc-photo-ui`
 Expected: PASS。
 
-- [ ] **Step 7: コミット**
+- [x] **Step 7: コミット**
 
 ```bash
 git add crates/ui/src/state/thumbnail.rs crates/ui/src/app/photos.rs crates/ui/src/ui/gallery.rs
@@ -483,7 +485,7 @@ git commit -m "fix(ui): refresh thumbnail recency from the memory cache"
 - `decode_thumbnail_with` の `Ensure` は
   `Fn(i64, &Path, &Path) -> Result<Option<thumbnail::EnsuredThumbnail>>` に変わる。
 
-- [ ] **Step 1: 生成サイズの失敗テストを書く**
+- [x] **Step 1: 生成サイズの失敗テストを書く**
 
 ```rust
 #[test]
@@ -499,12 +501,12 @@ fn decode_thumbnail_does_not_generate_without_a_cache_dir() {
 }
 ```
 
-- [ ] **Step 2: 失敗を確認する**
+- [x] **Step 2: 失敗を確認する**
 
 Run: `cargo test -p vrc-photo-ui decode_thumbnail_reports_bytes_only_when_it_creates_the_file`
 Expected: `DecodedThumbnail` が未定義でコンパイル失敗。
 
-- [ ] **Step 3: `DecodedThumbnail` とサイズ返却を実装する**
+- [x] **Step 3: `DecodedThumbnail` とサイズ返却を実装する**
 
 `decode_thumbnail_file` はログを出さず `Option<(u32, RgbaImage)>` を返す。
 `decode_thumbnail_with` は `EnsuredThumbnail` を受け取り、`created` のとき
@@ -512,12 +514,12 @@ Expected: `DecodedThumbnail` が未定義でコンパイル失敗。
 既存ファイルのデコード成功時は `refresh_thumbnail_access` を呼ぶ。
 `photos.rs` の `request_thumbnail` は `decoded.color` / `decoded.image` を使う。
 
-- [ ] **Step 4: サイズのテストが通ることを確認する**
+- [x] **Step 4: サイズのテストが通ることを確認する**
 
 Run: `cargo test -p vrc-photo-ui decode_thumbnail`
 Expected: PASS。
 
-- [ ] **Step 5: ログ経路の失敗テストを書く**
+- [x] **Step 5: ログ経路の失敗テストを書く**
 
 ```rust
 #[test]
@@ -537,12 +539,12 @@ fn decode_thumbnail_does_not_regenerate_an_undecodable_existing_file() {
 }
 ```
 
-- [ ] **Step 6: 失敗を確認する**
+- [x] **Step 6: 失敗を確認する**
 
 Run: `cargo test -p vrc-photo-ui decode_thumbnail_`
 Expected: 既存実装は再生成後のサイズを返さないため FAIL。
 
-- [ ] **Step 7: ログレベルを実装する**
+- [x] **Step 7: ログレベルを実装する**
 
 - 消えた場合の再生成開始: `tracing::debug!("thumbnail cache entry disappeared during decode; regenerating")`。
 - 再生成が `Ok(None)`: `tracing::debug!("thumbnail source disappeared during decode")`。
@@ -551,12 +553,12 @@ Expected: 既存実装は再生成後のサイズを返さないため FAIL。
 - 再生成後のデコード失敗: `tracing::warn!("cannot decode regenerated thumbnail")`。
 - `cache_dir` なしの読み取り失敗: `tracing::warn!("cannot decode thumbnail")`。
 
-- [ ] **Step 8: UI テストが通ることを確認する**
+- [x] **Step 8: UI テストが通ることを確認する**
 
 Run: `cargo test -p vrc-photo-ui`
 Expected: PASS。
 
-- [ ] **Step 9: コミット**
+- [x] **Step 9: コミット**
 
 ```bash
 git add crates/ui/src/state/thumbnail.rs crates/ui/src/app/photos.rs
@@ -583,7 +585,7 @@ git commit -m "fix(ui): report generated thumbnail sizes and quiet deletion race
   - `pub(crate) struct ThumbnailNoticeBatch` with `add(bytes: u64) -> bool` and `take(&mut self) -> Option<(u64, u64)>`
   - `App::flush_thumbnail_notice(&mut self, cx: &mut Context<Self>)`
 
-- [ ] **Step 1: バッチの失敗テストを書く**
+- [x] **Step 1: バッチの失敗テストを書く**
 
 ```rust
 #[test]
@@ -602,22 +604,22 @@ fn thumbnail_notice_batch_flushes_at_file_and_byte_thresholds() {
 }
 ```
 
-- [ ] **Step 2: 失敗を確認する**
+- [x] **Step 2: 失敗を確認する**
 
 Run: `cargo test -p vrc-photo-ui thumbnail_notice_batch`
 Expected: `ThumbnailNoticeBatch` が未定義でコンパイル失敗。
 
-- [ ] **Step 3: バッチを実装する**
+- [x] **Step 3: バッチを実装する**
 
 `files: u64` と `bytes: u64` を持ち、`add` で加算して
 `files >= 32 || bytes >= 1024 * 1024` を返す。`take` は空なら `None`、あれば値を返して 0 に戻す。
 
-- [ ] **Step 4: バッチテストが通ることを確認する**
+- [x] **Step 4: バッチテストが通ることを確認する**
 
 Run: `cargo test -p vrc-photo-ui thumbnail_notice_batch`
 Expected: PASS。
 
-- [ ] **Step 5: App の配線を実装する**
+- [x] **Step 5: App の配線を実装する**
 
 `app.rs` の `App` に `thumbnail_notice: ThumbnailNoticeBatch` と
 `thumbnail_notice_scheduled: bool` を追加し、初期化する。
@@ -638,12 +640,12 @@ Expected: PASS。
 
 `lifecycle.rs` の `Incoming::Connected` 分岐で `self.flush_thumbnail_notice(cx)` を呼ぶ。
 
-- [ ] **Step 6: UI テストとビルドを確認する**
+- [x] **Step 6: UI テストとビルドを確認する**
 
 Run: `cargo test -p vrc-photo-ui && cargo check --workspace`
 Expected: PASS。
 
-- [ ] **Step 7: コミット**
+- [x] **Step 7: コミット**
 
 ```bash
 git add crates/ui/src/state/thumbnail.rs crates/ui/src/app.rs crates/ui/src/app/photos.rs crates/ui/src/app/lifecycle.rs
@@ -661,7 +663,7 @@ git commit -m "feat(ui): notify the daemon about generated thumbnails"
 - Consumes: `cargo test -p vrc-photo-core thumbnail::tests`（Task 1 のテスト）
 - Produces: `changes` ジョブの `thumbnails` 出力。
 
-- [ ] **Step 1: `changes` ジョブに出力を追加する**
+- [x] **Step 1: `changes` ジョブに出力を追加する**
 
 `outputs` に `thumbnails: ${{ steps.check.outputs.thumbnails }}` を追加する。
 `check` ステップで:
@@ -671,7 +673,7 @@ git commit -m "feat(ui): notify the daemon about generated thumbnails"
   `crates/daemon/src/lib.rs`、`crates/ipc/src/protocol.rs`、
   `.github/workflows/ci.yml`。
 
-- [ ] **Step 2: Windows ジョブにステップを追加する**
+- [x] **Step 2: Windows ジョブにステップを追加する**
 
 `ipc-windows` の最後に:
 
@@ -683,12 +685,12 @@ git commit -m "feat(ui): notify the daemon about generated thumbnails"
 
 新しい必須チェックは増やさない（既存 `ipc-windows` 内の条件付きステップ）。
 
-- [ ] **Step 3: YAML の構文を確認する**
+- [x] **Step 3: YAML の構文を確認する**
 
 Run: `git diff --check && sed -n '18,50p' .github/workflows/ci.yml`
 Expected: インデントと出力名が一致し、`git diff --check` が空。
 
-- [ ] **Step 4: コミット**
+- [x] **Step 4: コミット**
 
 ```bash
 git add .github/workflows/ci.yml
@@ -701,7 +703,7 @@ git commit -m "ci: run thumbnail tests on Windows when they change"
 
 **Files:** なし
 
-- [ ] **Step 1: ローカル検証を実行する**
+- [x] **Step 1: ローカル検証を実行する**
 
 ```bash
 cargo fmt --all -- --check
@@ -711,7 +713,7 @@ cargo test --workspace
 
 Expected: すべて PASS。
 
-- [ ] **Step 2: 差分を確認する**
+- [x] **Step 2: 差分を確認する**
 
 ```bash
 git diff --stat origin/main...HEAD
@@ -720,7 +722,7 @@ git status --short
 
 Expected: 意図したファイル群のみ。未追跡ファイルや `opencode.json` を含めない。
 
-- [ ] **Step 3: PR を作成する**
+- [x] **Step 3: PR を作成する**
 
 PR 本文に `Closes #187`, `Closes #189`, `Closes #190`, `Closes #191` を記載し、
 ラベル `enhancement` と `bug` を付ける。`ci-watch` で CI を監視する。
