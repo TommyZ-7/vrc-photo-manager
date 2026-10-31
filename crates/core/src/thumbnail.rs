@@ -6,7 +6,7 @@ use crate::error::{CoreError, Result};
 
 pub const THUMBNAIL_MAX: u32 = 256;
 const THUMBNAIL_QUALITY: f32 = 80.0;
-const ACCESS_REFRESH_AFTER: Duration = Duration::from_secs(60 * 60);
+pub const ACCESS_REFRESH_AFTER: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ThumbnailCacheUsage {
@@ -22,6 +22,18 @@ pub struct ThumbnailPruneReport {
     pub removed_bytes: u64,
     pub remaining_files: usize,
     pub remaining_bytes: u64,
+}
+
+/// A thumbnail returned by [`ensure_thumbnail_in_with_status`].
+///
+/// `created` is true when this call wrote the file (a new thumbnail or a
+/// regeneration); false when an existing non-empty file was reused. `bytes`
+/// is the on-disk size after the call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnsuredThumbnail {
+    pub path: PathBuf,
+    pub created: bool,
+    pub bytes: u64,
 }
 
 struct ThumbnailEntry {
@@ -58,6 +70,20 @@ pub fn thumbnail_cache_usage_in(cache_dir: &Path) -> Result<ThumbnailCacheUsage>
 /// Removes the least recently modified thumbnails until the cache fits in
 /// `max_bytes`. A limit of zero means unlimited.
 pub fn prune_thumbnails_in(cache_dir: &Path, max_bytes: u64) -> Result<ThumbnailPruneReport> {
+    prune_thumbnails_with(cache_dir, max_bytes, |path| fs::remove_file(path))
+}
+
+/// Removes thumbnails while allowing callers (tests) to inject removal
+/// failures. Failed removals are logged and skipped; successful ones count
+/// toward the report.
+fn prune_thumbnails_with<Remove>(
+    cache_dir: &Path,
+    max_bytes: u64,
+    mut remove: Remove,
+) -> Result<ThumbnailPruneReport>
+where
+    Remove: FnMut(&Path) -> std::io::Result<()>,
+{
     let mut entries = match collect_thumbnail_entries(cache_dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -90,7 +116,7 @@ pub fn prune_thumbnails_in(cache_dir: &Path, max_bytes: u64) -> Result<Thumbnail
         if remaining <= max_bytes {
             break;
         }
-        match fs::remove_file(&entry.path) {
+        match remove(&entry.path) {
             Ok(()) => {
                 report.removed_files += 1;
                 report.removed_bytes = report.removed_bytes.saturating_add(entry.bytes);
@@ -200,13 +226,29 @@ pub fn ensure_thumbnail_in(
     source: &Path,
     cache_dir: &Path,
 ) -> Result<Option<PathBuf>> {
+    ensure_thumbnail_in_with_status(photo_id, source, cache_dir)
+        .map(|ensured| ensured.map(|ensured| ensured.path))
+}
+
+/// Same as [`ensure_thumbnail_in`] but also reports whether the file was
+/// written and its on-disk size.
+pub fn ensure_thumbnail_in_with_status(
+    photo_id: i64,
+    source: &Path,
+    cache_dir: &Path,
+) -> Result<Option<EnsuredThumbnail>> {
     let output = cache_dir.join(format!("{photo_id}.webp"));
-    if output.is_file()
-        && fs::metadata(&output)
-            .map(|meta| meta.len() > 0)
-            .unwrap_or(false)
-    {
-        return Ok(Some(output));
+    let existing_bytes = fs::metadata(&output)
+        .ok()
+        .filter(|metadata| metadata.is_file())
+        .map(|metadata| metadata.len())
+        .filter(|bytes| *bytes > 0);
+    if let Some(bytes) = existing_bytes {
+        return Ok(Some(EnsuredThumbnail {
+            path: output,
+            created: false,
+            bytes,
+        }));
     }
     if !source.is_file() {
         return Ok(None);
@@ -236,7 +278,11 @@ pub fn ensure_thumbnail_in(
         }
         return Err(CoreError::Io(error));
     }
-    Ok(Some(output))
+    Ok(Some(EnsuredThumbnail {
+        path: output,
+        created: true,
+        bytes: encoded.len() as u64,
+    }))
 }
 
 #[cfg(test)]
@@ -385,6 +431,173 @@ mod tests {
     }
 
     #[test]
+    fn prune_continues_after_a_removal_error_and_retries_on_the_next_pass() {
+        let dir = tempdir().unwrap();
+        let now = SystemTime::now();
+        write_cache_entry(
+            &dir.path().join("1.webp"),
+            1000,
+            now - Duration::from_secs(30),
+        );
+        write_cache_entry(
+            &dir.path().join("2.webp"),
+            1000,
+            now - Duration::from_secs(20),
+        );
+        write_cache_entry(
+            &dir.path().join("3.webp"),
+            1000,
+            now - Duration::from_secs(10),
+        );
+
+        let report = prune_thumbnails_with(dir.path(), 2500, |path| {
+            if path.ends_with("1.webp") {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected removal failure",
+                ))
+            } else {
+                fs::remove_file(path)
+            }
+        })
+        .unwrap();
+
+        assert_eq!(report.removed_files, 1);
+        assert_eq!(report.removed_bytes, 1000);
+        assert_eq!(report.remaining_bytes, 2000);
+        assert!(dir.path().join("1.webp").exists());
+        assert!(!dir.path().join("2.webp").exists());
+        assert!(dir.path().join("3.webp").exists());
+
+        // The failed entry is retried on the next pass once removal works.
+        let retry = prune_thumbnails_with(dir.path(), 1500, |path| fs::remove_file(path)).unwrap();
+
+        assert_eq!(retry.removed_files, 1);
+        assert_eq!(retry.remaining_bytes, 1000);
+        assert!(!dir.path().join("1.webp").exists());
+        assert!(dir.path().join("3.webp").exists());
+    }
+
+    #[test]
+    fn prune_reports_removal_failures_without_stopping_other_deletions() {
+        let dir = tempdir().unwrap();
+        let now = SystemTime::now();
+        write_cache_entry(
+            &dir.path().join("1.webp"),
+            1000,
+            now - Duration::from_secs(30),
+        );
+        write_cache_entry(
+            &dir.path().join("2.webp"),
+            1000,
+            now - Duration::from_secs(20),
+        );
+        write_cache_entry(
+            &dir.path().join("3.webp"),
+            1000,
+            now - Duration::from_secs(10),
+        );
+
+        let report = prune_thumbnails_with(dir.path(), 500, |path| {
+            if path.ends_with("1.webp") || path.ends_with("3.webp") {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "injected removal failure",
+                ))
+            } else {
+                fs::remove_file(path)
+            }
+        })
+        .unwrap();
+
+        assert_eq!(report.scanned_files, 3);
+        assert_eq!(report.scanned_bytes, 3000);
+        assert_eq!(report.removed_files, 1);
+        assert_eq!(report.removed_bytes, 1000);
+        assert_eq!(report.remaining_files, 2);
+        assert_eq!(report.remaining_bytes, 2000);
+        assert!(dir.path().join("1.webp").exists());
+        assert!(!dir.path().join("2.webp").exists());
+        assert!(dir.path().join("3.webp").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prune_retries_after_directory_permissions_are_restored() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let now = SystemTime::now();
+        write_cache_entry(
+            &dir.path().join("1.webp"),
+            1000,
+            now - Duration::from_secs(20),
+        );
+        write_cache_entry(
+            &dir.path().join("2.webp"),
+            1000,
+            now - Duration::from_secs(10),
+        );
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+
+        let blocked = prune_thumbnails_in(dir.path(), 500).unwrap();
+
+        if blocked.removed_files > 0 {
+            // A privileged user (for example root) ignores directory write
+            // permissions, so there is nothing left to verify here.
+            fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+        assert_eq!(blocked.remaining_files, 2);
+        assert_eq!(blocked.remaining_bytes, 2000);
+
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        let retried = prune_thumbnails_in(dir.path(), 500).unwrap();
+
+        assert_eq!(retried.removed_files, 2);
+        assert_eq!(retried.remaining_files, 0);
+        assert_eq!(retried.remaining_bytes, 0);
+        assert!(!dir.path().join("1.webp").exists());
+        assert!(!dir.path().join("2.webp").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prune_retries_a_file_locked_by_another_handle() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = tempdir().unwrap();
+        let now = SystemTime::now();
+        let locked_path = dir.path().join("1.webp");
+        write_cache_entry(&locked_path, 1000, now - Duration::from_secs(20));
+        write_cache_entry(
+            &dir.path().join("2.webp"),
+            1000,
+            now - Duration::from_secs(10),
+        );
+        let locked = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&locked_path)
+            .unwrap();
+
+        let first = prune_thumbnails_in(dir.path(), 500).unwrap();
+
+        assert_eq!(first.removed_files, 1);
+        assert_eq!(first.remaining_files, 1);
+        assert_eq!(first.remaining_bytes, 1000);
+        drop(locked);
+        assert!(locked_path.exists());
+        assert!(!dir.path().join("2.webp").exists());
+
+        let second = prune_thumbnails_in(dir.path(), 500).unwrap();
+
+        assert_eq!(second.removed_files, 1);
+        assert_eq!(second.remaining_bytes, 0);
+        assert!(!locked_path.exists());
+    }
+
+    #[test]
     fn refresh_thumbnail_access_rewrites_a_stale_mtime() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("1.webp");
@@ -429,6 +642,44 @@ mod tests {
             .unwrap()
             .expect("cached");
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn ensure_reports_created_bytes_for_a_new_thumbnail() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.png");
+        RgbaImage::from_pixel(640, 360, Rgba([10, 20, 30, 255]))
+            .save(&source)
+            .unwrap();
+
+        let ensured = ensure_thumbnail_in_with_status(999_997, &source, dir.path())
+            .unwrap()
+            .expect("thumbnail");
+
+        assert!(ensured.created);
+        assert!(ensured.bytes > 0);
+        assert_eq!(ensured.bytes, fs::metadata(&ensured.path).unwrap().len());
+        assert!(ensured.path.is_file());
+    }
+
+    #[test]
+    fn ensure_reports_a_cache_hit_without_creation() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.png");
+        RgbaImage::from_pixel(640, 360, Rgba([10, 20, 30, 255]))
+            .save(&source)
+            .unwrap();
+        let first = ensure_thumbnail_in_with_status(999_996, &source, dir.path())
+            .unwrap()
+            .expect("thumbnail");
+
+        let second = ensure_thumbnail_in_with_status(999_996, &source, dir.path())
+            .unwrap()
+            .expect("cached");
+
+        assert!(!second.created);
+        assert_eq!(second.bytes, first.bytes);
+        assert_eq!(second.path, first.path);
     }
 
     #[test]

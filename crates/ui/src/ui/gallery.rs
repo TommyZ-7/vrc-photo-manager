@@ -415,6 +415,19 @@ fn render_grid(
                     }
                 });
             }
+            // Cards read the memory cache during the render above; hand the
+            // ids that crossed the throttle window to one background batch.
+            let access_refreshes = list_shared.thumbnails.borrow_mut().take_access_refreshes();
+            if !access_refreshes.is_empty() {
+                let app = list_shared.app.clone();
+                cx.defer(move |cx| {
+                    if let Some(app_entity) = app.upgrade() {
+                        app_entity.update(cx, |app, cx| {
+                            app.refresh_thumbnail_access(access_refreshes, cx);
+                        });
+                    }
+                });
+            }
             rendered
         },
     )

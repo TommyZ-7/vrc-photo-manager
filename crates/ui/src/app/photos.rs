@@ -15,6 +15,7 @@ use gpui_kit::component::*;
 use gpui_kit::*;
 use vrc_photo_core::model::{DeletionJobSummary, DeletionReason, Photo};
 use vrc_photo_core::{preview, thumbnail};
+use vrc_photo_ipc::Request as IpcRequest;
 
 use crate::app::cli::log_timing;
 use crate::app::demo::demo_thumb_path;
@@ -22,6 +23,10 @@ use crate::app::{App, Screen};
 use crate::state::photo_browser::PhotoBrowser;
 use crate::state::preview::{preview_cache_dir, preview_key, should_request_preview};
 use crate::state::thumbnail::{decode_thumbnail, make_render_image, rgba_to_bgra};
+
+/// Delay before a partial thumbnail notice batch is reported. Keeps a quiet
+/// gallery's generated files visible to the daemon without one request each.
+const THUMBNAIL_NOTICE_DELAY: Duration = Duration::from_secs(1);
 
 #[derive(Debug)]
 enum TrashOutcome {
@@ -89,10 +94,15 @@ impl App {
                 .await;
             this.update(cx, |this, cx| {
                 match decoded {
-                    Some((color, rgba)) => {
-                        this.thumbnails
-                            .borrow_mut()
-                            .insert(id, make_render_image(rgba), color);
+                    Some(decoded) => {
+                        this.thumbnails.borrow_mut().insert(
+                            id,
+                            make_render_image(decoded.image),
+                            decoded.color,
+                        );
+                        if let Some(bytes) = decoded.generated_bytes {
+                            this.note_generated_thumbnail(bytes, cx);
+                        }
                     }
                     None => this.thumbnails.borrow_mut().fail(id),
                 }
@@ -104,6 +114,67 @@ impl App {
             .ok();
         })
         .detach();
+    }
+
+    /// Marks the cached thumbnail files as recently used after the grid reads
+    /// them from the memory cache. One background task handles the whole
+    /// batch; demo assets have no real cache to touch.
+    pub(crate) fn refresh_thumbnail_access(&self, ids: Vec<i64>, cx: &mut Context<Self>) {
+        if ids.is_empty() || self.demo_assets.is_some() {
+            return;
+        }
+        cx.spawn(async move |_this, cx| {
+            cx.background_executor()
+                .spawn(async move {
+                    for id in ids {
+                        if let Some(path) = thumbnail::thumbnail_path(id) {
+                            thumbnail::refresh_thumbnail_access(&path);
+                        }
+                    }
+                })
+                .await;
+        })
+        .detach();
+    }
+
+    /// Records a thumbnail the UI generated itself. The daemon uses the same
+    /// notice to track cache growth, so the files are reported in batches
+    /// rather than as one request per decode. Demo assets are not part of the
+    /// real cache and stay silent.
+    fn note_generated_thumbnail(&mut self, bytes: u64, cx: &mut Context<Self>) {
+        if self.demo_assets.is_some() {
+            return;
+        }
+        if self.thumbnail_notice.add(bytes) {
+            self.flush_thumbnail_notice(cx);
+            return;
+        }
+        if self.thumbnail_notice_scheduled {
+            return;
+        }
+        self.thumbnail_notice_scheduled = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(THUMBNAIL_NOTICE_DELAY).await;
+            this.update(cx, |this, cx| {
+                this.thumbnail_notice_scheduled = false;
+                this.flush_thumbnail_notice(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Sends the accumulated generation notice, if any, and only while the
+    /// daemon connection is up. A batch held across a disconnect is kept for
+    /// the reconnect path to flush.
+    pub(crate) fn flush_thumbnail_notice(&mut self, cx: &mut Context<Self>) {
+        if !self.ipc_connected {
+            return;
+        }
+        let Some((files, bytes)) = self.thumbnail_notice.take() else {
+            return;
+        };
+        self.wake_daemon(IpcRequest::ThumbnailsGenerated { files, bytes }, cx);
     }
 
     /// Coalesces bursts of thumbnail decodes into one UI notification. A

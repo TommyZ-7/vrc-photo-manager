@@ -128,6 +128,8 @@ impl App {
                 self.daemon_shutdown_armed = false;
                 self.refresh_monitor();
                 self.apply_daemon_status(status);
+                // A batch held while disconnected can now be reported.
+                self.flush_thumbnail_notice(cx);
             }
             ipc_bridge::Incoming::Disconnected(error) => {
                 let was_connected = self.ipc_connected;
