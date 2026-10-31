@@ -710,6 +710,13 @@ mod tests {
             Some(DeletionReason::AutoReplace)
         );
         assert_eq!(DeletionReason::Manual.as_str(), "manual");
+        assert_eq!(DeletionReason::Unknown.as_str(), "unknown");
+        assert_eq!(DeletionReason::parse("unknown"), None);
+        assert_eq!(DeletionReason::parse("future_reason"), None);
+        assert_eq!(
+            DeletionReason::parse("manual"),
+            Some(DeletionReason::Manual)
+        );
     }
 
     #[test]
