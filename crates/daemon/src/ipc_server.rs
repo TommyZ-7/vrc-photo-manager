@@ -1,5 +1,5 @@
 use std::io::{self, BufReader};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -44,6 +44,7 @@ pub(crate) struct IpcControl {
     pub(crate) wake: Arc<WakeSignal>,
     pub(crate) jobs: Arc<JobSignal>,
     pub(crate) events: EventBus,
+    pub(crate) thumbnail_external_bytes: Arc<AtomicU64>,
 }
 
 impl IpcControl {
@@ -225,6 +226,13 @@ fn handle_connection(stream: vrc_photo_ipc::server::Stream, control: IpcControl)
                 control.set_paused(paused);
                 write_response(reader.get_mut(), id, Response::Ok)?;
             }
+            Request::ThumbnailsGenerated { files, bytes } => {
+                control
+                    .thumbnail_external_bytes
+                    .fetch_add(bytes, Ordering::Relaxed);
+                tracing::debug!(files, bytes, "UI reported generated thumbnails");
+                write_response(reader.get_mut(), id, Response::Ok)?;
+            }
             Request::Shutdown => {
                 // Clear the running flag before acknowledging so a client that
                 // observes `Ok` also observes a stopped daemon.
@@ -291,6 +299,7 @@ mod tests {
             wake: Arc::new(WakeSignal::default()),
             jobs: Arc::new(JobSignal::default()),
             events: EventBus::default(),
+            thumbnail_external_bytes: Arc::new(AtomicU64::new(0)),
         };
         (dir, endpoint, control)
     }
@@ -321,6 +330,26 @@ mod tests {
             subscription.next_event().unwrap(),
             Some(Event::StatusChanged { .. })
         ));
+    }
+
+    #[test]
+    fn thumbnails_generated_adds_external_bytes() {
+        let (_dir, endpoint, control) = test_control();
+        let _server = IpcServer::start(endpoint.clone(), control.clone()).unwrap();
+        let response = request(
+            &endpoint,
+            Request::ThumbnailsGenerated {
+                files: 3,
+                bytes: 4096,
+            },
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(matches!(response, Response::Ok));
+        assert_eq!(
+            control.thumbnail_external_bytes.load(Ordering::Relaxed),
+            4096
+        );
     }
 
     #[test]

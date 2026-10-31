@@ -21,6 +21,11 @@ pub enum Request {
     SetPaused {
         paused: bool,
     },
+    /// Batched notice that the UI generated thumbnails on its own side.
+    ThumbnailsGenerated {
+        files: u64,
+        bytes: u64,
+    },
     Shutdown,
     Subscribe,
 }
@@ -169,6 +174,23 @@ mod tests {
         };
         let json = serde_json::to_string(&value).unwrap();
         assert!(json.contains("\"set_paused\""));
+        assert_eq!(
+            serde_json::from_str::<RequestEnvelope>(&json).unwrap(),
+            value
+        );
+    }
+
+    #[test]
+    fn thumbnails_generated_round_trips() {
+        let value = RequestEnvelope {
+            id: 8,
+            request: Request::ThumbnailsGenerated {
+                files: 3,
+                bytes: 4096,
+            },
+        };
+        let json = serde_json::to_string(&value).unwrap();
+        assert!(json.contains("\"thumbnails_generated\""));
         assert_eq!(
             serde_json::from_str::<RequestEnvelope>(&json).unwrap(),
             value

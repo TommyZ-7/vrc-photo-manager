@@ -175,6 +175,8 @@ pub struct Daemon {
     last_asset_check: Instant,
     thumbnail_dir: PathBuf,
     thumbnail_cache_limit: Arc<AtomicU64>,
+    /// Bytes of thumbnails the UI generated itself, as reported over IPC.
+    thumbnail_external_bytes: Arc<AtomicU64>,
     last_errors: HashMap<DaemonOperation, String>,
 }
 
@@ -294,6 +296,7 @@ impl Daemon {
             last_asset_check: Instant::now() - Duration::from_secs(30),
             thumbnail_dir,
             thumbnail_cache_limit,
+            thumbnail_external_bytes: Arc::new(AtomicU64::new(0)),
             last_errors,
         })
     }
@@ -703,6 +706,7 @@ impl Daemon {
             wake: self.wake.clone(),
             jobs: self.jobs.clone(),
             events: self.events.clone(),
+            thumbnail_external_bytes: self.thumbnail_external_bytes.clone(),
         };
         match IpcServer::start(endpoint, control) {
             Ok(server) => self.ipc = Some(server),
