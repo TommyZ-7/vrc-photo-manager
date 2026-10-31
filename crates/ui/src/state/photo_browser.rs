@@ -379,12 +379,10 @@ pub(crate) fn apply_library_index(
     }
 }
 
-/// Quiet-period tracker for the live photo count.
-///
-/// The three-second refresh tick observes a changing count while the daemon
-/// imports a burst of files. Rebuilding the 100k index on every tick would
-/// waste work, so a rebuild waits until the count has stayed at the same
-/// value for one full quiet period. Any further change restarts the period.
+/// Tracks a value that must stay unchanged for one quiet period before the
+/// UI rebuilds the library index. Used for both the live photo count and
+/// `library_revision` in `app::lifecycle`: a burst of imports or revisions
+/// restarts the period, and a stable value releases one rebuild.
 #[derive(Default)]
 pub(crate) struct CountDebounce {
     pending: Option<i64>,

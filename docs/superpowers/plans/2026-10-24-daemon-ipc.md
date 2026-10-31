@@ -373,7 +373,7 @@ Expected: FAIL because the server does not exist.
 - `EventBus`: `Arc<Mutex<Vec<Sender<Event>>>>`; `publish` clones the event and retains only successful sends; `subscribe` pushes a channel receiver.
 - `IpcControl`: `running`, `status`, `wake`, `jobs`, `events`; `snapshot()` converts `DaemonStatus`; `set_paused` updates status, notifies `wake`, and publishes `StatusChanged`; `shutdown` clears running and notifies `wake`.
 - `IpcServer::start`: bind the endpoint, set `ListenerNonblockingMode::Accept`, spawn the accept thread with a stop flag, and return a handle whose `Drop` stops and joins the accept thread.
-- Per connection: require `Hello` first, reject mismatches with `protocol_mismatch`, respond with `hello` + snapshot; handle `Status`, `WakeCommands`, `WakeJobs`, `SetPaused`, `Shutdown`; `Subscribe` replies `subscribed` and streams events with a 100 ms receive timeout, exiting when `running` is false or the socket write fails. Use `BufReader<Stream>` and write through `get_mut()`.
+- Per connection: require `Hello` first, respond with `hello` + snapshot, then close on a mismatch; handle `Status`, `WakeCommands`, `WakeJobs`, `SetPaused`, `Shutdown`; `Subscribe` replies `subscribed` and streams events with a 100 ms receive timeout, exiting when `running` is false or the socket write fails. Use `BufReader<Stream>` and write through `get_mut()`.
 - Log accept/connection errors with `tracing`; never panic on a malformed client.
 
 - [ ] **Step 4: Run the tests to verify they pass**

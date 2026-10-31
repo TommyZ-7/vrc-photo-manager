@@ -14,6 +14,7 @@ UIと常駐デーモンを別プロセスにし、写真索引・ログ解析・
 - デーモンは写真・ログ・圧縮・サムネイルの重い書き込みを行う。
 - 圧縮ジョブの取得は単一の `UPDATE ... RETURNING` で原子的に行う。
 - デーモンの稼働状態は `app_settings.daemon_heartbeat` で共有する。
+- 再スキャン・ログ再解析・再紐付けの要求は、実装済みの `daemon_commands` に積む。UIは要求を積んだ後にIPCの `wake_commands` でデーモンを起こす（[ADR-0011](0011-daemon-ipc.md)）。
 
 ## Consequences
 
