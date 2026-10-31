@@ -437,7 +437,7 @@ gh issue create \
   --label "triage,area: core,area: daemon"
 ```
 
-- [ ] **Step 3: Push and open the code PR**
+- [x] **Step 3: Push and open the code PR**
 
 ```bash
 git push -u origin fix/deletion-followup-coverage
@@ -453,7 +453,7 @@ gh pr create --title "fix: deletion follow-up coverage (#170 #171 #172 #174)" \
 The send-side count lands with #142; the follow-up issue tracks that test."
 ```
 
-- [ ] **Step 4: Push and open the docs PR**
+- [x] **Step 4: Push and open the docs PR**
 
 ```bash
 git push -u origin docs/deletion-followups-complete
@@ -465,7 +465,7 @@ gh pr create --title "docs: complete the deletion follow-up plan (#175)" \
 - add the short design and implementation plan for #170/#171/#172/#174"
 ```
 
-- [ ] **Step 5: Watch CI and merge**
+- [x] **Step 5: Watch CI and merge**
 
 Use the `ci-watch` skill for both PRs. On success merge each, then switch to
 `main`, pull, and delete the work branches and worktrees.
