@@ -623,6 +623,73 @@ mod tests {
     }
 
     #[test]
+    fn mtime_only_change_is_reindexed() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        write_png(&path);
+        let db = Db::open_in_memory().unwrap();
+        let root_id = db
+            .add_root(dir.path().to_str().unwrap(), "reference")
+            .unwrap();
+        scan_and_index(&db, root_id, dir.path()).unwrap();
+        let size_before = std::fs::metadata(&path).unwrap().len();
+
+        // Touch only the mtime; the bytes (and therefore the size) stay the
+        // same, so the skip check must fall through on the mtime mismatch.
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(mtime + std::time::Duration::from_secs(3600))
+            .unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), size_before);
+
+        let report = scan_and_index(&db, root_id, dir.path()).unwrap();
+        assert_eq!(report.modified, 1);
+        let photo = db.photo_by_path(path.to_str().unwrap()).unwrap().unwrap();
+        let new_mtime = std::fs::metadata(&path)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert_eq!(photo.mtime, new_mtime);
+    }
+
+    #[test]
+    fn size_only_change_is_reindexed() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        write_png(&path);
+        let db = Db::open_in_memory().unwrap();
+        let root_id = db
+            .add_root(dir.path().to_str().unwrap(), "reference")
+            .unwrap();
+        scan_and_index(&db, root_id, dir.path()).unwrap();
+
+        // Rewrite with different dimensions, then restore the original
+        // mtime so only the size differs from the indexed row.
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        image::RgbaImage::from_pixel(8, 3, image::Rgba([1, 2, 3, 255]))
+            .save(&path)
+            .unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+
+        let report = scan_and_index(&db, root_id, dir.path()).unwrap();
+        assert_eq!(report.modified, 1);
+        let photo = db.photo_by_path(path.to_str().unwrap()).unwrap().unwrap();
+        assert_eq!(photo.width, 8);
+        assert_eq!(photo.file_size, std::fs::metadata(&path).unwrap().len());
+    }
+
+    #[test]
     fn a_reappearing_missing_photo_becomes_present() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("VRChat_2026-10-21_21-14-03.221_4x3.png");

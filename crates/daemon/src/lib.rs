@@ -1050,7 +1050,7 @@ impl Daemon {
             }
         }
         self.verify_replaced_assets()?;
-        self.report_scan_outcome(&report)?;
+        self.report_scan_outcome(&report, full_scan)?;
         if report.modified > 0 {
             self.link_unlinked()?;
         }
@@ -1069,10 +1069,15 @@ impl Daemon {
     }
 
     /// Records one `Scan` error summarizing the current failures, or clears a
-    /// stale error when the full scan had none.
-    fn report_scan_outcome(&mut self, report: &ScanReport) -> Result<()> {
+    /// stale error when a full scan had none. A targeted scan (`ScanRoot`)
+    /// without failures leaves any recorded error alone: it says nothing
+    /// about the roots it did not scan.
+    fn report_scan_outcome(&mut self, report: &ScanReport, full_scan: bool) -> Result<()> {
         if report.failures.is_empty() {
-            return self.clear_daemon_error(DaemonOperation::Scan);
+            if full_scan {
+                return self.clear_daemon_error(DaemonOperation::Scan);
+            }
+            return Ok(());
         }
         let detail = report
             .failures
@@ -2694,6 +2699,51 @@ mod tests {
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].operation, DaemonOperation::Scan);
         assert!(errors[0].message.contains("写真フォルダ"));
+    }
+
+    #[test]
+    fn scan_root_success_keeps_another_roots_scan_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("photos");
+        let missing = dir.path().join("missing");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&good).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        write_photo(&good.join("VRChat_2026-10-21_21-24-00.000_4x3.png"));
+        let db_path = dir.path().join("library.db");
+
+        let mut daemon = Daemon::open(&db_path, Some(good.clone()), Some(log_dir)).unwrap();
+        daemon.set_ipc_endpoint(None);
+        daemon.settings.photo_roots = vec![
+            good.to_string_lossy().to_string(),
+            missing.to_string_lossy().to_string(),
+        ];
+
+        // The full scan covers the missing root and records a Scan error.
+        daemon.scan_photos().unwrap();
+        {
+            let db = daemon.db.lock().unwrap();
+            let errors = db.daemon_errors().unwrap();
+            assert_eq!(errors.len(), 1);
+            assert_eq!(errors[0].operation, DaemonOperation::Scan);
+        }
+
+        // A successful targeted scan of the healthy root must not clear the
+        // error recorded for the missing one.
+        let report = daemon.scan_root_photos(good.clone()).unwrap();
+        assert!(report.failures.is_empty());
+        {
+            let db = daemon.db.lock().unwrap();
+            let errors = db.daemon_errors().unwrap();
+            assert_eq!(errors.len(), 1);
+            assert_eq!(errors[0].operation, DaemonOperation::Scan);
+        }
+
+        // A full scan with every root healthy clears the stale error.
+        std::fs::create_dir_all(&missing).unwrap();
+        daemon.scan_photos().unwrap();
+        let db = daemon.db.lock().unwrap();
+        assert!(db.daemon_errors().unwrap().is_empty());
     }
 
     #[test]
@@ -4917,6 +4967,78 @@ mod tests {
         match events.try_recv().unwrap() {
             Event::ScanStarted { roots, .. } => assert_eq!(roots, 1),
             other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scan_root_missing_path_records_failure_and_keeps_other_photos() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let photo = dir
+            .path()
+            .join("photos/VRChat_2026-10-21_21-14-03.221_4x3.png");
+        write_photo(&photo);
+        let root = dir.path().join("photos");
+        daemon.scan_root_photos(root).unwrap();
+
+        let missing = dir.path().join("does-not-exist");
+        let report = daemon.scan_root_photos(missing.clone()).unwrap();
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].path, missing);
+
+        let not_a_dir = dir.path().join("not-a-dir.png");
+        write_photo(&not_a_dir);
+        let report = daemon.scan_root_photos(not_a_dir.clone()).unwrap();
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].path, not_a_dir);
+
+        let db = daemon.db.lock().unwrap();
+        let indexed = db.photo_by_path(photo.to_str().unwrap()).unwrap().unwrap();
+        assert_eq!(indexed.status, PhotoStatus::Present);
+        let errors = db.daemon_errors().unwrap();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.operation == DaemonOperation::Scan)
+        );
+    }
+
+    #[test]
+    fn scan_root_sends_new_photos_to_the_thumbnail_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let photo = dir
+            .path()
+            .join("photos/VRChat_2026-10-21_21-14-03.221_4x3.png");
+        write_photo(&photo);
+        let (tx, rx) = std::sync::mpsc::channel();
+        daemon.thumbnail_tx = Some(tx);
+        let events = daemon.events.subscribe();
+        let root = dir.path().join("photos");
+        let report = daemon.scan_root_photos(root.clone()).unwrap();
+        assert_eq!(report.new_ids.len(), 1);
+
+        assert_eq!(rx.try_recv().unwrap(), report.new_ids[0]);
+        assert!(rx.try_recv().is_err());
+
+        let mut finished = None;
+        while let Ok(event) = events.try_recv() {
+            if let Event::ScanFinished { .. } = event {
+                finished = Some(event);
+            }
+        }
+        match finished {
+            Some(Event::ScanFinished {
+                failures,
+                failed,
+                target,
+                ..
+            }) => {
+                assert_eq!(failures, 0);
+                assert!(!failed);
+                assert_eq!(target.as_deref(), Some(root.to_str().unwrap()));
+            }
+            _ => panic!("scan did not finish"),
         }
     }
 
