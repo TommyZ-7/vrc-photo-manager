@@ -38,7 +38,7 @@
 - Consumes: `compression_jobs.status`, `QueueStatus::parse`.
 - Produces: `DeletionJobSummary.affected_photos` counts distinct selected photos with any status other than `completed`/`cancelled`.
 
-- [ ] **Step 1: Write the failing core test**
+- [x] **Step 1: Write the failing core test**
 
 Add after `deletion_job_summary_counts_each_status`:
 
@@ -68,12 +68,12 @@ fn deletion_job_summary_counts_a_unknown_status_as_affected() {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cargo test -p vrc-photo-core deletion_job_summary_counts_a_unknown_status_as_affected`
 Expected: FAIL (`affected_photos` is 0 because the status list excludes `future_status`).
 
-- [ ] **Step 3: Use the non-terminal predicate**
+- [x] **Step 3: Use the non-terminal predicate**
 
 In `deletion_job_summary`, replace the affected-photo query with:
 
@@ -93,12 +93,12 @@ Update the method's doc comment: unknown statuses count because
 `QueueStatus::parse` reports them as pending, and the send bucket still waits
 for #142.
 
-- [ ] **Step 4: Run the test to verify it passes**
+- [x] **Step 4: Run the test to verify it passes**
 
 Run: `cargo test -p vrc-photo-core deletion_job_summary`
 Expected: PASS for both summary tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/core/src/db.rs
@@ -116,7 +116,7 @@ git commit -m "fix(core): count non-terminal jobs in deletion warnings"
 - Consumes: `Db::add_derivative`, `Db::derivatives_for_photo`, `Daemon::process_deletions`.
 - Produces: a regression test that fails if an unknown-reason guard ever moves behind derivative removal.
 
-- [ ] **Step 1: Prepare a derivative and extend the assertions**
+- [x] **Step 1: Prepare a derivative and extend the assertions**
 
 In `unknown_deletion_reason_is_blocked_without_deleting`, after loading `photo`,
 create a derivative file and row:
@@ -152,13 +152,13 @@ assert_eq!(
 );
 ```
 
-- [ ] **Step 2: Run the test**
+- [x] **Step 2: Run the test**
 
 Run: `cargo test -p vrc-photo-daemon unknown_deletion_reason_is_blocked_without_deleting`
 Expected: PASS. The guard already blocks before touching files; the new
 assertions lock the derivative behavior against future guard movement.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add crates/daemon/src/lib.rs
@@ -176,7 +176,7 @@ git commit -m "chore(daemon): keep derivatives when the deletion reason is unkno
 - Consumes: `DeletionReason::as_str`, `DeletionReason::parse`.
 - Produces: pinned values `"unknown"` (write side) and `None` (read side).
 
-- [ ] **Step 1: Extend the round-trip test**
+- [x] **Step 1: Extend the round-trip test**
 
 Add to `deletion_status_and_reason_round_trip`:
 
@@ -190,12 +190,12 @@ assert_eq!(
 );
 ```
 
-- [ ] **Step 2: Run the test**
+- [x] **Step 2: Run the test**
 
 Run: `cargo test -p vrc-photo-core deletion_status_and_reason_round_trip`
 Expected: PASS. This is a coverage lock for existing behavior.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add crates/core/src/model.rs
@@ -215,7 +215,7 @@ git commit -m "chore(core): pin the persisted unknown deletion reason"
 - Consumes: `deletion_update`, `DeletionSnapshot`.
 - Produces: `fn apply_deletion_snapshot(requests: &mut Vec<DeletionRequest>, counts: &mut DeletionCounts, baseline: &mut Option<(i64, i64)>, snapshot: Option<DeletionSnapshot>) -> Option<DeletionApply>`; `DeletionApply { changed: bool, blocked: Option<i64> }`.
 
-- [ ] **Step 1: Write the failing apply-path test**
+- [x] **Step 1: Write the failing apply-path test**
 
 Change the test import to:
 
@@ -280,12 +280,12 @@ fn failed_deletion_snapshot_keeps_all_state_and_avoids_a_false_toast() {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cargo test -p vrc-photo-ui failed_deletion_snapshot_keeps_all_state_and_avoids_a_false_toast`
 Expected: FAIL to compile (`apply_deletion_snapshot` is not defined).
 
-- [ ] **Step 3: Add the apply helper**
+- [x] **Step 3: Add the apply helper**
 
 Below `deletion_update`:
 
@@ -315,7 +315,7 @@ fn apply_deletion_snapshot(
 }
 ```
 
-- [ ] **Step 4: Route `apply_live_snapshot` through the helper**
+- [x] **Step 4: Route `apply_live_snapshot` through the helper**
 
 Replace the deletion `if let` block with:
 
@@ -339,12 +339,12 @@ if let Some(update) = apply_deletion_snapshot(
 }
 ```
 
-- [ ] **Step 5: Run the UI tests**
+- [x] **Step 5: Run the UI tests**
 
 Run: `cargo test -p vrc-photo-ui failed_deletion_snapshot_keeps_all_state_and_avoids_a_false_toast deletion_update_keeps_the_baseline`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/ui/src/app/live.rs
@@ -365,9 +365,9 @@ git commit -m "chore(ui): cover the live deletion apply path"
 - Consumes: the merged work from PR #169.
 - Produces: a completed plan record and a standing checkbox rule.
 
-- [ ] **Step 1: Mark the 2026-10-29 plan complete**
+- [x] **Step 1: Mark the 2026-10-29 plan complete**
 
-Change every `- [ ]` to `- [x]` in
+Change every `- [x]` to `- [x]` in
 `docs/superpowers/plans/2026-10-29-deletion-followups.md`. Add below the title:
 
 ```markdown
@@ -376,7 +376,7 @@ Change every `- [ ]` to `- [x]` in
 > done.
 ```
 
-- [ ] **Step 2: Add the checkbox rule to AGENTS.md §4**
+- [x] **Step 2: Add the checkbox rule to AGENTS.md §4**
 
 Append to the commit-conventions section:
 
@@ -385,12 +385,12 @@ Append to the commit-conventions section:
   チェックボックスを `- [x]` に更新する。
 ```
 
-- [ ] **Step 3: Confirm no unchecked steps remain**
+- [x] **Step 3: Confirm no unchecked steps remain**
 
 Run: `grep -n -- '- \[ \]' docs/superpowers/plans/2026-10-29-deletion-followups.md`
 Expected: no output.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add AGENTS.md docs/superpowers/plans/2026-10-29-deletion-followups.md \
@@ -405,7 +405,7 @@ git commit -m "docs: record the completed deletion follow-up plan"
 
 **Files:** none (verification and release work)
 
-- [ ] **Step 1: Run the full local gate on the code branch**
+- [x] **Step 1: Run the full local gate on the code branch**
 
 Run:
 
@@ -417,7 +417,9 @@ cargo test --workspace
 
 Expected: all exit 0.
 
-- [ ] **Step 2: Create the send-side follow-up issue**
+- [x] **Step 2: Create the send-side follow-up issue**
+
+Created as #216.
 
 ```bash
 gh issue create \

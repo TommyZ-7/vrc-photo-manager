@@ -58,8 +58,8 @@ This batch closes those gaps without changing the user-facing deletion flow.
 not `completed` or `cancelled`. This matches `QueueStatus::parse`: unknown
 statuses become `Pending` in the body, so they must also count as affected.
 
-The send side is deferred. A follow-up issue will add send-job coverage when
-#142 introduces the outbox, and #170 can close with the compression and
+The send side is deferred. Follow-up issue #216 will add send-job coverage
+when #142 introduces the outbox, and #170 can close with the compression and
 unknown-status behavior fixed.
 
 ### #171 derivative survival
