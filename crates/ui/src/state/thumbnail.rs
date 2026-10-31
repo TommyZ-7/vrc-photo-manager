@@ -15,6 +15,40 @@ use crate::ui::theme::average_bgra;
 const THUMB_CACHE_ENTRIES: usize = 192;
 const THUMB_IN_FLIGHT: usize = 4;
 
+/// A flush is due once a batch reaches either bound. Small batches are flushed
+/// by a timer instead so a quiet gallery still reports its generated files.
+pub(crate) const THUMBNAIL_NOTICE_BATCH_FILES: u64 = 32;
+pub(crate) const THUMBNAIL_NOTICE_BATCH_BYTES: u64 = 1024 * 1024;
+
+/// Accumulates thumbnails the UI generated on its own before telling the
+/// daemon about them. One notice per thumbnail would double the IPC traffic,
+/// so the caller flushes on a threshold or a short timer.
+#[derive(Debug, Default)]
+pub(crate) struct ThumbnailNoticeBatch {
+    files: u64,
+    bytes: u64,
+}
+
+impl ThumbnailNoticeBatch {
+    /// Records one generated file and returns whether the batch is now full.
+    pub(crate) fn add(&mut self, bytes: u64) -> bool {
+        self.files += 1;
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.files >= THUMBNAIL_NOTICE_BATCH_FILES || self.bytes >= THUMBNAIL_NOTICE_BATCH_BYTES
+    }
+
+    /// Returns the accumulated `(files, bytes)` and clears the batch.
+    pub(crate) fn take(&mut self) -> Option<(u64, u64)> {
+        if self.files == 0 {
+            return None;
+        }
+        let notice = (self.files, self.bytes);
+        self.files = 0;
+        self.bytes = 0;
+        Some(notice)
+    }
+}
+
 /// Bounded LRU cache for grid thumbnails.
 ///
 /// Decoding runs on the background executor; the UI thread only turns the
@@ -141,7 +175,6 @@ pub(crate) struct DecodedThumbnail {
     /// RGBA buffer with channels already swapped to BGRA.
     pub(crate) image: image::RgbaImage,
     /// On-disk size when this decode wrote the file; `None` for a cache hit.
-    #[allow(dead_code)] // Consumed by the thumbnail generation notice in the next change.
     pub(crate) generated_bytes: Option<u64>,
 }
 
@@ -407,6 +440,24 @@ mod tests {
         assert!(!cache.begin(1));
         cache.fail(1);
         assert!(!cache.begin(1));
+    }
+
+    #[test]
+    fn thumbnail_notice_batch_flushes_at_file_and_byte_thresholds() {
+        let mut batch = ThumbnailNoticeBatch::default();
+        for _ in 0..(THUMBNAIL_NOTICE_BATCH_FILES - 1) {
+            assert!(!batch.add(1));
+        }
+        assert!(batch.add(1));
+        assert_eq!(
+            batch.take(),
+            Some((THUMBNAIL_NOTICE_BATCH_FILES, THUMBNAIL_NOTICE_BATCH_FILES))
+        );
+        assert_eq!(batch.take(), None);
+
+        let mut batch = ThumbnailNoticeBatch::default();
+        assert!(batch.add(THUMBNAIL_NOTICE_BATCH_BYTES));
+        assert_eq!(batch.take(), Some((1, THUMBNAIL_NOTICE_BATCH_BYTES)));
     }
 
     #[test]
