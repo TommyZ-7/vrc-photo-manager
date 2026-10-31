@@ -106,6 +106,27 @@ impl App {
         .detach();
     }
 
+    /// Marks the cached thumbnail files as recently used after the grid reads
+    /// them from the memory cache. One background task handles the whole
+    /// batch; demo assets have no real cache to touch.
+    pub(crate) fn refresh_thumbnail_access(&self, ids: Vec<i64>, cx: &mut Context<Self>) {
+        if ids.is_empty() || self.demo_assets.is_some() {
+            return;
+        }
+        cx.spawn(async move |_this, cx| {
+            cx.background_executor()
+                .spawn(async move {
+                    for id in ids {
+                        if let Some(path) = thumbnail::thumbnail_path(id) {
+                            thumbnail::refresh_thumbnail_access(&path);
+                        }
+                    }
+                })
+                .await;
+        })
+        .detach();
+    }
+
     /// Coalesces bursts of thumbnail decodes into one UI notification. A
     /// 16 ms window keeps scrolling responsive without one full-app render per
     /// decoded thumbnail.

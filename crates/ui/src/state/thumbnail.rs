@@ -4,6 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use gpui_kit::RenderImage;
 use smallvec::SmallVec;
@@ -27,6 +28,11 @@ pub(crate) struct ThumbnailCache {
     /// instead of scanning an order list for every visible card.
     recency: HashMap<i64, u64>,
     clock: u64,
+    /// Last time a disk access refresh was queued for a cached id. Throttles
+    /// the mtime update to once per `ACCESS_REFRESH_AFTER`.
+    last_disk_refresh: HashMap<i64, Instant>,
+    /// Ids whose disk access time should be refreshed in the background.
+    disk_refresh_due: HashSet<i64>,
     pending: HashSet<i64>,
     failed: HashSet<i64>,
     pub(crate) pinned: Option<i64>,
@@ -37,11 +43,27 @@ impl ThumbnailCache {
     pub(crate) fn get(&mut self, id: i64) -> Option<Arc<RenderImage>> {
         let image = self.images.get(&id)?.clone();
         self.touch(id);
+        let now = Instant::now();
+        let stale = self
+            .last_disk_refresh
+            .get(&id)
+            .is_none_or(|at| now.duration_since(*at) >= thumbnail::ACCESS_REFRESH_AFTER);
+        if stale {
+            // Record the queue time so later frames in the same throttle
+            // window do not queue the same id again.
+            self.last_disk_refresh.insert(id, now);
+            self.disk_refresh_due.insert(id);
+        }
         Some(image)
     }
 
     pub(crate) fn color(&self, id: i64) -> Option<u32> {
         self.colors.get(&id).copied()
+    }
+
+    /// Drains the ids whose cached file should be marked as recently used.
+    pub(crate) fn take_access_refreshes(&mut self) -> Vec<i64> {
+        self.disk_refresh_due.drain().collect()
     }
 
     pub(crate) fn begin(&mut self, id: i64) -> bool {
@@ -64,6 +86,8 @@ impl ThumbnailCache {
         self.images.insert(id, image);
         self.colors.insert(id, color);
         self.touch(id);
+        self.last_disk_refresh.insert(id, Instant::now());
+        self.disk_refresh_due.remove(&id);
         self.evict();
     }
 
@@ -103,6 +127,8 @@ impl ThumbnailCache {
             self.images.remove(&victim);
             self.colors.remove(&victim);
             self.recency.remove(&victim);
+            self.last_disk_refresh.remove(&victim);
+            self.disk_refresh_due.remove(&victim);
         }
     }
 }
@@ -239,6 +265,8 @@ pub(crate) fn rgba_to_bgra(mut rgba: image::RgbaImage) -> image::RgbaImage {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::*;
 
     fn test_render_image() -> Arc<RenderImage> {
@@ -421,6 +449,33 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn thumbnail_cache_queues_one_disk_refresh_per_hour() {
+        let mut cache = ThumbnailCache::default();
+        cache.insert(1, test_render_image(), 0);
+        cache.last_disk_refresh.insert(
+            1,
+            Instant::now() - thumbnail::ACCESS_REFRESH_AFTER - Duration::from_secs(1),
+        );
+        assert!(cache.get(1).is_some());
+        assert_eq!(cache.take_access_refreshes(), vec![1]);
+        assert!(cache.get(1).is_some());
+        assert!(cache.take_access_refreshes().is_empty());
+    }
+
+    #[test]
+    fn thumbnail_cache_insert_cancels_a_pending_disk_refresh() {
+        let mut cache = ThumbnailCache::default();
+        cache.insert(1, test_render_image(), 0);
+        cache.last_disk_refresh.insert(
+            1,
+            Instant::now() - thumbnail::ACCESS_REFRESH_AFTER - Duration::from_secs(1),
+        );
+        assert!(cache.get(1).is_some());
+        cache.insert(1, test_render_image(), 0);
+        assert!(cache.take_access_refreshes().is_empty());
     }
 
     #[test]
