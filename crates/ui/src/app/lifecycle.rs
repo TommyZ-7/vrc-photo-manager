@@ -35,6 +35,21 @@ pub(crate) struct ScanProgressView {
     pub(crate) roots: usize,
 }
 
+/// Returns the updated import auto-compression count when a finished scan
+/// targets the root the import asked for. Unrelated scans (including full
+/// scans and other imports) must not consume the pending target.
+pub(crate) fn import_scan_enqueued_count(
+    pending_target: Option<&str>,
+    event_target: Option<&str>,
+    current: usize,
+    auto_enqueued: usize,
+) -> Option<usize> {
+    pending_target
+        .zip(event_target)
+        .filter(|(pending, event)| pending == event)
+        .map(|_| current.saturating_add(auto_enqueued))
+}
+
 /// True when a live snapshot was collected before a revision the UI has
 /// already applied. Revisions are monotonic; an older observation must not
 /// trigger a reload or count comparison.
@@ -124,6 +139,7 @@ impl App {
                 self.daemon_paused = false;
                 self.daemon_shutdown_armed = false;
                 self.scan_progress = None;
+                self.import_scan_target = None;
                 if was_connected {
                     self.refresh_monitor();
                 }
@@ -135,7 +151,7 @@ impl App {
 
     fn handle_ipc_event(&mut self, event: IpcEvent, cx: &mut Context<Self>) {
         match event {
-            IpcEvent::ScanStarted { roots } => {
+            IpcEvent::ScanStarted { roots, .. } => {
                 self.scan_progress = Some(ScanProgressView {
                     phase: IpcScanPhase::Walking,
                     processed: 0,
@@ -162,7 +178,20 @@ impl App {
                     roots,
                 });
             }
-            IpcEvent::ScanFinished { .. } => {
+            IpcEvent::ScanFinished {
+                auto_enqueued,
+                target,
+                ..
+            } => {
+                if let Some(count) = import_scan_enqueued_count(
+                    self.import_scan_target.as_deref(),
+                    target.as_deref(),
+                    self.import_auto_compress_enqueued,
+                    auto_enqueued,
+                ) {
+                    self.import_scan_target = None;
+                    self.import_auto_compress_enqueued = count;
+                }
                 self.scan_progress = None;
                 self.refresh_live(cx);
                 self.refresh_library_after_scan(cx);
@@ -817,8 +846,32 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{ScanRefresh, is_stale_revision, scan_refresh_action};
+    use super::{ScanRefresh, import_scan_enqueued_count, is_stale_revision, scan_refresh_action};
     use crate::app::Screen;
+
+    #[test]
+    fn import_auto_compress_count_only_accepts_the_requested_target() {
+        assert_eq!(
+            import_scan_enqueued_count(Some("/imported"), Some("/imported"), 2, 3),
+            Some(5)
+        );
+        assert_eq!(
+            import_scan_enqueued_count(Some("/imported"), Some("/other"), 2, 3),
+            None
+        );
+        assert_eq!(
+            import_scan_enqueued_count(Some("/imported"), None, 2, 3),
+            None
+        );
+        assert_eq!(
+            import_scan_enqueued_count(None, Some("/imported"), 2, 3),
+            None
+        );
+        assert_eq!(
+            import_scan_enqueued_count(Some("/imported"), Some("/imported"), usize::MAX, 1),
+            Some(usize::MAX)
+        );
+    }
 
     #[test]
     fn only_older_live_revisions_are_stale() {
