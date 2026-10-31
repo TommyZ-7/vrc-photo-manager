@@ -232,13 +232,14 @@
 ### 8.1 UI⇔デーモンIPC
 
 - トランスポートはローカルソケット（Unix domain socket / Windows名前付きパイプ）。TCPやネットワーク公開は使わない。
-- プロトコルは改行区切りJSON、`PROTOCOL_VERSION = 1`。接続は `hello` で始まり、バージョン不一致なら接続を閉じる。
-- リクエスト: `status`、`wake_commands`、`wake_jobs`、`set_paused`、`shutdown`、`subscribe`。
+- プロトコルは改行区切りJSON、`PROTOCOL_VERSION = 2`。接続は `hello` で始まり、バージョン不一致なら接続を閉じる。
+- リクエスト: `status`、`wake_commands`、`wake_jobs`、`set_paused`、`shutdown`、`subscribe`、`thumbnails_generated`。
 - UI操作:
   - ダッシュボードの「再スキャン」は `daemon_commands` に積み、IPC接続中なら `wake_commands` で即時実行する。
   - 「監視を一時停止/再開」は `set_paused` を送る。停止中はボタンを無効化する。
   - 「デーモンを終了」は2回押しで `shutdown` を送る。
   - 圧縮キュー投入後は `wake_jobs` を送り、ワーカーを即時起床する。
+  - UIが生成したサムネイルは、32ファイルまたは1 MiB、もしくは1秒経過で `thumbnails_generated`（files、bytes）にまとめて送る。デーモンは起動時の実測値を起点に通知分を加算し、上限超過時だけ走査・削除する。未接続中の通知は保持し、再接続時にまとめて送る。
 - イベント:
   - `scan_started` / `scan_progress`（walking / indexing、root番号、処理数） / `scan_finished`
   - `compression_progress`（job_id、photo_id、status、progress、error）
@@ -256,7 +257,7 @@
 - 自動起動、トレイ常駐、自動圧縮
 - カラーテーマ: メインカラー（背景・パネル）とサブカラー（アクセント）を各18色（暗系・白系・パステル各6色）から選ぶ。全画面の色はこの2色から導出され、変更は即時反映・保存される
 - 言語（ja固定。enは未実装）
-- サムネイルキャッシュ上限（既定2GB。デーモンが起動時・生成後・約60秒ごとに最終アクセス順で削除。0は無制限。設定変更は再起動なしで反映）
+- サムネイルキャッシュ上限（既定2GB。デーモンが起動時と上限超過時に最終アクセス順で削除。UIが生成した分はIPC通知で追跡し、定期全走査は行わない。0は無制限。設定変更は再起動なしで反映）
 - 圧縮ワーカー数
 - デーモンハートビート表示とIPC接続状態
 - ダッシュボードのデーモンカード: 最終同期、IPC状態、一時停止状態、スキャン進捗、再スキャン、一時停止/再開、終了
