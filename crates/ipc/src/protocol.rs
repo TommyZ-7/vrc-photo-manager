@@ -118,6 +118,10 @@ pub enum Event {
         skipped: usize,
         failures: usize,
         failed: bool,
+        /// Automatic compression jobs created by this scan. Defaults to 0 so
+        /// an older daemon stays compatible with a newer UI.
+        #[serde(default)]
+        auto_enqueued: usize,
     },
     CompressionProgress {
         job_id: String,

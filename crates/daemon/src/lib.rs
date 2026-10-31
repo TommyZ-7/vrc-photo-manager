@@ -384,13 +384,23 @@ impl Daemon {
         Ok(())
     }
 
+    /// Consumes queued UI requests once. See
+    /// [`Self::poll_commands_with_initial`].
+    fn poll_commands(&mut self) -> Result<()> {
+        self.poll_commands_with_initial(None)
+    }
+
     /// Consumes queued UI requests once: reloads settings, rebuilds the photo
     /// watchers for the new roots, runs each command in request order, then
     /// refreshes the status view. Commands are consumed even when they fail so
     /// a broken request cannot loop forever; the failure is recorded under its
     /// operation instead.
-    fn poll_commands(&mut self) -> Result<()> {
-        let commands = {
+    ///
+    /// When `initial_scan` is `Some(true)`, targeted `ScanRoot` commands run
+    /// before full rescans. An import into an empty library must be indexed as
+    /// new work before the startup scan can classify it as backlog.
+    fn poll_commands_with_initial(&mut self, initial_scan: Option<bool>) -> Result<()> {
+        let mut commands = {
             let db = self.db.lock().unwrap();
             db.take_daemon_commands()?
         };
@@ -399,9 +409,12 @@ impl Daemon {
         }
         self.reload_settings()?;
         self.restart_watchers();
+        if initial_scan == Some(true) {
+            commands.sort_by_key(|command| !matches!(command, DaemonCommand::ScanRoot { .. }));
+        }
         for command in commands {
             let kind = command.as_str();
-            if let Err(error) = self.run_command(&command) {
+            if let Err(error) = self.run_command_with_initial(&command, initial_scan) {
                 tracing::error!(command = kind, %error, "daemon command failed");
                 let (operation, message) = match &command {
                     DaemonCommand::Rescan => (
@@ -475,12 +488,17 @@ impl Daemon {
         }
     }
 
-    /// Runs one queued command. `poll_commands` records a failure under the
-    /// command's operation.
-    fn run_command(&mut self, command: &DaemonCommand) -> Result<()> {
+    /// Runs one queued command with an optional startup initial-scan flag.
+    /// `ScanRoot` always indexes a targeted root and therefore never treats
+    /// its photos as backlog.
+    fn run_command_with_initial(
+        &mut self,
+        command: &DaemonCommand,
+        initial_scan: Option<bool>,
+    ) -> Result<()> {
         match command {
             DaemonCommand::Rescan => {
-                self.scan_photos()?;
+                self.scan_photos_with_initial(initial_scan)?;
                 self.link_unlinked()?;
             }
             DaemonCommand::Relog => {
@@ -497,9 +515,13 @@ impl Daemon {
     }
 
     pub fn run_once(&mut self) -> Result<()> {
-        self.poll_commands()?;
+        let initial_scan = {
+            let db = self.db.lock().unwrap();
+            db.count_photos()? == 0
+        };
+        self.poll_commands_with_initial(Some(initial_scan))?;
         self.write_heartbeat();
-        let report = self.scan_photos()?;
+        let report = self.scan_photos_with_initial(Some(initial_scan))?;
         for id in &report.new_ids {
             let path = {
                 let db = self.db.lock().unwrap();
@@ -563,6 +585,27 @@ impl Daemon {
         Ok(())
     }
 
+    /// Prepares the initial scan: load roots, run queued import scans before
+    /// the first full scan, then scan the library. The empty-library decision
+    /// is taken before commands run so imported photos are new work while
+    /// pre-existing photos stay backlog.
+    fn startup_scan(&mut self) -> Result<()> {
+        self.ensure_roots()?;
+        if self.stopping() {
+            return Ok(());
+        }
+        let initial_scan = {
+            let db = self.db.lock().unwrap();
+            db.count_photos()? == 0
+        };
+        self.poll_commands_with_initial(Some(initial_scan))?;
+        if self.stopping() {
+            return Ok(());
+        }
+        self.scan_photos_with_initial(Some(initial_scan))?;
+        Ok(())
+    }
+
     pub fn run(&mut self) -> Result<()> {
         self.start_ipc();
         if self.stopping() {
@@ -570,12 +613,7 @@ impl Daemon {
             return Ok(());
         }
         self.record_supervisor();
-        self.ensure_roots()?;
-        if self.stopping() {
-            self.shutdown();
-            return Ok(());
-        }
-        self.scan_photos()?;
+        self.startup_scan()?;
         if self.stopping() {
             self.shutdown();
             return Ok(());
@@ -808,20 +846,34 @@ impl Daemon {
         Ok(())
     }
 
+    #[cfg(test)]
     fn scan_photos(&mut self) -> Result<ScanReport> {
+        self.scan_photos_with_initial(None)
+    }
+
+    fn scan_photos_with_initial(&mut self, initial_scan: Option<bool>) -> Result<ScanReport> {
         let roots = self.settings.photo_roots();
-        self.scan_roots(roots, true)
+        self.scan_roots_with_initial(roots, true, initial_scan)
     }
 
     fn scan_root_photos(&mut self, root: PathBuf) -> Result<ScanReport> {
-        self.scan_roots(vec![root], false)
+        self.scan_roots_with_initial(vec![root], false, None)
     }
 
-    fn scan_roots(&mut self, roots: Vec<PathBuf>, full_scan: bool) -> Result<ScanReport> {
+    fn scan_roots_with_initial(
+        &mut self,
+        roots: Vec<PathBuf>,
+        full_scan: bool,
+        initial_scan: Option<bool>,
+    ) -> Result<ScanReport> {
         self.begin_scan(roots.len());
-        let result = self.scan_roots_inner(roots, full_scan);
-        self.finish_scan(&result);
-        result
+        let result = self.scan_roots_inner(roots, full_scan, initial_scan);
+        let (report_result, auto_enqueued) = match result {
+            Ok((report, auto_enqueued)) => (Ok(report), auto_enqueued),
+            Err(error) => (Err(error), 0),
+        };
+        self.finish_scan(&report_result, auto_enqueued);
+        report_result
     }
 
     fn begin_scan(&self, roots: usize) {
@@ -838,7 +890,7 @@ impl Daemon {
         self.events.publish(Event::ScanStarted { roots });
     }
 
-    fn finish_scan(&self, result: &Result<ScanReport>) {
+    fn finish_scan(&self, result: &Result<ScanReport>, auto_enqueued: usize) {
         let (found, indexed, skipped, failures, failed) = match result {
             Ok(report) => (
                 report.found,
@@ -863,16 +915,24 @@ impl Daemon {
             skipped,
             failures,
             failed,
+            auto_enqueued,
         });
     }
 
-    fn scan_roots_inner(&mut self, roots: Vec<PathBuf>, full_scan: bool) -> Result<ScanReport> {
+    fn scan_roots_inner(
+        &mut self,
+        roots: Vec<PathBuf>,
+        full_scan: bool,
+        initial_scan_override: Option<bool>,
+    ) -> Result<(ScanReport, usize)> {
         self.refresh_compression_settings();
         let mut report = ScanReport::default();
+        let mut auto_enqueued = 0;
         let root_count = roots.len();
         if !roots.is_empty() {
             let db = self.db.lock().unwrap();
-            let initial_scan = full_scan && db.count_photos()? == 0;
+            let initial_scan =
+                initial_scan_override.unwrap_or(full_scan && db.count_photos()? == 0);
             let mut changed = false;
             let mut missing_ids = Vec::new();
             for (index, root) in roots.into_iter().enumerate() {
@@ -965,7 +1025,7 @@ impl Daemon {
                 && !report.new_ids.is_empty()
                 && (!initial_scan || self.settings.auto_compress_backlog)
             {
-                enqueue_auto_jobs(
+                auto_enqueued = enqueue_auto_jobs(
                     &db,
                     &report.new_ids,
                     self.settings.auto_compress_keep_original,
@@ -990,7 +1050,7 @@ impl Daemon {
                 }
             }
         }
-        Ok(report)
+        Ok((report, auto_enqueued))
     }
 
     /// Records one `Scan` error summarizing the current failures, or clears a
@@ -1645,14 +1705,19 @@ fn cgroup_has_unit(cgroup: &str, unit: &str) -> bool {
         .any(|part| part == unit)
 }
 
-fn enqueue_auto_jobs(db: &Db, new_ids: &[i64], keep_original: bool, immediate: bool) -> Result<()> {
+fn enqueue_auto_jobs(
+    db: &Db,
+    new_ids: &[i64],
+    keep_original: bool,
+    immediate: bool,
+) -> Result<usize> {
     let profiles = db.list_profiles()?;
     let auto_profiles: Vec<&CompressionProfile> = profiles
         .iter()
         .filter(|profile| profile.enabled && profile.auto_enabled)
         .collect();
     if auto_profiles.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
     let policy = if keep_original { "keep" } else { "replace" };
     let status = if immediate {
@@ -1660,17 +1725,26 @@ fn enqueue_auto_jobs(db: &Db, new_ids: &[i64], keep_original: bool, immediate: b
     } else {
         QueueStatus::Waiting
     };
+    let mut enqueued = 0;
     for photo_id in new_ids {
         for profile in &auto_profiles {
-            db.enqueue_job_for_existing_profile_with_status(
+            if db.enqueue_auto_job_for_existing_profile_with_status(
                 *photo_id,
                 &profile.id,
                 policy,
                 status,
-            )?;
+            )? {
+                enqueued += 1;
+            }
         }
     }
-    Ok(())
+    tracing::info!(
+        photos = new_ids.len(),
+        profiles = auto_profiles.len(),
+        jobs = enqueued,
+        "auto compression jobs enqueued"
+    );
+    Ok(enqueued)
 }
 
 /// Keeps a photo visible when its original file was deleted manually but a
@@ -4430,6 +4504,125 @@ mod tests {
 
         let db = Db::open(&db_path).unwrap();
         assert_eq!(db.count_jobs(QueueStatus::Pending).unwrap(), 1);
+    }
+
+    #[test]
+    fn startup_scan_enqueues_imported_photos_before_backlog() {
+        let dir = tempfile::tempdir().unwrap();
+        let backlog_root = dir.path().join("photos");
+        let import_root = dir.path().join("imported");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&backlog_root).unwrap();
+        std::fs::create_dir_all(&import_root).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let backlog_photo = backlog_root.join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        let imported_photo = import_root.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&backlog_photo);
+        write_photo(&imported_photo);
+
+        let db_path = dir.path().join("library.db");
+        add_auto_profile(&db_path);
+        let mut daemon =
+            Daemon::open(&db_path, Some(backlog_root.clone()), Some(log_dir)).unwrap();
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+        daemon.set_ipc_endpoint(None);
+        save_daemon_settings(&daemon, |settings| {
+            settings.auto_compress = true;
+            settings.auto_compress_backlog = false;
+            settings.auto_compress_immediate = true;
+            settings.photo_roots = vec![
+                backlog_root.to_string_lossy().to_string(),
+                import_root.to_string_lossy().to_string(),
+            ];
+        });
+        {
+            let db = Db::open(&db_path).unwrap();
+            db.request_daemon_scan_root(import_root.to_str().unwrap())
+                .unwrap();
+        }
+
+        daemon.startup_scan().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        assert_eq!(db.count_photos().unwrap(), 2);
+        let imported_id = db
+            .photo_by_path(imported_photo.to_str().unwrap())
+            .unwrap()
+            .unwrap()
+            .id;
+        let backlog_id = db
+            .photo_by_path(backlog_photo.to_str().unwrap())
+            .unwrap()
+            .unwrap()
+            .id;
+        let jobs = db.list_jobs(10).unwrap();
+        assert_eq!(
+            jobs.iter().filter(|job| job.photo_id == imported_id).count(),
+            1
+        );
+        assert_eq!(
+            jobs.iter().filter(|job| job.photo_id == backlog_id).count(),
+            0
+        );
+        assert_eq!(jobs[0].status, QueueStatus::Pending);
+    }
+
+    #[test]
+    fn scan_root_finished_event_reports_auto_enqueued_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        write_photo(&photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png"));
+
+        let db_path = dir.path().join("library.db");
+        add_auto_profile(&db_path);
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir.clone()), Some(log_dir)).unwrap();
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+        daemon.set_ipc_endpoint(None);
+        let events = daemon.events.subscribe();
+        daemon.scan_root_photos(photo_dir).unwrap();
+
+        let mut finished = None;
+        while let Ok(event) = events.try_recv() {
+            if matches!(event, Event::ScanFinished { .. }) {
+                finished = Some(event);
+            }
+        }
+        match finished {
+            Some(Event::ScanFinished { auto_enqueued, .. }) => assert_eq!(auto_enqueued, 1),
+            _ => panic!("scan did not finish"),
+        }
+    }
+
+    #[test]
+    fn enqueue_auto_jobs_skips_profiles_that_are_not_auto_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let photo = dir
+            .path()
+            .join("photos/VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&photo);
+        daemon.run_once().unwrap();
+
+        let db = daemon.db.lock().unwrap();
+        let photo_id = db
+            .photo_by_path(photo.to_str().unwrap())
+            .unwrap()
+            .unwrap()
+            .id;
+        db.save_profile(&CompressionProfile {
+            id: "manual-only".to_string(),
+            name: "Manual only".to_string(),
+            enabled: true,
+            auto_enabled: false,
+            ..CompressionProfile::default()
+        })
+        .unwrap();
+
+        assert_eq!(enqueue_auto_jobs(&db, &[photo_id], true, true).unwrap(), 0);
+        assert!(db.list_jobs(10).unwrap().is_empty());
     }
 
     #[test]
