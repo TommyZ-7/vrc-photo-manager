@@ -1,6 +1,6 @@
 # Issue #97 取り込み直後の自動圧縮 Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** デーモン稼働中・停止中のどちらで取り込んでも、新規写真を自動圧縮キューへ重複なく登録し、取り込み結果に登録件数を表示する。
 
@@ -50,7 +50,7 @@
   ```
   同じ `photo_id` + `profile_id` のジョブが1件でも存在すれば `false` を返し、挿入しない。
 
-- [ ] **Step 1: 失敗するテストを書く**
+- [x] **Step 1: 失敗するテストを書く**
 
 `crates/core/src/db.rs` の tests に追加する。
 
@@ -83,13 +83,13 @@ fn auto_job_enqueue_skips_an_existing_photo_profile_job() {
 }
 ```
 
-- [ ] **Step 2: テストが失敗することを確認する**
+- [x] **Step 2: テストが失敗することを確認する**
 
 Run: `cargo test -p vrc-photo-core auto_job_enqueue_skips_an_existing_photo_profile_job`
 
 Expected: FAIL（`enqueue_auto_job_for_existing_profile_with_status` が未定義）
 
-- [ ] **Step 3: 最小実装を追加する**
+- [x] **Step 3: 最小実装を追加する**
 
 `enqueue_job_for_existing_profile_with_options` と同じ挿入条件に、次の条件を加えた専用メソッドを追加する。
 
@@ -102,13 +102,13 @@ AND NOT EXISTS (
 
 ステータスは問わない（`completed` / `failed` / `cancelled` も重複扱い）。自動圧縮は「その写真・プロファイルにつき一度だけ」とし、再索引で再実行しない。手動圧縮用の既存メソッドは変更しない。
 
-- [ ] **Step 4: テストが通ることを確認する**
+- [x] **Step 4: テストが通ることを確認する**
 
 Run: `cargo test -p vrc-photo-core auto_job_enqueue_skips_an_existing_photo_profile_job`
 
 Expected: PASS
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/core/src/db.rs
@@ -156,7 +156,7 @@ git commit -m "fix(core): deduplicate automatic compression jobs"
   ```
   `scan_roots_inner` は `Result<(ScanReport, usize)>` を返し、第2要素は登録した自動圧縮ジョブ数。`Event::ScanFinished` に `auto_enqueued: usize` が加わる。
 
-- [ ] **Step 1: 失敗するテストを書く**
+- [x] **Step 1: 失敗するテストを書く**
 
 `crates/daemon/src/lib.rs` の tests に追加する。
 
@@ -286,7 +286,7 @@ fn enqueue_auto_jobs_skips_profiles_that_are_not_auto_enabled() {
 }
 ```
 
-- [ ] **Step 2: テストが失敗することを確認する**
+- [x] **Step 2: テストが失敗することを確認する**
 
 Run:
 
@@ -298,7 +298,7 @@ cargo test -p vrc-photo-daemon enqueue_auto_jobs_skips_profiles_that_are_not_aut
 
 Expected: FAIL（`startup_scan` が未定義、またはジョブ / `auto_enqueued` が0件）
 
-- [ ] **Step 3: 起動処理を実装する**
+- [x] **Step 3: 起動処理を実装する**
 
 `run` の `ensure_roots` + `scan_photos` を `startup_scan` に置き換える。
 
@@ -325,7 +325,7 @@ fn startup_scan(&mut self) -> Result<()> {
 
 `scan_photos` / `scan_root_photos` / `scan_roots` は既存シグネチャを保ち、内部で `*_with_initial(..., None)` に委譲する。`scan_roots_inner` は `initial_scan.unwrap_or(full_scan && db.count_photos()? == 0)` を使い、末尾で `(report, auto_enqueued)` を返す。
 
-- [ ] **Step 4: 自動圧縮 enqueue を冪等化し、件数をイベントへ載せる**
+- [x] **Step 4: 自動圧縮 enqueue を冪等化し、件数をイベントへ載せる**
 
 `enqueue_auto_jobs` を `Result<usize>` に変更し、Task 1 の専用メソッドを使う。登録数を数えて返し、次のログを出す。
 
@@ -342,7 +342,7 @@ tracing::info!(
 
 `Event::ScanFinished` には `#[serde(default)] auto_enqueued: usize` を追加する。これで旧デーモン / 新 UI の組み合わせでもデシリアライズできる。
 
-- [ ] **Step 5: テストが通ることを確認する**
+- [x] **Step 5: テストが通ることを確認する**
 
 Run:
 
@@ -354,13 +354,13 @@ cargo test -p vrc-photo-daemon enqueue_auto_jobs_skips_profiles_that_are_not_aut
 
 Expected: PASS
 
-- [ ] **Step 6: 既存の自動圧縮テストを確認する**
+- [x] **Step 6: 既存の自動圧縮テストを確認する**
 
 Run: `cargo test -p vrc-photo-daemon auto_`
 
 Expected: PASS（`auto_jobs_use_replace_policy_and_waiting_status`, `auto_compress_holds_waiting_jobs_until_released`, `end_to_end_auto_compress` を含む）
 
-- [ ] **Step 7: コミット**
+- [x] **Step 7: コミット**
 
 ```bash
 git add crates/ipc/src/protocol.rs crates/daemon/src/lib.rs
@@ -382,7 +382,7 @@ git commit -m "fix(daemon): enqueue imported photos before the startup backlog s
 - Consumes: Task 2 の `Event::ScanFinished { auto_enqueued, .. }`
 - Produces: `App` に `import_scan_pending: bool` と `import_auto_compress_enqueued: usize`。
 
-- [ ] **Step 1: 失敗するテストを書く**
+- [x] **Step 1: 失敗するテストを書く**
 
 `crates/ui/src/ui/notifications.rs` の tests に追加する。
 
@@ -397,13 +397,13 @@ fn auto_compress_badge_is_hidden_for_zero_and_shows_the_count() {
 }
 ```
 
-- [ ] **Step 2: テストが失敗することを確認する**
+- [x] **Step 2: テストが失敗することを確認する**
 
 Run: `cargo test -p vrc-photo-ui auto_compress_badge_is_hidden_for_zero_and_shows_the_count`
 
 Expected: FAIL（`auto_compress_badge_label` が未定義）
 
-- [ ] **Step 3: UI の取り込み待ち状態を実装する**
+- [x] **Step 3: UI の取り込み待ち状態を実装する**
 
 `App` に以下を追加し、初期化する。
 
@@ -432,7 +432,7 @@ IpcEvent::ScanFinished { auto_enqueued, .. } => {
 }
 ```
 
-- [ ] **Step 4: バッジを表示する**
+- [x] **Step 4: バッジを表示する**
 
 `crates/ui/src/ui/notifications.rs` に純粋関数を追加する。
 
@@ -444,13 +444,13 @@ fn auto_compress_badge_label(count: usize) -> Option<String> {
 
 `import_notification` のバッジ列で、`self.import_auto_compress_enqueued` が 0 より大きいときに `self.badge(&label, p.green, p.green_soft)` を追加する。取り込み結果を閉じるとき（`notification-import-dismiss`）は `self.import_auto_compress_enqueued = 0;` と `self.import_scan_pending = false;` もリセットする。
 
-- [ ] **Step 5: テストが通ることを確認する**
+- [x] **Step 5: テストが通ることを確認する**
 
 Run: `cargo test -p vrc-photo-ui auto_compress_badge_is_hidden_for_zero_and_shows_the_count`
 
 Expected: PASS
 
-- [ ] **Step 6: コミット**
+- [x] **Step 6: コミット**
 
 ```bash
 git add crates/ui/src/app.rs crates/ui/src/app/import.rs \
@@ -465,25 +465,25 @@ git commit -m "feat(ui): show auto compression jobs added by an import"
 **Files:**
 - 変更なし（検証と PR のみ）
 
-- [ ] **Step 1: フォーマットを確認する**
+- [x] **Step 1: フォーマットを確認する**
 
 Run: `cargo fmt --all -- --check`
 
 Expected: 差分なし
 
-- [ ] **Step 2: Clippy を実行する**
+- [x] **Step 2: Clippy を実行する**
 
 Run: `cargo clippy --workspace --all-targets -- -D warnings`
 
 Expected: warning / error なし
 
-- [ ] **Step 3: ワークスペース全体のテストを実行する**
+- [x] **Step 3: ワークスペース全体のテストを実行する**
 
 Run: `cargo test --workspace`
 
 Expected: 全テスト PASS
 
-- [ ] **Step 4: PR を作成する**
+- [x] **Step 4: PR を作成する**
 
 ```bash
 gh pr create --base main --head fix/97-import-auto-compress \
@@ -498,7 +498,7 @@ gh pr create --base main --head fix/97-import-auto-compress \
 gh pr edit --add-label bug
 ```
 
-- [ ] **Step 5: CI を監視する**
+- [x] **Step 5: CI を監視する**
 
 `ci-watch` スキルに従い、最新の `CI` run を再解決しながら監視する。成功後にマージする。
 
@@ -510,13 +510,13 @@ gh pr edit --add-label bug
 - Modify: `docs/features.md:162`
 - Modify: `docs/testing.md:80-81`
 
-- [ ] **Step 1: 別 worktree / ブランチを main から作る**
+- [x] **Step 1: 別 worktree / ブランチを main から作る**
 
 ```bash
 git worktree add ../vrc-photo-manager-97-docs -b docs/97-import-auto-compress
 ```
 
-- [ ] **Step 2: 機能仕様を更新する**
+- [x] **Step 2: 機能仕様を更新する**
 
 `docs/features.md` の取り込み章にある既知ギャップの記述を、次の趣旨に置き換える。
 
@@ -525,7 +525,7 @@ git worktree add ../vrc-photo-manager-97-docs -b docs/97-import-auto-compress
 - 自動圧縮ジョブは同じ写真・プロファイルにつき重複登録されない。
 - 取り込み結果に「自動圧縮 N」を表示する。
 
-- [ ] **Step 3: テスト仕様を更新する**
+- [x] **Step 3: テスト仕様を更新する**
 
 `docs/testing.md` の daemon テスト一覧に以下を追加する。
 
@@ -535,7 +535,7 @@ git worktree add ../vrc-photo-manager-97-docs -b docs/97-import-auto-compress
 
 UI テスト一覧に「自動圧縮件数バッジが0件で非表示、1件以上で件数表示」を追加する。
 
-- [ ] **Step 4: 検証と PR**
+- [x] **Step 4: 検証と PR**
 
 ```bash
 cargo fmt --all -- --check

@@ -68,12 +68,16 @@ watcher の全経路で同じ関数を使う。
 
 ### 3. 取り込み結果への件数表示
 
-- IPC の `Event::ScanFinished` に `auto_enqueued` を追加する。
+- IPC の `Event::ScanStarted` / `Event::ScanFinished` に対象ルート
+  （単一ルートの `ScanRoot` のときだけ `Some`）を追加する。
+- `Event::ScanFinished` に `auto_enqueued` を追加する。
 - デーモンはスキャン中に enqueue したジョブ数をイベントへ載せる。
-- UI は取り込み後に `ScanRoot` を要求したとき「取り込みスキャン待ち」を
-  立て、次の `ScanFinished` の `auto_enqueued` を取り込み結果へ加算する。
-- 取り込み結果パネルに `自動圧縮に N 件追加` を表示する。
-  N が 0 のときは表示しない。
+- UI は取り込み後に `ScanRoot` を要求したとき、取り込み先を
+  「取り込みスキャン待ち」として保持する。
+- 受信した `ScanFinished` の対象ルートが保持中の取り込み先と一致する
+  ときだけ `auto_enqueued` を取り込み結果へ加算する。フルスキャンや
+  別の取り込み先のイベントは無視する。
+- 取り込み結果パネルに `自動圧縮 N` を表示する。N が 0 のときは表示しない。
 - デーモンログにも同じ件数を残す。
 
 ## テスト
