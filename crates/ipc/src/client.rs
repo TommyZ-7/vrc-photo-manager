@@ -327,7 +327,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let endpoint = Endpoint::for_tests(dir.path());
         let listener = server::Listener::bind(endpoint.clone()).unwrap();
-        let event = Event::ScanStarted { roots: 2 };
+        let event = Event::ScanStarted {
+            roots: 2,
+            target: None,
+        };
         let event_for_server = event.clone();
         let server = std::thread::spawn(move || {
             let mut stream = listener.accept().unwrap();
