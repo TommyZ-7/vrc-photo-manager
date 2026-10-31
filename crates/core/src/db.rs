@@ -2166,6 +2166,38 @@ impl Db {
         )
     }
 
+    /// Enqueues an automatic job unless the photo already has any job for the
+    /// profile. Auto compression runs once per photo/profile; re-indexing must
+    /// not recreate completed, failed, or cancelled work.
+    pub fn enqueue_auto_job_for_existing_profile_with_status(
+        &self,
+        photo_id: i64,
+        profile_id: &str,
+        policy: &str,
+        status: QueueStatus,
+    ) -> Result<bool> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let inserted = self.conn.execute(
+            "INSERT INTO compression_jobs(id, photo_id, profile_id, status, progress, policy, output_dir, created_at) \
+             SELECT ?1, ?2, ?3, ?4, 0, ?5, NULL, ?6 \
+             WHERE EXISTS (SELECT 1 FROM compression_profiles WHERE id = ?3) \
+               AND EXISTS (SELECT 1 FROM photos WHERE id = ?2 AND status <> 'deleting') \
+               AND NOT EXISTS (SELECT 1 FROM deletion_requests \
+                   WHERE photo_id = ?2 AND status IN ('pending', 'blocked', 'running')) \
+               AND NOT EXISTS (SELECT 1 FROM compression_jobs \
+                   WHERE photo_id = ?2 AND profile_id = ?3)",
+            params![
+                id,
+                photo_id,
+                profile_id,
+                status.as_str(),
+                policy,
+                now_string()
+            ],
+        )?;
+        Ok(inserted == 1)
+    }
+
     /// Enqueues a manual job for an existing profile with an optional output
     /// directory override.
     pub fn enqueue_job_for_existing_profile_with_output_dir(
@@ -4438,6 +4470,33 @@ mod tests {
         db.enqueue_job(photo, "profile", "keep").unwrap();
         let job = db.next_pending_job().unwrap().unwrap();
         assert!(job.output_dir.is_none());
+    }
+
+    #[test]
+    fn auto_job_enqueue_skips_an_existing_photo_profile_job() {
+        let db = Db::open_in_memory().unwrap();
+        let id = seed_photo(&db);
+        db.save_profile(&profile("p", "P")).unwrap();
+
+        assert!(
+            db.enqueue_auto_job_for_existing_profile_with_status(
+                id,
+                "p",
+                "keep",
+                QueueStatus::Pending,
+            )
+            .unwrap()
+        );
+        assert!(
+            !db.enqueue_auto_job_for_existing_profile_with_status(
+                id,
+                "p",
+                "keep",
+                QueueStatus::Waiting,
+            )
+            .unwrap()
+        );
+        assert_eq!(db.list_jobs(10).unwrap().len(), 1);
     }
 
     #[test]
