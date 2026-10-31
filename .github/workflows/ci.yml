@@ -20,6 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       docs_only: ${{ steps.check.outputs.docs_only }}
+      thumbnails: ${{ steps.check.outputs.thumbnails }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -28,8 +29,10 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" != "pull_request" ]; then
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "thumbnails=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          echo "thumbnails=false" >> "$GITHUB_OUTPUT"
           git fetch origin "${{ github.base_ref }}"
           FILES=$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")
           echo "Changed files:"
@@ -37,6 +40,9 @@ jobs:
           if [ -z "$FILES" ]; then
             echo "docs_only=true" >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+          if echo "$FILES" | grep -qE '^(crates/core/src/thumbnail\.rs|crates/ui/src/state/thumbnail\.rs|crates/daemon/src/lib\.rs|crates/ipc/src/protocol\.rs|\.github/workflows/ci\.yml)$'; then
+            echo "thumbnails=true" >> "$GITHUB_OUTPUT"
           fi
           if echo "$FILES" | grep -qvE '(^docs/|\.md$|(^|/)LICENSE$|^packaging/.*\.md$)'; then
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
@@ -116,3 +122,6 @@ jobs:
         run: cargo test -p vrc-photo-update
       - name: Clippy updater on Windows
         run: cargo clippy -p vrc-photo-update --all-targets -- -D warnings
+      - name: Test thumbnail cache on Windows
+        if: needs.changes.outputs.thumbnails == 'true'
+        run: cargo test -p vrc-photo-core thumbnail::tests
