@@ -103,6 +103,10 @@ pub(crate) fn toast_flush_needed(pending: usize, scheduled: bool) -> bool {
 }
 
 /// The notification modal must not stack over another modal.
+fn auto_compress_badge_label(count: usize) -> Option<String> {
+    (count > 0).then(|| format!("自動圧縮 {count}"))
+}
+
 pub(crate) fn notification_modal_allowed(import_open: bool, manual_open: bool) -> bool {
     !import_open && !manual_open
 }
@@ -466,6 +470,9 @@ impl App {
             badges =
                 badges.child(self.badge(&format!("スキャン失敗 {scan_failed}"), p.red, p.red_soft));
         }
+        if let Some(label) = auto_compress_badge_label(self.import_auto_compress_enqueued) {
+            badges = badges.child(self.badge(&label, p.green, p.green_soft));
+        }
 
         let mut actions = h_flex().flex_wrap().gap(px(6.));
         if !retryable.is_empty() {
@@ -515,6 +522,8 @@ impl App {
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.import_report = None;
                         this.import_report_expanded = false;
+                        this.import_auto_compress_enqueued = 0;
+                        this.import_scan_pending = false;
                         cx.notify();
                     })),
             );
@@ -678,9 +687,18 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{
-        NotificationSection, deletion_blocked_transition, notification_modal_allowed,
-        notification_sections, toast_flush_needed,
+        NotificationSection, auto_compress_badge_label, deletion_blocked_transition,
+        notification_modal_allowed, notification_sections, toast_flush_needed,
     };
+
+    #[test]
+    fn auto_compress_badge_is_hidden_for_zero_and_shows_the_count() {
+        assert_eq!(auto_compress_badge_label(0), None);
+        assert_eq!(
+            auto_compress_badge_label(3).as_deref(),
+            Some("自動圧縮 3")
+        );
+    }
 
     #[test]
     fn blocked_deletion_transition_notifies_only_on_increase() {

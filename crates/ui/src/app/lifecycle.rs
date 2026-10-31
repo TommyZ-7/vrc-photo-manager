@@ -162,7 +162,13 @@ impl App {
                     roots,
                 });
             }
-            IpcEvent::ScanFinished { .. } => {
+            IpcEvent::ScanFinished { auto_enqueued, .. } => {
+                if self.import_scan_pending {
+                    self.import_scan_pending = false;
+                    self.import_auto_compress_enqueued = self
+                        .import_auto_compress_enqueued
+                        .saturating_add(auto_enqueued);
+                }
                 self.scan_progress = None;
                 self.refresh_live(cx);
                 self.refresh_library_after_scan(cx);

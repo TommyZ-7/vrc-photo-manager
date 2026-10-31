@@ -398,6 +398,7 @@ impl App {
                         merge_resume_report(&report, result)
                     }
                 };
+                self.import_auto_compress_enqueued = 0;
                 if import_should_index(imported) {
                     report.scan_failures.clear();
                     report.scan_error = None;
@@ -485,6 +486,7 @@ impl App {
         // UI reload.
         match request_import_scan(&self.db, &report.dest) {
             Ok(_) => {
+                self.import_scan_pending = true;
                 self.send_wake_commands(cx);
                 if !self.ipc_connected {
                     self.toast_warning(

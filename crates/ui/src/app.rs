@@ -224,6 +224,11 @@ pub struct App {
     pub(crate) deletion_counts: DeletionCounts,
     pub(crate) deletion_baseline: Option<(i64, i64)>,
     pub(crate) import_report: Option<ImportReportView>,
+    /// The import asked the daemon for a targeted scan and is waiting for its
+    /// `ScanFinished` event.
+    pub(crate) import_scan_pending: bool,
+    /// Automatic compression jobs reported by the most recent import scan.
+    pub(crate) import_auto_compress_enqueued: usize,
     pub(crate) import_dialog: Option<ImportDialogState>,
     /// Last time the import progress rebuilt the window. The importer reports
     /// once per file, so notifications are coalesced to ~20 fps.
@@ -650,6 +655,8 @@ impl App {
             failed_jobs: Vec::new(),
             failed_job_names: HashMap::new(),
             import_report: None,
+            import_scan_pending: false,
+            import_auto_compress_enqueued: 0,
             import_dialog: None,
             last_import_progress_notify: None,
             compression_refresh_scheduled: false,
