@@ -173,8 +173,8 @@ non-UI client that wants a command must use the shared database, not a
 separate IPC command path.
 
 Responses: `hello`, `status`, `subscribed`, `ok`, `error { code, message }`.
-Error codes include `protocol_mismatch`, `invalid_request`, `unknown_request`,
-and `internal`.
+The only error code emitted today is `invalid_request` (for a missing or
+repeated `hello`). Version mismatches do not use an error response.
 
 Status snapshot: `paused`, `watching`, `scanning`, `scan_phase`,
 `scan_processed`, `scan_total`, `scan_indexed`, `scan_root`,
@@ -191,8 +191,11 @@ Events:
 | `daemon_error_changed` | `operation` (`scan`/`log`/`link`) |
 | `status_changed` | full status snapshot |
 
-A protocol mismatch returns `protocol_mismatch` and closes the connection. The
-UI shows a non-fatal message and keeps using the heartbeat/SQLite fallback.
+On a version mismatch the daemon still replies with `hello`, carrying its own
+`protocol_version`, and then closes the connection. The client compares the
+versions and raises `IpcError::ProtocolMismatch { daemon, client }`; the UI
+shows 「デーモンの更新が必要です」 and keeps using the heartbeat/SQLite
+fallback.
 
 ### 6.4 Daemon server
 

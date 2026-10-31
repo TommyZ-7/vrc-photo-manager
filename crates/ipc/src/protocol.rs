@@ -48,13 +48,12 @@ pub enum Response {
     },
 }
 
+/// Error codes currently emitted by the daemon. A version mismatch is
+/// reported through the `hello` response, not an error response.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
-    ProtocolMismatch,
     InvalidRequest,
-    UnknownRequest,
-    Internal,
 }
 
 /// Live daemon state shared with the UI.
