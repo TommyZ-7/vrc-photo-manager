@@ -48,11 +48,13 @@
     `LICENSE`, plus `packaging/**/*.md`).
   - Cancel superseded runs on the same ref (`cancel-in-progress: true`).
 - `.github/workflows/release.yml` (heavy: bundle + Release publish)
-  - `push: tags: ['v*.*.*']`, `pull_request` (with `paths` filter),
-    `workflow_dispatch`
-  - On PRs, run the bundle only when release-relevant paths changed
-    (`crates/**`, `Cargo.toml`, `Cargo.lock`, `Packager.toml`, `packaging/**`, `.github/workflows/release.yml`)
-    to prove `main` stays releasable.
+  - `push: tags: ['v*.*.*']`, `pull_request` (job-side `changes` gate;
+    no `paths` filter), `workflow_dispatch`
+  - On PRs, run the bundle only when packaging-relevant files changed
+    (`packaging/**`, `Packager.toml`, any `Cargo.toml`, `Cargo.lock`,
+    `.github/workflows/release.yml`, `.github/release.yml`) or the PR
+    carries the `bundle-check` label. `crates/**`-only changes do not
+    trigger the bundle; code correctness is covered by CI.
   - Run it manually only when needed: `gh workflow run Release --ref <branch>`
   - Release publishing (`gh release create/upload`) runs on tags only.
     AI must not publish on its own (§1).
