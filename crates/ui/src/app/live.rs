@@ -158,17 +158,16 @@ impl App {
             notify = true;
         }
 
-        if let Some((deletions, blocked, next_baseline)) =
-            deletion_update(self.deletion_baseline, snapshot.deletions)
-        {
-            if self.deletion_requests != deletions.requests
-                || self.deletion_counts != deletions.counts
-            {
-                self.deletion_requests = deletions.requests;
-                self.deletion_counts = deletions.counts;
+        if let Some(update) = apply_deletion_snapshot(
+            &mut self.deletion_requests,
+            &mut self.deletion_counts,
+            &mut self.deletion_baseline,
+            snapshot.deletions,
+        ) {
+            if update.changed {
                 notify = true;
             }
-            if let Some(blocked) = blocked {
+            if let Some(blocked) = update.blocked {
                 self.toast_warning(
                     format!(
                         "{blocked} 件の削除が保留されています。ダッシュボードを確認してください"
@@ -177,7 +176,6 @@ impl App {
                 );
                 notify = true;
             }
-            self.deletion_baseline = Some(next_baseline);
         }
 
         // Only transition the baseline after both counts were read. A failed
@@ -269,6 +267,30 @@ fn deletion_update(
     Some((snapshot, blocked, next))
 }
 
+/// Outcome of applying one deletion snapshot to the retained UI state.
+struct DeletionApply {
+    changed: bool,
+    blocked: Option<i64>,
+}
+
+/// Applies the deletion part of a live snapshot. `None` means the read failed:
+/// requests, counts, and the baseline stay exactly as they were, and no toast
+/// is produced. A missing snapshot must never reset the baseline, otherwise the
+/// next successful read would announce pre-existing blocked requests.
+fn apply_deletion_snapshot(
+    requests: &mut Vec<DeletionRequest>,
+    counts: &mut DeletionCounts,
+    baseline: &mut Option<(i64, i64)>,
+    snapshot: Option<DeletionSnapshot>,
+) -> Option<DeletionApply> {
+    let (deletions, blocked, next_baseline) = deletion_update(*baseline, snapshot)?;
+    let changed = *requests != deletions.requests || *counts != deletions.counts;
+    *requests = deletions.requests;
+    *counts = deletions.counts;
+    *baseline = Some(next_baseline);
+    Some(DeletionApply { changed, blocked })
+}
+
 fn collect_jobs(db: &Db) -> JobSnapshot {
     let failed_jobs = db
         .list_jobs_by_status(QueueStatus::Failed, 100)
@@ -332,9 +354,13 @@ fn collect_monitor(db: &Db) -> MonitorSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::{DeletionSnapshot, collect_live_snapshot, deletion_update};
+    use super::{
+        DeletionSnapshot, apply_deletion_snapshot, collect_live_snapshot, deletion_update,
+    };
     use vrc_photo_core::db::Db;
-    use vrc_photo_core::model::{DeletionReason, NewPhoto};
+    use vrc_photo_core::model::{
+        DeletionCounts, DeletionReason, DeletionRequest, DeletionStatus, NewPhoto,
+    };
 
     #[test]
     fn deletion_update_keeps_the_baseline_when_the_snapshot_is_missing() {
@@ -363,6 +389,55 @@ mod tests {
         let (_, blocked, baseline) = deletion_update(Some((1, 2)), Some(snapshot)).unwrap();
         assert_eq!(blocked, None);
         assert_eq!(baseline, (1, 2));
+    }
+
+    #[test]
+    fn failed_deletion_snapshot_keeps_all_state_and_avoids_a_false_toast() {
+        let mut requests = vec![DeletionRequest {
+            id: 1,
+            photo_id: 7,
+            photo_name: "a.png".to_string(),
+            reason: DeletionReason::Manual,
+            status: DeletionStatus::Blocked,
+            force: false,
+            blocked_reason: Some("unknown_reason".to_string()),
+            error: None,
+            requested_at: String::new(),
+            started_at: None,
+            finished_at: None,
+        }];
+        let mut counts = DeletionCounts {
+            pending: 1,
+            blocked: 1,
+            running: 0,
+        };
+        let mut baseline = Some((1, 1));
+
+        let update = apply_deletion_snapshot(&mut requests, &mut counts, &mut baseline, None);
+        assert!(update.is_none(), "a failed read must not apply");
+        assert_eq!(requests.len(), 1, "requests survive a failed read");
+        assert_eq!(
+            counts,
+            DeletionCounts {
+                pending: 1,
+                blocked: 1,
+                running: 0,
+            }
+        );
+        assert_eq!(baseline, Some((1, 1)), "baseline survives a failed read");
+
+        let snapshot = DeletionSnapshot {
+            requests: requests.clone(),
+            counts,
+        };
+        let update =
+            apply_deletion_snapshot(&mut requests, &mut counts, &mut baseline, Some(snapshot))
+                .expect("a successful snapshot applies");
+        assert!(!update.changed);
+        assert!(
+            update.blocked.is_none(),
+            "existing blocked requests must not toast again"
+        );
     }
 
     fn seed_photo(db: &Db) -> i64 {
