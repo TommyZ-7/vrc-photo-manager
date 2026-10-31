@@ -89,10 +89,12 @@ impl App {
                 .await;
             this.update(cx, |this, cx| {
                 match decoded {
-                    Some((color, rgba)) => {
-                        this.thumbnails
-                            .borrow_mut()
-                            .insert(id, make_render_image(rgba), color);
+                    Some(decoded) => {
+                        this.thumbnails.borrow_mut().insert(
+                            id,
+                            make_render_image(decoded.image),
+                            decoded.color,
+                        );
                     }
                     None => this.thumbnails.borrow_mut().fail(id),
                 }
