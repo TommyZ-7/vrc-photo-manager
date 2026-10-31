@@ -4133,6 +4133,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let root = db.add_root("/photos", "reference").unwrap();
         let mut paths = Vec::new();
+        let mut first_id = 0;
         let mut missing_id = 0;
         for index in 0..501i64 {
             let path = format!("/photos/{index:04}.png");
@@ -4152,6 +4153,9 @@ mod tests {
                     blake3: (index == 0).then(|| "hash".to_string()),
                 })
                 .unwrap();
+            if index == 0 {
+                first_id = id;
+            }
             if index == 500 {
                 missing_id = id;
             }
@@ -4162,11 +4166,34 @@ mod tests {
         let states = db.photo_scan_states(&paths).unwrap();
         assert_eq!(states.len(), 501);
         let first = &states["/photos/0000.png"];
+        assert_eq!(first.id, first_id);
         assert_eq!(first.file_size, 100);
         assert_eq!(first.mtime, 200);
         assert_eq!(first.blake3.as_deref(), Some("hash"));
         assert_eq!(first.status, PhotoStatus::Present);
+        assert_eq!(first.display_derivative_id, None);
         assert_eq!(states["/photos/0500.png"].status, PhotoStatus::Missing);
+
+        let derivative = db
+            .add_derivative(
+                first_id,
+                "/photos/0000_webp.webp",
+                "webp",
+                4,
+                3,
+                10,
+                "p",
+                "replace",
+            )
+            .unwrap();
+        db.set_replaced(first_id, derivative).unwrap();
+        let states = db
+            .photo_scan_states(&["/photos/0000.png".to_string()])
+            .unwrap();
+        let replaced = &states["/photos/0000.png"];
+        assert_eq!(replaced.id, first_id);
+        assert_eq!(replaced.display_derivative_id, Some(derivative));
+        assert_eq!(replaced.status, PhotoStatus::Replaced);
     }
 
     /// Seeds 100k synthetic rows in one transaction and measures the shipped

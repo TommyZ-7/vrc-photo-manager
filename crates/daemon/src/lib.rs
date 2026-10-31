@@ -4971,6 +4971,78 @@ mod tests {
     }
 
     #[test]
+    fn scan_root_missing_path_records_failure_and_keeps_other_photos() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let photo = dir
+            .path()
+            .join("photos/VRChat_2026-10-21_21-14-03.221_4x3.png");
+        write_photo(&photo);
+        let root = dir.path().join("photos");
+        daemon.scan_root_photos(root).unwrap();
+
+        let missing = dir.path().join("does-not-exist");
+        let report = daemon.scan_root_photos(missing.clone()).unwrap();
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].path, missing);
+
+        let not_a_dir = dir.path().join("not-a-dir.png");
+        write_photo(&not_a_dir);
+        let report = daemon.scan_root_photos(not_a_dir.clone()).unwrap();
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].path, not_a_dir);
+
+        let db = daemon.db.lock().unwrap();
+        let indexed = db.photo_by_path(photo.to_str().unwrap()).unwrap().unwrap();
+        assert_eq!(indexed.status, PhotoStatus::Present);
+        let errors = db.daemon_errors().unwrap();
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.operation == DaemonOperation::Scan)
+        );
+    }
+
+    #[test]
+    fn scan_root_sends_new_photos_to_the_thumbnail_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let photo = dir
+            .path()
+            .join("photos/VRChat_2026-10-21_21-14-03.221_4x3.png");
+        write_photo(&photo);
+        let (tx, rx) = std::sync::mpsc::channel();
+        daemon.thumbnail_tx = Some(tx);
+        let events = daemon.events.subscribe();
+        let root = dir.path().join("photos");
+        let report = daemon.scan_root_photos(root.clone()).unwrap();
+        assert_eq!(report.new_ids.len(), 1);
+
+        assert_eq!(rx.try_recv().unwrap(), report.new_ids[0]);
+        assert!(rx.try_recv().is_err());
+
+        let mut finished = None;
+        while let Ok(event) = events.try_recv() {
+            if let Event::ScanFinished { .. } = event {
+                finished = Some(event);
+            }
+        }
+        match finished {
+            Some(Event::ScanFinished {
+                failures,
+                failed,
+                target,
+                ..
+            }) => {
+                assert_eq!(failures, 0);
+                assert!(!failed);
+                assert_eq!(target.as_deref(), Some(root.to_str().unwrap()));
+            }
+            _ => panic!("scan did not finish"),
+        }
+    }
+
+    #[test]
     fn scan_photos_publishes_started_progress_and_finished() {
         let dir = tempfile::tempdir().unwrap();
         let mut daemon = test_daemon(&dir);
