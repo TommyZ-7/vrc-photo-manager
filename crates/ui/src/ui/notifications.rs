@@ -694,10 +694,7 @@ mod tests {
     #[test]
     fn auto_compress_badge_is_hidden_for_zero_and_shows_the_count() {
         assert_eq!(auto_compress_badge_label(0), None);
-        assert_eq!(
-            auto_compress_badge_label(3).as_deref(),
-            Some("自動圧縮 3")
-        );
+        assert_eq!(auto_compress_badge_label(3).as_deref(), Some("自動圧縮 3"));
     }
 
     #[test]

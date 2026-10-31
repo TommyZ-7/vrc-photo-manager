@@ -4522,8 +4522,7 @@ mod tests {
 
         let db_path = dir.path().join("library.db");
         add_auto_profile(&db_path);
-        let mut daemon =
-            Daemon::open(&db_path, Some(backlog_root.clone()), Some(log_dir)).unwrap();
+        let mut daemon = Daemon::open(&db_path, Some(backlog_root.clone()), Some(log_dir)).unwrap();
         daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
         daemon.set_ipc_endpoint(None);
         save_daemon_settings(&daemon, |settings| {
@@ -4557,7 +4556,9 @@ mod tests {
             .id;
         let jobs = db.list_jobs(10).unwrap();
         assert_eq!(
-            jobs.iter().filter(|job| job.photo_id == imported_id).count(),
+            jobs.iter()
+                .filter(|job| job.photo_id == imported_id)
+                .count(),
             1
         );
         assert_eq!(
