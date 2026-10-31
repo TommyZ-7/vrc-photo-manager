@@ -614,9 +614,6 @@ fn append_scan_error(report: &mut ImportReportView, message: String) {
     }
 }
 
-/// Adds `dest` to the settings roots and persists the change. A failed save
-/// restores the previous in-memory roots so a later retry attempts the save
-/// again instead of treating an unsaved path as persisted.
 /// Queues a scan of only the directory the import wrote to.
 pub(crate) fn request_import_scan(
     db: &vrc_photo_core::Db,
@@ -625,6 +622,9 @@ pub(crate) fn request_import_scan(
     db.request_daemon_scan_root(&dest.to_string_lossy())
 }
 
+/// Adds `dest` to the settings roots and persists the change. A failed save
+/// restores the previous in-memory roots so a later retry attempts the save
+/// again instead of treating an unsaved path as persisted.
 fn add_photo_root_and_save<E, F>(
     settings: &mut AppSettings,
     dest: &str,
