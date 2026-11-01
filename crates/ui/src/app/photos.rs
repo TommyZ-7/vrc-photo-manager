@@ -21,7 +21,9 @@ use crate::app::cli::log_timing;
 use crate::app::demo::demo_thumb_path;
 use crate::app::{App, Screen};
 use crate::state::photo_browser::PhotoBrowser;
-use crate::state::preview::{preview_cache_dir, preview_key, should_request_preview};
+use crate::state::preview::{
+    preview_cache_dir, preview_key, should_apply_preview, should_request_preview,
+};
 use crate::state::thumbnail::{decode_thumbnail, make_render_image, rgba_to_bgra};
 
 /// Delay before a partial thumbnail notice batch is reported. Keeps a quiet
@@ -319,11 +321,10 @@ impl App {
                     .await;
                 this.update(cx, |this, cx| {
                     this.preview_queue.finish(key);
-                    let current = this
-                        .selected_photo
-                        .as_ref()
-                        .is_some_and(|photo| preview_key(photo) == key);
-                    if current && let Some(rgba) = decoded {
+                    let selected = this.selected_photo.as_ref().map(preview_key);
+                    if should_apply_preview(selected, key)
+                        && let Some(rgba) = decoded
+                    {
                         this.preview = Some(make_render_image(rgba));
                         this.preview_key = Some(key);
                     }

@@ -150,9 +150,14 @@ fn write_cache(cache: &Path, image: &RgbaImage) -> bool {
     true
 }
 
+/// Whether the `writes`-th cache write triggers a prune.
+fn prune_due(writes: usize) -> bool {
+    writes.is_multiple_of(PRUNE_EVERY)
+}
+
 fn maybe_prune(cache_dir: &Path) {
     let writes = WRITES.fetch_add(1, Ordering::Relaxed) + 1;
-    if !writes.is_multiple_of(PRUNE_EVERY) {
+    if !prune_due(writes) {
         return;
     }
     match prune_previews_in(cache_dir, PREVIEW_CACHE_MAX_FILES, PREVIEW_CACHE_PRUNE_TO) {
@@ -373,6 +378,60 @@ mod tests {
             let name = entry.unwrap().file_name().to_string_lossy().to_string();
             assert!(!name.contains(".tmp"), "leftover temp file: {name}");
         }
+    }
+
+    #[test]
+    fn prune_is_due_every_32nd_write() {
+        assert_eq!(PRUNE_EVERY, 32);
+        assert!(!prune_due(1));
+        assert!(!prune_due(31));
+        assert!(prune_due(32));
+        assert!(!prune_due(33));
+        assert!(prune_due(64));
+    }
+
+    #[test]
+    fn prune_with_production_limits_keeps_the_prune_target() {
+        assert_eq!(PREVIEW_CACHE_MAX_FILES, 2048);
+        assert_eq!(PREVIEW_CACHE_PRUNE_TO, 1536);
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("previews");
+        fs::create_dir_all(&cache).unwrap();
+        let total = PREVIEW_CACHE_MAX_FILES + 12;
+        for index in 0..total {
+            let path = cache.join(format!("{index}-0.webp"));
+            fs::write(&path, b"preview").unwrap();
+            set_mtime(
+                &path,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(index as u64 + 1),
+            );
+        }
+
+        let removed =
+            prune_previews_in(&cache, PREVIEW_CACHE_MAX_FILES, PREVIEW_CACHE_PRUNE_TO).unwrap();
+        assert_eq!(removed, total - PREVIEW_CACHE_PRUNE_TO);
+        let remaining = fs::read_dir(&cache).unwrap().count();
+        assert_eq!(remaining, PREVIEW_CACHE_PRUNE_TO);
+        // The survivors are the newest entries.
+        assert!(!cache.join("0-0.webp").exists());
+        assert!(cache.join(format!("{}-0.webp", total - 1)).exists());
+    }
+
+    #[test]
+    fn returns_the_decoded_preview_when_the_cache_write_fails() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.png");
+        write_png(&source, 320, 200, [255, 0, 0, 255]);
+        // A regular file where the cache parent must be created makes
+        // create_dir_all fail, so nothing can be cached.
+        let blocker = dir.path().join("blocker");
+        fs::write(&blocker, b"not a directory").unwrap();
+        let cache = blocker.join("previews");
+
+        let image =
+            ensure_preview_in(12, 0, &source, &cache).expect("preview despite write failure");
+        assert_eq!(image.dimensions(), (1200, 750));
+        assert!(!cache.join("12-0.webp").exists());
     }
 
     #[test]
