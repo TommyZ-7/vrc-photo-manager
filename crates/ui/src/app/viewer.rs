@@ -15,7 +15,7 @@ use crate::state::viewer::{
 };
 use crate::ui::theme::{
     MOTION_BASE, MOTION_MORPH, MOTION_SLOW, VIEWER_DETAILS_WIDTH, centered_viewer_rect,
-    content_bounds, content_viewport, eased_progress, next_focus_index, step_index,
+    content_bounds, content_insets, content_viewport, eased_progress, next_focus_index, step_index,
     viewer_image_rect,
 };
 
@@ -93,10 +93,9 @@ impl App {
             to_width: details_width,
             duration: Duration::ZERO,
         };
-        let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
         let resolved = self
             .actual_source(id, source)
-            .map(|(kind, bounds)| (kind, content_bounds(bounds, client_inset)));
+            .map(|(kind, bounds)| (kind, content_bounds(bounds, content_insets(window))));
         if let Some((actual_source, _)) = resolved {
             self.viewer_return_source = Some(actual_source);
         }
@@ -190,10 +189,9 @@ impl App {
             .or(self.viewer_return_source)
             .unwrap_or(ViewerOpenSource::Auto);
         let id = self.selected.unwrap_or_default();
-        let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
         let target = self
             .actual_source(id, source)
-            .map(|(kind, bounds)| (kind, content_bounds(bounds, client_inset)));
+            .map(|(kind, bounds)| (kind, content_bounds(bounds, content_insets(window))));
         let (to, target_kind, fade_only) = match target {
             Some((kind, bounds)) => (bounds, kind, false),
             None => (from, source, true),
