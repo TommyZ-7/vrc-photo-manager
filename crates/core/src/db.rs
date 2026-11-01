@@ -356,28 +356,13 @@ impl Db {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))?;
         if version < 1 {
-            self.conn.execute_batch(SCHEMA_V1)?;
-            self.conn.execute(
-                "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (1, ?1)",
-                params![now_string()],
-            )?;
-            self.conn.pragma_update(None, "user_version", 1)?;
+            self.migrate_v1()?;
         }
         if version < 2 {
-            self.conn.execute_batch(SCHEMA_V2)?;
-            self.conn.execute(
-                "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (2, ?1)",
-                params![now_string()],
-            )?;
-            self.conn.pragma_update(None, "user_version", 2)?;
+            self.migrate_v2()?;
         }
         if version < 3 {
-            self.conn.execute_batch(SCHEMA_V3)?;
-            self.conn.execute(
-                "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (3, ?1)",
-                params![now_string()],
-            )?;
-            self.conn.pragma_update(None, "user_version", 3)?;
+            self.migrate_v3()?;
         }
         if version < 4 {
             self.migrate_v4()?;
@@ -397,6 +382,80 @@ impl Db {
         if version < 9 {
             self.migrate_v9()?;
         }
+        Ok(())
+    }
+
+    /// Applies schema version 1 in one immediate transaction. The write lock
+    /// serializes concurrent UI/daemon startups, and the `IF NOT EXISTS` DDL
+    /// makes the step safe to retry after an interrupted upgrade.
+    fn migrate_v1(&self) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        // Re-read under the write lock: another process may have completed V1
+        // between the caller's version check and this transaction.
+        let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version >= 1 {
+            tx.commit()?;
+            return Ok(());
+        }
+
+        tx.execute_batch(SCHEMA_V1)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (1, ?1)",
+            params![now_string()],
+        )?;
+        tx.pragma_update(None, "user_version", 1)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Applies schema version 2 in one immediate transaction. The column
+    /// check makes the step safe to retry after a crash between the ALTER
+    /// and `user_version`, which the pre-transaction runner could leave
+    /// behind as a duplicate column on the next open.
+    fn migrate_v2(&self) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version >= 2 {
+            tx.commit()?;
+            return Ok(());
+        }
+
+        let has_author: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('photo_context') \
+             WHERE name = 'author')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_author {
+            tx.execute_batch(SCHEMA_V2)?;
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (2, ?1)",
+            params![now_string()],
+        )?;
+        tx.pragma_update(None, "user_version", 2)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Applies schema version 3 in one immediate transaction. The index uses
+    /// `IF NOT EXISTS`, so the step is safe to retry after an interrupted
+    /// upgrade.
+    fn migrate_v3(&self) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version >= 3 {
+            tx.commit()?;
+            return Ok(());
+        }
+
+        tx.execute_batch(SCHEMA_V3)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (3, ?1)",
+            params![now_string()],
+        )?;
+        tx.pragma_update(None, "user_version", 3)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -3042,6 +3101,124 @@ mod tests {
             .unwrap();
         }
         conn.pragma_update(None, "user_version", 3).unwrap();
+    }
+
+    #[test]
+    fn interrupted_v1_migration_recovers() {
+        // The V1 DDL committed but the crash hit before user_version moved:
+        // the database still reports version 0 with the tables present.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("photos.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 9);
+    }
+
+    #[test]
+    fn interrupted_v2_migration_recovers() {
+        // The V2 ALTER committed but user_version stayed at 1: the old
+        // autocommit runner failed the next open with a duplicate column.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("photos.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (1, ?1)",
+                params![now_string()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO library_roots(path, kind, created_at) \
+                 VALUES ('/photos', 'reference', ?1)",
+                params![now_string()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO photos(root_id, rel_path, abs_path, file_name, captured_at_utc, \
+                    captured_at_local, tz_offset_sec, width, height, file_size, mtime, blake3, \
+                    status, created_at, updated_at) \
+                 VALUES (1, 'a.png', '/photos/a.png', 'a.png', 100, '2026-10-21 21:14:03', 32400, \
+                    3840, 2160, 12400000, 100, NULL, 'present', ?1, ?1)",
+                params![now_string()],
+            )
+            .unwrap();
+            conn.execute_batch(SCHEMA_V2).unwrap();
+            conn.execute(
+                "INSERT INTO photo_context(photo_id, link_method, confidence, linked_at, author) \
+                 VALUES (1, 'auto', 0, ?1, 'alice')",
+                params![now_string()],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 9);
+        let author_columns: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('photo_context') WHERE name = 'author'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(author_columns, 1);
+        let author: String = db
+            .conn
+            .query_row(
+                "SELECT author FROM photo_context WHERE photo_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(author, "alice");
+        let recorded: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 2",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(recorded, 1);
+    }
+
+    #[test]
+    fn concurrent_open_of_a_fresh_database_succeeds() {
+        // UI and daemon opening the same new database at once must both
+        // succeed: the immediate transactions serialize the migrations.
+        for round in 0..3 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(format!("photos-{round}.db"));
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let mut handles = Vec::new();
+            for _ in 0..2 {
+                let barrier = barrier.clone();
+                let path = path.clone();
+                handles.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    Db::open(&path).map(|db| {
+                        db.conn
+                            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                    })
+                }));
+            }
+            for handle in handles {
+                let opened = handle.join().unwrap();
+                assert_eq!(opened.unwrap().unwrap(), 9);
+            }
+        }
     }
 
     #[test]
