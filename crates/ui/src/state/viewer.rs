@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui_kit::{Bounds, Pixels, RenderImage};
+use gpui_kit::{Bounds, Pixels, Point, RenderImage, Size, point};
 
 use crate::ui::theme::{
     MOTION_MORPH, eased_progress, lerp_bounds, viewer_image_box_with_details_width,
@@ -72,6 +72,107 @@ pub(crate) fn morph_image_plan(
             10.0,
         )
     }
+}
+
+pub(crate) const ZOOM_STEP: f32 = 1.25;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ViewerZoom {
+    /// Scale relative to the fit box: 1.0 is fit, 1 / ratio is 100%.
+    pub(crate) scale: f32,
+    /// Screen-pixel offset from the centered position.
+    pub(crate) pan: Point<f32>,
+}
+
+impl Default for ViewerZoom {
+    fn default() -> Self {
+        Self {
+            scale: 1.0,
+            pan: Point::default(),
+        }
+    }
+}
+
+impl ViewerZoom {
+    pub(crate) fn is_active(self) -> bool {
+        self.scale > 1.0 + 1e-4
+    }
+
+    pub(crate) fn percent(self, image: (u32, u32), frame: Size<f32>) -> u32 {
+        (self.scale * pixel_ratio(image, frame) * 100.0).round() as u32
+    }
+
+    pub(crate) fn clamped(self, image: (u32, u32), frame: Size<f32>) -> Self {
+        let ratio = pixel_ratio(image, frame);
+        let (min, max) = zoom_limits(ratio);
+        let scale = self.scale.clamp(min, max);
+        let max_pan_x = (frame.width * (scale - 1.0) / 2.0).max(0.0);
+        let max_pan_y = (frame.height * (scale - 1.0) / 2.0).max(0.0);
+        Self {
+            scale,
+            pan: point(
+                self.pan.x.clamp(-max_pan_x, max_pan_x),
+                self.pan.y.clamp(-max_pan_y, max_pan_y),
+            ),
+        }
+    }
+
+    pub(crate) fn zoom_at(
+        self,
+        cursor: Point<f32>,
+        factor: f32,
+        image: (u32, u32),
+        frame: Size<f32>,
+    ) -> Self {
+        let ratio = pixel_ratio(image, frame);
+        let (min, max) = zoom_limits(ratio);
+        let scale = (self.scale * factor).clamp(min, max);
+        if (scale - self.scale).abs() < 1e-6 {
+            return self;
+        }
+        let change = scale / self.scale;
+        let pan = cursor - (cursor - self.pan) * change;
+        Self { scale, pan }.clamped(image, frame)
+    }
+
+    pub(crate) fn toggle_actual(self, image: (u32, u32), frame: Size<f32>) -> Self {
+        if (self.scale - 1.0).abs() < 1e-4 {
+            Self {
+                scale: 1.0 / pixel_ratio(image, frame),
+                pan: Point::default(),
+            }
+            .clamped(image, frame)
+        } else {
+            Self::default()
+        }
+    }
+
+    pub(crate) fn pan_by(self, delta: Point<f32>, image: (u32, u32), frame: Size<f32>) -> Self {
+        Self {
+            pan: self.pan + delta,
+            ..self
+        }
+        .clamped(image, frame)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum ViewerZoomDrag {
+    Pan(Point<Pixels>),
+}
+
+pub(crate) fn pixel_ratio(image: (u32, u32), frame: Size<f32>) -> f32 {
+    if image.0 == 0 || image.1 == 0 || frame.width <= 0.0 || frame.height <= 0.0 {
+        return 1.0;
+    }
+    (frame.width / image.0 as f32)
+        .min(frame.height / image.1 as f32)
+        .max(1e-4)
+}
+
+fn zoom_limits(ratio: f32) -> (f32, f32) {
+    let actual = 1.0 / ratio;
+    (actual.min(1.0), actual.max(1.0))
 }
 
 #[derive(Clone)]
@@ -220,6 +321,90 @@ mod tests {
         assert_eq!(morph.current_bounds(start + MOTION_MORPH), to);
         let middle = morph.current_bounds(start + MOTION_MORPH / 2);
         assert!(middle.origin.x > from.origin.x && middle.origin.x < to.origin.x);
+    }
+
+    #[test]
+    fn fit_ratio_matches_the_displayed_pixels() {
+        let image = (4000, 3000);
+        let frame = size(800.0, 600.0);
+        assert!((pixel_ratio(image, frame) - 0.2).abs() < 1e-6);
+        assert_eq!(ViewerZoom::default().percent(image, frame), 20);
+        assert_eq!(
+            ViewerZoom {
+                scale: 5.0,
+                pan: Point::default(),
+            }
+            .percent(image, frame),
+            100
+        );
+    }
+
+    #[test]
+    fn cursor_zoom_keeps_the_point_under_the_cursor() {
+        let image = (4000, 3000);
+        let frame = size(800.0, 600.0);
+        let before = ViewerZoom {
+            scale: 2.0,
+            pan: point(40.0, -20.0),
+        };
+        let cursor = point(100.0, 50.0);
+        let after = before.zoom_at(cursor, 1.25, image, frame);
+        let point_before = (cursor - before.pan) / before.scale;
+        let point_after = (cursor - after.pan) / after.scale;
+        assert!((point_before.x - point_after.x).abs() < 0.01);
+        assert!((point_before.y - point_after.y).abs() < 0.01);
+    }
+
+    #[test]
+    fn zoom_clamps_at_fit_and_actual_pixels() {
+        let image = (4000, 3000);
+        let frame = size(800.0, 600.0);
+        let fit = ViewerZoom::default();
+        assert_eq!(fit.zoom_at(point(0.0, 0.0), 10.0, image, frame).scale, 5.0);
+        assert_eq!(fit.zoom_at(point(0.0, 0.0), 0.01, image, frame).scale, 1.0);
+    }
+
+    #[test]
+    fn double_click_reaches_actual_pixels_even_for_a_small_image() {
+        let image = (400, 300);
+        let frame = size(800.0, 600.0);
+        let actual = ViewerZoom::default().toggle_actual(image, frame);
+        assert_eq!(actual.scale, 0.5);
+        assert_eq!(actual.percent(image, frame), 100);
+        assert_eq!(actual.toggle_actual(image, frame), ViewerZoom::default());
+    }
+
+    #[test]
+    fn pan_clamps_at_the_frame_and_centers_small_axes() {
+        let image = (4000, 3000);
+        let frame = size(800.0, 600.0);
+        let zoomed = ViewerZoom {
+            scale: 2.0,
+            pan: point(9999.0, -9999.0),
+        }
+        .clamped(image, frame);
+        assert_eq!(zoomed.pan, point(400.0, -300.0));
+        let fit = ViewerZoom {
+            scale: 1.0,
+            pan: point(50.0, 50.0),
+        }
+        .clamped(image, frame);
+        assert_eq!(fit.pan, Point::default());
+    }
+
+    #[test]
+    fn a_frame_resize_reclamps_the_pan_around_the_center() {
+        let image = (4000, 3000);
+        let wide = size(800.0, 600.0);
+        let narrow = size(500.0, 600.0);
+        let zoomed = ViewerZoom {
+            scale: 2.0,
+            pan: point(400.0, 0.0),
+        }
+        .clamped(image, wide);
+        let resized = zoomed.clamped(image, narrow);
+        assert_eq!(resized.pan.x, 250.0);
+        assert_eq!(resized.pan.y, 0.0);
     }
 
     #[test]

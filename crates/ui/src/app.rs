@@ -41,10 +41,14 @@ use crate::state::photo_browser::{CountDebounce, PhotoBrowser, PhotoIndex};
 use crate::state::preview::{PreviewKey, PreviewQueue};
 use crate::state::selection::PhotoSelection;
 use crate::state::thumbnail::{ThumbnailCache, ThumbnailNoticeBatch};
-use crate::state::viewer::{ViewerBoxState, ViewerMorph, ViewerOpenSource, ViewerPanelState};
+use crate::state::viewer::{
+    ViewerBoxState, ViewerMorph, ViewerOpenSource, ViewerPanelState, ViewerZoom, ViewerZoomDrag,
+    ZOOM_STEP,
+};
 use crate::ui::actions::{
     CloseNotifications, CloseQuickLook, FocusSearch, OpenQuickLook, QuickLookNextFocus,
     QuickLookPrevFocus, ToggleInspector, ToggleSidebar, ViewerNextPhoto, ViewerPreviousPhoto,
+    ViewerZoomIn, ViewerZoomOut, ViewerZoomReset,
 };
 use crate::ui::chrome::{ChromeLayout, chrome_layout};
 use crate::ui::gallery::GalleryView;
@@ -122,6 +126,9 @@ pub struct App {
     pub(crate) viewer_open_started_at: Instant,
     pub(crate) viewer_box: ViewerBoxState,
     pub(crate) viewer_panel: ViewerPanelState,
+    pub(crate) zoom: ViewerZoom,
+    pub(crate) zoom_drag: Option<ViewerZoomDrag>,
+    pub(crate) viewer_frame_bounds: Rc<Cell<Bounds<Pixels>>>,
     pub(crate) inspector_collapsed: bool,
     pub(crate) inspector_epoch: u64,
     pub(crate) hovered_nav: Option<Screen>,
@@ -643,6 +650,9 @@ impl App {
                 to_width: 0.0,
                 duration: Duration::ZERO,
             },
+            zoom: ViewerZoom::default(),
+            zoom_drag: None,
+            viewer_frame_bounds: Rc::new(Cell::new(Bounds::default())),
             inspector_collapsed: initial_settings.ui_inspector_collapsed,
             inspector_epoch: 0,
             hovered_nav: None,
@@ -873,6 +883,15 @@ impl Render for App {
             .on_action(cx.listener(|this, _: &ViewerNextPhoto, window, cx| {
                 this.step_viewer_photo(1, window, cx)
             }))
+            .on_action(cx.listener(|this, _: &ViewerZoomIn, window, cx| {
+                this.zoom_viewer(ZOOM_STEP, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ViewerZoomOut, window, cx| {
+                this.zoom_viewer(1.0 / ZOOM_STEP, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &ViewerZoomReset, _window, cx| this.reset_viewer_zoom(cx)),
+            )
             .on_action(cx.listener(|this, _: &QuickLookNextFocus, window, cx| {
                 this.cycle_quick_look_focus(false, window, cx)
             }))

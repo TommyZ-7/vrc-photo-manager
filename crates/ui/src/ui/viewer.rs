@@ -40,6 +40,23 @@ impl App {
         let index = self.quick_look_index.min(photo_count.saturating_sub(1));
         let prev_enabled = index > 0;
         let next_enabled = index + 1 < photo_count;
+        let viewport = content_viewport(window);
+        let box_state = self.viewer_box;
+        let nav_epoch = self.viewer_nav_epoch;
+        let nav_direction = self.viewer_nav_direction;
+        let nav_duration = if nav_epoch == 0 || cx.reduce_motion() {
+            Duration::ZERO
+        } else {
+            MOTION_BASE
+        };
+        let (frame_w, frame_h) = box_state.current_size(viewport);
+        let frame_size = size(frame_w, frame_h);
+        self.zoom = self.zoom.clamped(photo.effective_dimensions(), frame_size);
+        let zoom_left = frame_w * (1.0 - self.zoom.scale) / 2.0 + self.zoom.pan.x;
+        let zoom_top = frame_h * (1.0 - self.zoom.scale) / 2.0 + self.zoom.pan.y;
+        let zoom_width = frame_w * self.zoom.scale;
+        let zoom_height = frame_h * self.zoom.scale;
+        let percent = self.zoom.percent(photo.effective_dimensions(), frame_size);
 
         let close_button = self.focusable_text_button(
             "viewer-close",
@@ -124,17 +141,15 @@ impl App {
                     .text_color(rgb(p.muted))
                     .child(photo.file_name.clone()),
             )
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .font_family("monospace")
+                    .text_color(rgb(p.muted))
+                    .child(format!("{percent}%")),
+            )
             .child(details_button);
 
-        let viewport = content_viewport(window);
-        let box_state = self.viewer_box;
-        let nav_epoch = self.viewer_nav_epoch;
-        let nav_direction = self.viewer_nav_direction;
-        let nav_duration = if nav_epoch == 0 || cx.reduce_motion() {
-            Duration::ZERO
-        } else {
-            MOTION_BASE
-        };
         let previous_image = self.previous_preview.clone();
         let key = preview_key(&photo);
         let full_image = self
@@ -155,7 +170,21 @@ impl App {
             .overflow_hidden()
             .rounded(px(10.))
             .bg(rgb(color))
-            .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()));
+            .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
+                this.handle_viewer_scroll(event, window, cx)
+            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.handle_viewer_mouse_down(event, window, cx)
+                }),
+            )
+            .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                if event.click_count() >= 2 {
+                    this.toggle_viewer_zoom(window, cx);
+                }
+                cx.stop_propagation();
+            }));
 
         if nav_epoch > 0
             && let Some(previous) = previous_image
@@ -184,9 +213,10 @@ impl App {
             let current = gpui_kit::img(image)
                 .object_fit(ObjectFit::Contain)
                 .absolute()
-                .top_0()
-                .left_0()
-                .size_full()
+                .top(px(zoom_top))
+                .left(px(zoom_left))
+                .w(px(zoom_width))
+                .h(px(zoom_height))
                 .rounded(px(10.))
                 .with_animation(
                     ("viewer-nav-current", nav_epoch),
@@ -195,7 +225,11 @@ impl App {
                         .with_max_fps(self.motion_fps(window, cx)),
                     move |el, t| {
                         let (_, _, opacity, offset) = viewer_nav_frame(t, nav_direction);
-                        el.opacity(opacity).left(px(offset))
+                        el.opacity(opacity)
+                            .left(px(zoom_left + offset))
+                            .top(px(zoom_top))
+                            .w(px(zoom_width))
+                            .h(px(zoom_height))
                     },
                 );
             image_frame = image_frame.child(current);
@@ -232,7 +266,13 @@ impl App {
             .viewer_morph
             .as_ref()
             .is_some_and(|morph| !morph.closing);
+        let frame_bounds = self.viewer_frame_bounds.clone();
         let image_area = div()
+            .on_children_prepainted(move |children, _, _| {
+                if let Some(bounds) = children.first() {
+                    frame_bounds.set(*bounds);
+                }
+            })
             .id("viewer-image-area")
             .relative()
             .flex_1()
@@ -311,6 +351,15 @@ impl App {
             .bg(rgb(p.bg))
             .key_context("quick_look")
             .occlude()
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                this.handle_viewer_mouse_move(event, window, cx)
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseUpEvent, _window, cx| {
+                    this.handle_viewer_mouse_up(event, cx)
+                }),
+            )
             .child(div().absolute().size_full().bg(rgba((color << 8) | 0x22)))
             .child(top_bar)
             .child(content)

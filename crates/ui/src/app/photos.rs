@@ -244,6 +244,8 @@ impl App {
             self.preview_key = None;
             self.preview_attempt = None;
             self.reset_full_preview();
+            self.zoom = Default::default();
+            self.zoom_drag = None;
             self.load_selected_meta(id);
             self.request_preview(cx);
             if self.quick_look_open {
@@ -442,6 +444,8 @@ impl App {
         self.preview_attempt = None;
         self.preview_queue.cancel_wanted();
         self.reset_full_preview();
+        self.zoom = Default::default();
+        self.zoom_drag = None;
         self.previous_preview = None;
         self.previous_color = None;
     }

@@ -10,8 +10,8 @@ use gpui_kit::*;
 
 use crate::app::{App, Screen};
 use crate::state::viewer::{
-    ViewerBoxState, ViewerMorph, ViewerOpenSource, ViewerPanelState, current_tagged_bounds,
-    preferred_bounds,
+    ViewerBoxState, ViewerMorph, ViewerOpenSource, ViewerPanelState, ViewerZoom, ViewerZoomDrag,
+    current_tagged_bounds, preferred_bounds,
 };
 use crate::ui::theme::{
     MOTION_BASE, MOTION_MORPH, MOTION_SLOW, VIEWER_DETAILS_WIDTH, centered_viewer_rect,
@@ -26,6 +26,134 @@ impl App {
         self.viewer_morph_view.update(cx, |view, cx| {
             view.set_morph(morph, max_fps, cx);
         });
+    }
+
+    fn zoom_geometry(&self, window: &Window) -> Option<((u32, u32), Size<f32>)> {
+        let photo = self.selected_photo.as_ref()?;
+        let bounds = self.viewer_frame_bounds.get();
+        let frame = if bounds.size.width > px(0.) && bounds.size.height > px(0.) {
+            size(f32::from(bounds.size.width), f32::from(bounds.size.height))
+        } else {
+            let viewport = content_viewport(window);
+            let (width, height) = self.viewer_box.current_size(viewport);
+            size(width, height)
+        };
+        if frame.width <= 1.0 || frame.height <= 1.0 {
+            return None;
+        }
+        Some((photo.effective_dimensions(), frame))
+    }
+
+    fn viewer_zoom_allowed(&self) -> bool {
+        self.quick_look_open
+            && self.selected_photo.is_some()
+            && !self
+                .viewer_morph
+                .as_ref()
+                .is_some_and(|morph| !morph.closing)
+    }
+
+    pub(crate) fn zoom_viewer(&mut self, factor: f32, window: &Window, cx: &mut Context<Self>) {
+        if !self.viewer_zoom_allowed() {
+            return;
+        }
+        let Some((image, frame)) = self.zoom_geometry(window) else {
+            return;
+        };
+        self.zoom = self.zoom.zoom_at(point(0.0, 0.0), factor, image, frame);
+        cx.notify();
+    }
+
+    pub(crate) fn reset_viewer_zoom(&mut self, cx: &mut Context<Self>) {
+        self.zoom = ViewerZoom::default();
+        self.zoom_drag = None;
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_viewer_zoom(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if !self.viewer_zoom_allowed() {
+            return;
+        }
+        let Some((image, frame)) = self.zoom_geometry(window) else {
+            return;
+        };
+        self.zoom = self.zoom.toggle_actual(image, frame);
+        self.zoom_drag = None;
+        cx.notify();
+    }
+
+    pub(crate) fn handle_viewer_scroll(
+        &mut self,
+        event: &ScrollEvent,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.viewer_zoom_allowed() {
+            return;
+        }
+        let Some((image, frame)) = self.zoom_geometry(window) else {
+            return;
+        };
+        let center = self.viewer_frame_bounds.get().center();
+        let cursor = point(
+            f32::from(event.position.x - center.x),
+            f32::from(event.position.y - center.y),
+        );
+        let delta = event.delta.pixel_delta(px(20.0));
+        let factor = (f32::from(delta.y) * 0.003).exp();
+        if (factor - 1.0).abs() < 1e-6 {
+            return;
+        }
+        self.zoom = self.zoom.zoom_at(cursor, factor, image, frame);
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    pub(crate) fn handle_viewer_mouse_down(
+        &mut self,
+        event: &MouseDownEvent,
+        _window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.button != MouseButton::Left {
+            return;
+        }
+        if self.viewer_zoom_allowed() && self.zoom.is_active() {
+            self.zoom_drag = Some(ViewerZoomDrag::Pan(event.position));
+        }
+        cx.stop_propagation();
+    }
+
+    pub(crate) fn handle_viewer_mouse_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !event.dragging() {
+            self.zoom_drag = None;
+            return;
+        }
+        let Some(ViewerZoomDrag::Pan(last)) = self.zoom_drag else {
+            return;
+        };
+        let Some((image, frame)) = self.zoom_geometry(window) else {
+            return;
+        };
+        let delta = event.position - last;
+        self.zoom = self
+            .zoom
+            .pan_by(point(f32::from(delta.x), f32::from(delta.y)), image, frame);
+        self.zoom_drag = Some(ViewerZoomDrag::Pan(event.position));
+        cx.notify();
+    }
+
+    pub(crate) fn handle_viewer_mouse_up(
+        &mut self,
+        _event: &MouseUpEvent,
+        _cx: &mut Context<Self>,
+    ) {
+        self.zoom_drag = None;
     }
 
     pub(crate) fn open_quick_look(
@@ -147,6 +275,8 @@ impl App {
             }
         }
         self.quick_look_open = true;
+        self.zoom = ViewerZoom::default();
+        self.zoom_drag = None;
         self.request_full_preview(cx);
         self.quick_look_epoch = self.quick_look_epoch.wrapping_add(1);
         self.quick_look_focus_index = 0;
@@ -249,6 +379,8 @@ impl App {
         }
         self.viewer_return_source = None;
         self.reset_full_preview();
+        self.zoom = ViewerZoom::default();
+        self.zoom_drag = None;
         self.quick_look_open = false;
         self.note_edit_id = None;
         let focus = self
