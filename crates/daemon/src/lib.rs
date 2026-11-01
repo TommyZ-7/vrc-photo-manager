@@ -3848,12 +3848,60 @@ mod tests {
     }
 
     #[test]
+    fn startup_repair_falls_back_to_the_ingested_log_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let missing_log = log_dir.join("output_log_deleted.txt");
+        let db_path = dir.path().join("library.db");
+        {
+            let db = Db::open(&db_path).unwrap();
+            let world = db.upsert_world("wrld_test", None, None).unwrap();
+            db.create_session(missing_log.to_str().unwrap(), 100, world, None)
+                .unwrap();
+            db.set_log_offset(missing_log.to_str().unwrap(), 10, 500, 10, "1")
+                .unwrap();
+        }
+
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        assert_eq!(daemon.repair_open_sessions().unwrap(), 1);
+
+        let db = Db::open(&db_path).unwrap();
+        let session = db.session_at(200).unwrap().unwrap();
+        assert_eq!(session.ended_at, Some(500));
+    }
+
+    #[test]
+    fn maintenance_run_does_not_repair_open_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let db_path = dir.path().join("library.db");
+        {
+            let db = Db::open(&db_path).unwrap();
+            let world = db.upsert_world("wrld_test", None, None).unwrap();
+            db.create_session("output_log_live.txt", 100, world, None)
+                .unwrap();
+        }
+
+        let mut daemon =
+            Daemon::open_preserving_running_deletions(&db_path, Some(photo_dir), Some(log_dir))
+                .unwrap();
+        daemon.run_once().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        assert_eq!(db.open_sessions().unwrap().len(), 1);
+    }
+
+    #[test]
     fn vrchat_exit_closes_the_session_at_the_log_mtime_after_consecutive_misses() {
         let dir = tempfile::tempdir().unwrap();
         let mut daemon = test_daemon(&dir);
-        let log_path = dir
-            .path()
-            .join("logs/output_log_2026-10-21_21-00-00.txt");
+        let log_path = dir.path().join("logs/output_log_2026-10-21_21-00-00.txt");
         let join =
             "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)";
         let name =
@@ -3906,12 +3954,46 @@ mod tests {
     }
 
     #[test]
+    fn photos_imported_after_vrchat_exit_do_not_link_to_the_closed_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let log_path = dir.path().join("logs/output_log_2026-10-21_21-00-00.txt");
+        let join =
+            "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)";
+        let name =
+            "2026.10.21 21:23:13 Debug      -  [Behaviour] Joining or Creating Room: Test World";
+        std::fs::write(&log_path, format!("{join}\n{name}\n")).unwrap();
+        daemon.ingest_logs().unwrap();
+        let started = vrc_photo_core::log_parser::parse_line(join)
+            .unwrap()
+            .timestamp_utc();
+        let mtime = started + 120;
+        let file = File::options().write(true).open(&log_path).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(mtime as u64))
+            .unwrap();
+        for _ in 0..VRCHAT_MISSING_POLLS_BEFORE_CLOSE {
+            daemon.observe_vrchat_presence(Some(false)).unwrap();
+        }
+
+        let photo_path = dir
+            .path()
+            .join("photos/VRChat_2026-10-21_21-26-00.000_4x3.png");
+        write_photo(&photo_path);
+        daemon.run_once().unwrap();
+
+        let db = daemon.db.lock().unwrap();
+        let photo = db
+            .photo_by_path(photo_path.to_str().unwrap())
+            .unwrap()
+            .expect("photo indexed");
+        assert!(db.photo_context(photo.id).unwrap().is_none());
+    }
+
+    #[test]
     fn unknown_vrchat_presence_does_not_count_as_a_miss() {
         let dir = tempfile::tempdir().unwrap();
         let mut daemon = test_daemon(&dir);
-        let log_path = dir
-            .path()
-            .join("logs/output_log_2026-10-21_21-00-00.txt");
+        let log_path = dir.path().join("logs/output_log_2026-10-21_21-00-00.txt");
         let join =
             "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)";
         std::fs::write(&log_path, format!("{join}\n")).unwrap();
@@ -3932,9 +4014,7 @@ mod tests {
     fn shutdown_closes_the_session_at_the_log_mtime() {
         let dir = tempfile::tempdir().unwrap();
         let mut daemon = test_daemon(&dir);
-        let log_path = dir
-            .path()
-            .join("logs/output_log_2026-10-21_21-00-00.txt");
+        let log_path = dir.path().join("logs/output_log_2026-10-21_21-00-00.txt");
         let join =
             "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)";
         std::fs::write(&log_path, format!("{join}\n")).unwrap();

@@ -4731,10 +4731,7 @@ mod tests {
         assert_eq!(db.log_mtime("output_log.txt").unwrap(), None);
         db.set_log_offset("output_log.txt", 42, 1_700_000_123, 42, "1")
             .unwrap();
-        assert_eq!(
-            db.log_mtime("output_log.txt").unwrap(),
-            Some(1_700_000_123)
-        );
+        assert_eq!(db.log_mtime("output_log.txt").unwrap(), Some(1_700_000_123));
     }
 
     #[test]
