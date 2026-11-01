@@ -247,14 +247,44 @@ fn walk_folder(dir: &Path, exclude: Option<&Path>, scan: &mut FolderScan) {
 }
 
 fn import_one(source: &Path, dest: &Path, mode: ImportMode, result: &mut ImportResult) {
-    if !source.is_file() {
-        result.issues.push(failed_issue(
-            source,
-            None,
-            "ファイルが見つかりません".to_string(),
-            false,
-        ));
-        return;
+    match fs::metadata(source) {
+        Ok(metadata) if metadata.is_file() => {}
+        Ok(metadata) if metadata.is_dir() => {
+            result.issues.push(failed_issue(
+                source,
+                None,
+                "フォルダは取り込めません".to_string(),
+                false,
+            ));
+            return;
+        }
+        Ok(_) => {
+            result.issues.push(failed_issue(
+                source,
+                None,
+                "ファイルではないため取り込めません".to_string(),
+                false,
+            ));
+            return;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            result.issues.push(failed_issue(
+                source,
+                None,
+                "ファイルが見つかりません".to_string(),
+                false,
+            ));
+            return;
+        }
+        Err(error) => {
+            result.issues.push(failed_issue(
+                source,
+                None,
+                format!("ファイルの情報を読み取れませんでした: {error}"),
+                false,
+            ));
+            return;
+        }
     }
     if !is_source_photo(source) {
         result.skipped += 1;
@@ -309,16 +339,21 @@ fn move_file_with(
     rename: fn(&Path, &Path) -> std::io::Result<()>,
     remove_source: fn(&Path) -> std::io::Result<()>,
 ) {
-    if rename(source, &target).is_ok() {
-        record_imported(source, target, result);
-        return;
-    }
+    let rename_error = match rename(source, &target) {
+        Ok(()) => {
+            record_imported(source, target, result);
+            return;
+        }
+        Err(error) => error,
+    };
     // Cross-device moves cannot be renamed, so fall back to copy + delete.
+    // Keep the rename failure in the message: it is usually the reason the
+    // fallback was needed at all.
     if let Err(error) = copy_atomic(source, &target) {
         result.issues.push(failed_issue(
             source,
             Some(target),
-            format!("移動に失敗しました: {error}"),
+            format!("移動に失敗しました（リネーム: {rename_error}、コピー: {error}）"),
             true,
         ));
         return;
@@ -376,6 +411,16 @@ fn unique_target(dest: &Path, source: &Path) -> PathBuf {
 }
 
 fn copy_atomic(source: &Path, target: &Path) -> Result<()> {
+    copy_atomic_with(source, target, |from, to| fs::copy(from, to))
+}
+
+/// Copies `source` to a temporary file next to `target` and renames it into
+/// place. The copy operation is a parameter so tests can inject failures.
+fn copy_atomic_with(
+    source: &Path,
+    target: &Path,
+    copy: fn(&Path, &Path) -> std::io::Result<u64>,
+) -> Result<()> {
     let temp = target.with_extension(format!(
         "{}.tmp",
         target
@@ -383,33 +428,48 @@ fn copy_atomic(source: &Path, target: &Path) -> Result<()> {
             .and_then(|extension| extension.to_str())
             .unwrap_or("png")
     ));
-    fs::copy(source, &temp)?;
+    clear_stale_temp(&temp);
+    if let Err(error) = copy(source, &temp) {
+        remove_temp(&temp, "copy failure");
+        return Err(CoreError::Io(error));
+    }
     let source_len = fs::metadata(source)?.len();
     let copied_len = fs::metadata(&temp)?.len();
     if source_len != copied_len {
-        if let Err(error) = fs::remove_file(&temp) {
-            tracing::debug!(
-                %error,
-                path = %temp.display(),
-                "cannot remove temporary copy after size mismatch"
-            );
-        }
+        remove_temp(&temp, "size mismatch");
         return Err(CoreError::Invalid(format!(
             "copy size mismatch: {} != {}",
             source_len, copied_len
         )));
     }
     if let Err(error) = fs::rename(&temp, target) {
-        if let Err(cleanup) = fs::remove_file(&temp) {
-            tracing::debug!(
-                %cleanup,
-                path = %temp.display(),
-                "cannot remove temporary copy after rename failure"
-            );
-        }
+        remove_temp(&temp, "rename failure");
         return Err(CoreError::Io(error));
     }
     Ok(())
+}
+
+/// Removes a temp file left at `temp` by an interrupted import so it cannot
+/// block this file name on every later attempt. A directory at the temp path
+/// was not created by an import; it stays in place and the copy reports the
+/// failure instead.
+fn clear_stale_temp(temp: &Path) {
+    if temp.is_file() {
+        remove_temp(temp, "stale leftover");
+    }
+}
+
+fn remove_temp(temp: &Path, context: &str) {
+    if let Err(error) = fs::remove_file(temp)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::debug!(
+            %error,
+            path = %temp.display(),
+            context,
+            "cannot remove temporary copy"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -513,6 +573,106 @@ mod tests {
         assert!(
             issue.message.contains("コピーに失敗しました"),
             "unexpected message: {}",
+            issue.message
+        );
+    }
+
+    #[test]
+    fn stale_temp_file_does_not_block_the_import() {
+        let dir = tempdir().unwrap();
+        let dest = dir.path().join("dest");
+        fs::create_dir_all(&dest).unwrap();
+        let source = dir.path().join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        write_png(&source);
+        // A temp file left behind by an interrupted import of the same name.
+        let stale_temp = dest.join("VRChat_2026-10-21_21-14-03.221_4x3.png.tmp");
+        fs::write(&stale_temp, b"partial garbage").unwrap();
+
+        let result = import_files(std::slice::from_ref(&source), &dest, ImportMode::Copy).unwrap();
+
+        assert_eq!(result.imported.len(), 1);
+        assert!(result.issues.is_empty());
+        assert!(!stale_temp.exists(), "the stale temp must be gone");
+        assert_eq!(
+            fs::metadata(&result.imported[0]).unwrap().len(),
+            fs::metadata(&source).unwrap().len()
+        );
+    }
+
+    #[test]
+    fn failed_copy_removes_the_partial_temp() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("photo.png");
+        write_png(&source);
+        let target = dir.path().join("dest.png");
+        let temp = dir.path().join("dest.png.tmp");
+
+        let result = copy_atomic_with(&source, &target, |_from, to| {
+            fs::write(to, b"partial")?;
+            Err(std::io::Error::other("injected copy failure"))
+        });
+
+        assert!(result.is_err());
+        assert!(
+            !temp.exists(),
+            "a failed copy must not leave its temp behind"
+        );
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn directory_source_is_not_reported_as_missing() {
+        let dir = tempdir().unwrap();
+        // A folder wearing a photo's name must not be reported as missing.
+        let folder = dir.path().join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        fs::create_dir_all(&folder).unwrap();
+        let dest = dir.path().join("dest");
+
+        let result = import_files(std::slice::from_ref(&folder), &dest, ImportMode::Copy).unwrap();
+
+        assert!(result.imported.is_empty());
+        assert_eq!(result.issues.len(), 1);
+        assert_eq!(result.issues[0].kind, ImportIssueKind::Failed);
+        assert!(
+            result.issues[0].message.contains("フォルダ"),
+            "message should say the source is a folder: {}",
+            result.issues[0].message
+        );
+    }
+
+    #[test]
+    fn move_fallback_failure_keeps_the_rename_reason() {
+        let dir = tempdir().unwrap();
+        let dest = dir.path().join("dest");
+        fs::create_dir_all(&dest).unwrap();
+        let source = dir.path().join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        write_png(&source);
+        let target = dest.join(source.file_name().unwrap());
+        // Block the fallback copy at its temp path so it fails too.
+        fs::create_dir_all(dest.join("VRChat_2026-10-21_21-14-03.221_4x3.png.tmp")).unwrap();
+
+        let mut result = ImportResult::default();
+        move_file_with(
+            &source,
+            target,
+            &mut result,
+            |_, _| Err(std::io::Error::other("injected rename failure")),
+            |_| Ok(()),
+        );
+
+        assert!(result.imported.is_empty());
+        assert_eq!(result.issues.len(), 1);
+        let issue = &result.issues[0];
+        assert_eq!(issue.kind, ImportIssueKind::Failed);
+        assert!(issue.retryable);
+        assert!(
+            issue.message.contains("移動に失敗しました"),
+            "unexpected message: {}",
+            issue.message
+        );
+        assert!(
+            issue.message.contains("injected rename failure"),
+            "message must keep the rename reason: {}",
             issue.message
         );
     }

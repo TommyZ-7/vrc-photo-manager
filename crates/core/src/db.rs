@@ -2439,26 +2439,35 @@ impl Db {
         Ok(())
     }
 
+    /// Columns read for every `compression_jobs` row, in `row_to_job` order.
+    const JOB_COLUMNS: &str = "id, photo_id, profile_id, status, progress, error, \
+        output_path, policy, output_dir, retry_count, created_at, started_at, finished_at";
+
+    /// Lists the newest jobs first. `limit` is clamped to at least 1, so a
+    /// non-positive limit returns the single newest job.
     pub fn list_jobs(&self, limit: i64) -> Result<Vec<CompressionJob>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, photo_id, profile_id, status, progress, error, output_path, policy, \
-                output_dir, retry_count, created_at, started_at, finished_at FROM compression_jobs \
-             ORDER BY created_at DESC LIMIT ?1",
-        )?;
+        let sql = format!(
+            "SELECT {} FROM compression_jobs ORDER BY created_at DESC LIMIT ?1",
+            Self::JOB_COLUMNS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![limit.max(1)], row_to_job)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Lists the newest jobs with `status` first. `limit` is clamped to at
+    /// least 1, so a non-positive limit returns the single newest match.
     pub fn list_jobs_by_status(
         &self,
         status: QueueStatus,
         limit: i64,
     ) -> Result<Vec<CompressionJob>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, photo_id, profile_id, status, progress, error, output_path, policy, \
-                output_dir, retry_count, created_at, started_at, finished_at FROM compression_jobs \
-             WHERE status = ?1 ORDER BY created_at DESC LIMIT ?2",
-        )?;
+        let sql = format!(
+            "SELECT {} FROM compression_jobs WHERE status = ?1 \
+             ORDER BY created_at DESC LIMIT ?2",
+            Self::JOB_COLUMNS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![status.as_str(), limit.max(1)], row_to_job)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -2476,32 +2485,38 @@ impl Db {
         Ok(changed)
     }
 
+    /// Assignments that return a failed job to the queue.
+    const RETRY_JOB_SET: &str = "status = 'pending', progress = 0, error = NULL, \
+        started_at = NULL, finished_at = NULL, retry_count = retry_count + 1";
+
+    /// Guard that keeps a job queued while its photo is being deleted.
+    const NO_RUNNING_DELETION_GUARD: &str = "NOT EXISTS (SELECT 1 FROM deletion_requests dr \
+        WHERE dr.photo_id = compression_jobs.photo_id AND dr.status = 'running')";
+
     /// Returns a failed job to the queue once, incrementing its retry count.
     /// Returns false when the job is missing, not failed, or already at the
     /// retry cap.
     pub fn retry_job(&self, id: &str) -> Result<bool> {
-        let changed = self.conn.execute(
-            "UPDATE compression_jobs SET status = 'pending', progress = 0, error = NULL, \
-                started_at = NULL, finished_at = NULL, retry_count = retry_count + 1 \
-             WHERE id = ?1 AND status = 'failed' AND retry_count < ?2 \
-               AND NOT EXISTS (SELECT 1 FROM deletion_requests dr \
-                   WHERE dr.photo_id = compression_jobs.photo_id AND dr.status = 'running')",
-            params![id, MAX_JOB_RETRIES],
-        )?;
+        let sql = format!(
+            "UPDATE compression_jobs SET {} WHERE id = ?1 AND status = 'failed' \
+             AND retry_count < ?2 AND {}",
+            Self::RETRY_JOB_SET,
+            Self::NO_RUNNING_DELETION_GUARD
+        );
+        let changed = self.conn.execute(&sql, params![id, MAX_JOB_RETRIES])?;
         Ok(changed == 1)
     }
 
     /// Returns every eligible failed job to the queue and reports how many
     /// rows changed. Jobs at the retry cap are left untouched.
     pub fn retry_failed_jobs(&self) -> Result<usize> {
-        let changed = self.conn.execute(
-            "UPDATE compression_jobs SET status = 'pending', progress = 0, error = NULL, \
-                started_at = NULL, finished_at = NULL, retry_count = retry_count + 1 \
-             WHERE status = 'failed' AND retry_count < ?1 \
-               AND NOT EXISTS (SELECT 1 FROM deletion_requests dr \
-                   WHERE dr.photo_id = compression_jobs.photo_id AND dr.status = 'running')",
-            params![MAX_JOB_RETRIES],
-        )?;
+        let sql = format!(
+            "UPDATE compression_jobs SET {} WHERE status = 'failed' \
+             AND retry_count < ?1 AND {}",
+            Self::RETRY_JOB_SET,
+            Self::NO_RUNNING_DELETION_GUARD
+        );
+        let changed = self.conn.execute(&sql, params![MAX_JOB_RETRIES])?;
         Ok(changed)
     }
 
@@ -4807,6 +4822,40 @@ mod tests {
     }
 
     #[test]
+    fn retry_resets_progress_and_rejects_non_failed_jobs() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        let job = db.enqueue_job(photo, "p", "keep").unwrap();
+
+        // A job that never failed cannot be retried, and neither can a
+        // missing one.
+        assert!(!db.retry_job(&job).unwrap());
+        assert!(!db.retry_job("missing-job").unwrap());
+
+        db.next_pending_job().unwrap();
+        db.update_job(&job, QueueStatus::Failed, 0.5, Some("boom"), None)
+            .unwrap();
+        assert!(db.retry_job(&job).unwrap());
+        let row = &db.list_jobs(1).unwrap()[0];
+        assert_eq!(row.status, QueueStatus::Pending);
+        assert_eq!(row.progress, 0.0);
+        assert!(row.error.is_none());
+
+        // The bulk retry resets progress the same way.
+        db.next_pending_job().unwrap();
+        db.update_job(&job, QueueStatus::Failed, 0.75, Some("boom again"), None)
+            .unwrap();
+        assert_eq!(db.retry_failed_jobs().unwrap(), 1);
+        let row = &db.list_jobs(1).unwrap()[0];
+        assert_eq!(row.status, QueueStatus::Pending);
+        assert_eq!(row.progress, 0.0);
+        assert!(row.error.is_none());
+    }
+
+    #[test]
     fn retry_failed_jobs_returns_only_eligible_rows() {
         let db = Db::open_in_memory().unwrap();
         let root = db.add_root("/photos", "reference").unwrap();
@@ -4863,6 +4912,41 @@ mod tests {
                 .unwrap()
                 .len()
                 == 1
+        );
+    }
+
+    #[test]
+    fn list_jobs_by_status_clamps_non_positive_limits() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        let first = db.enqueue_job(photo, "p", "keep").unwrap();
+        let second = db.enqueue_job(photo, "p", "keep").unwrap();
+        for job in [&first, &second] {
+            db.update_job(job, QueueStatus::Failed, 0.0, Some("boom"), None)
+                .unwrap();
+        }
+
+        // The documented contract: the limit never drops below 1.
+        assert_eq!(
+            db.list_jobs_by_status(QueueStatus::Failed, 0)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            db.list_jobs_by_status(QueueStatus::Failed, -5)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            db.list_jobs_by_status(QueueStatus::Failed, 2)
+                .unwrap()
+                .len(),
+            2
         );
     }
 
