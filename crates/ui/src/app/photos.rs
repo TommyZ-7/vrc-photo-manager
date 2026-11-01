@@ -251,8 +251,12 @@ impl App {
             self.previous_color = previous_color;
             self.preview_key = None;
             self.preview_attempt = None;
+            self.reset_full_preview();
             self.load_selected_meta(id);
             self.request_preview(cx);
+            if self.quick_look_open {
+                self.request_full_preview(cx);
+            }
         } else {
             let current_key = self.selected_photo.as_ref().map(preview_key);
             let loaded = current_key.is_some() && self.preview_key == current_key;
@@ -348,6 +352,82 @@ impl App {
         }
     }
 
+    /// Requests the original display file for Quick Look. This queue is
+    /// separate from the 1200 px preview queue so a large decode never delays
+    /// the next photo's instant preview.
+    pub(crate) fn request_full_preview(&mut self, cx: &mut Context<Self>) {
+        if !self.quick_look_open {
+            self.full_preview_queue.cancel_wanted();
+            return;
+        }
+        let Some(photo) = self.selected_photo.as_ref() else {
+            return;
+        };
+        let key = preview_key(photo);
+        if self.full_preview_key == Some(key) {
+            self.full_preview_queue.cancel_wanted();
+            return;
+        }
+        if self.full_preview_queue.want(key) {
+            self.pump_full_preview(cx);
+        }
+    }
+
+    fn pump_full_preview(&mut self, cx: &mut Context<Self>) {
+        loop {
+            let Some(key) = self.full_preview_queue.begin() else {
+                return;
+            };
+            let matches = self
+                .selected_photo
+                .as_ref()
+                .is_some_and(|photo| preview_key(photo) == key);
+            if !matches || self.full_preview_key == Some(key) {
+                self.full_preview_queue.finish(key);
+                continue;
+            }
+            let source = PathBuf::from(
+                self.selected_photo
+                    .as_ref()
+                    .expect("selected photo")
+                    .effective_path(),
+            );
+            cx.spawn(async move |this, cx| {
+                let decoded = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let start = Instant::now();
+                        let decoded = preview::decode_full_image(&source);
+                        log_timing("full preview decode", start);
+                        decoded.map(rgba_to_bgra)
+                    })
+                    .await;
+                this.update(cx, |this, cx| {
+                    this.full_preview_queue.finish(key);
+                    let selected = this.selected_photo.as_ref().map(preview_key);
+                    if this.quick_look_open
+                        && should_apply_preview(selected, key)
+                        && let Some(rgba) = decoded
+                    {
+                        this.full_preview = Some(make_render_image(rgba));
+                        this.full_preview_key = Some(key);
+                    }
+                    this.pump_full_preview(cx);
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
+    }
+
+    pub(crate) fn reset_full_preview(&mut self) {
+        self.full_preview = None;
+        self.full_preview_key = None;
+        self.full_preview_queue.cancel_wanted();
+    }
+
     pub(crate) fn refresh_stale_preview(&mut self, cx: &mut Context<Self>) {
         let Some(photo) = self.selected_photo.as_ref() else {
             return;
@@ -369,6 +449,7 @@ impl App {
         self.preview_key = None;
         self.preview_attempt = None;
         self.preview_queue.cancel_wanted();
+        self.reset_full_preview();
         self.previous_preview = None;
         self.previous_color = None;
     }

@@ -5,7 +5,8 @@
 
 use std::time::{Duration, Instant};
 
-use gpui_kit::{Bounds, Pixels, Size, Window, point, px, size};
+use gpui_kit::component::window_paddings;
+use gpui_kit::{Bounds, Edges, Pixels, Size, Window, point, px, size};
 use vrc_photo_core::model::{CompressionFormat, CompressionProfile};
 use vrc_photo_core::settings::CardSize;
 use vrc_photo_i18n::tr;
@@ -214,25 +215,33 @@ pub(crate) fn window_content_extent(viewport: f32, client_inset: f32) -> f32 {
     (viewport - client_inset * 2.0).max(0.0)
 }
 
-/// Window content size after the platform's client-side decoration inset.
+/// Actual frame inset per edge. A tiled edge has zero padding even though the
+/// platform keeps `client_inset` set for window sizing.
+pub(crate) fn content_insets(window: &Window) -> Edges<Pixels> {
+    window_paddings(window)
+}
+
+/// Window content size after the platform's real per-edge decoration inset.
 /// Viewer geometry and overlays must use this, not the outer surface size.
-pub(crate) fn content_viewport(window: &Window) -> Size<Pixels> {
-    let inset = window.client_inset().map(f32::from).unwrap_or(0.0);
-    let viewport = window.viewport_size();
+pub(crate) fn content_size(viewport: Size<Pixels>, insets: Edges<Pixels>) -> Size<Pixels> {
     size(
-        px(window_content_extent(f32::from(viewport.width), inset)),
-        px(window_content_extent(f32::from(viewport.height), inset)),
+        px((f32::from(viewport.width) - f32::from(insets.left) - f32::from(insets.right)).max(0.0)),
+        px(
+            (f32::from(viewport.height) - f32::from(insets.top) - f32::from(insets.bottom))
+                .max(0.0),
+        ),
     )
+}
+
+pub(crate) fn content_viewport(window: &Window) -> Size<Pixels> {
+    content_size(window.viewport_size(), content_insets(window))
 }
 
 /// Converts a window-space bounds into the content coordinate space used by
 /// overlays (the viewer/morph layer sits inside the client-decoration inset).
-pub(crate) fn content_bounds(bounds: Bounds<Pixels>, client_inset: f32) -> Bounds<Pixels> {
+pub(crate) fn content_bounds(bounds: Bounds<Pixels>, insets: Edges<Pixels>) -> Bounds<Pixels> {
     Bounds::new(
-        point(
-            bounds.origin.x - px(client_inset),
-            bounds.origin.y - px(client_inset),
-        ),
+        point(bounds.origin.x - insets.left, bounds.origin.y - insets.top),
         bounds.size,
     )
 }
@@ -605,10 +614,38 @@ mod tests {
     #[test]
     fn content_bounds_convert_card_bounds_into_overlay_space() {
         let card = Bounds::new(point(px(301.), px(228.)), size(px(215.), px(144.)));
-        let converted = content_bounds(card, 20.0);
+        let converted = content_bounds(card, Edges::all(px(20.)));
         assert_eq!(converted.origin, point(px(281.), px(208.)));
         assert_eq!(converted.size, card.size);
-        assert_eq!(content_bounds(card, 0.0), card);
+        assert_eq!(content_bounds(card, Edges::default()), card);
+    }
+
+    #[test]
+    fn content_size_uses_each_edge_independently() {
+        let viewport = size(px(1920.), px(1080.));
+        assert_eq!(content_size(viewport, Edges::default()), viewport);
+
+        let partial = Edges {
+            top: px(20.),
+            bottom: px(0.),
+            left: px(20.),
+            right: px(0.),
+        };
+        assert_eq!(content_size(viewport, partial), size(px(1900.), px(1060.)));
+    }
+
+    #[test]
+    fn content_bounds_subtract_the_per_edge_inset() {
+        let card = Bounds::new(point(px(301.), px(228.)), size(px(215.), px(144.)));
+        let insets = Edges {
+            top: px(20.),
+            bottom: px(0.),
+            left: px(0.),
+            right: px(20.),
+        };
+        let converted = content_bounds(card, insets);
+        assert_eq!(converted.origin, point(px(301.), px(208.)));
+        assert_eq!(converted.size, card.size);
     }
 
     #[test]
