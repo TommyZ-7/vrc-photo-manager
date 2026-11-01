@@ -72,9 +72,9 @@ crates/
     src/fetch.rs          # HTTPSクライアント
     src/check.rs          # フィード確認
     src/download.rs       # ストリーミングDLと検証
-    src/install.rs        # インストール形式、適用ジョブ
-    src/helper.rs         # 置換・健康確認・ロールバック
-    src/bin/vrc-photo-updater.rs # 適用ヘルパー
+    src/install.rs        # インストール形式、pkexec/ヘルパー/policyの判定、適用ジョブ
+    src/helper.rs         # 置換・pkexec連携・健康確認・ロールバック
+    src/bin/vrc-photo-updater.rs # 適用ヘルパー（ユーザー / 特権モード）
   release-tool/
     src/lib.rs            # latest.json生成、署名、検証
     src/main.rs           # vrc-photo-update-manifest CLI（Release専用）
@@ -227,15 +227,44 @@ crates/ui/src/
 
 1. UIが起動15秒後と24時間ごとに `latest.json` と `latest.json.minisig` を取得する。
 2. マニフェスト署名をJSONパース前に検証し、semverで現行版と比較する。
+   `system_packages` は pacman / deb の成果物を選ぶために使う。旧フィードに
+   このフィールドがなければ、システムパッケージはコマンド表示にフォールバックする。
 3. 利用者がダウンロードを選ぶと、`<data_dir>/updates/downloads/<version>/` に
    `.part` で書きながらSHA-256とminisign署名を検証する。
 4. 利用者が適用を確定すると、UIはデーモンへ `shutdown` を送り、
    `updates/bin/vrc-photo-updater` をコピーして `updates/job.json` を書く。
-5. ヘルパーはUI/デーモンの終了を待ち、AppImageを `.previous` に退避して置換、
-   またはNSISインストーラを `/S` で実行する。
-6. 新UIは最初のフレームで `updates/health-<token>.json` を書き、ヘルパーが
-   バージョンを確認する。失敗時は旧版へ戻して再起動する。
-7. 結果は `last-result.json` と `updater.log` に残る。UIは次回起動時に一度表示する。
+   システムパッケージの job には署名対象の `latest.json` 生テキストと
+   `.minisig`、現在の実行ファイルを `target` として入れる。
+5. ユーザー権限ヘルパーはUI/デーモンの終了を待ち、適用ロックを取る。
+   - AppImage / Windows current-user NSIS は、旧版を退避して置換、または
+     NSIS インストーラを `/S` で実行する。
+   - `SystemPackage` は staging のSHA-256と署名を再確認し、
+     `pkexec --disable-internal-agent /usr/bin/vrc-photo-updater
+     --apply-system-package <job.json>` を実行する。`pkexec` がない場合は
+     `AuthUnavailable` としてフォールバックする。
+6. 特権ヘルパーは effective uid 0 と `PKEXEC_UID` を要求し、次を行う。
+   - staging が `data_dir/updates/downloads/<version>/` の直下にあり、
+     所有者が `PKEXEC_UID`、group / other 書き込み不可、symlink でないことを
+     確認する。
+   - 署名済み manifest を埋め込み公開鍵で再検証し、`manifest.version` が
+     job と一致し、ヘルパー自身のバージョンより新しいことを確認する。
+   - 検証済みファイルを `/var/tmp/vrc-photo-update-<uuid>.pkg` に root 所有・
+     mode 0600 でコピーし、コピー先でSHA-256と署名を再検証する（TOCTOU 対策）。
+   - `LC_ALL=C pacman -Qip` / `LC_ALL=C dpkg-deb -f` でパッケージ名
+     `vrc-photo-manager` とバージョンを確認する。
+   - 固定コマンド（`pacman -U --noconfirm` / `dpkg -i`）でインストールする。
+     シェルは使わない。特権側はUIを起動しない。
+7. ユーザー権限ヘルパーは `pkexec` の終了コードを `LastErrorCode` に写像し、
+   `last-result.json` を書く。インストール前の失敗は job と staged を掃除して
+   旧UIを再起動する。`PackageManagerFailed` と健康確認の失敗は job / staged /
+   log を残し、`target` を健康トークンなしで一度だけ起動する。
+8. 新UIは最初のフレームで `updates/health-<token>.json` を書き、ヘルパーが
+   バージョンを確認する。AppImage / Windows は失敗時に旧版へ戻す。
+   システムパッケージは自動ロールバックせず、失敗を記録して手動復旧に委ねる。
+9. 健康確認後、UIはデーモンを起動する。`daemon_supervisor` が `systemd` なら
+   `systemctl --user daemon-reload` と `systemctl --user restart
+   vrc-photo-daemon.service` を使い、失敗時はプロセス起動にフォールバックする。
+10. 結果は `last-result.json` と `updater.log` に残る。UIは次回起動時に一度表示する。
 
 ### 4.8 削除キュー
 
@@ -257,7 +286,8 @@ crates/ui/src/
 | UI IPC購読スレッド | デーモンへ接続し、イベントを受信。切断時は2秒後に再接続 | ローカルソケット |
 | UI更新確認スレッド | 起動15秒後と24時間ごとに署名付きフィードを確認 | HTTP、`async-channel` |
 | UI更新DLスレッド | 成果物を `.part` に書きながら署名/SHA-256を検証 | ファイル、`async-channel` |
-| 更新ヘルパー | UI/デーモン終了待ち、置換、健康確認、ロールバック | `updates/`、プロセス |
+| 更新ヘルパー（ユーザー権限） | UI/デーモン終了待ち、AppImage/NSISの置換、`pkexec`の起動、健康確認、ロールバック | `updates/`、プロセス |
+| 更新ヘルパー（特権、`pkexec`） | staging・署名・パッケージメタデータの再検証、固定コマンドでのインストール | 一時ファイル、パッケージDB |
 | デーモン監視ループ | notifyポーリング、ログ追記、増分索引、UIコマンドの消化、wake待ち | `Arc<Mutex<Db>>` |
 | デーモンIPCサーバー | 接続ごとにスレッド。hello/status/wake/pause/shutdown/subscribeを処理 | `DaemonStatus`、`WakeSignal`、`JobSignal`、`EventBus` |
 | 圧縮ワーカー | 1〜4スレッド。ジョブを原子的に取得 | `Arc<Mutex<Db>>` |
@@ -276,6 +306,8 @@ crates/ui/src/
 - パッケージ版のUIは、ハートビートが古い場合に同じディレクトリの `vrc-photo-daemon` を起動する。
 - 更新直後のUIは `VRC_PHOTO_HEALTH_TOKEN` を受け取り、健康マーカーを書くまで
   デーモンの自動起動を遅らせる。成功後に通常の起動処理でデーモンを起動する。
+  デーモンが systemd ユーザーサービス管理なら `systemctl --user start` /
+  `restart` を使い、unit 外のプロセスとして起動しない。
 - AppImageの自動起動は `$APPIMAGE --background` を登録する。UIの `--background` はデーモンを子プロセスとして起動し、終了まで待つ（マウント維持のため）。
 - deb/pacmanではデーモン実体（`/usr/bin/vrc-photo-daemon`）を自動起動に登録する。
 - deb/pacmanは任意の systemd ユーザーサービス `vrc-photo-daemon.service` を `/usr/lib/systemd/user/` に同梱する。unit は `graphical-session.target` に紐付き、インストール時には enable されない。

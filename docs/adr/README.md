@@ -31,7 +31,8 @@
 | [0009](0009-photo-index-virtual-window.md) | 10万枚の写真一覧を順序付き索引＋仮想ウィンドウで表示する | Accepted |
 | [0010](0010-systemd-user-service.md) | deb/pacmanはsystemdユーザーサービスを任意提供する | Accepted |
 | [0011](0011-daemon-ipc.md) | UIとデーモンはローカルIPCで即時コマンドとイベントを補完する | Accepted |
-| [0012](0012-auto-update.md) | 自動アップデートは署名付きマニフェストと専用ヘルパーで行う | Accepted |
+| [0012](0012-auto-update.md) | 自動アップデートは署名付きマニフェストと専用ヘルパーで行う | Accepted（deb/pacmanの扱いはADR-0016で一部置き換え） |
 | [0013](0013-auto-compression-policy.md) | 圧縮ポリシーを全体設定にし、自動圧縮にも適用する | Superseded in part by ADR-0014（ADR-0004を置き換え） |
 | [0014](0014-manual-compression-policy.md) | 手動圧縮は実行時ポリシー、自動圧縮は設定ポリシー | Accepted |
 | [0015](0015-deferred-deletion-queue.md) | 削除は依存ジョブのドレイン後に実行する | Accepted |
+| [0016](0016-system-package-update.md) | pacman / deb も polkit 経由でアプリ内更新する | Accepted |

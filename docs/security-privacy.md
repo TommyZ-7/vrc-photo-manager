@@ -19,7 +19,7 @@
 | 設定 | パス、自動化設定、最終更新確認時刻 | `app_settings` |
 | サムネイル | 256px WebP | `thumbnails/` |
 | プレビュー | 1200px WebP | `previews/` |
-| 更新 | ダウンロードした成果物、適用ジョブ、結果、ヘルパーのログ | `updates/` |
+| 更新 | ダウンロードした成果物、適用ジョブ（署名対象の `latest.json` を含む）、結果、ヘルパーのログ | `updates/` |
 
 保存しないもの:
 
@@ -67,10 +67,13 @@ VRChatの表示名・ユーザーID・ワールド名は個人情報になり得
 - 画像・ログ・DBの解析はローカルのみ。
 - 更新確認は GitHub Releases の署名付き `latest.json` と
   `latest.json.minisig` を HTTPS で取得する。GitHub API は使わない。
-- ユーザーが更新を選んだときだけ、マニフェストが示す AppImage / NSIS
-  成果物を同じく HTTPS で取得する。
+- ユーザーが更新を選んだときだけ、マニフェストが示す AppImage / NSIS /
+  `.pkg.tar.zst` / `.deb` の成果物を同じく HTTPS で取得する。
+- 特権ヘルパーはネットワークを使わない。検証済みのローカルファイルだけを
+  `pacman -U` / `dpkg -i` に渡す。`dpkg -i` は依存関係を取得しない。
 - 送信するのは標準的なHTTPヘッダー（`User-Agent: vrc-photo-manager/<version>`）
-  だけ。写真、ログ、DB、識別子、利用統計は送らない。
+  だけ。写真、ログ、DB、識別子、利用統計は送らない。polkit の認証情報は
+  ローカルの認証エージェントが扱い、アプリは保存も送信もしない。
 - GitHub には接続元IPと取得したReleaseアセットが見える。これはHTTPS配信に
   固有の情報で、アプリが追加で収集するものではない。
 - 更新確認は設定でOFFにできる。OFFでも手動確認は使える。
@@ -86,9 +89,84 @@ VRChatの表示名・ユーザーID・ワールド名は個人情報になり得
 - オプトインにする。
 - ADRとプライバシー文書を更新する。
 
-## 8. 安全な運用
+## 8. ローカル特権昇格（polkit）と権限境界
+
+システムパッケージ（pacman / deb）のアプリ内更新は、root 権限が必要な
+インストールだけを polkit 経由で実行する。通常の UI・ダウンロード・署名検証は
+ユーザー権限のまま動く。
+
+### 8.1 権限の境界
+
+| 実行主体 | 権限 | 行うこと | 行わないこと |
+|---|---|---|---|
+| UI | ユーザー | フィード確認、ダウンロード、job の作成、ヘルパー起動 | パッケージDBの変更 |
+| ユーザー権限ヘルパー (`--apply`) | ユーザー | UI / デーモンの終了待ち、staging の再検証、`pkexec` の起動、健康確認、旧UIの再起動 | root でのファイル置換 |
+| 特権ヘルパー (`--apply-system-package`) | root（`pkexec`） | staging・署名・メタデータの再検証、固定コマンドでのインストール | UI の起動、ネットワーク、結果ファイルの書き込み |
+| パッケージマネージャ | root | `pacman -U` / `dpkg -i` によるファイル配置 | アプリが指定した任意コマンドの実行 |
+
+- polkit action は `com.tommyz.vrc-photo-manager.update-package` で、
+  `allow_any` / `allow_inactive` / `allow_active` はすべて `auth_admin`。
+  `org.freedesktop.policykit.exec.path` を `/usr/bin/vrc-photo-updater` に
+  限定する。
+- `pkexec` は `--disable-internal-agent` 付きで起動する。認証エージェントが
+  ない環境では、テキストエージェントにフォールバックせず即座に失敗し、
+  アプリはコマンド表示へ切り替える。
+- policy がない環境では generic な `org.freedesktop.policykit.exec` を
+  使わない。これにより、任意のプログラムを polkit 経由で実行する経路を
+  作らない。
+- AppImage には policy を同梱しない。AppImage はシステムパッケージモードを
+  使わない。
+
+### 8.2 特権側の防御
+
+- `--apply` は effective uid 0 を拒否する。polkit action が
+  `/usr/bin/vrc-photo-updater` の任意引数を許可するため、ユーザーモードを
+  root で動かすと任意ファイル置換の特権昇格になる。
+- `--apply-system-package` は effective uid 0 かつ `PKEXEC_UID` が設定されて
+  いることを要求する。`PKEXEC_UID` は `pkexec` が設定する呼び出し元 UID で、
+  job の `target` は特権側では使わない。
+- staging は `data_dir/updates/downloads/<version>/` の直下に限定し、
+  canonical path、所有者（`PKEXEC_UID`）、group / other 書き込み不可、
+  最終パスが symlink でないことを確認する。
+- 署名済み `latest.json` を埋め込み公開鍵で再検証し、`manifest.version` が
+  job と一致し、ヘルパー自身のバージョンより新しいことを要求する。
+  同じ・古いバージョンはダウングレードとして拒否する。
+- 検証済みファイルは root 所有・mode 0600 の一時ファイル
+  （`/var/tmp/vrc-photo-update-<uuid>.pkg`）へコピーし、コピー先で SHA-256 と
+  minisign 署名を再検証する。以降のメタデータ確認とインストールはコピー先
+  だけを使い、TOCTOU を防ぐ。一時ファイルは成功・失敗にかかわらず削除する。
+- パッケージ名 `vrc-photo-manager` と、epoch / pkgrel / revision を正規化した
+  バージョンをパッケージマネージャ自身の出力（`pacman -Qip` /
+  `dpkg-deb -f`）で確認する。
+- 実行コマンドは固定で、シェルを経由しない。
+  `LC_ALL=C` を設定し、deb は `DEBIAN_FRONTEND=noninteractive` を使う。
+- パッケージマネージャの DB ロックを検出した場合は、変更を強行せず
+  `package_manager_locked` として失敗する。
+
+### 8.3 残余リスク
+
+- 署名鍵が漏洩した場合、特権側も署名済みパッケージを信頼する。鍵管理は
+  ADR-0012 の運用に従う。
+- パッケージのインストールスクリプトは root で実行される。現在の
+  vrc-photo-manager パッケージには install script を同梱していないが、将来
+  追加する場合はレビューを必須とする。
+- polkit action は `/usr/bin/vrc-photo-updater` の任意引数を許可する。
+  引数の検証はヘルパー側で行うため、ヘルパーの検証コードはセキュリティ境界
+  として扱う。
+- 管理者権限を持つローカルユーザーは、署名済みで現在より新しいパッケージを
+  インストールできる。これは意図した動作であり、任意のパッケージを
+  インストールできるわけではない。
+- システムパッケージの健康確認に失敗した場合、自動復旧できない。ログと
+  手動再インストール手順を案内する。
+- polkit policy の description / message は英語のみ。多言語化は未対応。
+
+## 9. 安全な運用
 
 - DBと写真のバックアップを定期的に取る。
 - 信頼できない場所の `library.db` を開かない。
 - パッケージは公式Releaseの成果物を使う。
 - `cargo install` するツール（cargo-packager等）はバージョンを固定する。
+- システムパッケージの更新は、公式Releaseの署名済み `latest.json` と
+  パッケージ成果物を使う。`--apply-system-package` を手動で実行しない。
+- 更新失敗時は `updates/last-result.json` と `updates/updater.log` を確認し、
+  パッケージマネージャのコマンドで復旧する。

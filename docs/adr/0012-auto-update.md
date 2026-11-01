@@ -1,7 +1,11 @@
 # ADR-0012: 自動アップデートは署名付きマニフェストと専用ヘルパーで行う
 
-- Status: Accepted
+- Status: Accepted（deb/pacman の扱いは [ADR-0016](0016-system-package-update.md) で一部置き換え）
 - Date: 2026-10-24
+
+> ADR-0016 で、deb/pacman を「通知のみ」から polkit 経由のアプリ内更新に
+> 変更した。AppImage / Windows current-user NSIS の自己更新と署名・フィードの
+> 仕組みはこの ADR のまま。
 
 ## Context
 

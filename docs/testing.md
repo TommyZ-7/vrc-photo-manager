@@ -45,18 +45,31 @@ cargo test --workspace
 
 - マニフェストのスキーマ、バージョン、サイズ、SHA-256、URL、安全なファイル名、
   未知のプラットフォームキーの検証。
+- `system_packages` の pacman / deb の受理、未知キー・format 不一致・拡張子
+  不一致・HTTP URL・サイズ / ハッシュ不正の拒否、`system_packages` のない
+  旧 manifest の受理、family に応じた asset 選択。
 - minisignのprehashed署名検証、改ざん・別鍵・legacy署名の拒否、本番公開鍵の読み込み。
 - AppImage / Windows current-user / per-machine / deb / pacman / 開発ビルドの判定と
-  自動適用・自動確認の可否。
+  自動適用・自動確認の可否、`pkexec` / ヘルパー / policy の有無による
+  システムパッケージ適用可否、`find_executable_in`。
 - 署名付きフィードの確認、404の扱い、ローカルHTTPのポリシー、タイムアウト。
 - ストリーミングダウンロードの署名・SHA-256・サイズ・キャンセル・部分ファイル削除。
-- 適用ジョブの検証、ヘルパーのコピーとジョブ書き込み、AppImageの退避・復元。
+- 適用ジョブの検証、システムパッケージ job の必須フィールド・staging パス・
+  拡張子の検証、`ApplyKind::SystemPackage` の serde 往復、ヘルパーのコピーと
+  ジョブ書き込み、AppImageの退避・復元。
 - ヘルパーのプロセス終了待ち、健康マーカー、成功・起動失敗時のロールバック。
+- システムパッケージの特権側: manifest 署名不正・バージョン不一致・
+  ダウングレード・staging 外 / symlink・パッケージ名 / バージョン不一致の拒否、
+  root 一時ファイルへのコピーと削除、`pacman -Qip` / `dpkg-deb -f` の引数、
+  固定インストールコマンド（`pacman -U --noconfirm` / `dpkg -i`）、
+  `LC_ALL=C` / `DEBIAN_FRONTEND=noninteractive`、DB ロック検出、
+  `--apply` の root 実行ガード。
 
 ### release-toolの主なテスト
 
 - AppImageとNSISからのマニフェスト生成、`.minisig` のbase64埋め込み。
-- 署名欠落、重複成果物、タグバージョンを含まないファイル名の拒否。
+- pacman / deb の `.pkg.tar.zst` / `.deb` を含む `system_packages` の生成。
+- 欠落・重複・タグバージョンを含まないファイル名の拒否。
 - テスト鍵での署名と、アプリと同じ `verify_file` 経路での検証。
 
 ### daemonの主なテスト
@@ -107,6 +120,10 @@ GPUIのウィンドウは開かず、表示に使う純粋関数だけを検証�
 - スキャン進捗ラベル/比率、IPC接続ラベル。
 - 更新のバイト表示、最終確認ラベル、成功/ロールバック結果の文言、適用可否、
   インストール形式ラベルとパッケージコマンド。
+- `SystemPackage` の `system_apply_available` による適用可否と、自動適用不可時の
+  コマンド表示。`LastErrorCode` ごとの通知文言。健康確認失敗時に新バージョン側でも
+  失敗通知が出ること。
+- `should_use_systemd` と、systemd 管理デーモンの起動 / 更新後再起動の分岐。
 
 ## 2. 追加すべきテスト
 
@@ -232,10 +249,40 @@ GPUIのウィンドウは開かず、表示に使う純粋関数だけを検証�
 - [ ] 署名が不正なマニフェスト／成果物は適用されない
 - [ ] AppImageで更新 → 新バージョン起動 → デーモン再接続を確認する
 - [ ] 起動直後に終了する新バージョンで、旧版へ戻って起動する
-- [ ] deb/pacmanではパッケージマネージャのコマンドが表示され、適用ボタンが出ない
 - [ ] 開発ビルドでは自動適用できない旨が表示される
 - [ ] Windows current-user NSISで更新とロールバックを確認する（実機）
 - [ ] `updates/updater.log` と `last-result.json` に結果が残る
+
+#### pacman / deb のアプリ内更新
+
+- [ ] pacman 環境で署名済みテストフィードを用意し、ダウンロード → 適用 →
+      新バージョン起動 → デーモン再接続を確認する
+- [ ] `pkexec` の認証ダイアログでキャンセルし、システムに変更が入らず、
+      UI が再起動して「認証がキャンセルされました」が表示され、再試行できる
+- [ ] pacman の DB をロックした状態で適用し、`package_manager_locked` の理由が
+      表示され、ロック解除後に再試行できる。`/var/lib/pacman/db.lck` が
+      残っていないことを確認する
+- [ ] 署名不正の `.pkg.tar.zst` / `.deb` をフィードに置き、通常側（ダウンロード）と
+      特権側（`--apply-system-package`）の両方で拒否される
+- [ ] パッケージ名・バージョンが manifest と違う成果物を拒否する
+- [ ] 現在と同じ、または古いバージョンへのダウングレードを拒否する
+- [ ] systemd ユーザーサービスでデーモンを動かし、更新後に
+      `systemctl --user is-active vrc-photo-daemon.service` が `active` で、
+      新バージョンで動いていることを確認する
+- [ ] polkit エージェントのないセッション、または `pkexec` を PATH から外した
+      環境で、コマンド表示にフォールバックする
+- [ ] `/usr/share/polkit-1/actions/com.tommyz.vrc-photo-manager.update.policy`
+      がない環境で、generic な `org.freedesktop.policykit.exec` に
+      フォールバックせずコマンド表示になる
+- [ ] `system_packages` のない旧 `latest.json` でコマンド表示になる
+- [ ] deb 環境（コンテナ / VM 可）で同じ流れを確認する。難しい場合は偽の
+      `dpkg` / `dpkg-deb` を使ったユニットテストで引数とロック検出を確認する
+- [ ] リリースビルドで loopback HTTP のフィードを拒否する
+      （デバッグビルドだけ `cfg!(debug_assertions)` で許可される）
+- [ ] インストール後の健康確認を失敗させ、自動ロールバックせず、
+      失敗が記録され、新 UI が一度だけ起動することを確認する
+- [ ] インストール前の失敗では job と staged が掃除され、インストール後 /
+      健康確認の失敗では調査用に残ることを確認する
 
 ### パッケージ
 
@@ -255,6 +302,9 @@ GPUIのウィンドウは開かず、表示に使う純粋関数だけを検証�
 - 実ポインタの年レール操作（X11の実XTestで年クリック・ドラッグ・ホイールを1280×820 / 1440×900で確認済み。WaylandはXTestイベントを落とすため未確認）、スクロール中の列リサイズ、スクロール中の取り込み、検索結果からのゴミ箱移動
 - 実VRChatログの最新バージョン差異
 - 実機のAppImage更新（署名付きフィード → ダウンロード → 置換 → 再起動 → ロールバック）
+- pacman / deb のアプリ内更新（認証キャンセル、DB ロック、署名不正、systemd 管理
+  デーモン、deb 実機）。ユニットテストと Release ワークフローのパッケージ検証で
+  代替している
 - Windows NSISの自動更新（current-user / per-machine）とSmartScreenの挙動
 - GitHub Releaseの署名付き `latest.json` を本番フィードから取得する確認
 - rfdのファイルダイアログ（xdg-portal環境）
@@ -263,8 +313,11 @@ GPUIのウィンドウは開かず、表示に使う純粋関数だけを検証�
 ## 5. CI
 
 - PR: `test` ジョブ（fmt / clippy / test）。docs-onlyはfast-pass。
-- PR（release-relevant paths）: Releaseワークフローで3形式をビルド。
-- tag: 3形式をビルドしGitHub Releaseへ添付。
+- PR（release-relevant paths）: Releaseワークフローで3形式をビルドし、
+  Arch Linux コンテナで `.pkg.tar.zst` を生成する。
+- Release ワークフローの検証: deb / pacman の polkit policy、systemd unit、
+  `latest.json` の `system_packages` 2件、`.pkg.tar.zst` の `pacman -Qip`。
+- tag: 3形式と `.pkg.tar.zst` をビルドしGitHub Releaseへ添付。
 - `main` の必須チェックは `test`。
 
 ## 6. テスト追加のルール
