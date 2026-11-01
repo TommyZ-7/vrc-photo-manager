@@ -9,7 +9,7 @@ use crate::app::daemon::run_background_supervisor;
 use crate::ui::actions::{
     CloseNotifications, CloseQuickLook, FocusSearch, OpenQuickLook, QuickLookNextFocus,
     QuickLookPrevFocus, ToggleInspector, ToggleSidebar, ViewerNextPhoto, ViewerPreviousPhoto,
-    register_global_actions,
+    ViewerZoomIn, ViewerZoomOut, ViewerZoomReset, register_global_actions,
 };
 
 mod app;
@@ -63,6 +63,10 @@ fn main() {
                 KeyBinding::new("escape", CloseNotifications, Some("notification_modal")),
                 KeyBinding::new("left", ViewerPreviousPhoto, Some("viewer_nav")),
                 KeyBinding::new("right", ViewerNextPhoto, Some("viewer_nav")),
+                KeyBinding::new("+", ViewerZoomIn, Some("viewer_nav")),
+                KeyBinding::new("=", ViewerZoomIn, Some("viewer_nav")),
+                KeyBinding::new("-", ViewerZoomOut, Some("viewer_nav")),
+                KeyBinding::new("0", ViewerZoomReset, Some("viewer_nav")),
                 KeyBinding::new("tab", QuickLookNextFocus, Some("quick_look")),
                 KeyBinding::new("shift-tab", QuickLookPrevFocus, Some("quick_look")),
             ]);
