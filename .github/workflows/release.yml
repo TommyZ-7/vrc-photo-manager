@@ -346,7 +346,7 @@ jobs:
             --output dist/latest.json
           ./target/debug/vrc-photo-update-manifest sign --key "$KEY" --file dist/latest.json
           ./target/debug/vrc-photo-update-manifest verify "${PUB_ARGS[@]}" --file dist/latest.json
-          jq -e '.schema == 1 and (.platforms | length == 2) and (.system_packages | length == 2)' dist/latest.json
+          jq -e '.schema == 1 and (.platforms | length == 2) and (.system_packages | length == 2) and (.system_packages | has("pacman") and has("deb")) and (.system_packages.pacman.format == "pacman") and (.system_packages.deb.format == "deb")' dist/latest.json
 
       - name: Publish release (tags only)
         env:
