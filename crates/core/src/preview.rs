@@ -13,6 +13,20 @@ const PREVIEW_CACHE_PRUNE_TO: usize = 1536;
 const PRUNE_EVERY: usize = 32;
 
 static WRITES: AtomicUsize = AtomicUsize::new(0);
+static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+/// A temp file path unique to this writer (process + sequence), so two
+/// writers racing the same cache entry never share a temp file: the last
+/// rename publishes a complete file, and a failed writer only ever removes
+/// its own temp.
+fn temp_path_for(cache: &Path) -> PathBuf {
+    let sequence = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let name = cache
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "preview".to_string());
+    cache.with_file_name(format!("{name}.tmp-{}-{sequence}", std::process::id()))
+}
 
 pub fn previews_dir() -> Option<PathBuf> {
     crate::data_dir().map(|dir| dir.join("previews"))
@@ -106,7 +120,7 @@ fn write_cache(cache: &Path, image: &RgbaImage) -> bool {
     }
     let encoder = webp::Encoder::from_rgba(image.as_raw(), image.width(), image.height());
     let encoded = encoder.encode(PREVIEW_QUALITY);
-    let temp = cache.with_extension("webp.tmp");
+    let temp = temp_path_for(cache);
     if let Err(error) = fs::write(&temp, &*encoded) {
         tracing::warn!(
             %error,
@@ -284,6 +298,50 @@ mod tests {
         let repaired = ensure_preview_in(11, 0, &source, &cache).expect("repaired");
         let pixel = repaired.get_pixel(0, 0).0;
         assert!(pixel[0] > 180 && pixel[1] > 80 && pixel[2] > 30);
+    }
+
+    #[test]
+    fn temp_paths_are_unique_per_writer() {
+        let cache = Path::new("/cache/7-0.webp");
+        let first = temp_path_for(cache);
+        let second = temp_path_for(cache);
+        assert_ne!(first, second);
+        for temp in [&first, &second] {
+            let name = temp.file_name().unwrap().to_string_lossy().to_string();
+            assert!(name.starts_with("7-0.webp.tmp-"), "{name}");
+            assert_eq!(temp.parent(), cache.parent());
+        }
+    }
+
+    #[test]
+    fn concurrent_writes_leave_a_decodable_cache() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.png");
+        let cache = dir.path().join("previews");
+        write_png(&source, 320, 200, [10, 200, 30, 255]);
+
+        // The import warmer and the selection decoder can write the same
+        // entry at once; every published cache file must be complete.
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let cache = &cache;
+                let source = &source;
+                scope.spawn(move || {
+                    for _ in 0..3 {
+                        let image = ensure_preview_in(20, 0, source, cache).expect("preview");
+                        assert_eq!(image.dimensions(), (1200, 750));
+                    }
+                });
+            }
+        });
+
+        let cached = read_cache(&cache.join("20-0.webp")).expect("decodable cache");
+        assert_eq!(cached.dimensions(), (1200, 750));
+        // No writer leaves its temp file behind.
+        for entry in fs::read_dir(&cache).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().to_string();
+            assert!(!name.contains(".tmp"), "leftover temp file: {name}");
+        }
     }
 
     #[test]
