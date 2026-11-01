@@ -1276,6 +1276,24 @@ impl Db {
         Ok(())
     }
 
+    pub fn open_sessions(&self) -> Result<Vec<Session>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, log_file, started_at, ended_at, world_id, instance_id \
+             FROM sessions WHERE ended_at IS NULL ORDER BY started_at",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(Session {
+                id: row.get(0)?,
+                log_file: row.get(1)?,
+                started_at: row.get(2)?,
+                ended_at: row.get(3)?,
+                world_id: row.get(4)?,
+                instance_id: row.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn session_at(&self, timestamp: i64) -> Result<Option<Session>> {
         let session = self
             .conn
@@ -2837,6 +2855,18 @@ impl Db {
             )
             .optional()?;
         Ok(offset)
+    }
+
+    pub fn log_mtime(&self, log_file: &str) -> Result<Option<i64>> {
+        let mtime = self
+            .conn
+            .query_row(
+                "SELECT mtime FROM log_imports WHERE log_file = ?1",
+                params![log_file],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(mtime)
     }
 
     pub fn set_log_offset(
@@ -4680,6 +4710,31 @@ mod tests {
         };
         assert_eq!(db.search_photos(&filter).unwrap().len(), 1);
         assert_eq!(db.count_search(&filter).unwrap(), 1);
+    }
+
+    #[test]
+    fn open_sessions_returns_only_unfinished_sessions() {
+        let db = Db::open_in_memory().unwrap();
+        let world = db.upsert_world("wrld_test", None, None).unwrap();
+        let open = db.create_session("open.txt", 10, world, None).unwrap();
+        let closed = db.create_session("closed.txt", 20, world, None).unwrap();
+        db.close_session(closed, 30).unwrap();
+
+        let sessions = db.open_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, open);
+    }
+
+    #[test]
+    fn log_mtime_reads_the_last_ingested_mtime() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.log_mtime("output_log.txt").unwrap(), None);
+        db.set_log_offset("output_log.txt", 42, 1_700_000_123, 42, "1")
+            .unwrap();
+        assert_eq!(
+            db.log_mtime("output_log.txt").unwrap(),
+            Some(1_700_000_123)
+        );
     }
 
     #[test]
