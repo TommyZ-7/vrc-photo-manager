@@ -14,6 +14,15 @@ use vrc_photo_ipc::{Request as IpcRequest, ScanPhase as IpcScanPhase, StatusSnap
 use crate::app::App;
 use crate::app::lifecycle::ScanProgressView;
 
+/// Whether an incoming status snapshot should replace the applied one.
+/// The daemon stamps each snapshot with the version of the state it was
+/// read from, so anything at or below the last applied version is a stale
+/// publish and must be dropped. Version 0 comes from a daemon without
+/// versioning and is always accepted.
+pub(crate) fn status_snapshot_is_newer(version: u64, last_applied: u64) -> bool {
+    version == 0 || version > last_applied
+}
+
 pub(crate) fn daemon_liveness(age_secs: Option<i64>, ipc_connected: bool) -> bool {
     ipc_connected || age_secs.is_some_and(|age| age < 20)
 }
@@ -301,9 +310,21 @@ impl App {
 mod tests {
     use super::{
         autostart_description, daemon_liveness, daemon_operation_label, daemon_state_label,
-        daemon_sync_label, format_timestamp, ipc_status_label,
+        daemon_sync_label, format_timestamp, ipc_status_label, status_snapshot_is_newer,
     };
     use vrc_photo_core::model::DaemonOperation;
+
+    #[test]
+    fn status_snapshot_versions_drop_stale_publishes() {
+        // A snapshot read before the scan finished versions below the one
+        // read after it; published late, it must not be applied again.
+        assert!(status_snapshot_is_newer(3, 2));
+        assert!(!status_snapshot_is_newer(2, 2));
+        assert!(!status_snapshot_is_newer(1, 2));
+        // Unversioned snapshots (older daemon) always apply.
+        assert!(status_snapshot_is_newer(0, 2));
+        assert!(status_snapshot_is_newer(0, 0));
+    }
 
     #[test]
     fn daemon_operation_labels_cover_every_operation() {

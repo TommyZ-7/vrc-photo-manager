@@ -75,6 +75,12 @@ pub struct StatusSnapshot {
     pub scan_roots: usize,
     pub photo_count: i64,
     pub pending_jobs: i64,
+    /// Monotonic version stamped by the daemon when the snapshot is taken
+    /// under its status lock. A snapshot published late therefore still
+    /// carries the older version, and receivers drop it once a newer one
+    /// has been applied. Zero means the sender does not version snapshots.
+    #[serde(default)]
+    pub version: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,6 +184,16 @@ mod tests {
             serde_json::from_str::<RequestEnvelope>(&json).unwrap(),
             value
         );
+    }
+
+    #[test]
+    fn status_snapshot_without_a_version_decodes_as_zero() {
+        // Snapshots written before versioning existed carry no version
+        // field; they decode as 0, which receivers always accept.
+        let json = r#"{"paused":false,"watching":true,"scanning":true,"scan_phase":"walking","scan_processed":3,"scan_total":null,"scan_indexed":2,"scan_root":0,"scan_roots":1,"photo_count":10,"pending_jobs":1}"#;
+        let snapshot: StatusSnapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(snapshot.version, 0);
+        assert!(snapshot.scanning);
     }
 
     #[test]

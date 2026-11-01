@@ -65,6 +65,10 @@ pub struct DaemonStatus {
     pub scan_indexed: usize,
     pub scan_root: usize,
     pub scan_roots: usize,
+    /// Number of snapshots taken so far. Each snapshot stamps and bumps
+    /// this under the status lock, so a snapshot's version orders it
+    /// against every other snapshot of this status.
+    pub version: u64,
 }
 
 #[derive(Debug)]
@@ -362,7 +366,7 @@ impl Daemon {
     }
 
     fn publish_status(&self) {
-        let status = status_snapshot(&self.status.lock().unwrap());
+        let status = status_snapshot(&mut self.status.lock().unwrap());
         self.events.publish(Event::StatusChanged { status });
     }
 
