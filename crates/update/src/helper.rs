@@ -884,6 +884,26 @@ fn is_preinstall_failure(code: LastErrorCode) -> bool {
     )
 }
 
+/// Maps a failed privileged helper exit to a user-side result, cleaning up only
+/// when the failure happened before the package manager changed anything.
+fn handle_system_package_exit(
+    paths: &UpdatePaths,
+    job: &ApplyJob,
+    job_path: &Path,
+    status: std::process::ExitStatus,
+    stderr: &str,
+) -> Result<()> {
+    let (code, reason) = map_pkexec_status(status, stderr);
+    fail_system_package(
+        paths,
+        job,
+        job_path,
+        code,
+        reason,
+        is_preinstall_failure(code),
+    )
+}
+
 /// Verifies the staged package, installs it through `pkexec`, then launches the
 /// new version and waits for its health marker.
 ///
@@ -966,15 +986,12 @@ fn run_system_package_apply(
         ),
     );
     if !output.status.success() {
-        let (code, reason) =
-            map_pkexec_status(output.status, &String::from_utf8_lossy(&output.stderr));
-        return fail_system_package(
+        return handle_system_package_exit(
             paths,
             job,
             job_path,
-            code,
-            reason,
-            is_preinstall_failure(code),
+            output.status,
+            &String::from_utf8_lossy(&output.stderr),
         );
     }
 
@@ -3120,5 +3137,92 @@ mod tests {
             sentinel.exists(),
             "the target is relaunched without a token"
         );
+    }
+
+    #[cfg(unix)]
+    fn exit_status(code: i32) -> std::process::ExitStatus {
+        use std::os::unix::process::ExitStatusExt;
+        std::process::ExitStatus::from_raw(code << 8)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handle_system_package_exit_keeps_files_after_a_package_manager_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut job, _options) = system_package_fixture(dir.path(), &next_version());
+        job.target = dir.path().join("missing-target");
+        let paths = UpdatePaths::new(&job.data_dir);
+        paths.ensure().unwrap();
+        let job_path = paths.job_file();
+        std::fs::write(&job_path, serde_json::to_vec(&job).unwrap()).unwrap();
+        let staged = job.staged.clone();
+
+        let error =
+            handle_system_package_exit(&paths, &job, &job_path, exit_status(15), "pacman failed")
+                .unwrap_err();
+        assert!(matches!(error, UpdateError::Other(_)));
+
+        let result = LastResult::read(&paths).unwrap();
+        assert_eq!(result.status, LastStatus::Failed);
+        assert_eq!(result.code, Some(LastErrorCode::PackageManagerFailed));
+        assert_eq!(result.reason.as_deref(), Some("pacman failed"));
+        assert!(
+            job_path.exists(),
+            "the job is kept after an install failure"
+        );
+        assert!(staged.exists(), "the staged package is kept");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handle_system_package_exit_cleans_up_after_authentication_cancel() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut job, _options) = system_package_fixture(dir.path(), &next_version());
+        job.target = dir.path().join("missing-target");
+        let paths = UpdatePaths::new(&job.data_dir);
+        paths.ensure().unwrap();
+        let job_path = paths.job_file();
+        std::fs::write(&job_path, serde_json::to_vec(&job).unwrap()).unwrap();
+        let staged = job.staged.clone();
+
+        let error =
+            handle_system_package_exit(&paths, &job, &job_path, exit_status(126), "cancelled")
+                .unwrap_err();
+        assert!(matches!(error, UpdateError::Other(_)));
+
+        let result = LastResult::read(&paths).unwrap();
+        assert_eq!(result.status, LastStatus::Failed);
+        assert_eq!(result.code, Some(LastErrorCode::AuthCancelled));
+        assert!(!job_path.exists(), "the job is cleaned up before install");
+        assert!(!staged.exists(), "the staged package is cleaned up");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handle_system_package_exit_cleans_up_after_a_locked_package_manager() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut job, _options) = system_package_fixture(dir.path(), &next_version());
+        job.target = dir.path().join("missing-target");
+        let paths = UpdatePaths::new(&job.data_dir);
+        paths.ensure().unwrap();
+        let job_path = paths.job_file();
+        std::fs::write(&job_path, serde_json::to_vec(&job).unwrap()).unwrap();
+        let staged = job.staged.clone();
+
+        let error = handle_system_package_exit(
+            &paths,
+            &job,
+            &job_path,
+            exit_status(14),
+            "unable to lock database",
+        )
+        .unwrap_err();
+        assert!(matches!(error, UpdateError::Other(_)));
+
+        let result = LastResult::read(&paths).unwrap();
+        assert_eq!(result.status, LastStatus::Failed);
+        assert_eq!(result.code, Some(LastErrorCode::PackageManagerLocked));
+        assert!(!job_path.exists(), "the job is cleaned up before install");
+        assert!(!staged.exists(), "the staged package is cleaned up");
     }
 }
