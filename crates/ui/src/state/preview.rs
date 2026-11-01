@@ -83,6 +83,14 @@ pub(crate) fn should_request_preview(
     loaded != Some(key) && attempt != Some(key) && !pending
 }
 
+/// Whether a finished decode for `key` should be applied.
+///
+/// The result is stale when the selection has moved on (or is gone) by the
+/// time the decode completes; stale results are dropped by the caller.
+pub(crate) fn should_apply_preview(selected: Option<PreviewKey>, key: PreviewKey) -> bool {
+    selected == Some(key)
+}
+
 /// Chooses the preview cache directory. Demo mode may only use its own cache;
 /// if the demo assets are unavailable, it must not touch the real data dir.
 pub(crate) fn preview_cache_dir(
@@ -255,6 +263,21 @@ mod tests {
         ));
         assert!(!should_request_preview(None, None, true, wanted));
         assert!(should_request_preview(None, None, false, wanted));
+    }
+
+    #[test]
+    fn applies_a_finished_decode_only_for_the_current_selection() {
+        let key = PreviewKey {
+            photo_id: 7,
+            variant: 0,
+        };
+        let other = PreviewKey {
+            photo_id: 7,
+            variant: 42,
+        };
+        assert!(should_apply_preview(Some(key), key));
+        assert!(!should_apply_preview(Some(other), key));
+        assert!(!should_apply_preview(None, key));
     }
 
     #[test]
