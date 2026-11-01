@@ -43,7 +43,8 @@ git push origin v0.1.0
 
 ## 3. 生成物
 
-`cargo-packager` が `dist/` に以下を生成する。
+`cargo-packager` が `dist/` に以下を生成する。`.pkg.tar.zst` だけは
+Release ワークフローが `makepkg` で追加生成する。
 
 | 形式 | 例 | 内容 |
 |---|---|---|
@@ -146,7 +147,8 @@ ls -lh dist
 - `Build pacman package`: `archlinux:base-devel` コンテナ内で非 root ユーザーが
   `dist/PKGBUILD` と `dist/vrc-photo-manager_<version>_x86_64.tar.gz` から
   `makepkg -f --nodeps` を実行し、`dist/*.pkg.tar.zst` を生成する。
-  `pacman -Qip` で `Name: vrc-photo-manager` とリリースバージョンを確認する
+  `LC_ALL=C pacman -Qip` の出力から `Name: vrc-photo-manager`、
+  `Version: <version>-1`、`Architecture: x86_64` を検証する
 - `Verify third-party notices`: deb / AppImage / pacman（`.tar.gz`）に
   `LICENSE` と `LICENSE-LUCIDE` が含まれることを検査する
 - `Verify systemd user unit`: deb / pacman に unit が入り、`ExecStart` が
@@ -167,8 +169,9 @@ ls -lh dist
   `latest.json` を同じReleaseに添付する。`generate` は AppImage / NSIS に加えて
   `.pkg.tar.zst` と `.deb` が各1個あること、ファイル名にタグバージョンが
   含まれることを要求する
-- `jq -e '.schema == 1 and (.platforms | length == 2) and (.system_packages | length == 2)' dist/latest.json`
-  で `system_packages` の pacman / deb が揃っていることを検査する
+- `jq -e '.schema == 1 and (.platforms | length == 2) and (.system_packages | length == 2) and (.system_packages | has("pacman") and has("deb")) and (.system_packages.pacman.format == "pacman") and (.system_packages.deb.format == "deb")' dist/latest.json`
+  で `system_packages` が pacman / deb の2件だけを持ち、`format` が一致することを
+  検査する
 
 Releaseノートは前回タグとの差分から `feat:` / `fix:` / その他を分類して生成する。
 
@@ -197,7 +200,7 @@ Required check名を変更した場合は、GitHubのbranch protectionも更新�
 - [ ] パッケージ生成物に `LICENSE` と `LICENSE-LUCIDE` が入っている
 - [ ] パッケージ生成物に `vrc-photo-updater` が入っている
 - [ ] deb / pacman に `usr/share/polkit-1/actions/com.tommyz.vrc-photo-manager.update.policy` が入り、`exec.path` が `/usr/bin/vrc-photo-updater` である
-- [ ] `dist/*.pkg.tar.zst` が存在し、`pacman -Qip` で `vrc-photo-manager` とリリースバージョンを返す
+- [ ] `dist/*.pkg.tar.zst` が存在し、`LC_ALL=C pacman -Qip` で `Name: vrc-photo-manager`、`Version: <version>-1`、`Architecture: x86_64` を返す
 - [ ] `latest.json` の `system_packages` が pacman / deb の2件で、両方に署名済みURL・サイズ・SHA-256・署名がある
 - [ ] `MINISIGN_SECRET_KEY` が登録されている
 - [ ] `latest.json` と `latest.json.minisig` がReleaseに添付されている
@@ -335,8 +338,9 @@ AppImage には同梱しない。policy がない環境、`pkexec` がない環�
    メタデータを再検証し、固定コマンドでインストールする。
    - pacman: `LC_ALL=C /usr/bin/pacman -U --noconfirm <temp>`
    - deb: `LC_ALL=C DEBIAN_FRONTEND=noninteractive /usr/bin/dpkg -i <temp>`
-5. ユーザー権限ヘルパーが新 UI を起動し、健康マーカーを確認する。デーモンが
-   systemd 管理なら `systemctl --user restart vrc-photo-daemon.service` を使う。
+5. ユーザー権限ヘルパーが新 UI を起動し、健康マーカーを確認する。新 UI は
+   `complete_update_startup` でデーモンを起動し、systemd 管理なら
+   `systemctl --user restart vrc-photo-daemon.service` を使う。
 6. 結果は `<data_dir>/updates/last-result.json` と `updater.log` に残る。
 
 システムパッケージは自動ロールバックしない。認証キャンセル・DB ロック・
@@ -378,8 +382,11 @@ sudo apt-get install -f
 
 `pacman -U` / `dpkg -i` が途中で失敗した場合は、まずパッケージマネージャの
 状態を確認する。pacman は `/var/lib/pacman/db.lck`、deb は
-`/var/lib/dpkg/lock-frontend` のロックを解放してから再試行する。健康確認だけが
-失敗した場合は、新しいバージョンは既にインストールされているため、
+`/var/lib/dpkg/lock-frontend` のロックを確認する。実行中の pacman / dpkg /
+apt プロセスがないこと（例: `pgrep -a pacman`、`pgrep -a dpkg`）と、ロックを
+保持しているプロセスがないこと（例: `sudo fuser /var/lib/pacman/db.lck`）を
+確認してからロックを解放し、再試行する。実行中にロックファイルを削除しない。
+健康確認だけが失敗した場合は、新しいバージョンは既にインストールされているため、
 `updater.log` を確認して UI を手動で起動する。
 
 `<data_dir>/updates/updater.log` と `last-result.json` に失敗理由が残る。

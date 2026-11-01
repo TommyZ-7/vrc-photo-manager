@@ -100,17 +100,35 @@ jobs:
       - name: Build Linux packages
         run: cargo packager --release
 
+      - name: Read package version
+        id: package-version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Packager.toml | head -n1)
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
       - name: Build pacman package
+        env:
+          PACKAGE_VERSION: ${{ steps.package-version.outputs.version }}
         run: |
           set -euo pipefail
-          docker run --rm -v "$PWD/dist:/dist" -w /dist archlinux:base-devel bash -c '
+          docker run --rm -e PACKAGE_VERSION \
+            -v "$PWD/dist:/dist" -w /dist archlinux:base-devel bash -c '
             set -euo pipefail
             owner=$(stat -c "%u:%g" /dist)
             trap "chown -R $owner /dist" EXIT
             useradd -m builder
             chown -R builder:builder /dist
             su builder -c "makepkg -f --nodeps"
-            pacman -Qip /dist/*.pkg.tar.zst
+            pkg=$(ls /dist/*.pkg.tar.zst)
+            metadata=$(LC_ALL=C pacman -Qip "$pkg")
+            printf "%s\n" "$metadata"
+            name=$(printf "%s\n" "$metadata" | sed -n "s/^Name[[:space:]]*: //p")
+            version=$(printf "%s\n" "$metadata" | sed -n "s/^Version[[:space:]]*: //p")
+            arch=$(printf "%s\n" "$metadata" | sed -n "s/^Architecture[[:space:]]*: //p")
+            test "$name" = "vrc-photo-manager"
+            test "$version" = "${PACKAGE_VERSION}-1"
+            test "$arch" = "x86_64"
             rm -rf /dist/src /dist/pkg
           '
           ls -lh dist/*.pkg.tar.zst

@@ -310,7 +310,7 @@
     認証不能でフォールバックした場合、その UI セッションでは自動適用を隠す。
     次回起動時は再試行できる。
 - 開発ビルド、ポータブル、Windowsのper-machineインストールは自動適用の対象外。
-- 更新の結果（成功・失敗）は `last-result.json` に残り、次回起動時に一度だけ
+- 更新の結果（成功・ロールバック・失敗）は `last-result.json` に残り、次回起動時に一度だけ
   表示する。失敗コードは `auth_cancelled` / `auth_unavailable` /
   `package_manager_locked` / `package_manager_failed` /
   `package_verification_failed` / `package_metadata_mismatch` / `downgrade` /

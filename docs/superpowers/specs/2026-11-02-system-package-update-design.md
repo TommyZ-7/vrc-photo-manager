@@ -679,7 +679,7 @@ UI の `update_error_message` / `result_notice` に新しい i18n キーを追�
 
 ## 9. ドキュメント
 
-- 新規 `docs/adr/0013-system-package-update.md` を追加し、ADR-0012 の
+- 新規 `docs/adr/0016-system-package-update.md` を追加し、ADR-0012 の
   「deb/pacman は通知のみ」という判断を置き換える。`docs/adr/README.md` に追記。
 - `docs/release.md`: `latest.json` の `system_packages`、polkit policy、
   リリース時の検証項目を追記。

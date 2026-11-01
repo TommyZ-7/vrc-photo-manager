@@ -44,12 +44,12 @@
   "schema": 1,
   "version": "0.10.0",
   "platforms": {
-    "linux-x86_64": { "format": "appimage", "url": "...", "size": 0, "sha256": "...", "signature": "..." },
-    "windows-x86_64": { "format": "nsis", "url": "...", "size": 0, "sha256": "...", "signature": "..." }
+    "linux-x86_64": { "format": "appimage", "url": "...", "size": 12345678, "sha256": "...", "signature": "..." },
+    "windows-x86_64": { "format": "nsis", "url": "...", "size": 12345678, "sha256": "...", "signature": "..." }
   },
   "system_packages": {
-    "pacman": { "format": "pacman", "url": "https://.../vrc-photo-manager-0.10.0-1-x86_64.pkg.tar.zst", "size": 0, "sha256": "...", "signature": "..." },
-    "deb": { "format": "deb", "url": "https://.../vrc-photo-manager_0.10.0_amd64.deb", "size": 0, "sha256": "...", "signature": "..." }
+    "pacman": { "format": "pacman", "url": "https://.../vrc-photo-manager-0.10.0-1-x86_64.pkg.tar.zst", "size": 12345678, "sha256": "...", "signature": "..." },
+    "deb": { "format": "deb", "url": "https://.../vrc-photo-manager_0.10.0_amd64.deb", "size": 12345678, "sha256": "...", "signature": "..." }
   }
 }
 ```
@@ -83,8 +83,8 @@
   - `latest.json` の `system_packages` が 2 件であること。
   - deb / pacman の両方に polkit policy が入り、`exec.path` が
     `/usr/bin/vrc-photo-updater` であること。
-  - `.pkg.tar.zst` が `pacman -Qip` で `vrc-photo-manager` とリリース
-    バージョンを返すこと。
+  - `.pkg.tar.zst` が `LC_ALL=C pacman -Qip` で `Name: vrc-photo-manager`、
+    `Version: <version>-1`、`Architecture: x86_64` を返すこと。
 
 ### 3. 特権実行の構成
 
@@ -226,7 +226,8 @@ policy がない環境では generic な `org.freedesktop.policykit.exec` に
   従来のコマンド表示にフォールバックする。
 - `dpkg -i` は依存関係を解決しない。現在の依存は既存インストールで満たされて
   いる前提とし、失敗時は理由を表示して `apt install --only-upgrade` を案内する。
-- CI に Arch Linux コンテナでの `makepkg` と pacman メタデータ検証が加わる。
+- CI に Arch Linux コンテナでの `makepkg` と、`pacman -Qip` による
+  `Name` / `Version` / `Architecture` の検証が加わる。
 
 ## Alternatives
 

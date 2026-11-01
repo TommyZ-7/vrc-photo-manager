@@ -220,13 +220,13 @@ policy がない、または `pkexec` がない場合は、パッケージを再
 |---|---|---|
 | 更新の認証がキャンセルされました。再試行できます / `auth_cancelled` | polkit ダイアログでキャンセルした | もう一度「更新して再起動」を押す。システムは変更されていない |
 | polkit 認証エージェントが見つかりません。パッケージマネージャのコマンドで更新してください / `auth_unavailable` | `pkexec` または認証エージェントがない | パッケージマネージャのコマンドで更新する。次回起動時は再試行できる |
-| pacman のデータベースがロックされています。ロック解除後に再試行してください / `package_manager_locked` | 他の pacman / dpkg 操作が進行中 | 他の操作の完了を待つ。pacman は `/var/lib/pacman/db.lck`、deb は `/var/lib/dpkg/lock-frontend` を確認する。実行中プロセスがないことを確認してからロックを解放する |
+| pacman のデータベースがロックされています。ロック解除後に再試行してください / `package_manager_locked` | 他の pacman / dpkg 操作が進行中（deb でも UI 文言は pacman 固有） | 他の操作の完了を待つ。pacman は `/var/lib/pacman/db.lck`、deb は `/var/lib/dpkg/lock-frontend` を確認する。実行中プロセスがないことを確認してからロックを解放する |
 | パッケージの検証に失敗しました / `package_verification_failed` | SHA-256 または minisign 署名が一致しない | ダウンロードをやり直す。再発する場合はフィードとリリース成果物を確認する |
 | パッケージ名またはバージョンが署名済み情報と一致しません / `package_metadata_mismatch` | 成果物の `Name` / `Package` または `Version` が manifest と違う | 手動でインストールせず、リリース担当に連絡する |
 | このバージョンへのダウングレードはできません / `downgrade` | 現在と同じ、または古いバージョン | 新しいバージョンのリリースを待つ |
 | パッケージのインストールに失敗しました / `package_manager_failed` | `pacman -U` / `dpkg -i` が非ゼロ終了 | `updater.log` のパッケージマネージャ出力を確認し、下記の手動復旧を行う |
 | インストール後の起動確認に失敗しました / `health_check_failed` | 新バージョンはインストール済みだが UI が健康マーカーを書かない | `updater.log` を確認して UI を手動起動する。必要なら再インストールする |
-| 更新に失敗しました（理由は `updater.log`） / `helper_failed` | `/usr/bin/vrc-photo-updater` がない、または特権側の検証に失敗した | deb / pacman を再インストールする。`updater.log` の理由を確認する |
+| 更新に失敗しました（<reason>） / `helper_failed` | `/usr/bin/vrc-photo-updater` がない、または特権側の検証に失敗した | `updater.log` の理由を確認する。ヘルパー欠落なら deb / pacman を再インストールする |
 
 手動復旧:
 

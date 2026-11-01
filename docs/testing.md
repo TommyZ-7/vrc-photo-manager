@@ -269,8 +269,11 @@ GPUIのウィンドウは開かず、表示に使う純粋関数だけを検証�
 - [ ] systemd ユーザーサービスでデーモンを動かし、更新後に
       `systemctl --user is-active vrc-photo-daemon.service` が `active` で、
       新バージョンで動いていることを確認する
-- [ ] polkit エージェントのないセッション、または `pkexec` を PATH から外した
-      環境で、コマンド表示にフォールバックする
+- [ ] polkit エージェントのないセッション、または `pkexec` をテスト環境から
+      アンインストール / 一時退避した環境で、コマンド表示にフォールバックする。
+      `pkexec_available()` は PATH に加えて `/usr/bin`・`/bin`・`/usr/local/bin`
+      も検索するため、PATH から外すだけでは不十分。`/usr/bin/pkexec` を
+      リネームする場合は、確認後に元へ戻す
 - [ ] `/usr/share/polkit-1/actions/com.tommyz.vrc-photo-manager.update.policy`
       がない環境で、generic な `org.freedesktop.policykit.exec` に
       フォールバックせずコマンド表示になる
@@ -316,7 +319,9 @@ GPUIのウィンドウは開かず、表示に使う純粋関数だけを検証�
 - PR（release-relevant paths）: Releaseワークフローで3形式をビルドし、
   Arch Linux コンテナで `.pkg.tar.zst` を生成する。
 - Release ワークフローの検証: deb / pacman の polkit policy、systemd unit、
-  `latest.json` の `system_packages` 2件、`.pkg.tar.zst` の `pacman -Qip`。
+  `latest.json` の `system_packages` が pacman / deb の2件、
+  `.pkg.tar.zst` の `LC_ALL=C pacman -Qip` による `Name` / `Version` /
+  `Architecture` の一致。
 - tag: 3形式と `.pkg.tar.zst` をビルドしGitHub Releaseへ添付。
 - `main` の必須チェックは `test`。
 

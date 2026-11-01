@@ -2544,7 +2544,7 @@ git commit -m "feat(packaging): ship polkit policy and build a real pacman packa
 ### Task 10: ADR とユーザー向けドキュメント
 
 **Files:**
-- Create: `docs/adr/0013-system-package-update.md`
+- Create: `docs/adr/0016-system-package-update.md`
 - Modify: `docs/adr/README.md`
 - Modify: `docs/release.md`
 - Modify: `docs/architecture.md`
@@ -2557,7 +2557,7 @@ git commit -m "feat(packaging): ship polkit policy and build a real pacman packa
 - Consumes: 実装済みの設計とコマンド
 - Produces: 利用者・リリース担当向けの手順
 
-- [ ] **Step 1: ADR-0013 を書く**
+- [x] **Step 1: ADR-0016 を書く**
 
 含める内容:
 - ADR-0012 の「deb/pacman は通知のみ」を置き換える。
@@ -2567,15 +2567,15 @@ git commit -m "feat(packaging): ship polkit policy and build a real pacman packa
 - 自動ロールバックしない理由。
 - 認証キャンセル / DB ロック / policy 欠落時のフォールバック。
 
-- [ ] **Step 2: ADR README に追記する**
+- [x] **Step 2: ADR README に追記する**
 
 `docs/adr/README.md` の表に:
 
 ```markdown
-| [0013](0013-system-package-update.md) | pacman / deb も polkit 経由でアプリ内更新する | Accepted |
+| [0016](0016-system-package-update.md) | pacman / deb も polkit 経由でアプリ内更新する | Accepted |
 ```
 
-- [ ] **Step 3: release / architecture / testing を更新する**
+- [x] **Step 3: release / architecture / testing を更新する**
 
 - `docs/release.md` 10章: `system_packages`、`.pkg.tar.zst` の生成、policy、署名、jq 検証。
 - `docs/architecture.md` 4.7: ユーザーヘルパー → pkexec → 特権検証 → 固定コマンド → health → daemon restart。
@@ -2584,12 +2584,12 @@ git commit -m "feat(packaging): ship polkit policy and build a real pacman packa
 - `docs/troubleshooting.md`: pacman / deb の失敗時のログと手動復旧。
 - `docs/security-privacy.md`: polkit によるローカル特権昇格と権限境界。
 
-- [ ] **Step 4: リンク切れを確認する**
+- [x] **Step 4: リンク切れを確認する**
 
-Run: `rg -n "0013-system-package-update|system_packages|pkg.tar.zst" docs`
+Run: `rg -n "0016-system-package-update|system_packages|pkg.tar.zst" docs`
 Expected: 追加したドキュメントと ADR の参照が見つかる
 
-- [ ] **Step 5: commit**
+- [x] **Step 5: commit**
 
 ```bash
 git add docs/adr docs/release.md docs/architecture.md docs/testing.md docs/features.md docs/troubleshooting.md docs/security-privacy.md
