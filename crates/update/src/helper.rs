@@ -989,22 +989,13 @@ fn run_system_package_apply(
             log(paths, &format!("cannot launch the new version: {error}"));
             // The package is installed but the new UI did not start. Keep the
             // job, staged package, and log for investigation.
-            let _ = LastResult::write(
-                paths,
-                &LastResult {
-                    status: LastStatus::Failed,
-                    from: job.from_version.clone(),
-                    to: job.to_version.clone(),
-                    reason: Some(format!(
-                        "{error} (job: {}, staged: {}, log: {})",
-                        job_path.display(),
-                        job.staged.display(),
-                        paths.log_file().display()
-                    )),
-                    code: Some(LastErrorCode::HealthCheckFailed),
-                },
+            let reason = format!(
+                "{error} (job: {}, staged: {}, log: {})",
+                job_path.display(),
+                job.staged.display(),
+                paths.log_file().display()
             );
-            relaunch_target(paths, job);
+            fail_system_package_after_install(paths, job, reason);
             return Err(error);
         }
     };
@@ -1037,17 +1028,7 @@ fn run_system_package_apply(
             log(paths, &format!("health check failed: {error}"));
             let _ = child.kill();
             let _ = child.wait();
-            let _ = LastResult::write(
-                paths,
-                &LastResult {
-                    status: LastStatus::Failed,
-                    from: job.from_version.clone(),
-                    to: job.to_version.clone(),
-                    reason: Some(error.to_string()),
-                    code: Some(LastErrorCode::HealthCheckFailed),
-                },
-            );
-            relaunch_target(paths, job);
+            fail_system_package_after_install(paths, job, error.to_string());
             Err(error)
         }
     }
@@ -1082,6 +1063,29 @@ fn fail_system_package(
         cleanup(paths, job, job_path);
     }
     Err(UpdateError::Other(reason))
+}
+
+/// Records a launch or health failure after a successful install.
+///
+/// The package is already installed, so the job, staged package, and log are
+/// kept for investigation. The target is relaunched without a health token
+/// because the new version did not become healthy.
+fn fail_system_package_after_install(paths: &UpdatePaths, job: &ApplyJob, reason: String) {
+    log(
+        paths,
+        &format!("system package update failed after install: {reason}"),
+    );
+    let _ = LastResult::write(
+        paths,
+        &LastResult {
+            status: LastStatus::Failed,
+            from: job.from_version.clone(),
+            to: job.to_version.clone(),
+            reason: Some(reason),
+            code: Some(LastErrorCode::HealthCheckFailed),
+        },
+    );
+    relaunch_target(paths, job);
 }
 
 /// Launches the target again without a health token after a failed update.
@@ -3042,5 +3046,79 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(sentinel.exists(), "the target is relaunched");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn package_manager_failure_keeps_the_job_and_staged_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut job, _options) = system_package_fixture(dir.path(), &next_version());
+        job.target = dir.path().join("missing-target");
+        let paths = UpdatePaths::new(&job.data_dir);
+        paths.ensure().unwrap();
+        let job_path = paths.job_file();
+        std::fs::write(&job_path, serde_json::to_vec(&job).unwrap()).unwrap();
+        let staged = job.staged.clone();
+
+        let error = fail_system_package(
+            &paths,
+            &job,
+            &job_path,
+            LastErrorCode::PackageManagerFailed,
+            "pacman failed".to_string(),
+            false,
+        )
+        .unwrap_err();
+        assert!(matches!(error, UpdateError::Other(_)));
+
+        let result = LastResult::read(&paths).unwrap();
+        assert_eq!(result.status, LastStatus::Failed);
+        assert_eq!(result.code, Some(LastErrorCode::PackageManagerFailed));
+        assert_eq!(result.reason.as_deref(), Some("pacman failed"));
+        assert!(
+            job_path.exists(),
+            "the job is kept after an install failure"
+        );
+        assert!(staged.exists(), "the staged package is kept");
+        assert!(paths.log_file().exists(), "the log is kept");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_install_failure_keeps_the_job_and_staged_package() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut job, _options) = system_package_fixture(dir.path(), &next_version());
+        let sentinel = dir.path().join("relaunched");
+        let target = dir.path().join("vrc-photo-manager");
+        std::fs::write(
+            &target,
+            format!("#!/bin/sh\nprintf ok > '{}'\n", sentinel.display()),
+        )
+        .unwrap();
+        make_executable(&target);
+        job.target = target;
+        let paths = UpdatePaths::new(&job.data_dir);
+        paths.ensure().unwrap();
+        let job_path = paths.job_file();
+        std::fs::write(&job_path, serde_json::to_vec(&job).unwrap()).unwrap();
+        let staged = job.staged.clone();
+
+        fail_system_package_after_install(&paths, &job, "health check timed out".to_string());
+
+        let result = LastResult::read(&paths).unwrap();
+        assert_eq!(result.status, LastStatus::Failed);
+        assert_eq!(result.code, Some(LastErrorCode::HealthCheckFailed));
+        assert_eq!(result.reason.as_deref(), Some("health check timed out"));
+        assert!(job_path.exists(), "the job is kept after a health failure");
+        assert!(staged.exists(), "the staged package is kept");
+        assert!(paths.log_file().exists(), "the log is kept");
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !sentinel.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            sentinel.exists(),
+            "the target is relaunched without a token"
+        );
     }
 }
