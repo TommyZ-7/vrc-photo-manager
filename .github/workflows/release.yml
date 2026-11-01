@@ -119,8 +119,11 @@ jobs:
             trap "chown -R $owner /dist" EXIT
             useradd -m builder
             chown -R builder:builder /dist
+            sed -i "s/^options=(!lto)$/options=(!lto !debug)/" /dist/PKGBUILD
             su builder -c "makepkg -f --nodeps"
-            pkg=$(ls /dist/*.pkg.tar.zst)
+            rm -f /dist/*-debug-*.pkg.tar.zst
+            pkg=$(ls /dist/vrc-photo-manager-[0-9]*.pkg.tar.zst)
+            test "$(printf '%s\n' "$pkg" | wc -l)" -eq 1
             metadata=$(LC_ALL=C pacman -Qip "$pkg")
             printf "%s\n" "$metadata"
             name=$(printf "%s\n" "$metadata" | sed -n "s/^Name[[:space:]]*: //p")
@@ -193,7 +196,7 @@ jobs:
           set -euo pipefail
           policy="usr/share/polkit-1/actions/com.tommyz.vrc-photo-manager.update.policy"
           deb=$(ls dist/*.deb)
-          pkg=$(ls dist/*.pkg.tar.zst)
+          pkg=$(ls dist/vrc-photo-manager-[0-9]*.pkg.tar.zst)
           tmp=$(mktemp -d)
           mkdir -p "$tmp/deb"
           dpkg-deb --extract "$deb" "$tmp/deb"
