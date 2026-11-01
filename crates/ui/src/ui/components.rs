@@ -371,30 +371,32 @@ impl App {
             }))
     }
 
-    pub(crate) fn filter_field(&self, label: &str, input: Input) -> impl IntoElement {
+    pub(crate) fn filter_field(&self, label: impl Into<String>, input: Input) -> impl IntoElement {
         let p = self.palette;
+        let label: String = label.into();
         v_flex()
             .gap(px(6.))
             .child(
                 div()
                     .text_size(px(10.))
                     .text_color(rgb(p.muted_2))
-                    .child(label.to_string()),
+                    .child(label),
             )
             .child(input.w_full())
     }
 
     pub(crate) fn setting_switch(
         &self,
-        label: &str,
-        description: &str,
+        label: impl Into<String>,
+        description: impl Into<String>,
         checked: bool,
         capture_layout: bool,
         cx: &mut Context<Self>,
         apply: fn(&mut AppSettings, bool),
     ) -> impl IntoElement {
         let p = self.palette;
-        let label = label.to_string();
+        let label: String = label.into();
+        let description: String = description.into();
         h_flex()
             .items_center()
             .gap(px(12.))

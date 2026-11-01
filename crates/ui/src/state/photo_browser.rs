@@ -278,6 +278,12 @@ impl PhotoBrowser {
         self.rail_hover.set(false);
     }
 
+    /// Drops the shaped year-rail labels so the next render rebuilds them in
+    /// the current language.
+    pub(crate) fn invalidate_labels(&mut self) {
+        self.labels = None;
+    }
+
     /// Invalidates the decoded page cache without replacing the index. Used
     /// when photo rows changed (compression replacement, rebinds) but the set
     /// and order of ids did not.
@@ -422,6 +428,7 @@ mod tests {
     use super::*;
     use crate::state::test_support::{index_entry, test_photo};
     use crate::ui::theme::library_grid_metrics;
+    use crate::ui::year_rail::YearRailLabels;
     use gpui_kit::{ScrollStrategy, UniformListScrollHandle, point, px};
     use vrc_photo_core::error::CoreError;
     use vrc_photo_core::settings::CardSize;
@@ -429,6 +436,14 @@ mod tests {
     /// Arbitrary non-196 row height so these tests prove the maths reads the
     /// supplied layout instead of a fixed constant.
     const TEST_ROW_HEIGHT: f32 = 180.0;
+
+    #[test]
+    fn invalidate_labels_drops_cached_rail_labels() {
+        let mut browser = PhotoBrowser::new(Arc::new(PhotoIndex::new(Vec::new())));
+        browser.labels = Some(Arc::new(YearRailLabels::empty_for_test()));
+        browser.invalidate_labels();
+        assert!(browser.labels.is_none());
+    }
 
     #[test]
     fn page_cache_evicts_the_oldest_page() {

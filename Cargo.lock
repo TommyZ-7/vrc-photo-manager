@@ -8047,6 +8047,7 @@ dependencies = [
  "tracing-subscriber",
  "trash",
  "vrc-photo-core",
+ "vrc-photo-i18n",
  "vrc-photo-ipc",
  "vrc-photo-update",
 ]

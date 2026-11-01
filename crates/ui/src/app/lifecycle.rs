@@ -656,10 +656,18 @@ impl App {
             .into_iter()
             .collect();
         self.reload_job_state(cx);
-        self.settings = AppSettings::load(&self.db).unwrap_or_else(|error| {
+        let previous_language = self.settings.language.clone();
+        let mut settings = AppSettings::load(&self.db).unwrap_or_else(|error| {
             tracing::warn!(%error, "cannot load app settings");
             AppSettings::default()
         });
+        settings.language = vrc_photo_i18n::set_locale(&settings.language);
+        let language_changed = settings.language != previous_language;
+        self.settings = settings;
+        if language_changed {
+            self.library.borrow_mut().invalidate_labels();
+            self.search_view.borrow_mut().invalidate_labels();
+        }
         cx.set_reduce_motion(self.settings.ui_reduce_motion);
         let palette = resolve(&self.settings.ui_theme_main, &self.settings.ui_theme_accent);
         if palette != self.palette {
