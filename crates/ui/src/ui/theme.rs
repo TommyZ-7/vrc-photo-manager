@@ -50,6 +50,9 @@ pub(crate) const COMPRESSION_PROFILE_WIDTH: f32 = 280.0;
 pub(crate) const VIEWER_DETAILS_WIDTH: f32 = 380.0;
 pub(crate) const VIEWER_TOP_BAR: f32 = 56.0;
 pub(crate) const VIEWER_PAD: f32 = 24.0;
+pub(crate) const VIEWER_MINIMAP_WIDTH: f32 = 148.0;
+pub(crate) const VIEWER_MINIMAP_HEIGHT: f32 = 110.0;
+pub(crate) const VIEWER_MINIMAP_MARGIN: f32 = 14.0;
 /// Breathing room between a modal card and the window content edge.
 pub(crate) const DIALOG_VIEWPORT_MARGIN: f32 = 24.0;
 

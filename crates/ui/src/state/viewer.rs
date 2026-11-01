@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 use gpui_kit::{Bounds, Pixels, Point, RenderImage, Size, point};
 
 use crate::ui::theme::{
-    MOTION_MORPH, eased_progress, lerp_bounds, viewer_image_box_with_details_width,
+    MOTION_MORPH, VIEWER_MINIMAP_HEIGHT, VIEWER_MINIMAP_WIDTH, eased_progress, lerp_bounds,
+    viewer_image_box_with_details_width,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -154,11 +155,40 @@ impl ViewerZoom {
         }
         .clamped(image, frame)
     }
+
+    pub(crate) fn minimap_viewport(self, frame: Size<f32>, minimap: (f32, f32)) -> Bounds<f32> {
+        let scale = self.scale.max(1.0);
+        let width = (minimap.0 / scale).min(minimap.0);
+        let height = (minimap.1 / scale).min(minimap.1);
+        let center_x = 0.5 - self.pan.x / (frame.width * scale);
+        let center_y = 0.5 - self.pan.y / (frame.height * scale);
+        let left = (center_x * minimap.0 - width / 2.0).clamp(0.0, minimap.0 - width);
+        let top = (center_y * minimap.1 - height / 2.0).clamp(0.0, minimap.1 - height);
+        Bounds::new(Point { x: left, y: top }, Size { width, height })
+    }
+
+    pub(crate) fn pan_for_minimap(self, normalized: Point<f32>, frame: Size<f32>) -> Point<f32> {
+        let scale = self.scale.max(1.0);
+        let half = 0.5 / scale;
+        let center_x = normalized.x.clamp(half, 1.0 - half);
+        let center_y = normalized.y.clamp(half, 1.0 - half);
+        point(
+            -(center_x - 0.5) * frame.width * scale,
+            -(center_y - 0.5) * frame.height * scale,
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum ViewerZoomDrag {
     Pan(Point<Pixels>),
+    Minimap,
+}
+
+pub(crate) fn minimap_size(aspect: f32) -> (f32, f32) {
+    let aspect = aspect.max(0.05);
+    let width = VIEWER_MINIMAP_WIDTH.min(VIEWER_MINIMAP_HEIGHT * aspect);
+    (width, width / aspect)
 }
 
 pub(crate) fn pixel_ratio(image: (u32, u32), frame: Size<f32>) -> f32 {
@@ -405,6 +435,46 @@ mod tests {
         let resized = zoomed.clamped(image, narrow);
         assert_eq!(resized.pan.x, 250.0);
         assert_eq!(resized.pan.y, 0.0);
+    }
+
+    #[test]
+    fn minimap_size_keeps_the_image_aspect_inside_the_box() {
+        let (width, height) = minimap_size(16.0 / 9.0);
+        assert_eq!(width, 148.0);
+        assert!((height - 83.25).abs() < 0.01);
+        let (width, height) = minimap_size(1.0 / 2.0);
+        assert_eq!((width.round(), height.round()), (55.0, 110.0));
+    }
+
+    #[test]
+    fn minimap_viewport_tracks_zoom_and_pan() {
+        let frame = size(800.0, 600.0);
+        let minimap = (148.0, 111.0);
+        let fit = ViewerZoom::default().minimap_viewport(frame, minimap);
+        assert_eq!(fit.size.width, 148.0);
+        assert_eq!(fit.origin.x, 0.0);
+
+        let zoomed = ViewerZoom {
+            scale: 2.0,
+            pan: point(400.0, 0.0),
+        }
+        .clamped((4000, 3000), frame)
+        .minimap_viewport(frame, minimap);
+        assert!((zoomed.size.width - 74.0).abs() < 0.01);
+        assert!((zoomed.origin.x - 0.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn minimap_click_centers_the_view_and_clamps_at_edges() {
+        let frame = size(800.0, 600.0);
+        let zoom = ViewerZoom {
+            scale: 2.0,
+            pan: Point::default(),
+        };
+        let centered = zoom.pan_for_minimap(point(0.5, 0.5), frame);
+        assert_eq!(centered, Point::default());
+        let right = zoom.pan_for_minimap(point(1.0, 1.0), frame);
+        assert_eq!(right, point(-400.0, -300.0));
     }
 
     #[test]

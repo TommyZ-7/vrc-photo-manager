@@ -11,7 +11,7 @@ use vrc_photo_i18n::tr;
 
 use crate::app::{App, effective_motion_fps};
 use crate::state::preview::{preview_key, preview_placeholder_label};
-use crate::state::viewer::{ViewerMorph, morph_image_plan};
+use crate::state::viewer::{ViewerMorph, minimap_size, morph_image_plan};
 use crate::ui::components::{ButtonState, ButtonTone};
 use crate::ui::theme::*;
 
@@ -266,6 +266,60 @@ impl App {
             .viewer_morph
             .as_ref()
             .is_some_and(|morph| !morph.closing);
+        let minimap = if self.zoom.is_active() && !opening_morph {
+            let thumbnail = self.thumbnails.borrow_mut().get(photo.id);
+            thumbnail.map(|thumbnail| {
+                let (image_w, image_h) = photo.effective_dimensions();
+                let aspect = image_w as f32 / image_h.max(1) as f32;
+                let (minimap_w, minimap_h) = minimap_size(aspect);
+                let viewport_rect = self
+                    .zoom
+                    .minimap_viewport(frame_size, (minimap_w, minimap_h));
+                let minimap_bounds = self.viewer_minimap_bounds.clone();
+                div()
+                    .on_children_prepainted(move |children, _, _| {
+                        if let Some(bounds) = children.first() {
+                            minimap_bounds.set(*bounds);
+                        }
+                    })
+                    .id("viewer-minimap")
+                    .absolute()
+                    .right(px(VIEWER_MINIMAP_MARGIN))
+                    .bottom(px(VIEWER_MINIMAP_MARGIN))
+                    .w(px(minimap_w))
+                    .h(px(minimap_h))
+                    .overflow_hidden()
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(rgba(with_alpha(p.text, 0x40)))
+                    .bg(rgb(p.panel_deep))
+                    .child(
+                        gpui_kit::img(thumbnail)
+                            .object_fit(ObjectFit::Cover)
+                            .size_full(),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .left(px(viewport_rect.origin.x))
+                            .top(px(viewport_rect.origin.y))
+                            .w(px(viewport_rect.size.width))
+                            .h(px(viewport_rect.size.height))
+                            .border_1()
+                            .border_color(rgb(p.accent))
+                            .bg(rgba(with_alpha(p.accent, 0x33))),
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            this.handle_viewer_minimap_down(event, window, cx)
+                        }),
+                    )
+                    .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
+            })
+        } else {
+            None
+        };
         let frame_bounds = self.viewer_frame_bounds.clone();
         let image_area = div()
             .on_children_prepainted(move |children, _, _| {
@@ -285,7 +339,8 @@ impl App {
             .p(px(VIEWER_PAD))
             .opacity(if opening_morph { 0.0 } else { 1.0 })
             .on_click(cx.listener(|this, _, window, cx| this.close_quick_look(window, cx)))
-            .child(image_frame);
+            .child(image_frame)
+            .when_some(minimap, |this, minimap| this.child(minimap));
 
         let mut details_panel = v_flex().h_full().flex_shrink_0().overflow_hidden();
         if details_open {

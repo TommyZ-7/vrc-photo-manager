@@ -134,17 +134,59 @@ impl App {
             self.zoom_drag = None;
             return;
         }
-        let Some(ViewerZoomDrag::Pan(last)) = self.zoom_drag else {
+        let Some(drag) = self.zoom_drag else {
             return;
         };
         let Some((image, frame)) = self.zoom_geometry(window) else {
             return;
         };
-        let delta = event.position - last;
-        self.zoom = self
-            .zoom
-            .pan_by(point(f32::from(delta.x), f32::from(delta.y)), image, frame);
-        self.zoom_drag = Some(ViewerZoomDrag::Pan(event.position));
+        match drag {
+            ViewerZoomDrag::Pan(last) => {
+                let delta = event.position - last;
+                self.zoom =
+                    self.zoom
+                        .pan_by(point(f32::from(delta.x), f32::from(delta.y)), image, frame);
+                self.zoom_drag = Some(ViewerZoomDrag::Pan(event.position));
+            }
+            ViewerZoomDrag::Minimap => self.pan_from_minimap(event.position, image, frame),
+        }
+        cx.notify();
+    }
+
+    pub(crate) fn pan_from_minimap(
+        &mut self,
+        position: Point<Pixels>,
+        image: (u32, u32),
+        frame: Size<f32>,
+    ) {
+        let bounds = self.viewer_minimap_bounds.get();
+        if bounds.size.width <= px(0.) || bounds.size.height <= px(0.) {
+            return;
+        }
+        let normalized = point(
+            (f32::from(position.x - bounds.origin.x) / f32::from(bounds.size.width))
+                .clamp(0.0, 1.0),
+            (f32::from(position.y - bounds.origin.y) / f32::from(bounds.size.height))
+                .clamp(0.0, 1.0),
+        );
+        let pan = self.zoom.pan_for_minimap(normalized, frame);
+        self.zoom = ViewerZoom { pan, ..self.zoom }.clamped(image, frame);
+    }
+
+    pub(crate) fn handle_viewer_minimap_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if event.button != MouseButton::Left {
+            return;
+        }
+        self.zoom_drag = Some(ViewerZoomDrag::Minimap);
+        if let Some((image, frame)) = self.zoom_geometry(window) {
+            self.pan_from_minimap(event.position, image, frame);
+        }
+        cx.stop_propagation();
         cx.notify();
     }
 
