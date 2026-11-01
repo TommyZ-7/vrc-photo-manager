@@ -4187,6 +4187,14 @@ mod tests {
         assert_eq!(session.ended_at, Some(mtime));
     }
 
+    #[test]
+    fn session_end_time_handles_a_start_time_in_the_future() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("library.db")).unwrap();
+        let ended_at = session_end_time(&db, Path::new("/missing/log.txt"), 2_000, 1_000);
+        assert_eq!(ended_at, 1_000);
+    }
+
     fn save_daemon_settings(daemon: &Daemon, update: impl FnOnce(&mut AppSettings)) {
         let db = daemon.db.lock().unwrap();
         let mut settings = AppSettings::load(&db).unwrap_or_default();
