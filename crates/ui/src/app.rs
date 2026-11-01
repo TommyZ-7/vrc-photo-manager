@@ -122,6 +122,11 @@ pub struct App {
     pub(crate) daemon_age_secs: Option<i64>,
     pub(crate) daemon_supervisor: Option<String>,
     pub(crate) daemon_pid: Option<u32>,
+    /// Version of the last daemon status snapshot applied from the event
+    /// stream. Snapshots stamped with an older version are stale (read
+    /// before a state change but published after it) and must not revive
+    /// state the daemon has already moved past.
+    pub(crate) last_status_version: u64,
     pub(crate) ipc_endpoint: Option<Endpoint>,
     pub(crate) ipc_connected: bool,
     pub(crate) ipc_error: Option<String>,
@@ -587,6 +592,7 @@ impl App {
             daemon_age_secs: None,
             daemon_supervisor: None,
             daemon_pid: None,
+            last_status_version: 0,
             ipc_endpoint: None,
             ipc_connected: false,
             ipc_error: None,

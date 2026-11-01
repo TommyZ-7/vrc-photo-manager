@@ -126,6 +126,9 @@ impl App {
                 self.daemon_pid = Some(daemon_pid);
                 self.ipc_error = None;
                 self.daemon_shutdown_armed = false;
+                // A new connection may belong to a restarted daemon whose
+                // version counter started over; adopt its lineage.
+                self.last_status_version = status.version;
                 self.refresh_monitor();
                 self.apply_daemon_status(status);
                 // A batch held while disconnected can now be reported.
@@ -209,8 +212,14 @@ impl App {
                 self.reload_job_state(cx);
             }
             IpcEvent::StatusChanged { status } => {
-                self.apply_daemon_status(status);
-                self.refresh_monitor();
+                if crate::app::daemon::status_snapshot_is_newer(
+                    status.version,
+                    self.last_status_version,
+                ) {
+                    self.last_status_version = self.last_status_version.max(status.version);
+                    self.apply_daemon_status(status);
+                    self.refresh_monitor();
+                }
             }
         }
     }

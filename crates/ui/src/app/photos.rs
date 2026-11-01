@@ -350,6 +350,20 @@ impl App {
         }
     }
 
+    /// Resets every piece of preview state: the decoded preview, its key
+    /// and attempt bookkeeping, the queued decode request, and the
+    /// crossfade's previous frame. Selection clears, forced viewer closes,
+    /// and removals all go through here so no path can leave a stale
+    /// preview (or a decode for one) behind.
+    pub(crate) fn reset_preview_state(&mut self) {
+        self.preview = None;
+        self.preview_key = None;
+        self.preview_attempt = None;
+        self.preview_queue.cancel_wanted();
+        self.previous_preview = None;
+        self.previous_color = None;
+    }
+
     pub(crate) fn clear_selection(&mut self, cx: &mut Context<Self>) {
         if let Some(id) = self.selected.take() {
             self.thumbnails.borrow_mut().unpin(id);
@@ -360,12 +374,7 @@ impl App {
         self.selected_players.clear();
         self.selected_tags.clear();
         self.selected_derivatives.clear();
-        self.preview = None;
-        self.preview_key = None;
-        self.preview_attempt = None;
-        self.preview_queue.cancel_wanted();
-        self.previous_preview = None;
-        self.previous_color = None;
+        self.reset_preview_state();
         self.note_edit_id = None;
         cx.notify();
     }
@@ -762,7 +771,7 @@ impl App {
             self.selected_players.clear();
             self.selected_tags.clear();
             self.selected_derivatives.clear();
-            self.preview = None;
+            self.reset_preview_state();
         }
         if self.note_edit_id.is_some_and(|id| removed.contains(&id)) {
             self.note_edit_id = None;
