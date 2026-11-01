@@ -100,6 +100,21 @@ jobs:
       - name: Build Linux packages
         run: cargo packager --release
 
+      - name: Build pacman package
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/dist:/dist" -w /dist archlinux:base-devel bash -c '
+            set -euo pipefail
+            owner=$(stat -c "%u:%g" /dist)
+            trap "chown -R $owner /dist" EXIT
+            useradd -m builder
+            chown -R builder:builder /dist
+            su builder -c "makepkg -f --nodeps"
+            pacman -Qip /dist/*.pkg.tar.zst
+            rm -rf /dist/src /dist/pkg
+          '
+          ls -lh dist/*.pkg.tar.zst
+
       - name: List artifacts
         run: ls -lh dist
 
@@ -154,6 +169,25 @@ jobs:
           grep -qx 'ExecStart=/usr/bin/vrc-photo-daemon' "$tmp/pacman/$unit" \
             || { echo "unexpected ExecStart in pacman unit"; exit 1; }
           echo "systemd user unit verified"
+
+      - name: Verify polkit policy
+        run: |
+          set -euo pipefail
+          policy="usr/share/polkit-1/actions/com.tommyz.vrc-photo-manager.update.policy"
+          deb=$(ls dist/*.deb)
+          pkg=$(ls dist/*.pkg.tar.zst)
+          tmp=$(mktemp -d)
+          mkdir -p "$tmp/deb"
+          dpkg-deb --extract "$deb" "$tmp/deb"
+          test -f "$tmp/deb/$policy" \
+            || { echo "missing $policy in deb"; exit 1; }
+          grep -q 'org.freedesktop.policykit.exec.path' "$tmp/deb/$policy"
+          grep -q 'org.freedesktop.policykit.exec.path.*/usr/bin/vrc-photo-updater' "$tmp/deb/$policy" \
+            || { echo "unexpected pkexec path in $policy"; exit 1; }
+          docker run --rm -v "$PWD/dist:/dist" archlinux:base-devel bash -c "
+            pacman -Qlp /dist/$(basename "$pkg") | grep -q '$policy$'
+          "
+          echo "polkit policy verified"
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
@@ -294,7 +328,7 @@ jobs:
             --output dist/latest.json
           ./target/debug/vrc-photo-update-manifest sign --key "$KEY" --file dist/latest.json
           ./target/debug/vrc-photo-update-manifest verify "${PUB_ARGS[@]}" --file dist/latest.json
-          jq -e '.schema == 1 and (.platforms | length == 2)' dist/latest.json
+          jq -e '.schema == 1 and (.platforms | length == 2) and (.system_packages | length == 2)' dist/latest.json
 
       - name: Publish release (tags only)
         env:
