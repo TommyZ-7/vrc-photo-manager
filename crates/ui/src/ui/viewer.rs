@@ -10,7 +10,7 @@ use gpui_kit::*;
 use vrc_photo_i18n::tr;
 
 use crate::app::{App, effective_motion_fps};
-use crate::state::preview::preview_placeholder_label;
+use crate::state::preview::{preview_key, preview_placeholder_label};
 use crate::state::viewer::{ViewerMorph, morph_image_plan};
 use crate::ui::components::{ButtonState, ButtonTone};
 use crate::ui::theme::*;
@@ -136,9 +136,13 @@ impl App {
             MOTION_BASE
         };
         let previous_image = self.previous_preview.clone();
-        let current_image = self
-            .preview
+        let key = preview_key(&photo);
+        let full_image = self
+            .full_preview
             .clone()
+            .filter(|_| self.full_preview_key == Some(key));
+        let current_image = full_image
+            .or_else(|| self.preview.clone())
             .or_else(|| self.thumbnails.borrow_mut().get(photo.id));
         let (start_w, start_h) = box_state.size_at(0.0, viewport);
 

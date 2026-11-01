@@ -148,6 +148,7 @@ impl App {
             }
         }
         self.quick_look_open = true;
+        self.request_full_preview(cx);
         self.quick_look_epoch = self.quick_look_epoch.wrapping_add(1);
         self.quick_look_focus_index = 0;
         // Remember the last details state for the session, but render it
@@ -249,6 +250,7 @@ impl App {
             self.set_viewer_morph(None, cx);
         }
         self.viewer_return_source = None;
+        self.reset_full_preview();
         self.quick_look_open = false;
         self.note_edit_id = None;
         let focus = self
