@@ -530,7 +530,7 @@ fn verify_manifest(
             .map_err(|error| UpdateError::io(&job.staged, error))?
             .len()
     {
-        return Err(UpdateError::Integrity(
+        return Err(UpdateError::PackageVerificationFailed(
             "staged package size does not match the manifest".to_string(),
         ));
     }
@@ -604,7 +604,7 @@ fn copy_and_verify(
         .map_err(|error| UpdateError::io(temp.path(), error))?;
     let digest = hex::encode(hasher.finalize());
     if digest != asset.sha256 {
-        return Err(UpdateError::Integrity(
+        return Err(UpdateError::PackageVerificationFailed(
             "staged package SHA-256 does not match the manifest".to_string(),
         ));
     }
@@ -2119,6 +2119,39 @@ mod tests {
         assert!(matches!(
             verify_system_package(&job, &options),
             Err(UpdateError::StagingRejected(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_package_rejects_a_tampered_staged_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (job, options) = system_package_fixture(dir.path(), &next_version());
+        let mut tampered = std::fs::read(&job.staged).unwrap();
+        *tampered.last_mut().unwrap() ^= 0xff;
+        std::fs::write(&job.staged, &tampered).unwrap();
+        assert_eq!(
+            tampered.len(),
+            std::fs::metadata(&job.staged).unwrap().len() as usize,
+            "the tampered file must keep the manifest size to reach the hash re-check"
+        );
+        assert!(matches!(
+            verify_system_package(&job, &options),
+            Err(UpdateError::PackageVerificationFailed(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_package_rejects_a_staged_file_with_a_wrong_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let (job, options) = system_package_fixture(dir.path(), &next_version());
+        let mut bytes = std::fs::read(&job.staged).unwrap();
+        bytes.extend_from_slice(b"extra");
+        std::fs::write(&job.staged, bytes).unwrap();
+        assert!(matches!(
+            verify_system_package(&job, &options),
+            Err(UpdateError::PackageVerificationFailed(_))
         ));
     }
 
