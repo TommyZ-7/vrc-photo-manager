@@ -455,19 +455,25 @@ impl App {
             );
         }
 
-        if let Some(error) = report.scan_error.clone() {
+        if !report.scan_errors.is_empty() {
             body = body.child(
-                div()
+                v_flex()
                     .mx(px(16.))
                     .my(px(8.))
                     .p(px(8.))
+                    .gap(px(2.))
                     .rounded(px(8.))
                     .bg(rgb(p.red_soft))
                     .border_1()
                     .border_color(rgb(p.red_border))
                     .text_size(px(10.))
                     .text_color(rgb(p.red))
-                    .child(error),
+                    .children(
+                        report
+                            .scan_errors
+                            .iter()
+                            .map(|error| div().child(error.clone())),
+                    ),
             );
         }
         body.into_any_element()

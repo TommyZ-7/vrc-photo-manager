@@ -437,7 +437,7 @@ impl App {
         let p = self.palette;
         let (failed, partial) = import_issue_counts(&report.issues);
         let retryable = retryable_sources(&report.issues);
-        let scan_failed = report.scan_failures.len() + usize::from(report.scan_error.is_some());
+        let scan_failed = report.scan_failures.len() + report.scan_errors.len();
         let mode = import_mode_label(report.mode);
         let dest = report.dest.to_string_lossy().to_string();
         let expanded = self.import_report_expanded;
