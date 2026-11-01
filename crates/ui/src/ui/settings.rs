@@ -564,16 +564,16 @@ impl App {
         let selected_main = find_main(&self.settings.ui_theme_main);
         let selected_accent = find_accent(&self.settings.ui_theme_accent);
         let selected_label = match axis {
-            ThemeAxis::Main => selected_main.label,
-            ThemeAxis::Accent => selected_accent.label,
+            ThemeAxis::Main => selected_main.label(),
+            ThemeAxis::Accent => selected_accent.label(),
         };
-        let items: Vec<(&'static str, &'static str, u32, bool)> = match axis {
+        let items: Vec<(&'static str, String, u32, bool)> = match axis {
             ThemeAxis::Main => main_colors()
                 .iter()
                 .map(|color| {
                     (
                         color.id,
-                        color.label,
+                        color.label(),
                         preview_main(color),
                         selected_main.id == color.id,
                     )
@@ -584,7 +584,7 @@ impl App {
                 .map(|color| {
                     (
                         color.id,
-                        color.label,
+                        color.label(),
                         preview_accent(color),
                         selected_accent.id == color.id,
                     )
@@ -594,8 +594,9 @@ impl App {
         let mut rows = v_flex().gap(px(8.));
         for chunk in items.chunks(6) {
             let mut row = h_flex().items_center().gap(px(8.));
-            for &(id, label, swatch, selected) in chunk {
-                row = row.child(self.theme_swatch(axis, id, label, swatch, selected, cx));
+            for item in chunk {
+                let (id, label, swatch, selected) = item;
+                row = row.child(self.theme_swatch(axis, id, label.clone(), *swatch, *selected, cx));
             }
             rows = rows.child(row);
         }
@@ -626,7 +627,7 @@ impl App {
         &self,
         axis: ThemeAxis,
         id: &'static str,
-        label: &'static str,
+        label: String,
         swatch: u32,
         selected: bool,
         cx: &mut Context<Self>,
@@ -647,7 +648,7 @@ impl App {
                 rgba(0x00000000)
             })
             .cursor_pointer()
-            .tooltip(move |window, cx| Tooltip::new(label).build(window, cx))
+            .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
             .hover(move |this| this.bg(rgb(p.panel_inner)))
             .on_click(cx.listener(move |this, _, _, cx| match axis {
                 ThemeAxis::Main => this.set_main_theme(id, cx),

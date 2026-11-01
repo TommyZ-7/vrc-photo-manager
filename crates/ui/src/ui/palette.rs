@@ -26,7 +26,7 @@ impl Family {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct MainColor {
     pub(crate) id: &'static str,
-    pub(crate) label: &'static str,
+    pub(crate) label_key: &'static str,
     pub(crate) family: Family,
     pub(crate) hue: f32,
     pub(crate) tint: f32,
@@ -37,11 +37,23 @@ pub(crate) struct MainColor {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct AccentColor {
     pub(crate) id: &'static str,
-    pub(crate) label: &'static str,
+    pub(crate) label_key: &'static str,
     pub(crate) family: Family,
     pub(crate) hue: f32,
     pub(crate) saturation: f32,
     pub(crate) lightness: f32,
+}
+
+impl MainColor {
+    pub(crate) fn label(&self) -> String {
+        vrc_photo_i18n::tr(self.label_key)
+    }
+}
+
+impl AccentColor {
+    pub(crate) fn label(&self) -> String {
+        vrc_photo_i18n::tr(self.label_key)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,7 +101,7 @@ pub(crate) struct Palette {
 pub(crate) const MAIN_COLORS: [MainColor; 18] = [
     MainColor {
         id: "charcoal",
-        label: "チャコール",
+        label_key: "theme.color.main.charcoal",
         family: Family::Dark,
         hue: 220.0,
         tint: 1.0,
@@ -97,7 +109,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
     },
     MainColor {
         id: "midnight",
-        label: "ミッドナイト",
+        label_key: "theme.color.main.midnight",
         family: Family::Dark,
         hue: 228.0,
         tint: 1.15,
@@ -105,7 +117,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
     },
     MainColor {
         id: "forest",
-        label: "フォレスト",
+        label_key: "theme.color.main.forest",
         family: Family::Dark,
         hue: 155.0,
         tint: 0.85,
@@ -113,7 +125,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
     },
     MainColor {
         id: "plum",
-        label: "プラム",
+        label_key: "theme.color.main.plum",
         family: Family::Dark,
         hue: 285.0,
         tint: 0.90,
@@ -121,7 +133,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
     },
     MainColor {
         id: "wine",
-        label: "ワイン",
+        label_key: "theme.color.main.wine",
         family: Family::Dark,
         hue: 350.0,
         tint: 0.85,
@@ -129,7 +141,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
     },
     MainColor {
         id: "sepia",
-        label: "セピア",
+        label_key: "theme.color.main.sepia",
         family: Family::Dark,
         hue: 35.0,
         tint: 0.80,
@@ -137,7 +149,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
     },
     MainColor {
         id: "paper",
-        label: "ペーパー",
+        label_key: "theme.color.main.paper",
         family: Family::Light,
         hue: 220.0,
         tint: 1.00,
@@ -145,7 +157,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
     },
     MainColor {
         id: "ivory",
-        label: "アイボリー",
+        label_key: "theme.color.main.ivory",
         family: Family::Light,
         hue: 45.0,
         tint: 1.20,
@@ -153,7 +165,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
     },
     MainColor {
         id: "mist",
-        label: "ミスト",
+        label_key: "theme.color.main.mist",
         family: Family::Light,
         hue: 205.0,
         tint: 1.65,
@@ -161,7 +173,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
     },
     MainColor {
         id: "sage",
-        label: "セージ",
+        label_key: "theme.color.main.sage",
         family: Family::Light,
         hue: 145.0,
         tint: 1.50,
@@ -169,7 +181,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
     },
     MainColor {
         id: "blush",
-        label: "ブラッシュ",
+        label_key: "theme.color.main.blush",
         family: Family::Light,
         hue: 345.0,
         tint: 1.40,
@@ -177,7 +189,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
     },
     MainColor {
         id: "cloud",
-        label: "クラウド",
+        label_key: "theme.color.main.cloud",
         family: Family::Light,
         hue: 260.0,
         tint: 1.50,
@@ -185,7 +197,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
     },
     MainColor {
         id: "sakura",
-        label: "さくら",
+        label_key: "theme.color.main.sakura",
         family: Family::Pastel,
         hue: 345.0,
         tint: 0.95,
@@ -193,7 +205,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
     },
     MainColor {
         id: "lavender",
-        label: "ラベンダー",
+        label_key: "theme.color.main.lavender",
         family: Family::Pastel,
         hue: 265.0,
         tint: 0.85,
@@ -201,7 +213,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
     },
     MainColor {
         id: "mint",
-        label: "ミント",
+        label_key: "theme.color.main.mint",
         family: Family::Pastel,
         hue: 155.0,
         tint: 0.85,
@@ -209,7 +221,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
     },
     MainColor {
         id: "sky",
-        label: "スカイ",
+        label_key: "theme.color.main.sky",
         family: Family::Pastel,
         hue: 205.0,
         tint: 1.0,
@@ -217,7 +229,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
     },
     MainColor {
         id: "peach",
-        label: "ピーチ",
+        label_key: "theme.color.main.peach",
         family: Family::Pastel,
         hue: 25.0,
         tint: 0.95,
@@ -225,7 +237,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
     },
     MainColor {
         id: "lemon",
-        label: "レモン",
+        label_key: "theme.color.main.lemon",
         family: Family::Pastel,
         hue: 50.0,
         tint: 0.85,
@@ -236,7 +248,7 @@ pub(crate) const MAIN_COLORS: [MainColor; 18] = [
 pub(crate) const ACCENT_COLORS: [AccentColor; 18] = [
     AccentColor {
         id: "deep-blue",
-        label: "ディープブルー",
+        label_key: "theme.color.accent.deep-blue",
         family: Family::Dark,
         hue: 218.0,
         saturation: 0.65,
@@ -244,7 +256,7 @@ pub(crate) const ACCENT_COLORS: [AccentColor; 18] = [
     },
     AccentColor {
         id: "emerald",
-        label: "エメラルド",
+        label_key: "theme.color.accent.emerald",
         family: Family::Dark,
         hue: 160.0,
         saturation: 0.60,
@@ -252,7 +264,7 @@ pub(crate) const ACCENT_COLORS: [AccentColor; 18] = [
     },
     AccentColor {
         id: "crimson",
-        label: "クリムゾン",
+        label_key: "theme.color.accent.crimson",
         family: Family::Dark,
         hue: 348.0,
         saturation: 0.68,
@@ -260,7 +272,7 @@ pub(crate) const ACCENT_COLORS: [AccentColor; 18] = [
     },
     AccentColor {
         id: "violet",
-        label: "バイオレット",
+        label_key: "theme.color.accent.violet",
         family: Family::Dark,
         hue: 268.0,
         saturation: 0.55,
@@ -268,7 +280,7 @@ pub(crate) const ACCENT_COLORS: [AccentColor; 18] = [
     },
     AccentColor {
         id: "amber",
-        label: "アンバー",
+        label_key: "theme.color.accent.amber",
         family: Family::Dark,
         hue: 38.0,
         saturation: 0.85,
@@ -276,7 +288,7 @@ pub(crate) const ACCENT_COLORS: [AccentColor; 18] = [
     },
     AccentColor {
         id: "teal",
-        label: "ティール",
+        label_key: "theme.color.accent.teal",
         family: Family::Dark,
         hue: 185.0,
         saturation: 0.60,
@@ -284,7 +296,7 @@ pub(crate) const ACCENT_COLORS: [AccentColor; 18] = [
     },
     AccentColor {
         id: "white",
-        label: "ホワイト",
+        label_key: "theme.color.accent.white",
         family: Family::Light,
         hue: 220.0,
         saturation: 0.08,
@@ -292,7 +304,7 @@ pub(crate) const ACCENT_COLORS: [AccentColor; 18] = [
     },
     AccentColor {
         id: "silver",
-        label: "シルバー",
+        label_key: "theme.color.accent.silver",
         family: Family::Light,
         hue: 215.0,
         saturation: 0.10,
@@ -300,7 +312,7 @@ pub(crate) const ACCENT_COLORS: [AccentColor; 18] = [
     },
     AccentColor {
         id: "ice",
-        label: "アイス",
+        label_key: "theme.color.accent.ice",
         family: Family::Light,
         hue: 200.0,
         saturation: 0.40,
@@ -308,7 +320,7 @@ pub(crate) const ACCENT_COLORS: [AccentColor; 18] = [
     },
     AccentColor {
         id: "pearl",
-        label: "パール",
+        label_key: "theme.color.accent.pearl",
         family: Family::Light,
         hue: 40.0,
         saturation: 0.30,
@@ -316,7 +328,7 @@ pub(crate) const ACCENT_COLORS: [AccentColor; 18] = [
     },
     AccentColor {
         id: "smoke",
-        label: "スモーク",
+        label_key: "theme.color.accent.smoke",
         family: Family::Light,
         hue: 220.0,
         saturation: 0.07,
@@ -324,7 +336,7 @@ pub(crate) const ACCENT_COLORS: [AccentColor; 18] = [
     },
     AccentColor {
         id: "champagne",
-        label: "シャンパン",
+        label_key: "theme.color.accent.champagne",
         family: Family::Light,
         hue: 45.0,
         saturation: 0.40,
@@ -332,7 +344,7 @@ pub(crate) const ACCENT_COLORS: [AccentColor; 18] = [
     },
     AccentColor {
         id: "sky",
-        label: "スカイ",
+        label_key: "theme.color.accent.sky",
         family: Family::Pastel,
         hue: 210.0,
         saturation: 1.0,
@@ -340,7 +352,7 @@ pub(crate) const ACCENT_COLORS: [AccentColor; 18] = [
     },
     AccentColor {
         id: "mint",
-        label: "ミント",
+        label_key: "theme.color.accent.mint",
         family: Family::Pastel,
         hue: 165.0,
         saturation: 0.70,
@@ -348,7 +360,7 @@ pub(crate) const ACCENT_COLORS: [AccentColor; 18] = [
     },
     AccentColor {
         id: "peach",
-        label: "ピーチ",
+        label_key: "theme.color.accent.peach",
         family: Family::Pastel,
         hue: 20.0,
         saturation: 0.90,
@@ -356,7 +368,7 @@ pub(crate) const ACCENT_COLORS: [AccentColor; 18] = [
     },
     AccentColor {
         id: "lavender",
-        label: "ラベンダー",
+        label_key: "theme.color.accent.lavender",
         family: Family::Pastel,
         hue: 265.0,
         saturation: 0.75,
@@ -364,7 +376,7 @@ pub(crate) const ACCENT_COLORS: [AccentColor; 18] = [
     },
     AccentColor {
         id: "rose",
-        label: "ローズ",
+        label_key: "theme.color.accent.rose",
         family: Family::Pastel,
         hue: 340.0,
         saturation: 0.85,
@@ -372,7 +384,7 @@ pub(crate) const ACCENT_COLORS: [AccentColor; 18] = [
     },
     AccentColor {
         id: "lemon",
-        label: "レモン",
+        label_key: "theme.color.accent.lemon",
         family: Family::Pastel,
         hue: 50.0,
         saturation: 0.90,
@@ -1012,8 +1024,12 @@ mod tests {
         accent_ids.sort_unstable();
         accent_ids.dedup();
         assert_eq!(accent_ids.len(), 18);
-        assert!(main_colors().iter().all(|color| !color.label.is_empty()));
-        assert!(accent_colors().iter().all(|color| !color.label.is_empty()));
+        assert!(main_colors().iter().all(|color| !color.label().is_empty()));
+        assert!(
+            accent_colors()
+                .iter()
+                .all(|color| !color.label().is_empty())
+        );
     }
 
     #[test]
