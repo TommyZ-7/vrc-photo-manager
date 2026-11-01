@@ -40,4 +40,4 @@ tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 tray-icon = { version = "0.26", default-features = false }
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_UI_WindowsAndMessaging"] }

@@ -32,6 +32,7 @@ use vrc_photo_ipc::{Endpoint, Event, JobStatus, Operation, ScanPhase as IpcScanP
 mod ipc_server;
 mod signals;
 mod tray;
+mod vrchat_process;
 use ipc_server::{EventBus, IpcControl, IpcServer, status_snapshot};
 use signals::{JobSignal, WakeSignal};
 use tray::{Tray, TrayAction};
@@ -41,6 +42,10 @@ const PARSER_VERSION: &str = "1";
 const MAX_SKIPPED_DETAILS: usize = 5;
 const SCAN_INTERVAL: Duration = Duration::from_millis(500);
 const LOG_INTERVAL: Duration = Duration::from_millis(750);
+/// Consecutive log-poll misses required before a missing VRChat process closes
+/// the active session. This tolerates one-off process-table read failures and
+/// short restart gaps.
+const VRCHAT_MISSING_POLLS_BEFORE_CLOSE: u8 = 3;
 /// How often the daemon re-reads the compression settings and thumbnail
 /// cache limit the UI saved. Runs on every loop iteration, paused or not,
 /// so a change is applied within roughly one interval plus one loop wait.
@@ -214,6 +219,8 @@ pub struct Daemon {
     /// `--once`); the caller generates their thumbnails directly.
     deferred_thumbnail_ids: Vec<i64>,
     log_tail: Option<LogTail>,
+    vrchat_missing_polls: u8,
+    vrchat_session_id: Option<i64>,
     workers: Vec<JoinHandle<()>>,
     dirty_paths: Vec<PathBuf>,
     last_log_poll: std::time::Instant,
@@ -364,6 +371,8 @@ impl Daemon {
             watcher_error,
             deferred_thumbnail_ids: Vec::new(),
             log_tail: None,
+            vrchat_missing_polls: 0,
+            vrchat_session_id: None,
             workers: Vec::new(),
             dirty_paths: Vec::new(),
             last_log_poll: std::time::Instant::now() - LOG_INTERVAL,
@@ -683,6 +692,7 @@ impl Daemon {
     }
 
     pub fn run_once(&mut self) -> Result<()> {
+        self.repair_open_sessions()?;
         let initial_scan = {
             let db = self.db.lock().unwrap();
             db.count_photos()? == 0
@@ -741,6 +751,7 @@ impl Daemon {
             self.thumbnail_cache_limit.load(Ordering::Relaxed),
         );
         self.ingest_logs()?;
+        self.poll_vrchat_presence()?;
         self.link_unlinked()?;
         self.refresh_status()?;
         self.process_deletions()?;
@@ -800,6 +811,7 @@ impl Daemon {
             &self.thumbnail_dir,
             self.thumbnail_cache_limit.load(Ordering::Relaxed),
         );
+        self.repair_open_sessions()?;
         self.start_ipc();
         if self.stopping() {
             self.shutdown();
@@ -812,6 +824,7 @@ impl Daemon {
             return Ok(());
         }
         self.ingest_logs()?;
+        self.poll_vrchat_presence()?;
         self.link_unlinked()?;
         if self.stopping() {
             self.shutdown();
@@ -859,6 +872,9 @@ impl Daemon {
             if self.last_log_poll.elapsed() >= LOG_INTERVAL {
                 if let Err(error) = self.ingest_logs() {
                     tracing::error!(%error, "log ingestion failed");
+                }
+                if let Err(error) = self.poll_vrchat_presence() {
+                    tracing::error!(%error, "VRChat process check failed");
                 }
                 self.last_log_poll = std::time::Instant::now();
             }
@@ -1306,6 +1322,101 @@ impl Daemon {
         )
     }
 
+    /// Closes sessions left open by a previous daemon. Only the owner of the
+    /// single-instance lock may repair them: a maintenance run must not close
+    /// the live daemon's active session.
+    fn repair_open_sessions(&mut self) -> Result<usize> {
+        if !self.owns_deletion_executor {
+            return Ok(0);
+        }
+        let db = self.db.lock().unwrap();
+        let sessions = db.open_sessions()?;
+        let now = chrono::Utc::now().timestamp();
+        let mut repaired = 0;
+        for session in sessions {
+            let ended_at =
+                session_end_time(&db, Path::new(&session.log_file), session.started_at, now);
+            db.close_session(session.id, ended_at)?;
+            tracing::info!(
+                session_id = session.id,
+                log_file = %session.log_file,
+                ended_at,
+                "closed stale session at startup"
+            );
+            repaired += 1;
+        }
+        Ok(repaired)
+    }
+
+    fn poll_vrchat_presence(&mut self) -> Result<()> {
+        let has_session = self
+            .log_tail
+            .as_ref()
+            .and_then(|tail| tail.ingestor.session_id())
+            .is_some();
+        if !has_session {
+            self.vrchat_missing_polls = 0;
+            self.vrchat_session_id = None;
+            return Ok(());
+        }
+        self.observe_vrchat_presence(vrchat_process::is_running())
+    }
+
+    fn observe_vrchat_presence(&mut self, running: Option<bool>) -> Result<()> {
+        let Some(session_id) = self
+            .log_tail
+            .as_ref()
+            .and_then(|tail| tail.ingestor.session_id())
+        else {
+            self.vrchat_missing_polls = 0;
+            self.vrchat_session_id = None;
+            return Ok(());
+        };
+        if self.vrchat_session_id != Some(session_id) {
+            self.vrchat_session_id = Some(session_id);
+            self.vrchat_missing_polls = 0;
+        }
+        let Some(running) = running else {
+            self.vrchat_missing_polls = 0;
+            return Ok(());
+        };
+        if running {
+            self.vrchat_missing_polls = 0;
+            return Ok(());
+        }
+        self.vrchat_missing_polls = self.vrchat_missing_polls.saturating_add(1);
+        if self.vrchat_missing_polls < VRCHAT_MISSING_POLLS_BEFORE_CLOSE {
+            return Ok(());
+        }
+
+        let now = chrono::Utc::now().timestamp();
+        let (ended_at, closed) = {
+            let db = self.db.lock().unwrap();
+            let ended_at = self
+                .log_tail
+                .as_ref()
+                .map(|tail| {
+                    let started_at = tail.ingestor.session_started_at().unwrap_or(now);
+                    session_end_time(&db, &tail.path, started_at, now)
+                })
+                .unwrap_or(now);
+            let closed = self
+                .log_tail
+                .as_mut()
+                .map(|tail| tail.ingestor.close_current_session(&db, ended_at))
+                .transpose()?
+                .unwrap_or(false);
+            (ended_at, closed)
+        };
+        self.vrchat_missing_polls = 0;
+        self.vrchat_session_id = None;
+        if closed {
+            tracing::info!(ended_at, "closed session after VRChat exited");
+            self.refresh_status()?;
+        }
+        Ok(())
+    }
+
     fn ingest_logs(&mut self) -> Result<()> {
         let Some(log_dir) = self.settings.log_dir() else {
             self.clear_daemon_error(DaemonOperation::Log)?;
@@ -1369,15 +1480,10 @@ impl Daemon {
             .unwrap_or(true);
         if new_tail {
             if let Some(mut previous) = self.log_tail.take() {
-                let finish_at = previous
-                    .path
-                    .metadata()
-                    .ok()
-                    .and_then(|meta| meta.modified().ok())
-                    .map(vrc_photo_core::time::from_system_time)
-                    .map(|stamp| stamp.utc)
-                    .unwrap_or_else(|| chrono::Utc::now().timestamp());
                 let db = self.db.lock().unwrap();
+                let now = chrono::Utc::now().timestamp();
+                let started_at = previous.ingestor.session_started_at().unwrap_or(now);
+                let finish_at = session_end_time(&db, &previous.path, started_at, now);
                 previous.ingestor.finish(&db, finish_at)?;
             }
             let offset = {
@@ -1860,7 +1966,10 @@ impl Daemon {
         self.wake.notify();
         if let Some(mut tail) = self.log_tail.take() {
             let db = self.db.lock().unwrap();
-            if let Err(error) = tail.ingestor.finish(&db, chrono::Utc::now().timestamp()) {
+            let now = chrono::Utc::now().timestamp();
+            let started_at = tail.ingestor.session_started_at().unwrap_or(now);
+            let ended_at = session_end_time(&db, &tail.path, started_at, now);
+            if let Err(error) = tail.ingestor.finish(&db, ended_at) {
                 tracing::warn!(%error, "cannot finish log ingestion on shutdown");
             }
         }
@@ -2820,6 +2929,26 @@ fn process_job(db: &Arc<Mutex<Db>>, job: &CompressionJob) -> Result<()> {
     }
 }
 
+fn modified_utc(path: &Path) -> Option<i64> {
+    path.metadata()
+        .ok()?
+        .modified()
+        .ok()
+        .map(vrc_photo_core::time::from_system_time)
+        .map(|stamp| stamp.utc)
+}
+
+/// Picks the end timestamp for a session: log file mtime, then the mtime
+/// recorded by the last log ingestion, then `now`. The result is clamped to
+/// `[started_at, now]` so a future or pre-start mtime cannot keep the session
+/// visible (and so a clock skew cannot create an invalid interval).
+fn session_end_time(db: &Db, log_file: &Path, started_at: i64, now: i64) -> i64 {
+    let candidate = modified_utc(log_file)
+        .or_else(|| db.log_mtime(&log_file.to_string_lossy()).ok().flatten())
+        .unwrap_or(now);
+    candidate.clamp(started_at.min(now), now)
+}
+
 fn latest_log_file(dir: &Path) -> Result<Option<PathBuf>> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -3710,6 +3839,360 @@ mod tests {
         daemon.run_once().unwrap();
         let photo = db.photo_by_id(photo.id).unwrap().unwrap();
         assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Missing);
+    }
+
+    #[test]
+    fn startup_repairs_open_sessions_at_the_log_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let log_path = log_dir.join("output_log_2026-10-21_21-00-00.txt");
+        std::fs::write(&log_path, "").unwrap();
+        let mtime: i64 = 1_700_000_500;
+        let file = File::options().write(true).open(&log_path).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(mtime as u64))
+            .unwrap();
+
+        let db_path = dir.path().join("library.db");
+        {
+            let db = Db::open(&db_path).unwrap();
+            let world = db
+                .upsert_world("wrld_test", Some("Test World"), Some("log"))
+                .unwrap();
+            let session = db
+                .create_session(log_path.to_str().unwrap(), mtime - 120, world, None)
+                .unwrap();
+            db.upsert_session_player(session, "usr_a", "Mio", mtime - 60)
+                .unwrap();
+        }
+
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        daemon.run_once().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        assert!(db.open_sessions().unwrap().is_empty());
+        let session = db.session_at(mtime - 60).unwrap().unwrap();
+        assert_eq!(session.ended_at, Some(mtime));
+    }
+
+    #[test]
+    fn startup_repair_falls_back_to_the_ingested_log_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let missing_log = log_dir.join("output_log_deleted.txt");
+        let db_path = dir.path().join("library.db");
+        {
+            let db = Db::open(&db_path).unwrap();
+            let world = db.upsert_world("wrld_test", None, None).unwrap();
+            db.create_session(missing_log.to_str().unwrap(), 100, world, None)
+                .unwrap();
+            db.set_log_offset(missing_log.to_str().unwrap(), 10, 500, 10, "1")
+                .unwrap();
+        }
+
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        assert_eq!(daemon.repair_open_sessions().unwrap(), 1);
+
+        let db = Db::open(&db_path).unwrap();
+        let session = db.session_at(200).unwrap().unwrap();
+        assert_eq!(session.ended_at, Some(500));
+    }
+
+    #[test]
+    fn maintenance_run_does_not_repair_open_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let db_path = dir.path().join("library.db");
+        {
+            let db = Db::open(&db_path).unwrap();
+            let world = db.upsert_world("wrld_test", None, None).unwrap();
+            db.create_session("output_log_live.txt", 100, world, None)
+                .unwrap();
+        }
+
+        let mut daemon =
+            Daemon::open_preserving_running_deletions(&db_path, Some(photo_dir), Some(log_dir))
+                .unwrap();
+        daemon.run_once().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        assert_eq!(db.open_sessions().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn vrchat_exit_closes_the_session_at_the_log_mtime_after_consecutive_misses() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let log_path = dir.path().join("logs/output_log_2026-10-21_21-00-00.txt");
+        let join =
+            "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)";
+        let name =
+            "2026.10.21 21:23:13 Debug      -  [Behaviour] Joining or Creating Room: Test World";
+        std::fs::write(&log_path, format!("{join}\n{name}\n")).unwrap();
+        daemon.ingest_logs().unwrap();
+        let started = vrc_photo_core::log_parser::parse_line(join)
+            .unwrap()
+            .timestamp_utc();
+        let mtime = started + 120;
+        let file = File::options().write(true).open(&log_path).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(mtime as u64))
+            .unwrap();
+        assert!(
+            daemon
+                .log_tail
+                .as_ref()
+                .unwrap()
+                .ingestor
+                .session_id()
+                .is_some()
+        );
+
+        daemon.observe_vrchat_presence(Some(false)).unwrap();
+        daemon.observe_vrchat_presence(Some(false)).unwrap();
+        daemon.observe_vrchat_presence(Some(true)).unwrap();
+        daemon.observe_vrchat_presence(Some(false)).unwrap();
+        daemon.observe_vrchat_presence(Some(false)).unwrap();
+        {
+            let db = daemon.db.lock().unwrap();
+            assert!(db.session_at(started + 1).unwrap().is_some());
+        }
+        daemon.observe_vrchat_presence(Some(false)).unwrap();
+
+        assert!(
+            daemon
+                .log_tail
+                .as_ref()
+                .unwrap()
+                .ingestor
+                .session_id()
+                .is_none()
+        );
+        let db = daemon.db.lock().unwrap();
+        let session = db.session_at(started + 1).unwrap().unwrap();
+        assert_eq!(session.ended_at, Some(mtime));
+        drop(db);
+        let status = daemon.status.lock().unwrap();
+        assert_eq!(status.world_name, None);
+    }
+
+    #[test]
+    fn photos_imported_after_vrchat_exit_do_not_link_to_the_closed_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let log_path = dir.path().join("logs/output_log_2026-10-21_21-00-00.txt");
+        let join =
+            "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)";
+        let name =
+            "2026.10.21 21:23:13 Debug      -  [Behaviour] Joining or Creating Room: Test World";
+        std::fs::write(&log_path, format!("{join}\n{name}\n")).unwrap();
+        daemon.ingest_logs().unwrap();
+        let started = vrc_photo_core::log_parser::parse_line(join)
+            .unwrap()
+            .timestamp_utc();
+        let mtime = started + 120;
+        let file = File::options().write(true).open(&log_path).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(mtime as u64))
+            .unwrap();
+        for _ in 0..VRCHAT_MISSING_POLLS_BEFORE_CLOSE {
+            daemon.observe_vrchat_presence(Some(false)).unwrap();
+        }
+
+        let photo_path = dir
+            .path()
+            .join("photos/VRChat_2026-10-21_21-26-00.000_4x3.png");
+        write_photo(&photo_path);
+        daemon.run_once().unwrap();
+
+        let db = daemon.db.lock().unwrap();
+        let photo = db
+            .photo_by_path(photo_path.to_str().unwrap())
+            .unwrap()
+            .expect("photo indexed");
+        assert!(db.photo_context(photo.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn runtime_close_uses_the_ingested_mtime_when_the_log_file_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let log_path = dir.path().join("logs/output_log_2026-10-21_21-00-00.txt");
+        let join =
+            "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)";
+        std::fs::write(&log_path, format!("{join}\n")).unwrap();
+        let started = vrc_photo_core::log_parser::parse_line(join)
+            .unwrap()
+            .timestamp_utc();
+        let mtime = started + 60;
+        let file = File::options().write(true).open(&log_path).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(mtime as u64))
+            .unwrap();
+        daemon.ingest_logs().unwrap();
+        std::fs::remove_file(&log_path).unwrap();
+
+        for _ in 0..VRCHAT_MISSING_POLLS_BEFORE_CLOSE {
+            daemon.observe_vrchat_presence(Some(false)).unwrap();
+        }
+
+        let db = daemon.db.lock().unwrap();
+        let session = db.session_at(started + 1).unwrap().unwrap();
+        assert_eq!(session.ended_at, Some(mtime));
+    }
+
+    #[test]
+    fn shutdown_uses_the_ingested_mtime_when_the_log_file_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let log_path = dir.path().join("logs/output_log_2026-10-21_21-00-00.txt");
+        let join =
+            "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)";
+        std::fs::write(&log_path, format!("{join}\n")).unwrap();
+        let started = vrc_photo_core::log_parser::parse_line(join)
+            .unwrap()
+            .timestamp_utc();
+        let mtime = started + 60;
+        let file = File::options().write(true).open(&log_path).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(mtime as u64))
+            .unwrap();
+        daemon.ingest_logs().unwrap();
+        std::fs::remove_file(&log_path).unwrap();
+
+        daemon.shutdown();
+
+        let db = daemon.db.lock().unwrap();
+        let session = db.session_at(started + 1).unwrap().unwrap();
+        assert_eq!(session.ended_at, Some(mtime));
+    }
+
+    #[test]
+    fn future_log_mtime_is_clamped_to_now() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let log_path = dir.path().join("logs/output_log_2026-10-21_21-00-00.txt");
+        let join =
+            "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)";
+        std::fs::write(&log_path, format!("{join}\n")).unwrap();
+        daemon.ingest_logs().unwrap();
+        let started = vrc_photo_core::log_parser::parse_line(join)
+            .unwrap()
+            .timestamp_utc();
+        let now = chrono::Utc::now().timestamp();
+        let future = now + 3600;
+        let file = File::options().write(true).open(&log_path).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(future as u64))
+            .unwrap();
+
+        for _ in 0..VRCHAT_MISSING_POLLS_BEFORE_CLOSE {
+            daemon.observe_vrchat_presence(Some(false)).unwrap();
+        }
+
+        let db = daemon.db.lock().unwrap();
+        let session = db.session_at(started + 1).unwrap().unwrap();
+        assert!(session.ended_at.unwrap() <= chrono::Utc::now().timestamp());
+        assert!(db.session_at(now + 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn pending_misses_do_not_close_a_new_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let log_path = dir.path().join("logs/output_log_2026-10-21_21-00-00.txt");
+        let first_join =
+            "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_first:12345~region(jp)";
+        std::fs::write(&log_path, format!("{first_join}\n")).unwrap();
+        daemon.ingest_logs().unwrap();
+        daemon.observe_vrchat_presence(Some(false)).unwrap();
+        daemon.observe_vrchat_presence(Some(false)).unwrap();
+
+        let second_join =
+            "2026.10.21 21:24:12 Debug      -  [Behaviour] Joining wrld_second:12345~region(jp)";
+        let mut file = File::options().append(true).open(&log_path).unwrap();
+        writeln!(file, "{second_join}").unwrap();
+        daemon.ingest_logs().unwrap();
+        daemon.observe_vrchat_presence(Some(false)).unwrap();
+
+        let second_started = vrc_photo_core::log_parser::parse_line(second_join)
+            .unwrap()
+            .timestamp_utc();
+        let db = daemon.db.lock().unwrap();
+        assert!(
+            db.session_at(second_started + 1)
+                .unwrap()
+                .unwrap()
+                .ended_at
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn unknown_vrchat_presence_does_not_count_as_a_miss() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let log_path = dir.path().join("logs/output_log_2026-10-21_21-00-00.txt");
+        let join =
+            "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)";
+        std::fs::write(&log_path, format!("{join}\n")).unwrap();
+        daemon.ingest_logs().unwrap();
+
+        for _ in 0..10 {
+            daemon.observe_vrchat_presence(None).unwrap();
+        }
+
+        daemon.observe_vrchat_presence(Some(false)).unwrap();
+        daemon.observe_vrchat_presence(Some(false)).unwrap();
+        daemon.observe_vrchat_presence(None).unwrap();
+        daemon.observe_vrchat_presence(Some(false)).unwrap();
+
+        let db = daemon.db.lock().unwrap();
+        let started = vrc_photo_core::log_parser::parse_line(join)
+            .unwrap()
+            .timestamp_utc();
+        assert!(
+            db.session_at(started + 1)
+                .unwrap()
+                .unwrap()
+                .ended_at
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn shutdown_closes_the_session_at_the_log_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let log_path = dir.path().join("logs/output_log_2026-10-21_21-00-00.txt");
+        let join =
+            "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)";
+        std::fs::write(&log_path, format!("{join}\n")).unwrap();
+        daemon.ingest_logs().unwrap();
+        let started = vrc_photo_core::log_parser::parse_line(join)
+            .unwrap()
+            .timestamp_utc();
+        let mtime = started + 120;
+        let file = File::options().write(true).open(&log_path).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(mtime as u64))
+            .unwrap();
+
+        daemon.shutdown();
+
+        let db = daemon.db.lock().unwrap();
+        let session = db.session_at(started + 1).unwrap().unwrap();
+        assert_eq!(session.ended_at, Some(mtime));
+    }
+
+    #[test]
+    fn session_end_time_handles_a_start_time_in_the_future() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open(dir.path().join("library.db")).unwrap();
+        let ended_at = session_end_time(&db, Path::new("/missing/log.txt"), 2_000, 1_000);
+        assert_eq!(ended_at, 1_000);
     }
 
     fn save_daemon_settings(daemon: &Daemon, update: impl FnOnce(&mut AppSettings)) {
