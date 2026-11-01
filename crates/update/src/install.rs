@@ -362,7 +362,7 @@ fn safe_component(value: &str) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApplyKind {
-    #[serde(rename = "appimage")]
+    #[serde(rename = "appimage", alias = "app_image")]
     AppImage,
     Windows,
     SystemPackage {
@@ -490,7 +490,7 @@ impl ApplyJob {
             let expected_dir = UpdatePaths::new(&self.data_dir)
                 .downloads_dir()
                 .join(version.to_string());
-            if !self.staged.starts_with(&expected_dir)
+            if self.staged.parent() != Some(expected_dir.as_path())
                 || self
                     .staged
                     .components()
@@ -887,7 +887,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_kind_keeps_existing_json_and_adds_system_package() {
+    fn apply_kind_serializes_appimage_windows_and_system_package() {
         assert_eq!(
             serde_json::to_string(&ApplyKind::AppImage).unwrap(),
             "\"appimage\""
@@ -902,6 +902,14 @@ mod tests {
             })
             .unwrap(),
             "{\"system_package\":{\"family\":\"pacman\"}}"
+        );
+    }
+
+    #[test]
+    fn apply_kind_accepts_the_legacy_app_image_alias() {
+        assert_eq!(
+            serde_json::from_str::<ApplyKind>("\"app_image\"").unwrap(),
+            ApplyKind::AppImage
         );
     }
 
@@ -925,6 +933,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut job = system_job(dir.path());
         job.staged = dir.path().join("elsewhere.pkg.tar.zst");
+        assert!(job.validate().is_err());
+    }
+
+    #[test]
+    fn system_package_job_rejects_nested_staging_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut job = system_job(dir.path());
+        let nested = job.staged.parent().unwrap().join("sub");
+        std::fs::create_dir_all(&nested).unwrap();
+        let nested_file = nested.join(job.staged.file_name().unwrap());
+        std::fs::write(&nested_file, b"package").unwrap();
+        job.staged = nested_file;
         assert!(job.validate().is_err());
     }
 
