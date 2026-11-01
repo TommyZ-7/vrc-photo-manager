@@ -215,13 +215,21 @@ impl LogIngestor {
         Ok(())
     }
 
-    /// Closes the open session when a log file ends or the daemon stops.
-    pub fn finish(&mut self, db: &Db, timestamp_utc: i64) -> Result<()> {
-        if let Some(session_id) = self.session_id.take() {
-            db.close_session(session_id, timestamp_utc)?;
-        }
+    /// Closes the session currently tracked by this ingestor and clears the
+    /// world state so later lines cannot write into the closed session.
+    pub fn close_current_session(&mut self, db: &Db, ended_at: i64) -> Result<bool> {
+        let Some(session_id) = self.session_id.take() else {
+            return Ok(false);
+        };
+        db.close_session(session_id, ended_at)?;
         self.world_db_id = None;
         self.world_id = None;
+        Ok(true)
+    }
+
+    /// Closes the open session when a log file ends or the daemon stops.
+    pub fn finish(&mut self, db: &Db, timestamp_utc: i64) -> Result<()> {
+        self.close_current_session(db, timestamp_utc)?;
         Ok(())
     }
 }
@@ -307,5 +315,19 @@ mod tests {
 
         ingestor.ingest_line(&db, LEAVE).unwrap();
         assert!(ingestor.session_id().is_none());
+    }
+
+    #[test]
+    fn close_current_session_closes_at_the_given_time() {
+        let db = Db::open_in_memory().unwrap();
+        let mut ingestor = LogIngestor::new("log.txt");
+        ingestor.ingest_line(&db, JOIN).unwrap();
+        let started = parse_line(JOIN).unwrap().timestamp_utc();
+
+        assert!(ingestor.close_current_session(&db, started + 60).unwrap());
+        assert!(ingestor.session_id().is_none());
+        assert!(db.session_at(started + 30).unwrap().is_some());
+        assert!(db.session_at(started + 60).unwrap().is_none());
+        assert!(!ingestor.close_current_session(&db, started + 120).unwrap());
     }
 }
