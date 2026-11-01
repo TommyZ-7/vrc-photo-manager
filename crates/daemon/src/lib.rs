@@ -66,6 +66,44 @@ pub struct DaemonStatus {
     pub scan_roots: usize,
 }
 
+/// A user-facing daemon error summary that can be rendered in any locale.
+#[derive(Debug, Clone)]
+struct LocalizedError {
+    key: &'static str,
+    args: Vec<(&'static str, String)>,
+}
+
+impl LocalizedError {
+    fn new(key: &'static str) -> Self {
+        Self {
+            key,
+            args: Vec::new(),
+        }
+    }
+
+    fn arg(mut self, name: &'static str, value: impl ToString) -> Self {
+        self.args.push((name, value.to_string()));
+        self
+    }
+
+    fn message(&self) -> String {
+        self.message_in(&vrc_photo_i18n::current_locale())
+    }
+
+    fn message_in(&self, locale: &str) -> String {
+        vrc_photo_i18n::tr_args_in(locale, self.key, &self.args)
+    }
+
+    fn args_json(&self) -> String {
+        let args: std::collections::BTreeMap<&str, &str> = self
+            .args
+            .iter()
+            .map(|(name, value)| (*name, value.as_str()))
+            .collect();
+        serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string())
+    }
+}
+
 #[derive(Debug)]
 struct LogTail {
     path: PathBuf,
@@ -220,6 +258,7 @@ impl Daemon {
             );
         }
         let mut settings = AppSettings::load(&db).context("cannot load settings")?;
+        settings.language = vrc_photo_i18n::set_locale(&settings.language);
         if let Some(path) = photo_dir {
             settings.photo_roots = vec![path.to_string_lossy().to_string()];
         }
@@ -251,9 +290,15 @@ impl Daemon {
             .context("cannot load daemon errors")?
             .into_iter()
             .map(|error| {
+                let signature_source = match error.message_key.as_deref() {
+                    Some(key) => {
+                        format!("{}|{}", key, error.message_args.as_deref().unwrap_or("{}"))
+                    }
+                    None => error.message.clone(),
+                };
                 (
                     error.operation,
-                    error_signature(&error.message, error.detail.as_deref()),
+                    error_signature(&signature_source, error.detail.as_deref()),
                 )
             })
             .collect();
@@ -347,21 +392,53 @@ impl Daemon {
         &self.settings
     }
 
-    /// Persists a daemon failure unless the same message/detail was already
-    /// reported, so `attempts` counts distinct reports rather than poll ticks.
+    /// Persists a technical daemon failure without a catalog key. Kept for
+    /// errors whose detail text has no user-facing translation.
+    #[allow(dead_code)]
     fn report_daemon_error(
         &mut self,
         operation: DaemonOperation,
         message: &str,
         detail: Option<&str>,
     ) -> Result<()> {
-        let signature = error_signature(message, detail);
+        self.report_daemon_error_fields(operation, message, None, None, detail, message)
+    }
+
+    /// Records a user-facing failure with a catalog key and JSON args.
+    fn report_localized_error(
+        &mut self,
+        operation: DaemonOperation,
+        error: LocalizedError,
+        detail: Option<&str>,
+    ) -> Result<()> {
+        let args_json = error.args_json();
+        let signature = format!("{}|{}", error.key, args_json);
+        self.report_daemon_error_fields(
+            operation,
+            &error.message(),
+            Some(error.key),
+            Some(&args_json),
+            detail,
+            &signature,
+        )
+    }
+
+    fn report_daemon_error_fields(
+        &mut self,
+        operation: DaemonOperation,
+        message: &str,
+        message_key: Option<&str>,
+        message_args: Option<&str>,
+        detail: Option<&str>,
+        signature_source: &str,
+    ) -> Result<()> {
+        let signature = error_signature(signature_source, detail);
         if self.last_errors.get(&operation) == Some(&signature) {
             return Ok(());
         }
         {
             let db = self.db.lock().unwrap();
-            db.record_daemon_error(operation, message, detail)?;
+            db.record_daemon_error_i18n(operation, message, message_key, message_args, detail)?;
         }
         self.last_errors.insert(operation, signature);
         self.events.publish(Event::DaemonErrorChanged {
@@ -421,21 +498,23 @@ impl Daemon {
                 let (operation, message) = match &command {
                     DaemonCommand::Rescan => (
                         DaemonOperation::Scan,
-                        "写真フォルダの再スキャンに失敗しました",
+                        LocalizedError::new("daemon.rescan_failed"),
                     ),
-                    DaemonCommand::Relog => {
-                        (DaemonOperation::Log, "ログの再取り込みに失敗しました")
-                    }
-                    DaemonCommand::Relink => {
-                        (DaemonOperation::Link, "写真とログの紐付けに失敗しました")
-                    }
+                    DaemonCommand::Relog => (
+                        DaemonOperation::Log,
+                        LocalizedError::new("daemon.log_reimport_failed"),
+                    ),
+                    DaemonCommand::Relink => (
+                        DaemonOperation::Link,
+                        LocalizedError::new("daemon.relink_failed"),
+                    ),
                     DaemonCommand::ScanRoot { .. } => (
                         DaemonOperation::Scan,
-                        "写真フォルダの再スキャンに失敗しました",
+                        LocalizedError::new("daemon.rescan_failed"),
                     ),
                 };
                 if let Err(report_error) =
-                    self.report_daemon_error(operation, message, Some(&error.to_string()))
+                    self.report_localized_error(operation, message, Some(&error.to_string()))
                 {
                     tracing::error!(%report_error, "cannot record daemon command error");
                 }
@@ -447,10 +526,12 @@ impl Daemon {
     /// Replaces the in-memory settings with the current database values so a
     /// corrected path or switch takes effect without restarting the daemon.
     fn reload_settings(&mut self) -> Result<()> {
-        let settings = {
+        let mut settings = {
             let db = self.db.lock().unwrap();
             AppSettings::load(&db)?
         };
+        settings.language = vrc_photo_i18n::normalize(&settings.language);
+        let language_changed = settings.language != self.settings.language;
         if settings.autostart != self.settings.autostart {
             self.apply_autostart(settings.autostart);
         }
@@ -459,6 +540,12 @@ impl Daemon {
             Ordering::Relaxed,
         );
         self.settings = settings;
+        if language_changed {
+            vrc_photo_i18n::set_locale(&self.settings.language);
+            if let Some(tray) = self.tray.as_mut() {
+                tray.set_language();
+            }
+        }
         Ok(())
     }
 
@@ -480,9 +567,9 @@ impl Daemon {
     fn restart_watchers(&mut self) {
         if let Err(error) = self.rebuild_watchers() {
             tracing::error!(%error, "cannot start photo watchers");
-            if let Err(report_error) = self.report_daemon_error(
+            if let Err(report_error) = self.report_localized_error(
                 DaemonOperation::Scan,
-                "写真フォルダの監視を開始できませんでした",
+                LocalizedError::new("daemon.watcher_failed"),
                 Some(&error.to_string()),
             ) {
                 tracing::error!(%report_error, "cannot record watcher error");
@@ -661,9 +748,9 @@ impl Daemon {
                 && let Err(error) = self.index_dirty_paths()
             {
                 tracing::error!(%error, "incremental photo scan failed");
-                if let Err(report_error) = self.report_daemon_error(
+                if let Err(report_error) = self.report_localized_error(
                     DaemonOperation::Scan,
-                    "写真フォルダの差分スキャンに失敗しました",
+                    LocalizedError::new("daemon.diff_scan_failed"),
                     Some(&error.to_string()),
                 ) {
                     tracing::error!(%report_error, "cannot record scan error");
@@ -967,7 +1054,7 @@ impl Daemon {
                     tracing::warn!(path = %root.display(), "photo root does not exist");
                     report.failures.push(ScanFailure {
                         path: root,
-                        message: "写真フォルダが見つかりません".to_string(),
+                        message: vrc_photo_i18n::tr!("daemon.photo_root_missing"),
                     });
                     continue;
                 }
@@ -1081,11 +1168,11 @@ impl Daemon {
             .map(|failure| format!("{}: {}", failure.path.display(), failure.message))
             .collect::<Vec<_>>()
             .join("\n");
-        let message = format!(
-            "写真フォルダのスキャンで{}件の失敗がありました",
-            report.failures.len()
-        );
-        self.report_daemon_error(DaemonOperation::Scan, &message, Some(&detail))
+        self.report_localized_error(
+            DaemonOperation::Scan,
+            LocalizedError::new("daemon.scan_failed").arg("count", report.failures.len()),
+            Some(&detail),
+        )
     }
 
     fn ingest_logs(&mut self) -> Result<()> {
@@ -1094,9 +1181,9 @@ impl Daemon {
             return Ok(());
         };
         if !log_dir.is_dir() {
-            self.report_daemon_error(
+            self.report_localized_error(
                 DaemonOperation::Log,
-                &format!("ログフォルダが見つかりません: {}", log_dir.display()),
+                LocalizedError::new("daemon.log_dir_missing").arg("path", log_dir.display()),
                 None,
             )?;
             return Ok(());
@@ -1105,9 +1192,9 @@ impl Daemon {
             Ok(Some(path)) => path,
             Ok(None) => return Ok(()),
             Err(error) => {
-                self.report_daemon_error(
+                self.report_localized_error(
                     DaemonOperation::Log,
-                    "ログフォルダを読み取れません",
+                    LocalizedError::new("daemon.log_unreadable"),
                     Some(&error.to_string()),
                 )?;
                 return Ok(());
@@ -1115,9 +1202,9 @@ impl Daemon {
         };
         let pass = self.ingest_log_pass(&path)?;
         if let Some(failure) = pass.failure_detail() {
-            self.report_daemon_error(
+            self.report_localized_error(
                 DaemonOperation::Log,
-                "ログの取り込みに失敗しました",
+                LocalizedError::new("daemon.log_ingest_failed"),
                 Some(&failure),
             )?;
         } else if pass.is_clean() {
@@ -1241,9 +1328,9 @@ impl Daemon {
             }
             Err(error) => {
                 tracing::error!(%error, "cannot link photos to log context");
-                self.report_daemon_error(
+                self.report_localized_error(
                     DaemonOperation::Link,
-                    "写真とログの紐付けに失敗しました",
+                    LocalizedError::new("daemon.link_failed"),
                     Some(&error.to_string()),
                 )?;
                 Err(error.into())
@@ -2567,6 +2654,14 @@ mod tests {
     use std::io::Write;
     use std::time::SystemTime;
     use vrc_photo_core::model::DeletionStatus;
+
+    #[test]
+    fn localized_error_builds_text_and_json_args() {
+        let error = LocalizedError::new("daemon.scan_failed").arg("count", 3);
+        assert!(error.message_in("ja").contains('3'));
+        assert!(error.message_in("en").contains('3'));
+        assert_eq!(error.args_json(), r#"{"count":"3"}"#);
+    }
 
     #[test]
     fn reads_only_complete_lines_with_offsets() {

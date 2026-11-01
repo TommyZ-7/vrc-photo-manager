@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+use vrc_photo_i18n::{tr, tr_args};
 
 use crate::DaemonStatus;
 
@@ -22,10 +23,14 @@ pub struct Tray {
 
 impl Tray {
     pub fn new() -> Result<Self> {
-        let open = MenuItem::new("UIを開く", true, None);
-        let pause = CheckMenuItem::new("監視を一時停止", true, false, None);
-        let status = MenuItem::new("状態: 起動中", false, None);
-        let quit = MenuItem::new("終了", true, None);
+        let open = MenuItem::new(tr!("tray.open"), true, None);
+        let pause = CheckMenuItem::new(tr!("tray.pause"), true, false, None);
+        let status = MenuItem::new(
+            tr_args!("tray.status.prefix", status = tr!("tray.status.idle")),
+            false,
+            None,
+        );
+        let quit = MenuItem::new(tr!("tray.quit"), true, None);
         let menu = Menu::new();
         menu.append_items(&[
             &open,
@@ -53,6 +58,14 @@ impl Tray {
         })
     }
 
+    /// Refresh the menu labels after the UI changed the language.
+    pub fn set_language(&mut self) {
+        self.open.set_text(tr!("tray.open"));
+        self.pause.set_text(tr!("tray.pause"));
+        self.quit.set_text(tr!("tray.quit"));
+        self.last_text.clear();
+    }
+
     pub fn poll(&mut self, status: &DaemonStatus) -> TrayAction {
         #[cfg(target_os = "windows")]
         pump_windows_messages();
@@ -69,14 +82,19 @@ impl Tray {
         }
 
         let text = if status.paused {
-            "停止中".to_string()
+            tr!("tray.status.paused")
         } else if let Some(world) = &status.world_name {
-            format!("監視中 · {world} · {}人", status.players)
+            tr_args!(
+                "tray.status.watching",
+                world = world,
+                players = status.players
+            )
         } else {
-            "監視中 · 待機".to_string()
+            tr!("tray.status.idle")
         };
         if text != self.last_text {
-            self.status.set_text(format!("状態: {text}"));
+            self.status
+                .set_text(tr_args!("tray.status.prefix", status = text.clone()));
             let _ = self
                 .icon
                 .set_tooltip(Some(format!("VRC Photo Manager — {text}")));

@@ -7977,6 +7977,7 @@ dependencies = [
  "interprocess",
  "mimalloc",
  "notify",
+ "serde_json",
  "single-instance",
  "tempfile",
  "tracing",
@@ -7984,6 +7985,7 @@ dependencies = [
  "trash",
  "tray-icon",
  "vrc-photo-core",
+ "vrc-photo-i18n",
  "vrc-photo-ipc",
  "windows 0.62.2",
 ]
