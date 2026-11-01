@@ -1727,7 +1727,8 @@ mod tests {
         write_script(
             &path,
             &format!(
-                "#!/bin/sh\nif [ \"$1\" = \"-Qip\" ]; then\ncat <<'EOF'\n{metadata}\nEOF\nexit 0\nfi\nif [ \"$1\" = \"-U\" ]; then\necho \"$@\" >> \"{log}\"\necho \"{install_stderr}\" >&2\nexit {install_exit}\nfi\nexit 2\n",
+                "#!/bin/sh\nif [ \"$1\" = \"-Qip\" ]; then\necho \"$@\" >> \"{metadata_log}\"\ncat <<'EOF'\n{metadata}\nEOF\nexit 0\nfi\nif [ \"$1\" = \"-U\" ]; then\necho \"$@\" >> \"{log}\"\necho \"{install_stderr}\" >&2\nexit {install_exit}\nfi\nexit 2\n",
+                metadata_log = dir.join("pacman-metadata-args.log").display(),
                 log = dir.join("pacman-args.log").display(),
             ),
         );
@@ -1737,7 +1738,13 @@ mod tests {
     #[cfg(unix)]
     fn fake_dpkg_deb(dir: &Path, metadata: &str) -> PathBuf {
         let path = dir.join("dpkg-deb");
-        write_script(&path, &format!("#!/bin/sh\ncat <<'EOF'\n{metadata}\nEOF\n"));
+        write_script(
+            &path,
+            &format!(
+                "#!/bin/sh\necho \"$@\" >> \"{log}\"\ncat <<'EOF'\n{metadata}\nEOF\n",
+                log = dir.join("dpkg-deb-args.log").display(),
+            ),
+        );
         path
     }
 
@@ -2444,17 +2451,20 @@ mod tests {
     #[test]
     fn system_package_rejects_a_package_name_mismatch() {
         let dir = tempfile::tempdir().unwrap();
-        let (job, mut options) = system_package_fixture(dir.path(), &next_version());
+        let version = next_version();
+        let (job, mut options) = system_package_fixture(dir.path(), &version);
         options.pacman_path = Some(fake_pacman(
             dir.path(),
-            "Name            : evil\nVersion         : 0.4.0-1",
+            &format!("Name            : evil\nVersion         : {version}-1"),
             0,
             "",
         ));
-        assert!(matches!(
-            run_system_package_from_job(&job, &options),
-            Err(UpdateError::PackageMetadataMismatch(_))
-        ));
+        let error = run_system_package_from_job(&job, &options).unwrap_err();
+        assert!(matches!(&error, UpdateError::PackageMetadataMismatch(_)));
+        assert!(
+            error.to_string().contains("unexpected package name"),
+            "the name check must reject the package before the version check: {error}"
+        );
     }
 
     #[cfg(unix)]
@@ -2527,6 +2537,11 @@ mod tests {
             format!("Name            : vrc-photo-manager\nVersion         : {version}-1");
         options.pacman_path = Some(fake_pacman(dir.path(), &metadata, 0, ""));
         run_system_package_from_job(&job, &options).unwrap();
+        let metadata_args =
+            std::fs::read_to_string(dir.path().join("pacman-metadata-args.log")).unwrap();
+        assert!(metadata_args.contains("-Qip"));
+        assert!(metadata_args.contains("vrc-photo-update-"));
+        assert!(!metadata_args.contains("downloads"));
         let args = std::fs::read_to_string(dir.path().join("pacman-args.log")).unwrap();
         assert!(args.contains("-U --noconfirm"));
         assert!(args.contains("vrc-photo-update-"));
@@ -2544,6 +2559,11 @@ mod tests {
         let job_file = dir.path().join("job.json");
         std::fs::write(&job_file, serde_json::to_vec(&job).unwrap()).unwrap();
         run_system_package(&job_file, &options).unwrap();
+        let metadata_args =
+            std::fs::read_to_string(dir.path().join("pacman-metadata-args.log")).unwrap();
+        assert!(metadata_args.contains("-Qip"));
+        assert!(metadata_args.contains("vrc-photo-update-"));
+        assert!(!metadata_args.contains("downloads"));
         let args = std::fs::read_to_string(dir.path().join("pacman-args.log")).unwrap();
         assert!(args.contains("-U --noconfirm"));
         assert!(args.contains("vrc-photo-update-"));
@@ -2560,6 +2580,10 @@ mod tests {
         options.dpkg_deb_path = Some(fake_dpkg_deb(dir.path(), &metadata));
         options.dpkg_path = Some(fake_dpkg(dir.path(), 0, ""));
         run_system_package_from_job(&job, &options).unwrap();
+        let metadata_args = std::fs::read_to_string(dir.path().join("dpkg-deb-args.log")).unwrap();
+        assert!(metadata_args.contains("-f"));
+        assert!(metadata_args.contains("vrc-photo-update-"));
+        assert!(!metadata_args.contains("downloads"));
         let args = std::fs::read_to_string(dir.path().join("dpkg-args.log")).unwrap();
         assert!(args.contains("-i "));
         assert!(args.contains("vrc-photo-update-"));
