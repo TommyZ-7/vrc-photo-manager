@@ -7989,6 +7989,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "vrc-photo-i18n"
+version = "0.9.1"
+dependencies = [
+ "regex",
+ "rust-i18n",
+ "tracing",
+]
+
+[[package]]
 name = "vrc-photo-ipc"
 version = "0.9.1"
 dependencies = [

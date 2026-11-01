@@ -1,0 +1,12 @@
+_version: 1
+language.name: "日本語"
+nav.photos: "写真"
+nav.search: "検索"
+nav.compression: "圧縮設定"
+nav.dashboard: "ダッシュボード"
+nav.settings: "設定"
+common.cancel: "キャンセル"
+common.retry: "再試行"
+photos.selected: "%{count} 件選択中"
+settings.language.title: "言語"
+settings.language.hint: "変更はすぐに反映されます"

@@ -1,0 +1,12 @@
+_version: 1
+language.name: "English"
+nav.photos: "Photos"
+nav.search: "Search"
+nav.compression: "Compression"
+nav.dashboard: "Dashboard"
+nav.settings: "Settings"
+common.cancel: "Cancel"
+common.retry: "Retry"
+photos.selected: "Selected: %{count}"
+settings.language.title: "Language"
+settings.language.hint: "Changes apply immediately."
