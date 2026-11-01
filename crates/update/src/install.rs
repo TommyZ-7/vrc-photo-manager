@@ -77,11 +77,23 @@ impl PackageFamily {
 /// How this copy of the application was installed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallKind {
-    AppImage { path: PathBuf },
-    WindowsCurrentUser { install_dir: PathBuf },
-    WindowsPerMachine { install_dir: PathBuf },
+    AppImage {
+        path: PathBuf,
+    },
+    WindowsCurrentUser {
+        install_dir: PathBuf,
+    },
+    WindowsPerMachine {
+        install_dir: PathBuf,
+    },
     WindowsOther,
-    SystemPackage { family: PackageFamily },
+    SystemPackage {
+        family: PackageFamily,
+        /// Whether this is the package-managed `/usr/bin` install. A binary in
+        /// `/usr/local/bin` shadows the packaged one, so it only gets the
+        /// package-manager command.
+        managed: bool,
+    },
     Development,
 }
 
@@ -113,7 +125,8 @@ impl InstallKind {
         matches!(
             self,
             Self::SystemPackage {
-                family: PackageFamily::Pacman | PackageFamily::Deb
+                family: PackageFamily::Pacman | PackageFamily::Deb,
+                managed: true,
             }
         ) && pkexec_available
             && helper_available
@@ -217,9 +230,14 @@ pub fn classify_linux(
             path: std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()),
         };
     }
+    // Only the package-managed `/usr/bin` install may auto-apply. A binary in
+    // `/usr/local/bin` shadows the packaged one, so installing the system
+    // package would not replace what the user is running; it keeps the
+    // package-manager command fallback instead.
     if current_exe.starts_with("/usr/bin") || current_exe.starts_with("/usr/local/bin") {
         return InstallKind::SystemPackage {
             family: PackageFamily::from_os_release(os_release),
+            managed: current_exe.starts_with("/usr/bin"),
         };
     }
     InstallKind::Development
@@ -289,17 +307,20 @@ fn install_kind_windows() -> InstallKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdatePaths {
     pub root: PathBuf,
+    data_dir: PathBuf,
 }
 
 impl UpdatePaths {
     pub fn new(data_dir: &Path) -> Self {
         Self {
             root: data_dir.join("updates"),
+            data_dir: data_dir.to_path_buf(),
         }
     }
 
     /// Creates the directories the UI and helper write to.
     pub fn ensure(&self) -> Result<()> {
+        create_private_dir(&self.data_dir)?;
         for path in [&self.root, &self.downloads_dir(), &self.bin_dir()] {
             create_private_dir(path)?;
         }
@@ -577,11 +598,21 @@ pub fn prepare_apply(job: &ApplyJob, current_exe: &Path, data_dir: &Path) -> Res
 pub fn start_apply(job: &ApplyJob, current_exe: &Path, data_dir: &Path) -> Result<()> {
     let helper = prepare_apply(job, current_exe, data_dir)?;
     let paths = UpdatePaths::new(data_dir);
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let log = options
         .open(paths.log_file())
         .map_err(|error| UpdateError::io_at(IoOperation::Job, paths.log_file(), error))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(paths.log_file(), std::fs::Permissions::from_mode(0o600));
+    }
     let stderr = log
         .try_clone()
         .map_err(|error| UpdateError::io_at(IoOperation::Job, paths.log_file(), error))?;
@@ -653,7 +684,19 @@ mod tests {
                 "ID=ubuntu\nID_LIKE=debian\n"
             ),
             InstallKind::SystemPackage {
-                family: PackageFamily::Deb
+                family: PackageFamily::Deb,
+                managed: true,
+            }
+        );
+        assert_eq!(
+            classify_linux(
+                Path::new("/usr/local/bin/vrc-photo-manager"),
+                None,
+                "ID=arch\n"
+            ),
+            InstallKind::SystemPackage {
+                family: PackageFamily::Pacman,
+                managed: false,
             }
         );
         assert_eq!(
@@ -706,7 +749,8 @@ mod tests {
         );
         assert!(
             !InstallKind::SystemPackage {
-                family: PackageFamily::Deb
+                family: PackageFamily::Deb,
+                managed: true,
             }
             .automatic_apply()
         );
@@ -717,7 +761,8 @@ mod tests {
     fn automatic_check_excludes_unsupported_windows_and_development() {
         assert!(
             InstallKind::SystemPackage {
-                family: PackageFamily::Pacman
+                family: PackageFamily::Pacman,
+                managed: true,
             }
             .automatic_check()
         );
@@ -792,7 +837,8 @@ mod tests {
         assert!(
             manifest
                 .asset_for(&InstallKind::SystemPackage {
-                    family: PackageFamily::Deb
+                    family: PackageFamily::Deb,
+                    managed: true,
                 })
                 .is_none()
         );
@@ -801,6 +847,11 @@ mod tests {
     #[test]
     fn update_paths_create_private_directories() {
         let dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let paths = UpdatePaths::new(dir.path());
         paths.ensure().unwrap();
         assert!(paths.root.is_dir());
@@ -819,6 +870,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
             for path in [&paths.root, &paths.downloads_dir(), &paths.bin_dir()] {
                 assert_eq!(
                     std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
@@ -949,6 +1004,16 @@ mod tests {
     }
 
     #[test]
+    fn system_package_job_rejects_parent_dir_components() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut job = system_job(dir.path());
+        let version_dir = job.staged.parent().unwrap().to_path_buf();
+        let file_name = job.staged.file_name().unwrap().to_os_string();
+        job.staged = version_dir.join("..").join("0.4.0").join(file_name);
+        assert!(job.validate().is_err());
+    }
+
+    #[test]
     fn system_package_job_rejects_wrong_extension() {
         let dir = tempfile::tempdir().unwrap();
         let mut job = system_job(dir.path());
@@ -960,12 +1025,27 @@ mod tests {
     fn system_package_apply_requires_pkexec_helper_and_policy() {
         let install = InstallKind::SystemPackage {
             family: PackageFamily::Pacman,
+            managed: true,
         };
         assert!(install.system_package_apply(true, true, true));
         assert!(!install.system_package_apply(false, true, true));
         assert!(!install.system_package_apply(true, false, true));
         assert!(!install.system_package_apply(true, true, false));
         assert!(!InstallKind::Development.system_package_apply(true, true, true));
+        assert!(
+            !InstallKind::SystemPackage {
+                family: PackageFamily::Unknown,
+                managed: true,
+            }
+            .system_package_apply(true, true, true)
+        );
+        assert!(
+            !InstallKind::SystemPackage {
+                family: PackageFamily::Pacman,
+                managed: false,
+            }
+            .system_package_apply(true, true, true)
+        );
     }
 
     #[test]
@@ -978,6 +1058,7 @@ mod tests {
         );
         let install = InstallKind::SystemPackage {
             family: PackageFamily::Deb,
+            managed: true,
         };
         assert!(install.can_apply_automatically(true, true, true));
         assert!(!install.can_apply_automatically(true, true, false));

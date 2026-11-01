@@ -174,7 +174,8 @@ mod tests {
     fn only_self_update_capable_installs_with_assets_can_apply() {
         assert!(!can_apply(
             &InstallKind::SystemPackage {
-                family: PackageFamily::Deb
+                family: PackageFamily::Deb,
+                managed: true,
             },
             true,
             false,
@@ -191,6 +192,7 @@ mod tests {
     fn system_package_can_apply_only_when_ready() {
         let install = InstallKind::SystemPackage {
             family: PackageFamily::Pacman,
+            managed: true,
         };
         assert!(can_apply(&install, true, false, false, true));
         assert!(!can_apply(&install, true, false, false, false));
@@ -201,24 +203,45 @@ mod tests {
     fn system_package_without_auto_apply_shows_the_package_command() {
         assert!(should_show_package_command(
             &InstallKind::SystemPackage {
-                family: PackageFamily::Pacman
+                family: PackageFamily::Pacman,
+                managed: true,
             },
             false,
             true,
         ));
         assert!(!should_show_package_command(
             &InstallKind::SystemPackage {
-                family: PackageFamily::Pacman
+                family: PackageFamily::Pacman,
+                managed: true,
             },
             true,
             true,
         ));
         assert!(should_show_package_command(
             &InstallKind::SystemPackage {
-                family: PackageFamily::Pacman
+                family: PackageFamily::Pacman,
+                managed: true,
             },
             true,
             false,
+        ));
+        assert!(should_show_package_command(
+            &InstallKind::SystemPackage {
+                family: PackageFamily::Pacman,
+                managed: false,
+            },
+            false,
+            true,
+        ));
+        assert!(!can_apply(
+            &InstallKind::SystemPackage {
+                family: PackageFamily::Pacman,
+                managed: false,
+            },
+            true,
+            false,
+            false,
+            false
         ));
     }
 
@@ -351,13 +374,15 @@ mod tests {
         assert_eq!(install_label(&appimage()), "AppImage");
         assert_eq!(
             install_label(&InstallKind::SystemPackage {
-                family: PackageFamily::Deb
+                family: PackageFamily::Deb,
+                managed: true,
             }),
             "deb"
         );
         assert_eq!(
             package_command(&InstallKind::SystemPackage {
-                family: PackageFamily::Pacman
+                family: PackageFamily::Pacman,
+                managed: true,
             }),
             Some("sudo pacman -Syu vrc-photo-manager")
         );
@@ -544,7 +569,9 @@ impl UpdateNotice {
                 Some(LastErrorCode::HealthCheckFailed) => {
                     vrc_photo_i18n::tr_in(locale, "update.notice.health_failed")
                 }
-                Some(LastErrorCode::HelperFailed) | None => match &self.reason {
+                Some(LastErrorCode::InstallOutcomeUnknown)
+                | Some(LastErrorCode::HelperFailed)
+                | None => match &self.reason {
                     Some(reason) => vrc_photo_i18n::tr_args_in(
                         locale,
                         "update.notice.failed",
@@ -863,7 +890,13 @@ impl App {
                 return;
             }
         };
-        let dest = UpdatePaths::new(&data_dir)
+        let paths = UpdatePaths::new(&data_dir);
+        if let Err(error) = paths.ensure() {
+            self.update.phase = UpdatePhase::Error(update_error_message(&error));
+            cx.notify();
+            return;
+        }
+        let dest = paths
             .downloads_dir()
             .join(update.version.to_string())
             .join(file_name);
@@ -1011,7 +1044,7 @@ impl App {
         let (kind, target) = match &self.update.install {
             InstallKind::AppImage { path } => (ApplyKind::AppImage, path.clone()),
             InstallKind::WindowsCurrentUser { .. } => (ApplyKind::Windows, current_exe.clone()),
-            InstallKind::SystemPackage { family } => (
+            InstallKind::SystemPackage { family, .. } => (
                 ApplyKind::SystemPackage { family: *family },
                 current_exe.clone(),
             ),
@@ -1616,7 +1649,7 @@ fn install_label(install: &InstallKind) -> String {
             "Windows (NSIS)".to_string()
         }
         InstallKind::WindowsOther => tr!("update.install.windows_manual"),
-        InstallKind::SystemPackage { family } => match family {
+        InstallKind::SystemPackage { family, .. } => match family {
             vrc_photo_update::PackageFamily::Deb => "deb".to_string(),
             vrc_photo_update::PackageFamily::Pacman => "pacman".to_string(),
             vrc_photo_update::PackageFamily::Unknown => tr!("update.install.linux_package"),
@@ -1627,7 +1660,7 @@ fn install_label(install: &InstallKind) -> String {
 
 fn package_command(install: &InstallKind) -> Option<&'static str> {
     match install {
-        InstallKind::SystemPackage { family } => family.update_command(),
+        InstallKind::SystemPackage { family, .. } => family.update_command(),
         _ => None,
     }
 }

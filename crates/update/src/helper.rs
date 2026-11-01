@@ -40,6 +40,9 @@ pub struct HelperOptions {
     pub dpkg_path: Option<PathBuf>,
     #[cfg(test)]
     pub dpkg_deb_path: Option<PathBuf>,
+    /// Test-only polkit policy path used by the helper-side gate.
+    #[cfg(test)]
+    pub policy_path: Option<PathBuf>,
 }
 
 impl Default for HelperOptions {
@@ -61,6 +64,8 @@ impl Default for HelperOptions {
             dpkg_path: None,
             #[cfg(test)]
             dpkg_deb_path: None,
+            #[cfg(test)]
+            policy_path: None,
         }
     }
 }
@@ -415,6 +420,20 @@ fn root_temp_dir(options: &HelperOptions) -> PathBuf {
     PathBuf::from("/var/tmp")
 }
 
+/// Whether the polkit policy for the system update helper is installed.
+///
+/// Without the dedicated policy, `pkexec` falls back to the generic
+/// `org.freedesktop.policykit.exec` action, which the design explicitly does
+/// not allow for system package installs.
+fn system_policy_available(options: &HelperOptions) -> bool {
+    #[cfg(test)]
+    if let Some(path) = &options.policy_path {
+        return path.is_file();
+    }
+    let _ = options;
+    crate::install::system_policy_available()
+}
+
 /// Rejects staging paths that are not a regular file owned by the invoking
 /// user directly under `<data_dir>/updates/downloads/<version>/`.
 #[cfg(unix)]
@@ -578,17 +597,22 @@ impl TempPackage {
     fn create(dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(dir).map_err(|error| UpdateError::io(dir, error))?;
         let path = dir.join(format!("vrc-photo-update-{}.pkg", uuid::Uuid::new_v4()));
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|error| UpdateError::io(&path, error))?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-                .map_err(|error| UpdateError::io(&path, error))?;
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
         }
+        let file = match options.open(&path) {
+            Ok(file) => file,
+            Err(error) => {
+                if error.kind() != std::io::ErrorKind::AlreadyExists {
+                    let _ = std::fs::remove_file(&path);
+                }
+                return Err(UpdateError::io(&path, error));
+            }
+        };
         drop(file);
         Ok(Self { path })
     }
@@ -729,7 +753,7 @@ fn read_package_metadata(
         return Err(UpdateError::PackageManagerFailed {
             family,
             status: output.status.to_string(),
-            output: truncate_output(&output.stderr),
+            output: command_output(&output),
         });
     }
     let text = String::from_utf8_lossy(&output.stdout);
@@ -754,9 +778,27 @@ fn parse_field(text: &str, key: &str) -> Option<String> {
     })
 }
 
+/// Keeps the last 64 KiB of command output, where package managers put the
+/// actionable error.
 fn truncate_output(bytes: &[u8]) -> String {
     const LIMIT: usize = 64 * 1024;
-    String::from_utf8_lossy(&bytes[..bytes.len().min(LIMIT)]).to_string()
+    let start = bytes.len().saturating_sub(LIMIT);
+    let text = String::from_utf8_lossy(&bytes[start..]).to_string();
+    if start == 0 {
+        text
+    } else {
+        format!("... ({start} bytes omitted)\n{text}")
+    }
+}
+
+/// The combined stdout and stderr of a failed command, keeping the tail.
+fn command_output(output: &std::process::Output) -> String {
+    let mut bytes = output.stdout.clone();
+    if !bytes.is_empty() && !output.stderr.is_empty() {
+        bytes.push(b'\n');
+    }
+    bytes.extend_from_slice(&output.stderr);
+    truncate_output(&bytes)
 }
 
 fn install_package(family: PackageFamily, path: &Path, options: &HelperOptions) -> Result<()> {
@@ -793,7 +835,7 @@ fn install_package(family: PackageFamily, path: &Path, options: &HelperOptions) 
     Err(UpdateError::PackageManagerFailed {
         family,
         status: output.status.to_string(),
-        output: truncate_output(&output.stderr),
+        output: command_output(&output),
     })
 }
 
@@ -852,7 +894,7 @@ pub(crate) fn run_system_package_from_job(job: &ApplyJob, options: &HelperOption
 }
 
 /// Maps a `pkexec` exit status to a user-facing failure code and reason.
-fn map_pkexec_status(status: std::process::ExitStatus, stderr: &str) -> (LastErrorCode, String) {
+fn map_pkexec_status(status: std::process::ExitStatus, output: &str) -> (LastErrorCode, String) {
     let code = match status.code() {
         Some(126) => LastErrorCode::AuthCancelled,
         Some(127) => LastErrorCode::AuthUnavailable,
@@ -862,9 +904,13 @@ fn map_pkexec_status(status: std::process::ExitStatus, stderr: &str) -> (LastErr
         Some(13) => LastErrorCode::Downgrade,
         Some(15) => LastErrorCode::PackageManagerFailed,
         Some(10) => LastErrorCode::HelperFailed,
-        _ => LastErrorCode::HelperFailed,
+        // The privileged helper did not report a known pre-install failure.
+        // The package manager may have started, so the job and staged package
+        // must be kept for investigation.
+        Some(16) | None => LastErrorCode::InstallOutcomeUnknown,
+        _ => LastErrorCode::InstallOutcomeUnknown,
     };
-    (code, truncate_output(stderr.as_bytes()))
+    (code, truncate_output(output.as_bytes()))
 }
 
 /// Whether a failure happened before the package manager changed anything.
@@ -891,9 +937,9 @@ fn handle_system_package_exit(
     job: &ApplyJob,
     job_path: &Path,
     status: std::process::ExitStatus,
-    stderr: &str,
+    output: &str,
 ) -> Result<()> {
-    let (code, reason) = map_pkexec_status(status, stderr);
+    let (code, reason) = map_pkexec_status(status, output);
     fail_system_package(
         paths,
         job,
@@ -926,6 +972,16 @@ fn run_system_package_apply(
             job_path,
             LastErrorCode::PackageVerificationFailed,
             error.to_string(),
+            true,
+        );
+    }
+    if !system_policy_available(options) {
+        return fail_system_package(
+            paths,
+            job,
+            job_path,
+            LastErrorCode::AuthUnavailable,
+            "the polkit policy for the system update helper is missing".to_string(),
             true,
         );
     }
@@ -980,8 +1036,9 @@ fn run_system_package_apply(
     log(
         paths,
         &format!(
-            "system package helper exit: {:?}\n{}",
+            "system package helper exit: {:?}\nstdout:\n{}\nstderr:\n{}",
             output.status.code(),
+            truncate_output(&output.stdout),
             truncate_output(&output.stderr)
         ),
     );
@@ -991,7 +1048,7 @@ fn run_system_package_apply(
             job,
             job_path,
             output.status,
-            &String::from_utf8_lossy(&output.stderr),
+            &command_output(&output),
         );
     }
 
@@ -1417,7 +1474,19 @@ fn log(paths: &UpdatePaths, message: &str) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    if let Ok(mut file) = options.open(&path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        }
         let _ = writeln!(file, "[{}] {message}", Utc::now().to_rfc3339());
     }
 }
@@ -1821,6 +1890,60 @@ mod tests {
             Some(dir.path())
         );
         assert!(read_health_marker(&paths, "other").unwrap().is_none());
+    }
+
+    #[test]
+    fn truncate_output_keeps_the_tail_of_large_output() {
+        let mut bytes = vec![b'a'; 64 * 1024 + 32];
+        bytes[..4].copy_from_slice(b"HEAD");
+        let len = bytes.len();
+        bytes[len - 4..].copy_from_slice(b"TAIL");
+
+        let text = truncate_output(&bytes);
+
+        assert!(text.ends_with("TAIL"));
+        assert!(!text.contains("HEAD"));
+        assert!(text.contains("bytes omitted"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_output_keeps_stdout_and_stderr() {
+        let mut output = std::process::Command::new("true").output().unwrap();
+        output.stdout = b"stdout message".to_vec();
+        output.stderr = b"stderr message".to_vec();
+
+        let text = command_output(&output);
+
+        assert!(text.contains("stdout message"));
+        assert!(text.contains("stderr message"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn updater_log_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        std::fs::write(paths.log_file(), b"old\n").unwrap();
+        std::fs::set_permissions(paths.log_file(), std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        log(&paths, "message");
+
+        assert_eq!(
+            std::fs::metadata(paths.log_file())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert!(
+            std::fs::read_to_string(paths.log_file())
+                .unwrap()
+                .contains("message")
+        );
     }
 
     #[test]
@@ -2661,6 +2784,49 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn system_package_rejects_a_group_writable_version_directory() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (job, options) = system_package_fixture(dir.path(), &next_version());
+        let version_dir = job.staged.parent().unwrap();
+        std::fs::set_permissions(version_dir, std::fs::Permissions::from_mode(0o775)).unwrap();
+        assert!(matches!(
+            verify_system_package(&job, &options),
+            Err(UpdateError::StagingRejected(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_package_rejects_a_group_writable_staged_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (job, options) = system_package_fixture(dir.path(), &next_version());
+        std::fs::set_permissions(&job.staged, std::fs::Permissions::from_mode(0o664)).unwrap();
+        assert!(matches!(
+            verify_system_package(&job, &options),
+            Err(UpdateError::StagingRejected(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_package_rejects_a_symlinked_data_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut job, options) = system_package_fixture(dir.path(), &next_version());
+        let link = dir.path().join("data-link");
+        std::os::unix::fs::symlink(&job.data_dir, &link).unwrap();
+        job.data_dir = link;
+        assert!(matches!(
+            verify_system_package(&job, &options),
+            Err(UpdateError::StagingRejected(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn system_package_rejects_a_symlink() {
         let dir = tempfile::tempdir().unwrap();
         let (job, options) = system_package_fixture(dir.path(), &next_version());
@@ -2774,6 +2940,26 @@ mod tests {
         assert!(matches!(
             run_system_package_from_job(&job, &options),
             Err(UpdateError::PackageMetadataMismatch(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_package_reports_a_metadata_command_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let (job, mut options) = system_package_fixture(dir.path(), &next_version());
+        let pacman = dir.path().join("pacman-metadata-fail");
+        write_script(
+            &pacman,
+            "#!/bin/sh\necho 'error: cannot read package' >&2\nexit 1\n",
+        );
+        options.pacman_path = Some(pacman);
+        assert!(matches!(
+            run_system_package_from_job(&job, &options),
+            Err(UpdateError::PackageManagerFailed {
+                family: PackageFamily::Pacman,
+                ..
+            })
         ));
     }
 
@@ -3002,6 +3188,7 @@ mod tests {
             (13, LastErrorCode::Downgrade),
             (15, LastErrorCode::PackageManagerFailed),
             (10, LastErrorCode::HelperFailed),
+            (16, LastErrorCode::InstallOutcomeUnknown),
         ];
         for (code, expected) in cases {
             // `from_raw` takes a wait status; the exit code lives in bits 8..16.
@@ -3009,6 +3196,20 @@ mod tests {
             assert_eq!(status.code(), Some(code));
             assert_eq!(map_pkexec_status(status, "reason").0, expected);
         }
+
+        let signal = std::process::ExitStatus::from_raw(9);
+        assert_eq!(signal.code(), None);
+        assert_eq!(
+            map_pkexec_status(signal, "killed").0,
+            LastErrorCode::InstallOutcomeUnknown
+        );
+
+        let unknown = std::process::ExitStatus::from_raw(42 << 8);
+        assert_eq!(unknown.code(), Some(42));
+        assert_eq!(
+            map_pkexec_status(unknown, "").0,
+            LastErrorCode::InstallOutcomeUnknown
+        );
     }
 
     #[test]
@@ -3026,6 +3227,7 @@ mod tests {
         assert!(is_preinstall_failure(LastErrorCode::HelperFailed));
         assert!(!is_preinstall_failure(LastErrorCode::PackageManagerFailed));
         assert!(!is_preinstall_failure(LastErrorCode::HealthCheckFailed));
+        assert!(!is_preinstall_failure(LastErrorCode::InstallOutcomeUnknown));
     }
 
     #[cfg(unix)]
@@ -3056,6 +3258,43 @@ mod tests {
         let result = LastResult::read(&paths).unwrap();
         assert_eq!(result.status, LastStatus::Failed);
         assert_eq!(result.code, Some(LastErrorCode::PackageVerificationFailed));
+        assert!(!job_path.exists(), "the job is cleaned up before install");
+        assert!(!staged.exists(), "the staged package is cleaned up");
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !sentinel.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(sentinel.exists(), "the target is relaunched");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_package_apply_refuses_without_the_polkit_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut job, mut options) = system_package_fixture(dir.path(), &next_version());
+        let sentinel = dir.path().join("old-ran");
+        let target = dir.path().join("vrc-photo-manager");
+        std::fs::write(
+            &target,
+            format!("#!/bin/sh\nprintf old > '{}'\n", sentinel.display()),
+        )
+        .unwrap();
+        make_executable(&target);
+        job.target = target;
+        options.policy_path = Some(dir.path().join("missing.policy"));
+
+        let paths = UpdatePaths::new(&job.data_dir);
+        paths.ensure().unwrap();
+        let job_path = paths.job_file();
+        std::fs::write(&job_path, serde_json::to_vec(&job).unwrap()).unwrap();
+        let staged = job.staged.clone();
+
+        let error = run_system_package_apply(&paths, &job, &job_path, &options).unwrap_err();
+        assert!(matches!(error, UpdateError::Other(_)));
+
+        let result = LastResult::read(&paths).unwrap();
+        assert_eq!(result.status, LastStatus::Failed);
+        assert_eq!(result.code, Some(LastErrorCode::AuthUnavailable));
         assert!(!job_path.exists(), "the job is cleaned up before install");
         assert!(!staged.exists(), "the staged package is cleaned up");
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -3171,6 +3410,36 @@ mod tests {
             "the job is kept after an install failure"
         );
         assert!(staged.exists(), "the staged package is kept");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn handle_system_package_exit_keeps_files_when_the_outcome_is_unknown() {
+        use std::os::unix::process::ExitStatusExt;
+
+        for status in [exit_status(16), std::process::ExitStatus::from_raw(9)] {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut job, _options) = system_package_fixture(dir.path(), &next_version());
+            job.target = dir.path().join("missing-target");
+            let paths = UpdatePaths::new(&job.data_dir);
+            paths.ensure().unwrap();
+            let job_path = paths.job_file();
+            std::fs::write(&job_path, serde_json::to_vec(&job).unwrap()).unwrap();
+            let staged = job.staged.clone();
+
+            let error =
+                handle_system_package_exit(&paths, &job, &job_path, status, "killed").unwrap_err();
+            assert!(matches!(error, UpdateError::Other(_)));
+
+            let result = LastResult::read(&paths).unwrap();
+            assert_eq!(result.status, LastStatus::Failed);
+            assert_eq!(result.code, Some(LastErrorCode::InstallOutcomeUnknown));
+            assert!(
+                job_path.exists(),
+                "the job is kept when a partial install is possible"
+            );
+            assert!(staged.exists(), "the staged package is kept");
+        }
     }
 
     #[cfg(unix)]

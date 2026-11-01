@@ -298,7 +298,7 @@ docker run --rm -v "$PWD/dist:/dist" -w /dist archlinux:base-devel bash -c '
   useradd -m builder
   chown -R builder:builder /dist
   su builder -c "makepkg -f --nodeps"
-  pacman -Qip /dist/*.pkg.tar.zst
+  LC_ALL=C pacman -Qip /dist/*.pkg.tar.zst
   rm -rf /dist/src /dist/pkg
 '
 ```
@@ -391,7 +391,8 @@ apt プロセスがないこと（例: `pgrep -a pacman`、`pgrep -a dpkg`）と
 
 `<data_dir>/updates/updater.log` と `last-result.json` に失敗理由が残る。
 `last-result.json` はUIが起動時に一度読んで削除する。インストール前の失敗では
-job と staged が掃除され、インストール後・健康確認の失敗では調査用に残る。
+job と staged が掃除され、インストール後・健康確認の失敗、および
+`install_outcome_unknown`（exit 16 / シグナル）では調査用に残る。
 
 ## 11. 未対応
 

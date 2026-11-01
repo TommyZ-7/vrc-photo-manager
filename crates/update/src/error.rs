@@ -18,6 +18,9 @@ pub enum LastErrorCode {
     Downgrade,
     HealthCheckFailed,
     HelperFailed,
+    /// The privileged helper exited without a known pre-install code (for
+    /// example exit 16 or a signal), so a partial install cannot be ruled out.
+    InstallOutcomeUnknown,
 }
 
 /// The operation whose I/O failed, used to choose a user-facing message.
@@ -196,6 +199,10 @@ mod tests {
             (LastErrorCode::Downgrade, "\"downgrade\""),
             (LastErrorCode::HealthCheckFailed, "\"health_check_failed\""),
             (LastErrorCode::HelperFailed, "\"helper_failed\""),
+            (
+                LastErrorCode::InstallOutcomeUnknown,
+                "\"install_outcome_unknown\"",
+            ),
         ] {
             let json = serde_json::to_string(&code).unwrap();
             assert_eq!(json, expected);

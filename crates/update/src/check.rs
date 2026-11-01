@@ -266,6 +266,13 @@ mod tests {
                     "size": 1024,
                     "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
                     "signature": crate::verify::test_signature()
+                },
+                "deb": {
+                    "url": "https://example.com/vrc-photo-manager_0.4.0_amd64.deb",
+                    "format": "deb",
+                    "size": 1024,
+                    "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "signature": crate::verify::test_signature()
                 }
             }
         })
@@ -483,6 +490,7 @@ mod tests {
             &Version::new(0, 3, 0),
             &InstallKind::SystemPackage {
                 family: PackageFamily::Pacman,
+                managed: true,
             },
         )
         .unwrap()
@@ -513,12 +521,42 @@ mod tests {
             &Version::new(0, 3, 0),
             &InstallKind::SystemPackage {
                 family: PackageFamily::Pacman,
+                managed: true,
             },
         )
         .unwrap()
         .unwrap();
         assert_eq!(update.version, Version::new(0, 4, 0));
         assert_eq!(update.asset.unwrap().format, UpdateFormat::Pacman);
+    }
+
+    #[test]
+    fn system_packages_select_the_deb_asset() {
+        let fixture = fixture_with_system_packages("0.4.0", system_platforms());
+        let client = FakeHttpClient::new(HashMap::from([
+            (fixture.manifest_url.clone(), Ok(fixture.manifest.clone())),
+            (
+                fixture.signature_url.clone(),
+                Ok(fixture.signature.into_bytes()),
+            ),
+        ]));
+        let feed = FeedConfig::for_tests(
+            fixture.manifest_url.clone(),
+            vec![fixture.public_key.clone()],
+            false,
+        );
+        let update = check(
+            &client,
+            &feed,
+            &Version::new(0, 3, 0),
+            &InstallKind::SystemPackage {
+                family: PackageFamily::Deb,
+                managed: true,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(update.asset.unwrap().format, UpdateFormat::Deb);
     }
 
     #[test]
@@ -542,6 +580,7 @@ mod tests {
             &Version::new(0, 3, 0),
             &InstallKind::SystemPackage {
                 family: PackageFamily::Deb,
+                managed: true,
             },
         )
         .unwrap()

@@ -227,6 +227,7 @@ policy がない、または `pkexec` がない場合は、パッケージを再
 | パッケージのインストールに失敗しました / `package_manager_failed` | `pacman -U` / `dpkg -i` が非ゼロ終了 | `updater.log` のパッケージマネージャ出力を確認し、下記の手動復旧を行う |
 | インストール後の起動確認に失敗しました / `health_check_failed` | 新バージョンはインストール済みだが UI が健康マーカーを書かない | `updater.log` を確認して UI を手動起動する。必要なら再インストールする |
 | 更新に失敗しました（<reason>） / `helper_failed` | `/usr/bin/vrc-photo-updater` がない、または特権側の検証に失敗した | `updater.log` の理由を確認する。ヘルパー欠落なら deb / pacman を再インストールする |
+| 更新に失敗しました（<reason>） / `install_outcome_unknown` | 特権ヘルパーが exit 16 / シグナル / 不明な終了で終わり、部分インストールの可能性がある | `updater.log` とパッケージマネージャの状態を確認する。job と staged は調査用に残る |
 
 手動復旧:
 
@@ -242,8 +243,8 @@ sudo apt-get install -f
 - インストール前の失敗（認証キャンセル、認証不能、DB ロック、署名不正、
   メタデータ不一致、ダウングレード、ヘルパー欠落）では、job と staged は
   掃除され、システムは変更されていない。
-- `package_manager_failed` と `health_check_failed` では、調査用に job /
-  staged / log が残る。復旧後に手動で削除してよい。
+- `package_manager_failed` / `health_check_failed` / `install_outcome_unknown`
+  では、調査用に job / staged / log が残る。復旧後に手動で削除してよい。
 - デーモンが systemd 管理の場合、更新後に
   `systemctl --user is-active vrc-photo-daemon.service` を確認する。
   `inactive` なら `systemctl --user daemon-reload` と

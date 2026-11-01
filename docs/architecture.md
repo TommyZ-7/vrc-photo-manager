@@ -235,7 +235,7 @@ crates/ui/src/
    `updates/bin/vrc-photo-updater` をコピーして `updates/job.json` を書く。
    システムパッケージの job には署名対象の `latest.json` 生テキストと
    `.minisig`、現在の実行ファイルを `target` として入れる。
-5. ユーザー権限ヘルパーはUI/デーモンの終了を待ち、適用ロックを取る。
+5. ユーザー権限ヘルパーは適用ロックを取り、UI/デーモンの終了を待つ。
    - AppImage / Windows current-user NSIS は、旧版を退避して置換、または
      NSIS インストーラを `/S` で実行する。
    - `SystemPackage` は staging のSHA-256と署名を再確認し、
@@ -256,8 +256,9 @@ crates/ui/src/
      シェルは使わない。特権側はUIを起動しない。
 7. ユーザー権限ヘルパーは `pkexec` の終了コードを `LastErrorCode` に写像し、
    `last-result.json` を書く。インストール前の失敗は job と staged を掃除して
-   旧UIを再起動する。`PackageManagerFailed` と健康確認の失敗は job / staged /
-   log を残し、`target` を健康トークンなしで一度だけ起動する。
+   旧UIを再起動する。`PackageManagerFailed`、`InstallOutcomeUnknown`（exit 16 /
+   シグナル / 不明）、健康確認の失敗は job / staged / log を残し、`target` を
+   健康トークンなしで一度だけ起動する。
 8. 新UIは最初のフレームで `updates/health-<token>.json` を書き、ヘルパーが
    バージョンを確認する。AppImage / Windows は失敗時に旧版へ戻す。
    システムパッケージは自動ロールバックせず、失敗を記録して手動復旧に委ねる。

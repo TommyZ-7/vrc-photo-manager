@@ -203,7 +203,11 @@ jobs:
           grep -q 'org.freedesktop.policykit.exec.path.*/usr/bin/vrc-photo-updater' "$tmp/deb/$policy" \
             || { echo "unexpected pkexec path in $policy"; exit 1; }
           docker run --rm -v "$PWD/dist:/dist" archlinux:base-devel bash -c "
-            pacman -Qlp /dist/$(basename "$pkg") | grep -q '$policy$'
+            set -euo pipefail
+            package=/dist/$(basename "$pkg")
+            pacman -Qlp \"\$package\" | grep -q '$policy$'
+            bsdtar -xOf \"\$package\" '$policy' \
+              | grep -q 'org.freedesktop.policykit.exec.path.*/usr/bin/vrc-photo-updater'
           "
           echo "polkit policy verified"
 

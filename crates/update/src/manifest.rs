@@ -133,7 +133,7 @@ impl Manifest {
         let (platform, format) = match kind {
             InstallKind::AppImage { .. } => (LINUX_PLATFORM, UpdateFormat::AppImage),
             InstallKind::WindowsCurrentUser { .. } => (WINDOWS_PLATFORM, UpdateFormat::Nsis),
-            InstallKind::SystemPackage { family } => return self.system_package_for(*family),
+            InstallKind::SystemPackage { family, .. } => return self.system_package_for(*family),
             _ => return None,
         };
         self.platforms
@@ -437,7 +437,8 @@ mod tests {
         assert_eq!(
             manifest
                 .asset_for(&InstallKind::SystemPackage {
-                    family: PackageFamily::Deb
+                    family: PackageFamily::Deb,
+                    managed: true,
                 })
                 .unwrap()
                 .format,
@@ -446,7 +447,8 @@ mod tests {
         assert!(
             manifest
                 .asset_for(&InstallKind::SystemPackage {
-                    family: PackageFamily::Unknown
+                    family: PackageFamily::Unknown,
+                    managed: true,
                 })
                 .is_none()
         );

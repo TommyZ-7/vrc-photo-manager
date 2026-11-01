@@ -53,7 +53,7 @@
 - Produces: `Manifest::system_package_for(&self, family: PackageFamily) -> Option<&PlatformAsset>`
 - Produces: `build_manifest` が `system_packages` を含む `Manifest` を返す
 
-- [ ] **Step 1: manifest の失敗テストを書く**
+- [x] **Step 1: manifest の失敗テストを書く**
 
 `crates/update/src/manifest.rs` の tests に追加する。`test_signature()` は既存のものを使う。
 
@@ -134,12 +134,12 @@ fn rejects_a_system_package_with_the_wrong_extension() {
 }
 ```
 
-- [ ] **Step 2: manifest テストを失敗させる**
+- [x] **Step 2: manifest テストを失敗させる**
 
 Run: `cargo test -p vrc-photo-update manifest::tests::validates_pacman_and_deb_system_packages`
 Expected: FAIL（`system_packages` フィールドがない、または `UpdateFormat::Pacman` がない）
 
-- [ ] **Step 3: `PackageFamily` に serde と manifest key を追加する**
+- [x] **Step 3: `PackageFamily` に serde と manifest key を追加する**
 
 `crates/update/src/install.rs`:
 
@@ -171,7 +171,7 @@ impl PackageFamily {
 }
 ```
 
-- [ ] **Step 4: `Manifest` / `PlatformAsset` を実装する**
+- [x] **Step 4: `Manifest` / `PlatformAsset` を実装する**
 
 `crates/update/src/manifest.rs`:
 
@@ -249,12 +249,12 @@ for (key, asset) in &manifest.system_packages {
 InstallKind::SystemPackage { family } => self.system_package_for(*family),
 ```
 
-- [ ] **Step 5: manifest テストを通す**
+- [x] **Step 5: manifest テストを通す**
 
 Run: `cargo test -p vrc-photo-update manifest::tests`
 Expected: PASS
 
-- [ ] **Step 6: release-tool の失敗テストを書く**
+- [x] **Step 6: release-tool の失敗テストを書く**
 
 `crates/release-tool/src/lib.rs` の tests に追加する。既存の `write_artifact` を使う。
 
@@ -303,12 +303,12 @@ fn builds_a_manifest_with_system_packages() {
 既存の `builds_a_manifest_for_both_platforms` と拒否テストの fixture にも `.pkg.tar.zst` と `.deb` を追加する
 （追加しないと `build_manifest` が system package 欠落で失敗する）。
 
-- [ ] **Step 7: release-tool テストを失敗させる**
+- [x] **Step 7: release-tool テストを失敗させる**
 
 Run: `cargo test -p vrc-photo-release-tool builds_a_manifest_with_system_packages`
 Expected: FAIL（`system_packages` がない、または `.pkg.tar.zst` が見つからない）
 
-- [ ] **Step 8: release-tool を実装する**
+- [x] **Step 8: release-tool を実装する**
 
 `build_manifest`:
 
@@ -344,12 +344,12 @@ Ok(Manifest {
 })
 ```
 
-- [ ] **Step 9: release-tool テストを通す**
+- [x] **Step 9: release-tool テストを通す**
 
 Run: `cargo test -p vrc-photo-release-tool`
 Expected: PASS
 
-- [ ] **Step 10: commit**
+- [x] **Step 10: commit**
 
 ```bash
 git add crates/update/src/manifest.rs crates/update/src/install.rs crates/release-tool/src/lib.rs
@@ -376,7 +376,7 @@ git commit -m "feat(update): add system package assets to the signed manifest"
 - Produces: `system_policy_available() -> bool`
 - Produces: `find_executable_in(dirs: &[PathBuf], name: &str) -> bool`
 
-- [ ] **Step 1: 失敗テストを書く**
+- [x] **Step 1: 失敗テストを書く**
 
 `crates/update/src/install.rs` tests に追加する。`test_job` は AppImage 用なので、system package 用のヘルパーを作る。
 
@@ -488,12 +488,12 @@ fn finds_pkexec_in_a_path_directory() {
 }
 ```
 
-- [ ] **Step 2: テストを失敗させる**
+- [x] **Step 2: テストを失敗させる**
 
 Run: `cargo test -p vrc-photo-update install::tests::apply_kind_keeps_existing_json_and_adds_system_package`
 Expected: FAIL（`SystemPackage` variant がない）
 
-- [ ] **Step 3: `ApplyKind` / `ApplyJob` を実装する**
+- [x] **Step 3: `ApplyKind` / `ApplyJob` を実装する**
 
 `ApplyKind` に `SystemPackage { family: PackageFamily }` を追加する。`ApplyJob` に:
 
@@ -564,7 +564,7 @@ if let ApplyKind::SystemPackage { family } = self.kind {
 
 `install.rs` の先頭で `use crate::manifest::{MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES};` を追加する。
 
-- [ ] **Step 4: capability 判定を実装する**
+- [x] **Step 4: capability 判定を実装する**
 
 `crates/update/src/install.rs`:
 
@@ -653,12 +653,12 @@ pub fn system_policy_available() -> bool {
 
 `crates/update/src/lib.rs` の re-export に新しい関数と定数を追加する。
 
-- [ ] **Step 5: テストを通す**
+- [x] **Step 5: テストを通す**
 
 Run: `cargo test -p vrc-photo-update install::tests`
 Expected: PASS
 
-- [ ] **Step 6: commit**
+- [x] **Step 6: commit**
 
 ```bash
 git add crates/update/src/install.rs crates/update/src/lib.rs
@@ -681,7 +681,7 @@ git commit -m "feat(update): add system package apply jobs and capability checks
 - Produces: `SignedManifest { bytes: Vec<u8>, signature: String }`
 - Produces: `AvailableUpdate.signed_manifest: SignedManifest`
 
-- [ ] **Step 1: 失敗テストを書く**
+- [x] **Step 1: 失敗テストを書く**
 
 `crates/update/src/manifest.rs`:
 
@@ -762,12 +762,12 @@ fn system_package_check_selects_the_pacman_asset_and_keeps_the_manifest() {
 asset が `Some` になるよう名前と期待値を変更する。`system_packages` のない旧 manifest 用に
 `old_manifest_without_system_packages_has_no_asset` を追加する。
 
-- [ ] **Step 2: テストを失敗させる**
+- [x] **Step 2: テストを失敗させる**
 
 Run: `cargo test -p vrc-photo-update check::tests::system_package_check_selects_the_pacman_asset_and_keeps_the_manifest`
 Expected: FAIL（`signed_manifest` がない）
 
-- [ ] **Step 3: `SignedManifest` / `AvailableUpdate` を実装する**
+- [x] **Step 3: `SignedManifest` / `AvailableUpdate` を実装する**
 
 `crates/update/src/manifest.rs`:
 
@@ -798,7 +798,7 @@ signed_manifest: SignedManifest {
 
 `crates/update/src/lib.rs` の re-export に `SignedManifest` を追加する。
 
-- [ ] **Step 4: 既存の `AvailableUpdate` リテラルを更新する**
+- [x] **Step 4: 既存の `AvailableUpdate` リテラルを更新する**
 
 `crates/update/src/download.rs` の `available()` と、`crates/ui/src/update_view.rs` の tests にある
 `AvailableUpdate { ... }` に以下を追加する。
@@ -810,7 +810,7 @@ signed_manifest: vrc_photo_update::SignedManifest {
 },
 ```
 
-- [ ] **Step 5: テストを通す**
+- [x] **Step 5: テストを通す**
 
 Run: `cargo test -p vrc-photo-update`
 Expected: PASS
@@ -818,7 +818,7 @@ Expected: PASS
 Run: `cargo test -p vrc-photo-ui update_view::tests`
 Expected: PASS
 
-- [ ] **Step 6: commit**
+- [x] **Step 6: commit**
 
 ```bash
 git add crates/update/src/manifest.rs crates/update/src/check.rs crates/update/src/download.rs crates/update/src/lib.rs crates/ui/src/update_view.rs
@@ -843,7 +843,7 @@ git commit -m "feat(update): carry the signed manifest with available updates"
 - Produces: `TempPackage`
 - Produces: `verify_system_package(job: &ApplyJob, options: &HelperOptions) -> Result<TempPackage>`
 
-- [ ] **Step 1: 失敗テストを書く**
+- [x] **Step 1: 失敗テストを書く**
 
 `crates/update/src/helper.rs` の tests に、system package 用の fixture を追加する。
 `minisign::KeyPair` と `sha2` は既存の dev-dependency を使う。
@@ -1024,12 +1024,12 @@ fn system_package_rejects_a_symlink() {
 ダウングレードテストだけ `CURRENT_VERSION` を渡す。
 `public_key` の取得方法は既存の `verify.rs` テストの `public_box` パターンに合わせる。
 
-- [ ] **Step 2: テストを失敗させる**
+- [x] **Step 2: テストを失敗させる**
 
 Run: `cargo test -p vrc-photo-update helper::tests::system_package_rejects_a_bad_manifest_signature`
 Expected: FAIL（`LastErrorCode` / `verify_system_package` がない）
 
-- [ ] **Step 3: error / LastResult の型を追加する**
+- [x] **Step 3: error / LastResult の型を追加する**
 
 `crates/update/src/error.rs` に `LastErrorCode` と新しい `UpdateError` variants を追加する。
 
@@ -1100,7 +1100,7 @@ pub code: Option<LastErrorCode>,
 
 既存の `LastResult` リテラル（helper.rs / update_view.rs tests）に `code: None` を追加する。
 
-- [ ] **Step 4: `HelperOptions` と `TempPackage` を追加する**
+- [x] **Step 4: `HelperOptions` と `TempPackage` を追加する**
 
 `helper.rs`:
 
@@ -1158,7 +1158,7 @@ impl Drop for TempPackage {
 }
 ```
 
-- [ ] **Step 5: staging / manifest / copy 検証を実装する**
+- [x] **Step 5: staging / manifest / copy 検証を実装する**
 
 `helper.rs` の先頭に `use semver::Version;` と
 `use crate::manifest::{Manifest, PlatformAsset};` を追加する。
@@ -1362,12 +1362,12 @@ pub(crate) fn verify_system_package(
 `job.staged.file_name()` と比較する。job とのバージョン比較には、manifest の生文字列ではなく
 `parse_and_validate` が返す `Version` を使う。
 
-- [ ] **Step 6: テストを通す**
+- [x] **Step 6: テストを通す**
 
 Run: `cargo test -p vrc-photo-update helper::tests::system_package`
 Expected: PASS（ダウングレード / 署名 / staging / symlink）
 
-- [ ] **Step 7: `LastResult` の code を既存テストに反映する**
+- [x] **Step 7: `LastResult` の code を既存テストに反映する**
 
 `helper.rs` の既存 `LastResult` リテラルと `crates/ui/src/update_view.rs` tests の
 `LastResult` リテラルに `code: None` を追加する。
@@ -1375,7 +1375,7 @@ Expected: PASS（ダウングレード / 署名 / staging / symlink）
 Run: `cargo test -p vrc-photo-update helper::tests`
 Expected: PASS
 
-- [ ] **Step 8: commit**
+- [x] **Step 8: commit**
 
 ```bash
 git add crates/update/src/error.rs crates/update/src/helper.rs crates/ui/src/update_view.rs
@@ -1397,7 +1397,7 @@ git commit -m "feat(update): verify system package staging and signed manifests"
 - Produces: `install_package(family: PackageFamily, path: &Path, options: &HelperOptions) -> Result<()>`
 - Produces: `run_system_package(job_path: &Path, options: &HelperOptions) -> Result<()>`
 
-- [ ] **Step 1: 失敗テストを書く**
+- [x] **Step 1: 失敗テストを書く**
 
 `crates/update/src/helper.rs` の tests に fake command scripts を追加する。
 
@@ -1528,12 +1528,12 @@ fn system_package_runs_the_fixed_pacman_command() {
 `system_package_fixture` は Task 4 のものを使う。`run_system_package_from_job` は
 `run_system_package` の内部処理を job 直接受けでテストするための `pub(crate)` 関数にする。
 
-- [ ] **Step 2: テストを失敗させる**
+- [x] **Step 2: テストを失敗させる**
 
 Run: `cargo test -p vrc-photo-update helper::tests::package_version_normalization_accepts_revisions`
 Expected: FAIL（`package_version_matches` がない）
 
-- [ ] **Step 3: メタデータとコマンドを実装する**
+- [x] **Step 3: メタデータとコマンドを実装する**
 
 `helper.rs`:
 
@@ -1711,12 +1711,12 @@ pub(crate) fn run_system_package_from_job(
 }
 ```
 
-- [ ] **Step 4: テストを通す**
+- [x] **Step 4: テストを通す**
 
 Run: `cargo test -p vrc-photo-update helper::tests::system_package`
 Expected: PASS
 
-- [ ] **Step 5: commit**
+- [x] **Step 5: commit**
 
 ```bash
 git add crates/update/src/helper.rs
@@ -1743,7 +1743,7 @@ git commit -m "feat(update): verify package metadata and run fixed install comma
 - Produces: `map_pkexec_status(status: ExitStatus, stderr: &str) -> (LastErrorCode, String)`
 - Produces: `is_preinstall_failure(code: LastErrorCode) -> bool`
 
-- [ ] **Step 1: 失敗テストを書く**
+- [x] **Step 1: 失敗テストを書く**
 
 `crates/update/src/helper.rs` tests:
 
@@ -1795,12 +1795,12 @@ fn only_preinstall_failures_cleanup_the_job() {
 }
 ```
 
-- [ ] **Step 2: テストを失敗させる**
+- [x] **Step 2: テストを失敗させる**
 
 Run: `cargo test -p vrc-photo-update helper::tests::maps_pkexec_exit_codes`
 Expected: FAIL（`map_pkexec_status` がない）
 
-- [ ] **Step 3: libc と root ガードを追加する**
+- [x] **Step 3: libc と root ガードを追加する**
 
 `Cargo.toml` の `[workspace.dependencies]` に `libc = "0.2"` を追加する。
 `crates/update/Cargo.toml` の `[target.'cfg(unix)'.dependencies]` に `libc.workspace = true` を追加する。
@@ -1873,7 +1873,7 @@ fn main() {
 }
 ```
 
-- [ ] **Step 4: pkexec フローを実装する**
+- [x] **Step 4: pkexec フローを実装する**
 
 `helper.rs` に追加する。
 
@@ -2055,12 +2055,12 @@ if matches!(job.kind, ApplyKind::SystemPackage { .. }) {
 }
 ```
 
-- [ ] **Step 5: テストを通す**
+- [x] **Step 5: テストを通す**
 
 Run: `cargo test -p vrc-photo-update helper::tests`
 Expected: PASS
 
-- [ ] **Step 6: commit**
+- [x] **Step 6: commit**
 
 ```bash
 git add Cargo.toml crates/update/Cargo.toml crates/update/src/helper.rs crates/update/src/bin/vrc-photo-updater.rs
@@ -2084,7 +2084,7 @@ git commit -m "feat(update): orchestrate system package updates through pkexec"
 - Produces: `UpdateState.system_apply_available: bool`
 - Produces: `can_apply(install, has_asset, daemon_active, ipc_connected, system_apply_available) -> bool`
 
-- [ ] **Step 1: 失敗テストを書く**
+- [x] **Step 1: 失敗テストを書く**
 
 `crates/ui/src/update_view.rs` tests:
 
@@ -2163,12 +2163,12 @@ fn failed_notice_is_shown_on_the_new_version() {
 }
 ```
 
-- [ ] **Step 2: テストを失敗させる**
+- [x] **Step 2: テストを失敗させる**
 
 Run: `cargo test -p vrc-photo-ui update_view::tests::system_package_can_apply_only_when_ready`
 Expected: FAIL（`can_apply` の引数が足りない）
 
-- [ ] **Step 3: UpdateState と can_apply を実装する**
+- [x] **Step 3: UpdateState と can_apply を実装する**
 
 `UpdateState` に `system_apply_available: bool` を追加する。`new` で:
 
@@ -2216,7 +2216,7 @@ fn should_show_package_command(
 }
 ```
 
-- [ ] **Step 4: UI の表示と job を更新する**
+- [x] **Step 4: UI の表示と job を更新する**
 
 - `update_available_view`: ダウンロード可能条件を次にする。
 
@@ -2275,7 +2275,7 @@ update.notice.health_failed: "インストール後の起動確認に失敗し�
 英語側も同じ意味で追加する。`update.notice.package_failed` は reason を出さない（既存の
 `update.notice.failed` を使うなら不要）。`UpdateNotice.message_in` の code 分岐で使う。
 
-- [ ] **Step 5: テストを通す**
+- [x] **Step 5: テストを通す**
 
 Run: `cargo test -p vrc-photo-ui update_view::tests`
 Expected: PASS
@@ -2283,7 +2283,7 @@ Expected: PASS
 Run: `cargo test -p vrc-photo-i18n`
 Expected: PASS（ja/en のキーが揃う）
 
-- [ ] **Step 6: commit**
+- [x] **Step 6: commit**
 
 ```bash
 git add crates/ui/src/update_view.rs crates/i18n/locales/ja.yml crates/i18n/locales/en.yml
@@ -2305,7 +2305,7 @@ git commit -m "feat(ui): offer in-app updates for system packages"
 - Produces: `start_daemon(supervisor: Option<&str>) -> Result<(), String>`
 - Produces: `restart_daemon_after_update(supervisor: Option<&str>) -> Result<(), String>`
 
-- [ ] **Step 1: 失敗テストを書く**
+- [x] **Step 1: 失敗テストを書く**
 
 `crates/ui/src/app/daemon.rs` tests:
 
@@ -2323,12 +2323,12 @@ fn daemon_start_uses_spawn_for_app_supervisor() {
 }
 ```
 
-- [ ] **Step 2: テストを失敗させる**
+- [x] **Step 2: テストを失敗させる**
 
 Run: `cargo test -p vrc-photo-ui app::daemon::tests::systemd_supervisor_uses_systemctl`
 Expected: FAIL（`should_use_systemd` がない）
 
-- [ ] **Step 3: `start_daemon` / `restart_daemon_after_update` を実装する**
+- [x] **Step 3: `start_daemon` / `restart_daemon_after_update` を実装する**
 
 `daemon.rs`:
 
@@ -2374,7 +2374,7 @@ pub(crate) fn restart_daemon_after_update(supervisor: Option<&str>) -> Result<()
 }
 ```
 
-- [ ] **Step 4: 起動経路を差し替える**
+- [x] **Step 4: 起動経路を差し替える**
 
 `crates/ui/src/app.rs`:
 
@@ -2408,12 +2408,12 @@ if !self.demo
 `start_apply` 失敗時の `spawn_daemon_process()` も `start_daemon(supervisor.as_deref())` に置き換える。
 `app.rs` と `update_view.rs` で不要になった `spawn_daemon_process` の import を削除する。
 
-- [ ] **Step 5: テストを通す**
+- [x] **Step 5: テストを通す**
 
 Run: `cargo test -p vrc-photo-ui app::daemon::tests`
 Expected: PASS
 
-- [ ] **Step 6: commit**
+- [x] **Step 6: commit**
 
 ```bash
 git add crates/ui/src/app/daemon.rs crates/ui/src/app.rs crates/ui/src/update_view.rs
@@ -2435,7 +2435,7 @@ git commit -m "fix(ui): restart systemd-managed daemons after updates"
 - Produces: deb / pacman に同梱される polkit action
 - Produces: CI で `.pkg.tar.zst` を生成・検証する
 
-- [ ] **Step 1: policy ファイルを作る**
+- [x] **Step 1: policy ファイルを作る**
 
 `packaging/polkit/com.tommyz.vrc-photo-manager.update.policy`:
 
@@ -2462,7 +2462,7 @@ git commit -m "fix(ui): restart systemd-managed daemons after updates"
 </policyconfig>
 ```
 
-- [ ] **Step 2: Packager.toml に追加する**
+- [x] **Step 2: Packager.toml に追加する**
 
 `[deb.files]` と `[pacman.files]` に:
 
@@ -2470,7 +2470,7 @@ git commit -m "fix(ui): restart systemd-managed daemons after updates"
 "packaging/polkit/com.tommyz.vrc-photo-manager.update.policy" = "usr/share/polkit-1/actions/com.tommyz.vrc-photo-manager.update.policy"
 ```
 
-- [ ] **Step 3: Release workflow に makepkg ステップを追加する**
+- [x] **Step 3: Release workflow に makepkg ステップを追加する**
 
 `cargo packager --release` の後、`List artifacts` の前に:
 
@@ -2487,7 +2487,7 @@ git commit -m "fix(ui): restart systemd-managed daemons after updates"
           ls -lh dist/*.pkg.tar.zst
 ```
 
-- [ ] **Step 4: 既存の検証ステップを更新する**
+- [x] **Step 4: 既存の検証ステップを更新する**
 
 - `Verify third-party notices` の `pacman=$(ls dist/*.tar.gz)` はそのまま（ソース tar.gz 用）。
 - `Verify systemd user unit` の後に policy 検証を追加する:
@@ -2511,7 +2511,7 @@ git commit -m "fix(ui): restart systemd-managed daemons after updates"
           echo "polkit policy verified"
 ```
 
-- [ ] **Step 5: latest.json の jq チェックを更新する**
+- [x] **Step 5: latest.json の jq チェックを更新する**
 
 `publish` ジョブの:
 
@@ -2527,12 +2527,12 @@ jq -e '.schema == 1 and (.platforms | length == 2) and (.system_packages | lengt
 
 に変更する。
 
-- [ ] **Step 6: ローカルで policy XML を検証する**
+- [x] **Step 6: ローカルで policy XML を検証する**
 
 Run: `xmllint --noout packaging/polkit/com.tommyz.vrc-photo-manager.update.policy`
 Expected: PASS（xmllint がない場合は `python3 -c "import xml.etree.ElementTree as ET; ET.parse('...')"` で代替）
 
-- [ ] **Step 7: commit**
+- [x] **Step 7: commit**
 
 ```bash
 git add packaging/polkit/com.tommyz.vrc-photo-manager.update.policy Packager.toml .github/workflows/release.yml
@@ -2605,8 +2605,10 @@ git commit -m "docs: document in-app system package updates"
 - 手動: pacman 環境
 
 > **Status (2026-11-02):** ローカル検証（fmt / clippy / test）と Release workflow の
-> 静的確認は完了。特権を伴う pacman / deb の手動 QA はユーザーの明示承認待ちのため
-> 未実施。計画全体の完了マークは保留する。
+> 静的確認は完了し、Task 1-9 の Step は `- [x]` に更新済み。特権を伴う
+> pacman / deb の手動 QA と、PR の Release workflow（makepkg / policy 検査）の
+> green 確認は未実施のため、Task 11 の完了マークは保留する。
+> この fix wave では Docker / pkexec / `pacman -U` / `dpkg -i` を実行していない。
 
 - [x] **Step 1: fmt / clippy / test を実行する**
 
@@ -2661,8 +2663,8 @@ Debian コンテナ / VM で同じ流れを確認する。難しい場合は、T
 
 - [ ] **Step 5: 計画のチェックボックスを更新する**
 
-> **Pending:** 手動 QA が未完了のため、計画全体の完了チェックは保留。
-> 本検証で完了した Step 1 / Step 2 のみ `- [x]` にした。
+> **Pending:** 手動 QA が未完了のため、Task 11 の完了チェックは保留。
+> Task 1-9 の Step は完了済みとして `- [x]` に更新済み。
 
 実行完了時に `docs/superpowers/plans/2026-11-02-system-package-update.md` の
 チェックボックスを `- [x]` に更新する（AGENTS.md §4）。
