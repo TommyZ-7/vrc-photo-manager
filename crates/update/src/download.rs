@@ -127,7 +127,7 @@ mod tests {
     use super::*;
     use crate::error::UpdateError;
     use crate::fetch::HttpClient;
-    use crate::manifest::{AvailableUpdate, PlatformAsset, UpdateFormat};
+    use crate::manifest::{AvailableUpdate, PlatformAsset, SignedManifest, UpdateFormat};
 
     struct FakeClient {
         body: Vec<u8>,
@@ -200,6 +200,10 @@ mod tests {
             notes_url: None,
             asset: Some(asset),
             public_keys: vec![keys.public_key.clone()],
+            signed_manifest: SignedManifest {
+                bytes: Vec::new(),
+                signature: String::new(),
+            },
         }
     }
 
@@ -328,6 +332,10 @@ mod tests {
             notes_url: None,
             asset: None,
             public_keys: Vec::new(),
+            signed_manifest: SignedManifest {
+                bytes: Vec::new(),
+                signature: String::new(),
+            },
         };
         let dir = tempfile::tempdir().unwrap();
         let error = download(

@@ -27,7 +27,7 @@ pub use install::{
 };
 pub use manifest::{
     AvailableUpdate, MANIFEST_SCHEMA, MAX_ARTIFACT_BYTES, MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES,
-    Manifest, PlatformAsset, UpdateFormat,
+    Manifest, PlatformAsset, SignedManifest, UpdateFormat,
 };
 pub use native::NativeString;
 pub use verify::{

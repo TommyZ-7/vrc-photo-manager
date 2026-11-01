@@ -55,6 +55,13 @@ pub enum UpdateFormat {
     Deb,
 }
 
+/// The raw signed manifest and detached signature that produced an update.
+#[derive(Debug, Clone)]
+pub struct SignedManifest {
+    pub bytes: Vec<u8>,
+    pub signature: String,
+}
+
 /// A newer release selected for the current installation.
 #[derive(Debug, Clone)]
 pub struct AvailableUpdate {
@@ -63,6 +70,8 @@ pub struct AvailableUpdate {
     pub asset: Option<PlatformAsset>,
     /// Keys used to verify the manifest that produced this update.
     pub public_keys: Vec<String>,
+    /// Verified manifest bytes and signature, kept for privileged re-checks.
+    pub signed_manifest: SignedManifest,
 }
 
 impl Manifest {
@@ -616,5 +625,21 @@ mod tests {
             parse(&value, false),
             Err(UpdateError::InvalidManifest(_))
         ));
+    }
+
+    #[test]
+    fn available_update_carries_the_signed_manifest() {
+        let update = AvailableUpdate {
+            version: semver::Version::new(0, 4, 0),
+            notes_url: None,
+            asset: None,
+            public_keys: Vec::new(),
+            signed_manifest: SignedManifest {
+                bytes: b"{\"schema\":1}".to_vec(),
+                signature: "signature".to_string(),
+            },
+        };
+        assert_eq!(update.signed_manifest.bytes, b"{\"schema\":1}");
+        assert_eq!(update.signed_manifest.signature, "signature");
     }
 }

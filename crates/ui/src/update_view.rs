@@ -119,6 +119,10 @@ mod tests {
             notes_url: None,
             asset: None,
             public_keys: Vec::new(),
+            signed_manifest: vrc_photo_update::SignedManifest {
+                bytes: Vec::new(),
+                signature: String::new(),
+            },
         };
         assert!(phase_allows_auto_check(&UpdatePhase::Available(update)));
         assert!(!phase_allows_auto_check(&UpdatePhase::Applying));
@@ -131,6 +135,10 @@ mod tests {
             notes_url: None,
             asset: None,
             public_keys: Vec::new(),
+            signed_manifest: vrc_photo_update::SignedManifest {
+                bytes: Vec::new(),
+                signature: String::new(),
+            },
         };
         let failure: std::result::Result<Option<AvailableUpdate>, UpdateText> =
             Err(UpdateText::key("update.error.network"));
