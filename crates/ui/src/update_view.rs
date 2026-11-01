@@ -892,6 +892,8 @@ impl App {
             health_token: ApplyJob::new_health_token(),
             data_dir,
             created_at: Utc::now().to_rfc3339(),
+            signed_manifest: None,
+            manifest_signature: None,
         };
 
         let endpoint = self.ipc_endpoint.clone();

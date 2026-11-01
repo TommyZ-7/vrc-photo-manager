@@ -21,8 +21,9 @@ pub use fetch::{HttpClient, UreqClient};
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub use helper::{HealthMarker, LastResult, LastStatus};
 pub use install::{
-    APPLY_SCHEMA, ApplyJob, ApplyKind, InstallKind, PackageFamily, UpdatePaths, install_kind,
-    prepare_apply, start_apply,
+    APPLY_SCHEMA, ApplyJob, ApplyKind, InstallKind, PackageFamily, SYSTEM_HELPER_PATH,
+    SYSTEM_POLICY_PATH, UpdatePaths, find_executable_in, install_kind, pkexec_available,
+    prepare_apply, start_apply, system_helper_available, system_policy_available,
 };
 pub use manifest::{
     AvailableUpdate, MANIFEST_SCHEMA, MAX_ARTIFACT_BYTES, MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES,

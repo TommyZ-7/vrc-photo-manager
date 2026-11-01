@@ -339,6 +339,9 @@ fn apply(paths: &UpdatePaths, job: &ApplyJob) -> Result<Backup> {
                 ))
             }
         }
+        ApplyKind::SystemPackage { .. } => Err(UpdateError::InvalidJob(
+            "system package jobs are handled by the privileged helper".to_string(),
+        )),
     }
 }
 
@@ -1341,6 +1344,8 @@ mod tests {
             health_token: token.to_string(),
             data_dir: dir.to_path_buf(),
             created_at: "2026-10-24T12:00:00Z".to_string(),
+            signed_manifest: None,
+            manifest_signature: None,
         }
     }
 
@@ -1417,6 +1422,8 @@ mod tests {
             health_token: "token-apply-failure".to_string(),
             data_dir: dir.path().to_path_buf(),
             created_at: "2026-10-24T12:00:00Z".to_string(),
+            signed_manifest: None,
+            manifest_signature: None,
         };
         let job_file = dir.path().join("updates/job.json");
         std::fs::write(&job_file, serde_json::to_vec(&job).unwrap()).unwrap();
@@ -1464,6 +1471,8 @@ mod tests {
             health_token: "token".to_string(),
             data_dir: dir.path().to_path_buf(),
             created_at: "2026-10-24T12:00:00Z".to_string(),
+            signed_manifest: None,
+            manifest_signature: None,
         };
         std::fs::write(&job_path, serde_json::to_vec(&job).unwrap()).unwrap();
 
