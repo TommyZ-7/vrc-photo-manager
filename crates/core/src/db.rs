@@ -1259,6 +1259,30 @@ impl Db {
         Ok(session)
     }
 
+    /// Sessions that do not contain `timestamp` but end or start within
+    /// `window_seconds` of it. At most two are returned: callers only need
+    /// to distinguish none, exactly one, and ambiguous.
+    pub fn sessions_near(&self, timestamp: i64, window_seconds: i64) -> Result<Vec<Session>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, log_file, started_at, ended_at, world_id, instance_id \
+             FROM sessions \
+             WHERE (ended_at IS NOT NULL AND ?1 - ended_at BETWEEN 0 AND ?2) \
+                OR (started_at - ?1 BETWEEN 0 AND ?2) \
+             ORDER BY started_at LIMIT 2",
+        )?;
+        let rows = stmt.query_map(params![timestamp, window_seconds], |row| {
+            Ok(Session {
+                id: row.get(0)?,
+                log_file: row.get(1)?,
+                started_at: row.get(2)?,
+                ended_at: row.get(3)?,
+                world_id: row.get(4)?,
+                instance_id: row.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn upsert_session_player(
         &self,
         session_id: i64,
