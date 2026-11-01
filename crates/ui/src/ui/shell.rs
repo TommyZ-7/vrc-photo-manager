@@ -939,7 +939,7 @@ fn import_card_status(
 }
 
 fn import_scan_failure_count(report: &ImportReportView) -> usize {
-    report.scan_failures.len() + usize::from(report.scan_error.is_some())
+    report.scan_failures.len() + report.scan_errors.len()
 }
 
 fn scan_card_status(
@@ -1174,7 +1174,7 @@ mod tests {
             remaining: Vec::new(),
             cancelled: false,
             scan_failures: Vec::new(),
-            scan_error: None,
+            scan_errors: Vec::new(),
             issue_counts: Cell::new(None),
         }
     }
@@ -1345,7 +1345,7 @@ mod tests {
         );
 
         let hard_error = ImportReportView {
-            scan_error: Some("cannot index".to_string()),
+            scan_errors: vec!["cannot index".to_string()],
             ..import_report_fixture()
         };
         let hard_error_status = import_card_status(None, Some(&hard_error));
