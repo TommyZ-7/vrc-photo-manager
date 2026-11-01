@@ -50,7 +50,7 @@ pub(crate) struct IpcControl {
 
 impl IpcControl {
     fn snapshot(&self) -> StatusSnapshot {
-        status_snapshot(&self.status.lock().unwrap())
+        status_snapshot(&mut self.status.lock().unwrap())
     }
 
     fn set_paused(&self, paused: bool) {
@@ -70,7 +70,13 @@ impl IpcControl {
     }
 }
 
-pub(crate) fn status_snapshot(status: &DaemonStatus) -> StatusSnapshot {
+/// Takes a snapshot of the status, stamping it with the next version.
+/// Callers hold the status lock, so the version orders the snapshot
+/// against the state it was read from: a snapshot read before a state
+/// change always carries a lower version than one read after it, no
+/// matter when each is published.
+pub(crate) fn status_snapshot(status: &mut DaemonStatus) -> StatusSnapshot {
+    status.version += 1;
     StatusSnapshot {
         paused: status.paused,
         watching: status.watching,
@@ -83,6 +89,7 @@ pub(crate) fn status_snapshot(status: &DaemonStatus) -> StatusSnapshot {
         scan_roots: status.scan_roots,
         photo_count: status.photo_count,
         pending_jobs: status.pending_jobs,
+        version: status.version,
     }
 }
 
@@ -385,6 +392,28 @@ mod tests {
             subscription.next_event().unwrap(),
             Some(Event::StatusChanged { .. })
         ));
+    }
+
+    #[test]
+    fn a_snapshot_read_before_a_state_change_versions_below_one_read_after() {
+        // The stale-publish race from #66: a snapshot read while a scan is
+        // running must stay older than the snapshot read after the scan
+        // finished, so the receiver can drop it even when it is published
+        // after the fresher one.
+        let (_dir, _endpoint, control) = test_control();
+        control.status.lock().unwrap().scanning = true;
+        let stale = control.snapshot();
+        control.status.lock().unwrap().scanning = false;
+        let fresh = control.snapshot();
+
+        assert!(stale.scanning);
+        assert!(!fresh.scanning);
+        assert!(
+            stale.version < fresh.version,
+            "stale {} must version below fresh {}",
+            stale.version,
+            fresh.version
+        );
     }
 
     #[test]
