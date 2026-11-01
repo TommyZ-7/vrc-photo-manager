@@ -284,9 +284,7 @@ impl App {
         self.selection_anchor = None;
         self.quick_look_photo_ids.clear();
         self.quick_look_index = 0;
-        self.preview = None;
-        self.previous_preview = None;
-        self.previous_color = None;
+        self.reset_preview_state();
         let focus = self
             .quick_look_return_focus
             .take()
