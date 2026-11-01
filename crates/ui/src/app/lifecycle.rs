@@ -23,6 +23,7 @@ use crate::state::photo_browser::{
 use crate::ui::notifications::{FailureNotice, failure_transition};
 use crate::ui::palette::{Palette, apply_component_theme, resolve};
 use crate::ui::shell::screen_direction;
+use crate::ui::theme::{MOTION_BASE, MOTION_SIDEBAR};
 
 /// Current daemon scan progress, shown by the sidebar status card and the
 /// dashboard.
@@ -678,6 +679,9 @@ impl App {
             .collect();
         self.reload_job_state(cx);
         let previous_language = self.settings.language.clone();
+        let previous_auto_compress = self.settings.auto_compress;
+        let previous_clipboard_enabled = self.settings.clipboard_enabled;
+        let previous_thumbnail_spec = self.settings.thumbnail_spec();
         let mut settings = AppSettings::load(&self.db).unwrap_or_else(|error| {
             tracing::warn!(%error, "cannot load app settings");
             AppSettings::default()
@@ -685,6 +689,25 @@ impl App {
         settings.language = vrc_photo_i18n::set_locale(&settings.language);
         let language_changed = settings.language != previous_language;
         self.settings = settings;
+        if self.settings.thumbnail_spec() != previous_thumbnail_spec {
+            self.thumbnails.borrow_mut().clear();
+        }
+        if self.settings.auto_compress != previous_auto_compress {
+            self.integrations_auto_motion =
+                crate::state::motion::ToggleMotion::settled(if self.settings.auto_compress {
+                    0.0
+                } else {
+                    1.0
+                });
+        }
+        if self.settings.clipboard_enabled != previous_clipboard_enabled {
+            self.integrations_clipboard_motion =
+                crate::state::motion::ToggleMotion::settled(if self.settings.clipboard_enabled {
+                    0.0
+                } else {
+                    1.0
+                });
+        }
         if language_changed {
             self.library.borrow_mut().invalidate_labels();
             self.search_view.borrow_mut().invalidate_labels();
@@ -796,6 +819,9 @@ impl App {
             self.clear_selection(cx);
         }
         self.screen = screen;
+        if screen == Screen::Settings {
+            self.refresh_thumbnail_cache_usage(cx);
+        }
         if screen == Screen::Photos && self.library_dirty {
             let revision = self.db.library_revision().ok();
             self.apply_library_snapshot(revision, cx);
@@ -823,7 +849,12 @@ impl App {
         // The width animation recreates the nav subtree, so its animations must
         // render at the current tab instead of replaying the last tab change.
         self.nav_previous = self.screen;
-        self.sidebar_motion_epoch = self.sidebar_motion_epoch.wrapping_add(1);
+        let target = if self.sidebar_collapsed { 1.0 } else { 0.0 };
+        if cx.reduce_motion() {
+            self.sidebar_motion = crate::state::motion::ToggleMotion::settled(target);
+        } else {
+            self.sidebar_motion.animate_to(target, MOTION_SIDEBAR);
+        }
         self.hovered_nav = None;
         self.settings.ui_sidebar_collapsed = self.sidebar_collapsed;
         if let Err(error) = self.settings.save(&self.db) {
@@ -851,7 +882,12 @@ impl App {
 
     fn set_ribbon_collapsed(&mut self, collapsed: bool, cx: &mut Context<Self>) {
         self.ribbon_collapsed = collapsed;
-        self.ribbon_epoch = self.ribbon_epoch.wrapping_add(1);
+        let target = if collapsed { 1.0 } else { 0.0 };
+        if cx.reduce_motion() {
+            self.ribbon_motion = crate::state::motion::ToggleMotion::settled(target);
+        } else {
+            self.ribbon_motion.animate_to(target, MOTION_BASE);
+        }
         self.settings.ui_ribbon_collapsed = collapsed;
         if let Err(error) = self.settings.save(&self.db) {
             tracing::warn!(%error, "cannot save ribbon state");

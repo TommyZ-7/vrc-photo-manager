@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::notification::NotificationType;
+use gpui_kit::component::slider::{SliderEvent, SliderState};
 use gpui_kit::component::*;
 use gpui_kit::*;
 use vrc_photo_core::db::Db;
@@ -28,6 +29,7 @@ use vrc_photo_core::model::{
     LibraryStats, Photo, PhotoPlayer, PhotoTextFilter,
 };
 use vrc_photo_core::settings::AppSettings;
+use vrc_photo_core::thumbnail::ThumbnailCacheUsage;
 use vrc_photo_i18n::{tr, tr_args};
 use vrc_photo_ipc::Endpoint;
 
@@ -37,6 +39,7 @@ use crate::app::daemon::spawn_daemon_process;
 use crate::app::demo::{DemoAssets, open_database};
 use crate::app::import::{ImportDialogState, ImportReportView};
 use crate::app::lifecycle::ScanProgressView;
+use crate::state::motion::ToggleMotion;
 use crate::state::photo_browser::{CountDebounce, PhotoBrowser, PhotoIndex};
 use crate::state::preview::{PreviewKey, PreviewQueue};
 use crate::state::selection::PhotoSelection;
@@ -74,6 +77,7 @@ pub(crate) enum Screen {
     Compression,
     Search,
     Dashboard,
+    Integrations,
     Settings,
 }
 
@@ -88,6 +92,7 @@ impl Screen {
             Self::Compression => "nav.compression",
             Self::Search => "nav.search",
             Self::Dashboard => "nav.dashboard",
+            Self::Integrations => "nav.integrations",
             Self::Settings => "nav.settings",
         };
         vrc_photo_i18n::tr_in(locale, key)
@@ -99,7 +104,8 @@ pub struct App {
     pub(crate) screen: Screen,
     pub(crate) sidebar_collapsed: bool,
     pub(crate) sidebar_status_tab: SidebarStatusTab,
-    pub(crate) sidebar_motion_epoch: u64,
+    /// 0 = expanded, 1 = collapsed.
+    pub(crate) sidebar_motion: ToggleMotion,
     pub(crate) nav_previous: Screen,
     pub(crate) nav_epoch: u64,
     pub(crate) screen_epoch: u64,
@@ -107,8 +113,10 @@ pub struct App {
     /// Scroll position of the settings section column, shared with its
     /// scrollbar.
     pub(crate) settings_scroll: ScrollHandle,
+    pub(crate) integrations_scroll: ScrollHandle,
     pub(crate) ribbon_collapsed: bool,
-    pub(crate) ribbon_epoch: u64,
+    /// 0 = expanded, 1 = collapsed.
+    pub(crate) ribbon_motion: ToggleMotion,
     pub(crate) render_epoch: u64,
     pub(crate) library_bounds: CardBoundsMap,
     pub(crate) search_bounds: CardBoundsMap,
@@ -234,6 +242,14 @@ pub struct App {
     /// Library revision the cached stats were computed for.
     pub(crate) stats_revision: i64,
     pub(crate) settings: AppSettings,
+    /// 0 = body expanded, 1 = collapsed to the card header.
+    pub(crate) integrations_auto_motion: ToggleMotion,
+    pub(crate) integrations_clipboard_motion: ToggleMotion,
+    pub(crate) thumbnail_quality_slider: Entity<SliderState>,
+    pub(crate) _thumbnail_quality_subscription: Subscription,
+    /// Last measured size of the thumbnail cache, refreshed when the settings
+    /// screen opens and after a clear.
+    pub(crate) thumbnail_cache_usage: Option<ThumbnailCacheUsage>,
     pub(crate) palette: Palette,
     pub(crate) update: update_view::UpdateState,
     pub(crate) jobs: Vec<CompressionJob>,
@@ -556,6 +572,32 @@ impl App {
                 }
             },
         );
+        let thumbnail_quality_slider = cx.new(|_| {
+            SliderState::new()
+                .min(f32::from(vrc_photo_core::thumbnail::THUMBNAIL_QUALITY_MIN))
+                .max(f32::from(vrc_photo_core::thumbnail::THUMBNAIL_QUALITY_MAX))
+                .step(1.0)
+                .default_value(f32::from(initial_settings.thumbnail_quality))
+        });
+        let thumbnail_quality_subscription = cx.subscribe(
+            &thumbnail_quality_slider,
+            |this, _, event: &SliderEvent, cx| match event {
+                SliderEvent::Change(value) => {
+                    let quality = value.end().round().clamp(10.0, 100.0) as u8;
+                    if this.settings.thumbnail_quality != quality {
+                        this.settings.thumbnail_quality = quality;
+                        cx.notify();
+                    }
+                }
+                SliderEvent::Release(value) => {
+                    let quality = value.end().round().clamp(10.0, 100.0) as u8;
+                    if this.settings.thumbnail_quality != quality {
+                        this.settings.thumbnail_quality = quality;
+                    }
+                    this.save_thumbnail_settings(cx);
+                }
+            },
+        );
         let photo_grid_focus = cx.focus_handle();
         let import_dialog_focus = cx.focus_handle();
         let quick_look_close_focus = cx.focus_handle();
@@ -615,14 +657,23 @@ impl App {
             screen: Screen::Photos,
             sidebar_collapsed: initial_settings.ui_sidebar_collapsed,
             sidebar_status_tab: SidebarStatusTab::Compression,
-            sidebar_motion_epoch: 0,
+            sidebar_motion: ToggleMotion::settled(if initial_settings.ui_sidebar_collapsed {
+                1.0
+            } else {
+                0.0
+            }),
             nav_previous: Screen::Photos,
             nav_epoch: 0,
             screen_epoch: 0,
             screen_direction: 1.0,
             settings_scroll: ScrollHandle::new(),
+            integrations_scroll: ScrollHandle::new(),
             ribbon_collapsed: initial_settings.ui_ribbon_collapsed,
-            ribbon_epoch: 0,
+            ribbon_motion: ToggleMotion::settled(if initial_settings.ui_ribbon_collapsed {
+                1.0
+            } else {
+                0.0
+            }),
             render_epoch: 0,
             library_bounds,
             search_bounds,
@@ -735,6 +786,21 @@ impl App {
             stats: LibraryStats::default(),
             stats_revision: -1,
             settings: AppSettings::default(),
+            integrations_auto_motion: ToggleMotion::settled(if initial_settings.auto_compress {
+                0.0
+            } else {
+                1.0
+            }),
+            integrations_clipboard_motion: ToggleMotion::settled(
+                if initial_settings.clipboard_enabled {
+                    0.0
+                } else {
+                    1.0
+                },
+            ),
+            thumbnail_quality_slider,
+            _thumbnail_quality_subscription: thumbnail_quality_subscription,
+            thumbnail_cache_usage: None,
             palette: initial_palette,
             update: update_view::UpdateState::new(health_token, database_ok, demo, db_path),
             jobs: Vec::new(),
@@ -932,7 +998,7 @@ impl Render for App {
                 .child(self.sidebar(window, layout.content_height, cx))
                 .child(main)
                 .child(self.nav_tooltip(window, cx))
-                .child(self.rail_toggle(window, cx));
+                .child(self.rail_toggle(cx));
             root = root.child(shell);
             if self.manual_compress.is_some() {
                 root = root.child(self.manual_compression_overlay(window, cx));
@@ -970,6 +1036,7 @@ mod tests {
     fn screen_titles_translate() {
         assert_eq!(Screen::Photos.title_in("ja"), "写真");
         assert_eq!(Screen::Photos.title_in("en"), "Photos");
+        assert_eq!(Screen::Integrations.title_in("ja"), "連携・自動");
         assert_eq!(Screen::Settings.title_in("en"), "Settings");
     }
 

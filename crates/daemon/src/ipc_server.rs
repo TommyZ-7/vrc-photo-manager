@@ -1,4 +1,5 @@
 use std::io::{self, BufReader, Read};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -45,6 +46,8 @@ pub(crate) struct IpcControl {
     pub(crate) wake: Arc<WakeSignal>,
     pub(crate) jobs: Arc<JobSignal>,
     pub(crate) events: EventBus,
+    pub(crate) thumbnail_dir: PathBuf,
+    pub(crate) thumbnail_cache_epoch: Arc<AtomicU64>,
     pub(crate) thumbnail_external_bytes: Arc<AtomicU64>,
 }
 
@@ -241,6 +244,37 @@ fn handle_connection(stream: vrc_photo_ipc::server::Stream, control: IpcControl)
                 tracing::debug!(files, bytes, "UI reported generated thumbnails");
                 write_response(reader.get_mut(), id, Response::Ok)?;
             }
+            Request::ClearThumbnailCache => {
+                let response = match vrc_photo_core::thumbnail::clear_thumbnail_cache_in(
+                    &control.thumbnail_dir,
+                ) {
+                    Ok(report) => {
+                        control.thumbnail_external_bytes.store(0, Ordering::Relaxed);
+                        control
+                            .thumbnail_cache_epoch
+                            .fetch_add(1, Ordering::Relaxed);
+                        tracing::info!(
+                            removed_files = report.removed_files,
+                            removed_bytes = report.removed_bytes,
+                            "cleared thumbnail cache"
+                        );
+                        Response::ThumbnailCacheCleared {
+                            removed_files: report.removed_files as u64,
+                            removed_bytes: report.removed_bytes,
+                            remaining_files: report.remaining_files as u64,
+                            remaining_bytes: report.remaining_bytes,
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "cannot clear thumbnail cache");
+                        Response::Error {
+                            code: ErrorCode::InvalidRequest,
+                            message: error.to_string(),
+                        }
+                    }
+                };
+                write_response(reader.get_mut(), id, response)?;
+            }
             Request::Shutdown => {
                 // Clear the running flag before acknowledging so a client that
                 // observes `Ok` also observes a stopped daemon.
@@ -361,6 +395,8 @@ mod tests {
             wake: Arc::new(WakeSignal::default()),
             jobs: Arc::new(JobSignal::default()),
             events: EventBus::default(),
+            thumbnail_dir: dir.path().join("thumbnails"),
+            thumbnail_cache_epoch: Arc::new(AtomicU64::new(0)),
             thumbnail_external_bytes: Arc::new(AtomicU64::new(0)),
         };
         (dir, endpoint, control)
@@ -434,6 +470,44 @@ mod tests {
             control.thumbnail_external_bytes.load(Ordering::Relaxed),
             4096
         );
+    }
+
+    #[test]
+    fn clear_thumbnail_cache_removes_files_and_resets_the_ledger() {
+        let (_dir, endpoint, control) = test_control();
+        let cache = control.thumbnail_dir.clone();
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("1-q80-s256.webp"), b"thumb").unwrap();
+        std::fs::write(cache.join("2-q80-s256.webp.tmp"), b"tmp").unwrap();
+        control
+            .thumbnail_external_bytes
+            .store(1234, Ordering::Relaxed);
+        let _server = IpcServer::start(endpoint.clone(), control.clone()).unwrap();
+
+        let response = request(
+            &endpoint,
+            Request::ClearThumbnailCache,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        match response {
+            Response::ThumbnailCacheCleared {
+                removed_files,
+                removed_bytes,
+                remaining_files,
+                ..
+            } => {
+                assert_eq!(removed_files, 2);
+                assert_eq!(removed_bytes, 8);
+                assert_eq!(remaining_files, 0);
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+        assert!(!cache.join("1-q80-s256.webp").exists());
+        assert!(!cache.join("2-q80-s256.webp.tmp").exists());
+        assert_eq!(control.thumbnail_external_bytes.load(Ordering::Relaxed), 0);
+        assert_eq!(control.thumbnail_cache_epoch.load(Ordering::Relaxed), 1);
     }
 
     #[test]

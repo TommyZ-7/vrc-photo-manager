@@ -1,3 +1,4 @@
+pub(crate) mod motion;
 pub(crate) mod photo_browser;
 pub(crate) mod preview;
 pub(crate) mod selection;

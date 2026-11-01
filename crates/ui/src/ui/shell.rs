@@ -62,7 +62,7 @@ impl App {
         let p = self.palette;
         let collapsed = self.sidebar_collapsed;
         let update_badge = self.update.nav_badge();
-        let epoch = self.sidebar_motion_epoch;
+        let motion = self.sidebar_motion;
         let photo_count = format_count(self.stats.photo_count);
         let compression_count =
             (self.active_job_count > 0).then(|| format_count(self.active_job_count));
@@ -130,6 +130,14 @@ impl App {
                     ))
                     .child(self.nav_item(
                         window,
+                        tr!("nav.integrations"),
+                        Screen::Integrations,
+                        IconName::Bot,
+                        None,
+                        cx,
+                    ))
+                    .child(self.nav_item(
+                        window,
                         tr!("nav.settings"),
                         Screen::Settings,
                         IconName::Settings,
@@ -188,27 +196,24 @@ impl App {
             );
 
         body.with_animation(
-            ("sidebar", epoch),
-            Animation::new(if epoch == 0 {
-                Duration::ZERO
-            } else {
-                Duration::from_millis(440)
-            })
-            .with_easing(ease_motion)
-            .with_max_fps(self.motion_fps(window, cx)),
-            move |el, t| {
-                let from = sidebar_width(!collapsed);
-                let to = sidebar_width(collapsed);
-                el.w(px(from + (to - from) * t))
+            ("sidebar", motion.epoch()),
+            Animation::new(motion.driver_duration())
+                .with_easing(ease_motion)
+                .with_max_fps(self.motion_fps(window, cx)),
+            move |el, _| {
+                let progress = motion.value();
+                let from = sidebar_width(false);
+                let to = sidebar_width(true);
+                el.w(px(from + (to - from) * progress))
             },
         )
         .into_any_element()
     }
 
-    pub(crate) fn rail_toggle(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn rail_toggle(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let p = self.palette;
         let collapsed = self.sidebar_collapsed;
-        let epoch = self.sidebar_motion_epoch;
+        let progress = self.sidebar_motion.value();
         let icon = if collapsed {
             IconName::ChevronRight
         } else {
@@ -219,13 +224,14 @@ impl App {
         } else {
             tr!("sidebar.toggle.collapse")
         };
-        let (from_left, top) = rail_toggle_origin(!collapsed);
-        let (to_left, _) = rail_toggle_origin(collapsed);
+        let (from_left, top) = rail_toggle_origin(false);
+        let (to_left, _) = rail_toggle_origin(true);
+        let left = from_left + (to_left - from_left) * progress;
 
         div()
             .absolute()
             .top(px(top))
-            .left(px(from_left))
+            .left(px(left))
             .child(
                 Button::new("sidebar-toggle")
                     .ghost()
@@ -239,17 +245,6 @@ impl App {
                     .text_color(rgb(p.muted))
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
             )
-            .with_animation(
-                ("rail-toggle", epoch),
-                Animation::new(if epoch == 0 {
-                    Duration::ZERO
-                } else {
-                    Duration::from_millis(440)
-                })
-                .with_easing(ease_motion)
-                .with_max_fps(self.motion_fps(window, cx)),
-                move |el, t| el.left(px(from_left + (to_left - from_left) * t)),
-            )
             .into_any_element()
     }
 
@@ -262,16 +257,6 @@ impl App {
             .bg(rgb(p.panel))
             .border_1()
             .border_color(rgba(with_alpha(p.text, 0x0f)))
-            .child(
-                div()
-                    .text_size(px(8.))
-                    .text_color(rgb(p.muted_2))
-                    .whitespace_nowrap()
-                    .child(tr_args!(
-                        "sidebar.waiting_jobs",
-                        count = format_count(self.waiting_job_count)
-                    )),
-            )
             .child(
                 div()
                     .text_size(px(7.5))
@@ -538,7 +523,6 @@ impl App {
 
     fn nav_highlight(&self, window: &Window, cx: &Context<Self>) -> AnyElement {
         let p = self.palette;
-        let collapsed = self.sidebar_collapsed;
         let nav_epoch = self.nav_epoch;
         let from = nav_item_top(nav_index(self.nav_previous));
         let to = nav_item_top(nav_index(self.screen));
@@ -564,27 +548,15 @@ impl App {
                 el.top(px(from + (to - from) * t))
             });
 
-        let sidebar_epoch = self.sidebar_motion_epoch;
-        let from_left = nav_bar_left(!collapsed);
-        let to_left = nav_bar_left(collapsed);
-        let horizontal_anim = Animation::new(if sidebar_epoch == 0 {
-            Duration::ZERO
-        } else {
-            MOTION_SLOW
-        })
-        .with_easing(ease_motion)
-        .with_max_fps(self.motion_fps(window, cx));
+        let progress = self.sidebar_motion.value();
+        let from_left = nav_bar_left(false);
+        let to_left = nav_bar_left(true);
         let bar = div()
             .absolute()
-            .left_0()
+            .left(px(from_left + (to_left - from_left) * progress))
             .top_0()
             .w(px(2.))
             .h_full()
-            .with_animation(
-                ("nav-bar-x", sidebar_epoch),
-                horizontal_anim,
-                move |el, t| el.left(px(from_left + (to_left - from_left) * t)),
-            )
             .child(
                 div()
                     .absolute()
@@ -604,7 +576,7 @@ impl App {
             .top_0()
             .left_0()
             .w_full()
-            .h(px(5.0 * NAV_ITEM_HEIGHT + 4.0 * NAV_ITEM_GAP))
+            .h(px(6.0 * NAV_ITEM_HEIGHT + 5.0 * NAV_ITEM_GAP))
             .child(pill)
             .child(bar)
             .into_any_element()
@@ -624,13 +596,7 @@ impl App {
         let active = self.screen == screen;
         let was_active = self.nav_previous == screen;
         let hovered = self.hovered_nav == Some(screen);
-        let collapsed = self.sidebar_collapsed;
-        let epoch = self.sidebar_motion_epoch;
-        let reveal_duration = if epoch == 0 {
-            Duration::ZERO
-        } else {
-            Duration::from_millis(320)
-        };
+        let reveal_progress = self.sidebar_motion.value();
         let nav_epoch = self.nav_epoch;
         let color_anim = || {
             Animation::new(MOTION_FAST)
@@ -689,39 +655,16 @@ impl App {
                         ),
                 )
             })
-            .with_animation(
-                SharedString::from(format!("sidebar-label-{label}-{epoch}")),
-                Animation::new(reveal_duration)
-                    .with_easing(ease_motion)
-                    .with_max_fps(self.motion_fps(window, cx)),
-                move |el, t| {
-                    el.w(px(sidebar_reveal_width(collapsed, t)))
-                        .opacity(if collapsed { 1.0 - t } else { t })
-                },
-            );
+            .w(px(sidebar_reveal_width(reveal_progress)))
+            .opacity(1.0 - reveal_progress);
 
-        let from_pad = if collapsed { 11.0 } else { 18.5 };
-        let to_pad = if collapsed { 18.5 } else { 11.0 };
-        let from_gap = if collapsed { 11.0 } else { 0.0 };
-        let to_gap = if collapsed { 0.0 } else { 11.0 };
-        let pad_anim = Animation::new(if epoch == 0 {
-            Duration::ZERO
-        } else {
-            MOTION_SLOW
-        })
-        .with_easing(ease_motion)
-        .with_max_fps(self.motion_fps(window, cx));
+        let pad = 18.5 + (11.0 - 18.5) * reveal_progress;
+        let gap = 11.0 * reveal_progress;
         let content = h_flex()
             .w_full()
             .items_center()
-            .with_animation(
-                SharedString::from(format!("nav-pad-{label}-{epoch}")),
-                pad_anim,
-                move |el, t| {
-                    el.pl(px(from_pad + (to_pad - from_pad) * t))
-                        .gap(px(from_gap + (to_gap - from_gap) * t))
-                },
-            )
+            .pl(px(pad))
+            .gap(px(gap))
             .child(icon_element)
             .child(label_block);
 
@@ -797,6 +740,7 @@ impl App {
             Screen::Compression => self.compression_screen(window, cx).into_any_element(),
             Screen::Search => self.search_screen(window, cx).into_any_element(),
             Screen::Dashboard => self.dashboard_screen(cx).into_any_element(),
+            Screen::Integrations => self.integrations_screen(window, cx).into_any_element(),
             Screen::Settings => self.settings_screen(cx).into_any_element(),
         };
         let enter = Animation::new(if self.screen_epoch == 0 {
@@ -1099,7 +1043,8 @@ fn nav_index(screen: Screen) -> usize {
         Screen::Search => 1,
         Screen::Compression => 2,
         Screen::Dashboard => 3,
-        Screen::Settings => 4,
+        Screen::Integrations => 4,
+        Screen::Settings => 5,
     }
 }
 
@@ -1168,7 +1113,8 @@ mod tests {
         assert_eq!(nav_index(Screen::Search), 1);
         assert_eq!(nav_index(Screen::Compression), 2);
         assert_eq!(nav_index(Screen::Dashboard), 3);
-        assert_eq!(nav_index(Screen::Settings), 4);
+        assert_eq!(nav_index(Screen::Integrations), 4);
+        assert_eq!(nav_index(Screen::Settings), 5);
     }
 
     #[test]

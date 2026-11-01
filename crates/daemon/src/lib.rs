@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -230,6 +230,11 @@ pub struct Daemon {
     last_asset_check: Instant,
     thumbnail_dir: PathBuf,
     thumbnail_cache_limit: Arc<AtomicU64>,
+    /// Packed quality and long edge for the thumbnail worker.
+    thumbnail_spec: Arc<AtomicU32>,
+    /// Bumped when the thumbnail cache is cleared so the worker resets its
+    /// byte accounting and rescans on the next pass.
+    thumbnail_cache_epoch: Arc<AtomicU64>,
     /// Bytes of thumbnails the UI generated itself, as reported over IPC.
     thumbnail_external_bytes: Arc<AtomicU64>,
     last_errors: HashMap<DaemonOperation, String>,
@@ -303,6 +308,9 @@ impl Daemon {
         let thumbnail_cache_limit = Arc::new(AtomicU64::new(thumbnail_cache_limit_bytes(
             settings.thumbnail_cache_mb,
         )));
+        let thumbnail_spec = Arc::new(AtomicU32::new(pack_thumbnail_spec(
+            settings.thumbnail_spec(),
+        )));
         let errors = db.daemon_errors().context("cannot load daemon errors")?;
         let watcher_error = errors
             .iter()
@@ -372,6 +380,8 @@ impl Daemon {
             last_asset_check: Instant::now() - Duration::from_secs(30),
             thumbnail_dir,
             thumbnail_cache_limit,
+            thumbnail_spec,
+            thumbnail_cache_epoch: Arc::new(AtomicU64::new(0)),
             thumbnail_external_bytes: Arc::new(AtomicU64::new(0)),
             last_errors,
         })
@@ -571,6 +581,10 @@ impl Daemon {
             thumbnail_cache_limit_bytes(settings.thumbnail_cache_mb),
             Ordering::Relaxed,
         );
+        self.thumbnail_spec.store(
+            pack_thumbnail_spec(settings.thumbnail_spec()),
+            Ordering::Relaxed,
+        );
         self.settings = settings;
         if language_changed {
             vrc_photo_i18n::set_locale(&self.settings.language);
@@ -701,7 +715,12 @@ impl Daemon {
                 }
             };
             if let Some(path) = path {
-                match thumbnail::ensure_thumbnail_in(*id, Path::new(&path), &self.thumbnail_dir) {
+                match thumbnail::ensure_thumbnail_in(
+                    *id,
+                    Path::new(&path),
+                    &self.thumbnail_dir,
+                    self.settings.thumbnail_spec(),
+                ) {
                     Ok(Some(_)) => {}
                     Ok(None) => tracing::debug!(
                         photo_id = *id,
@@ -879,6 +898,8 @@ impl Daemon {
             wake: self.wake.clone(),
             jobs: self.jobs.clone(),
             events: self.events.clone(),
+            thumbnail_dir: self.thumbnail_dir.clone(),
+            thumbnail_cache_epoch: self.thumbnail_cache_epoch.clone(),
             thumbnail_external_bytes: self.thumbnail_external_bytes.clone(),
         };
         match IpcServer::start(endpoint, control) {
@@ -1593,8 +1614,14 @@ impl Daemon {
         self.settings.auto_compress_backlog = settings.auto_compress_backlog;
         self.settings.auto_compress_immediate = settings.auto_compress_immediate;
         self.settings.auto_compress_keep_original = settings.auto_compress_keep_original;
+        self.settings.thumbnail_quality = settings.thumbnail_quality;
+        self.settings.thumbnail_size = settings.thumbnail_size;
         self.thumbnail_cache_limit.store(
             thumbnail_cache_limit_bytes(settings.thumbnail_cache_mb),
+            Ordering::Relaxed,
+        );
+        self.thumbnail_spec.store(
+            pack_thumbnail_spec(settings.thumbnail_spec()),
             Ordering::Relaxed,
         );
     }
@@ -1721,11 +1748,22 @@ impl Daemon {
             let running = self.running.clone();
             let cache_dir = self.thumbnail_dir.clone();
             let cache_limit = self.thumbnail_cache_limit.clone();
+            let spec = self.thumbnail_spec.clone();
+            let cache_epoch = self.thumbnail_cache_epoch.clone();
             let external_bytes = self.thumbnail_external_bytes.clone();
             let handle = thread::Builder::new()
                 .name("thumbnails".to_string())
                 .spawn(move || {
-                    thumbnail_loop(db, running, rx, cache_dir, cache_limit, external_bytes)
+                    thumbnail_loop(
+                        db,
+                        running,
+                        rx,
+                        cache_dir,
+                        cache_limit,
+                        spec,
+                        cache_epoch,
+                        external_bytes,
+                    )
                 })
                 .expect("cannot spawn thumbnail worker");
             self.thumbnail_tx = Some(tx.clone());
@@ -2054,6 +2092,12 @@ impl ThumbnailCacheBudget {
         self.known_bytes = (self.limit_bytes > 0).then_some(report.remaining_bytes);
     }
 
+    /// The cache was cleared behind the worker's back; rescan before the next
+    /// prune decision instead of trusting the previous byte count.
+    fn note_cleared(&mut self) {
+        self.known_bytes = None;
+    }
+
     fn needs_prune(&self) -> bool {
         self.limit_bytes > 0
             && self
@@ -2102,6 +2146,14 @@ impl ThumbnailPruneSchedule {
 
 fn thumbnail_cache_limit_bytes(megabytes: u64) -> u64 {
     megabytes.saturating_mul(1024 * 1024)
+}
+
+fn pack_thumbnail_spec(spec: thumbnail::ThumbnailSpec) -> u32 {
+    (u32::from(spec.quality) << 16) | (spec.size & 0xffff)
+}
+
+fn unpack_thumbnail_spec(packed: u32) -> thumbnail::ThumbnailSpec {
+    thumbnail::ThumbnailSpec::new((packed >> 16) as u8, packed & 0xffff)
 }
 
 /// Prunes the cache when a limit is set. Returns the measurement from the
@@ -2157,22 +2209,34 @@ fn refresh_thumbnail_budget_and_prune(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn thumbnail_loop(
     db: Arc<Mutex<Db>>,
     running: Arc<AtomicBool>,
     rx: Receiver<i64>,
     cache_dir: PathBuf,
     cache_limit: Arc<AtomicU64>,
+    spec: Arc<AtomicU32>,
+    cache_epoch: Arc<AtomicU64>,
     external_bytes: Arc<AtomicU64>,
 ) {
     let mut budget = ThumbnailCacheBudget::new(cache_limit.load(Ordering::Relaxed));
     let mut schedule = ThumbnailPruneSchedule::new(THUMBNAIL_PRUNE_BATCH);
+    let mut seen_epoch = cache_epoch.load(Ordering::Relaxed);
     // Notifications that arrived before this worker started describe a cache
     // that the startup scan is about to measure anyway.
     external_bytes.swap(0, Ordering::Relaxed);
     refresh_thumbnail_budget_and_prune(&cache_dir, &cache_limit, &mut budget);
 
     while running.load(Ordering::Relaxed) {
+        let epoch = cache_epoch.load(Ordering::Relaxed);
+        if epoch != seen_epoch {
+            seen_epoch = epoch;
+            external_bytes.swap(0, Ordering::Relaxed);
+            budget.note_cleared();
+            schedule.note_pruned();
+            refresh_thumbnail_budget_and_prune(&cache_dir, &cache_limit, &mut budget);
+        }
         let limit = cache_limit.load(Ordering::Relaxed);
         if limit != budget.limit_bytes {
             schedule.note_pruned();
@@ -2198,10 +2262,12 @@ fn thumbnail_loop(
                 };
                 let mut batch_due = false;
                 if let Some(path) = path {
+                    let thumbnail_spec = unpack_thumbnail_spec(spec.load(Ordering::Relaxed));
                     match thumbnail::ensure_thumbnail_in_with_status(
                         id,
                         Path::new(&path),
                         &cache_dir,
+                        thumbnail_spec,
                     ) {
                         Ok(Some(ensured)) => {
                             if ensured.created {
@@ -3233,7 +3299,9 @@ mod tests {
         // nothing new; the thumbnail still exists.
         let db = Db::open(dir.path().join("library.db")).unwrap();
         assert_eq!(db.count_photos().unwrap(), 1);
-        assert!(cache.join("1.webp").exists());
+        assert!(
+            thumbnail::thumbnail_path_in(&cache, 1, daemon.settings().thumbnail_spec()).exists()
+        );
     }
 
     #[test]

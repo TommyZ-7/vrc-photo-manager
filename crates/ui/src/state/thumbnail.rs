@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use gpui_kit::RenderImage;
 use smallvec::SmallVec;
-use vrc_photo_core::thumbnail;
+use vrc_photo_core::thumbnail::{self, ThumbnailSpec};
 
 use crate::ui::theme::average_bgra;
 
@@ -71,6 +71,10 @@ pub(crate) struct ThumbnailCache {
     failed: HashSet<i64>,
     pub(crate) pinned: Option<i64>,
     in_flight: usize,
+    /// Bumped when every entry is discarded (thumbnail settings changed or the
+    /// daemon cleared the cache). Decodes started under an older generation
+    /// are dropped instead of repopulating the cache with stale images.
+    generation: u64,
 }
 
 impl ThumbnailCache {
@@ -100,6 +104,24 @@ impl ThumbnailCache {
         self.disk_refresh_due.drain().collect()
     }
 
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Discards every decoded image and retry marker. Decodes already in
+    /// flight finish under their old generation and are ignored.
+    pub(crate) fn clear(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.images.clear();
+        self.colors.clear();
+        self.recency.clear();
+        self.last_disk_refresh.clear();
+        self.disk_refresh_due.clear();
+        self.pending.clear();
+        self.failed.clear();
+        self.in_flight = 0;
+    }
+
     pub(crate) fn begin(&mut self, id: i64) -> bool {
         if self.images.contains_key(&id)
             || self.pending.contains(&id)
@@ -113,7 +135,26 @@ impl ThumbnailCache {
         true
     }
 
+    #[cfg(test)]
     pub(crate) fn insert(&mut self, id: i64, image: Arc<RenderImage>, color: u32) {
+        let generation = self.generation;
+        self.insert_if_generation(generation, id, image, color);
+    }
+
+    /// Inserts a decode only if the cache has not been cleared since it
+    /// started. A stale decode releases its in-flight slot so the new spec
+    /// can be requested on the next frame.
+    pub(crate) fn insert_if_generation(
+        &mut self,
+        generation: u64,
+        id: i64,
+        image: Arc<RenderImage>,
+        color: u32,
+    ) -> bool {
+        if generation != self.generation {
+            self.cancel(id);
+            return false;
+        }
         if self.pending.remove(&id) {
             self.in_flight = self.in_flight.saturating_sub(1);
         }
@@ -123,13 +164,30 @@ impl ThumbnailCache {
         self.last_disk_refresh.insert(id, Instant::now());
         self.disk_refresh_due.remove(&id);
         self.evict();
+        true
     }
 
+    #[cfg(test)]
     pub(crate) fn fail(&mut self, id: i64) {
+        let generation = self.generation;
+        self.fail_if_generation(generation, id);
+    }
+
+    pub(crate) fn fail_if_generation(&mut self, generation: u64, id: i64) {
+        if generation != self.generation {
+            self.cancel(id);
+            return;
+        }
         if self.pending.remove(&id) {
             self.in_flight = self.in_flight.saturating_sub(1);
         }
         self.failed.insert(id);
+    }
+
+    fn cancel(&mut self, id: i64) {
+        if self.pending.remove(&id) {
+            self.in_flight = self.in_flight.saturating_sub(1);
+        }
     }
 
     pub(crate) fn pin(&mut self, id: i64) {
@@ -188,12 +246,14 @@ pub(crate) fn decode_thumbnail(
     cache_path: &Path,
     source: &Path,
     cache_dir: Option<&Path>,
+    spec: ThumbnailSpec,
 ) -> Option<DecodedThumbnail> {
     decode_thumbnail_with(
         id,
         cache_path,
         source,
         cache_dir,
+        spec,
         thumbnail::ensure_thumbnail_in_with_status,
         decode_thumbnail_file,
     )
@@ -204,12 +264,17 @@ fn decode_thumbnail_with<Ensure, Decode>(
     cache_path: &Path,
     source: &Path,
     cache_dir: Option<&Path>,
+    spec: ThumbnailSpec,
     ensure_thumbnail: Ensure,
     decode_thumbnail_file: Decode,
 ) -> Option<DecodedThumbnail>
 where
-    Ensure:
-        Fn(i64, &Path, &Path) -> vrc_photo_core::error::Result<Option<thumbnail::EnsuredThumbnail>>,
+    Ensure: Fn(
+        i64,
+        &Path,
+        &Path,
+        ThumbnailSpec,
+    ) -> vrc_photo_core::error::Result<Option<thumbnail::EnsuredThumbnail>>,
     Decode: Fn(i64, &Path) -> Option<(u32, image::RgbaImage)>,
 {
     let Some(cache_dir) = cache_dir else {
@@ -233,7 +298,7 @@ where
         };
     };
 
-    let ensured = match ensure_thumbnail(id, source, cache_dir) {
+    let ensured = match ensure_thumbnail(id, source, cache_dir, spec) {
         Ok(Some(ensured)) => ensured,
         Ok(None) => {
             tracing::debug!(
@@ -283,7 +348,7 @@ where
         }
     }
 
-    match ensure_thumbnail(id, source, cache_dir) {
+    match ensure_thumbnail(id, source, cache_dir, spec) {
         Ok(Some(ensured)) => {
             path = ensured.path;
             if ensured.created {
@@ -470,9 +535,11 @@ mod tests {
             .unwrap();
         let cache_path = cache.join("5.webp");
 
-        let first = decode_thumbnail(5, &cache_path, &source, Some(&cache)).expect("generated");
+        let spec = ThumbnailSpec::default();
+        let first =
+            decode_thumbnail(5, &cache_path, &source, Some(&cache), spec).expect("generated");
         assert!(first.generated_bytes.is_some_and(|bytes| bytes > 0));
-        let second = decode_thumbnail(5, &cache_path, &source, Some(&cache)).expect("cached");
+        let second = decode_thumbnail(5, &cache_path, &source, Some(&cache), spec).expect("cached");
         assert_eq!(second.generated_bytes, None);
     }
 
@@ -484,12 +551,15 @@ mod tests {
         image::RgbaImage::from_pixel(128, 80, image::Rgba([200, 100, 50, 255]))
             .save(&source)
             .unwrap();
-        let cache_path = cache.join("7.webp");
+        let spec = ThumbnailSpec::default();
+        let cache_path = thumbnail::thumbnail_path_in(&cache, 7, spec);
 
-        let first = decode_thumbnail(7, &cache_path, &source, Some(&cache)).expect("generated");
+        let first =
+            decode_thumbnail(7, &cache_path, &source, Some(&cache), spec).expect("generated");
         assert!(cache_path.is_file());
         std::fs::remove_file(&cache_path).unwrap();
-        let second = decode_thumbnail(7, &cache_path, &source, Some(&cache)).expect("regenerated");
+        let second =
+            decode_thumbnail(7, &cache_path, &source, Some(&cache), spec).expect("regenerated");
         assert!(cache_path.is_file());
         assert_eq!(first.color, second.color);
     }
@@ -502,8 +572,9 @@ mod tests {
         image::RgbaImage::from_pixel(32, 32, image::Rgba([10, 20, 30, 255]))
             .save(&source)
             .unwrap();
-        let cache_path = cache.join("8.webp");
-        decode_thumbnail(8, &cache_path, &source, Some(&cache)).expect("generated");
+        let spec = ThumbnailSpec::default();
+        let cache_path = thumbnail::thumbnail_path_in(&cache, 8, spec);
+        decode_thumbnail(8, &cache_path, &source, Some(&cache), spec).expect("generated");
         let stale = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60);
         std::fs::File::options()
             .write(true)
@@ -513,7 +584,7 @@ mod tests {
             .unwrap();
         let before = std::fs::metadata(&cache_path).unwrap().modified().unwrap();
 
-        decode_thumbnail(8, &cache_path, &source, Some(&cache)).expect("cached");
+        decode_thumbnail(8, &cache_path, &source, Some(&cache), spec).expect("cached");
 
         assert!(std::fs::metadata(&cache_path).unwrap().modified().unwrap() > before);
     }
@@ -525,7 +596,7 @@ mod tests {
         let regenerated = dir.path().join("regenerated.webp");
         std::fs::write(&regenerated, b"not decoded here").unwrap();
         let calls = std::cell::Cell::new(0);
-        let ensure = |_id: i64, _source: &Path, _cache: &Path| {
+        let ensure = |_id: i64, _source: &Path, _cache: &Path, _spec: ThumbnailSpec| {
             calls.set(calls.get() + 1);
             if calls.get() == 1 {
                 Ok(Some(thumbnail::EnsuredThumbnail {
@@ -554,6 +625,7 @@ mod tests {
             &missing,
             Path::new("/no/such/source.png"),
             Some(dir.path()),
+            ThumbnailSpec::default(),
             ensure,
             decode,
         )
@@ -570,7 +642,7 @@ mod tests {
         let cache_path = dir.path().join("corrupt.webp");
         std::fs::write(&cache_path, b"not an image").unwrap();
         let calls = std::cell::Cell::new(0);
-        let ensure = |_id: i64, _source: &Path, _cache: &Path| {
+        let ensure = |_id: i64, _source: &Path, _cache: &Path, _spec: ThumbnailSpec| {
             calls.set(calls.get() + 1);
             Ok(Some(thumbnail::EnsuredThumbnail {
                 path: cache_path.clone(),
@@ -585,6 +657,7 @@ mod tests {
             &cache_path,
             Path::new("/no/such/source.png"),
             Some(dir.path()),
+            ThumbnailSpec::default(),
             ensure,
             decode,
         );
@@ -601,9 +674,14 @@ mod tests {
             .save(&cache_path)
             .unwrap();
 
-        let decoded =
-            decode_thumbnail(6, &cache_path, &dir.path().join("missing-source.png"), None)
-                .expect("cached");
+        let decoded = decode_thumbnail(
+            6,
+            &cache_path,
+            &dir.path().join("missing-source.png"),
+            None,
+            ThumbnailSpec::default(),
+        )
+        .expect("cached");
 
         assert_eq!(decoded.generated_bytes, None);
     }
@@ -618,6 +696,7 @@ mod tests {
                 &dir.path().join("missing.png"),
                 Path::new("/no/such/source.png"),
                 None,
+                ThumbnailSpec::default(),
             )
             .is_none()
         );
@@ -658,8 +737,14 @@ mod tests {
         image::RgbaImage::from_pixel(2, 2, image::Rgba([10, 20, 30, 255]))
             .save(&cache_path)
             .unwrap();
-        let decoded =
-            decode_thumbnail(7, &cache_path, &dir.join("missing-source.png"), None).unwrap();
+        let decoded = decode_thumbnail(
+            7,
+            &cache_path,
+            &dir.join("missing-source.png"),
+            None,
+            ThumbnailSpec::default(),
+        )
+        .unwrap();
         assert_eq!(decoded.color, 0x0a141e);
         assert_eq!(&decoded.image.as_raw()[..4], &[30, 20, 10, 255]);
         let _ = std::fs::remove_dir_all(&dir);

@@ -50,7 +50,9 @@ impl App {
         let can_confirm = match dialog.output {
             ManualOutputTarget::Folder => folder_ready,
             ManualOutputTarget::Profile => selected_profile.is_some(),
-            ManualOutputTarget::Clipboard => manual_output_available(count, dialog.output),
+            ManualOutputTarget::Clipboard => {
+                manual_output_available(count, dialog.output, self.settings.clipboard_enabled)
+            }
         };
 
         let profiles = self.profiles.clone();
@@ -103,12 +105,18 @@ impl App {
             cx.notify();
         }));
 
-        let clipboard_enabled = manual_output_available(count, ManualOutputTarget::Clipboard);
+        let clipboard_enabled = manual_output_available(
+            count,
+            ManualOutputTarget::Clipboard,
+            self.settings.clipboard_enabled,
+        );
         let clipboard_row = manual_option_row(
             &self.palette,
             "manual-output-clipboard",
             tr!("dialog.output.clipboard"),
-            if clipboard_enabled {
+            if !self.settings.clipboard_enabled {
+                tr!("dialog.output.clipboard_disabled")
+            } else if clipboard_enabled {
                 tr!("dialog.output.clipboard_hint")
             } else {
                 tr!("dialog.output.clipboard_single")
