@@ -7,6 +7,8 @@ use image::RgbaImage;
 
 /// Longest edge of a cached preview, matching the inspector and viewer.
 pub const PREVIEW_MAX: u32 = 1200;
+/// Longest edge kept for the Quick Look full-resolution image.
+pub const FULL_IMAGE_MAX: u32 = 8192;
 const PREVIEW_QUALITY: f32 = 85.0;
 const PREVIEW_CACHE_MAX_FILES: usize = 2048;
 const PREVIEW_CACHE_PRUNE_TO: usize = 1536;
@@ -38,6 +40,23 @@ pub fn previews_dir() -> Option<PathBuf> {
 pub fn decode_preview(source: &Path) -> Option<RgbaImage> {
     let image = crate::image_decode::decode_image(source)?;
     Some(image.thumbnail(PREVIEW_MAX, PREVIEW_MAX).to_rgba8())
+}
+
+/// Decodes the display file for Quick Look without the 1200 px preview cap.
+/// Images under [`FULL_IMAGE_MAX`] keep their original pixels; larger ones are
+/// downscaled once so the memory ceiling is bounded.
+pub fn decode_full_image(source: &Path) -> Option<RgbaImage> {
+    decode_limited(source, FULL_IMAGE_MAX)
+}
+
+fn decode_limited(source: &Path, max_edge: u32) -> Option<RgbaImage> {
+    let image = crate::image_decode::decode_image(source)?;
+    let (width, height) = (image.width(), image.height());
+    if width.max(height) <= max_edge {
+        Some(image.to_rgba8())
+    } else {
+        Some(image.thumbnail(max_edge, max_edge).to_rgba8())
+    }
 }
 
 pub fn ensure_preview(photo_id: i64, variant: i64, source: &Path) -> Option<RgbaImage> {
@@ -262,6 +281,26 @@ mod tests {
             .unwrap()
             .set_modified(time)
             .unwrap();
+    }
+
+    #[test]
+    fn full_decode_preserves_small_images_pixel_for_pixel() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.png");
+        write_png(&source, 37, 21, [12, 34, 56, 255]);
+
+        let image = decode_full_image(&source).expect("full image");
+        assert_eq!(image.dimensions(), (37, 21));
+        assert_eq!(image.get_pixel(0, 0).0, [12, 34, 56, 255]);
+    }
+
+    #[test]
+    fn full_decode_caps_only_the_long_edge() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("wide.png");
+        write_png(&source, 200, 100, [1, 2, 3, 255]);
+        let image = decode_limited(&source, 100).expect("limited image");
+        assert_eq!(image.dimensions(), (100, 50));
     }
 
     #[test]
