@@ -70,6 +70,31 @@ pub fn run_helper(job_path: &Path) -> Result<()> {
     run_helper_with_options(job_path, HelperOptions::default())
 }
 
+/// Whether the user-mode helper may run under this effective uid.
+///
+/// The polkit policy lets `/usr/bin/vrc-photo-updater` run with arbitrary
+/// arguments, so a root `--apply` would turn the job file into an arbitrary
+/// file replacement primitive.
+pub fn user_mode_allowed(euid: u32) -> bool {
+    euid != 0
+}
+
+/// Whether the privileged system package helper was started through `pkexec`.
+pub fn system_mode_allowed(euid: u32, pkexec_uid: Option<u32>) -> bool {
+    euid == 0 && pkexec_uid.is_some_and(|uid| uid > 0)
+}
+
+#[cfg(unix)]
+pub fn effective_uid() -> u32 {
+    // SAFETY: `geteuid` only reads the effective uid and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
+#[cfg(not(unix))]
+pub fn effective_uid() -> u32 {
+    1
+}
+
 /// Reads the job, waits for the old processes, applies the update, verifies
 /// the new UI's health marker, and rolls back on failure.
 pub fn run_helper_with_options(job_path: &Path, options: HelperOptions) -> Result<()> {
@@ -129,6 +154,13 @@ pub fn run_helper_with_options(job_path: &Path, options: HelperOptions) -> Resul
             job_path,
             "the daemon did not exit before the update timeout",
         );
+    }
+
+    // System packages are installed by the privileged helper through pkexec.
+    // The user-side helper only orchestrates verification, relaunch, and
+    // health checks.
+    if matches!(job.kind, ApplyKind::SystemPackage { .. }) {
+        return run_system_package_apply(&paths, &job, job_path, &options);
     }
 
     if let Err(error) = verify_staged(&job, &options) {
@@ -817,6 +849,246 @@ pub(crate) fn run_system_package_from_job(job: &ApplyJob, options: &HelperOption
         )));
     }
     install_package(family, temp.path(), options)
+}
+
+/// Maps a `pkexec` exit status to a user-facing failure code and reason.
+fn map_pkexec_status(status: std::process::ExitStatus, stderr: &str) -> (LastErrorCode, String) {
+    let code = match status.code() {
+        Some(126) => LastErrorCode::AuthCancelled,
+        Some(127) => LastErrorCode::AuthUnavailable,
+        Some(14) => LastErrorCode::PackageManagerLocked,
+        Some(11) => LastErrorCode::PackageVerificationFailed,
+        Some(12) => LastErrorCode::PackageMetadataMismatch,
+        Some(13) => LastErrorCode::Downgrade,
+        Some(15) => LastErrorCode::PackageManagerFailed,
+        Some(10) => LastErrorCode::HelperFailed,
+        _ => LastErrorCode::HelperFailed,
+    };
+    (code, truncate_output(stderr.as_bytes()))
+}
+
+/// Whether a failure happened before the package manager changed anything.
+///
+/// Those failures remove the job and staged package. Failures after the
+/// install (`PackageManagerFailed`, health checks) keep them for investigation.
+fn is_preinstall_failure(code: LastErrorCode) -> bool {
+    matches!(
+        code,
+        LastErrorCode::AuthCancelled
+            | LastErrorCode::AuthUnavailable
+            | LastErrorCode::PackageManagerLocked
+            | LastErrorCode::PackageVerificationFailed
+            | LastErrorCode::PackageMetadataMismatch
+            | LastErrorCode::Downgrade
+            | LastErrorCode::HelperFailed
+    )
+}
+
+/// Verifies the staged package, installs it through `pkexec`, then launches the
+/// new version and waits for its health marker.
+///
+/// System packages are never rolled back automatically: the package manager
+/// owns the files and the previous package may no longer be cached.
+fn run_system_package_apply(
+    paths: &UpdatePaths,
+    job: &ApplyJob,
+    job_path: &Path,
+    options: &HelperOptions,
+) -> Result<()> {
+    if let Err(error) = verify_staged(job, options) {
+        log(
+            paths,
+            &format!("staged package verification failed: {error}"),
+        );
+        return fail_system_package(
+            paths,
+            job,
+            job_path,
+            LastErrorCode::PackageVerificationFailed,
+            error.to_string(),
+            true,
+        );
+    }
+    if !crate::install::pkexec_available() {
+        return fail_system_package(
+            paths,
+            job,
+            job_path,
+            LastErrorCode::AuthUnavailable,
+            "pkexec is missing".to_string(),
+            true,
+        );
+    }
+    if !Path::new(crate::install::SYSTEM_HELPER_PATH).is_file() {
+        return fail_system_package(
+            paths,
+            job,
+            job_path,
+            LastErrorCode::HelperFailed,
+            "system update helper is missing".to_string(),
+            true,
+        );
+    }
+
+    log(
+        paths,
+        &format!(
+            "running the system package helper through pkexec: {}",
+            job_path.display()
+        ),
+    );
+    let output = Command::new("pkexec")
+        .arg("--disable-internal-agent")
+        .arg(crate::install::SYSTEM_HELPER_PATH)
+        .arg("--apply-system-package")
+        .arg(job_path)
+        .env("LC_ALL", "C")
+        .output();
+    let output = match output {
+        Ok(output) => output,
+        Err(error) => {
+            return fail_system_package(
+                paths,
+                job,
+                job_path,
+                LastErrorCode::AuthUnavailable,
+                format!("cannot run pkexec: {error}"),
+                true,
+            );
+        }
+    };
+    log(
+        paths,
+        &format!(
+            "system package helper exit: {:?}\n{}",
+            output.status.code(),
+            truncate_output(&output.stderr)
+        ),
+    );
+    if !output.status.success() {
+        let (code, reason) =
+            map_pkexec_status(output.status, &String::from_utf8_lossy(&output.stderr));
+        return fail_system_package(
+            paths,
+            job,
+            job_path,
+            code,
+            reason,
+            is_preinstall_failure(code),
+        );
+    }
+
+    let mut child = match launch(
+        &job.target,
+        &job.restart_args,
+        Some(&job.health_token),
+        &job.working_dir,
+    ) {
+        Ok(child) => child,
+        Err(error) => {
+            log(paths, &format!("cannot launch the new version: {error}"));
+            // The package is installed but the new UI did not start. Keep the
+            // job, staged package, and log for investigation.
+            let _ = LastResult::write(
+                paths,
+                &LastResult {
+                    status: LastStatus::Failed,
+                    from: job.from_version.clone(),
+                    to: job.to_version.clone(),
+                    reason: Some(format!(
+                        "{error} (job: {}, staged: {}, log: {})",
+                        job_path.display(),
+                        job.staged.display(),
+                        paths.log_file().display()
+                    )),
+                    code: Some(LastErrorCode::HealthCheckFailed),
+                },
+            );
+            relaunch_target(paths, job);
+            return Err(error);
+        }
+    };
+
+    match wait_for_health(
+        paths,
+        &job.health_token,
+        &job.to_version,
+        job.database.as_ref().map(NativeString::as_path),
+        &mut child,
+        options.health_timeout,
+    ) {
+        Ok(()) => {
+            log(paths, "system package update healthy");
+            let _ = std::fs::remove_file(paths.health_file(&job.health_token));
+            let _ = LastResult::write(
+                paths,
+                &LastResult {
+                    status: LastStatus::Success,
+                    from: job.from_version.clone(),
+                    to: job.to_version.clone(),
+                    reason: None,
+                    code: None,
+                },
+            );
+            cleanup(paths, job, job_path);
+            Ok(())
+        }
+        Err(error) => {
+            log(paths, &format!("health check failed: {error}"));
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = LastResult::write(
+                paths,
+                &LastResult {
+                    status: LastStatus::Failed,
+                    from: job.from_version.clone(),
+                    to: job.to_version.clone(),
+                    reason: Some(error.to_string()),
+                    code: Some(LastErrorCode::HealthCheckFailed),
+                },
+            );
+            relaunch_target(paths, job);
+            Err(error)
+        }
+    }
+}
+
+/// Writes the failure result, relaunches the target, and optionally removes the
+/// job and staged package.
+fn fail_system_package(
+    paths: &UpdatePaths,
+    job: &ApplyJob,
+    job_path: &Path,
+    code: LastErrorCode,
+    reason: String,
+    cleanup_files: bool,
+) -> Result<()> {
+    log(
+        paths,
+        &format!("system package update failed ({code:?}): {reason}"),
+    );
+    let _ = LastResult::write(
+        paths,
+        &LastResult {
+            status: LastStatus::Failed,
+            from: job.from_version.clone(),
+            to: job.to_version.clone(),
+            reason: Some(reason.clone()),
+            code: Some(code),
+        },
+    );
+    relaunch_target(paths, job);
+    if cleanup_files {
+        cleanup(paths, job, job_path);
+    }
+    Err(UpdateError::Other(reason))
+}
+
+/// Launches the target again without a health token after a failed update.
+fn relaunch_target(paths: &UpdatePaths, job: &ApplyJob) {
+    if let Err(error) = launch(&job.target, &job.restart_args, None, &job.working_dir) {
+        log(paths, &format!("cannot relaunch the target: {error}"));
+    }
 }
 
 enum Backup {
@@ -2680,5 +2952,95 @@ mod tests {
         .unwrap();
         let result = LastResult::read(&paths).unwrap();
         assert_eq!(result.code, None);
+    }
+
+    #[test]
+    fn user_mode_rejects_root() {
+        assert!(user_mode_allowed(1000));
+        assert!(!user_mode_allowed(0));
+    }
+
+    #[test]
+    fn system_mode_requires_root_and_pkexec_uid() {
+        assert!(system_mode_allowed(0, Some(1000)));
+        assert!(!system_mode_allowed(1000, Some(1000)));
+        assert!(!system_mode_allowed(0, None));
+        assert!(!system_mode_allowed(0, Some(0)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn maps_pkexec_exit_codes() {
+        use std::os::unix::process::ExitStatusExt;
+        let cases = [
+            (126, LastErrorCode::AuthCancelled),
+            (127, LastErrorCode::AuthUnavailable),
+            (14, LastErrorCode::PackageManagerLocked),
+            (11, LastErrorCode::PackageVerificationFailed),
+            (12, LastErrorCode::PackageMetadataMismatch),
+            (13, LastErrorCode::Downgrade),
+            (15, LastErrorCode::PackageManagerFailed),
+            (10, LastErrorCode::HelperFailed),
+        ];
+        for (code, expected) in cases {
+            // `from_raw` takes a wait status; the exit code lives in bits 8..16.
+            let status = std::process::ExitStatus::from_raw(code << 8);
+            assert_eq!(status.code(), Some(code));
+            assert_eq!(map_pkexec_status(status, "reason").0, expected);
+        }
+    }
+
+    #[test]
+    fn only_preinstall_failures_cleanup_the_job() {
+        assert!(is_preinstall_failure(LastErrorCode::AuthCancelled));
+        assert!(is_preinstall_failure(LastErrorCode::AuthUnavailable));
+        assert!(is_preinstall_failure(LastErrorCode::PackageManagerLocked));
+        assert!(is_preinstall_failure(
+            LastErrorCode::PackageVerificationFailed
+        ));
+        assert!(is_preinstall_failure(
+            LastErrorCode::PackageMetadataMismatch
+        ));
+        assert!(is_preinstall_failure(LastErrorCode::Downgrade));
+        assert!(is_preinstall_failure(LastErrorCode::HelperFailed));
+        assert!(!is_preinstall_failure(LastErrorCode::PackageManagerFailed));
+        assert!(!is_preinstall_failure(LastErrorCode::HealthCheckFailed));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_package_apply_records_a_verification_failure_and_relaunches() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut job, options) = system_package_fixture(dir.path(), &next_version());
+        let sentinel = dir.path().join("old-ran");
+        let target = dir.path().join("vrc-photo-manager");
+        std::fs::write(
+            &target,
+            format!("#!/bin/sh\nprintf old > '{}'\n", sentinel.display()),
+        )
+        .unwrap();
+        make_executable(&target);
+        job.target = target;
+
+        let paths = UpdatePaths::new(&job.data_dir);
+        paths.ensure().unwrap();
+        let job_path = paths.job_file();
+        std::fs::write(&job_path, serde_json::to_vec(&job).unwrap()).unwrap();
+        let staged = job.staged.clone();
+        std::fs::write(&staged, b"tampered").unwrap();
+
+        let error = run_system_package_apply(&paths, &job, &job_path, &options).unwrap_err();
+        assert!(matches!(error, UpdateError::Other(_)));
+
+        let result = LastResult::read(&paths).unwrap();
+        assert_eq!(result.status, LastStatus::Failed);
+        assert_eq!(result.code, Some(LastErrorCode::PackageVerificationFailed));
+        assert!(!job_path.exists(), "the job is cleaned up before install");
+        assert!(!staged.exists(), "the staged package is cleaned up");
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !sentinel.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(sentinel.exists(), "the target is relaunched");
     }
 }
