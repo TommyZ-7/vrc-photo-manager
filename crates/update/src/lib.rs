@@ -15,7 +15,7 @@ pub mod verify;
 
 pub use check::{FeedConfig, check};
 pub use download::download;
-pub use error::{IoOperation, Result, UpdateError};
+pub use error::{IoOperation, LastErrorCode, Result, UpdateError};
 pub use fetch::{HttpClient, UreqClient};
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");

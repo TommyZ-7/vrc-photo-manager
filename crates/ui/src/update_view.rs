@@ -54,6 +54,7 @@ mod tests {
             from: "0.3.0".to_string(),
             to: "0.4.0".to_string(),
             reason: None,
+            code: None,
         };
         let notice = result_notice(&result, "0.4.0").unwrap();
         assert!(notice.message_in("ja").contains("v0.4.0"));
@@ -69,6 +70,7 @@ mod tests {
             from: "0.3.0".to_string(),
             to: "0.4.0".to_string(),
             reason: Some("起動しませんでした".to_string()),
+            code: None,
         };
         let notice = result_notice(&result, "0.3.0").unwrap();
         assert!(notice.message_in("ja").contains("v0.3.0"));
@@ -601,6 +603,20 @@ fn update_error_message(error: &UpdateError) -> UpdateText {
         UpdateError::InvalidJob(_) => UpdateText::key("update.error.invalid_job"),
         UpdateError::Other(message) => {
             UpdateText::key("update.error.other").arg("message", message)
+        }
+        // Dedicated messages for these arrive with the privileged apply flow.
+        UpdateError::SystemHelperMissing => {
+            UpdateText::key("update.error.helper_missing_reinstall")
+        }
+        UpdateError::NotPrivileged
+        | UpdateError::StagingRejected(_)
+        | UpdateError::PackageManagerLocked
+        | UpdateError::PackageManagerUnavailable
+        | UpdateError::PackageMetadataMismatch(_)
+        | UpdateError::PackageVerificationFailed(_)
+        | UpdateError::Downgrade { .. }
+        | UpdateError::PackageManagerFailed { .. } => {
+            UpdateText::key("update.error.other").arg("message", error.to_string())
         }
     }
 }

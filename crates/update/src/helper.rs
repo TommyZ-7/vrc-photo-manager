@@ -6,13 +6,15 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
+use semver::Version;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::error::{IoOperation, Result, UpdateError};
+use crate::error::{IoOperation, LastErrorCode, Result, UpdateError};
 use crate::install::{ApplyJob, ApplyKind, UpdatePaths};
+use crate::manifest::{Manifest, PlatformAsset};
 use crate::native::NativeString;
-use crate::verify::{decode_signature_base64, effective_public_keys, verify_file};
+use crate::verify::{decode_signature_base64, effective_public_keys, verify_bytes, verify_file};
 
 /// Timeouts for the helper. Tests may skip the signature check to exercise
 /// launch/rollback with generated scripts.
@@ -25,6 +27,19 @@ pub struct HelperOptions {
     /// Test-only trusted keys; empty means the embedded production keys.
     #[cfg(test)]
     pub public_keys: Vec<String>,
+    /// Test-only `PKEXEC_UID` override.
+    #[cfg(test)]
+    pub pkexec_uid: Option<u32>,
+    /// Test-only root temp directory override.
+    #[cfg(test)]
+    pub root_temp_dir: Option<PathBuf>,
+    /// Test-only package manager paths used by the metadata and install steps.
+    #[cfg(test)]
+    pub pacman_path: Option<PathBuf>,
+    #[cfg(test)]
+    pub dpkg_path: Option<PathBuf>,
+    #[cfg(test)]
+    pub dpkg_deb_path: Option<PathBuf>,
 }
 
 impl Default for HelperOptions {
@@ -36,6 +51,16 @@ impl Default for HelperOptions {
             skip_signature_check: false,
             #[cfg(test)]
             public_keys: Vec::new(),
+            #[cfg(test)]
+            pkexec_uid: None,
+            #[cfg(test)]
+            root_temp_dir: None,
+            #[cfg(test)]
+            pacman_path: None,
+            #[cfg(test)]
+            dpkg_path: None,
+            #[cfg(test)]
+            dpkg_deb_path: None,
         }
     }
 }
@@ -63,6 +88,7 @@ pub fn run_helper_with_options(job_path: &Path, options: HelperOptions) -> Resul
                 from: job.from_version.clone(),
                 to: job.to_version.clone(),
                 reason: Some(error.to_string()),
+                code: None,
             },
         );
         relaunch_old(&paths, &job);
@@ -117,6 +143,7 @@ pub fn run_helper_with_options(job_path: &Path, options: HelperOptions) -> Resul
                 from: job.from_version.clone(),
                 to: job.to_version.clone(),
                 reason: Some(error.to_string()),
+                code: None,
             },
         );
         relaunch_old(&paths, &job);
@@ -143,6 +170,7 @@ pub fn run_helper_with_options(job_path: &Path, options: HelperOptions) -> Resul
                         job.staged.display(),
                         paths.log_file().display()
                     )),
+                    code: None,
                 },
             );
             relaunch_old(&paths, &job);
@@ -157,6 +185,7 @@ pub fn run_helper_with_options(job_path: &Path, options: HelperOptions) -> Resul
             from: job.from_version.clone(),
             to: job.to_version.clone(),
             reason: None,
+            code: None,
         },
     );
 
@@ -228,6 +257,7 @@ fn rollback_after_failure(
             from: job.from_version.clone(),
             to: job.to_version.clone(),
             reason: Some(reason.clone()),
+            code: None,
         },
     );
     relaunch_old(paths, job);
@@ -260,6 +290,7 @@ fn abort_before_apply(
             from: job.from_version.clone(),
             to: job.to_version.clone(),
             reason: Some(reason.to_string()),
+            code: None,
         },
     );
     relaunch_old(paths, job);
@@ -315,6 +346,285 @@ fn sha256_file(path: &Path) -> Result<String> {
         hasher.update(&buffer[..read]);
     }
     Ok(hex::encode(hasher.finalize()))
+}
+
+/// The uid of the user that invoked the privileged helper through `pkexec`.
+fn pkexec_uid(options: &HelperOptions) -> Result<u32> {
+    #[cfg(test)]
+    if let Some(uid) = options.pkexec_uid {
+        return Ok(uid);
+    }
+    #[cfg(not(test))]
+    let _ = options;
+    std::env::var("PKEXEC_UID")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|uid| *uid > 0)
+        .ok_or(UpdateError::NotPrivileged)
+}
+
+/// Keys used to verify the signed manifest and the package signature.
+fn verification_keys(options: &HelperOptions) -> Vec<String> {
+    #[cfg(test)]
+    if !options.public_keys.is_empty() {
+        return options.public_keys.clone();
+    }
+    let _ = options;
+    effective_public_keys()
+}
+
+/// The directory the verified package is copied into before installation.
+fn root_temp_dir(options: &HelperOptions) -> PathBuf {
+    #[cfg(test)]
+    if let Some(dir) = &options.root_temp_dir {
+        return dir.clone();
+    }
+    let _ = options;
+    PathBuf::from("/var/tmp")
+}
+
+/// Rejects staging paths that are not a regular file owned by the invoking
+/// user directly under `<data_dir>/updates/downloads/<version>/`.
+#[cfg(unix)]
+fn verify_staging(job: &ApplyJob, uid: u32) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    if job
+        .staged
+        .components()
+        .any(|component| component == std::path::Component::ParentDir)
+    {
+        return Err(UpdateError::StagingRejected(
+            "staged package path contains ..".to_string(),
+        ));
+    }
+
+    let data_meta = std::fs::symlink_metadata(&job.data_dir)
+        .map_err(|error| UpdateError::StagingRejected(error.to_string()))?;
+    if data_meta.file_type().is_symlink() {
+        return Err(UpdateError::StagingRejected(
+            "data directory must not be a symlink".to_string(),
+        ));
+    }
+    let data_dir = std::fs::canonicalize(&job.data_dir)
+        .map_err(|error| UpdateError::StagingRejected(error.to_string()))?;
+    let metadata = std::fs::metadata(&data_dir)
+        .map_err(|error| UpdateError::StagingRejected(error.to_string()))?;
+    if metadata.uid() != uid || metadata.mode() & 0o022 != 0 {
+        return Err(UpdateError::StagingRejected(
+            "data directory ownership or mode is invalid".to_string(),
+        ));
+    }
+
+    let version = Version::parse(job.to_version.trim_start_matches('v'))
+        .map_err(|error| UpdateError::StagingRejected(error.to_string()))?;
+    let expected = data_dir.join("updates/downloads").join(version.to_string());
+    let expected = std::fs::canonicalize(&expected)
+        .map_err(|error| UpdateError::StagingRejected(error.to_string()))?;
+    if !expected.starts_with(&data_dir) {
+        return Err(UpdateError::StagingRejected(
+            "downloads directory escapes the data directory".to_string(),
+        ));
+    }
+    let expected_meta = std::fs::metadata(&expected)
+        .map_err(|error| UpdateError::StagingRejected(error.to_string()))?;
+    if expected_meta.uid() != uid || expected_meta.mode() & 0o022 != 0 {
+        return Err(UpdateError::StagingRejected(
+            "version directory ownership or mode is invalid".to_string(),
+        ));
+    }
+
+    let staged_meta = std::fs::symlink_metadata(&job.staged)
+        .map_err(|error| UpdateError::StagingRejected(error.to_string()))?;
+    if staged_meta.file_type().is_symlink() {
+        return Err(UpdateError::StagingRejected(
+            "staged package must not be a symlink".to_string(),
+        ));
+    }
+    let staged = std::fs::canonicalize(&job.staged)
+        .map_err(|error| UpdateError::StagingRejected(error.to_string()))?;
+    if !staged.starts_with(&expected) {
+        return Err(UpdateError::StagingRejected(
+            "staged package is outside the version directory".to_string(),
+        ));
+    }
+    if staged.parent() != Some(expected.as_path()) {
+        return Err(UpdateError::StagingRejected(
+            "staged package must be directly under the version directory".to_string(),
+        ));
+    }
+    let metadata = std::fs::metadata(&staged)
+        .map_err(|error| UpdateError::StagingRejected(error.to_string()))?;
+    if !metadata.is_file() || metadata.uid() != uid || metadata.mode() & 0o022 != 0 {
+        return Err(UpdateError::StagingRejected(
+            "staged package ownership or mode is invalid".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn verify_staging(_job: &ApplyJob, _uid: u32) -> Result<()> {
+    Err(UpdateError::UnsupportedPlatform)
+}
+
+/// Verifies the signed manifest and returns the asset for the job's family.
+fn verify_manifest(
+    job: &ApplyJob,
+    options: &HelperOptions,
+) -> Result<(Manifest, Version, PlatformAsset)> {
+    let bytes = job
+        .signed_manifest
+        .as_deref()
+        .ok_or_else(|| UpdateError::InvalidJob("signed manifest is missing".to_string()))?;
+    let signature = job
+        .manifest_signature
+        .as_deref()
+        .ok_or_else(|| UpdateError::InvalidJob("manifest signature is missing".to_string()))?;
+    let keys = verification_keys(options);
+    verify_bytes(bytes.as_bytes(), signature, &keys)?;
+    let allow_http = cfg!(debug_assertions);
+    let (manifest, version) = Manifest::parse_and_validate(bytes.as_bytes(), allow_http)?;
+    let job_version = Version::parse(job.to_version.trim_start_matches('v'))
+        .map_err(|error| UpdateError::InvalidJob(error.to_string()))?;
+    if version != job_version {
+        return Err(UpdateError::InvalidJob(
+            "manifest version does not match the job".to_string(),
+        ));
+    }
+    let current = Version::parse(crate::CURRENT_VERSION)
+        .map_err(|error| UpdateError::Other(error.to_string()))?;
+    if version <= current {
+        return Err(UpdateError::Downgrade {
+            current: current.to_string(),
+            target: version.to_string(),
+        });
+    }
+    let family = match job.kind {
+        ApplyKind::SystemPackage { family } => family,
+        _ => {
+            return Err(UpdateError::InvalidJob(
+                "job is not a system package job".to_string(),
+            ));
+        }
+    };
+    let asset = manifest
+        .system_package_for(family)
+        .cloned()
+        .ok_or_else(|| {
+            UpdateError::InvalidManifest("system package asset is missing".to_string())
+        })?;
+    if asset.file_name()?
+        != job
+            .staged
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+    {
+        return Err(UpdateError::InvalidJob(
+            "manifest asset does not match the staged file name".to_string(),
+        ));
+    }
+    if asset.size
+        != std::fs::metadata(&job.staged)
+            .map_err(|error| UpdateError::io(&job.staged, error))?
+            .len()
+    {
+        return Err(UpdateError::Integrity(
+            "staged package size does not match the manifest".to_string(),
+        ));
+    }
+    Ok((manifest, version, asset))
+}
+
+/// A root-owned copy of the verified package, removed when dropped.
+pub(crate) struct TempPackage {
+    path: PathBuf,
+}
+
+impl TempPackage {
+    fn create(dir: &Path) -> Result<Self> {
+        std::fs::create_dir_all(dir).map_err(|error| UpdateError::io(dir, error))?;
+        let path = dir.join(format!("vrc-photo-update-{}.pkg", uuid::Uuid::new_v4()));
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|error| UpdateError::io(&path, error))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .map_err(|error| UpdateError::io(&path, error))?;
+        }
+        drop(file);
+        Ok(Self { path })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempPackage {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Copies the staged package to a root-owned temp file and re-verifies its
+/// SHA-256 and minisign signature before any install command sees it.
+fn copy_and_verify(
+    job: &ApplyJob,
+    asset: &PlatformAsset,
+    options: &HelperOptions,
+) -> Result<TempPackage> {
+    let temp = TempPackage::create(&root_temp_dir(options))?;
+    let mut source =
+        std::fs::File::open(&job.staged).map_err(|error| UpdateError::io(&job.staged, error))?;
+    let mut target = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(temp.path())
+        .map_err(|error| UpdateError::io(temp.path(), error))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = std::io::Read::read(&mut source, &mut buffer)
+            .map_err(|error| UpdateError::io(&job.staged, error))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        std::io::Write::write_all(&mut target, &buffer[..read])
+            .map_err(|error| UpdateError::io(temp.path(), error))?;
+    }
+    target
+        .sync_all()
+        .map_err(|error| UpdateError::io(temp.path(), error))?;
+    let digest = hex::encode(hasher.finalize());
+    if digest != asset.sha256 {
+        return Err(UpdateError::Integrity(
+            "staged package SHA-256 does not match the manifest".to_string(),
+        ));
+    }
+    let signature = decode_signature_base64(&asset.signature)?;
+    verify_file(temp.path(), &signature, &verification_keys(options))?;
+    Ok(temp)
+}
+
+/// Verifies the staging directory, the signed manifest, and the package
+/// signature, then returns the root-owned copy to install.
+// Consumed by the privileged `--apply-system-package` mode.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn verify_system_package(
+    job: &ApplyJob,
+    options: &HelperOptions,
+) -> Result<TempPackage> {
+    let uid = pkexec_uid(options)?;
+    verify_staging(job, uid)?;
+    let (_, _, asset) = verify_manifest(job, options)?;
+    copy_and_verify(job, &asset, options)
 }
 
 enum Backup {
@@ -644,6 +954,9 @@ pub struct LastResult {
     pub to: String,
     #[serde(default)]
     pub reason: Option<String>,
+    /// Machine-readable reason for a failure; older files have no code.
+    #[serde(default)]
+    pub code: Option<LastErrorCode>,
 }
 
 impl LastResult {
@@ -912,7 +1225,7 @@ mod tests {
     use super::*;
     use crate::install::UpdatePaths;
     #[cfg(unix)]
-    use crate::install::{APPLY_SCHEMA, ApplyJob, ApplyKind};
+    use crate::install::{APPLY_SCHEMA, ApplyJob, ApplyKind, PackageFamily};
 
     fn paths(dir: &Path) -> UpdatePaths {
         let paths = UpdatePaths::new(dir);
@@ -989,6 +1302,7 @@ mod tests {
             from: "0.3.0".to_string(),
             to: "0.4.0".to_string(),
             reason: Some("did not start".to_string()),
+            code: None,
         };
         LastResult::write(&paths, &result).unwrap();
         assert_eq!(LastResult::take(&paths).unwrap(), result);
@@ -1625,5 +1939,219 @@ mod tests {
         let result = LastResult::read(&UpdatePaths::new(dir.path())).unwrap();
         assert_eq!(result.status, LastStatus::RolledBack);
         assert!(!job_file.exists());
+    }
+
+    #[cfg(unix)]
+    fn next_version() -> String {
+        let mut version = semver::Version::parse(crate::CURRENT_VERSION).unwrap();
+        version.patch += 1;
+        version.to_string()
+    }
+
+    #[cfg(unix)]
+    fn system_package_fixture(dir: &Path, version: &str) -> (ApplyJob, HelperOptions) {
+        use base64::Engine as _;
+        use minisign::KeyPair;
+        use sha2::Sha256;
+        use std::os::unix::fs::MetadataExt;
+
+        let keypair = KeyPair::generate_unencrypted_keypair().unwrap();
+        let public_key = keypair
+            .pk
+            .to_box()
+            .unwrap()
+            .to_string()
+            .lines()
+            .find(|line| line.starts_with("RW"))
+            .unwrap()
+            .to_string();
+        let package = b"fake pacman package";
+        let asset_signature =
+            minisign::sign(None, &keypair.sk, std::io::Cursor::new(package), None, None)
+                .unwrap()
+                .into_string();
+        let manifest = serde_json::to_vec(&serde_json::json!({
+            "schema": 1,
+            "version": version,
+            "platforms": {},
+            "system_packages": {
+                "pacman": {
+                    "url": format!(
+                        "https://example.com/vrc-photo-manager-{version}-1-x86_64.pkg.tar.zst"
+                    ),
+                    "format": "pacman",
+                    "size": package.len(),
+                    "sha256": hex::encode(Sha256::digest(package)),
+                    "signature": base64::engine::general_purpose::STANDARD
+                        .encode(asset_signature.as_bytes())
+                }
+            }
+        }))
+        .unwrap();
+        let manifest_signature = minisign::sign(
+            None,
+            &keypair.sk,
+            std::io::Cursor::new(manifest.as_slice()),
+            None,
+            None,
+        )
+        .unwrap()
+        .into_string();
+
+        let data_dir = dir.join("data");
+        let staged = data_dir
+            .join(format!("updates/downloads/{version}"))
+            .join(format!("vrc-photo-manager-{version}-1-x86_64.pkg.tar.zst"));
+        std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+        std::fs::write(&staged, package).unwrap();
+        let job = ApplyJob {
+            schema: APPLY_SCHEMA,
+            kind: ApplyKind::SystemPackage {
+                family: PackageFamily::Pacman,
+            },
+            from_version: "0.3.0".to_string(),
+            to_version: version.to_string(),
+            target: "/usr/bin/vrc-photo-manager".into(),
+            staged,
+            signature: base64::engine::general_purpose::STANDARD.encode(asset_signature.as_bytes()),
+            sha256: hex::encode(Sha256::digest(package)),
+            ui_pid: 1,
+            daemon_pid: Some(2),
+            restart_args: Vec::new(),
+            working_dir: dir.to_path_buf(),
+            database: None,
+            health_token: "abc-123".to_string(),
+            data_dir,
+            created_at: "2026-10-24T12:00:00Z".to_string(),
+            signed_manifest: Some(String::from_utf8(manifest).unwrap()),
+            manifest_signature: Some(manifest_signature),
+        };
+        let options = HelperOptions {
+            public_keys: vec![public_key],
+            pkexec_uid: Some(std::fs::metadata(dir).unwrap().uid()),
+            root_temp_dir: Some(dir.join("root-temp")),
+            ..HelperOptions::default()
+        };
+        std::fs::create_dir_all(options.root_temp_dir.as_ref().unwrap()).unwrap();
+        (job, options)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_package_rejects_a_bad_manifest_signature() {
+        let dir = tempfile::tempdir().unwrap();
+        let (job, mut options) = system_package_fixture(dir.path(), &next_version());
+        options.public_keys =
+            vec!["RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3".to_string()];
+        assert!(matches!(
+            verify_system_package(&job, &options),
+            Err(UpdateError::Signature)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_package_rejects_a_manifest_version_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut job, options) = system_package_fixture(dir.path(), &next_version());
+        let other = "0.0.1";
+        let other_dir = job.data_dir.join("updates/downloads").join(other);
+        std::fs::create_dir_all(&other_dir).unwrap();
+        let staged = other_dir.join(job.staged.file_name().unwrap());
+        std::fs::copy(&job.staged, &staged).unwrap();
+        job.staged = staged;
+        job.to_version = other.to_string();
+        assert!(matches!(
+            verify_system_package(&job, &options),
+            Err(UpdateError::InvalidJob(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_package_rejects_a_downgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        let (job, options) = system_package_fixture(dir.path(), crate::CURRENT_VERSION);
+        assert!(matches!(
+            verify_system_package(&job, &options),
+            Err(UpdateError::Downgrade { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_package_rejects_a_staged_file_outside_the_download_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut job, options) = system_package_fixture(dir.path(), &next_version());
+        job.staged = dir.path().join("outside.pkg.tar.zst");
+        std::fs::write(&job.staged, b"fake pacman package").unwrap();
+        assert!(matches!(
+            verify_system_package(&job, &options),
+            Err(UpdateError::StagingRejected(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_package_rejects_a_nested_staged_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut job, options) = system_package_fixture(dir.path(), &next_version());
+        let nested_dir = job.staged.parent().unwrap().join("nested");
+        std::fs::create_dir_all(&nested_dir).unwrap();
+        let nested = nested_dir.join(job.staged.file_name().unwrap());
+        std::fs::copy(&job.staged, &nested).unwrap();
+        job.staged = nested;
+        assert!(matches!(
+            verify_system_package(&job, &options),
+            Err(UpdateError::StagingRejected(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_package_rejects_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let (job, options) = system_package_fixture(dir.path(), &next_version());
+        let link = job.staged.with_file_name("link.pkg.tar.zst");
+        std::os::unix::fs::symlink(&job.staged, &link).unwrap();
+        let mut job = job;
+        job.staged = link;
+        assert!(matches!(
+            verify_system_package(&job, &options),
+            Err(UpdateError::StagingRejected(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_package_copies_to_a_root_temp_file_and_removes_it() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (job, options) = system_package_fixture(dir.path(), &next_version());
+        let root_temp = options.root_temp_dir.clone().unwrap();
+        let temp = verify_system_package(&job, &options).unwrap();
+        let path = temp.path().to_path_buf();
+        assert!(path.starts_with(&root_temp));
+        assert_eq!(std::fs::read(&path).unwrap(), b"fake pacman package");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        drop(temp);
+        assert!(!path.exists(), "the temp package must be removed on drop");
+    }
+
+    #[test]
+    fn last_result_accepts_a_missing_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        std::fs::write(
+            paths.result_file(),
+            br#"{"status":"success","from":"0.3.0","to":"0.4.0"}"#,
+        )
+        .unwrap();
+        let result = LastResult::read(&paths).unwrap();
+        assert_eq!(result.code, None);
     }
 }
