@@ -220,6 +220,7 @@ pub struct Daemon {
     deferred_thumbnail_ids: Vec<i64>,
     log_tail: Option<LogTail>,
     vrchat_missing_polls: u8,
+    vrchat_session_id: Option<i64>,
     workers: Vec<JoinHandle<()>>,
     dirty_paths: Vec<PathBuf>,
     last_log_poll: std::time::Instant,
@@ -371,6 +372,7 @@ impl Daemon {
             deferred_thumbnail_ids: Vec::new(),
             log_tail: None,
             vrchat_missing_polls: 0,
+            vrchat_session_id: None,
             workers: Vec::new(),
             dirty_paths: Vec::new(),
             last_log_poll: std::time::Instant::now() - LOG_INTERVAL,
@@ -1329,12 +1331,11 @@ impl Daemon {
         }
         let db = self.db.lock().unwrap();
         let sessions = db.open_sessions()?;
+        let now = chrono::Utc::now().timestamp();
         let mut repaired = 0;
         for session in sessions {
-            let ended_at = modified_utc(Path::new(&session.log_file))
-                .or_else(|| db.log_mtime(&session.log_file).ok().flatten())
-                .unwrap_or(session.started_at)
-                .max(session.started_at);
+            let ended_at =
+                session_end_time(&db, Path::new(&session.log_file), session.started_at, now);
             db.close_session(session.id, ended_at)?;
             tracing::info!(
                 session_id = session.id,
@@ -1355,13 +1356,28 @@ impl Daemon {
             .is_some();
         if !has_session {
             self.vrchat_missing_polls = 0;
+            self.vrchat_session_id = None;
             return Ok(());
         }
         self.observe_vrchat_presence(vrchat_process::is_running())
     }
 
     fn observe_vrchat_presence(&mut self, running: Option<bool>) -> Result<()> {
+        let Some(session_id) = self
+            .log_tail
+            .as_ref()
+            .and_then(|tail| tail.ingestor.session_id())
+        else {
+            self.vrchat_missing_polls = 0;
+            self.vrchat_session_id = None;
+            return Ok(());
+        };
+        if self.vrchat_session_id != Some(session_id) {
+            self.vrchat_session_id = Some(session_id);
+            self.vrchat_missing_polls = 0;
+        }
         let Some(running) = running else {
+            self.vrchat_missing_polls = 0;
             return Ok(());
         };
         if running {
@@ -1373,20 +1389,27 @@ impl Daemon {
             return Ok(());
         }
 
-        let ended_at = self
-            .log_tail
-            .as_ref()
-            .and_then(|tail| modified_utc(&tail.path))
-            .unwrap_or_else(|| chrono::Utc::now().timestamp());
-        let closed = {
+        let now = chrono::Utc::now().timestamp();
+        let (ended_at, closed) = {
             let db = self.db.lock().unwrap();
-            self.log_tail
+            let ended_at = self
+                .log_tail
+                .as_ref()
+                .map(|tail| {
+                    let started_at = tail.ingestor.session_started_at().unwrap_or(now);
+                    session_end_time(&db, &tail.path, started_at, now)
+                })
+                .unwrap_or(now);
+            let closed = self
+                .log_tail
                 .as_mut()
                 .map(|tail| tail.ingestor.close_current_session(&db, ended_at))
                 .transpose()?
-                .unwrap_or(false)
+                .unwrap_or(false);
+            (ended_at, closed)
         };
         self.vrchat_missing_polls = 0;
+        self.vrchat_session_id = None;
         if closed {
             tracing::info!(ended_at, "closed session after VRChat exited");
             self.refresh_status()?;
@@ -1457,15 +1480,10 @@ impl Daemon {
             .unwrap_or(true);
         if new_tail {
             if let Some(mut previous) = self.log_tail.take() {
-                let finish_at = previous
-                    .path
-                    .metadata()
-                    .ok()
-                    .and_then(|meta| meta.modified().ok())
-                    .map(vrc_photo_core::time::from_system_time)
-                    .map(|stamp| stamp.utc)
-                    .unwrap_or_else(|| chrono::Utc::now().timestamp());
                 let db = self.db.lock().unwrap();
+                let now = chrono::Utc::now().timestamp();
+                let started_at = previous.ingestor.session_started_at().unwrap_or(now);
+                let finish_at = session_end_time(&db, &previous.path, started_at, now);
                 previous.ingestor.finish(&db, finish_at)?;
             }
             let offset = {
@@ -1948,8 +1966,9 @@ impl Daemon {
         self.wake.notify();
         if let Some(mut tail) = self.log_tail.take() {
             let db = self.db.lock().unwrap();
-            let ended_at =
-                modified_utc(&tail.path).unwrap_or_else(|| chrono::Utc::now().timestamp());
+            let now = chrono::Utc::now().timestamp();
+            let started_at = tail.ingestor.session_started_at().unwrap_or(now);
+            let ended_at = session_end_time(&db, &tail.path, started_at, now);
             if let Err(error) = tail.ingestor.finish(&db, ended_at) {
                 tracing::warn!(%error, "cannot finish log ingestion on shutdown");
             }
@@ -2917,6 +2936,17 @@ fn modified_utc(path: &Path) -> Option<i64> {
         .ok()
         .map(vrc_photo_core::time::from_system_time)
         .map(|stamp| stamp.utc)
+}
+
+/// Picks the end timestamp for a session: log file mtime, then the mtime
+/// recorded by the last log ingestion, then `now`. The result is clamped to
+/// `[started_at, now]` so a future or pre-start mtime cannot keep the session
+/// visible (and so a clock skew cannot create an invalid interval).
+fn session_end_time(db: &Db, log_file: &Path, started_at: i64, now: i64) -> i64 {
+    let candidate = modified_utc(log_file)
+        .or_else(|| db.log_mtime(&log_file.to_string_lossy()).ok().flatten())
+        .unwrap_or(now);
+    candidate.clamp(started_at.min(now), now)
 }
 
 fn latest_log_file(dir: &Path) -> Result<Option<PathBuf>> {
@@ -3990,6 +4020,118 @@ mod tests {
     }
 
     #[test]
+    fn runtime_close_uses_the_ingested_mtime_when_the_log_file_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let log_path = dir.path().join("logs/output_log_2026-10-21_21-00-00.txt");
+        let join =
+            "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)";
+        std::fs::write(&log_path, format!("{join}\n")).unwrap();
+        let started = vrc_photo_core::log_parser::parse_line(join)
+            .unwrap()
+            .timestamp_utc();
+        let mtime = started + 60;
+        let file = File::options().write(true).open(&log_path).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(mtime as u64))
+            .unwrap();
+        daemon.ingest_logs().unwrap();
+        std::fs::remove_file(&log_path).unwrap();
+
+        for _ in 0..VRCHAT_MISSING_POLLS_BEFORE_CLOSE {
+            daemon.observe_vrchat_presence(Some(false)).unwrap();
+        }
+
+        let db = daemon.db.lock().unwrap();
+        let session = db.session_at(started + 1).unwrap().unwrap();
+        assert_eq!(session.ended_at, Some(mtime));
+    }
+
+    #[test]
+    fn shutdown_uses_the_ingested_mtime_when_the_log_file_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let log_path = dir.path().join("logs/output_log_2026-10-21_21-00-00.txt");
+        let join =
+            "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)";
+        std::fs::write(&log_path, format!("{join}\n")).unwrap();
+        let started = vrc_photo_core::log_parser::parse_line(join)
+            .unwrap()
+            .timestamp_utc();
+        let mtime = started + 60;
+        let file = File::options().write(true).open(&log_path).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(mtime as u64))
+            .unwrap();
+        daemon.ingest_logs().unwrap();
+        std::fs::remove_file(&log_path).unwrap();
+
+        daemon.shutdown();
+
+        let db = daemon.db.lock().unwrap();
+        let session = db.session_at(started + 1).unwrap().unwrap();
+        assert_eq!(session.ended_at, Some(mtime));
+    }
+
+    #[test]
+    fn future_log_mtime_is_clamped_to_now() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let log_path = dir.path().join("logs/output_log_2026-10-21_21-00-00.txt");
+        let join =
+            "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)";
+        std::fs::write(&log_path, format!("{join}\n")).unwrap();
+        daemon.ingest_logs().unwrap();
+        let started = vrc_photo_core::log_parser::parse_line(join)
+            .unwrap()
+            .timestamp_utc();
+        let now = chrono::Utc::now().timestamp();
+        let future = now + 3600;
+        let file = File::options().write(true).open(&log_path).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(future as u64))
+            .unwrap();
+
+        for _ in 0..VRCHAT_MISSING_POLLS_BEFORE_CLOSE {
+            daemon.observe_vrchat_presence(Some(false)).unwrap();
+        }
+
+        let db = daemon.db.lock().unwrap();
+        let session = db.session_at(started + 1).unwrap().unwrap();
+        assert!(session.ended_at.unwrap() <= chrono::Utc::now().timestamp());
+        assert!(db.session_at(now + 1).unwrap().is_none());
+    }
+
+    #[test]
+    fn pending_misses_do_not_close_a_new_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let log_path = dir.path().join("logs/output_log_2026-10-21_21-00-00.txt");
+        let first_join =
+            "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_first:12345~region(jp)";
+        std::fs::write(&log_path, format!("{first_join}\n")).unwrap();
+        daemon.ingest_logs().unwrap();
+        daemon.observe_vrchat_presence(Some(false)).unwrap();
+        daemon.observe_vrchat_presence(Some(false)).unwrap();
+
+        let second_join =
+            "2026.10.21 21:24:12 Debug      -  [Behaviour] Joining wrld_second:12345~region(jp)";
+        let mut file = File::options().append(true).open(&log_path).unwrap();
+        writeln!(file, "{second_join}").unwrap();
+        daemon.ingest_logs().unwrap();
+        daemon.observe_vrchat_presence(Some(false)).unwrap();
+
+        let second_started = vrc_photo_core::log_parser::parse_line(second_join)
+            .unwrap()
+            .timestamp_utc();
+        let db = daemon.db.lock().unwrap();
+        assert!(
+            db.session_at(second_started + 1)
+                .unwrap()
+                .unwrap()
+                .ended_at
+                .is_none()
+        );
+    }
+
+    #[test]
     fn unknown_vrchat_presence_does_not_count_as_a_miss() {
         let dir = tempfile::tempdir().unwrap();
         let mut daemon = test_daemon(&dir);
@@ -4003,11 +4145,22 @@ mod tests {
             daemon.observe_vrchat_presence(None).unwrap();
         }
 
+        daemon.observe_vrchat_presence(Some(false)).unwrap();
+        daemon.observe_vrchat_presence(Some(false)).unwrap();
+        daemon.observe_vrchat_presence(None).unwrap();
+        daemon.observe_vrchat_presence(Some(false)).unwrap();
+
         let db = daemon.db.lock().unwrap();
         let started = vrc_photo_core::log_parser::parse_line(join)
             .unwrap()
             .timestamp_utc();
-        assert!(db.session_at(started + 1).unwrap().is_some());
+        assert!(
+            db.session_at(started + 1)
+                .unwrap()
+                .unwrap()
+                .ended_at
+                .is_none()
+        );
     }
 
     #[test]

@@ -135,6 +135,7 @@ fn parse_player(message: &str, prefix: &str) -> Option<(String, String)> {
 pub struct LogIngestor {
     log_file: String,
     session_id: Option<i64>,
+    session_started_at: Option<i64>,
     world_db_id: Option<i64>,
     world_id: Option<String>,
 }
@@ -149,6 +150,10 @@ impl LogIngestor {
 
     pub fn session_id(&self) -> Option<i64> {
         self.session_id
+    }
+
+    pub fn session_started_at(&self) -> Option<i64> {
+        self.session_started_at
     }
 
     /// Applies one line. Returns true when the line was a recognized event.
@@ -178,6 +183,7 @@ impl LogIngestor {
                     instance_id.as_deref(),
                 )?;
                 self.session_id = Some(session_id);
+                self.session_started_at = Some(timestamp_utc);
                 self.world_db_id = Some(world_db_id);
                 self.world_id = Some(world_id);
             }
@@ -208,6 +214,7 @@ impl LogIngestor {
                 if let Some(session_id) = self.session_id.take() {
                     db.close_session(session_id, timestamp_utc)?;
                 }
+                self.session_started_at = None;
                 self.world_db_id = None;
                 self.world_id = None;
             }
@@ -219,11 +226,16 @@ impl LogIngestor {
     /// world state so later lines cannot write into the closed session.
     pub fn close_current_session(&mut self, db: &Db, ended_at: i64) -> Result<bool> {
         let Some(session_id) = self.session_id.take() else {
+            self.session_started_at = None;
+            self.world_db_id = None;
+            self.world_id = None;
             return Ok(false);
         };
-        db.close_session(session_id, ended_at)?;
+        let result = db.close_session(session_id, ended_at);
+        self.session_started_at = None;
         self.world_db_id = None;
         self.world_id = None;
+        result?;
         Ok(true)
     }
 
@@ -293,6 +305,10 @@ mod tests {
             assert!(ingestor.ingest_line(&db, line).unwrap());
         }
         let session_id = ingestor.session_id().unwrap();
+        assert_eq!(
+            ingestor.session_started_at(),
+            Some(parse_line(JOIN).unwrap().timestamp_utc())
+        );
         let session = db
             .session_at(parse_line(P1).unwrap().timestamp_utc())
             .unwrap()
@@ -326,6 +342,7 @@ mod tests {
 
         assert!(ingestor.close_current_session(&db, started + 60).unwrap());
         assert!(ingestor.session_id().is_none());
+        assert!(ingestor.session_started_at().is_none());
         assert!(db.session_at(started + 30).unwrap().is_some());
         assert!(db.session_at(started + 60).unwrap().is_none());
         assert!(!ingestor.close_current_session(&db, started + 120).unwrap());

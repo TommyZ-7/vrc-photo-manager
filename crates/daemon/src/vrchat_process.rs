@@ -15,7 +15,8 @@ fn is_vrchat_comm(comm: &str) -> bool {
 #[cfg(target_os = "linux")]
 pub fn is_running() -> Option<bool> {
     let entries = std::fs::read_dir("/proc").ok()?;
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = entry.ok()?;
         let name = entry.file_name();
         let Some(pid) = name.to_str() else {
             continue;
@@ -23,11 +24,16 @@ pub fn is_running() -> Option<bool> {
         if !pid.bytes().all(|byte| byte.is_ascii_digit()) {
             continue;
         }
-        let Ok(comm) = std::fs::read_to_string(entry.path().join("comm")) else {
-            continue;
-        };
-        if is_vrchat_comm(&comm) {
-            return Some(true);
+        match std::fs::read_to_string(entry.path().join("comm")) {
+            Ok(comm) => {
+                if is_vrchat_comm(&comm) {
+                    return Some(true);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            // A process we cannot inspect may be VRChat. Never turn a partial
+            // process-table read into a "not running" verdict.
+            Err(_) => return None,
         }
     }
     Some(false)
@@ -48,28 +54,36 @@ pub fn is_running() -> Option<bool> {
         dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
         ..Default::default()
     };
-    let mut found = false;
-    unsafe {
-        if Process32FirstW(snapshot, &mut entry).is_ok() {
-            loop {
-                let len = entry
-                    .szExeFile
-                    .iter()
-                    .position(|&unit| unit == 0)
-                    .unwrap_or(entry.szExeFile.len());
-                let name = String::from_utf16_lossy(&entry.szExeFile[..len]);
-                if is_vrchat_comm(&name) {
-                    found = true;
-                    break;
-                }
-                if Process32NextW(snapshot, &mut entry).is_err() {
-                    break;
-                }
+    let result = match unsafe { Process32FirstW(snapshot, &mut entry) } {
+        Ok(()) => loop {
+            let len = entry
+                .szExeFile
+                .iter()
+                .position(|&unit| unit == 0)
+                .unwrap_or(entry.szExeFile.len());
+            let name = String::from_utf16_lossy(&entry.szExeFile[..len]);
+            if is_vrchat_comm(&name) {
+                break Some(true);
             }
-        }
+            match unsafe { Process32NextW(snapshot, &mut entry) } {
+                Ok(()) => {}
+                Err(error) if is_end_of_process_list(&error) => break Some(false),
+                Err(_) => break None,
+            }
+        },
+        Err(error) if is_end_of_process_list(&error) => Some(false),
+        Err(_) => None,
+    };
+    unsafe {
         let _ = CloseHandle(snapshot);
     }
-    Some(found)
+    result
+}
+
+#[cfg(target_os = "windows")]
+fn is_end_of_process_list(error: &windows::core::Error) -> bool {
+    error.code()
+        == windows::core::HRESULT::from_win32(windows::Win32::Foundation::ERROR_NO_MORE_FILES.0)
 }
 
 /// Other platforms do not ship a supported VRChat process table reader.
