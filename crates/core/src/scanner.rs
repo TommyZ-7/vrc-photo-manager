@@ -153,7 +153,7 @@ pub fn scan_one_detailed(
         Err(error) => {
             return Some(Err(ScanFailure::new(
                 path,
-                format!("cannot read file metadata: {error}"),
+                format!("ファイルの情報を読み取れませんでした: {error}"),
             )));
         }
     };
@@ -168,10 +168,10 @@ fn read_photo(root: &Path, path: &Path) -> std::result::Result<ScannedPhoto, Sca
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| failure(format!("invalid file name: {}", path.display())))?
+        .ok_or_else(|| failure(format!("ファイル名が不正です: {}", path.display())))?
         .to_string();
     let metadata = std::fs::metadata(path)
-        .map_err(|error| failure(format!("cannot read file metadata: {error}")))?;
+        .map_err(|error| failure(format!("ファイルの情報を読み取れませんでした: {error}")))?;
     let mtime = metadata
         .modified()
         .ok()
@@ -187,7 +187,7 @@ fn read_photo(root: &Path, path: &Path) -> std::result::Result<ScannedPhoto, Sca
             parsed.width = width;
             parsed.height = height;
         }
-        _ => return Err(failure("cannot read image dimensions".to_string())),
+        _ => return Err(failure("画像の寸法を読み取れませんでした".to_string())),
     }
 
     let rel_path = path
@@ -223,7 +223,10 @@ fn walk<F>(
         Ok(entries) => entries,
         Err(error) => {
             tracing::warn!(path = %dir.display(), %error, "cannot read directory");
-            failures.push(ScanFailure::new(dir, error.to_string()));
+            failures.push(ScanFailure::new(
+                dir,
+                format!("ディレクトリを読み取れませんでした: {error}"),
+            ));
             return;
         }
     };
@@ -233,7 +236,10 @@ fn walk<F>(
             Ok(entry) => entry,
             Err(error) => {
                 tracing::warn!(path = %dir.display(), %error, "cannot read directory entry");
-                failures.push(ScanFailure::new(dir, error.to_string()));
+                failures.push(ScanFailure::new(
+                    dir,
+                    format!("ディレクトリ内の項目を読み取れませんでした: {error}"),
+                ));
                 continue;
             }
         };
@@ -242,7 +248,10 @@ fn walk<F>(
             Ok(file_type) => file_type,
             Err(error) => {
                 tracing::warn!(path = %path.display(), %error, "cannot read file type");
-                failures.push(ScanFailure::new(&path, error.to_string()));
+                failures.push(ScanFailure::new(
+                    &path,
+                    format!("ファイルの種類を確認できませんでした: {error}"),
+                ));
                 continue;
             }
         };
@@ -270,7 +279,9 @@ fn walk<F>(
 /// Scans and upserts all source photos under `root` into the library.
 ///
 /// Per-photo failures are reported in [`ScanReport::failures`] and do not
-/// abort the batch.
+/// abort the batch. The one fatal step is the preflight read of the batch's
+/// existing scan states: if that read fails, the scan returns an error
+/// before indexing anything.
 pub fn scan_and_index(db: &Db, root_id: i64, root: &Path) -> Result<ScanReport> {
     scan_and_index_observed(db, root_id, root, |_| {})
 }
@@ -354,22 +365,40 @@ where
                 .flatten(),
         };
 
-        if !existed && let Some(candidate) = db.find_rebind_candidate(&new_photo)? {
-            // A copy leaves the old path in place; only rebind when the old
-            // file is gone, which distinguishes a move from a duplicate copy.
-            let old_path_exists = std::path::Path::new(&candidate.abs_path).exists();
-            if !old_path_exists && db.rebind_photo(candidate.id, &new_photo)? {
-                report.indexed += 1;
-                report.modified += 1;
-                report.rebound_ids.push(candidate.id);
-                processed += 1;
-                observe(ScanProgress {
-                    phase: ScanPhase::Indexing,
-                    processed,
-                    total: Some(total),
-                    indexed: report.indexed,
-                });
-                continue;
+        if !existed {
+            // A database error while checking for a move is a per-photo
+            // failure: whether this photo moved is unknown, so it is
+            // reported instead of being indexed blind.
+            match rebind_moved_photo(db, &new_photo) {
+                Ok(Some(candidate_id)) => {
+                    report.indexed += 1;
+                    report.modified += 1;
+                    report.rebound_ids.push(candidate_id);
+                    processed += 1;
+                    observe(ScanProgress {
+                        phase: ScanPhase::Indexing,
+                        processed,
+                        total: Some(total),
+                        indexed: report.indexed,
+                    });
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(path = %new_photo.abs_path, %error, "cannot check photo move");
+                    report.skipped += 1;
+                    report
+                        .failures
+                        .push(ScanFailure::new(&photo_path, error.to_string()));
+                    processed += 1;
+                    observe(ScanProgress {
+                        phase: ScanPhase::Indexing,
+                        processed,
+                        total: Some(total),
+                        indexed: report.indexed,
+                    });
+                    continue;
+                }
             }
         }
 
@@ -398,6 +427,26 @@ where
         });
     }
     Ok(report)
+}
+
+/// Rebinds `new_photo` to the row of a photo that moved to its path.
+///
+/// A copy leaves the old path in place; only rebind when the old file is
+/// gone, which distinguishes a move from a duplicate copy. Returns the
+/// rebound row id, or `None` when there is no move candidate, the
+/// candidate's old file still exists, or the rebind did not apply.
+fn rebind_moved_photo(db: &Db, new_photo: &NewPhoto) -> Result<Option<i64>> {
+    let Some(candidate) = db.find_rebind_candidate(new_photo)? else {
+        return Ok(None);
+    };
+    if Path::new(&candidate.abs_path).exists() {
+        return Ok(None);
+    }
+    if db.rebind_photo(candidate.id, new_photo)? {
+        Ok(Some(candidate.id))
+    } else {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
@@ -545,6 +594,38 @@ mod tests {
         assert_eq!(report.indexed, 1);
         assert_eq!(report.failures.len(), 1);
         assert!(report.failures[0].path.ends_with("broken.png"));
+        assert_eq!(db.count_photos().unwrap(), 1);
+    }
+
+    #[test]
+    fn corrupt_vrchat_named_photo_is_reported_but_others_are_indexed() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        write_png(&root.join("VRChat_2026-10-21_21-14-03.221_4x3.png"));
+        // A VRChat-style name whose bytes are not a readable image: the
+        // name parses, but the dimensions cannot be read.
+        std::fs::write(
+            root.join("VRChat_2026-10-21_21-14-05.221_3840x2160.png"),
+            b"not an image",
+        )
+        .unwrap();
+
+        let db = Db::open_in_memory().unwrap();
+        let root_id = db.add_root(root.to_str().unwrap(), "reference").unwrap();
+        let report = scan_and_index(&db, root_id, root).unwrap();
+
+        assert_eq!(report.indexed, 1);
+        assert_eq!(report.failures.len(), 1);
+        assert!(
+            report.failures[0]
+                .path
+                .ends_with("VRChat_2026-10-21_21-14-05.221_3840x2160.png")
+        );
+        assert!(
+            report.failures[0].message.contains("寸法"),
+            "message should describe the dimension failure: {}",
+            report.failures[0].message
+        );
         assert_eq!(db.count_photos().unwrap(), 1);
     }
 
@@ -746,6 +827,16 @@ mod tests {
         std::fs::create_dir(&locked).unwrap();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
 
+        // Root ignores the permission bits, so the directory stays readable
+        // and there is no failure to report.
+        if std::fs::read_dir(&locked).is_ok() {
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            eprintln!(
+                "skipping unreadable-directory assertions: running with elevated permissions"
+            );
+            return;
+        }
+
         let (photos, failures) = scan_root_report(dir.path()).unwrap();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
 
@@ -787,7 +878,7 @@ mod tests {
         assert_eq!(failures.len(), 1, "failures: {failures:?}");
         assert_eq!(failures[0].path, photo);
         assert!(
-            failures[0].message.contains("metadata"),
+            failures[0].message.contains("読み取れませんでした"),
             "message should describe the stat failure: {}",
             failures[0].message
         );
