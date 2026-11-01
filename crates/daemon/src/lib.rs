@@ -594,10 +594,17 @@ impl Daemon {
         for id in &thumbnail_ids {
             let path = {
                 let db = self.db.lock().unwrap();
-                db.photo_by_id(*id)
-                    .ok()
-                    .flatten()
-                    .map(|photo| photo.effective_path().to_string())
+                match db.photo_by_id(*id) {
+                    Ok(photo) => photo.map(|photo| photo.effective_path().to_string()),
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            photo_id = *id,
+                            "cannot load photo for thumbnail"
+                        );
+                        None
+                    }
+                }
             };
             if let Some(path) = path {
                 match thumbnail::ensure_thumbnail_in(*id, Path::new(&path), &self.thumbnail_dir) {
@@ -742,7 +749,9 @@ impl Daemon {
                 }
                 self.last_log_poll = std::time::Instant::now();
             }
-            self.refresh_status().ok();
+            if let Err(error) = self.refresh_status() {
+                tracing::warn!(%error, "cannot refresh daemon status");
+            }
             if self.last_asset_check.elapsed() >= Duration::from_secs(30) {
                 if let Err(error) = self.verify_replaced_assets() {
                     tracing::warn!(%error, "cannot verify replaced photo assets");
@@ -1454,9 +1463,13 @@ impl Daemon {
     fn refresh_autostart_setting(&mut self) {
         let enabled = {
             let db = self.db.lock().unwrap();
-            AppSettings::load(&db)
-                .map(|settings| settings.autostart)
-                .unwrap_or(self.settings.autostart)
+            match AppSettings::load(&db) {
+                Ok(settings) => settings.autostart,
+                Err(error) => {
+                    tracing::warn!(%error, "cannot reload settings for autostart");
+                    self.settings.autostart
+                }
+            }
         };
         if enabled != self.settings.autostart {
             self.settings.autostart = enabled;
@@ -1471,7 +1484,13 @@ impl Daemon {
     fn refresh_compression_settings(&mut self) {
         let loaded = {
             let db = self.db.lock().unwrap();
-            AppSettings::load(&db).ok()
+            match AppSettings::load(&db) {
+                Ok(settings) => Some(settings),
+                Err(error) => {
+                    tracing::warn!(%error, "cannot reload compression settings");
+                    None
+                }
+            }
         };
         let Some(settings) = loaded else {
             return;
@@ -2071,10 +2090,17 @@ fn thumbnail_loop(
                 budget.note_external(external);
                 let path = {
                     let db = db.lock().unwrap();
-                    db.photo_by_id(id)
-                        .ok()
-                        .flatten()
-                        .map(|photo| photo.effective_path().to_string())
+                    match db.photo_by_id(id) {
+                        Ok(photo) => photo.map(|photo| photo.effective_path().to_string()),
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                photo_id = id,
+                                "cannot load photo for thumbnail"
+                            );
+                            None
+                        }
+                    }
                 };
                 let mut batch_due = false;
                 if let Some(path) = path {
@@ -2320,10 +2346,26 @@ fn worker_loop(
     events: EventBus,
 ) {
     let mut seen_generation = 0;
+    let mut last_poll_error: Option<String> = None;
     while running.load(Ordering::Relaxed) {
         let batch = {
             let db = db.lock().unwrap();
-            db.next_pending_photo_jobs().ok().unwrap_or_default()
+            match db.next_pending_photo_jobs() {
+                Ok(batch) => {
+                    last_poll_error = None;
+                    batch
+                }
+                Err(error) => {
+                    // The loop polls every 400 ms; warn once per distinct
+                    // failure instead of flooding the log while it persists.
+                    let message = error.to_string();
+                    if last_poll_error.as_deref() != Some(&message) {
+                        tracing::warn!(%error, "cannot load pending compression jobs");
+                        last_poll_error = Some(message);
+                    }
+                    Vec::new()
+                }
+            }
         };
         if batch.is_empty() {
             // Poll first so a batch keeps all workers busy; the signal only

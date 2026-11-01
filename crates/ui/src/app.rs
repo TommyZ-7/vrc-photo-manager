@@ -368,7 +368,10 @@ impl App {
         let db_path = db.path().and_then(|path| std::fs::canonicalize(path).ok());
         let health_token = std::env::var("VRC_PHOTO_HEALTH_TOKEN").ok();
         let updating = health_token.is_some();
-        let initial_settings = AppSettings::load(&db).unwrap_or_default();
+        let initial_settings = AppSettings::load(&db).unwrap_or_else(|error| {
+            tracing::warn!(%error, "cannot load app settings; using defaults");
+            AppSettings::default()
+        });
         let initial_palette = resolve(
             &initial_settings.ui_theme_main,
             &initial_settings.ui_theme_accent,

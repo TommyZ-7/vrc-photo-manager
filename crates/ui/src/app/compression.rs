@@ -462,7 +462,7 @@ impl App {
         let id = profile.id.clone();
         match self.db.duplicate_profile(&id) {
             Ok(copy) => {
-                self.profiles = self.db.list_profiles().unwrap_or_default();
+                self.reload_profiles();
                 self.profile_index = self
                     .profiles
                     .iter()
@@ -553,7 +553,7 @@ impl App {
             .unwrap_or_else(|| id.to_string());
         match self.db.delete_profile(id) {
             Ok(()) => {
-                self.profiles = self.db.list_profiles().unwrap_or_default();
+                self.reload_profiles();
                 self.profile_index = removed_index.min(self.profiles.len().saturating_sub(1));
                 self.toast_success("プロファイルを削除しました", cx);
             }
