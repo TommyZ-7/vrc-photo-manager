@@ -39,6 +39,7 @@ use tray::{Tray, TrayAction};
 const PARSER_VERSION: &str = "1";
 /// Number of skipped-line sentences kept in one log error detail.
 const MAX_SKIPPED_DETAILS: usize = 5;
+const WATCHER_ERROR_MESSAGE: &str = "写真フォルダの監視を開始できませんでした";
 const SCAN_INTERVAL: Duration = Duration::from_millis(500);
 const LOG_INTERVAL: Duration = Duration::from_millis(750);
 /// How often the daemon re-reads the compression settings and thumbnail
@@ -157,6 +158,16 @@ pub struct Daemon {
     ipc: Option<IpcServer>,
     watchers: Vec<RecommendedWatcher>,
     watcher_rx: Option<Receiver<notify::Result<notify::Event>>>,
+    /// Roots the current watchers were set up for, to skip pointless
+    /// rebuilds that would drop buffered events.
+    watcher_roots: Vec<PathBuf>,
+    /// The watcher-start failure currently kept visible, if any. It is
+    /// recorded under the `Scan` operation but must survive clean scans:
+    /// scanning works while watching does not.
+    watcher_error: Option<(String, Option<String>)>,
+    /// New photo ids scanned while no thumbnail worker exists (notably
+    /// `--once`); the caller generates their thumbnails directly.
+    deferred_thumbnail_ids: Vec<i64>,
     log_tail: Option<LogTail>,
     workers: Vec<JoinHandle<()>>,
     dirty_paths: Vec<PathBuf>,
@@ -246,7 +257,7 @@ impl Daemon {
         let thumbnail_cache_limit = Arc::new(AtomicU64::new(thumbnail_cache_limit_bytes(
             settings.thumbnail_cache_mb,
         )));
-        let last_errors = db
+        let last_errors: std::collections::HashMap<DaemonOperation, String> = db
             .daemon_errors()
             .context("cannot load daemon errors")?
             .into_iter()
@@ -257,6 +268,15 @@ impl Daemon {
                 )
             })
             .collect();
+        let watcher_error = last_errors
+            .get(&DaemonOperation::Scan)
+            .and_then(|signature| {
+                let (message, detail) = match signature.split_once('\n') {
+                    Some((message, detail)) => (message.to_string(), Some(detail.to_string())),
+                    None => (signature.clone(), None),
+                };
+                (message == WATCHER_ERROR_MESSAGE).then_some((message, detail))
+            });
         let ipc_endpoint =
             vrc_photo_core::data_dir().and_then(|dir| match Endpoint::for_data_dir(&dir) {
                 Ok(endpoint) => Some(endpoint),
@@ -278,6 +298,9 @@ impl Daemon {
             ipc: None,
             watchers: Vec::new(),
             watcher_rx: None,
+            watcher_roots: Vec::new(),
+            watcher_error,
+            deferred_thumbnail_ids: Vec::new(),
             log_tail: None,
             workers: Vec::new(),
             dirty_paths: Vec::new(),
@@ -465,27 +488,62 @@ impl Daemon {
     /// Stops the current watchers and sets up new ones for the reloaded roots.
     /// A failure leaves them stopped so the next command or daemon start can
     /// retry the setup.
+    ///
+    /// Buffered events are drained first, and when the existing roots are
+    /// already watched the channel (and its buffer) is kept as is: a
+    /// command batch must not lose photo events that arrived while it ran.
     fn rebuild_watchers(&mut self) -> Result<()> {
+        self.poll_watchers();
+        let wanted: Vec<PathBuf> = self
+            .settings
+            .photo_roots()
+            .into_iter()
+            .filter(|root| root.is_dir())
+            .collect();
+        if self.watcher_rx.is_some() && self.watcher_roots == wanted {
+            return Ok(());
+        }
         self.watchers.clear();
         self.watcher_rx = None;
+        self.watcher_roots.clear();
         let result = self.setup_watchers();
         if result.is_err() {
             self.watchers.clear();
+            self.watcher_roots.clear();
         }
         result
     }
 
     /// Rebuilds the watchers, recording a `Scan` failure instead of aborting
-    /// the daemon when the operating system refuses a watch.
+    /// the daemon when the operating system refuses a watch. The failure is
+    /// tracked separately from scan failures so a clean scan cannot erase
+    /// it; it clears when the watchers start successfully.
     fn restart_watchers(&mut self) {
-        if let Err(error) = self.rebuild_watchers() {
-            tracing::error!(%error, "cannot start photo watchers");
-            if let Err(report_error) = self.report_daemon_error(
-                DaemonOperation::Scan,
-                "写真フォルダの監視を開始できませんでした",
-                Some(&error.to_string()),
-            ) {
-                tracing::error!(%report_error, "cannot record watcher error");
+        match self.rebuild_watchers() {
+            Ok(()) => {
+                if let Some((message, detail)) = self.watcher_error.take() {
+                    // Clear only when the Scan slot still shows the watcher
+                    // failure; a scan failure recorded since supersedes it.
+                    if self.last_errors.get(&DaemonOperation::Scan)
+                        == Some(&error_signature(&message, detail.as_deref()))
+                        && let Err(error) = self.clear_daemon_error(DaemonOperation::Scan)
+                    {
+                        tracing::error!(%error, "cannot clear watcher error");
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::error!(%error, "cannot start photo watchers");
+                let detail = error.to_string();
+                self.watcher_error =
+                    Some((WATCHER_ERROR_MESSAGE.to_string(), Some(detail.clone())));
+                if let Err(report_error) = self.report_daemon_error(
+                    DaemonOperation::Scan,
+                    WATCHER_ERROR_MESSAGE,
+                    Some(&detail),
+                ) {
+                    tracing::error!(%report_error, "cannot record watcher error");
+                }
             }
         }
     }
@@ -524,7 +582,16 @@ impl Daemon {
         self.poll_commands_with_initial(Some(initial_scan))?;
         self.write_heartbeat();
         let report = self.scan_photos_with_initial(Some(initial_scan))?;
+        // Photos indexed by the queued commands above were scanned while
+        // no thumbnail worker exists in `--once` mode, so their ids were
+        // deferred; generate for the union of both batches.
+        let mut thumbnail_ids = std::mem::take(&mut self.deferred_thumbnail_ids);
         for id in &report.new_ids {
+            if !thumbnail_ids.contains(id) {
+                thumbnail_ids.push(*id);
+            }
+        }
+        for id in &thumbnail_ids {
             let path = {
                 let db = self.db.lock().unwrap();
                 db.photo_by_id(*id)
@@ -1064,6 +1131,11 @@ impl Daemon {
                     );
                 }
             }
+        } else {
+            // No thumbnail worker (notably `--once`): keep the ids so the
+            // caller can generate directly instead of dropping them.
+            self.deferred_thumbnail_ids
+                .extend_from_slice(&report.new_ids);
         }
         Ok((report, auto_enqueued))
     }
@@ -1072,9 +1144,26 @@ impl Daemon {
     /// stale error when a full scan had none. A targeted scan (`ScanRoot`)
     /// without failures leaves any recorded error alone: it says nothing
     /// about the roots it did not scan.
+    ///
+    /// A watcher-start failure shares the `Scan` slot but is not a scan
+    /// failure: a clean scan keeps it visible (or restores it after clearing
+    /// a scan failure) until the watchers start successfully.
     fn report_scan_outcome(&mut self, report: &ScanReport, full_scan: bool) -> Result<()> {
         if report.failures.is_empty() {
             if full_scan {
+                if let Some((message, detail)) = self.watcher_error.clone() {
+                    if self.last_errors.get(&DaemonOperation::Scan)
+                        == Some(&error_signature(&message, detail.as_deref()))
+                    {
+                        return Ok(());
+                    }
+                    self.clear_daemon_error(DaemonOperation::Scan)?;
+                    return self.report_daemon_error(
+                        DaemonOperation::Scan,
+                        &message,
+                        detail.as_deref(),
+                    );
+                }
                 return self.clear_daemon_error(DaemonOperation::Scan);
             }
             return Ok(());
@@ -1458,6 +1547,7 @@ impl Daemon {
             return Ok(());
         }
         let (tx, rx) = mpsc::channel();
+        let mut watched = Vec::new();
         for root in self.settings.photo_roots() {
             if !root.is_dir() {
                 continue;
@@ -1473,8 +1563,10 @@ impl Daemon {
                 .watch(&root, RecursiveMode::Recursive)
                 .with_context(|| format!("cannot watch {}", root.display()))?;
             self.watchers.push(watcher);
+            watched.push(root);
         }
         self.watcher_rx = Some(rx);
+        self.watcher_roots = watched;
         Ok(())
     }
 
@@ -1537,6 +1629,15 @@ impl Daemon {
                             "thumbnail worker is unavailable; dropping request"
                         );
                     }
+                }
+            }
+            for id in std::mem::take(&mut self.deferred_thumbnail_ids) {
+                if let Err(error) = tx.send(id) {
+                    tracing::debug!(
+                        %error,
+                        photo_id = id,
+                        "thumbnail worker is unavailable; dropping deferred request"
+                    );
                 }
             }
         }
@@ -2851,6 +2952,192 @@ mod tests {
         assert_eq!(db.count_photos().unwrap(), 1);
         assert_eq!(daemon.watchers.len(), 1);
         assert!(db.daemon_errors().unwrap().is_empty());
+    }
+
+    #[test]
+    fn poll_commands_preserves_buffered_watcher_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let photo_dir = dir.path().join("photos");
+        // Establish the real watchers so the root set is recorded, then
+        // stand in for the channel with an event already buffered.
+        daemon.restart_watchers();
+        assert_eq!(daemon.watcher_roots, vec![photo_dir.clone()]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        daemon.watcher_rx = Some(rx);
+        let create = |path: PathBuf| -> notify::Result<notify::Event> {
+            Ok(
+                notify::Event::new(notify::EventKind::Create(notify::event::CreateKind::File))
+                    .add_path(path),
+            )
+        };
+        let first = photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        tx.send(create(first.clone())).unwrap();
+        {
+            let db = Db::open(dir.path().join("library.db")).unwrap();
+            assert!(db.request_daemon_command(DaemonCommand::Relog).unwrap());
+        }
+        daemon.poll_commands().unwrap();
+
+        // The buffered event was drained, not dropped with a rebuilt
+        // channel, and the unchanged roots keep the same channel alive.
+        assert_eq!(daemon.dirty_paths, vec![first]);
+        let second = photo_dir.join("VRChat_2026-10-21_21-25-00.000_4x3.png");
+        tx.send(create(second.clone())).unwrap();
+        daemon.poll_watchers();
+        assert_eq!(daemon.dirty_paths.len(), 2);
+        assert_eq!(daemon.dirty_paths[1], second);
+    }
+
+    #[test]
+    fn poll_commands_drains_watcher_events_before_a_rebuild() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let photo_dir = dir.path().join("photos");
+        daemon.restart_watchers();
+        let (tx, rx) = std::sync::mpsc::channel();
+        daemon.watcher_rx = Some(rx);
+        let pending = photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        tx.send(Ok(notify::Event::new(notify::EventKind::Create(
+            notify::event::CreateKind::File,
+        ))
+        .add_path(pending.clone())))
+            .unwrap();
+        // Point the settings at a different root so the batch rebuilds.
+        let new_root = dir.path().join("new");
+        std::fs::create_dir_all(&new_root).unwrap();
+        {
+            let db = Db::open(dir.path().join("library.db")).unwrap();
+            let mut settings = AppSettings::load(&db).unwrap();
+            settings.photo_roots = vec![new_root.to_string_lossy().to_string()];
+            settings.save(&db).unwrap();
+            assert!(db.request_daemon_command(DaemonCommand::Relog).unwrap());
+        }
+        daemon.poll_commands().unwrap();
+
+        assert_eq!(daemon.dirty_paths, vec![pending]);
+        assert_eq!(daemon.watcher_roots, vec![new_root]);
+    }
+
+    #[test]
+    fn watcher_failure_survives_clean_scans_until_watchers_recover() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        write_photo(&original_path(&dir));
+        let db_path = dir.path().join("library.db");
+        // Seed the state a failed watcher start leaves behind.
+        daemon.watcher_error = Some((WATCHER_ERROR_MESSAGE.to_string(), Some("boom".to_string())));
+        daemon
+            .report_daemon_error(DaemonOperation::Scan, WATCHER_ERROR_MESSAGE, Some("boom"))
+            .unwrap();
+
+        // A clean full scan must not erase the watcher failure.
+        daemon.scan_photos().unwrap();
+        {
+            let db = Db::open(&db_path).unwrap();
+            let errors = db.daemon_errors().unwrap();
+            assert_eq!(errors.len(), 1);
+            assert_eq!(errors[0].message, WATCHER_ERROR_MESSAGE);
+        }
+
+        // A scan failure takes the slot; the next clean scan clears it and
+        // surfaces the still-unrecovered watcher failure again.
+        daemon
+            .report_daemon_error(
+                DaemonOperation::Scan,
+                "写真フォルダのスキャンで1件の失敗がありました",
+                Some("detail"),
+            )
+            .unwrap();
+        daemon.scan_photos().unwrap();
+        {
+            let db = Db::open(&db_path).unwrap();
+            let errors = db.daemon_errors().unwrap();
+            assert_eq!(errors.len(), 1);
+            assert_eq!(errors[0].message, WATCHER_ERROR_MESSAGE);
+        }
+
+        // Once the watchers start, the failure clears.
+        daemon.restart_watchers();
+        let db = Db::open(&db_path).unwrap();
+        assert!(db.daemon_errors().unwrap().is_empty());
+    }
+
+    #[test]
+    fn run_once_generates_thumbnails_for_command_scans() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let cache = dir.path().join("thumbnails");
+        std::fs::create_dir_all(&cache).unwrap();
+        daemon.set_thumbnail_dir(cache.clone());
+        write_photo(&original_path(&dir));
+        {
+            let db = Db::open(dir.path().join("library.db")).unwrap();
+            assert!(db.request_daemon_command(DaemonCommand::Rescan).unwrap());
+        }
+
+        daemon.run_once().unwrap();
+
+        // The Rescan command indexed the photo, so run_once's own scan had
+        // nothing new; the thumbnail still exists.
+        let db = Db::open(dir.path().join("library.db")).unwrap();
+        assert_eq!(db.count_photos().unwrap(), 1);
+        assert!(cache.join("1.webp").exists());
+    }
+
+    #[test]
+    fn scan_marks_missing_only_for_roots_that_scanned_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let healthy = dir.path().join("photos");
+        let deleted = healthy.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&deleted);
+        // A "root" that is a plain file fails as a root; the photo indexed
+        // under it earlier must not be marked missing by the healthy
+        // root's clean diff.
+        let broken_root = dir.path().join("broken");
+        std::fs::write(&broken_root, b"not a directory").unwrap();
+        let broken_photo_id = {
+            let db = daemon.db.lock().unwrap();
+            let root_id = db
+                .add_root(&broken_root.to_string_lossy(), "reference")
+                .unwrap();
+            db.upsert_photo(&vrc_photo_core::model::NewPhoto {
+                root_id,
+                rel_path: "lost.png".to_string(),
+                abs_path: broken_root.join("lost.png").to_string_lossy().to_string(),
+                file_name: "lost.png".to_string(),
+                captured_at_utc: 1_700_000_000,
+                captured_at_local: "2026-10-21 21:24:00".to_string(),
+                tz_offset_sec: 0,
+                width: 4,
+                height: 3,
+                file_size: 10,
+                mtime: 1,
+                blake3: None,
+            })
+            .unwrap()
+        };
+        daemon.settings.photo_roots = vec![
+            broken_root.to_string_lossy().to_string(),
+            healthy.to_string_lossy().to_string(),
+        ];
+
+        let first = daemon.scan_photos().unwrap();
+        assert_eq!(first.indexed, 1);
+        std::fs::remove_file(&deleted).unwrap();
+        let report = daemon.scan_photos().unwrap();
+
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].path, broken_root);
+        let db = daemon.db.lock().unwrap();
+        let healthy_photo = db
+            .photo_by_path(deleted.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(healthy_photo.status, PhotoStatus::Missing);
+        let broken_photo = db.photo_by_id(broken_photo_id).unwrap().unwrap();
+        assert_eq!(broken_photo.status, PhotoStatus::Present);
     }
 
     #[test]
