@@ -254,6 +254,9 @@ const SCHEMA_V8_COMMAND_PAYLOAD: &str = "ALTER TABLE daemon_commands ADD COLUMN 
 const SCHEMA_V9_JOB_PHOTO_PROFILE_INDEX: &str = "CREATE INDEX IF NOT EXISTS idx_jobs_photo_profile \
      ON compression_jobs(photo_id, profile_id);";
 
+const SCHEMA_V10_MESSAGE_KEY: &str = "ALTER TABLE daemon_errors ADD COLUMN message_key TEXT;";
+const SCHEMA_V10_MESSAGE_ARGS: &str = "ALTER TABLE daemon_errors ADD COLUMN message_args TEXT;";
+
 const PHOTO_SELECT: &str = "p.id, p.root_id, p.rel_path, p.abs_path, p.file_name, \
     p.captured_at_utc, p.captured_at_local, p.tz_offset_sec, p.width, p.height, \
     p.file_size, p.mtime, p.blake3, p.status, p.is_favorite, p.note, \
@@ -381,6 +384,9 @@ impl Db {
         }
         if version < 9 {
             self.migrate_v9()?;
+        }
+        if version < 10 {
+            self.migrate_v10()?;
         }
         Ok(())
     }
@@ -617,6 +623,40 @@ impl Db {
             params![now_string()],
         )?;
         tx.pragma_update(None, "user_version", 9)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Adds the key/args columns used to render stored daemon errors in the
+    /// current language. Additive and nullable, so old rows keep their
+    /// `message` fallback.
+    fn migrate_v10(&self) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version >= 10 {
+            tx.commit()?;
+            return Ok(());
+        }
+
+        for (column, sql) in [
+            ("message_key", SCHEMA_V10_MESSAGE_KEY),
+            ("message_args", SCHEMA_V10_MESSAGE_ARGS),
+        ] {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('daemon_errors') \
+                 WHERE name = ?1)",
+                params![column],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                tx.execute_batch(sql)?;
+            }
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (10, ?1)",
+            params![now_string()],
+        )?;
+        tx.pragma_update(None, "user_version", 10)?;
         tx.commit()?;
         Ok(())
     }
@@ -2589,13 +2629,36 @@ impl Db {
         message: &str,
         detail: Option<&str>,
     ) -> Result<()> {
+        self.record_daemon_error_i18n(operation, message, None, None, detail)
+    }
+
+    /// Records a daemon failure with an optional catalog key and JSON args.
+    /// `message` stays the fallback for older UIs and direct database readers.
+    pub fn record_daemon_error_i18n(
+        &self,
+        operation: DaemonOperation,
+        message: &str,
+        message_key: Option<&str>,
+        message_args: Option<&str>,
+        detail: Option<&str>,
+    ) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO daemon_errors(operation, message, detail, occurred_at, attempts) \
-             VALUES (?1, ?2, ?3, ?4, 1) \
+            "INSERT INTO daemon_errors(operation, message, detail, occurred_at, attempts, \
+                message_key, message_args) \
+             VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6) \
              ON CONFLICT(operation) DO UPDATE SET message = excluded.message, \
                 detail = excluded.detail, occurred_at = excluded.occurred_at, \
-                attempts = daemon_errors.attempts + 1",
-            params![operation.as_str(), message, detail, now_string()],
+                attempts = daemon_errors.attempts + 1, \
+                message_key = excluded.message_key, \
+                message_args = excluded.message_args",
+            params![
+                operation.as_str(),
+                message,
+                detail,
+                now_string(),
+                message_key,
+                message_args
+            ],
         )?;
         Ok(())
     }
@@ -2613,8 +2676,8 @@ impl Db {
     /// string is unknown to this build are skipped.
     pub fn daemon_errors(&self) -> Result<Vec<DaemonError>> {
         let mut stmt = self.conn.prepare(
-            "SELECT operation, message, detail, occurred_at, attempts FROM daemon_errors \
-             ORDER BY occurred_at DESC, operation",
+            "SELECT operation, message, detail, occurred_at, attempts, message_key, message_args \
+             FROM daemon_errors ORDER BY occurred_at DESC, operation",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok((
@@ -2623,11 +2686,14 @@ impl Db {
                 row.get::<_, Option<String>>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, i64>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
             ))
         })?;
         let mut errors = Vec::new();
         for row in rows {
-            let (operation, message, detail, occurred_at, attempts) = row?;
+            let (operation, message, detail, occurred_at, attempts, message_key, message_args) =
+                row?;
             let Some(operation) = DaemonOperation::parse(&operation) else {
                 continue;
             };
@@ -2637,6 +2703,8 @@ impl Db {
                 detail,
                 occurred_at,
                 attempts,
+                message_key,
+                message_args,
             });
         }
         Ok(errors)
@@ -3171,7 +3239,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
     }
 
     #[test]
@@ -3217,7 +3285,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
         let author_columns: i64 = db
             .conn
             .query_row(
@@ -3269,7 +3337,7 @@ mod tests {
             }
             for handle in handles {
                 let opened = handle.join().unwrap();
-                assert_eq!(opened.unwrap().unwrap(), 9);
+                assert_eq!(opened.unwrap().unwrap(), 10);
             }
         }
     }
@@ -3281,7 +3349,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
         let has_output_dir: bool = db
             .conn
             .query_row(
@@ -3301,7 +3369,7 @@ mod tests {
             .connection()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
         let table: i64 = db
             .connection()
             .query_row(
@@ -3971,7 +4039,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
 
         let recorded: i64 = db
             .conn
@@ -4014,7 +4082,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
         let retry_column: i64 = db
             .conn
             .query_row(
@@ -4081,7 +4149,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
 
         let jobs = db.list_jobs(10).unwrap();
         assert_eq!(jobs.len(), 1);
@@ -4114,7 +4182,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
         assert_eq!(db.list_jobs(10).unwrap()[0].retry_count, 2);
 
         let tables: i64 = db
@@ -5035,6 +5103,97 @@ mod tests {
 
         db.clear_daemon_error(DaemonOperation::Scan).unwrap();
         assert!(db.daemon_errors().unwrap().is_empty());
+    }
+
+    #[test]
+    fn keyed_daemon_errors_round_trip() {
+        let db = Db::open_in_memory().unwrap();
+        db.record_daemon_error_i18n(
+            DaemonOperation::Scan,
+            "Photo scan failed",
+            Some("daemon.scan_failed"),
+            Some(r#"{"count":"3"}"#),
+            Some("detail"),
+        )
+        .unwrap();
+
+        let errors = db.daemon_errors().unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].message_key.as_deref(), Some("daemon.scan_failed"));
+        assert_eq!(errors[0].message_args.as_deref(), Some(r#"{"count":"3"}"#));
+    }
+
+    #[test]
+    fn legacy_daemon_errors_have_no_key_or_args() {
+        let db = Db::open_in_memory().unwrap();
+        db.record_daemon_error(DaemonOperation::Log, "log failed", None)
+            .unwrap();
+
+        let errors = db.daemon_errors().unwrap();
+        assert!(errors[0].message_key.is_none());
+        assert!(errors[0].message_args.is_none());
+    }
+
+    #[test]
+    fn v10_migration_preserves_pre_v10_daemon_errors() {
+        let db = Db::open_in_memory().unwrap();
+        db.connection()
+            .execute_batch(
+                "ALTER TABLE daemon_errors DROP COLUMN message_key;\
+                 ALTER TABLE daemon_errors DROP COLUMN message_args;",
+            )
+            .unwrap();
+        db.connection()
+            .pragma_update(None, "user_version", 9)
+            .unwrap();
+        db.connection()
+            .execute(
+                "INSERT INTO daemon_errors(operation, message, detail, occurred_at, attempts) \
+                 VALUES ('scan', 'legacy scan error', '/photos', \
+                 '2026-10-31T00:00:00+00:00', 2)",
+                [],
+            )
+            .unwrap();
+
+        db.migrate_v10().unwrap();
+
+        let errors = db.daemon_errors().unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].message, "legacy scan error");
+        assert_eq!(errors[0].detail.as_deref(), Some("/photos"));
+        assert!(errors[0].message_key.is_none());
+        assert!(errors[0].message_args.is_none());
+    }
+
+    #[test]
+    fn migrate_v10_adds_columns_and_is_retryable() {
+        let db = Db::open_in_memory().unwrap();
+        db.connection()
+            .pragma_update(None, "user_version", 9)
+            .unwrap();
+        db.migrate_v10().unwrap();
+        db.migrate_v10().unwrap();
+
+        let has_key: bool = db
+            .connection()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('daemon_errors') \
+                 WHERE name = 'message_key')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let has_args: bool = db
+            .connection()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('daemon_errors') \
+                 WHERE name = 'message_args')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(has_key);
+        assert!(has_args);
     }
 
     #[test]

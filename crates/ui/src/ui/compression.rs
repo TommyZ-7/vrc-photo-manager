@@ -16,6 +16,7 @@ use vrc_photo_core::model::{
     CompressionFormat, CompressionJob, CompressionProfile, MAX_JOB_RETRIES, MAX_PROFILE_NAME_CHARS,
     QueueStatus, ResizeMode,
 };
+use vrc_photo_i18n::{tr, tr_args};
 
 use crate::app::App;
 use crate::ui::components::{card_header, glass_panel};
@@ -30,14 +31,18 @@ fn section_divider(palette: &Palette) -> AnyElement {
         .into_any_element()
 }
 
-fn queue_status_badge(status: &QueueStatus, p: &Palette) -> (&'static str, u32, u32) {
+fn queue_status_badge(status: &QueueStatus, p: &Palette) -> (String, u32, u32) {
     match status {
-        QueueStatus::Waiting => ("未実行", p.amber, p.amber_soft),
-        QueueStatus::Pending => ("実行待ち", p.muted, p.panel_2),
-        QueueStatus::Processing => ("処理中", p.accent, p.accent_soft),
-        QueueStatus::Completed => ("完了", p.green, p.green_soft),
-        QueueStatus::Failed => ("失敗", p.red, p.red_soft),
-        QueueStatus::Cancelled => ("取消", p.muted, p.panel_2),
+        QueueStatus::Waiting => (tr!("compression.status.waiting"), p.amber, p.amber_soft),
+        QueueStatus::Pending => (tr!("compression.status.pending"), p.muted, p.panel_2),
+        QueueStatus::Processing => (
+            tr!("compression.status.processing"),
+            p.accent,
+            p.accent_soft,
+        ),
+        QueueStatus::Completed => (tr!("compression.status.completed"), p.green, p.green_soft),
+        QueueStatus::Failed => (tr!("compression.status.failed"), p.red, p.red_soft),
+        QueueStatus::Cancelled => (tr!("compression.status.cancelled"), p.muted, p.panel_2),
     }
 }
 
@@ -54,16 +59,20 @@ fn job_error_label(job: &CompressionJob) -> String {
         .as_deref()
         .map(str::trim)
         .filter(|error| !error.is_empty())
-        .unwrap_or("原因不明")
-        .to_string()
+        .map(str::to_string)
+        .unwrap_or_else(|| tr!("compression.job.unknown_error"))
 }
 
 /// Retry usage for a failed job, or the cap explanation once exhausted.
 fn job_retry_label(job: &CompressionJob) -> String {
     if job_retry_available(job) {
-        format!("再試行 {}/{MAX_JOB_RETRIES}", job.retry_count)
+        tr_args!(
+            "compression.retry_label",
+            count = job.retry_count,
+            max = MAX_JOB_RETRIES
+        )
     } else {
-        format!("再試行の上限（{MAX_JOB_RETRIES}回）に達しました")
+        tr_args!("compression.retry_limit", max = MAX_JOB_RETRIES)
     }
 }
 
@@ -96,7 +105,7 @@ impl App {
                     .rounded(px(17.))
                     .text_size(px(12.))
                     .text_color(rgb(p.muted_2))
-                    .child("プロファイルがありません")
+                    .child(tr!("compression.no_profiles"))
                     .into_any_element(),
             })
     }
@@ -161,13 +170,17 @@ impl App {
                                             .child(title),
                                     )
                                     .child(self.badge(
-                                        if auto { "自動" } else { "手動" },
+                                        if auto {
+                                            tr!("compression.auto")
+                                        } else {
+                                            tr!("compression.manual")
+                                        },
                                         if auto { p.green } else { p.muted },
                                         if auto { p.green_soft } else { p.panel_2 },
                                     ))
                                     .when(profile.clipboard, |this| {
                                         this.child(self.badge(
-                                            "クリップボード",
+                                            tr!("compression.clipboard"),
                                             p.accent,
                                             p.accent_soft,
                                         ))
@@ -252,21 +265,24 @@ impl App {
                     .text_size(px(13.))
                     .font_semibold()
                     .text_color(rgb(p.text))
-                    .child("プロファイル"),
+                    .child(tr!("compression.profiles")),
             )
             .child(
                 Button::new("add-profile")
-                    .label("＋ 追加")
+                    .label(tr!("compression.add"))
                     .small()
                     .on_click(cx.listener(|this, _, _, cx| {
                         let profile = CompressionProfile {
-                            name: format!("新規プロファイル {}", this.profiles.len() + 1),
+                            name: tr_args!(
+                                "compression.new_profile",
+                                index = this.profiles.len() + 1
+                            ),
                             auto_enabled: false,
                             ..CompressionProfile::default()
                         };
                         if let Err(error) = this.db.save_profile(&profile) {
                             tracing::warn!(%error, "cannot add compression profile");
-                            this.toast_error(format!("プロファイルを追加できません: {error}"), cx);
+                            this.toast_error(tr_args!("compression.add_error", error = error), cx);
                         }
                         this.profiles = this.db.list_profiles().unwrap_or_else(|error| {
                             tracing::warn!(%error, "cannot reload compression profiles");
@@ -309,7 +325,7 @@ impl App {
             self.profile_name_reset_pending = false;
             self.profile_name_error = None;
         }
-        let name_error = self.profile_name_error.clone();
+        let name_error = self.profile_name_error;
         let name_char_count = self
             .profile_name_input
             .read(cx)
@@ -334,9 +350,9 @@ impl App {
             });
         }
         let output_hint = match profile.output_dir.as_deref() {
-            None => "空欄: 元画像と同じフォルダの compressed/".to_string(),
-            Some(dir) if Path::new(dir).is_absolute() => "絶対パス".to_string(),
-            Some(_) => "相対パス: 元画像のフォルダ基準".to_string(),
+            None => tr!("compression.output.empty"),
+            Some(dir) if Path::new(dir).is_absolute() => tr!("compression.output.absolute"),
+            Some(_) => tr!("compression.output.relative"),
         };
         glass_panel(&self.palette)
             .flex()
@@ -362,14 +378,14 @@ impl App {
                     .child(div().flex_1())
                     .child(
                         Button::new("duplicate-profile")
-                            .label("複製")
+                            .label(tr!("compression.duplicate"))
                             .small()
                             .ghost()
                             .on_click(cx.listener(|this, _, _, cx| this.duplicate_profile(cx))),
                     )
                     .child(
                         Button::new("delete-profile")
-                            .label("削除")
+                            .label(tr!("compression.delete"))
                             .small()
                             .danger()
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -384,7 +400,7 @@ impl App {
                     .overflow_y_scrollbar()
                     .p(px(14.))
                     .gap(px(14.))
-                    .child(self.section_label("基本"))
+                    .child(self.section_label(tr!("compression.section.basic")))
                     .child(
                         v_flex()
                             .gap(px(6.))
@@ -392,7 +408,7 @@ impl App {
                                 div()
                                     .text_size(px(10.))
                                     .text_color(rgb(p.muted_2))
-                                    .child("プロファイル名"),
+                                    .child(tr!("compression.profile_name")),
                             )
                             .child(Input::new(&self.profile_name_input).small())
                             .child(
@@ -404,9 +420,11 @@ impl App {
                                         p.muted_2
                                     }))
                                     .child(match name_error {
-                                        Some(error) => error,
-                                        None => format!(
-                                            "前後の空白は保存時に除去されます · {name_char_count}/{MAX_PROFILE_NAME_CHARS}文字"
+                                        Some(error) => error.message(),
+                                        None => tr_args!(
+                                            "compression.name_hint",
+                                            count = name_char_count,
+                                            max = MAX_PROFILE_NAME_CHARS
                                         ),
                                     }),
                             ),
@@ -422,13 +440,13 @@ impl App {
                                         div()
                                             .text_size(px(12.))
                                             .text_color(rgb(p.text))
-                                            .child("自動圧縮に使う"),
+                                            .child(tr!("compression.use_for_auto")),
                                     )
                                     .child(
                                         div()
                                             .text_size(px(10.))
                                             .text_color(rgb(p.muted_2))
-                                            .child("新規写真にこのプロファイルを適用します"),
+                                            .child(tr!("compression.use_for_auto_hint")),
                                     ),
                             )
                             .child(div().flex_1())
@@ -444,7 +462,7 @@ impl App {
                             ),
                     )
                     .child(section_divider(&p))
-                    .child(self.section_label("形式と画質"))
+                    .child(self.section_label(tr!("compression.section.format")))
                     .child(
                         h_flex().gap(px(4.)).children(
                             [
@@ -459,10 +477,7 @@ impl App {
                                 let label = format_label(&format);
                                 let selected_format = format.clone();
                                 div()
-                                    .id(SharedString::from(format!(
-                                        "format-{}",
-                                        format.as_str()
-                                    )))
+                                    .id(SharedString::from(format!("format-{}", format.as_str())))
                                     .px(px(10.))
                                     .py(px(5.))
                                     .rounded(px(8.))
@@ -499,7 +514,7 @@ impl App {
                                     .w(px(80.))
                                     .text_size(px(12.))
                                     .text_color(rgb(p.muted))
-                                    .child("ロスレス"),
+                                    .child(tr!("compression.lossless")),
                             )
                             .child(
                                 Switch::new("profile-lossless")
@@ -528,7 +543,7 @@ impl App {
                                     .w(px(80.))
                                     .text_size(px(12.))
                                     .text_color(rgb(p.muted))
-                                    .child("品質"),
+                                    .child(tr!("compression.quality")),
                             )
                             .child(
                                 Button::new("quality-minus")
@@ -570,14 +585,14 @@ impl App {
                             )
                             .child(div().text_size(px(10.)).text_color(rgb(p.muted_2)).child(
                                 if profile.lossless {
-                                    "ロスレスでは品質指定を使用しません"
+                                    tr!("compression.lossless_no_quality")
                                 } else {
-                                    "品質を調整"
+                                    tr!("compression.adjust_quality")
                                 },
                             )),
                     )
                     .child(section_divider(&p))
-                    .child(self.section_label("リサイズ"))
+                    .child(self.section_label(tr!("compression.section.resize")))
                     .child(
                         v_flex()
                             .gap(px(8.))
@@ -589,7 +604,7 @@ impl App {
                                         div()
                                             .text_size(px(12.))
                                             .text_color(rgb(p.muted))
-                                            .child("リサイズを有効にする"),
+                                            .child(tr!("compression.enable_resize")),
                                     )
                                     .child(
                                         Switch::new("profile-resize")
@@ -613,7 +628,7 @@ impl App {
                                                 .flex_shrink_0()
                                                 .text_size(px(12.))
                                                 .text_color(rgb(p.muted))
-                                                .child("解像度"),
+                                                .child(tr!("compression.resolution")),
                                         )
                                         .children(
                                             [
@@ -623,43 +638,46 @@ impl App {
                                                 ("4K", 3840, 2160),
                                             ]
                                             .into_iter()
-                                            .map(|(label, width, height)| {
-                                                let active = profile.width == width
-                                                    && profile.height == height;
-                                                div()
-                                                    .id(SharedString::from(format!(
-                                                        "resize-{label}"
-                                                    )))
-                                                    .px(px(8.))
-                                                    .py(px(4.))
-                                                    .rounded(px(8.))
-                                                    .bg(if active {
-                                                        rgb(p.accent_soft)
-                                                    } else {
-                                                        rgba(0x00000000)
-                                                    })
-                                                    .text_size(px(10.))
-                                                    .font_medium()
-                                                    .text_color(if active {
-                                                        rgb(p.accent)
-                                                    } else {
-                                                        rgb(p.muted)
-                                                    })
-                                                    .cursor_pointer()
-                                                    .on_click(cx.listener(
-                                                        move |this, _, _, cx| {
-                                                            this.edit_profile(
-                                                                |profile| {
-                                                                    profile.resize_enabled = true;
-                                                                    profile.width = width;
-                                                                    profile.height = height;
-                                                                },
-                                                                cx,
-                                                            );
-                                                        },
-                                                    ))
-                                                    .child(label)
-                                            }),
+                                            .map(
+                                                |(label, width, height)| {
+                                                    let active = profile.width == width
+                                                        && profile.height == height;
+                                                    div()
+                                                        .id(SharedString::from(format!(
+                                                            "resize-{label}"
+                                                        )))
+                                                        .px(px(8.))
+                                                        .py(px(4.))
+                                                        .rounded(px(8.))
+                                                        .bg(if active {
+                                                            rgb(p.accent_soft)
+                                                        } else {
+                                                            rgba(0x00000000)
+                                                        })
+                                                        .text_size(px(10.))
+                                                        .font_medium()
+                                                        .text_color(if active {
+                                                            rgb(p.accent)
+                                                        } else {
+                                                            rgb(p.muted)
+                                                        })
+                                                        .cursor_pointer()
+                                                        .on_click(cx.listener(
+                                                            move |this, _, _, cx| {
+                                                                this.edit_profile(
+                                                                    |profile| {
+                                                                        profile.resize_enabled =
+                                                                            true;
+                                                                        profile.width = width;
+                                                                        profile.height = height;
+                                                                    },
+                                                                    cx,
+                                                                );
+                                                            },
+                                                        ))
+                                                        .child(label)
+                                                },
+                                            ),
                                         )
                                         .child(
                                             div()
@@ -686,16 +704,19 @@ impl App {
                                                         .flex_shrink_0()
                                                         .text_size(px(12.))
                                                         .text_color(rgb(p.muted))
-                                                        .child("リサイズ方法"),
+                                                        .child(tr!("compression.resize_mode")),
                                                 )
                                                 .child(
                                                     h_flex().gap(px(4.)).children(
                                                         [
                                                             (
                                                                 ResizeMode::DownscaleOnly,
-                                                                "大きい場合のみ",
+                                                                tr!("compression.resize.shrink"),
                                                             ),
-                                                            (ResizeMode::Always, "毎回"),
+                                                            (
+                                                                ResizeMode::Always,
+                                                                tr!("compression.resize.always"),
+                                                            ),
                                                         ]
                                                         .into_iter()
                                                         .map(|(mode, label)| {
@@ -726,7 +747,8 @@ impl App {
                                                                     move |this, _, _, cx| {
                                                                         this.edit_profile(
                                                                             |profile| {
-                                                                                profile.resize_mode =
+                                                                                profile
+                                                                                    .resize_mode =
                                                                                     mode;
                                                                             },
                                                                             cx,
@@ -745,10 +767,10 @@ impl App {
                                                 .text_color(rgb(p.muted_2))
                                                 .child(match profile.resize_mode {
                                                     ResizeMode::DownscaleOnly => {
-                                                        "指定解像度より大きい画像だけ縮小します"
+                                                        tr!("compression.resize.shrink_hint")
                                                     }
                                                     ResizeMode::Always => {
-                                                        "小さい画像も指定解像度に合わせて拡大します"
+                                                        tr!("compression.resize.always_hint")
                                                     }
                                                 }),
                                         ),
@@ -765,7 +787,7 @@ impl App {
                                                 .flex_shrink_0()
                                                 .text_size(px(12.))
                                                 .text_color(rgb(p.muted_2))
-                                                .child("アスペクト比維持"),
+                                                .child(tr!("compression.keep_aspect")),
                                         )
                                         .child(
                                             Switch::new("profile-aspect")
@@ -783,7 +805,7 @@ impl App {
                             }),
                     )
                     .child(section_divider(&p))
-                    .child(self.section_label("出力"))
+                    .child(self.section_label(tr!("compression.section.output")))
                     .child(
                         h_flex()
                             .flex_wrap()
@@ -798,7 +820,7 @@ impl App {
                                         div()
                                             .text_size(px(10.))
                                             .text_color(rgb(p.muted_2))
-                                            .child("出力先"),
+                                            .child(tr!("compression.output_dir")),
                                     )
                                     .child(
                                         h_flex()
@@ -811,7 +833,7 @@ impl App {
                                             )
                                             .child(
                                                 Button::new("profile-output-pick")
-                                                    .label("参照")
+                                                    .label(tr!("compression.browse"))
                                                     .small()
                                                     .ghost()
                                                     .on_click(cx.listener(
@@ -826,7 +848,8 @@ impl App {
                                                             if let Some(dir) = current {
                                                                 picker = picker.set_directory(dir);
                                                             }
-                                                            if let Some(dir) = picker.pick_folder() {
+                                                            if let Some(dir) = picker.pick_folder()
+                                                            {
                                                                 let path = dir
                                                                     .to_string_lossy()
                                                                     .to_string();
@@ -868,14 +891,14 @@ impl App {
                                         div()
                                             .text_size(px(10.))
                                             .text_color(rgb(p.muted_2))
-                                            .child("サフィックス"),
+                                            .child(tr!("compression.suffix")),
                                     )
                                     .child(Input::new(&self.profile_suffix_input).small().flex_1())
                                     .child(
                                         div()
                                             .text_size(px(9.5))
                                             .text_color(rgb(p.muted_2))
-                                            .child("空欄可"),
+                                            .child(tr!("compression.empty_ok")),
                                     ),
                             ),
                     )
@@ -893,20 +916,24 @@ impl App {
                                         div()
                                             .text_size(px(12.))
                                             .text_color(rgb(p.text))
-                                            .child("クリップボード用"),
+                                            .child(tr!("compression.clipboard_for")),
                                     )
                                     .child(
                                         div()
                                             .text_size(px(10.))
                                             .text_color(rgb(p.muted_2))
-                                            .child("システム全体で1つだけ設定できます"),
+                                            .child(tr!("compression.clipboard_system")),
                                     ),
                             )
                             .child(
                                 Switch::new("profile-clipboard")
                                     .checked(profile.clipboard)
                                     .on_click(cx.listener(move |this, checked, _, cx| {
-                                        this.set_clipboard_profile(&clipboard_profile_id, *checked, cx);
+                                        this.set_clipboard_profile(
+                                            &clipboard_profile_id,
+                                            *checked,
+                                            cx,
+                                        );
                                     })),
                             ),
                     )
@@ -919,7 +946,7 @@ impl App {
                             .border_color(rgb(p.border))
                             .text_size(px(10.))
                             .text_color(rgb(p.muted))
-                            .child("変更は即時保存されます。サフィックスの使用不可文字は _ に置換されます。手動圧縮の出力先と元画像の扱いは実行時に選べます。"),
+                            .child(tr!("compression.save_hint")),
                     ),
             )
             .child(
@@ -930,20 +957,24 @@ impl App {
                     .border_t_1()
                     .border_color(rgba(p.highlight))
                     .child(self.editor_stat(
-                        "総圧縮数",
+                        tr!("compression.stats.total"),
                         self.stats.compressed_count.to_string(),
                     ))
-                    .child(self.editor_stat("写真", self.stats.photo_count.to_string()))
                     .child(self.editor_stat(
-                        "圧縮後合計",
+                        tr!("compression.stats.photos"),
+                        self.stats.photo_count.to_string(),
+                    ))
+                    .child(self.editor_stat(
+                        tr!("compression.stats.compressed_total"),
                         format_bytes(self.stats.derivative_bytes),
                     )),
             )
     }
 
     /// Small stat block inside the editor card's footer.
-    fn editor_stat(&self, label: &str, value: String) -> impl IntoElement {
+    fn editor_stat(&self, label: impl Into<String>, value: String) -> impl IntoElement {
         let p = self.palette;
+        let label: String = label.into();
         v_flex()
             .flex_1()
             .min_w_0()
@@ -957,7 +988,7 @@ impl App {
                 div()
                     .text_size(px(10.))
                     .text_color(rgb(p.muted_2))
-                    .child(label.to_string()),
+                    .child(label),
             )
             .child(
                 div()
@@ -999,32 +1030,32 @@ impl App {
                             .text_size(px(13.))
                             .font_semibold()
                             .text_color(rgb(p.text))
-                            .child("圧縮キュー"),
+                            .child(tr!("compression.queue.title")),
                     )
                     .when(self.active_job_count > 0, |this| {
                         this.child(self.badge(
-                            &format!("未完了 {}", self.active_job_count),
+                            tr_args!("compression.queue.active", count = self.active_job_count),
                             p.accent,
                             p.accent_soft,
                         ))
                     })
                     .when(self.waiting_job_count > 0, |this| {
                         this.child(self.badge(
-                            &format!("未実行 {}", self.waiting_job_count),
+                            tr_args!("compression.queue.waiting", count = self.waiting_job_count),
                             p.amber,
                             p.amber_soft,
                         ))
                     })
                     .when(self.waiting_job_count > 0, |this| {
                         this.child(if self.settings.auto_compress_keep_original {
-                            self.badge("自動: 元画像を保持", p.green, p.green_soft)
+                            self.badge(tr!("compression.queue.auto_keep"), p.green, p.green_soft)
                         } else {
-                            self.badge("自動: 元画像を置換", p.red, p.red_soft)
+                            self.badge(tr!("compression.queue.auto_replace"), p.red, p.red_soft)
                         })
                     })
                     .when(self.failed_job_count > 0, |this| {
                         this.child(self.badge(
-                            &format!("失敗 {}", self.failed_job_count),
+                            tr_args!("compression.queue.failed", count = self.failed_job_count),
                             p.red,
                             p.red_soft,
                         ))
@@ -1033,7 +1064,7 @@ impl App {
                     .when(self.waiting_job_count > 0, |this| {
                         this.child(
                             Button::new("release-waiting-jobs")
-                                .label("待機をすべて圧縮")
+                                .label(tr!("compression.queue.release_waiting"))
                                 .small()
                                 .primary()
                                 .on_click(cx.listener(|this, _, window, cx| {
@@ -1044,7 +1075,7 @@ impl App {
                     .when(retryable_jobs, |this| {
                         this.child(
                             Button::new("retry-all-failed-jobs")
-                                .label("失敗をすべて再試行")
+                                .label(tr!("compression.queue.retry_all"))
                                 .small()
                                 .ghost()
                                 .on_click(
@@ -1059,68 +1090,23 @@ impl App {
                     .min_h_0()
                     .overflow_y_scrollbar()
                     .when(self.failed_job_count > 100, |this| {
-                this.child(
-                    div()
-                        .px(px(GALLERY_PAD_X))
-                        .py(px(8.))
-                        .text_size(px(10.))
-                        .text_color(rgb(p.muted_2))
-                        .child("失敗は最新の100件のみ表示しています（再試行は上限内のすべてが対象です）"),
-                )
-            })
-            .children(self.waiting_jobs.iter().take(20).map(|job| {
-                let status = queue_status_badge(&job.status, &p);
-                let profile_name = self
-                    .profiles
-                    .iter()
-                    .find(|profile| profile.id == job.profile_id)
-                    .map(|profile| profile.name.clone())
-                    .unwrap_or_else(|| "不明なプロファイル".to_string());
-                h_flex()
-                    .px(px(16.))
-                    .py(px(10.))
-                    .gap(px(8.))
-                    .items_center()
-                    .border_b_1()
-                    .border_color(rgb(p.border))
-                    .child(self.badge(status.0, status.1, status.2))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(px(12.))
-                            .text_color(rgb(p.text))
-                            .truncate()
-                            .child(format!("photo #{}", job.photo_id)),
-                    )
-                    .child(
-                        div()
-                            .max_w(px(160.))
-                            .truncate()
-                            .text_size(px(10.))
-                            .text_color(rgb(p.muted_2))
-                            .child(profile_name),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(p.muted_2))
-                            .child(format!("{:.0}%", job.progress * 100.0)),
-                    )
-            }))
-            .children(
-                self.jobs
-                    .iter()
-                    .filter(|job| !matches!(job.status, QueueStatus::Waiting | QueueStatus::Failed))
-                    .take(6)
-                    .map(|job| {
+                        this.child(
+                            div()
+                                .px(px(GALLERY_PAD_X))
+                                .py(px(8.))
+                                .text_size(px(10.))
+                                .text_color(rgb(p.muted_2))
+                                .child(tr!("compression.queue.failed_hint")),
+                        )
+                    })
+                    .children(self.waiting_jobs.iter().take(20).map(|job| {
                         let status = queue_status_badge(&job.status, &p);
                         let profile_name = self
                             .profiles
                             .iter()
                             .find(|profile| profile.id == job.profile_id)
                             .map(|profile| profile.name.clone())
-                            .unwrap_or_else(|| "不明なプロファイル".to_string());
+                            .unwrap_or_else(|| tr!("compression.unknown_profile"));
                         h_flex()
                             .px(px(16.))
                             .py(px(10.))
@@ -1136,10 +1122,12 @@ impl App {
                                     .text_size(px(12.))
                                     .text_color(rgb(p.text))
                                     .truncate()
-                                    .child(format!("photo #{}", job.photo_id)),
+                                    .child(tr_args!("compression.job.photo", id = job.photo_id)),
                             )
                             .child(
                                 div()
+                                    .max_w(px(160.))
+                                    .truncate()
                                     .text_size(px(10.))
                                     .text_color(rgb(p.muted_2))
                                     .child(profile_name),
@@ -1150,101 +1138,106 @@ impl App {
                                     .text_color(rgb(p.muted_2))
                                     .child(format!("{:.0}%", job.progress * 100.0)),
                             )
-                    }),
-            )
-            .children(self.failed_jobs.iter().map(|job| {
-                let name = self
-                    .failed_job_names
-                    .get(&job.photo_id)
-                    .cloned()
-                    .unwrap_or_else(|| format!("photo #{}", job.photo_id));
-                let profile_name = self
-                    .profiles
-                    .iter()
-                    .find(|profile| profile.id == job.profile_id)
-                    .map(|profile| profile.name.clone());
-                let error = job_error_label(job);
-                let retryable = job_retry_available(job);
-                let id = job.id.clone();
-                v_flex()
-                    .px(px(16.))
-                    .py(px(10.))
-                    .gap(px(6.))
-                    .border_b_1()
-                    .border_color(rgb(p.border))
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(self.badge("失敗", p.red, p.red_soft))
+                    }))
+                    .children(self.failed_jobs.iter().map(|job| {
+                        let name = self
+                            .failed_job_names
+                            .get(&job.photo_id)
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                tr_args!("compression.job.photo", id = job.photo_id)
+                            });
+                        let profile_name = self
+                            .profiles
+                            .iter()
+                            .find(|profile| profile.id == job.profile_id)
+                            .map(|profile| profile.name.clone());
+                        let error = job_error_label(job);
+                        let retryable = job_retry_available(job);
+                        let id = job.id.clone();
+                        v_flex()
+                            .px(px(16.))
+                            .py(px(10.))
+                            .gap(px(6.))
+                            .border_b_1()
+                            .border_color(rgb(p.border))
                             .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_size(px(12.))
-                                    .text_color(rgb(p.text))
-                                    .truncate()
-                                    .child(name),
+                                h_flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .child(self.badge(
+                                        tr!("compression.status.failed"),
+                                        p.red,
+                                        p.red_soft,
+                                    ))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_size(px(12.))
+                                            .text_color(rgb(p.text))
+                                            .truncate()
+                                            .child(name),
+                                    )
+                                    .when_some(profile_name, |this, name| {
+                                        this.child(
+                                            div()
+                                                .max_w(px(160.))
+                                                .truncate()
+                                                .text_size(px(10.))
+                                                .text_color(rgb(p.muted_2))
+                                                .child(name),
+                                        )
+                                    }),
                             )
-                            .when_some(profile_name, |this, name| {
+                            .when(!error.is_empty(), |this| {
                                 this.child(
                                     div()
-                                        .max_w(px(160.))
-                                        .truncate()
+                                        .w_full()
                                         .text_size(px(10.))
-                                        .text_color(rgb(p.muted_2))
-                                        .child(name),
+                                        .text_color(rgb(p.red))
+                                        .child(error),
                                 )
-                            }),
-                    )
-                    .when(!error.is_empty(), |this| {
-                        this.child(
-                            div()
-                                .w_full()
-                                .text_size(px(10.))
-                                .text_color(rgb(p.red))
-                                .child(error),
-                        )
-                    })
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap(px(8.))
+                            })
                             .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(p.muted_2))
-                                    .child(job_retry_label(job)),
+                                h_flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .child(
+                                        div()
+                                            .text_size(px(10.))
+                                            .text_color(rgb(p.muted_2))
+                                            .child(job_retry_label(job)),
+                                    )
+                                    .when(retryable, |this| {
+                                        this.child(
+                                            Button::new(SharedString::from(format!(
+                                                "retry-job-{}",
+                                                job.id
+                                            )))
+                                            .label(tr!("common.retry"))
+                                            .small()
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.retry_job(id.clone(), cx)
+                                            })),
+                                        )
+                                    }),
                             )
-                            .when(retryable, |this| {
-                                this.child(
-                                    Button::new(SharedString::from(format!(
-                                        "retry-job-{}",
-                                        job.id
-                                    )))
-                                    .label("再試行")
-                                    .small()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.retry_job(id.clone(), cx)
-                                    })),
-                                )
-                            }),
-                    )
-            }))
-            .when(
-                self.waiting_jobs.is_empty()
-                    && self.jobs.is_empty()
-                    && self.failed_jobs.is_empty(),
-                |this| {
-                    this.child(
-                        div()
-                            .p(px(GALLERY_PAD_X))
-                            .text_size(px(12.))
-                            .text_color(rgb(p.muted_2))
-                            .child("キューは空です"),
-                    )
-                },
-            ),
+                    }))
+                    .when(
+                        self.waiting_jobs.is_empty()
+                            && self.jobs.is_empty()
+                            && self.failed_jobs.is_empty(),
+                        |this| {
+                            this.child(
+                                div()
+                                    .p(px(GALLERY_PAD_X))
+                                    .text_size(px(12.))
+                                    .text_color(rgb(p.muted_2))
+                                    .child(tr!("compression.queue.empty")),
+                            )
+                        },
+                    ),
             )
     }
 }

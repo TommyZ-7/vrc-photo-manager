@@ -14,6 +14,7 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use vrc_photo_i18n::{tr, tr_args};
 
 use crate::app::App;
 use crate::app::Screen;
@@ -104,7 +105,7 @@ pub(crate) fn toast_flush_needed(pending: usize, scheduled: bool) -> bool {
 
 /// Label for the import result badge; zero jobs stay hidden.
 fn auto_compress_badge_label(count: usize) -> Option<String> {
-    (count > 0).then(|| format!("自動圧縮 {count}"))
+    (count > 0).then(|| tr_args!("notifications.auto_compress_badge", count = count))
 }
 
 /// The notification modal must not stack over another modal.
@@ -258,7 +259,7 @@ impl App {
                 Button::new("titlebar-notifications")
                     .ghost()
                     .icon(IconName::Bell)
-                    .tooltip("通知")
+                    .tooltip(tr!("notifications.title"))
                     .size(px(26.))
                     .rounded(px(6.))
                     .text_color(rgb(p.muted_2))
@@ -300,7 +301,7 @@ impl App {
             self.daemon_errors.len(),
         );
         let import_report = self.import_report.clone();
-        let library_error = self.library_error.clone();
+        let library_error = self.library_error;
         let failed_jobs = self.failed_job_count;
         let daemon_errors = self.daemon_errors.len();
 
@@ -328,7 +329,7 @@ impl App {
                     .p(px(16.))
                     .text_size(px(11.))
                     .text_color(rgb(p.muted))
-                    .child("対応が必要な通知はありません")
+                    .child(tr!("notifications.empty"))
                     .into_any_element(),
             );
         }
@@ -336,7 +337,7 @@ impl App {
         let max_height = (f32::from(window.viewport_size().height) * 0.8).max(240.0);
         let close = self.focusable_text_button(
             "notification-close",
-            "閉じる Esc",
+            tr!("viewer.close"),
             self.notification_close_focus.clone(),
             ButtonState {
                 tone: ButtonTone::Neutral,
@@ -403,7 +404,7 @@ impl App {
                                     .text_size(px(14.))
                                     .font_semibold()
                                     .text_color(rgb(p.text))
-                                    .child("通知"),
+                                    .child(tr!("notifications.title")),
                             )
                             .child(div().flex_1())
                             .child(close),
@@ -444,42 +445,63 @@ impl App {
 
         let mut badges = h_flex().flex_wrap().gap(px(6.));
         badges = badges
-            .child(self.badge(&format!("取込 {}", report.imported), p.green, p.green_soft))
-            .child(self.badge(&format!("スキップ {}", report.skipped), p.muted, p.panel_2));
+            .child(self.badge(
+                tr_args!("notifications.import.imported", count = report.imported),
+                p.green,
+                p.green_soft,
+            ))
+            .child(self.badge(
+                tr_args!("notifications.import.skipped", count = report.skipped),
+                p.muted,
+                p.panel_2,
+            ));
         if failed > 0 {
-            badges = badges.child(self.badge(&format!("失敗 {failed}"), p.red, p.red_soft));
+            badges = badges.child(self.badge(
+                tr_args!("notifications.import.failed", count = failed),
+                p.red,
+                p.red_soft,
+            ));
         }
         if partial > 0 {
-            badges =
-                badges.child(self.badge(&format!("部分移動 {partial}"), p.amber, p.amber_soft));
+            badges = badges.child(self.badge(
+                tr_args!("notifications.import.partial", count = partial),
+                p.amber,
+                p.amber_soft,
+            ));
         }
         if !report.renamed.is_empty() {
             badges = badges.child(self.badge(
-                &format!("連番 {}", report.renamed.len()),
+                tr_args!("notifications.import.renamed", count = report.renamed.len()),
                 p.accent,
                 p.accent_soft,
             ));
         }
         if !report.remaining.is_empty() {
             badges = badges.child(self.badge(
-                &format!("未処理 {}", report.remaining.len()),
+                tr_args!(
+                    "notifications.import.pending",
+                    count = report.remaining.len()
+                ),
                 p.amber,
                 p.amber_soft,
             ));
         }
         if scan_failed > 0 {
-            badges =
-                badges.child(self.badge(&format!("スキャン失敗 {scan_failed}"), p.red, p.red_soft));
+            badges = badges.child(self.badge(
+                tr_args!("notifications.import.scan_failed", count = scan_failed),
+                p.red,
+                p.red_soft,
+            ));
         }
         if let Some(label) = auto_compress_badge_label(self.import_auto_compress_enqueued) {
-            badges = badges.child(self.badge(&label, p.green, p.green_soft));
+            badges = badges.child(self.badge(label, p.green, p.green_soft));
         }
 
         let mut actions = h_flex().flex_wrap().gap(px(6.));
         if !retryable.is_empty() {
             actions = actions.child(
                 Button::new("notification-import-retry")
-                    .label("失敗分を再試行")
+                    .label(tr!("notifications.import.retry_failed"))
                     .small()
                     .primary()
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -491,7 +513,10 @@ impl App {
         if !report.remaining.is_empty() {
             actions = actions.child(
                 Button::new("notification-import-resume")
-                    .label(format!("残り {} 件を再開", report.remaining.len()))
+                    .label(tr_args!(
+                        "notifications.import.resume",
+                        count = report.remaining.len()
+                    ))
                     .small()
                     .primary()
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -504,9 +529,9 @@ impl App {
             .child(
                 Button::new("notification-import-details")
                     .label(if expanded {
-                        "詳細を閉じる"
+                        tr!("viewer.details_close")
                     } else {
-                        "詳細"
+                        tr!("viewer.details")
                     })
                     .small()
                     .ghost()
@@ -517,7 +542,7 @@ impl App {
             )
             .child(
                 Button::new("notification-import-dismiss")
-                    .label("結果を閉じる")
+                    .label(tr!("notifications.import.close_result"))
                     .small()
                     .ghost()
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -545,7 +570,7 @@ impl App {
                             .text_size(px(12.))
                             .font_semibold()
                             .text_color(rgb(p.text))
-                            .child("取り込み結果"),
+                            .child(tr!("notifications.import.title")),
                     )
                     .child(self.badge(mode, p.accent, p.accent_soft))
                     .child(
@@ -580,7 +605,7 @@ impl App {
                     .text_size(px(12.))
                     .font_semibold()
                     .text_color(rgb(p.text))
-                    .child("ライブラリ"),
+                    .child(tr!("notifications.section.library")),
             )
             .child(
                 div()
@@ -590,7 +615,7 @@ impl App {
             )
             .child(
                 Button::new("notification-library-reload")
-                    .label("再読込")
+                    .label(tr!("notifications.reload"))
                     .small()
                     .primary()
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -615,20 +640,23 @@ impl App {
                     .text_size(px(12.))
                     .font_semibold()
                     .text_color(rgb(p.text))
-                    .child("圧縮"),
+                    .child(tr!("notifications.section.compression")),
             )
             .child(
                 div()
                     .text_size(px(11.))
                     .text_color(rgb(p.amber))
-                    .child(format!("{count} 件の失敗があります")),
+                    .child(tr_args!(
+                        "notifications.compression.failures",
+                        count = count
+                    )),
             )
             .child(
                 h_flex()
                     .gap(px(6.))
                     .child(
                         Button::new("notification-compression-dashboard")
-                            .label("ダッシュボードを開く")
+                            .label(tr!("notifications.open_dashboard"))
                             .small()
                             .primary()
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -638,7 +666,7 @@ impl App {
                     )
                     .child(
                         Button::new("notification-compression-retry")
-                            .label("失敗を再試行")
+                            .label(tr!("notifications.retry_failures"))
                             .small()
                             .ghost()
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -663,17 +691,17 @@ impl App {
                     .text_size(px(12.))
                     .font_semibold()
                     .text_color(rgb(p.text))
-                    .child("デーモン"),
+                    .child(tr!("notifications.section.daemon")),
             )
             .child(
                 div()
                     .text_size(px(11.))
                     .text_color(rgb(p.amber))
-                    .child(format!("{count} 件の処理エラーがあります")),
+                    .child(tr_args!("notifications.daemon.errors", count = count)),
             )
             .child(
                 Button::new("notification-daemon-dashboard")
-                    .label("ダッシュボードを開く")
+                    .label(tr!("notifications.open_dashboard"))
                     .small()
                     .primary()
                     .on_click(cx.listener(|this, _, window, cx| {

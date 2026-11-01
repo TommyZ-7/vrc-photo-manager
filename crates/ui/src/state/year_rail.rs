@@ -89,10 +89,24 @@ pub(crate) fn rail_row_at(y: f32, total: usize, height: f32) -> usize {
 
 /// Formats a local `YYYYMM` capture month for the rail pill.
 pub(crate) fn format_captured_month(month: i32) -> String {
+    format_captured_month_in(&vrc_photo_i18n::current_locale(), month)
+}
+
+pub(crate) fn format_captured_month_in(locale: &str, month: i32) -> String {
     if month <= 0 {
-        return "不明".to_string();
+        return vrc_photo_i18n::tr_in(locale, "date.unknown");
     }
-    format!("{}年{}月", month / 100, month % 100)
+    let month_number = month % 100;
+    let month_name = vrc_photo_i18n::tr_in(locale, &format!("date.month_name.{month_number}"));
+    vrc_photo_i18n::tr_args_in(
+        locale,
+        "date.captured_month",
+        &[
+            ("year", (month / 100).to_string()),
+            ("month", month_number.to_string()),
+            ("month_name", month_name),
+        ],
+    )
 }
 
 /// Visits the year labels that fit without overlapping, in bucket order.
@@ -299,11 +313,12 @@ mod tests {
     }
 
     #[test]
-    fn rail_month_format_is_japanese() {
-        assert_eq!(format_captured_month(202504), "2025年4月");
-        assert_eq!(format_captured_month(202612), "2026年12月");
-        assert_eq!(format_captured_month(0), "不明");
-        assert_eq!(format_captured_month(-202601), "不明");
+    fn rail_month_format_follows_the_locale() {
+        assert_eq!(format_captured_month_in("ja", 202504), "2025年4月");
+        assert_eq!(format_captured_month_in("en", 202504), "April 2025");
+        assert_eq!(format_captured_month_in("ja", 0), "不明");
+        assert_eq!(format_captured_month_in("en", 0), "Unknown");
+        assert_eq!(format_captured_month_in("xx", 202612), "2026年12月");
     }
 
     #[test]

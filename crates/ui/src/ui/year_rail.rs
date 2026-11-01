@@ -33,6 +33,15 @@ pub(crate) struct YearRailLabels {
 }
 
 impl YearRailLabels {
+    #[cfg(test)]
+    pub(crate) fn empty_for_test() -> Self {
+        Self {
+            years: Vec::new(),
+            current_years: Vec::new(),
+            months: HashMap::new(),
+        }
+    }
+
     pub(crate) fn build(index: &PhotoIndex, window: &mut Window, palette: &Palette) -> Self {
         let text_system = window.text_system();
         let mut years = Vec::with_capacity(index.years.len());

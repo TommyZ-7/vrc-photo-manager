@@ -11,6 +11,8 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use vrc_photo_i18n::{tr, tr_args};
+
 use crate::app::App;
 use crate::ui::components::{card_header, glass_panel};
 use crate::ui::theme::*;
@@ -36,7 +38,7 @@ impl App {
     fn search_results_card(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = self.palette;
         let total = self.search_view.borrow().index.total;
-        let count = format!("{total} 枚");
+        let count = tr_args!("search.count", total = total);
         let selection = (self.selected_ids.len() > 1).then(|| self.selection_bar(window, cx));
         let mut card = glass_panel(&self.palette)
             .flex()
@@ -67,7 +69,7 @@ impl App {
                                     .whitespace_nowrap()
                                     .text_size(px(10.))
                                     .text_color(rgb(p.muted_2))
-                                    .child("検索結果"),
+                                    .child(tr!("search.results")),
                             ),
                     )
                     .when(self.searching, |this| {
@@ -76,7 +78,7 @@ impl App {
                                 .flex_shrink_0()
                                 .text_size(px(10.))
                                 .text_color(rgb(p.amber))
-                                .child("検索中…"),
+                                .child(tr!("search.searching")),
                         )
                     })
                     .child(div().flex_1()),
@@ -111,17 +113,17 @@ impl App {
                     .text_size(px(13.))
                     .font_semibold()
                     .text_color(rgb(p.text))
-                    .child("絞り込み"),
+                    .child(tr!("search.filters")),
             )
             .child(
                 div()
                     .text_size(px(10.))
                     .text_color(rgb(p.muted_2))
-                    .child("カテゴリ間はAND、カテゴリ内はOR"),
+                    .child(tr!("search.filter_logic")),
             )
-            .child(self.filter_field("ワールド", Input::new(&self.world_input)))
-            .child(self.filter_field("プレイヤー", Input::new(&self.player_input)))
-            .child(self.filter_field("タグ", Input::new(&self.tag_input)))
+            .child(self.filter_field(tr!("search.world"), Input::new(&self.world_input)))
+            .child(self.filter_field(tr!("search.player"), Input::new(&self.player_input)))
+            .child(self.filter_field(tr!("search.tag"), Input::new(&self.tag_input)))
             .child(
                 v_flex()
                     .gap(px(6.))
@@ -129,15 +131,15 @@ impl App {
                         div()
                             .text_size(px(10.))
                             .text_color(rgb(p.muted_2))
-                            .child("日時"),
+                            .child(tr!("search.date")),
                     )
                     .child(
                         h_flex()
                             .gap(px(4.))
-                            .child(self.preset_button("今日", Some(1), cx))
-                            .child(self.preset_button("7日", Some(7), cx))
-                            .child(self.preset_button("30日", Some(30), cx))
-                            .child(self.preset_button("すべて", None, cx)),
+                            .child(self.preset_button(tr!("search.today"), Some(1), cx))
+                            .child(self.preset_button(tr!("search.7days"), Some(7), cx))
+                            .child(self.preset_button(tr!("search.30days"), Some(30), cx))
+                            .child(self.preset_button(tr!("search.all"), None, cx)),
                     ),
             )
             .child(
@@ -148,7 +150,7 @@ impl App {
                         div()
                             .text_size(px(12.))
                             .text_color(rgb(p.muted))
-                            .child("お気に入りのみ"),
+                            .child(tr!("search.favorites_only")),
                     )
                     .child(div().flex_1())
                     .child(
@@ -166,9 +168,9 @@ impl App {
                     .child(
                         Button::new("search-run")
                             .label(if self.searching {
-                                "検索中…"
+                                tr!("search.searching")
                             } else {
-                                "検索"
+                                tr!("search.action")
                             })
                             .small()
                             .primary()
@@ -177,7 +179,7 @@ impl App {
                     )
                     .child(
                         Button::new("search-clear")
-                            .label("クリア")
+                            .label(tr!("search.clear"))
                             .small()
                             .secondary()
                             .on_click(cx.listener(|this, _, _, cx| this.clear_search(cx))),

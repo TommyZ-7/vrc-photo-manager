@@ -19,11 +19,13 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 mimalloc.workspace = true
 rfd = "0.17"
 semver.workspace = true
+serde_json.workspace = true
 smallvec = "1"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 trash = "5"
 vrc-photo-core = { path = "../core" }
+vrc-photo-i18n = { path = "../i18n" }
 vrc-photo-ipc = { path = "../ipc" }
 vrc-photo-update = { path = "../update" }
 

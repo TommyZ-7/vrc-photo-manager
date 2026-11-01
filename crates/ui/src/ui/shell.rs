@@ -11,6 +11,7 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use vrc_photo_core::importer::ImportProgress;
+use vrc_photo_i18n::{tr, tr_args};
 use vrc_photo_ipc::ScanPhase as IpcScanPhase;
 
 use crate::app::import::{ImportDialogPhase, ImportDialogState, ImportReportView};
@@ -97,7 +98,7 @@ impl App {
                     .child(self.nav_highlight(window, cx))
                     .child(self.nav_item(
                         window,
-                        "写真",
+                        tr!("nav.photos"),
                         Screen::Photos,
                         IconName::GalleryVerticalEnd,
                         Some(photo_count.clone()),
@@ -105,7 +106,7 @@ impl App {
                     ))
                     .child(self.nav_item(
                         window,
-                        "検索",
+                        tr!("nav.search"),
                         Screen::Search,
                         IconName::Search,
                         None,
@@ -113,7 +114,7 @@ impl App {
                     ))
                     .child(self.nav_item(
                         window,
-                        "圧縮",
+                        tr!("nav.compression_short"),
                         Screen::Compression,
                         IconName::Minimize,
                         compression_count,
@@ -121,7 +122,7 @@ impl App {
                     ))
                     .child(self.nav_item(
                         window,
-                        "ダッシュボード",
+                        tr!("nav.dashboard"),
                         Screen::Dashboard,
                         IconName::LayoutDashboard,
                         None,
@@ -129,7 +130,7 @@ impl App {
                     ))
                     .child(self.nav_item(
                         window,
-                        "設定",
+                        tr!("nav.settings"),
                         Screen::Settings,
                         IconName::Settings,
                         update_badge,
@@ -151,14 +152,14 @@ impl App {
                             div()
                                 .text_size(px(10.))
                                 .text_color(rgb(p.muted_2))
-                                .child("ライブラリ"),
+                                .child(tr!("sidebar.library")),
                         )
                         .child(
                             div()
                                 .text_size(px(13.))
                                 .font_semibold()
                                 .text_color(rgb(p.text))
-                                .child(format!("{photo_count} 枚")),
+                                .child(tr_args!("sidebar.photo_count", count = photo_count)),
                         )
                         .child(
                             div()
@@ -214,9 +215,9 @@ impl App {
             IconName::ChevronLeft
         };
         let tooltip = if collapsed {
-            "サイドバーを展開 (Ctrl+B)"
+            tr!("sidebar.toggle.expand")
         } else {
-            "サイドバーを最小化 (Ctrl+B)"
+            tr!("sidebar.toggle.collapse")
         };
         let (from_left, top) = rail_toggle_origin(!collapsed);
         let (to_left, _) = rail_toggle_origin(collapsed);
@@ -266,14 +267,20 @@ impl App {
                     .text_size(px(8.))
                     .text_color(rgb(p.muted_2))
                     .whitespace_nowrap()
-                    .child(format!("未実行 {}件", format_count(self.waiting_job_count))),
+                    .child(tr_args!(
+                        "sidebar.waiting_jobs",
+                        count = format_count(self.waiting_job_count)
+                    )),
             )
             .child(
                 div()
                     .text_size(px(7.5))
                     .text_color(rgb(p.text))
                     .whitespace_nowrap()
-                    .child(format!("{}枚", format_count(self.stats.photo_count))),
+                    .child(tr_args!(
+                        "sidebar.photo_count_short",
+                        count = format_count(self.stats.photo_count)
+                    )),
             )
             .child(
                 div()
@@ -322,19 +329,19 @@ impl App {
         let tabs = [
             (
                 SidebarStatusTab::Compression,
-                "圧縮",
+                tr!("sidebar.tab.compression"),
                 "sidebar-status-tab-compression",
                 compression_attention,
             ),
             (
                 SidebarStatusTab::Import,
-                "取り込み",
+                tr!("sidebar.tab.import"),
                 "sidebar-status-tab-import",
                 import_attention,
             ),
             (
                 SidebarStatusTab::Scan,
-                "スキャン",
+                tr!("sidebar.tab.scan"),
                 "sidebar-status-tab-scan",
                 scan_attention,
             ),
@@ -415,10 +422,10 @@ impl App {
                 if self.waiting_job_count > 0 {
                     row = row.child(
                         Button::new("sidebar-status-release-waiting")
-                            .label("未実行を開始")
+                            .label(tr!("sidebar.start_waiting"))
                             .small()
                             .primary()
-                            .tooltip("未実行のジョブをすべて圧縮します")
+                            .tooltip(tr!("sidebar.start_waiting_hint"))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.request_release_waiting_jobs(window, cx)
                             })),
@@ -427,17 +434,17 @@ impl App {
                 if retry_available {
                     row = row.child(
                         Button::new("sidebar-status-retry-failed")
-                            .label("再試行")
+                            .label(tr!("common.retry"))
                             .small()
                             .ghost()
-                            .tooltip("上限内の失敗ジョブを再試行します")
+                            .tooltip(tr!("sidebar.retry_hint"))
                             .on_click(cx.listener(|this, _, _, cx| this.retry_all_failed_jobs(cx))),
                     );
                 }
                 if self.waiting_job_count == 0 && !retry_available {
                     row = row.child(
                         Button::new("sidebar-status-open-queue")
-                            .label("キューを開く")
+                            .label(tr!("sidebar.open_queue"))
                             .small()
                             .ghost()
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -454,7 +461,7 @@ impl App {
                     .gap(px(6.))
                     .child(if import_has_report {
                         Button::new("sidebar-status-import-result")
-                            .label("結果を見る")
+                            .label(tr!("sidebar.view_result"))
                             .small()
                             .ghost()
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -462,7 +469,7 @@ impl App {
                             }))
                     } else {
                         Button::new("sidebar-status-photos")
-                            .label("写真を開く")
+                            .label(tr!("sidebar.open_photos"))
                             .small()
                             .ghost()
                             .on_click(
@@ -477,14 +484,14 @@ impl App {
                     self.scan_progress.is_none() && self.daemon_active && !self.daemon_paused;
                 let button = if can_rescan {
                     Button::new("sidebar-status-rescan")
-                        .label("再スキャン")
+                        .label(tr!("sidebar.rescan"))
                         .small()
                         .ghost()
-                        .tooltip("デーモンに再スキャンを要求します")
+                        .tooltip(tr!("sidebar.rescan_hint"))
                         .on_click(cx.listener(|this, _, _, cx| this.request_daemon_rescan(cx)))
                 } else {
                     Button::new("sidebar-status-dashboard")
-                        .label("ダッシュボード")
+                        .label(tr!("sidebar.open_dashboard"))
                         .small()
                         .ghost()
                         .on_click(
@@ -513,7 +520,7 @@ impl App {
                             .text_size(px(10.))
                             .font_semibold()
                             .text_color(rgb(p.muted_2))
-                            .child("進行状況"),
+                            .child(tr!("sidebar.progress")),
                     )
                     .child(div().flex_1())
                     .child(
@@ -606,12 +613,13 @@ impl App {
     fn nav_item(
         &mut self,
         window: &Window,
-        label: &'static str,
+        label: impl Into<SharedString>,
         screen: Screen,
         icon: IconName,
         count: Option<String>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let label = label.into();
         let p = self.palette;
         let active = self.screen == screen;
         let was_active = self.nav_previous == screen;
@@ -651,11 +659,16 @@ impl App {
             .justify_between()
             .overflow_hidden()
             .whitespace_nowrap()
-            .child(div().text_size(px(12.)).child(label).with_animation(
-                SharedString::from(format!("nav-label-{label}-{nav_epoch}")),
-                color_anim(),
-                move |el, t| el.text_color(rgb(lerp_color(label_from, label_to, t))),
-            ))
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .child(label.clone())
+                    .with_animation(
+                        SharedString::from(format!("nav-label-{label}-{nav_epoch}")),
+                        color_anim(),
+                        move |el, t| el.text_color(rgb(lerp_color(label_from, label_to, t))),
+                    ),
+            )
             .when_some(count, |this, count| {
                 this.child(
                     div()
@@ -805,16 +818,18 @@ impl App {
 
 pub(crate) fn scan_progress_label(progress: &ScanProgressView) -> String {
     match progress.phase {
-        IpcScanPhase::Walking => format!(
-            "フォルダ {}/{} · 検索 {} 件",
-            progress.root, progress.roots, progress.processed
+        IpcScanPhase::Walking => tr_args!(
+            "sidebar.scan_progress",
+            root = progress.root,
+            roots = progress.roots,
+            count = progress.processed
         ),
-        IpcScanPhase::Indexing => format!(
-            "フォルダ {}/{} · 索引 {}/{}",
-            progress.root,
-            progress.roots,
-            progress.processed,
-            progress
+        IpcScanPhase::Indexing => tr_args!(
+            "sidebar.scan_index",
+            root = progress.root,
+            roots = progress.roots,
+            indexed = progress.processed,
+            total = progress
                 .total
                 .map(|total| total.to_string())
                 .unwrap_or_else(|| "?".to_string())
@@ -842,26 +857,30 @@ fn compression_card_status(active: i64, waiting: i64, failed: i64) -> CardStatus
     let running = running_job_count(active, waiting);
     if waiting > 0 {
         CardStatus {
-            headline: format!("未実行 {waiting}"),
-            detail: format!("実行中 {running} · 失敗 {failed}"),
+            headline: tr_args!("sidebar.status.waiting.headline", waiting = waiting),
+            detail: tr_args!(
+                "sidebar.status.waiting.detail",
+                running = running,
+                failed = failed
+            ),
             tone: StatusTone::Waiting,
         }
     } else if running > 0 {
         CardStatus {
-            headline: format!("実行中 {running}"),
-            detail: format!("未実行 0 · 失敗 {failed}"),
+            headline: tr_args!("sidebar.status.running.headline", running = running),
+            detail: tr_args!("sidebar.status.running.detail", failed = failed),
             tone: StatusTone::Running,
         }
     } else if failed > 0 {
         CardStatus {
-            headline: format!("失敗 {failed}"),
-            detail: "未実行 0 · 実行中 0".to_string(),
+            headline: tr_args!("sidebar.status.failed.headline", failed = failed),
+            detail: tr!("sidebar.status.failed.detail"),
             tone: StatusTone::Failed,
         }
     } else {
         CardStatus {
-            headline: "キューは空です".to_string(),
-            detail: "未実行のジョブはありません".to_string(),
+            headline: tr!("sidebar.status.idle.headline"),
+            detail: tr!("sidebar.status.idle.detail"),
             tone: StatusTone::Idle,
         }
     }
@@ -873,18 +892,21 @@ fn import_card_status(
 ) -> CardStatus {
     if let Some(progress) = progress {
         return CardStatus {
-            headline: "取り込み中".to_string(),
-            detail: format!(
-                "{}/{} · 取込 {} · 失敗 {}",
-                progress.processed, progress.total, progress.imported, progress.failed
+            headline: tr!("sidebar.import.running.headline"),
+            detail: tr_args!(
+                "sidebar.import.running.detail",
+                processed = progress.processed,
+                total = progress.total,
+                imported = progress.imported,
+                failed = progress.failed
             ),
             tone: StatusTone::Running,
         };
     }
     let Some(report) = report else {
         return CardStatus {
-            headline: "履歴なし".to_string(),
-            detail: "取り込み結果がここに残ります".to_string(),
+            headline: tr!("sidebar.import.none.headline"),
+            detail: tr!("sidebar.import.none.detail"),
             tone: StatusTone::Idle,
         };
     };
@@ -893,41 +915,59 @@ fn import_card_status(
     let failed_total = failed + scan_failed;
     if !report.remaining.is_empty() {
         return CardStatus {
-            headline: format!("未処理 {}", report.remaining.len()),
-            detail: format!(
-                "取込 {}/{} · 失敗 {failed_total}",
-                report.imported, report.total
+            headline: tr_args!(
+                "sidebar.import.pending.headline",
+                remaining = report.remaining.len()
+            ),
+            detail: tr_args!(
+                "sidebar.import.pending.detail",
+                imported = report.imported,
+                total = report.total,
+                failed = failed_total
             ),
             tone: StatusTone::Waiting,
         };
     }
     if failed_total > 0 {
         return CardStatus {
-            headline: format!("失敗 {failed_total}"),
+            headline: tr_args!("sidebar.import.failed.headline", failed = failed_total),
             detail: if scan_failed > 0 {
-                format!(
-                    "取込 {}/{} · スキャン失敗 {scan_failed}",
-                    report.imported, report.total
+                tr_args!(
+                    "sidebar.import.scan_failed.detail",
+                    imported = report.imported,
+                    total = report.total,
+                    scan_failed = scan_failed
                 )
             } else {
-                format!("取込 {}/{}", report.imported, report.total)
+                tr_args!(
+                    "sidebar.import.failed.detail",
+                    imported = report.imported,
+                    total = report.total
+                )
             },
             tone: StatusTone::Failed,
         };
     }
     if partial > 0 {
         return CardStatus {
-            headline: format!("部分移動 {partial}"),
-            detail: format!("取込 {}/{} · 完了", report.imported, report.total),
+            headline: tr_args!("sidebar.import.partial.headline", partial = partial),
+            detail: tr_args!(
+                "sidebar.import.partial.detail",
+                imported = report.imported,
+                total = report.total
+            ),
             tone: StatusTone::Waiting,
         };
     }
     CardStatus {
-        headline: format!("完了 {} 枚", report.imported),
+        headline: tr_args!("sidebar.import.done.headline", count = report.imported),
         detail: if report.renamed.is_empty() {
-            "前回の取り込み".to_string()
+            tr!("sidebar.import.done.detail")
         } else {
-            format!("前回の取り込み · 連番 {}", report.renamed.len())
+            tr_args!(
+                "sidebar.import.done_renamed.detail",
+                count = report.renamed.len()
+            )
         },
         tone: StatusTone::Success,
     }
@@ -951,7 +991,7 @@ fn scan_card_status(
                 (scan_progress_ratio(progress) * 100.0).round() as i32
             )
         } else {
-            "走査中…".to_string()
+            tr!("sidebar.scan.walking.headline")
         };
         return CardStatus {
             headline,
@@ -961,21 +1001,21 @@ fn scan_card_status(
     }
     if !daemon_active {
         return CardStatus {
-            headline: "停止中".to_string(),
-            detail: "デーモンは接続されていません".to_string(),
+            headline: tr!("sidebar.scan.paused.headline"),
+            detail: tr!("sidebar.scan.paused.detail"),
             tone: StatusTone::Idle,
         };
     }
     if daemon_paused {
         return CardStatus {
-            headline: "一時停止中".to_string(),
-            detail: "監視を再開すると走査します".to_string(),
+            headline: tr!("sidebar.scan.paused_watch.headline"),
+            detail: tr!("sidebar.scan.paused_watch.detail"),
             tone: StatusTone::Waiting,
         };
     }
     CardStatus {
-        headline: "待機中".to_string(),
-        detail: "変更を監視しています".to_string(),
+        headline: tr!("sidebar.scan.idle.headline"),
+        detail: tr!("sidebar.scan.idle.detail"),
         tone: StatusTone::Idle,
     }
 }

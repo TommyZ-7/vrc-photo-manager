@@ -28,6 +28,7 @@ use vrc_photo_core::model::{
     LibraryStats, Photo, PhotoPlayer, PhotoTextFilter,
 };
 use vrc_photo_core::settings::AppSettings;
+use vrc_photo_i18n::{tr, tr_args};
 use vrc_photo_ipc::Endpoint;
 
 use crate::app::cli::{log_timing, process_start, timing_enabled};
@@ -73,14 +74,19 @@ pub(crate) enum Screen {
 }
 
 impl Screen {
-    pub(crate) fn title(self) -> &'static str {
-        match self {
-            Self::Photos => "写真",
-            Self::Compression => "圧縮設定",
-            Self::Search => "検索",
-            Self::Dashboard => "ダッシュボード",
-            Self::Settings => "設定",
-        }
+    pub(crate) fn title(self) -> String {
+        self.title_in(&vrc_photo_i18n::current_locale())
+    }
+
+    pub(crate) fn title_in(self, locale: &str) -> String {
+        let key = match self {
+            Self::Photos => "nav.photos",
+            Self::Compression => "nav.compression",
+            Self::Search => "nav.search",
+            Self::Dashboard => "nav.dashboard",
+            Self::Settings => "nav.settings",
+        };
+        vrc_photo_i18n::tr_in(locale, key)
     }
 }
 
@@ -145,7 +151,7 @@ pub struct App {
     pub(crate) library_dirty: bool,
     /// A failed index/page query kept the previous snapshot mounted; retry from
     /// the Photos header.
-    pub(crate) library_error: Option<String>,
+    pub(crate) library_error: Option<&'static str>,
     pub(crate) count_debounce: CountDebounce,
     /// Quiet-period tracker for daemon revision bursts. A full index rebuild
     /// waits until the revision has stopped moving for `LIBRARY_QUIET_PERIOD`.
@@ -203,7 +209,7 @@ pub struct App {
     /// Profile whose name the input currently mirrors. Set when the editor
     /// changes selection so trim/normalization only rewrites the field then.
     pub(crate) profile_name_editing_id: Option<String>,
-    pub(crate) profile_name_error: Option<String>,
+    pub(crate) profile_name_error: Option<crate::app::compression::ProfileNameError>,
     /// Requests the editor to restore the persisted name on the next render,
     /// after Enter or when focus leaves the field.
     pub(crate) profile_name_reset_pending: bool,
@@ -353,16 +359,58 @@ impl App {
         )
     }
 
-    pub(crate) fn note_library_error(&mut self, error: String, cx: &mut Context<Self>) {
-        let notify = should_notify_library_error(self.library_error.as_deref(), &error);
+    pub(crate) fn note_library_error(&mut self, error: &'static str, cx: &mut Context<Self>) {
+        let notify = should_notify_library_error(self.library_error, error);
         self.library_error = Some(error);
         if notify {
-            self.toast_actionable(
-                NotificationType::Error,
-                "ライブラリを読み込めませんでした。通知から再読込できます",
-                cx,
-            );
+            self.toast_actionable(NotificationType::Error, tr!("app.library_error"), cx);
         }
+    }
+
+    pub(crate) fn set_language(&mut self, code: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let code = vrc_photo_i18n::normalize(code);
+        if self.settings.language == code {
+            return;
+        }
+        let previous = self.settings.clone();
+        self.settings.language = code.clone();
+        if let Err(error) = self.settings.save(&self.db) {
+            self.settings = previous;
+            self.toast_error(tr_args!("settings.language.save_failed", error = error), cx);
+            cx.notify();
+            return;
+        }
+        vrc_photo_i18n::set_locale(&code);
+        self.update_input_placeholders(window, cx);
+        self.library.borrow_mut().invalidate_labels();
+        self.search_view.borrow_mut().invalidate_labels();
+        // The connection detail was formatted when it arrived; the next
+        // heartbeat/reconnect repopulates it in the new language.
+        self.ipc_error = None;
+        cx.notify();
+    }
+
+    fn update_input_placeholders(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let inputs = [
+            (&self.world_input, "input.world"),
+            (&self.player_input, "input.player"),
+            (&self.tag_input, "input.tag"),
+            (&self.tag_edit_input, "input.tag_add"),
+            (&self.photo_root_input, "input.photo_root"),
+            (&self.log_dir_input, "input.log_dir"),
+            (&self.import_dir_input, "input.import_dir"),
+            (&self.profile_name_input, "input.profile_name"),
+            (&self.profile_suffix_input, "input.profile_suffix"),
+            (&self.profile_output_input, "input.profile_output"),
+        ];
+        for (input, key) in inputs {
+            input.update(cx, |state, cx| {
+                state.set_placeholder(vrc_photo_i18n::tr(key), window, cx);
+            });
+        }
+        self.note_edit_input.update(cx, |state, cx| {
+            state.set_placeholder(vrc_photo_i18n::tr("input.note"), window, cx);
+        });
     }
 
     pub(crate) fn new(
@@ -374,29 +422,31 @@ impl App {
         let db_path = db.path().and_then(|path| std::fs::canonicalize(path).ok());
         let health_token = std::env::var("VRC_PHOTO_HEALTH_TOKEN").ok();
         let updating = health_token.is_some();
-        let initial_settings = AppSettings::load(&db).unwrap_or_else(|error| {
+        let mut initial_settings = AppSettings::load(&db).unwrap_or_else(|error| {
             tracing::warn!(%error, "cannot load app settings; using defaults");
             AppSettings::default()
         });
+        initial_settings.language = vrc_photo_i18n::set_locale(&initial_settings.language);
         let initial_palette = resolve(
             &initial_settings.ui_theme_main,
             &initial_settings.ui_theme_accent,
         );
         let initial_library_revision = db.library_revision().unwrap_or(0);
         cx.set_reduce_motion(initial_settings.ui_reduce_motion);
-        let world_input = cx.new(|cx| InputState::new(window, cx).placeholder("ワールド名 / ID"));
+        let world_input = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("input.world")));
         let player_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("プレイヤー名 / ID"));
-        let tag_input = cx.new(|cx| InputState::new(window, cx).placeholder("タグ"));
-        let tag_edit_input = cx.new(|cx| InputState::new(window, cx).placeholder("タグを追加"));
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("input.player")));
+        let tag_input = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("input.tag")));
+        let tag_edit_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("input.tag_add")));
         let note_edit_input = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .placeholder("メモを入力")
+                .placeholder(tr!("input.note"))
                 .auto_grow(2, 6)
         });
         let photo_root_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("例: C:/Users/you/Pictures/VRChat")
+                .placeholder(tr!("input.photo_root"))
                 .default_value(
                     initial_settings
                         .photo_roots
@@ -407,16 +457,16 @@ impl App {
         });
         let log_dir_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("例: C:/Users/you/AppData/LocalLow/VRChat/VRChat")
+                .placeholder(tr!("input.log_dir"))
                 .default_value(initial_settings.log_dir.clone().unwrap_or_default())
         });
         let import_dir_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("取り込み先フォルダ")
+                .placeholder(tr!("input.import_dir"))
                 .default_value(initial_settings.import_dir().display().to_string())
         });
         let profile_name_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("例: SNS共有用"));
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("input.profile_name")));
         let profile_name_subscription = cx.subscribe(
             &profile_name_input,
             |this, input, event: &InputEvent, cx| match event {
@@ -446,9 +496,8 @@ impl App {
                             }
                         }
                         Err(error) => {
-                            let message = error.message();
-                            if this.profile_name_error.as_deref() != Some(message.as_str()) {
-                                this.profile_name_error = Some(message);
+                            if this.profile_name_error != Some(error) {
+                                this.profile_name_error = Some(error);
                                 cx.notify();
                             }
                         }
@@ -465,7 +514,7 @@ impl App {
             },
         );
         let profile_suffix_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("例: _webp"));
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("input.profile_suffix")));
         let profile_suffix_subscription = cx.subscribe(
             &profile_suffix_input,
             |this, input, event: &InputEvent, cx| {
@@ -475,8 +524,8 @@ impl App {
                 }
             },
         );
-        let profile_output_input = cx
-            .new(|cx| InputState::new(window, cx).placeholder("compressed または /path/to/output"));
+        let profile_output_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("input.profile_output")));
         let profile_output_subscription = cx.subscribe(
             &profile_output_input,
             |this, input, event: &InputEvent, cx| {
@@ -733,13 +782,10 @@ impl App {
             }
         }
         if app.library_error.is_none() && app.library.borrow().index.total == 0 {
-            app.toast_info(
-                "写真がありません。VRChatの写真フォルダを設定するか、--demo で起動してください。",
-                cx,
-            );
+            app.toast_info(tr!("app.empty_library"), cx);
         }
         if let Some(notice) = app.update.notice() {
-            app.toast_info(notice.message.clone(), cx);
+            app.toast_info(notice.message(), cx);
         }
         let first_photo_id = app
             .library
@@ -762,7 +808,7 @@ impl App {
             && !updating
             && let Err(error) = spawn_daemon_process()
         {
-            app.toast_error(format!("デーモンを起動できません: {error}"), cx);
+            app.toast_error(tr_args!("app.daemon_start_error", error = error), cx);
         }
         app.start_auto_refresh(cx);
         if !app.demo {
@@ -881,8 +927,8 @@ impl Render for App {
 #[cfg(test)]
 mod tests {
     use super::{
-        any_overlay_open, effective_motion_fps, retain_recent_bounds, should_notify_library_error,
-        should_render_shell,
+        Screen, any_overlay_open, effective_motion_fps, retain_recent_bounds,
+        should_notify_library_error, should_render_shell,
     };
     use crate::ui::notifications::{FailureNotice, failure_transition};
     use gpui_kit::{Bounds, point, px, size};
@@ -890,6 +936,13 @@ mod tests {
 
     fn refresh_rate(hz: f32) -> Option<Duration> {
         Some(Duration::from_secs_f32(1.0 / hz))
+    }
+
+    #[test]
+    fn screen_titles_translate() {
+        assert_eq!(Screen::Photos.title_in("ja"), "写真");
+        assert_eq!(Screen::Photos.title_in("en"), "Photos");
+        assert_eq!(Screen::Settings.title_in("en"), "Settings");
     }
 
     #[test]

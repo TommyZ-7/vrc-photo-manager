@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/core",
     "crates/daemon",
+    "crates/i18n",
     "crates/ipc",
     "crates/ui",
     "crates/update",
@@ -28,6 +29,7 @@ interprocess = "2.4"
 mimalloc = "0.1"
 minisign-verify = "0.3"
 regex = "1"
+rust-i18n = "4.2"
 semver = "1"
 sha2 = "0.11"
 rusqlite = { version = "0.41", features = ["bundled"] }

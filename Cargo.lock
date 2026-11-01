@@ -7977,6 +7977,7 @@ dependencies = [
  "interprocess",
  "mimalloc",
  "notify",
+ "serde_json",
  "single-instance",
  "tempfile",
  "tracing",
@@ -7984,8 +7985,18 @@ dependencies = [
  "trash",
  "tray-icon",
  "vrc-photo-core",
+ "vrc-photo-i18n",
  "vrc-photo-ipc",
  "windows 0.62.2",
+]
+
+[[package]]
+name = "vrc-photo-i18n"
+version = "0.9.2"
+dependencies = [
+ "regex",
+ "rust-i18n",
+ "tracing",
 ]
 
 [[package]]
@@ -8030,12 +8041,14 @@ dependencies = [
  "mimalloc",
  "rfd",
  "semver",
+ "serde_json",
  "smallvec",
  "tempfile",
  "tracing",
  "tracing-subscriber",
  "trash",
  "vrc-photo-core",
+ "vrc-photo-i18n",
  "vrc-photo-ipc",
  "vrc-photo-update",
 ]

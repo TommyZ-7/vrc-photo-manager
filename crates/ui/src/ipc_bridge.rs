@@ -1,6 +1,7 @@
 use std::thread;
 use std::time::Duration;
 
+use vrc_photo_i18n::{tr, tr_args};
 use vrc_photo_ipc::client::{self, IpcError, Subscription};
 use vrc_photo_ipc::{Endpoint, Event, Request, Response, StatusSnapshot};
 
@@ -31,15 +32,15 @@ pub fn request(endpoint: Endpoint, request: Request) -> Result<Response, IpcErro
     client::request(&endpoint, request, Duration::from_secs(2))
 }
 
-/// Converts an IPC failure into a user-facing Japanese message.
+/// Converts an IPC failure into a user-facing message.
 pub fn error_message(error: &IpcError) -> String {
     match error {
         IpcError::ProtocolMismatch { daemon, client } => {
-            format!("デーモンの更新が必要です（プロトコル {daemon} / {client}）")
+            tr_args!("ipc.error.protocol", daemon = daemon, client = client)
         }
-        IpcError::Timeout => "デーモンの応答がタイムアウトしました".to_string(),
-        IpcError::Disconnected => "デーモンとの接続が終了しました".to_string(),
-        other => format!("デーモンに接続できません: {other}"),
+        IpcError::Timeout => tr!("ipc.error.timeout"),
+        IpcError::Disconnected => tr!("ipc.error.disconnected"),
+        other => tr_args!("ipc.error.connect", error = other),
     }
 }
 
@@ -65,9 +66,9 @@ fn bridge_loop(endpoint: Endpoint, tx: async_channel::Sender<Incoming>) {
                         }
                         Ok(None) => {
                             if tx
-                                .send_blocking(Incoming::Disconnected(
-                                    "デーモンとの接続が終了しました".to_string(),
-                                ))
+                                .send_blocking(Incoming::Disconnected(tr!(
+                                    "ipc.error.disconnected"
+                                )))
                                 .is_err()
                             {
                                 return;

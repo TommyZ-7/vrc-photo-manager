@@ -101,11 +101,11 @@ pub(crate) fn preview_cache_dir(
     if demo { demo_dir } else { real_dir }
 }
 
-pub(crate) fn preview_placeholder_label(pending: bool) -> &'static str {
+pub(crate) fn preview_placeholder_label(pending: bool) -> String {
     if pending {
-        "プレビューを読み込み中…"
+        vrc_photo_i18n::tr!("preview.loading")
     } else {
-        "プレビューを読み込めません"
+        vrc_photo_i18n::tr!("preview.error")
     }
 }
 

@@ -15,6 +15,7 @@ use gpui_kit::prelude::StatefulInteractiveElement as _;
 use gpui_kit::*;
 use vrc_photo_core::model::DaemonCommand;
 use vrc_photo_core::settings::CardSize;
+use vrc_photo_i18n::{tr, tr_args};
 
 use crate::app::App;
 use crate::app::daemon::autostart_description;
@@ -41,10 +42,10 @@ impl ThemeAxis {
         }
     }
 
-    fn title(self) -> &'static str {
+    fn title(self) -> String {
         match self {
-            Self::Main => "メインカラー（背景・パネル）",
-            Self::Accent => "サブカラー（アクセント）",
+            Self::Main => tr!("theme.color.main.title"),
+            Self::Accent => tr!("theme.color.accent.title"),
         }
     }
 }
@@ -55,10 +56,16 @@ impl App {
         let autostart_hint =
             autostart_description(self.daemon_active, self.daemon_supervisor.as_deref());
         let cache_label = if self.settings.thumbnail_cache_mb == 0 {
-            "無制限".to_string()
+            tr!("settings.cache.unlimited")
         } else {
             format!("{} MB", self.settings.thumbnail_cache_mb)
         };
+        let active_language = vrc_photo_i18n::normalize(&self.settings.language);
+        let language_name = vrc_photo_i18n::locales()
+            .into_iter()
+            .find(|locale| locale.code == active_language)
+            .map(|locale| locale.name)
+            .unwrap_or(active_language);
         h_flex()
             .relative()
             .flex_1()
@@ -73,6 +80,7 @@ impl App {
                     .overflow_y_scroll()
                     .track_scroll(&self.settings_scroll)
                     .gap(px(CARD_GAP))
+                    .child(self.language_card(cx))
                     .child(self.theme_card(cx))
                     .child(
                         glass_panel(&self.palette)
@@ -86,19 +94,18 @@ impl App {
                                     .text_size(px(13.))
                                     .font_semibold()
                                     .text_color(rgb(p.text))
-                                    .child("ライブラリ"),
-                            )
-                            .child(
-                                self.filter_field(
-                                    "写真フォルダ",
-                                    Input::new(&self.photo_root_input),
-                                ),
-                            )
-                            .child(
-                                self.filter_field("ログフォルダ", Input::new(&self.log_dir_input)),
+                                    .child(tr!("settings.library.title")),
                             )
                             .child(self.filter_field(
-                                "取り込み先",
+                                tr!("settings.library.photo_roots"),
+                                Input::new(&self.photo_root_input),
+                            ))
+                            .child(self.filter_field(
+                                tr!("settings.library.log_dir"),
+                                Input::new(&self.log_dir_input),
+                            ))
+                            .child(self.filter_field(
+                                tr!("settings.library.import_dir"),
                                 Input::new(&self.import_dir_input),
                             ))
                             .child(
@@ -107,7 +114,7 @@ impl App {
                                     .items_center()
                                     .child(
                                         Button::new("save-paths")
-                                            .label("パスを保存")
+                                            .label(tr!("settings.library.save_paths"))
                                             .small()
                                             .primary()
                                             .on_click(cx.listener(|this, _, _, cx| {
@@ -116,11 +123,8 @@ impl App {
                                                     .read(cx)
                                                     .value()
                                                     .to_string();
-                                                let log = this
-                                                    .log_dir_input
-                                                    .read(cx)
-                                                    .value()
-                                                    .to_string();
+                                                let log =
+                                                    this.log_dir_input.read(cx).value().to_string();
                                                 let imported = this
                                                     .import_dir_input
                                                     .read(cx)
@@ -144,8 +148,8 @@ impl App {
                                                     } else {
                                                         Some(imported.trim().to_string())
                                                     };
-                                                let root_changed =
-                                                    this.settings.photo_roots != previous.photo_roots;
+                                                let root_changed = this.settings.photo_roots
+                                                    != previous.photo_roots;
                                                 let paths_changed = root_changed
                                                     || this.settings.log_dir != previous.log_dir
                                                     || this.settings.managed_dir
@@ -153,7 +157,10 @@ impl App {
                                                 if let Err(error) = this.settings.save(&this.db) {
                                                     this.settings = previous;
                                                     this.toast_error(
-                                                        format!("設定を保存できません: {error}"),
+                                                        tr_args!(
+                                                            "settings.language.save_failed",
+                                                            error = error
+                                                        ),
                                                         cx,
                                                     );
                                                     tracing::warn!(
@@ -164,34 +171,40 @@ impl App {
                                                     return;
                                                 }
                                                 if root_changed {
-                                                    let revision =
-                                                        this.db.library_revision().ok();
+                                                    let revision = this.db.library_revision().ok();
                                                     this.apply_library_snapshot_with_anchor(
                                                         revision, false, cx,
                                                     );
                                                 }
                                                 if paths_changed {
-                                                    let requested = this
-                                                        .db
-                                                        .request_daemon_command(DaemonCommand::Rescan);
+                                                    let requested = this.db.request_daemon_command(
+                                                        DaemonCommand::Rescan,
+                                                    );
                                                     if requested.is_ok() {
                                                         this.send_wake_commands(cx);
                                                     }
                                                     this.toast_success(
                                                         match requested {
-                                                            Ok(_) => "保存しました。デーモンに再スキャンを要求しました（停止中なら起動後に実行）",
+                                                            Ok(_) => {
+                                                                tr!("settings.library.saved_rescan")
+                                                            }
                                                             Err(error) => {
                                                                 tracing::warn!(
                                                                     %error,
                                                                     "cannot request daemon rescan"
                                                                 );
-                                                                "保存しました。デーモン再起動後に反映されます。"
+                                                                tr!(
+                                                                    "settings.library.saved_restart"
+                                                                )
                                                             }
                                                         },
                                                         cx,
                                                     );
                                                 } else {
-                                                    this.toast_success("保存しました。", cx);
+                                                    this.toast_success(
+                                                        tr!("settings.library.saved"),
+                                                        cx,
+                                                    );
                                                 }
                                                 cx.notify();
                                             })),
@@ -200,7 +213,7 @@ impl App {
                                         div()
                                             .text_size(px(10.))
                                             .text_color(rgb(p.muted_2))
-                                            .child("保存時に再スキャンを要求します（停止中なら起動後に実行）"),
+                                            .child(tr!("settings.library.save_hint")),
                                     ),
                             ),
                     )
@@ -216,40 +229,40 @@ impl App {
                                     .text_size(px(13.))
                                     .font_semibold()
                                     .text_color(rgb(p.text))
-                                    .child("表示（ライブラリ・検索）"),
+                                    .child(tr!("settings.display.title")),
                             )
                             .child(self.setting_switch(
-                                "圧縮状態",
-                                "写真カード左下の圧縮状態ラベルを表示します",
+                                tr!("settings.display.status.label"),
+                                tr!("settings.display.status.hint"),
                                 self.settings.ui_card_show_status,
                                 true,
                                 cx,
                                 |settings, value| settings.ui_card_show_status = value,
                             ))
                             .child(self.setting_switch(
-                                "ワールド名",
-                                "カードのワールド名を表示します",
+                                tr!("settings.display.world.label"),
+                                tr!("settings.display.world.hint"),
                                 self.settings.ui_card_show_world,
                                 true,
                                 cx,
                                 |settings, value| settings.ui_card_show_world = value,
                             ))
                             .child(self.setting_switch(
-                                "日付",
-                                "撮影日を表示します",
+                                tr!("settings.display.date.label"),
+                                tr!("settings.display.date.hint"),
                                 self.settings.ui_card_show_date,
                                 true,
                                 cx,
                                 |settings, value| settings.ui_card_show_date = value,
                             ))
                             .child(self.setting_switch(
-                                "サイズ",
-                                "ファイルサイズを表示します",
+                                tr!("settings.display.size.label"),
+                                tr!("settings.display.size.hint"),
                                 self.settings.ui_card_show_size,
                                 true,
                                 cx,
                                 |settings, value| settings.ui_card_show_size = value,
-                            ))
+                            )),
                     )
                     .child(
                         glass_panel(&self.palette)
@@ -263,7 +276,7 @@ impl App {
                                     .text_size(px(13.))
                                     .font_semibold()
                                     .text_color(rgb(p.text))
-                                    .child("パフォーマンス"),
+                                    .child(tr!("settings.performance.title")),
                             )
                             .child(
                                 v_flex()
@@ -272,31 +285,28 @@ impl App {
                                         div()
                                             .text_size(px(12.))
                                             .text_color(rgb(p.text))
-                                            .child("アニメーションの最大FPS"),
+                                            .child(tr!("settings.performance.max_fps.label")),
                                     )
                                     .child(
                                         div()
                                             .text_size(px(10.))
                                             .text_color(rgb(p.muted_2))
-                                            .child("0（無制限）はモニタのリフレッシュレートまで描画します"),
+                                            .child(tr!("settings.performance.max_fps.hint")),
                                     )
                                     .child(
-                                        h_flex()
-                                            .flex_wrap()
-                                            .gap(px(4.))
-                                            .children(
-                                                [
-                                                    (30u32, "30"),
-                                                    (60, "60"),
-                                                    (120, "120"),
-                                                    (144, "144"),
-                                                    (240, "240"),
-                                                    (0, "無制限"),
-                                                ]
-                                                .into_iter()
-                                                .map(|(fps, label)| {
-                                                    let active =
-                                                        self.settings.ui_max_fps == fps;
+                                        h_flex().flex_wrap().gap(px(4.)).children(
+                                            [
+                                                (30u32, "30".to_string()),
+                                                (60, "60".to_string()),
+                                                (120, "120".to_string()),
+                                                (144, "144".to_string()),
+                                                (240, "240".to_string()),
+                                                (0, tr!("settings.performance.max_fps.unlimited")),
+                                            ]
+                                            .into_iter()
+                                            .map(
+                                                |(fps, label)| {
+                                                    let active = self.settings.ui_max_fps == fps;
                                                     div()
                                                         .id(SharedString::from(format!(
                                                             "max-fps-{fps}"
@@ -323,8 +333,9 @@ impl App {
                                                             },
                                                         ))
                                                         .child(label)
-                                                }),
+                                                },
                                             ),
+                                        ),
                                     ),
                             ),
                     )
@@ -340,10 +351,10 @@ impl App {
                                     .text_size(px(13.))
                                     .font_semibold()
                                     .text_color(rgb(p.text))
-                                    .child("起動と圧縮"),
+                                    .child(tr!("settings.startup.title")),
                             )
                             .child(self.setting_switch(
-                                "自動起動",
+                                tr!("settings.startup.autostart"),
                                 autostart_hint,
                                 self.settings.autostart,
                                 false,
@@ -351,16 +362,16 @@ impl App {
                                 |settings, value| settings.autostart = value,
                             ))
                             .child(self.setting_switch(
-                                "トレイ常駐",
-                                "UIを閉じても監視を継続",
+                                tr!("settings.startup.tray"),
+                                tr!("settings.startup.tray_hint"),
                                 self.settings.tray,
                                 false,
                                 cx,
                                 |settings, value| settings.tray = value,
                             ))
                             .child(self.setting_switch(
-                                "自動圧縮",
-                                "新規写真に自動で圧縮を適用",
+                                tr!("settings.startup.auto_compress"),
+                                tr!("settings.startup.auto_compress_hint"),
                                 self.settings.auto_compress,
                                 false,
                                 cx,
@@ -368,8 +379,8 @@ impl App {
                             ))
                             .when(self.settings.auto_compress, |this| {
                                 this.child(self.setting_switch(
-                                    "新規写真をすぐに圧縮",
-                                    "OFFにすると未実行キューに追加し、ダッシュボードからまとめて実行できます",
+                                    tr!("settings.startup.immediate"),
+                                    tr!("settings.startup.immediate_hint"),
                                     self.settings.auto_compress_immediate,
                                     false,
                                     cx,
@@ -377,8 +388,8 @@ impl App {
                                 ))
                             })
                             .child(self.setting_switch(
-                                "自動圧縮後に元画像を保持",
-                                "OFFにすると自動圧縮の成功後、元画像をOSゴミ箱へ移動します。手動圧縮では実行時に選べます",
+                                tr!("settings.startup.keep_original"),
+                                tr!("settings.startup.keep_original_hint"),
                                 self.settings.auto_compress_keep_original,
                                 false,
                                 cx,
@@ -415,15 +426,15 @@ impl App {
                                                 div()
                                                     .text_size(px(12.))
                                                     .text_color(rgb(p.text))
-                                                    .child("アニメーションを減らす"),
+                                                    .child(tr!("settings.startup.reduce_motion")),
                                             )
                                             .child(
                                                 div()
                                                     .text_size(px(10.))
                                                     .text_color(rgb(p.muted_2))
-                                                    .child(
-                                                        "画面遷移とカードの動きを抑制します",
-                                                    ),
+                                                    .child(tr!(
+                                                        "settings.startup.reduce_motion_hint"
+                                                    )),
                                             ),
                                     )
                                     .child(div().flex_1())
@@ -443,7 +454,7 @@ impl App {
                             .gap(px(8.))
                             .child(
                                 Button::new("settings-reload")
-                                    .label("設定を再読込")
+                                    .label(tr!("settings.reload"))
                                     .small()
                                     .ghost()
                                     .on_click(cx.listener(|this, _, _, cx| {
@@ -451,15 +462,13 @@ impl App {
                                         cx.notify();
                                     })),
                             )
-                            .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(p.muted_2))
-                                    .child(format!(
-                                        "言語: {} · サムネイルキャッシュ上限: {}",
-                                        self.settings.language, cache_label
-                                    )),
-                            ),
+                            .child(div().text_size(px(10.)).text_color(rgb(p.muted_2)).child(
+                                tr_args!(
+                                    "settings.footer.summary",
+                                    language = language_name,
+                                    cache = cache_label
+                                ),
+                            )),
                     ),
             )
             .child(
@@ -471,6 +480,58 @@ impl App {
                     .w(px(8.))
                     .child(Scrollbar::vertical(&self.settings_scroll)),
             )
+    }
+
+    fn language_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.palette;
+        let active = vrc_photo_i18n::normalize(&self.settings.language);
+        glass_panel(&self.palette)
+            .flex()
+            .flex_col()
+            .p(px(14.))
+            .gap(px(12.))
+            .rounded(px(17.))
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .font_semibold()
+                    .text_color(rgb(p.text))
+                    .child(tr!("settings.language.title")),
+            )
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(rgb(p.muted_2))
+                    .child(tr!("settings.language.hint")),
+            )
+            .child(h_flex().flex_wrap().gap(px(4.)).children(
+                vrc_photo_i18n::locales().into_iter().map(|locale| {
+                    let selected = locale.code == active;
+                    let code = locale.code.clone();
+                    div()
+                        .id(SharedString::from(format!("language-{}", locale.code)))
+                        .px(px(10.))
+                        .py(px(5.))
+                        .rounded(px(8.))
+                        .bg(if selected {
+                            rgb(p.accent_soft)
+                        } else {
+                            rgba(0x00000000)
+                        })
+                        .text_size(px(11.))
+                        .font_medium()
+                        .text_color(if selected {
+                            rgb(p.accent)
+                        } else {
+                            rgb(p.muted)
+                        })
+                        .cursor_pointer()
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.set_language(&code, window, cx)
+                        }))
+                        .child(locale.name)
+                }),
+            ))
     }
 
     fn theme_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -486,7 +547,7 @@ impl App {
                     .text_size(px(13.))
                     .font_semibold()
                     .text_color(rgb(p.text))
-                    .child("テーマ"),
+                    .child(tr!("settings.theme.title")),
             )
             .child(self.theme_axis(ThemeAxis::Main, cx))
             .child(self.theme_axis(ThemeAxis::Accent, cx))
@@ -494,7 +555,7 @@ impl App {
                 div()
                     .text_size(px(10.))
                     .text_color(rgb(p.muted_2))
-                    .child("サブカラーは背景とのコントラストに合わせて明度を自動調整します"),
+                    .child(tr!("settings.theme.hint")),
             )
     }
 
@@ -503,16 +564,16 @@ impl App {
         let selected_main = find_main(&self.settings.ui_theme_main);
         let selected_accent = find_accent(&self.settings.ui_theme_accent);
         let selected_label = match axis {
-            ThemeAxis::Main => selected_main.label,
-            ThemeAxis::Accent => selected_accent.label,
+            ThemeAxis::Main => selected_main.label(),
+            ThemeAxis::Accent => selected_accent.label(),
         };
-        let items: Vec<(&'static str, &'static str, u32, bool)> = match axis {
+        let items: Vec<(&'static str, String, u32, bool)> = match axis {
             ThemeAxis::Main => main_colors()
                 .iter()
                 .map(|color| {
                     (
                         color.id,
-                        color.label,
+                        color.label(),
                         preview_main(color),
                         selected_main.id == color.id,
                     )
@@ -523,7 +584,7 @@ impl App {
                 .map(|color| {
                     (
                         color.id,
-                        color.label,
+                        color.label(),
                         preview_accent(color),
                         selected_accent.id == color.id,
                     )
@@ -533,8 +594,9 @@ impl App {
         let mut rows = v_flex().gap(px(8.));
         for chunk in items.chunks(6) {
             let mut row = h_flex().items_center().gap(px(8.));
-            for &(id, label, swatch, selected) in chunk {
-                row = row.child(self.theme_swatch(axis, id, label, swatch, selected, cx));
+            for item in chunk {
+                let (id, label, swatch, selected) = item;
+                row = row.child(self.theme_swatch(axis, id, label.clone(), *swatch, *selected, cx));
             }
             rows = rows.child(row);
         }
@@ -565,7 +627,7 @@ impl App {
         &self,
         axis: ThemeAxis,
         id: &'static str,
-        label: &'static str,
+        label: String,
         swatch: u32,
         selected: bool,
         cx: &mut Context<Self>,
@@ -586,7 +648,7 @@ impl App {
                 rgba(0x00000000)
             })
             .cursor_pointer()
-            .tooltip(move |window, cx| Tooltip::new(label).build(window, cx))
+            .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
             .hover(move |this| this.bg(rgb(p.panel_inner)))
             .on_click(cx.listener(move |this, _, _, cx| match axis {
                 ThemeAxis::Main => this.set_main_theme(id, cx),
@@ -627,7 +689,7 @@ impl App {
         if let Err(error) = self.settings.save(&self.db) {
             self.settings.ui_theme_main = previous.0;
             self.palette = previous.1;
-            self.toast_error(format!("設定を保存できません: {error}"), cx);
+            self.toast_error(tr_args!("settings.language.save_failed", error = error), cx);
             tracing::warn!(%error, "cannot save theme setting");
             cx.notify();
             return;
@@ -647,7 +709,7 @@ impl App {
         if let Err(error) = self.settings.save(&self.db) {
             self.settings.ui_theme_accent = previous.0;
             self.palette = previous.1;
-            self.toast_error(format!("設定を保存できません: {error}"), cx);
+            self.toast_error(tr_args!("settings.language.save_failed", error = error), cx);
             tracing::warn!(%error, "cannot save theme setting");
             cx.notify();
             return;

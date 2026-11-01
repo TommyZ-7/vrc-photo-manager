@@ -13,6 +13,7 @@ use gpui_kit::*;
 use std::time::Duration;
 use vrc_photo_core::importer::ImportMode;
 use vrc_photo_core::settings::CardSize;
+use vrc_photo_i18n::tr;
 
 use crate::app::{App, Screen};
 use crate::ui::theme::*;
@@ -292,7 +293,7 @@ impl App {
                 large_button(
                     &self.palette,
                     "ribbon-import-copy",
-                    "コピー取込",
+                    tr!("chrome.import.copy"),
                     IconName::Copy,
                     RibbonLook::Normal,
                     metrics,
@@ -302,7 +303,7 @@ impl App {
                 large_button(
                     &self.palette,
                     "ribbon-import-move",
-                    "移動取込",
+                    tr!("chrome.import.move"),
                     IconName::Replace,
                     RibbonLook::Normal,
                     metrics,
@@ -310,7 +311,7 @@ impl App {
                     |this, window, cx| this.open_import_dialog(ImportMode::Move, window, cx),
                 ),
             ],
-            "取り込み",
+            tr!("chrome.import"),
             false,
             metrics,
         );
@@ -318,7 +319,7 @@ impl App {
         let reload = large_button(
             &self.palette,
             "ribbon-reload",
-            "再読込",
+            tr!("chrome.reload"),
             IconName::RefreshCw,
             RibbonLook::Normal,
             metrics,
@@ -333,20 +334,32 @@ impl App {
                 cx.notify();
             },
         );
-        let library_group = ribbon_group(&self.palette, vec![reload], "ライブラリ", false, metrics);
+        let library_group = ribbon_group(
+            &self.palette,
+            vec![reload],
+            tr!("chrome.group.library"),
+            false,
+            metrics,
+        );
 
         let mut display_items = vec![self.card_size_selector(metrics, cx)];
         display_items.push(large_button(
             &self.palette,
             "ribbon-toggle-inspector",
-            "詳細パネル",
+            tr!("chrome.group.details"),
             IconName::PanelRight,
             inspector_button_look(self.screen, self.inspector_collapsed),
             metrics,
             cx,
             |this, _, cx| this.toggle_inspector(cx),
         ));
-        let display_group = ribbon_group(&self.palette, display_items, "表示", false, metrics);
+        let display_group = ribbon_group(
+            &self.palette,
+            display_items,
+            tr!("chrome.group.display"),
+            false,
+            metrics,
+        );
 
         h_flex()
             .flex_shrink_0()
@@ -405,7 +418,7 @@ impl App {
                 large_button(
                     &self.palette,
                     "ribbon-select-all",
-                    "すべて選択",
+                    tr!("chrome.select_all"),
                     IconName::Check,
                     if self.photo_browser_empty() {
                         RibbonLook::Disabled
@@ -419,7 +432,7 @@ impl App {
                 large_button(
                     &self.palette,
                     "ribbon-clear-selection",
-                    "選択解除",
+                    tr!("chrome.clear_selection"),
                     IconName::Close,
                     if self.selected_ids.is_empty() {
                         RibbonLook::Disabled
@@ -431,7 +444,7 @@ impl App {
                     |this, _, cx| this.clear_selection(cx),
                 ),
             ],
-            "選択",
+            tr!("chrome.group.selection"),
             false,
             metrics,
         );
@@ -442,7 +455,7 @@ impl App {
                 large_button(
                     &self.palette,
                     "ribbon-trash",
-                    "ゴミ箱へ",
+                    tr!("chrome.trash"),
                     IconName::Delete,
                     if !has_selection {
                         RibbonLook::Disabled
@@ -456,7 +469,7 @@ impl App {
                 large_button(
                     &self.palette,
                     "ribbon-manual-compress",
-                    "圧縮",
+                    tr!("chrome.group.compress"),
                     IconName::Minimize,
                     selection_look(self.has_action_selection()),
                     metrics,
@@ -467,7 +480,7 @@ impl App {
                     },
                 ),
             ],
-            "整理",
+            tr!("chrome.group.organize"),
             false,
             metrics,
         );
@@ -489,7 +502,7 @@ impl App {
                 large_button(
                     &self.palette,
                     "ribbon-compress-folder",
-                    "指定フォルダ",
+                    tr!("chrome.output.folder"),
                     IconName::FolderOpen,
                     selection_look(has_selection),
                     metrics,
@@ -499,7 +512,7 @@ impl App {
                 large_button(
                     &self.palette,
                     "ribbon-compress-profile",
-                    "プロファイル先",
+                    tr!("chrome.output.profile"),
                     IconName::FolderOpen,
                     selection_look(has_selection),
                     metrics,
@@ -509,7 +522,7 @@ impl App {
                 large_button(
                     &self.palette,
                     "ribbon-compress-clipboard",
-                    "クリップボード",
+                    tr!("chrome.output.clipboard"),
                     IconName::Copy,
                     selection_look(has_selection),
                     metrics,
@@ -519,7 +532,7 @@ impl App {
                 large_button(
                     &self.palette,
                     "ribbon-release-waiting",
-                    "待機を圧縮",
+                    tr!("chrome.compress_waiting"),
                     IconName::Play,
                     if waiting > 0 {
                         RibbonLook::Normal
@@ -531,7 +544,7 @@ impl App {
                     |this, window, cx| this.request_release_waiting_jobs(window, cx),
                 ),
             ],
-            "圧縮",
+            tr!("chrome.group.compression"),
             false,
             metrics,
         );
@@ -582,11 +595,12 @@ fn collapse_button(collapsed: bool, palette: &Palette, cx: &mut Context<App>) ->
 fn ribbon_group(
     palette: &Palette,
     items: Vec<AnyElement>,
-    label: &'static str,
+    label: impl Into<SharedString>,
     grow: bool,
     metrics: RibbonMetrics,
 ) -> AnyElement {
     let p = palette;
+    let label = label.into();
     h_flex()
         .flex_shrink_0()
         .when(grow, |this| this.flex_1().min_w_0())
@@ -661,7 +675,7 @@ fn selection_look(enabled: bool) -> RibbonLook {
 fn large_button(
     palette: &Palette,
     id: &'static str,
-    label: &'static str,
+    label: impl Into<SharedString>,
     icon: IconName,
     look: RibbonLook,
     metrics: RibbonMetrics,
@@ -669,6 +683,7 @@ fn large_button(
     on_click: impl Fn(&mut App, &mut Window, &mut Context<App>) + 'static,
 ) -> AnyElement {
     let p = palette;
+    let label = label.into();
     let enabled = look.enabled();
     let active = look.active();
     let (bg, border, fg) = if !enabled {
@@ -718,7 +733,7 @@ fn large_button(
         }));
 
     if metrics.compact {
-        button = button.tooltip(move |window, cx| Tooltip::new(label).build(window, cx));
+        button = button.tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx));
     } else {
         button = button.child(label);
     }

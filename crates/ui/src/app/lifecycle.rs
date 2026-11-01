@@ -9,6 +9,7 @@ use gpui_kit::component::notification::NotificationType;
 use gpui_kit::*;
 use vrc_photo_core::model::{LibraryStats, PhotoSort, QueueStatus};
 use vrc_photo_core::settings::AppSettings;
+use vrc_photo_i18n::{tr, tr_args};
 use vrc_photo_ipc::{
     Endpoint, Event as IpcEvent, JobStatus, Request as IpcRequest, ScanPhase as IpcScanPhase,
 };
@@ -259,7 +260,7 @@ impl App {
             return;
         }
         let Some(endpoint) = self.ipc_endpoint.clone() else {
-            self.toast_error("IPCの接続先を解決できません", cx);
+            self.toast_error(tr!("daemon.ipc.resolve_error"), cx);
             cx.notify();
             return;
         };
@@ -608,12 +609,12 @@ impl App {
                 match notice {
                     FailureNotice::Compression { count } => self.toast_actionable(
                         NotificationType::Error,
-                        format!("圧縮に {count} 件の失敗があります"),
+                        tr_args!("daemon.compression.failures", count = count),
                         cx,
                     ),
                     FailureNotice::Daemon { count } => self.toast_actionable(
                         NotificationType::Error,
-                        format!("デーモンで {count} 件の処理エラーがあります"),
+                        tr_args!("daemon.errors.count", count = count),
                         cx,
                     ),
                 }
@@ -676,10 +677,18 @@ impl App {
             .into_iter()
             .collect();
         self.reload_job_state(cx);
-        self.settings = AppSettings::load(&self.db).unwrap_or_else(|error| {
+        let previous_language = self.settings.language.clone();
+        let mut settings = AppSettings::load(&self.db).unwrap_or_else(|error| {
             tracing::warn!(%error, "cannot load app settings");
             AppSettings::default()
         });
+        settings.language = vrc_photo_i18n::set_locale(&settings.language);
+        let language_changed = settings.language != previous_language;
+        self.settings = settings;
+        if language_changed {
+            self.library.borrow_mut().invalidate_labels();
+            self.search_view.borrow_mut().invalidate_labels();
+        }
         cx.set_reduce_motion(self.settings.ui_reduce_motion);
         let palette = resolve(&self.settings.ui_theme_main, &self.settings.ui_theme_accent);
         if palette != self.palette {

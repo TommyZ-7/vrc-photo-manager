@@ -279,6 +279,12 @@ impl PhotoBrowser {
         self.rail_hover.set(false);
     }
 
+    /// Drops the shaped year-rail labels so the next render rebuilds them in
+    /// the current language.
+    pub(crate) fn invalidate_labels(&mut self) {
+        self.labels = None;
+    }
+
     /// Invalidates the decoded page cache without replacing the index. Used
     /// when photo rows changed (compression replacement, rebinds) but the set
     /// and order of ids did not.
@@ -367,7 +373,7 @@ pub(crate) fn sync_search_mirror(search: &mut PhotoBrowser, library: &PhotoBrows
 pub(crate) fn apply_library_index(
     browser: &mut PhotoBrowser,
     result: vrc_photo_core::error::Result<Vec<PhotoIndexEntry>>,
-) -> Option<String> {
+) -> Option<&'static str> {
     match result {
         Ok(entries) => {
             browser.replace_index(Arc::new(PhotoIndex::new(entries)));
@@ -375,7 +381,7 @@ pub(crate) fn apply_library_index(
         }
         Err(error) => {
             tracing::error!(%error, "photo_index failed");
-            Some("写真一覧を読み込めませんでした".to_string())
+            Some("photos.index_error")
         }
     }
 }
@@ -423,6 +429,7 @@ mod tests {
     use super::*;
     use crate::state::test_support::{index_entry, test_photo};
     use crate::ui::theme::library_grid_metrics;
+    use crate::ui::year_rail::YearRailLabels;
     use gpui_kit::{ScrollStrategy, UniformListScrollHandle, point, px};
     use vrc_photo_core::error::CoreError;
     use vrc_photo_core::settings::CardSize;
@@ -430,6 +437,14 @@ mod tests {
     /// Arbitrary non-196 row height so these tests prove the maths reads the
     /// supplied layout instead of a fixed constant.
     const TEST_ROW_HEIGHT: f32 = 180.0;
+
+    #[test]
+    fn invalidate_labels_drops_cached_rail_labels() {
+        let mut browser = PhotoBrowser::new(Arc::new(PhotoIndex::new(Vec::new())), TEST_ROW_HEIGHT);
+        browser.labels = Some(Arc::new(YearRailLabels::empty_for_test()));
+        browser.invalidate_labels();
+        assert!(browser.labels.is_none());
+    }
 
     #[test]
     fn page_cache_evicts_the_oldest_page() {
@@ -546,7 +561,7 @@ mod tests {
             Err(CoreError::Invalid("database is locked".to_string())),
         );
 
-        assert_eq!(error.as_deref(), Some("写真一覧を読み込めませんでした"));
+        assert_eq!(error, Some("photos.index_error"));
         assert!(Arc::ptr_eq(&browser.index, &mounted));
         assert_eq!(browser.index.total, 2);
         assert!(browser.pages.get_page(0).is_some());

@@ -9,6 +9,7 @@ use std::process::Command;
 use chrono::Utc;
 use gpui_kit::*;
 use vrc_photo_core::model::{DaemonCommand, DaemonOperation};
+use vrc_photo_i18n::{tr, tr_args};
 use vrc_photo_ipc::{Request as IpcRequest, ScanPhase as IpcScanPhase, StatusSnapshot};
 
 use crate::app::App;
@@ -27,23 +28,23 @@ pub(crate) fn daemon_liveness(age_secs: Option<i64>, ipc_connected: bool) -> boo
     ipc_connected || age_secs.is_some_and(|age| age < 20)
 }
 
-pub(crate) fn daemon_state_label(active: bool, paused: bool) -> &'static str {
+pub(crate) fn daemon_state_label(active: bool, paused: bool) -> String {
     if !active {
-        "停止中"
+        tr!("daemon.state.stopped")
     } else if paused {
-        "一時停止中"
+        tr!("daemon.state.paused")
     } else {
-        "稼働中"
+        tr!("daemon.state.running")
     }
 }
 
 pub(crate) fn ipc_status_label(connected: bool, error: Option<&str>) -> String {
     if connected {
-        "IPC 接続中".to_string()
+        tr!("daemon.ipc.connected")
     } else if let Some(error) = error {
-        format!("IPC 未接続（{error}）")
+        tr_args!("daemon.ipc.disconnected_error", error = error)
     } else {
-        "IPC 未接続".to_string()
+        tr!("daemon.ipc.disconnected")
     }
 }
 
@@ -54,27 +55,27 @@ pub(crate) fn daemon_sync_label(
 ) -> String {
     match age_secs.filter(|age| *age < 20) {
         Some(age) if supervisor == Some("systemd") => {
-            format!("最終同期 {age}秒前 · systemd")
+            tr_args!("daemon.sync.age_systemd", age = age)
         }
-        Some(age) => format!("最終同期 {age}秒前"),
-        None if ipc_connected => "IPC 接続中".to_string(),
-        None => "デーモン停止".to_string(),
+        Some(age) => tr_args!("daemon.sync.age", age = age),
+        None if ipc_connected => tr!("daemon.sync.ipc"),
+        None => tr!("daemon.sync.stopped"),
     }
 }
 
-pub(crate) fn autostart_description(daemon_active: bool, supervisor: Option<&str>) -> &'static str {
+pub(crate) fn autostart_description(daemon_active: bool, supervisor: Option<&str>) -> String {
     if daemon_active && supervisor == Some("systemd") {
-        "systemd 管理で起動中。サービス利用時はOFF推奨"
+        tr!("daemon.autostart.systemd")
     } else {
-        "OSログイン時にデーモンを起動"
+        tr!("daemon.autostart.login")
     }
 }
 
-pub(crate) fn daemon_operation_label(operation: DaemonOperation) -> &'static str {
+pub(crate) fn daemon_operation_label(operation: DaemonOperation) -> String {
     match operation {
-        DaemonOperation::Scan => "写真スキャン",
-        DaemonOperation::Log => "ログ解析",
-        DaemonOperation::Link => "写真の紐付け",
+        DaemonOperation::Scan => tr!("daemon.operation.scan"),
+        DaemonOperation::Log => tr!("daemon.operation.log"),
+        DaemonOperation::Link => tr!("daemon.operation.link"),
     }
 }
 
@@ -97,7 +98,7 @@ pub(crate) fn open_path(path: &Path) -> Result<(), String> {
         .arg(path)
         .spawn()
         .map(|_| ())
-        .map_err(|error| format!("explorer を起動できません: {error}"))
+        .map_err(|error| tr_args!("daemon.error.explorer", error = error))
 }
 
 #[cfg(target_os = "macos")]
@@ -108,7 +109,7 @@ pub(crate) fn open_path(path: &Path) -> Result<(), String> {
         .arg(path)
         .spawn()
         .map(|_| ())
-        .map_err(|error| format!("open を起動できません: {error}"))
+        .map_err(|error| tr_args!("daemon.error.open", error = error))
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -130,14 +131,14 @@ fn open_spawn(program: &str, args: &[&str], path: &Path) -> Result<(), String> {
         .arg(path)
         .spawn()
         .map(|_| ())
-        .map_err(|error| format!("{program} を起動できません: {error}"))
+        .map_err(|error| tr_args!("daemon.error.spawn", program = program, error = error))
 }
 
 #[cfg(not(any(unix, target_os = "windows")))]
 pub(crate) fn open_path(path: &Path) -> Result<(), String> {
-    Err(format!(
-        "この環境ではフォルダを開けません: {}",
-        path.display()
+    Err(tr_args!(
+        "daemon.error.no_file_manager",
+        path = path.display()
     ))
 }
 
@@ -156,7 +157,7 @@ fn daemon_binary_path() -> Option<PathBuf> {
 pub(crate) fn spawn_daemon_process() -> Result<(), String> {
     let path = daemon_binary_path().ok_or_else(|| "daemon binary path not found".to_string())?;
     if !path.is_file() {
-        return Err(format!("{} が見つかりません", path.display()));
+        return Err(tr_args!("daemon.error.not_found", path = path.display()));
     }
     Command::new(&path)
         .spawn()
@@ -167,7 +168,7 @@ pub(crate) fn spawn_daemon_process() -> Result<(), String> {
 pub(crate) fn run_background_supervisor() -> Result<(), String> {
     let path = daemon_binary_path().ok_or_else(|| "daemon binary path not found".to_string())?;
     if !path.is_file() {
-        return Err(format!("{} が見つかりません", path.display()));
+        return Err(tr_args!("daemon.error.not_found", path = path.display()));
     }
     let mut child = Command::new(&path)
         .spawn()
@@ -204,15 +205,15 @@ impl App {
                 self.send_wake_commands(cx);
                 self.toast_info(
                     if self.ipc_connected {
-                        "再スキャンを要求しました。デーモンが処理します。"
+                        tr!("daemon.rescan.requested")
                     } else {
-                        "再スキャンを要求しました。デーモン起動後に実行されます。"
+                        tr!("daemon.rescan.queued")
                     },
                     cx,
                 );
             }
             Err(error) => {
-                self.toast_error(format!("再スキャンを要求できません: {error}"), cx);
+                self.toast_error(tr_args!("daemon.rescan.error", error = error), cx);
             }
         }
         cx.notify();
@@ -220,40 +221,35 @@ impl App {
 
     pub(crate) fn toggle_daemon_pause(&mut self, cx: &mut Context<Self>) {
         if !self.ipc_connected {
-            self.toast_warning("デーモン停止中です", cx);
+            self.toast_warning(tr!("daemon.stopped"), cx);
             cx.notify();
             return;
         }
         let paused = !self.daemon_paused;
         let success = if paused {
-            "監視を一時停止しました"
+            tr!("daemon.paused")
         } else {
-            "監視を再開しました"
+            tr!("daemon.resumed")
         };
-        self.send_ipc_request(
-            IpcRequest::SetPaused { paused },
-            Some(success.to_string()),
-            None,
-            cx,
-        );
+        self.send_ipc_request(IpcRequest::SetPaused { paused }, Some(success), None, cx);
     }
 
     pub(crate) fn toggle_daemon_shutdown(&mut self, cx: &mut Context<Self>) {
         if !self.ipc_connected {
-            self.toast_warning("デーモン停止中です", cx);
+            self.toast_warning(tr!("daemon.stopped"), cx);
             cx.notify();
             return;
         }
         if !self.daemon_shutdown_armed {
             self.daemon_shutdown_armed = true;
-            self.toast_warning("もう一度「デーモンを終了」を押すと終了します", cx);
+            self.toast_warning(tr!("daemon.quit.armed"), cx);
             cx.notify();
             return;
         }
         self.daemon_shutdown_armed = false;
         self.send_ipc_request(
             IpcRequest::Shutdown,
-            Some("デーモンを終了しました".to_string()),
+            Some(tr!("daemon.quit.done")),
             None,
             cx,
         );
@@ -265,9 +261,9 @@ impl App {
         cx: &mut Context<Self>,
     ) {
         match self.db.request_daemon_command(command) {
-            Ok(true) => self.toast_info("再試行を要求しました。デーモンが処理します。", cx),
-            Ok(false) => self.toast_info("すでに再試行を要求済みです。", cx),
-            Err(error) => self.toast_error(format!("再試行を要求できません: {error}"), cx),
+            Ok(true) => self.toast_info(tr!("daemon.retry.requested"), cx),
+            Ok(false) => self.toast_info(tr!("daemon.retry.already"), cx),
+            Err(error) => self.toast_error(tr_args!("daemon.retry.error", error = error), cx),
         }
         self.send_wake_commands(cx);
         cx.notify();

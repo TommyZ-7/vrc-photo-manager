@@ -9,6 +9,7 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use vrc_photo_core::settings::AppSettings;
+use vrc_photo_i18n::{tr, tr_args};
 
 use crate::app::App;
 use crate::ui::theme::*;
@@ -172,18 +173,12 @@ pub(crate) fn manual_option_row(
 pub(crate) fn compression_policy_warning(
     keep_original: bool,
     auto_compress: bool,
-) -> Option<&'static str> {
-    (auto_compress && !keep_original).then_some(
-        "自動圧縮で圧縮に成功すると元画像をOSゴミ箱へ移動します。取り消すにはゴミ箱から復元してください。",
-    )
+) -> Option<String> {
+    (auto_compress && !keep_original).then(|| tr!("components.compression_warning.keep"))
 }
 
 pub(crate) fn release_confirmation(keep_original: bool, count: i64) -> Option<String> {
-    (!keep_original).then(|| {
-        format!(
-            "待機中の自動圧縮 {count} 件を実行し、成功した元画像をOSゴミ箱へ移動します。取り消すにはゴミ箱から復元してください。"
-        )
-    })
+    (!keep_original).then(|| tr_args!("components.compression_warning.replace", count = count))
 }
 
 impl App {
@@ -369,12 +364,13 @@ impl App {
 
     pub(crate) fn preset_button(
         &self,
-        label: &str,
+        label: impl Into<String>,
         days: Option<i64>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let label: String = label.into();
         let active = self.search_days == days;
-        chip(&self.palette, label, active)
+        chip(&self.palette, &label, active)
             .id(SharedString::from(format!("preset-{label}")))
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -383,30 +379,32 @@ impl App {
             }))
     }
 
-    pub(crate) fn filter_field(&self, label: &str, input: Input) -> impl IntoElement {
+    pub(crate) fn filter_field(&self, label: impl Into<String>, input: Input) -> impl IntoElement {
         let p = self.palette;
+        let label: String = label.into();
         v_flex()
             .gap(px(6.))
             .child(
                 div()
                     .text_size(px(10.))
                     .text_color(rgb(p.muted_2))
-                    .child(label.to_string()),
+                    .child(label),
             )
             .child(input.w_full())
     }
 
     pub(crate) fn setting_switch(
         &self,
-        label: &str,
-        description: &str,
+        label: impl Into<String>,
+        description: impl Into<String>,
         checked: bool,
         capture_layout: bool,
         cx: &mut Context<Self>,
         apply: fn(&mut AppSettings, bool),
     ) -> impl IntoElement {
         let p = self.palette;
-        let label = label.to_string();
+        let label: String = label.into();
+        let description: String = description.into();
         h_flex()
             .items_center()
             .gap(px(12.))
@@ -444,8 +442,9 @@ impl App {
             )
     }
 
-    pub(crate) fn stat_card(&self, label: &str, value: String) -> impl IntoElement {
+    pub(crate) fn stat_card(&self, label: impl Into<String>, value: String) -> impl IntoElement {
         let p = self.palette;
+        let label: String = label.into();
         glass_panel(&self.palette)
             .flex()
             .flex_col()
@@ -458,7 +457,7 @@ impl App {
                 div()
                     .text_size(px(10.))
                     .text_color(rgb(p.muted_2))
-                    .child(label.to_string()),
+                    .child(label),
             )
             .child(
                 div()
@@ -470,8 +469,9 @@ impl App {
             )
     }
 
-    pub(crate) fn meta_row(&self, label: &str, value: String) -> impl IntoElement {
+    pub(crate) fn meta_row(&self, label: impl Into<String>, value: String) -> impl IntoElement {
         let p = self.palette;
+        let label: String = label.into();
         h_flex()
             .gap(px(8.))
             .text_size(px(10.))
@@ -481,7 +481,7 @@ impl App {
                     .flex_shrink_0()
                     .text_size(px(10.))
                     .text_color(rgb(p.muted_2))
-                    .child(label.to_string()),
+                    .child(label),
             )
             .child(
                 div()
@@ -494,16 +494,16 @@ impl App {
             )
     }
 
-    pub(crate) fn section_label(&self, label: &str) -> impl IntoElement {
+    pub(crate) fn section_label(&self, label: impl Into<String>) -> impl IntoElement {
         let p = self.palette;
         div()
             .text_size(px(10.))
             .font_semibold()
             .text_color(rgb(p.muted_2))
-            .child(label.to_string())
+            .child(label.into())
     }
 
-    pub(crate) fn badge(&self, text: &str, fg: u32, bg: u32) -> impl IntoElement {
+    pub(crate) fn badge(&self, text: impl Into<String>, fg: u32, bg: u32) -> impl IntoElement {
         div()
             .px(px(7.))
             .py(px(2.))
@@ -512,7 +512,7 @@ impl App {
             .text_size(px(10.))
             .font_medium()
             .text_color(rgb(fg))
-            .child(text.to_string())
+            .child(text.into())
     }
 }
 

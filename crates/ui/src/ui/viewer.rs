@@ -7,6 +7,8 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use vrc_photo_i18n::tr;
+
 use crate::app::{App, effective_motion_fps};
 use crate::state::preview::preview_placeholder_label;
 use crate::state::viewer::{ViewerMorph, morph_image_plan};
@@ -41,7 +43,7 @@ impl App {
 
         let close_button = self.focusable_text_button(
             "viewer-close",
-            "閉じる Esc",
+            tr!("viewer.close"),
             self.quick_look_close_focus.clone(),
             ButtonState {
                 tone: ButtonTone::Primary,
@@ -52,7 +54,7 @@ impl App {
         );
         let prev_button = self.focusable_text_button(
             "viewer-prev",
-            "前へ",
+            tr!("viewer.prev"),
             self.quick_look_prev_focus.clone(),
             ButtonState {
                 tone: if prev_enabled {
@@ -67,7 +69,7 @@ impl App {
         );
         let next_button = self.focusable_text_button(
             "viewer-next",
-            "次へ",
+            tr!("viewer.next"),
             self.quick_look_next_focus.clone(),
             ButtonState {
                 tone: if next_enabled {
@@ -83,9 +85,9 @@ impl App {
         let details_button = self.focusable_text_button(
             "viewer-details",
             if details_open {
-                "詳細を閉じる"
+                tr!("viewer.details_close")
             } else {
-                "詳細"
+                tr!("viewer.details")
             },
             self.quick_look_details_focus.clone(),
             ButtonState {

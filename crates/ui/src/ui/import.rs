@@ -9,6 +9,7 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use vrc_photo_core::importer::{ImportIssue, ImportIssueKind, ImportMode, ImportProgress};
+use vrc_photo_i18n::{tr, tr_args};
 
 use crate::app::App;
 use crate::app::import::{ImportDialogOrigin, ImportDialogPhase, ImportReportView};
@@ -34,9 +35,9 @@ impl App {
             return div().into_any_element();
         };
         let title = match &dialog.origin {
-            ImportDialogOrigin::New => "取り込み",
-            ImportDialogOrigin::Retry { .. } => "取り込み · 再試行",
-            ImportDialogOrigin::Resume { .. } => "取り込み · 再開",
+            ImportDialogOrigin::New => tr!("import.dialog.title"),
+            ImportDialogOrigin::Retry { .. } => tr!("import.dialog.retry"),
+            ImportDialogOrigin::Resume { .. } => tr!("import.dialog.resume"),
         };
         let mode = import_mode_label(dialog.mode);
         let dest = dialog.dest.to_string_lossy().to_string();
@@ -73,14 +74,14 @@ impl App {
                 let has_files = source.is_some_and(|source| !source.files().is_empty());
                 let mut body = v_flex()
                     .gap(px(10.))
-                    .child(self.section_label("取り込み元"))
+                    .child(self.section_label(tr!("import.section.source")))
                     .child(
                         h_flex()
                             .items_center()
                             .gap(px(8.))
                             .child(
                                 Button::new("import-pick-files")
-                                    .label("ファイルを選択")
+                                    .label(tr!("import.choose_files"))
                                     .small()
                                     .on_click(
                                         cx.listener(|this, _, _, cx| this.pick_import_files(cx)),
@@ -88,16 +89,19 @@ impl App {
                             )
                             .child(
                                 Button::new("import-pick-folder")
-                                    .label("フォルダを選択")
+                                    .label(tr!("import.choose_folder"))
                                     .small()
                                     .on_click(
                                         cx.listener(|this, _, _, cx| this.pick_import_folder(cx)),
                                     ),
                             ),
                     )
-                    .child(div().text_size(px(10.)).text_color(rgb(p.muted_2)).child(
-                        "フォルダはサブフォルダも対象です。compressed フォルダは除外します。",
-                    ))
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(p.muted_2))
+                            .child(tr!("import.folder_hint")),
+                    )
                     .when_some(source.map(|source| source.summary()), |this, summary| {
                         this.child(
                             div()
@@ -110,11 +114,7 @@ impl App {
                     .when_some(
                         source.and_then(|source| {
                             let count = source.issues().len();
-                            (count > 0).then(|| {
-                                format!(
-                                    "{count} 件のフォルダを読み取れませんでした（結果に表示します）"
-                                )
-                            })
+                            (count > 0).then(|| tr_args!("import.folder_read_error", count = count))
                         }),
                         |this, warning| {
                             this.child(
@@ -125,7 +125,7 @@ impl App {
                             )
                         },
                     )
-                    .when_some(dialog.error.clone(), |this, error| {
+                    .when_some(dialog.error.as_ref(), |this, error| {
                         this.child(
                             div()
                                 .p(px(10.))
@@ -135,33 +135,35 @@ impl App {
                                 .border_color(rgb(p.red_border))
                                 .text_size(px(10.))
                                 .text_color(rgb(p.red))
-                                .child(error),
+                                .child(error.message()),
                         )
                     });
-                body = body.child(self.section_label("取り込み先")).child(
-                    v_flex()
-                        .gap(px(4.))
-                        .child(
-                            div()
-                                .truncate()
-                                .text_size(px(11.))
-                                .text_color(rgb(p.muted))
-                                .child(dest.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(10.))
-                                .text_color(rgb(p.muted_2))
-                                .child("設定 > ライブラリ > 取り込み先で変更できます。"),
-                        ),
-                );
+                body = body
+                    .child(self.section_label(tr!("import.section.destination")))
+                    .child(
+                        v_flex()
+                            .gap(px(4.))
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(p.muted))
+                                    .child(dest.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(p.muted_2))
+                                    .child(tr!("import.destination_hint")),
+                            ),
+                    );
                 panel = panel.child(body).child(
                     h_flex()
                         .justify_end()
                         .gap(px(8.))
                         .child(
                             Button::new("import-cancel")
-                                .label("キャンセル")
+                                .label(tr!("common.cancel"))
                                 .small()
                                 .ghost()
                                 .on_click(
@@ -170,7 +172,7 @@ impl App {
                         )
                         .child(
                             Button::new("import-start")
-                                .label("取り込み開始")
+                                .label(tr!("import.start"))
                                 .small()
                                 .primary()
                                 .disabled(!has_files)
@@ -236,7 +238,7 @@ impl App {
                             )
                         },
                     )
-                    .child(self.section_label("取り込み先"))
+                    .child(self.section_label(tr!("import.section.destination")))
                     .child(
                         div()
                             .truncate()
@@ -248,9 +250,9 @@ impl App {
                         h_flex().justify_end().child(
                             Button::new("import-cancel")
                                 .label(if *cancel_requested {
-                                    "キャンセル中…"
+                                    tr!("import.cancelling")
                                 } else {
-                                    "キャンセル"
+                                    tr!("common.cancel")
                                 })
                                 .small()
                                 .ghost()
@@ -311,7 +313,7 @@ impl App {
                     .gap(px(6.))
                     .border_t_1()
                     .border_color(rgb(p.border))
-                    .child(self.section_label("失敗したファイル"))
+                    .child(self.section_label(tr!("import.section.failed_files")))
                     .child(
                         v_flex()
                             .gap(px(6.))
@@ -347,7 +349,7 @@ impl App {
                     .gap(px(6.))
                     .border_t_1()
                     .border_color(rgb(p.border))
-                    .child(self.section_label("移動元を削除できなかったファイル"))
+                    .child(self.section_label(tr!("import.section.partial_files")))
                     .children(partial_issues.iter().map(|issue| {
                         let source = issue.source.to_string_lossy().to_string();
                         let target = issue
@@ -395,7 +397,7 @@ impl App {
                     .gap(px(6.))
                     .border_t_1()
                     .border_color(rgb(p.border))
-                    .child(self.section_label("連番を付けたファイル"))
+                    .child(self.section_label(tr!("import.section.renamed_files")))
                     .child(
                         v_flex()
                             .gap(px(6.))
@@ -434,7 +436,7 @@ impl App {
                     .gap(px(6.))
                     .border_t_1()
                     .border_color(rgb(p.border))
-                    .child(self.section_label("スキャンできなかったファイル"))
+                    .child(self.section_label(tr!("import.section.scan_failed_files")))
                     .children(report.scan_failures.iter().map(|failure| {
                         v_flex()
                             .gap(px(2.))
@@ -489,17 +491,21 @@ pub(crate) fn retryable_sources(issues: &[ImportIssue]) -> Vec<PathBuf> {
         .collect()
 }
 
-pub(crate) fn import_mode_label(mode: ImportMode) -> &'static str {
+pub(crate) fn import_mode_label(mode: ImportMode) -> String {
     match mode {
-        ImportMode::Copy => "コピー",
-        ImportMode::Move => "移動",
+        ImportMode::Copy => tr!("import.mode.copy"),
+        ImportMode::Move => tr!("import.mode.move"),
     }
 }
 
 pub(crate) fn import_progress_label(progress: &ImportProgress) -> String {
-    format!(
-        "取り込み {}/{} · 取込 {} · スキップ {} · 失敗 {}",
-        progress.processed, progress.total, progress.imported, progress.skipped, progress.failed
+    tr_args!(
+        "import.progress",
+        processed = progress.processed,
+        total = progress.total,
+        imported = progress.imported,
+        skipped = progress.skipped,
+        failed = progress.failed
     )
 }
 

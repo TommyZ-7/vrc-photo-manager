@@ -12,6 +12,7 @@ use chrono::Utc;
 use gpui_kit::*;
 use vrc_photo_core::db::Db;
 use vrc_photo_core::model::{PhotoIndexEntry, PhotoTextFilter};
+use vrc_photo_i18n::tr_args;
 
 use crate::app::App;
 use crate::app::cli::log_timing;
@@ -149,7 +150,7 @@ impl App {
                 self.pending_search_anchor = None;
                 self.search_refresh_pending = false;
                 self.searching = false;
-                self.toast_error(format!("検索に失敗しました: {error}"), cx);
+                self.toast_error(tr_args!("search.error", error = error), cx);
             }
         }
         cx.notify();

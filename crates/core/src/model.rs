@@ -593,10 +593,16 @@ impl DaemonCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonError {
     pub operation: DaemonOperation,
+    /// Human-readable fallback, written in the locale active at write time.
     pub message: String,
     pub detail: Option<String>,
     pub occurred_at: String,
     pub attempts: i64,
+    /// Catalog key for the localized summary. `None` for legacy rows and
+    /// technical messages.
+    pub message_key: Option<String>,
+    /// JSON object of string values substituted into `message_key`.
+    pub message_args: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

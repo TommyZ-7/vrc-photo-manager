@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use gpui_kit::{Bounds, Pixels, Size, Window, point, px, size};
 use vrc_photo_core::model::{CompressionFormat, CompressionProfile};
 use vrc_photo_core::settings::CardSize;
+use vrc_photo_i18n::tr;
 
 pub(crate) use crate::ui::palette::{Palette, lerp_color, with_alpha};
 
@@ -530,20 +531,20 @@ pub(crate) fn card_meta_line(
     }
 }
 
-pub(crate) fn card_size_options() -> [(CardSize, &'static str); 4] {
+pub(crate) fn card_size_options() -> [(CardSize, String); 4] {
     [
-        (CardSize::Small, "小"),
-        (CardSize::Medium, "中"),
-        (CardSize::Large, "大"),
-        (CardSize::ExtraLarge, "特大"),
+        (CardSize::Small, tr!("theme.card_size.small")),
+        (CardSize::Medium, tr!("theme.card_size.medium")),
+        (CardSize::Large, tr!("theme.card_size.large")),
+        (CardSize::ExtraLarge, tr!("theme.card_size.extra_large")),
     ]
 }
 
-pub(crate) fn card_size_label(size: CardSize) -> &'static str {
+pub(crate) fn card_size_label(size: CardSize) -> String {
     card_size_options()
         .into_iter()
         .find_map(|(option, label)| (option == size).then_some(label))
-        .unwrap_or("中")
+        .unwrap_or_else(|| tr!("theme.card_size.medium"))
 }
 
 pub(crate) fn format_label(format: &CompressionFormat) -> String {
@@ -564,12 +565,12 @@ pub(crate) fn lossless_supported(format: &CompressionFormat) -> bool {
     !matches!(format, CompressionFormat::Jpeg)
 }
 
-pub(crate) fn lossless_hint(format: &CompressionFormat) -> &'static str {
+pub(crate) fn lossless_hint(format: &CompressionFormat) -> String {
     match format {
-        CompressionFormat::Jpeg => "JPEGはロスレス非対応",
-        CompressionFormat::Avif => "AVIFは近似ロスレス（品質100）",
-        CompressionFormat::Webp => "WebPの可逆圧縮",
-        CompressionFormat::JpegXl => "JPEG XLの可逆圧縮",
+        CompressionFormat::Jpeg => tr!("theme.lossless.jpeg"),
+        CompressionFormat::Avif => tr!("theme.lossless.avif"),
+        CompressionFormat::Webp => tr!("theme.lossless.webp"),
+        CompressionFormat::JpegXl => tr!("theme.lossless.jpegxl"),
     }
 }
 

@@ -15,6 +15,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use vrc_photo_core::db::Db;
 use vrc_photo_core::model::Photo;
+use vrc_photo_i18n::{tr, tr_args};
 
 use crate::app::App;
 use crate::app::cli::log_timing;
@@ -72,19 +73,19 @@ impl App {
                     .text_size(px(11.))
                     .font_medium()
                     .text_color(rgb(p.text))
-                    .child(format!("{count} 件選択中")),
+                    .child(tr_args!("photos.selected_count", count = count)),
             )
             .child(div().flex_1())
             .child(
                 Button::new("selection-clear")
-                    .label("選択解除")
+                    .label(tr!("chrome.clear_selection"))
                     .small()
                     .ghost()
                     .on_click(cx.listener(|this, _, _, cx| this.clear_selection(cx))),
             )
             .child(
                 Button::new("selection-compress")
-                    .label(format!("{count} 件を圧縮"))
+                    .label(tr_args!("photos.compress_count", count = count))
                     .small()
                     .primary()
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -218,7 +219,7 @@ impl App {
             }
         }
         if short_page {
-            self.note_library_error("一部の写真を読み込めませんでした".to_string(), cx);
+            self.note_library_error("photos.partial_load_error", cx);
         }
         cx.notify();
     }
@@ -241,7 +242,7 @@ impl App {
                 browser.fail_page(*page, generation);
             }
         }
-        self.note_library_error("一部の写真を読み込めませんでした".to_string(), cx);
+        self.note_library_error("photos.partial_load_error", cx);
         cx.notify();
     }
 
@@ -302,13 +303,13 @@ impl App {
                                 .text_size(px(12.))
                                 .font_medium()
                                 .text_color(rgb(p.text))
-                                .child("写真を選択してください"),
+                                .child(tr!("photos.select_prompt")),
                         )
                         .child(
                             div()
                                 .text_size(px(10.))
                                 .text_color(rgb(p.muted_2))
-                                .child("ライブラリから写真を選ぶと、ここに情報が表示されます。"),
+                                .child(tr!("photos.select_prompt_hint")),
                         ),
                 )
                 .into_any_element();
@@ -322,14 +323,14 @@ impl App {
         let world = photo
             .world_name
             .clone()
-            .unwrap_or_else(|| "未紐付け".to_string());
+            .unwrap_or_else(|| tr!("photos.unlinked"));
         let players = self
             .selected_players
             .iter()
             .map(|player| player.display_name.clone())
             .collect::<Vec<_>>();
         let tags = self.selected_tags.clone();
-        let section = |label: &'static str| {
+        let section = |label: String| {
             div()
                 .text_size(px(10.))
                 .font_semibold()
@@ -465,14 +466,14 @@ impl App {
                     .text_size(px(10.))
                     .font_semibold()
                     .text_color(rgb(p.muted_2))
-                    .child("選択中"),
+                    .child(tr!("photos.inspector.selected")),
             )
             .child(
                 div()
                     .text_size(px(10.))
                     .font_family("monospace")
                     .text_color(rgb(p.muted_2))
-                    .child("Space で開く"),
+                    .child(tr!("photos.inspector.space_hint")),
             );
 
         let title = v_flex()
@@ -499,46 +500,51 @@ impl App {
 
         let mut badges = h_flex().flex_wrap().gap(px(5.));
         if photo.world_name.is_some() {
-            badges = badges.child(self.badge("文脈あり", p.accent, p.accent_soft));
+            badges = badges.child(self.badge(tr!("photos.badge.context"), p.accent, p.accent_soft));
         }
         if photo.is_favorite {
-            badges = badges.child(self.badge("★ お気に入り", p.amber, p.amber_soft));
+            badges = badges.child(self.badge(tr!("photos.badge.favorite"), p.amber, p.amber_soft));
         }
         if compressed {
-            badges = badges.child(self.badge("圧縮済", p.green, p.green_soft));
+            badges =
+                badges.child(self.badge(tr!("photos.badge.compressed"), p.green, p.green_soft));
         } else {
-            badges = badges.child(self.badge("未圧縮", p.amber, p.amber_soft));
+            badges =
+                badges.child(self.badge(tr!("photos.badge.uncompressed"), p.amber, p.amber_soft));
         }
 
         let meta = v_flex()
             .gap(px(4.))
-            .child(self.meta_row("ワールド", world))
+            .child(self.meta_row(tr!("photos.meta.world"), world))
             .child(self.meta_row(
-                "インスタンス",
+                tr!("photos.meta.instance"),
                 photo.instance_id.clone().unwrap_or_else(|| "—".to_string()),
             ))
             .child(self.meta_row(
-                "解像度",
+                tr!("photos.meta.resolution"),
                 format!(
                     "{} × {}",
                     photo.effective_dimensions().0,
                     photo.effective_dimensions().1
                 ),
             ))
-            .child(self.meta_row("サイズ", format_bytes(photo.effective_file_size())))
             .child(self.meta_row(
-                "取得元",
+                tr!("photos.meta.size"),
+                format_bytes(photo.effective_file_size()),
+            ))
+            .child(self.meta_row(
+                tr!("photos.meta.source"),
                 photo.link_method.clone().unwrap_or_else(|| "—".to_string()),
             ))
             .child(self.meta_row(
-                "撮影者",
+                tr!("photos.meta.author"),
                 photo.author.clone().unwrap_or_else(|| "—".to_string()),
             ));
 
         let players_block = v_flex()
             .min_w_0()
             .gap(px(6.))
-            .child(section("撮影時のプレイヤー"))
+            .child(section(tr!("photos.section.players")))
             .child(
                 h_flex()
                     .flex_wrap()
@@ -547,13 +553,17 @@ impl App {
                     .children(players.iter().map(|name| pill(name.clone()))),
             );
 
-        let tags_block = v_flex().min_w_0().gap(px(6.)).child(section("タグ")).child(
-            h_flex()
-                .flex_wrap()
-                .gap(px(4.))
-                .when(tags.is_empty(), |this| this.child(pill("—".to_string())))
-                .children(tags.iter().map(|tag| pill(format!("#{tag}")))),
-        );
+        let tags_block = v_flex()
+            .min_w_0()
+            .gap(px(6.))
+            .child(section(tr!("photos.section.tags")))
+            .child(
+                h_flex()
+                    .flex_wrap()
+                    .gap(px(4.))
+                    .when(tags.is_empty(), |this| this.child(pill("—".to_string())))
+                    .children(tags.iter().map(|tag| pill(format!("#{tag}")))),
+            );
 
         let body = v_flex()
             .flex_1()
@@ -572,7 +582,7 @@ impl App {
             .gap(px(8.))
             .child(
                 Button::new("open-viewer")
-                    .label("全画面表示")
+                    .label(tr!("photos.open_viewer"))
                     .small()
                     .primary()
                     .w_full()
@@ -584,9 +594,9 @@ impl App {
             .child({
                 let count = self.selected_ids.len();
                 let label = if count > 1 {
-                    format!("{count} 件を圧縮")
+                    tr_args!("photos.compress_count", count = count)
                 } else {
-                    "圧縮".to_string()
+                    tr!("photos.compress")
                 };
                 Button::new("compress-selected")
                     .label(label)
@@ -629,7 +639,7 @@ impl App {
         let world = photo
             .world_name
             .clone()
-            .unwrap_or_else(|| "未紐付け".to_string());
+            .unwrap_or_else(|| tr!("photos.unlinked"));
         let players = self
             .selected_players
             .iter()
@@ -640,7 +650,7 @@ impl App {
         let favorite = photo.is_favorite;
         let note = photo.note.clone();
         let note_for_edit = note.clone();
-        let section = |label: &'static str| {
+        let section = |label: String| {
             div()
                 .text_size(px(10.))
                 .font_semibold()
@@ -663,9 +673,9 @@ impl App {
         let favorite_button = self.focusable_text_button(
             "viewer-favorite",
             if favorite {
-                "★ お気に入り"
+                tr!("photos.badge.favorite")
             } else {
-                "☆ お気に入り"
+                tr!("photos.favorite.remove")
             },
             self.quick_look_favorite_focus.clone(),
             ButtonState {
@@ -682,7 +692,7 @@ impl App {
                     Ok(()) => this.load_selected_meta(id),
                     Err(error) => {
                         tracing::warn!(%error, photo_id = id, "cannot update favorite");
-                        this.toast_error(format!("お気に入りを更新できません: {error}"), cx);
+                        this.toast_error(tr_args!("photos.favorite.error", error = error), cx);
                     }
                 }
                 cx.notify();
@@ -690,7 +700,7 @@ impl App {
         );
         let add_tag_button = self.focusable_text_button(
             "viewer-add-tag",
-            "追加",
+            tr!("photos.action.add"),
             self.quick_look_add_tag_focus.clone(),
             ButtonState {
                 tone: ButtonTone::Neutral,
@@ -708,7 +718,7 @@ impl App {
         let photo_path = photo.effective_path().to_string();
         let folder_button = self.focusable_text_button(
             "viewer-open-folder",
-            "フォルダを開く",
+            tr!("photos.action.open_folder"),
             self.quick_look_folder_focus.clone(),
             ButtonState {
                 tone: ButtonTone::Neutral,
@@ -722,14 +732,17 @@ impl App {
                     .filter(|parent| !parent.as_os_str().is_empty())
                     .unwrap_or(path);
                 if let Err(error) = open_path(folder) {
-                    this.toast_error(format!("フォルダを開けません: {error}"), cx);
+                    this.toast_error(
+                        tr_args!("photos.action.open_folder_error", error = error),
+                        cx,
+                    );
                 }
                 cx.notify();
             },
         );
         let compress_button = self.focusable_text_button(
             "viewer-compress",
-            "圧縮",
+            tr!("photos.compress"),
             self.quick_look_compress_focus.clone(),
             ButtonState {
                 tone: ButtonTone::Primary,
@@ -740,7 +753,7 @@ impl App {
         );
         let trash_button = self.focusable_text_button(
             "viewer-trash",
-            "ゴミ箱へ移動",
+            tr!("photos.action.trash"),
             self.quick_look_trash_focus.clone(),
             ButtonState {
                 tone: ButtonTone::Danger,
@@ -756,7 +769,7 @@ impl App {
         );
         let note_edit_button = self.focusable_text_button(
             "viewer-note-edit",
-            "編集",
+            tr!("photos.action.edit"),
             self.quick_look_note_edit_focus.clone(),
             ButtonState {
                 tone: ButtonTone::Neutral,
@@ -767,7 +780,7 @@ impl App {
         );
         let note_save_button = self.focusable_text_button(
             "viewer-note-save",
-            "保存",
+            tr!("photos.action.save"),
             self.quick_look_note_save_focus.clone(),
             ButtonState {
                 tone: ButtonTone::Primary,
@@ -778,7 +791,7 @@ impl App {
         );
         let note_cancel_button = self.focusable_text_button(
             "viewer-note-cancel",
-            "キャンセル",
+            tr!("common.cancel"),
             self.quick_look_note_cancel_focus.clone(),
             ButtonState {
                 tone: ButtonTone::Neutral,
@@ -820,35 +833,38 @@ impl App {
             .child(
                 v_flex()
                     .gap(px(4.))
-                    .child(self.meta_row("ワールド", world))
+                    .child(self.meta_row(tr!("photos.meta.world"), world))
                     .child(self.meta_row(
-                        "インスタンス",
+                        tr!("photos.meta.instance"),
                         photo.instance_id.clone().unwrap_or_else(|| "—".to_string()),
                     ))
                     .child(self.meta_row(
-                        "取得元",
+                        tr!("photos.meta.source"),
                         photo.link_method.clone().unwrap_or_else(|| "—".to_string()),
                     ))
                     .child(self.meta_row(
-                        "撮影者",
+                        tr!("photos.meta.author"),
                         photo.author.clone().unwrap_or_else(|| "—".to_string()),
                     ))
-                    .child(self.meta_row("ファイル", photo.file_name.clone()))
+                    .child(self.meta_row(tr!("photos.meta.file"), photo.file_name.clone()))
                     .child(self.meta_row(
-                        "解像度",
+                        tr!("photos.meta.resolution"),
                         format!(
                             "{} × {}",
                             photo.effective_dimensions().0,
                             photo.effective_dimensions().1
                         ),
                     ))
-                    .child(self.meta_row("サイズ", format_bytes(photo.effective_file_size()))),
+                    .child(self.meta_row(
+                        tr!("photos.meta.size"),
+                        format_bytes(photo.effective_file_size()),
+                    )),
             )
             .child(
                 v_flex()
                     .min_w_0()
                     .gap(px(6.))
-                    .child(section("撮影時のプレイヤー"))
+                    .child(section(tr!("photos.section.players")))
                     .child(
                         h_flex()
                             .flex_wrap()
@@ -858,17 +874,21 @@ impl App {
                     ),
             )
             .child(
-                v_flex().min_w_0().gap(px(6.)).child(section("タグ")).child(
-                    h_flex()
-                        .flex_wrap()
-                        .gap(px(4.))
-                        .when(tags.is_empty(), |this| this.child(pill("—".to_string())))
-                        .children(
-                            tags.iter()
-                                .map(|tag| self.tag_chip(id, tag.clone(), cx))
-                                .collect::<Vec<_>>(),
-                        ),
-                ),
+                v_flex()
+                    .min_w_0()
+                    .gap(px(6.))
+                    .child(section(tr!("photos.section.tags")))
+                    .child(
+                        h_flex()
+                            .flex_wrap()
+                            .gap(px(4.))
+                            .when(tags.is_empty(), |this| this.child(pill("—".to_string())))
+                            .children(
+                                tags.iter()
+                                    .map(|tag| self.tag_chip(id, tag.clone(), cx))
+                                    .collect::<Vec<_>>(),
+                            ),
+                    ),
             )
             .child(
                 h_flex()
@@ -880,13 +900,13 @@ impl App {
             .child(
                 v_flex()
                     .gap(px(6.))
-                    .child(section("圧縮履歴"))
+                    .child(section(tr!("photos.section.compression_history")))
                     .when(derivatives.is_empty(), |this| {
                         this.child(
                             div()
                                 .text_size(px(10.))
                                 .text_color(rgb(p.muted_2))
-                                .child("まだ圧縮されていません"),
+                                .child(tr!("photos.no_compression")),
                         )
                     })
                     .children(derivatives.iter().map(|derivative| {
@@ -906,7 +926,7 @@ impl App {
                         h_flex()
                             .items_center()
                             .justify_between()
-                            .child(section("メモ"))
+                            .child(section(tr!("photos.section.note")))
                             .when(self.note_edit_id != Some(id), |this| {
                                 this.child(note_edit_button)
                             }),
@@ -923,7 +943,7 @@ impl App {
                                         div()
                                             .text_size(px(10.))
                                             .text_color(rgb(p.muted_2))
-                                            .child("Esc でキャンセル"),
+                                            .child(tr!("photos.note.esc_cancel")),
                                     ),
                             )
                     })
@@ -937,10 +957,7 @@ impl App {
                                 .border_color(rgb(p.border))
                                 .text_size(px(10.))
                                 .text_color(rgb(p.muted))
-                                .child(
-                                    note.clone()
-                                        .unwrap_or_else(|| "メモはまだありません".to_string()),
-                                ),
+                                .child(note.clone().unwrap_or_else(|| tr!("photos.note.empty"))),
                         )
                     }),
             )
