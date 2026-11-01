@@ -301,7 +301,7 @@ impl App {
             self.daemon_errors.len(),
         );
         let import_report = self.import_report.clone();
-        let library_error = self.library_error.clone();
+        let library_error = self.library_error;
         let failed_jobs = self.failed_job_count;
         let daemon_errors = self.daemon_errors.len();
 

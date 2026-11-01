@@ -219,7 +219,7 @@ impl App {
             }
         }
         if short_page {
-            self.note_library_error(tr!("photos.partial_load_error"), cx);
+            self.note_library_error("photos.partial_load_error", cx);
         }
         cx.notify();
     }
@@ -242,7 +242,7 @@ impl App {
                 browser.fail_page(*page, generation);
             }
         }
-        self.note_library_error(tr!("photos.partial_load_error"), cx);
+        self.note_library_error("photos.partial_load_error", cx);
         cx.notify();
     }
 

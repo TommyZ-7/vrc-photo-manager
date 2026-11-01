@@ -149,7 +149,7 @@ pub struct App {
     pub(crate) library_dirty: bool,
     /// A failed index/page query kept the previous snapshot mounted; retry from
     /// the Photos header.
-    pub(crate) library_error: Option<String>,
+    pub(crate) library_error: Option<&'static str>,
     pub(crate) count_debounce: CountDebounce,
     /// Quiet-period tracker for daemon revision bursts. A full index rebuild
     /// waits until the revision has stopped moving for `LIBRARY_QUIET_PERIOD`.
@@ -207,7 +207,7 @@ pub struct App {
     /// Profile whose name the input currently mirrors. Set when the editor
     /// changes selection so trim/normalization only rewrites the field then.
     pub(crate) profile_name_editing_id: Option<String>,
-    pub(crate) profile_name_error: Option<String>,
+    pub(crate) profile_name_error: Option<crate::app::compression::ProfileNameError>,
     /// Requests the editor to restore the persisted name on the next render,
     /// after Enter or when focus leaves the field.
     pub(crate) profile_name_reset_pending: bool,
@@ -353,8 +353,8 @@ impl App {
         )
     }
 
-    pub(crate) fn note_library_error(&mut self, error: String, cx: &mut Context<Self>) {
-        let notify = should_notify_library_error(self.library_error.as_deref(), &error);
+    pub(crate) fn note_library_error(&mut self, error: &'static str, cx: &mut Context<Self>) {
+        let notify = should_notify_library_error(self.library_error, error);
         self.library_error = Some(error);
         if notify {
             self.toast_actionable(NotificationType::Error, tr!("app.library_error"), cx);
@@ -378,6 +378,9 @@ impl App {
         self.update_input_placeholders(window, cx);
         self.library.borrow_mut().invalidate_labels();
         self.search_view.borrow_mut().invalidate_labels();
+        // The connection detail was formatted when it arrived; the next
+        // heartbeat/reconnect repopulates it in the new language.
+        self.ipc_error = None;
         cx.notify();
     }
 
@@ -484,9 +487,8 @@ impl App {
                             }
                         }
                         Err(error) => {
-                            let message = error.message();
-                            if this.profile_name_error.as_deref() != Some(message.as_str()) {
-                                this.profile_name_error = Some(message);
+                            if this.profile_name_error != Some(error) {
+                                this.profile_name_error = Some(error);
                                 cx.notify();
                             }
                         }

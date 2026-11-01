@@ -25,11 +25,7 @@ impl Tray {
     pub fn new() -> Result<Self> {
         let open = MenuItem::new(tr!("tray.open"), true, None);
         let pause = CheckMenuItem::new(tr!("tray.pause"), true, false, None);
-        let status = MenuItem::new(
-            tr_args!("tray.status.prefix", status = tr!("tray.status.idle")),
-            false,
-            None,
-        );
+        let status = MenuItem::new(tr!("tray.status.starting"), false, None);
         let quit = MenuItem::new(tr!("tray.quit"), true, None);
         let menu = Menu::new();
         menu.append_items(&[

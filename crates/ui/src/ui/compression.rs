@@ -320,7 +320,7 @@ impl App {
             self.profile_name_reset_pending = false;
             self.profile_name_error = None;
         }
-        let name_error = self.profile_name_error.clone();
+        let name_error = self.profile_name_error;
         let name_char_count = self
             .profile_name_input
             .read(cx)
@@ -422,7 +422,7 @@ impl App {
                                         p.muted_2
                                     }))
                                     .child(match name_error {
-                                        Some(error) => error,
+                                        Some(error) => error.message(),
                                         None => tr_args!(
                                             "compression.name_hint",
                                             count = name_char_count,
@@ -1121,7 +1121,7 @@ impl App {
                                     .text_size(px(12.))
                                     .text_color(rgb(p.text))
                                     .truncate()
-                                    .child(format!("photo #{}", job.photo_id)),
+                                    .child(tr_args!("compression.job.photo", id = job.photo_id)),
                             )
                             .child(
                                 div()
@@ -1168,7 +1168,10 @@ impl App {
                                             .text_size(px(12.))
                                             .text_color(rgb(p.text))
                                             .truncate()
-                                            .child(format!("photo #{}", job.photo_id)),
+                                            .child(tr_args!(
+                                                "compression.job.photo",
+                                                id = job.photo_id
+                                            )),
                                     )
                                     .child(
                                         div()
@@ -1189,7 +1192,9 @@ impl App {
                             .failed_job_names
                             .get(&job.photo_id)
                             .cloned()
-                            .unwrap_or_else(|| format!("photo #{}", job.photo_id));
+                            .unwrap_or_else(|| {
+                                tr_args!("compression.job.photo", id = job.photo_id)
+                            });
                         let profile_name = self
                             .profiles
                             .iter()

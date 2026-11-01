@@ -135,13 +135,32 @@ pub(crate) enum ImportDialogPhase {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ImportDialogError {
+    FolderRead(String),
+    NoTargetImages,
+    Failed(String),
+}
+
+impl ImportDialogError {
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::FolderRead(error) => {
+                tr_args!("import.dialog.folder_error", error = error)
+            }
+            Self::NoTargetImages => tr!("import.no_target_images"),
+            Self::Failed(error) => tr_args!("import.error.failed", error = error),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ImportDialogState {
     pub(crate) origin: ImportDialogOrigin,
     pub(crate) mode: ImportMode,
     pub(crate) dest: PathBuf,
     pub(crate) source: Option<ImportSource>,
-    pub(crate) error: Option<String>,
+    pub(crate) error: Option<ImportDialogError>,
     pub(crate) phase: ImportDialogPhase,
 }
 
@@ -210,7 +229,7 @@ impl App {
             Err(error) => {
                 tracing::warn!(%error, path = %folder.display(), "cannot scan import folder");
                 if let Some(dialog) = &mut self.import_dialog {
-                    dialog.error = Some(tr_args!("import.dialog.folder_error", error = error));
+                    dialog.error = Some(ImportDialogError::FolderRead(error.to_string()));
                 }
                 cx.notify();
                 return;
@@ -220,7 +239,7 @@ impl App {
             dialog.error = scan
                 .files
                 .is_empty()
-                .then(|| tr!("import.no_target_images"));
+                .then_some(ImportDialogError::NoTargetImages);
             dialog.source = Some(ImportSource::Folder {
                 folder,
                 files: scan.files,
@@ -352,7 +371,7 @@ impl App {
                         mode: dialog.mode,
                         dest: dialog.dest,
                         source: dialog.source,
-                        error: Some(message),
+                        error: Some(ImportDialogError::Failed(error.to_string())),
                         phase: ImportDialogPhase::Ready,
                     });
                 }
@@ -537,7 +556,7 @@ impl App {
         }
         let revision = self.db.library_revision().ok();
         if !self.apply_library_snapshot(revision, cx)
-            && let Some(error) = self.library_error.clone()
+            && let Some(error) = self.library_error
         {
             append_scan_error(report, error);
         }
@@ -618,7 +637,8 @@ pub(crate) fn import_issue_counts(issues: &[ImportIssue]) -> (usize, usize) {
 }
 
 /// Keeps every hard error that occurred while indexing the destination.
-fn append_scan_error(report: &mut ImportReportView, message: String) {
+fn append_scan_error(report: &mut ImportReportView, message: impl Into<String>) {
+    let message = message.into();
     match &mut report.scan_error {
         Some(existing) => {
             existing.push('\n');
@@ -760,10 +780,10 @@ fn import_summary(report: &ImportReportView) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        IMPORT_PROGRESS_NOTIFY_INTERVAL, ImportDialogOrigin, ImportDialogPhase, ImportDialogState,
-        ImportReportView, add_photo_root_and_save, import_remaining, import_should_index,
-        import_summary, merge_resume_report, merge_retry_report, request_import_scan,
-        reserve_import_dialog, should_notify_import_progress,
+        IMPORT_PROGRESS_NOTIFY_INTERVAL, ImportDialogError, ImportDialogOrigin, ImportDialogPhase,
+        ImportDialogState, ImportReportView, add_photo_root_and_save, import_remaining,
+        import_should_index, import_summary, merge_resume_report, merge_retry_report,
+        request_import_scan, reserve_import_dialog, should_notify_import_progress,
     };
     use crate::ui::import::retryable_sources;
     use std::cell::Cell;
@@ -774,6 +794,13 @@ mod tests {
     };
     use vrc_photo_core::scanner::ScanFailure;
     use vrc_photo_core::settings::AppSettings;
+
+    #[test]
+    fn import_dialog_errors_render_in_the_current_language() {
+        let error = ImportDialogError::Failed("disk full".into());
+        assert!(error.message().contains("disk full"));
+        assert!(error.message().contains("取り込み"));
+    }
 
     #[test]
     fn import_scan_request_targets_the_destination_root() {

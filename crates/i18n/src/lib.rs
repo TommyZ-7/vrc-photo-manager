@@ -7,6 +7,7 @@
 rust_i18n::i18n!("locales", fallback = "ja");
 
 use std::borrow::Cow;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use rust_i18n::Backend as _;
@@ -34,12 +35,16 @@ fn backend() -> &'static dyn rust_i18n::Backend {
     _rust_i18n_backend()
 }
 
-fn available() -> Vec<String> {
-    backend()
-        .available_locales()
-        .into_iter()
-        .map(Cow::into_owned)
-        .collect()
+static AVAILABLE: OnceLock<Vec<String>> = OnceLock::new();
+
+fn available() -> &'static [String] {
+    AVAILABLE.get_or_init(|| {
+        backend()
+            .available_locales()
+            .into_iter()
+            .map(Cow::into_owned)
+            .collect()
+    })
 }
 
 fn lookup_exact(locale: &str, key: &str) -> Option<String> {
@@ -95,7 +100,7 @@ pub fn current_locale() -> String {
 
 /// Every locale discovered from `locales/`, Japanese first.
 pub fn locales() -> Vec<LocaleInfo> {
-    let mut codes = available();
+    let mut codes = available().to_vec();
     codes.sort();
     if let Some(index) = codes.iter().position(|code| code == DEFAULT_LOCALE) {
         let japanese = codes.remove(index);

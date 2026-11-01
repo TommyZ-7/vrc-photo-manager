@@ -36,6 +36,13 @@ mod tests {
     }
 
     #[test]
+    fn update_phase_errors_render_in_the_selected_language() {
+        let text = UpdateText::key("update.error.network");
+        assert!(text.message_in("ja").contains("更新"));
+        assert!(text.message_in("en").contains("update"));
+    }
+
+    #[test]
     fn labels_the_never_checked_state() {
         assert_eq!(last_checked_label(None), "未確認");
     }
@@ -125,8 +132,8 @@ mod tests {
             asset: None,
             public_keys: Vec::new(),
         };
-        let failure: std::result::Result<Option<AvailableUpdate>, String> =
-            Err("offline".to_string());
+        let failure: std::result::Result<Option<AvailableUpdate>, UpdateText> =
+            Err(UpdateText::key("update.error.network"));
 
         let restored = resolve_checked_phase(false, &failure, Some(update.clone()));
         assert!(matches!(
@@ -142,7 +149,7 @@ mod tests {
             UpdatePhase::Idle
         ));
 
-        let up_to_date: std::result::Result<Option<AvailableUpdate>, String> = Ok(None);
+        let up_to_date: std::result::Result<Option<AvailableUpdate>, UpdateText> = Ok(None);
         assert!(matches!(
             resolve_checked_phase(false, &up_to_date, Some(update)),
             UpdatePhase::UpToDate
@@ -224,7 +231,7 @@ mod tests {
         let messages: std::collections::HashSet<_> = cases
             .iter()
             .map(|(error, expected)| {
-                let message = update_error_message(error);
+                let message = update_error_message(error).message();
                 assert!(message.contains(*expected), "{message}");
                 message
             })
@@ -234,9 +241,21 @@ mod tests {
 
     #[test]
     fn keeps_existing_update_error_messages() {
-        assert!(update_error_message(&UpdateError::Signature).contains("署名"));
-        assert!(update_error_message(&UpdateError::Integrity("x".into())).contains("検証"));
-        assert!(update_error_message(&UpdateError::Network("x".into())).contains("ネットワーク"));
+        assert!(
+            update_error_message(&UpdateError::Signature)
+                .message()
+                .contains("署名")
+        );
+        assert!(
+            update_error_message(&UpdateError::Integrity("x".into()))
+                .message()
+                .contains("検証")
+        );
+        assert!(
+            update_error_message(&UpdateError::Network("x".into()))
+                .message()
+                .contains("ネットワーク")
+        );
     }
 
     #[test]
@@ -267,10 +286,38 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::prelude::*;
 use gpui_kit::{Context, Div, Window, div, px, relative, rgb};
 
+#[derive(Debug, Clone)]
+pub(crate) struct UpdateText {
+    key: &'static str,
+    args: Vec<(&'static str, String)>,
+}
+
+impl UpdateText {
+    fn key(key: &'static str) -> Self {
+        Self {
+            key,
+            args: Vec::new(),
+        }
+    }
+
+    fn arg(mut self, name: &'static str, value: impl ToString) -> Self {
+        self.args.push((name, value.to_string()));
+        self
+    }
+
+    fn message(&self) -> String {
+        self.message_in(&vrc_photo_i18n::current_locale())
+    }
+
+    fn message_in(&self, locale: &str) -> String {
+        vrc_photo_i18n::tr_args_in(locale, self.key, &self.args)
+    }
+}
+
 enum UpdateMessage {
     Checked {
         manual: bool,
-        result: std::result::Result<Option<AvailableUpdate>, String>,
+        result: std::result::Result<Option<AvailableUpdate>, UpdateText>,
     },
     DownloadProgress {
         received: u64,
@@ -279,7 +326,7 @@ enum UpdateMessage {
     Downloaded {
         staged: PathBuf,
     },
-    DownloadFailed(String),
+    DownloadFailed(UpdateText),
 }
 
 #[derive(Debug, Clone)]
@@ -298,7 +345,7 @@ pub enum UpdatePhase {
         staged: PathBuf,
     },
     Applying,
-    Error(String),
+    Error(UpdateText),
 }
 
 impl UpdatePhase {
@@ -328,7 +375,7 @@ fn phase_allows_auto_check(phase: &UpdatePhase) -> bool {
 
 fn resolve_checked_phase(
     manual: bool,
-    result: &std::result::Result<Option<AvailableUpdate>, String>,
+    result: &std::result::Result<Option<AvailableUpdate>, UpdateText>,
     resume: Option<AvailableUpdate>,
 ) -> UpdatePhase {
     match result {
@@ -524,36 +571,28 @@ impl UpdateState {
     }
 }
 
-fn update_error_message(error: &UpdateError) -> String {
+fn update_error_message(error: &UpdateError) -> UpdateText {
     match error {
-        UpdateError::Network(_) => {
-            tr!("update.error.network")
-        }
-        UpdateError::Signature => tr!("update.error.signature"),
-        UpdateError::Integrity(_) => {
-            tr!("update.error.integrity")
-        }
-        UpdateError::InvalidManifest(_) => tr!("update.error.manifest"),
-        UpdateError::UnsupportedPlatform => {
-            tr!("update.error.unsupported")
-        }
-        UpdateError::Cancelled => tr!("update.error.cancelled"),
-        UpdateError::NotFound => tr!("update.error.not_found"),
-        UpdateError::HelperMissing => {
-            tr!("update.error.helper_missing_reinstall")
-        }
+        UpdateError::Network(_) => UpdateText::key("update.error.network"),
+        UpdateError::Signature => UpdateText::key("update.error.signature"),
+        UpdateError::Integrity(_) => UpdateText::key("update.error.integrity"),
+        UpdateError::InvalidManifest(_) => UpdateText::key("update.error.manifest"),
+        UpdateError::UnsupportedPlatform => UpdateText::key("update.error.unsupported"),
+        UpdateError::Cancelled => UpdateText::key("update.error.cancelled"),
+        UpdateError::NotFound => UpdateText::key("update.error.not_found"),
+        UpdateError::HelperMissing => UpdateText::key("update.error.helper_missing_reinstall"),
         UpdateError::Io { operation, .. } => match operation {
-            IoOperation::Helper => tr!("update.error.helper_prepare"),
-            IoOperation::Job => tr!("update.error.job_write_past"),
-            IoOperation::Apply => tr!("update.error.appimage_replace_past"),
-            IoOperation::Spawn => tr!("update.error.helper_spawn_past"),
+            IoOperation::Helper => UpdateText::key("update.error.helper_prepare"),
+            IoOperation::Job => UpdateText::key("update.error.job_write_past"),
+            IoOperation::Apply => UpdateText::key("update.error.appimage_replace_past"),
+            IoOperation::Spawn => UpdateText::key("update.error.helper_spawn_past"),
             IoOperation::Download | IoOperation::Other => {
-                tr!("update.error.file_save_past")
+                UpdateText::key("update.error.file_save_past")
             }
         },
-        UpdateError::InvalidJob(_) => tr!("update.error.invalid_job"),
+        UpdateError::InvalidJob(_) => UpdateText::key("update.error.invalid_job"),
         UpdateError::Other(message) => {
-            tr_args!("update.error.other", message = message)
+            UpdateText::key("update.error.other").arg("message", message)
         }
     }
 }
@@ -634,7 +673,7 @@ impl App {
                 let Ok(current) = Version::parse(vrc_photo_update::CURRENT_VERSION) else {
                     let _ = tx.send_blocking(UpdateMessage::Checked {
                         manual,
-                        result: Err(tr!("update.error.version_parse")),
+                        result: Err(UpdateText::key("update.error.version_parse")),
                     });
                     return;
                 };
@@ -647,7 +686,9 @@ impl App {
             let resume = self.update.resume_available.take();
             self.update.phase = match (manual, resume) {
                 (false, Some(update)) => UpdatePhase::Available(update),
-                _ => UpdatePhase::Error(tr_args!("update.error.check_thread", error = error)),
+                _ => UpdatePhase::Error(
+                    UpdateText::key("update.error.check_thread").arg("error", error),
+                ),
             };
             self.toast_error(tr!("update.error.check_failed"), cx);
             cx.notify();
@@ -657,7 +698,7 @@ impl App {
     pub(crate) fn start_update_download(&mut self, cx: &mut Context<Self>) {
         if !appimage_writable(&self.update.install) {
             self.update.phase =
-                UpdatePhase::Error(tr!("update.error.appimage_not_writable").to_string());
+                UpdatePhase::Error(UpdateText::key("update.error.appimage_not_writable"));
             self.toast_error(tr!("update.error.appimage_not_writable"), cx);
             cx.notify();
             return;
@@ -667,12 +708,12 @@ impl App {
         };
         let update = update.clone();
         let Some(asset) = update.asset.clone() else {
-            self.update.phase = UpdatePhase::Error(tr!("update.error.unsupported"));
+            self.update.phase = UpdatePhase::Error(UpdateText::key("update.error.unsupported"));
             cx.notify();
             return;
         };
         let Some(data_dir) = self.update.data_dir.clone() else {
-            self.update.phase = UpdatePhase::Error(tr!("update.error.data_dir"));
+            self.update.phase = UpdatePhase::Error(UpdateText::key("update.error.data_dir"));
             cx.notify();
             return;
         };
@@ -731,8 +772,9 @@ impl App {
                 }
             });
         if let Err(error) = spawned {
-            self.update.phase =
-                UpdatePhase::Error(tr_args!("update.error.download_start", error = error));
+            self.update.phase = UpdatePhase::Error(
+                UpdateText::key("update.error.download_start").arg("error", error),
+            );
             self.toast_error(tr!("update.error.download_failed"), cx);
             cx.notify();
         }
@@ -768,7 +810,7 @@ impl App {
         let update = update.clone();
         let staged = staged.clone();
         let Some(asset) = update.asset.clone() else {
-            self.update.phase = UpdatePhase::Error(tr!("update.error.unsupported"));
+            self.update.phase = UpdatePhase::Error(UpdateText::key("update.error.unsupported"));
             cx.notify();
             return;
         };
@@ -811,9 +853,9 @@ impl App {
         let working_dir = match std::env::current_dir() {
             Ok(dir) => dir,
             Err(error) => {
-                let message = tr_args!("update.error.cwd", error = error);
+                let message = UpdateText::key("update.error.cwd").arg("error", error);
                 self.update.phase = UpdatePhase::Error(message.clone());
-                self.toast_error(message, cx);
+                self.toast_error(message.message(), cx);
                 cx.notify();
                 return;
             }
@@ -877,7 +919,7 @@ impl App {
                     Err(error) => {
                         let message = update_error_message(&error);
                         this.update.phase = UpdatePhase::Error(message.clone());
-                        this.toast_error(message, cx);
+                        this.toast_error(message.message(), cx);
                         if this.daemon_active {
                             let _ = spawn_daemon_process();
                         }
@@ -938,9 +980,9 @@ impl App {
                     }
                     Err(message) => {
                         if manual {
-                            self.toast_error(message.clone(), cx);
+                            self.toast_error(message.message(), cx);
                         } else {
-                            tracing::warn!(%message, "automatic update check failed");
+                            tracing::warn!(message = %message.message(), "automatic update check failed");
                         }
                     }
                 }
@@ -971,7 +1013,7 @@ impl App {
             }
             UpdateMessage::DownloadFailed(message) => {
                 self.update.phase = UpdatePhase::Error(message.clone());
-                self.toast_error(message, cx);
+                self.toast_error(message.message(), cx);
                 cx.notify();
             }
         }
@@ -1126,7 +1168,7 @@ impl App {
             UpdatePhase::Error(message) => div()
                 .text_size(px(11.))
                 .text_color(rgb(p.red))
-                .child(message.clone()),
+                .child(message.message()),
         }
     }
 

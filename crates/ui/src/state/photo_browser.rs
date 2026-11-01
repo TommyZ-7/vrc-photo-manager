@@ -12,7 +12,6 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::{ScrollStrategy, UniformListScrollHandle};
 use vrc_photo_core::model::{Photo, PhotoIndexEntry};
-use vrc_photo_i18n::tr;
 
 use crate::state::year_rail::{YearBucket, build_year_buckets};
 use crate::ui::theme::{MIN_CARD_WIDTH, photo_row_height};
@@ -373,7 +372,7 @@ pub(crate) fn sync_search_mirror(search: &mut PhotoBrowser, library: &PhotoBrows
 pub(crate) fn apply_library_index(
     browser: &mut PhotoBrowser,
     result: vrc_photo_core::error::Result<Vec<PhotoIndexEntry>>,
-) -> Option<String> {
+) -> Option<&'static str> {
     match result {
         Ok(entries) => {
             browser.replace_index(Arc::new(PhotoIndex::new(entries)));
@@ -381,7 +380,7 @@ pub(crate) fn apply_library_index(
         }
         Err(error) => {
             tracing::error!(%error, "photo_index failed");
-            Some(tr!("photos.index_error"))
+            Some("photos.index_error")
         }
     }
 }
@@ -556,7 +555,7 @@ mod tests {
             Err(CoreError::Invalid("database is locked".to_string())),
         );
 
-        assert_eq!(error.as_deref(), Some("写真一覧を読み込めませんでした"));
+        assert_eq!(error, Some("photos.index_error"));
         assert!(Arc::ptr_eq(&browser.index, &mounted));
         assert_eq!(browser.index.total, 2);
         assert!(browser.pages.get_page(0).is_some());

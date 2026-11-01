@@ -4779,6 +4779,37 @@ mod tests {
     }
 
     #[test]
+    fn v10_migration_preserves_pre_v10_daemon_errors() {
+        let db = Db::open_in_memory().unwrap();
+        db.connection()
+            .execute_batch(
+                "ALTER TABLE daemon_errors DROP COLUMN message_key;\
+                 ALTER TABLE daemon_errors DROP COLUMN message_args;",
+            )
+            .unwrap();
+        db.connection()
+            .pragma_update(None, "user_version", 9)
+            .unwrap();
+        db.connection()
+            .execute(
+                "INSERT INTO daemon_errors(operation, message, detail, occurred_at, attempts) \
+                 VALUES ('scan', 'legacy scan error', '/photos', \
+                 '2026-10-31T00:00:00+00:00', 2)",
+                [],
+            )
+            .unwrap();
+
+        db.migrate_v10().unwrap();
+
+        let errors = db.daemon_errors().unwrap();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].message, "legacy scan error");
+        assert_eq!(errors[0].detail.as_deref(), Some("/photos"));
+        assert!(errors[0].message_key.is_none());
+        assert!(errors[0].message_args.is_none());
+    }
+
+    #[test]
     fn migrate_v10_adds_columns_and_is_retryable() {
         let db = Db::open_in_memory().unwrap();
         db.connection()

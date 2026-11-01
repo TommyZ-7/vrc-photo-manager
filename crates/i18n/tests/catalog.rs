@@ -51,7 +51,7 @@ fn english_catalog_is_complete() {
 #[test]
 fn arguments_are_replaced() {
     assert_eq!(
-        tr_args_in("en", "photos.selected", &[("count", "3".into())]),
-        "Selected: 3"
+        tr_args_in("en", "photos.selected_count", &[("count", "3".into())]),
+        "3 selected"
     );
 }

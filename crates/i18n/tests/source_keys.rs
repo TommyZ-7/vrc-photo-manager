@@ -13,7 +13,13 @@ fn every_tr_key_exists_in_the_default_catalog() {
     let mut missing = Vec::new();
 
     for dir in ["crates/ui/src", "crates/daemon/src"] {
-        walk(&root.join(dir), &patterns, &mut missing);
+        let path = root.join(dir);
+        assert!(
+            path.is_dir(),
+            "source directory is missing: {}",
+            path.display()
+        );
+        walk(&path, &patterns, &mut missing);
     }
 
     assert!(missing.is_empty(), "missing catalog keys: {missing:#?}");

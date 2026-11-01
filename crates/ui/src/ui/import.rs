@@ -125,7 +125,7 @@ impl App {
                             )
                         },
                     )
-                    .when_some(dialog.error.clone(), |this, error| {
+                    .when_some(dialog.error.as_ref(), |this, error| {
                         this.child(
                             div()
                                 .p(px(10.))
@@ -135,7 +135,7 @@ impl App {
                                 .border_color(rgb(p.red_border))
                                 .text_size(px(10.))
                                 .text_color(rgb(p.red))
-                                .child(error),
+                                .child(error.message()),
                         )
                     });
                 body = body

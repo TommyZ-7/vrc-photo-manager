@@ -282,7 +282,7 @@ fn render_grid(
                 // empty library is not an empty result set.
                 div().into_any_element()
             }
-        } else if let Some(error) = app.library_error.clone() {
+        } else if let Some(error) = app.library_error {
             div()
                 .mt(px(18.))
                 .max_w(px(560.))
@@ -293,7 +293,7 @@ fn render_grid(
                 .border_color(rgb(p.border))
                 .text_size(px(12.))
                 .text_color(rgb(p.red))
-                .child(error)
+                .child(tr(error))
                 .child(
                     div()
                         .pt(px(4.))
