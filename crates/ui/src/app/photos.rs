@@ -76,9 +76,11 @@ impl App {
         }
         let id = photo.id;
         let source = PathBuf::from(photo.effective_path());
+        let spec = self.settings.thumbnail_spec();
+        let generation = self.thumbnails.borrow().generation();
         let cache_path = match &self.demo_assets {
             Some(assets) => demo_thumb_path(assets, id),
-            None => thumbnail::thumbnail_path(id).unwrap_or_default(),
+            None => thumbnail::thumbnail_path(id, spec).unwrap_or_default(),
         };
         let cache_dir = if self.demo_assets.is_none() {
             thumbnail::thumbnails_dir()
@@ -90,7 +92,8 @@ impl App {
                 .background_executor()
                 .spawn(async move {
                     let decode_start = Instant::now();
-                    let decoded = decode_thumbnail(id, &cache_path, &source, cache_dir.as_deref());
+                    let decoded =
+                        decode_thumbnail(id, &cache_path, &source, cache_dir.as_deref(), spec);
                     log_timing("thumbnail decode", decode_start);
                     decoded
                 })
@@ -98,16 +101,20 @@ impl App {
             this.update(cx, |this, cx| {
                 match decoded {
                     Some(decoded) => {
-                        this.thumbnails.borrow_mut().insert(
+                        let inserted = this.thumbnails.borrow_mut().insert_if_generation(
+                            generation,
                             id,
                             make_render_image(decoded.image),
                             decoded.color,
                         );
-                        if let Some(bytes) = decoded.generated_bytes {
+                        if inserted && let Some(bytes) = decoded.generated_bytes {
                             this.note_generated_thumbnail(bytes, cx);
                         }
                     }
-                    None => this.thumbnails.borrow_mut().fail(id),
+                    None => this
+                        .thumbnails
+                        .borrow_mut()
+                        .fail_if_generation(generation, id),
                 }
                 // The selected photo may have been refused earlier because
                 // every in-flight slot was busy; a freed slot is its retry.
@@ -126,11 +133,12 @@ impl App {
         if ids.is_empty() || self.demo_assets.is_some() {
             return;
         }
+        let spec = self.settings.thumbnail_spec();
         cx.spawn(async move |_this, cx| {
             cx.background_executor()
                 .spawn(async move {
                     for id in ids {
-                        if let Some(path) = thumbnail::thumbnail_path(id) {
+                        if let Some(path) = thumbnail::thumbnail_path(id, spec) {
                             thumbnail::refresh_thumbnail_access(&path);
                         }
                     }

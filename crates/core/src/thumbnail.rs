@@ -4,14 +4,57 @@ use std::time::{Duration, SystemTime};
 
 use crate::error::{CoreError, Result};
 
-pub const THUMBNAIL_MAX: u32 = 256;
-const THUMBNAIL_QUALITY: f32 = 80.0;
+pub const THUMBNAIL_QUALITY_MIN: u8 = 10;
+pub const THUMBNAIL_QUALITY_MAX: u8 = 100;
+pub const THUMBNAIL_QUALITY_DEFAULT: u8 = 80;
+pub const THUMBNAIL_SIZES: [u32; 3] = [256, 384, 512];
+pub const THUMBNAIL_SIZE_DEFAULT: u32 = THUMBNAIL_SIZES[0];
 pub const ACCESS_REFRESH_AFTER: Duration = Duration::from_secs(60 * 60);
+
+/// Encoding parameters that also form part of the cache key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThumbnailSpec {
+    pub quality: u8,
+    pub size: u32,
+}
+
+impl ThumbnailSpec {
+    pub fn new(quality: u8, size: u32) -> Self {
+        Self {
+            quality: quality.clamp(THUMBNAIL_QUALITY_MIN, THUMBNAIL_QUALITY_MAX),
+            size: normalize_thumbnail_size(size),
+        }
+    }
+}
+
+impl Default for ThumbnailSpec {
+    fn default() -> Self {
+        Self {
+            quality: THUMBNAIL_QUALITY_DEFAULT,
+            size: THUMBNAIL_SIZE_DEFAULT,
+        }
+    }
+}
+
+fn normalize_thumbnail_size(size: u32) -> u32 {
+    THUMBNAIL_SIZES
+        .into_iter()
+        .find(|candidate| *candidate == size)
+        .unwrap_or(THUMBNAIL_SIZE_DEFAULT)
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ThumbnailCacheUsage {
     pub files: usize,
     pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ThumbnailCacheClearReport {
+    pub removed_files: usize,
+    pub removed_bytes: u64,
+    pub remaining_files: usize,
+    pub remaining_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -46,11 +89,24 @@ pub fn thumbnails_dir() -> Option<PathBuf> {
     crate::data_dir().map(|dir| dir.join("thumbnails"))
 }
 
-pub fn thumbnail_path(photo_id: i64) -> Option<PathBuf> {
-    thumbnails_dir().map(|dir| dir.join(format!("{photo_id}.webp")))
+pub fn thumbnail_path(photo_id: i64, spec: ThumbnailSpec) -> Option<PathBuf> {
+    thumbnails_dir().map(|dir| thumbnail_path_in(&dir, photo_id, spec))
 }
 
-/// Total size of the thumbnail cache, counting only `<u64>.webp` files.
+pub fn thumbnail_path_in(cache_dir: &Path, photo_id: i64, spec: ThumbnailSpec) -> PathBuf {
+    let spec = ThumbnailSpec::new(spec.quality, spec.size);
+    cache_dir.join(format!("{photo_id}-q{}-s{}.webp", spec.quality, spec.size))
+}
+
+/// Total size of the default thumbnail cache.
+pub fn thumbnail_cache_usage() -> Result<ThumbnailCacheUsage> {
+    match thumbnails_dir() {
+        Some(dir) => thumbnail_cache_usage_in(&dir),
+        None => Ok(ThumbnailCacheUsage::default()),
+    }
+}
+
+/// Total size of the thumbnail cache, counting old and new cache keys.
 pub fn thumbnail_cache_usage_in(cache_dir: &Path) -> Result<ThumbnailCacheUsage> {
     let entries = match collect_thumbnail_entries(cache_dir) {
         Ok(entries) => entries,
@@ -134,6 +190,84 @@ where
     Ok(report)
 }
 
+/// Removes every regular file in the thumbnail cache, including old cache
+/// keys and temporary files, then reports the remaining thumbnail usage.
+///
+/// Subdirectories and unrelated entries are left alone; the cache is written
+/// as a flat directory.
+pub fn clear_thumbnail_cache_in(cache_dir: &Path) -> Result<ThumbnailCacheClearReport> {
+    let mut report = ThumbnailCacheClearReport::default();
+    let entries = match fs::read_dir(cache_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(report),
+        Err(error) => return Err(CoreError::Io(error)),
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    dir = %cache_dir.display(),
+                    "cannot read thumbnail cache entry while clearing"
+                );
+                continue;
+            }
+        };
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                report.removed_files += 1;
+                report.removed_bytes = report.removed_bytes.saturating_add(metadata.len());
+            }
+            Err(error) => tracing::debug!(
+                %error,
+                path = %path.display(),
+                "cannot remove thumbnail cache entry while clearing"
+            ),
+        }
+    }
+    let remaining = thumbnail_cache_usage_in(cache_dir)?;
+    report.remaining_files = remaining.files;
+    report.remaining_bytes = remaining.bytes;
+    Ok(report)
+}
+
+/// Accepts the current `<id>-q<quality>-s<size>` key and the old `<id>` key.
+fn is_thumbnail_stem(stem: &str) -> bool {
+    let mut parts = stem.split('-');
+    let Some(id) = parts.next() else {
+        return false;
+    };
+    if id.parse::<u64>().is_err() {
+        return false;
+    }
+    let Some(quality) = parts.next() else {
+        // The old key has no variant suffix.
+        return true;
+    };
+    let Some(size) = parts.next() else {
+        return false;
+    };
+    if parts.next().is_some() {
+        return false;
+    }
+    quality
+        .strip_prefix('q')
+        .and_then(|value| value.parse::<u32>().ok())
+        .is_some_and(|value| (1..=100).contains(&value))
+        && size
+            .strip_prefix('s')
+            .and_then(|value| value.parse::<u32>().ok())
+            .is_some_and(|value| value > 0)
+}
+
 fn collect_thumbnail_entries(cache_dir: &Path) -> std::io::Result<Vec<ThumbnailEntry>> {
     let mut entries = Vec::new();
     for entry in fs::read_dir(cache_dir)? {
@@ -155,7 +289,7 @@ fn collect_thumbnail_entries(cache_dir: &Path) -> std::io::Result<Vec<ThumbnailE
         let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
             continue;
         };
-        if stem.parse::<u64>().is_err() {
+        if !is_thumbnail_stem(stem) {
             continue;
         }
         let Ok(metadata) = entry.metadata() else {
@@ -208,15 +342,19 @@ pub fn refresh_thumbnail_access(path: &Path) {
     }
 }
 
-/// Creates a 256px WebP thumbnail if it does not exist yet.
+/// Creates a WebP thumbnail with the given spec if it does not exist yet.
 ///
 /// The file is written atomically. Returns `None` when the source is missing
 /// or cannot be decoded, so callers can keep a placeholder.
-pub fn ensure_thumbnail(photo_id: i64, source: &Path) -> Result<Option<PathBuf>> {
+pub fn ensure_thumbnail(
+    photo_id: i64,
+    source: &Path,
+    spec: ThumbnailSpec,
+) -> Result<Option<PathBuf>> {
     let Some(cache_dir) = thumbnails_dir() else {
         return Ok(None);
     };
-    ensure_thumbnail_in(photo_id, source, &cache_dir)
+    ensure_thumbnail_in(photo_id, source, &cache_dir, spec)
 }
 
 /// Same as [`ensure_thumbnail`] but with an explicit cache directory. Used by
@@ -225,8 +363,9 @@ pub fn ensure_thumbnail_in(
     photo_id: i64,
     source: &Path,
     cache_dir: &Path,
+    spec: ThumbnailSpec,
 ) -> Result<Option<PathBuf>> {
-    ensure_thumbnail_in_with_status(photo_id, source, cache_dir)
+    ensure_thumbnail_in_with_status(photo_id, source, cache_dir, spec)
         .map(|ensured| ensured.map(|ensured| ensured.path))
 }
 
@@ -236,8 +375,10 @@ pub fn ensure_thumbnail_in_with_status(
     photo_id: i64,
     source: &Path,
     cache_dir: &Path,
+    spec: ThumbnailSpec,
 ) -> Result<Option<EnsuredThumbnail>> {
-    let output = cache_dir.join(format!("{photo_id}.webp"));
+    let spec = ThumbnailSpec::new(spec.quality, spec.size);
+    let output = thumbnail_path_in(cache_dir, photo_id, spec);
     let existing_bytes = fs::metadata(&output)
         .ok()
         .filter(|metadata| metadata.is_file())
@@ -254,14 +395,14 @@ pub fn ensure_thumbnail_in_with_status(
         return Ok(None);
     }
     let image = match crate::image_decode::decode_image(source) {
-        Some(image) => image.thumbnail(THUMBNAIL_MAX, THUMBNAIL_MAX).to_rgba8(),
+        Some(image) => image.thumbnail(spec.size, spec.size).to_rgba8(),
         None => {
             tracing::warn!(path = %source.display(), "cannot decode thumbnail source");
             return Ok(None);
         }
     };
     let encoder = webp::Encoder::from_rgba(image.as_raw(), image.width(), image.height());
-    let encoded = encoder.encode(THUMBNAIL_QUALITY);
+    let encoded = encoder.encode(spec.quality as f32);
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -349,6 +490,65 @@ mod tests {
 
         assert_eq!(usage.files, 2);
         assert_eq!(usage.bytes, 3000);
+    }
+
+    #[test]
+    fn thumbnail_cache_usage_counts_old_and_spec_keys() {
+        let dir = tempdir().unwrap();
+        write_cache_entry(&dir.path().join("1.webp"), 1000, SystemTime::now());
+        write_cache_entry(&dir.path().join("2-q80-s256.webp"), 2000, SystemTime::now());
+        write_cache_entry(&dir.path().join("3-q95-s512.webp"), 3000, SystemTime::now());
+        write_cache_entry(
+            &dir.path().join("4-q80-s256.webp.tmp"),
+            4000,
+            SystemTime::now(),
+        );
+        write_cache_entry(&dir.path().join("notes.webp"), 5000, SystemTime::now());
+
+        let usage = thumbnail_cache_usage_in(dir.path()).unwrap();
+
+        assert_eq!(usage.files, 3);
+        assert_eq!(usage.bytes, 6000);
+    }
+
+    #[test]
+    fn clear_thumbnail_cache_removes_old_new_and_temporary_files() {
+        let dir = tempdir().unwrap();
+        write_cache_entry(&dir.path().join("1.webp"), 1000, SystemTime::now());
+        write_cache_entry(&dir.path().join("2-q80-s384.webp"), 2000, SystemTime::now());
+        write_cache_entry(
+            &dir.path().join("3-q80-s384.webp.tmp"),
+            3000,
+            SystemTime::now(),
+        );
+        fs::create_dir(dir.path().join("sub")).unwrap();
+
+        let report = clear_thumbnail_cache_in(dir.path()).unwrap();
+
+        assert_eq!(report.removed_files, 3);
+        assert_eq!(report.removed_bytes, 6000);
+        assert_eq!(report.remaining_files, 0);
+        assert_eq!(report.remaining_bytes, 0);
+        assert!(dir.path().join("sub").is_dir());
+    }
+
+    #[test]
+    fn clear_thumbnail_cache_accepts_a_missing_directory() {
+        let dir = tempdir().unwrap();
+
+        let report = clear_thumbnail_cache_in(&dir.path().join("missing")).unwrap();
+
+        assert_eq!(report, ThumbnailCacheClearReport::default());
+    }
+
+    #[test]
+    fn thumbnail_spec_normalizes_unknown_values() {
+        assert_eq!(ThumbnailSpec::new(5, 999), ThumbnailSpec::new(10, 256));
+        assert_eq!(ThumbnailSpec::new(200, 384).quality, 100);
+        assert_eq!(
+            thumbnail_path_in(Path::new("/cache"), 7, ThumbnailSpec::new(80, 512)),
+            Path::new("/cache/7-q80-s512.webp")
+        );
     }
 
     #[test]
@@ -632,13 +832,15 @@ mod tests {
         RgbaImage::from_pixel(640, 360, Rgba([10, 20, 30, 255]))
             .save(&source)
             .unwrap();
-        let first = ensure_thumbnail_in(999_999, &source, dir.path())
+        let spec = ThumbnailSpec::new(80, 384);
+        let first = ensure_thumbnail_in(999_999, &source, dir.path(), spec)
             .unwrap()
             .expect("thumbnail");
         assert!(first.is_file());
+        assert!(first.to_string_lossy().contains("-q80-s384.webp"));
         let size = image::image_dimensions(&first).unwrap();
-        assert!(size.0 <= THUMBNAIL_MAX && size.1 <= THUMBNAIL_MAX);
-        let second = ensure_thumbnail_in(999_999, &source, dir.path())
+        assert!(size.0 <= spec.size && size.1 <= spec.size);
+        let second = ensure_thumbnail_in(999_999, &source, dir.path(), spec)
             .unwrap()
             .expect("cached");
         assert_eq!(first, second);
@@ -652,9 +854,10 @@ mod tests {
             .save(&source)
             .unwrap();
 
-        let ensured = ensure_thumbnail_in_with_status(999_997, &source, dir.path())
-            .unwrap()
-            .expect("thumbnail");
+        let ensured =
+            ensure_thumbnail_in_with_status(999_997, &source, dir.path(), ThumbnailSpec::default())
+                .unwrap()
+                .expect("thumbnail");
 
         assert!(ensured.created);
         assert!(ensured.bytes > 0);
@@ -669,13 +872,15 @@ mod tests {
         RgbaImage::from_pixel(640, 360, Rgba([10, 20, 30, 255]))
             .save(&source)
             .unwrap();
-        let first = ensure_thumbnail_in_with_status(999_996, &source, dir.path())
-            .unwrap()
-            .expect("thumbnail");
+        let first =
+            ensure_thumbnail_in_with_status(999_996, &source, dir.path(), ThumbnailSpec::default())
+                .unwrap()
+                .expect("thumbnail");
 
-        let second = ensure_thumbnail_in_with_status(999_996, &source, dir.path())
-            .unwrap()
-            .expect("cached");
+        let second =
+            ensure_thumbnail_in_with_status(999_996, &source, dir.path(), ThumbnailSpec::default())
+                .unwrap()
+                .expect("cached");
 
         assert!(!second.created);
         assert_eq!(second.bytes, first.bytes);
@@ -686,9 +891,14 @@ mod tests {
     fn missing_source_is_not_an_error() {
         let dir = tempdir().unwrap();
         assert!(
-            ensure_thumbnail_in(999_998, Path::new("/no/such/file.png"), dir.path())
-                .unwrap()
-                .is_none()
+            ensure_thumbnail_in(
+                999_998,
+                Path::new("/no/such/file.png"),
+                dir.path(),
+                ThumbnailSpec::default(),
+            )
+            .unwrap()
+            .is_none()
         );
     }
 }

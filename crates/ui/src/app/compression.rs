@@ -26,8 +26,12 @@ pub(crate) enum ManualOutputTarget {
     Clipboard,
 }
 
-pub(crate) fn manual_output_available(photo_count: usize, target: ManualOutputTarget) -> bool {
-    target != ManualOutputTarget::Clipboard || photo_count == 1
+pub(crate) fn manual_output_available(
+    photo_count: usize,
+    target: ManualOutputTarget,
+    clipboard_enabled: bool,
+) -> bool {
+    target != ManualOutputTarget::Clipboard || (clipboard_enabled && photo_count == 1)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,6 +203,11 @@ impl App {
     }
 
     pub(crate) fn compress_selection_to_clipboard(&mut self, cx: &mut Context<Self>) {
+        if !self.settings.clipboard_enabled {
+            self.toast_error(tr!("compression.clipboard_disabled"), cx);
+            cx.notify();
+            return;
+        }
         let ids = self.selected_action_ids();
         if ids.is_empty() {
             self.toast_error(tr!("compression.select_photos"), cx);
@@ -239,6 +248,11 @@ impl App {
         folder: Option<String>,
         cx: &mut Context<Self>,
     ) {
+        if output == ManualOutputTarget::Clipboard && !self.settings.clipboard_enabled {
+            self.toast_error(tr!("compression.clipboard_disabled"), cx);
+            cx.notify();
+            return;
+        }
         let ids = self.existing_photo_ids(photo_ids);
         if ids.is_empty() {
             self.toast_error(tr!("compression.select_photos"), cx);
@@ -302,8 +316,17 @@ impl App {
             cx.notify();
             return;
         };
-        if !manual_output_available(dialog.photo_ids.len(), dialog.output) {
-            self.toast_error(tr!("compression.clipboard_single"), cx);
+        if !manual_output_available(
+            dialog.photo_ids.len(),
+            dialog.output,
+            self.settings.clipboard_enabled,
+        ) {
+            let message = if self.settings.clipboard_enabled {
+                tr!("compression.clipboard_single")
+            } else {
+                tr!("compression.clipboard_disabled")
+            };
+            self.toast_error(message, cx);
             cx.notify();
             return;
         }
@@ -706,11 +729,32 @@ mod tests {
     };
 
     #[test]
-    fn clipboard_output_is_limited_to_one_photo() {
-        assert!(manual_output_available(1, ManualOutputTarget::Clipboard));
-        assert!(!manual_output_available(2, ManualOutputTarget::Clipboard));
-        assert!(manual_output_available(2, ManualOutputTarget::Folder));
-        assert!(manual_output_available(2, ManualOutputTarget::Profile));
+    fn clipboard_output_is_limited_to_one_photo_and_the_enabled_setting() {
+        assert!(manual_output_available(
+            1,
+            ManualOutputTarget::Clipboard,
+            true
+        ));
+        assert!(!manual_output_available(
+            2,
+            ManualOutputTarget::Clipboard,
+            true
+        ));
+        assert!(!manual_output_available(
+            1,
+            ManualOutputTarget::Clipboard,
+            false
+        ));
+        assert!(manual_output_available(
+            2,
+            ManualOutputTarget::Folder,
+            false
+        ));
+        assert!(manual_output_available(
+            2,
+            ManualOutputTarget::Profile,
+            false
+        ));
     }
 
     #[test]
