@@ -739,9 +739,9 @@ fn import_summary(report: &ImportReportView) -> String {
 mod tests {
     use super::{
         IMPORT_PROGRESS_NOTIFY_INTERVAL, ImportDialogOrigin, ImportDialogPhase, ImportDialogState,
-        ImportReportView, add_photo_root_and_save, import_remaining, import_should_index,
-        import_summary, merge_resume_report, merge_retry_report, request_import_scan,
-        reserve_import_dialog, should_notify_import_progress,
+        ImportReportView, add_photo_root_and_save, append_scan_error, import_remaining,
+        import_should_index, import_summary, merge_resume_report, merge_retry_report,
+        request_import_scan, reserve_import_dialog, should_notify_import_progress,
     };
     use crate::ui::import::retryable_sources;
     use std::cell::Cell;
