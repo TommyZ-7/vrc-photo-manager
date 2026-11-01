@@ -475,6 +475,14 @@ impl App {
         }
     }
 
+    /// Whether the ribbon's bulk actions have anything to operate on,
+    /// without cloning the selection. Equivalent to
+    /// `!selected_action_ids().is_empty()`; rendering uses this, the clone
+    /// stays on click paths.
+    pub(crate) fn has_action_selection(&self) -> bool {
+        !self.selected_ids.is_empty() || self.selected.is_some()
+    }
+
     pub(crate) fn color_for(&self, photo: &Photo) -> u32 {
         self.thumbnails.borrow().color(photo.id).unwrap_or_else(|| {
             self.palette
