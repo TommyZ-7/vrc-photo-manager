@@ -35,6 +35,9 @@ fn main() {
     if options.background {
         if let Err(error) = run_background_supervisor() {
             tracing::error!(%error, "background supervisor failed");
+            // A failed supervisor must not look like a clean exit to the
+            // service manager or the launching process.
+            std::process::exit(1);
         }
         return;
     }

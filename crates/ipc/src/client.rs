@@ -1,4 +1,6 @@
 use std::io::{self, BufReader};
+#[cfg(unix)]
+use std::path::Path;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -31,6 +33,14 @@ pub enum IpcError {
 
 /// Connects to `endpoint` with a bounded wait.
 pub(crate) fn connect_io(endpoint: &Endpoint, timeout: Duration) -> io::Result<Stream> {
+    #[cfg(unix)]
+    if endpoint.is_fallback()
+        && let Some(parent) = endpoint.path().and_then(Path::parent)
+    {
+        // Never connect to a socket planted in an unsafe fallback
+        // directory (symlink or owned by another user).
+        crate::endpoint::verify_fallback_dir(parent)?;
+    }
     let name = endpoint.name()?;
     ConnectOptions::new()
         .name(name)

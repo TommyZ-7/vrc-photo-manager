@@ -14,7 +14,7 @@ use gpui_kit::*;
 use vrc_photo_i18n::{tr, tr_args};
 
 use crate::app::App;
-use crate::ui::components::glass_panel;
+use crate::ui::components::{card_header, glass_panel};
 use crate::ui::theme::*;
 
 impl App {
@@ -50,14 +50,7 @@ impl App {
             .overflow_hidden()
             .rounded(px(17.))
             .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .h(px(GALLERY_HEADER_HEIGHT))
-                    .px(px(GALLERY_PAD_X))
-                    .gap(px(8.))
-                    .items_center()
-                    .border_b_1()
-                    .border_color(rgba(p.highlight))
+                card_header(&p)
                     .child(
                         h_flex()
                             .flex_shrink_0()

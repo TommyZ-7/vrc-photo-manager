@@ -1,10 +1,11 @@
-use std::io::{self, BufReader};
+use std::io::{self, BufReader, Read};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use interprocess::TryClone as _;
 #[cfg(unix)]
 use interprocess::local_socket::traits::Stream as _;
 use vrc_photo_ipc::framing;
@@ -49,7 +50,7 @@ pub(crate) struct IpcControl {
 
 impl IpcControl {
     fn snapshot(&self) -> StatusSnapshot {
-        status_snapshot(&self.status.lock().unwrap())
+        status_snapshot(&mut self.status.lock().unwrap())
     }
 
     fn set_paused(&self, paused: bool) {
@@ -69,7 +70,13 @@ impl IpcControl {
     }
 }
 
-pub(crate) fn status_snapshot(status: &DaemonStatus) -> StatusSnapshot {
+/// Takes a snapshot of the status, stamping it with the next version.
+/// Callers hold the status lock, so the version orders the snapshot
+/// against the state it was read from: a snapshot read before a state
+/// change always carries a lower version than one read after it, no
+/// matter when each is published.
+pub(crate) fn status_snapshot(status: &mut DaemonStatus) -> StatusSnapshot {
+    status.version += 1;
     StatusSnapshot {
         paused: status.paused,
         watching: status.watching,
@@ -82,6 +89,7 @@ pub(crate) fn status_snapshot(status: &DaemonStatus) -> StatusSnapshot {
         scan_roots: status.scan_roots,
         photo_count: status.photo_count,
         pending_jobs: status.pending_jobs,
+        version: status.version,
     }
 }
 
@@ -261,16 +269,70 @@ fn stream_events(
     control: &IpcControl,
     events: Receiver<vrc_photo_ipc::Event>,
 ) -> io::Result<()> {
-    while control.running.load(Ordering::Relaxed) {
+    // Watch the read half on a cloned handle: after subscribing, the client
+    // sends nothing, so EOF or a read error means it is gone. Without this,
+    // a disconnect is only noticed when the next event write fails, and an
+    // idle subscription leaks this thread and its EventBus sender.
+    let disconnected = Arc::new(AtomicBool::new(false));
+    let stop_watcher = Arc::new(AtomicBool::new(false));
+    match reader.get_ref().try_clone() {
+        Ok(probe) => spawn_disconnect_watcher(probe, disconnected.clone(), stop_watcher.clone()),
+        Err(error) => {
+            tracing::debug!(%error, "cannot watch subscription for disconnects");
+        }
+    }
+    let mut result = Ok(());
+    while control.running.load(Ordering::Relaxed) && !disconnected.load(Ordering::Relaxed) {
         match events.recv_timeout(Duration::from_millis(100)) {
             Ok(event) => {
-                framing::write_message(reader.get_mut(), &ServerMessage::Event { event })?;
+                if let Err(error) =
+                    framing::write_message(reader.get_mut(), &ServerMessage::Event { event })
+                {
+                    result = Err(error);
+                    break;
+                }
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
-    Ok(())
+    // The watcher is detached; the stop flag lets it exit on its next read
+    // timeout instead of lingering until the client disconnects.
+    stop_watcher.store(true, Ordering::Relaxed);
+    result
+}
+
+/// Marks `disconnected` when the subscription's read half reaches EOF or
+/// fails. Unexpected post-subscribe bytes are discarded, matching the
+/// previous behavior of never reading from a subscribed connection.
+fn spawn_disconnect_watcher(
+    mut probe: vrc_photo_ipc::server::Stream,
+    disconnected: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+) {
+    let spawned = thread::Builder::new()
+        .name("ipc-subscription-watch".to_string())
+        .spawn(move || {
+            #[cfg(unix)]
+            let _ = probe.set_recv_timeout(Some(Duration::from_millis(200)));
+            let mut buf = [0u8; 64];
+            while !stop.load(Ordering::Relaxed) {
+                match probe.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                        ) => {}
+                    Err(_) => break,
+                }
+            }
+            disconnected.store(true, Ordering::Relaxed);
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "cannot spawn subscription watcher");
+    }
 }
 
 fn write_response(
@@ -333,6 +395,28 @@ mod tests {
     }
 
     #[test]
+    fn a_snapshot_read_before_a_state_change_versions_below_one_read_after() {
+        // The stale-publish race from #66: a snapshot read while a scan is
+        // running must stay older than the snapshot read after the scan
+        // finished, so the receiver can drop it even when it is published
+        // after the fresher one.
+        let (_dir, _endpoint, control) = test_control();
+        control.status.lock().unwrap().scanning = true;
+        let stale = control.snapshot();
+        control.status.lock().unwrap().scanning = false;
+        let fresh = control.snapshot();
+
+        assert!(stale.scanning);
+        assert!(!fresh.scanning);
+        assert!(
+            stale.version < fresh.version,
+            "stale {} must version below fresh {}",
+            stale.version,
+            fresh.version
+        );
+    }
+
+    #[test]
     fn thumbnails_generated_adds_external_bytes() {
         let (_dir, endpoint, control) = test_control();
         let _server = IpcServer::start(endpoint.clone(), control.clone()).unwrap();
@@ -360,6 +444,26 @@ mod tests {
         assert!(matches!(response, Response::Ok));
         assert!(!control.running.load(Ordering::Relaxed));
         assert!(control.wake.is_pending());
+    }
+
+    #[test]
+    fn disconnect_releases_the_subscription_without_an_event() {
+        let (_dir, endpoint, control) = test_control();
+        let _server = IpcServer::start(endpoint.clone(), control.clone()).unwrap();
+        let (subscription, _) = Subscription::open(&endpoint, Duration::from_secs(1)).unwrap();
+        // The sender is registered before the Subscribed response is
+        // written, so it is already counted when open() returns.
+        assert_eq!(control.events.subscribers.lock().unwrap().len(), 1);
+
+        drop(subscription);
+        // No event is published while the client is gone: the disconnect
+        // alone must end the connection thread and drop its receiver, so
+        // the next publish prunes the dead sender.
+        thread::sleep(Duration::from_secs(2));
+        control.events.publish(Event::StatusChanged {
+            status: control.snapshot(),
+        });
+        assert_eq!(control.events.subscribers.lock().unwrap().len(), 0);
     }
 
     #[test]

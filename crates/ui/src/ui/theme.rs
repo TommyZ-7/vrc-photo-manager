@@ -44,7 +44,6 @@ pub(crate) const GALLERY_PAD_BOTTOM: f32 = 12.0;
 pub(crate) const SEARCH_FILTER_WIDTH: f32 = 290.0;
 /// Fixed-ish width of the dashboard's daemon/session/log column.
 pub(crate) const DASHBOARD_SIDE_WIDTH: f32 = 340.0;
-/// Settings category navigation card.
 /// Compression profile list card.
 pub(crate) const COMPRESSION_PROFILE_WIDTH: f32 = 280.0;
 pub(crate) const VIEWER_DETAILS_WIDTH: f32 = 380.0;

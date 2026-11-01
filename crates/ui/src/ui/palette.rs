@@ -930,6 +930,46 @@ pub(crate) fn apply_component_theme(palette: Palette, cx: &mut App) {
         theme.colors.button_success_active = rgb(success_active).into();
         theme.colors.button_success_foreground =
             rgb(best_on_all(&[palette.green, success_hover, success_active])).into();
+        // The secondary family backs the Secondary button variant and the
+        // Ghost button's resting foreground, both used by the app.
+        theme.colors.secondary = rgb(palette.panel_2).into();
+        theme.colors.secondary_hover = rgb(palette.accent_soft).into();
+        theme.colors.secondary_active = rgb(palette.accent_soft_hover).into();
+        theme.colors.secondary_foreground = rgb(palette.text).into();
+        theme.colors.button_secondary = rgb(palette.panel_2).into();
+        theme.colors.button_secondary_hover = rgb(palette.accent_soft).into();
+        theme.colors.button_secondary_active = rgb(palette.accent_soft_hover).into();
+        theme.colors.button_secondary_foreground = rgb(palette.text).into();
+        // Info is the app's accent: the palette carries no separate info
+        // hue, and notifications / Info buttons should follow the theme.
+        theme.colors.info = rgb(palette.accent_fill).into();
+        theme.colors.info_hover = rgb(primary_hover).into();
+        theme.colors.info_active = rgb(primary_active).into();
+        theme.colors.info_foreground = rgb(primary_foreground).into();
+        theme.colors.button_info = rgb(palette.accent_fill).into();
+        theme.colors.button_info_hover = rgb(primary_hover).into();
+        theme.colors.button_info_active = rgb(primary_active).into();
+        theme.colors.button_info_foreground = rgb(primary_foreground).into();
+        // Hover/active siblings of the already-mapped state colors.
+        theme.colors.primary_hover = rgb(primary_hover).into();
+        theme.colors.primary_active = rgb(primary_active).into();
+        theme.colors.danger_hover = rgb(danger_hover).into();
+        theme.colors.danger_active = rgb(danger_active).into();
+        theme.colors.warning_hover = rgb(warning_hover).into();
+        theme.colors.warning_active = rgb(warning_active).into();
+        theme.colors.success_hover = rgb(success_hover).into();
+        theme.colors.success_active = rgb(success_active).into();
+        // Switch: the checked track is `primary` (mapped above); the
+        // unchecked track and the thumb come from the muted family, with
+        // the thumb chosen to read on both tracks.
+        theme.colors.switch = rgb(palette.muted_2).into();
+        theme.colors.switch_thumb =
+            rgb(best_on_all(&[palette.accent_fill, palette.muted_2])).into();
+        // Tokens for widgets the app never renders (accordion, chart,
+        // table, tabs, slider, skeleton, drop target, the component
+        // sidebar / title bar / status bar) intentionally keep the
+        // library defaults: the app draws those surfaces itself from the
+        // palette, so no default token can leak into the UI.
         theme.colors.drag_border = rgb(palette.accent_border).into();
         theme.colors.scrollbar = rgb(palette.border_strong).into();
         theme.colors.scrollbar_thumb = rgb(palette.muted_2).into();
@@ -1129,6 +1169,15 @@ mod tests {
                 assert_contrast(primary_fg, palette.accent_fill, 4.5, &label);
                 assert_contrast(primary_fg, hover, 4.5, &label);
                 assert_contrast(primary_fg, active, 4.5, &label);
+                // Secondary / Ghost foregrounds rest on the panel and
+                // accent-soft surfaces.
+                assert_contrast(palette.text, palette.panel_2, 4.5, &label);
+                assert_contrast(palette.text, palette.accent_soft, 4.5, &label);
+                assert_contrast(palette.text, palette.accent_soft_hover, 4.5, &label);
+                // The switch thumb must read on both switch tracks.
+                let switch_thumb = best_on_all(&[palette.accent_fill, palette.muted_2]);
+                assert_contrast(switch_thumb, palette.accent_fill, 3.0, &label);
+                assert_contrast(switch_thumb, palette.muted_2, 3.0, &label);
                 assert_contrast(palette.border, palette.panel_card, 1.2, &label);
                 assert_contrast(palette.border_strong, palette.panel_card, 1.8, &label);
             }

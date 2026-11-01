@@ -15,6 +15,15 @@ use vrc_photo_ipc::{Request as IpcRequest, ScanPhase as IpcScanPhase, StatusSnap
 use crate::app::App;
 use crate::app::lifecycle::ScanProgressView;
 
+/// Whether an incoming status snapshot should replace the applied one.
+/// The daemon stamps each snapshot with the version of the state it was
+/// read from, so anything at or below the last applied version is a stale
+/// publish and must be dropped. Version 0 comes from a daemon without
+/// versioning and is always accepted.
+pub(crate) fn status_snapshot_is_newer(version: u64, last_applied: u64) -> bool {
+    version == 0 || version > last_applied
+}
+
 pub(crate) fn daemon_liveness(age_secs: Option<i64>, ipc_connected: bool) -> bool {
     ipc_connected || age_secs.is_some_and(|age| age < 20)
 }
@@ -94,43 +103,35 @@ pub(crate) fn open_path(path: &Path) -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 pub(crate) fn open_path(path: &Path) -> Result<(), String> {
-    let status = Command::new("open")
+    // Like the Windows branch, success is the process starting: waiting
+    // for `open` to exit would stall the UI thread on the handler.
+    Command::new("open")
         .arg(path)
-        .status()
-        .map_err(|error| tr_args!("daemon.error.open", error = error))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(tr_args!("daemon.error.open_status", status = status))
-    }
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| tr_args!("daemon.error.open", error = error))
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
 pub(crate) fn open_path(path: &Path) -> Result<(), String> {
-    match open_status("xdg-open", &[], path) {
+    match open_spawn("xdg-open", &[], path) {
         Ok(()) => Ok(()),
         Err(first) => {
-            open_status("gio", &["open"], path).map_err(|second| format!("{first} / {second}"))
+            open_spawn("gio", &["open"], path).map_err(|second| format!("{first} / {second}"))
         }
     }
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn open_status(program: &str, args: &[&str], path: &Path) -> Result<(), String> {
-    let status = Command::new(program)
+fn open_spawn(program: &str, args: &[&str], path: &Path) -> Result<(), String> {
+    // Success is the opener starting (see the macOS branch); the opener
+    // hands the path to the desktop handler and exits on its own.
+    Command::new(program)
         .args(args)
         .arg(path)
-        .status()
-        .map_err(|error| tr_args!("daemon.error.spawn", program = program, error = error))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(tr_args!(
-            "daemon.error.spawn_status",
-            program = program,
-            status = status
-        ))
-    }
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| tr_args!("daemon.error.spawn", program = program, error = error))
 }
 
 #[cfg(not(any(unix, target_os = "windows")))]
@@ -301,9 +302,21 @@ impl App {
 mod tests {
     use super::{
         autostart_description, daemon_liveness, daemon_operation_label, daemon_state_label,
-        daemon_sync_label, format_timestamp, ipc_status_label,
+        daemon_sync_label, format_timestamp, ipc_status_label, status_snapshot_is_newer,
     };
     use vrc_photo_core::model::DaemonOperation;
+
+    #[test]
+    fn status_snapshot_versions_drop_stale_publishes() {
+        // A snapshot read before the scan finished versions below the one
+        // read after it; published late, it must not be applied again.
+        assert!(status_snapshot_is_newer(3, 2));
+        assert!(!status_snapshot_is_newer(2, 2));
+        assert!(!status_snapshot_is_newer(1, 2));
+        // Unversioned snapshots (older daemon) always apply.
+        assert!(status_snapshot_is_newer(0, 2));
+        assert!(status_snapshot_is_newer(0, 0));
+    }
 
     #[test]
     fn daemon_operation_labels_cover_every_operation() {

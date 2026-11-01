@@ -83,6 +83,14 @@ pub(crate) fn should_request_preview(
     loaded != Some(key) && attempt != Some(key) && !pending
 }
 
+/// Whether a finished decode for `key` should be applied.
+///
+/// The result is stale when the selection has moved on (or is gone) by the
+/// time the decode completes; stale results are dropped by the caller.
+pub(crate) fn should_apply_preview(selected: Option<PreviewKey>, key: PreviewKey) -> bool {
+    selected == Some(key)
+}
+
 /// Chooses the preview cache directory. Demo mode may only use its own cache;
 /// if the demo assets are unavailable, it must not touch the real data dir.
 pub(crate) fn preview_cache_dir(
@@ -105,6 +113,39 @@ pub(crate) fn preview_placeholder_label(pending: bool) -> String {
 mod tests {
     use super::*;
     use vrc_photo_core::model::PhotoStatus;
+
+    fn key(photo_id: i64) -> PreviewKey {
+        PreviewKey {
+            photo_id,
+            variant: 0,
+        }
+    }
+
+    #[test]
+    fn queue_starts_one_decode_and_holds_the_latest_request() {
+        let mut queue = PreviewQueue::default();
+        assert!(queue.want(key(1)));
+        assert_eq!(queue.begin(), Some(key(1)));
+        // A second request while one is in flight is held, not started.
+        assert!(!queue.want(key(2)));
+        assert_eq!(queue.begin(), None);
+        queue.finish(key(1));
+        assert_eq!(queue.begin(), Some(key(2)));
+    }
+
+    #[test]
+    fn cancel_wanted_drops_the_queued_request() {
+        // The reset path (selection clear / viewer close / removal) relies
+        // on this: after a cancel, no decode starts for the old selection.
+        let mut queue = PreviewQueue::default();
+        assert!(queue.want(key(1)));
+        assert_eq!(queue.begin(), Some(key(1)));
+        assert!(!queue.want(key(2)));
+        queue.cancel_wanted();
+        queue.finish(key(1));
+        assert_eq!(queue.begin(), None);
+        assert!(!queue.pending_for(2));
+    }
 
     fn test_photo(id: i64) -> Photo {
         Photo {
@@ -255,6 +296,21 @@ mod tests {
         ));
         assert!(!should_request_preview(None, None, true, wanted));
         assert!(should_request_preview(None, None, false, wanted));
+    }
+
+    #[test]
+    fn applies_a_finished_decode_only_for_the_current_selection() {
+        let key = PreviewKey {
+            photo_id: 7,
+            variant: 0,
+        };
+        let other = PreviewKey {
+            photo_id: 7,
+            variant: 42,
+        };
+        assert!(should_apply_preview(Some(key), key));
+        assert!(!should_apply_preview(Some(other), key));
+        assert!(!should_apply_preview(None, key));
     }
 
     #[test]

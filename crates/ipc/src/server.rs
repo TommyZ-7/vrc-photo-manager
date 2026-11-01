@@ -32,7 +32,7 @@ impl Listener {
     pub fn bind(endpoint: Endpoint) -> io::Result<Self> {
         #[cfg(unix)]
         if let Some(path) = endpoint.path() {
-            prepare_parent(path)?;
+            prepare_parent(path, endpoint.is_fallback())?;
             if path.exists() {
                 match client::connect_io(&endpoint, Duration::from_millis(200)) {
                     Ok(_) => {
@@ -83,10 +83,15 @@ impl Listener {
 }
 
 #[cfg(unix)]
-fn prepare_parent(path: &Path) -> io::Result<()> {
+fn prepare_parent(path: &Path, fallback: bool) -> io::Result<()> {
     let Some(parent) = path.parent() else {
         return Ok(());
     };
+    if fallback {
+        // The fallback parent lives in the shared temp directory: refuse
+        // to bind when another user planted it or it is a symlink.
+        return crate::endpoint::ensure_safe_fallback_dir(parent);
+    }
     fs::create_dir_all(parent)?;
     fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
 }
@@ -119,6 +124,31 @@ mod tests {
             error.kind(),
             io::ErrorKind::AddrInUse | io::ErrorKind::PermissionDenied
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fallback_bind_rejects_a_symlinked_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        fs::create_dir(&real).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let endpoint = Endpoint::fallback_for_tests(link.join("daemon.sock"));
+        let error = Listener::bind(endpoint).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fallback_bind_creates_a_private_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("fallback");
+        let endpoint = Endpoint::fallback_for_tests(parent.join("daemon.sock"));
+        let _listener = Listener::bind(endpoint).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&parent).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
     }
 
     #[cfg(unix)]

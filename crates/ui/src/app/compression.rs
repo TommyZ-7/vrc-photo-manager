@@ -16,6 +16,7 @@ use vrc_photo_i18n::{tr, tr_args};
 
 use crate::app::App;
 use crate::ui::components::release_confirmation;
+use crate::ui::compression::job_retry_available;
 use crate::ui::theme::{compression_policy, moved_profile_order, step_index};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -472,7 +473,7 @@ impl App {
         let id = profile.id.clone();
         match self.db.duplicate_profile(&id) {
             Ok(copy) => {
-                self.profiles = self.db.list_profiles().unwrap_or_default();
+                self.reload_profiles();
                 self.profile_index = self
                     .profiles
                     .iter()
@@ -571,7 +572,7 @@ impl App {
             .unwrap_or_else(|| id.to_string());
         match self.db.delete_profile(id) {
             Ok(()) => {
-                self.profiles = self.db.list_profiles().unwrap_or_default();
+                self.reload_profiles();
                 self.profile_index = removed_index.min(self.profiles.len().saturating_sub(1));
                 self.toast_success(tr!("compression.profile.deleted"), cx);
             }
@@ -600,10 +601,22 @@ impl App {
                 self.send_wake_jobs(cx);
             }
             Ok(false) => {
-                self.toast_warning(
-                    tr_args!("compression.retry_limit", max = MAX_JOB_RETRIES),
-                    cx,
-                );
+                // The update matched nothing: the job is either at the
+                // retry cap or no longer failed (already requeued, running,
+                // or removed). The loaded page tells the two apart.
+                let at_cap = self
+                    .failed_jobs
+                    .iter()
+                    .any(|job| job.id == id && !job_retry_available(job));
+                if at_cap {
+                    self.toast_warning(
+                        tr_args!("compression.retry_limit", max = MAX_JOB_RETRIES),
+                        cx,
+                    );
+                } else {
+                    self.toast_warning(tr!("compression.retry.state_changed"), cx);
+                }
+                self.reload_job_state(cx);
             }
             Err(error) => {
                 tracing::warn!(%error, %id, "cannot retry compression job");
@@ -615,6 +628,10 @@ impl App {
 
     pub(crate) fn retry_all_failed_jobs(&mut self, cx: &mut Context<Self>) {
         match self.db.retry_failed_jobs() {
+            Ok(0) => {
+                self.toast_warning(tr!("compression.retry.none"), cx);
+                self.reload_job_state(cx);
+            }
             Ok(count) => {
                 self.toast_success(
                     tr_args!("compression.retry.all_requeued", count = count),

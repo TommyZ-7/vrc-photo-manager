@@ -28,7 +28,7 @@ use crate::state::photo_browser::{
 use crate::state::thumbnail::ThumbnailCache;
 use crate::state::viewer::ViewerOpenSource;
 use crate::state::year_rail::format_captured_month;
-use crate::ui::components::glass_panel;
+use crate::ui::components::{card_header, glass_panel};
 use crate::ui::theme::*;
 use crate::ui::year_rail::{YearRail, YearRailLabels};
 
@@ -146,14 +146,7 @@ fn render_header(app: &App, shared: &Rc<GalleryShared>, window: &Window) -> AnyE
         (format_captured_month(month), count)
     };
 
-    h_flex()
-        .flex_shrink_0()
-        .h(px(GALLERY_HEADER_HEIGHT))
-        .px(px(GALLERY_PAD_X))
-        .gap(px(8.))
-        .items_center()
-        .border_b_1()
-        .border_color(rgba(p.highlight))
+    card_header(&p)
         .child(
             h_flex()
                 .min_w_0()

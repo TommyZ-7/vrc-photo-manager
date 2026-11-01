@@ -19,7 +19,7 @@ use vrc_photo_core::model::{
 use vrc_photo_i18n::{tr, tr_args};
 
 use crate::app::App;
-use crate::ui::components::glass_panel;
+use crate::ui::components::{card_header, glass_panel};
 use crate::ui::theme::*;
 
 fn section_divider(palette: &Palette) -> AnyElement {
@@ -47,8 +47,20 @@ fn queue_status_badge(status: &QueueStatus, p: &Palette) -> (String, u32, u32) {
 }
 
 /// Whether a failed job can return to the queue without exceeding the cap.
-fn job_retry_available(job: &CompressionJob) -> bool {
+pub(crate) fn job_retry_available(job: &CompressionJob) -> bool {
     job.status == QueueStatus::Failed && job.retry_count < MAX_JOB_RETRIES
+}
+
+/// The failure reason shown on a failed job's row. A job that failed
+/// without a recorded reason still gets a line, so the row never reads
+/// as if nothing went wrong.
+fn job_error_label(job: &CompressionJob) -> String {
+    job.error
+        .as_deref()
+        .map(str::trim)
+        .filter(|error| !error.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| tr!("compression.job.unknown_error"))
 }
 
 /// Retry usage for a failed job, or the cap explanation once exhausted.
@@ -245,14 +257,7 @@ impl App {
     /// header; the add action keeps its original save/reload path.
     fn profile_list_header(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let p = self.palette;
-        h_flex()
-            .flex_shrink_0()
-            .h(px(GALLERY_HEADER_HEIGHT))
-            .px(px(GALLERY_PAD_X))
-            .gap(px(8.))
-            .items_center()
-            .border_b_1()
-            .border_color(rgba(p.highlight))
+        card_header(&p)
             .child(
                 div()
                     .flex_1()
@@ -359,14 +364,7 @@ impl App {
             .overflow_hidden()
             .rounded(px(17.))
             .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .h(px(GALLERY_HEADER_HEIGHT))
-                    .px(px(GALLERY_PAD_X))
-                    .gap(px(8.))
-                    .items_center()
-                    .border_b_1()
-                    .border_color(rgba(p.highlight))
+                card_header(&p)
                     .child(
                         div()
                             .min_w_0()
@@ -1004,7 +1002,10 @@ impl App {
 
     pub(crate) fn queue_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.palette;
-        let retryable_jobs = self.failed_jobs.iter().any(job_retry_available);
+        // The loaded page holds at most 100 failed jobs; the aggregate
+        // count keeps the retry-all action available when the retryable
+        // failures sit beyond that page.
+        let retryable_jobs = self.retryable_failed_count > 0;
         glass_panel(&self.palette)
             .flex()
             .flex_col()
@@ -1138,55 +1139,6 @@ impl App {
                                     .child(format!("{:.0}%", job.progress * 100.0)),
                             )
                     }))
-                    .children(
-                        self.jobs
-                            .iter()
-                            .filter(|job| {
-                                !matches!(job.status, QueueStatus::Waiting | QueueStatus::Failed)
-                            })
-                            .take(6)
-                            .map(|job| {
-                                let status = queue_status_badge(&job.status, &p);
-                                let profile_name = self
-                                    .profiles
-                                    .iter()
-                                    .find(|profile| profile.id == job.profile_id)
-                                    .map(|profile| profile.name.clone())
-                                    .unwrap_or_else(|| tr!("compression.unknown_profile"));
-                                h_flex()
-                                    .px(px(16.))
-                                    .py(px(10.))
-                                    .gap(px(8.))
-                                    .items_center()
-                                    .border_b_1()
-                                    .border_color(rgb(p.border))
-                                    .child(self.badge(status.0, status.1, status.2))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .text_size(px(12.))
-                                            .text_color(rgb(p.text))
-                                            .truncate()
-                                            .child(tr_args!(
-                                                "compression.job.photo",
-                                                id = job.photo_id
-                                            )),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(10.))
-                                            .text_color(rgb(p.muted_2))
-                                            .child(profile_name),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(10.))
-                                            .text_color(rgb(p.muted_2))
-                                            .child(format!("{:.0}%", job.progress * 100.0)),
-                                    )
-                            }),
-                    )
                     .children(self.failed_jobs.iter().map(|job| {
                         let name = self
                             .failed_job_names
@@ -1200,7 +1152,7 @@ impl App {
                             .iter()
                             .find(|profile| profile.id == job.profile_id)
                             .map(|profile| profile.name.clone());
-                        let error = job.error.clone().unwrap_or_default();
+                        let error = job_error_label(job);
                         let retryable = job_retry_available(job);
                         let id = job.id.clone();
                         v_flex()
@@ -1292,7 +1244,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{job_retry_available, job_retry_label, queue_status_badge};
+    use super::{job_error_label, job_retry_available, job_retry_label, queue_status_badge};
     use vrc_photo_core::model::{CompressionJob, QueueStatus};
 
     fn test_job(status: QueueStatus, retry_count: i64) -> CompressionJob {
@@ -1320,6 +1272,21 @@ mod tests {
         assert!(!job_retry_available(&test_job(QueueStatus::Failed, 3)));
         assert!(!job_retry_available(&test_job(QueueStatus::Completed, 0)));
         assert!(job_retry_label(&test_job(QueueStatus::Failed, 3)).contains("上限"));
+    }
+
+    #[test]
+    fn job_error_label_falls_back_when_no_reason_was_recorded() {
+        assert_eq!(job_error_label(&test_job(QueueStatus::Failed, 0)), "boom");
+        let missing = CompressionJob {
+            error: None,
+            ..test_job(QueueStatus::Failed, 0)
+        };
+        assert_eq!(job_error_label(&missing), "原因不明");
+        let blank = CompressionJob {
+            error: Some("  ".to_string()),
+            ..test_job(QueueStatus::Failed, 0)
+        };
+        assert_eq!(job_error_label(&blank), "原因不明");
     }
 
     #[test]

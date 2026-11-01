@@ -321,14 +321,8 @@ impl App {
         let tab = self.sidebar_status_tab;
         let (status, ratio) = match tab {
             SidebarStatusTab::Compression => (&compression, None),
-            SidebarStatusTab::Import => (&import, import_progress.map(import_progress_ratio)),
-            SidebarStatusTab::Scan => (
-                &scan,
-                self.scan_progress
-                    .as_ref()
-                    .map(scan_progress_ratio)
-                    .filter(|ratio| *ratio > 0.0),
-            ),
+            SidebarStatusTab::Import => (&import, import_bar_ratio(import_progress)),
+            SidebarStatusTab::Scan => (&scan, scan_bar_ratio(self.scan_progress.as_ref())),
         };
         let import_has_report = self.import_report.is_some();
 
@@ -424,6 +418,7 @@ impl App {
         let footer = match tab {
             SidebarStatusTab::Compression => {
                 let mut row = h_flex().items_center().h(px(24.)).gap(px(6.));
+                let retry_available = sidebar_retry_available(self.retryable_failed_count);
                 if self.waiting_job_count > 0 {
                     row = row.child(
                         Button::new("sidebar-status-release-waiting")
@@ -436,7 +431,7 @@ impl App {
                             })),
                     );
                 }
-                if self.failed_job_count > 0 {
+                if retry_available {
                     row = row.child(
                         Button::new("sidebar-status-retry-failed")
                             .label(tr!("common.retry"))
@@ -446,7 +441,7 @@ impl App {
                             .on_click(cx.listener(|this, _, _, cx| this.retry_all_failed_jobs(cx))),
                     );
                 }
-                if self.waiting_job_count == 0 && self.failed_job_count == 0 {
+                if self.waiting_job_count == 0 && !retry_available {
                     row = row.child(
                         Button::new("sidebar-status-open-queue")
                             .label(tr!("sidebar.open_queue"))
@@ -979,7 +974,7 @@ fn import_card_status(
 }
 
 fn import_scan_failure_count(report: &ImportReportView) -> usize {
-    report.scan_failures.len() + usize::from(report.scan_error.is_some())
+    report.scan_failures.len() + report.scan_errors.len()
 }
 
 fn scan_card_status(
@@ -1025,6 +1020,15 @@ fn scan_card_status(
     }
 }
 
+/// Whether the sidebar compression card offers its retry action. The
+/// input is the DB aggregate of retryable failures, not the loaded page
+/// of failed jobs: when every failure is at the retry cap the action
+/// would retry nothing, so the card offers the queue instead — the same
+/// gate the dashboard applies.
+fn sidebar_retry_available(retryable_failed: i64) -> bool {
+    retryable_failed > 0
+}
+
 fn compression_attention(active: i64, waiting: i64, failed: i64) -> Option<StatusTone> {
     if failed > 0 {
         Some(StatusTone::Failed)
@@ -1067,6 +1071,20 @@ fn scan_attention(
     } else {
         None
     }
+}
+
+/// The import bar shows its track even before any file has moved, so
+/// the card reads as present-but-empty at ratio 0.
+fn import_bar_ratio(progress: Option<&ImportProgress>) -> Option<f32> {
+    progress.map(import_progress_ratio)
+}
+
+/// The scan bar stays hidden at ratio 0: a scan that has not processed
+/// anything yet shows its label only.
+fn scan_bar_ratio(progress: Option<&ScanProgressView>) -> Option<f32> {
+    progress
+        .map(scan_progress_ratio)
+        .filter(|ratio| *ratio > 0.0)
 }
 
 fn import_running_progress(dialog: Option<&ImportDialogState>) -> Option<&ImportProgress> {
@@ -1124,9 +1142,10 @@ pub(crate) fn screen_direction(from: Screen, to: Screen) -> f32 {
 mod tests {
     use super::{
         NAV_ITEM_GAP, NAV_ITEM_HEIGHT, StatusTone, compression_attention, compression_card_status,
-        import_attention, import_card_status, import_running_progress, nav_index, nav_item_top,
-        nav_tooltip_origin, rail_toggle_origin, running_job_count, scan_attention,
-        scan_card_status, scan_progress_label, scan_progress_ratio, screen_direction,
+        import_attention, import_bar_ratio, import_card_status, import_running_progress, nav_index,
+        nav_item_top, nav_tooltip_origin, rail_toggle_origin, running_job_count, scan_attention,
+        scan_bar_ratio, scan_card_status, scan_progress_label, scan_progress_ratio,
+        screen_direction, sidebar_retry_available,
     };
     use crate::app::Screen;
     use crate::app::import::{
@@ -1214,7 +1233,7 @@ mod tests {
             remaining: Vec::new(),
             cancelled: false,
             scan_failures: Vec::new(),
-            scan_error: None,
+            scan_errors: Vec::new(),
             issue_counts: Cell::new(None),
         }
     }
@@ -1276,6 +1295,16 @@ mod tests {
         assert_eq!(running_job_count(2, 6), 0);
         assert_eq!(running_job_count(0, 0), 0);
     }
+
+    #[test]
+    fn sidebar_retry_needs_a_retryable_failure() {
+        // The aggregate count excludes failures at the retry cap, so any
+        // positive count means the retry action has work to do.
+        assert!(!sidebar_retry_available(0));
+        assert!(sidebar_retry_available(1));
+        assert!(sidebar_retry_available(120));
+    }
+
     #[test]
     fn compression_card_status_prioritizes_waiting_running_and_failed() {
         let waiting = compression_card_status(6, 5, 2);
@@ -1385,7 +1414,7 @@ mod tests {
         );
 
         let hard_error = ImportReportView {
-            scan_error: Some("cannot index".to_string()),
+            scan_errors: vec!["cannot index".to_string()],
             ..import_report_fixture()
         };
         let hard_error_status = import_card_status(None, Some(&hard_error));
@@ -1527,6 +1556,59 @@ mod tests {
         assert_eq!(scan_attention(None, true, true), Some(StatusTone::Waiting));
         assert_eq!(scan_attention(None, true, false), None);
         assert_eq!(scan_attention(None, false, false), None);
+    }
+
+    #[test]
+    fn attention_dots_cover_partial_only_success_only_and_paused_scan() {
+        // A report whose only blemish is a partial move waits for the
+        // user's attention without counting as a failure.
+        let partial_only = ImportReportView {
+            total: 1,
+            processed: 1,
+            imported: 1,
+            issues: vec![partial_issue("/a.png")],
+            ..import_report_fixture()
+        };
+        assert_eq!(
+            import_attention(None, Some(&partial_only)),
+            Some(StatusTone::Waiting)
+        );
+
+        // A fully successful import needs no attention dot.
+        let success_only = ImportReportView {
+            total: 2,
+            processed: 2,
+            imported: 2,
+            ..import_report_fixture()
+        };
+        assert_eq!(import_attention(None, Some(&success_only)), None);
+
+        // Scan progress outranks the paused state: a paused daemon that
+        // is mid-scan still reads as running.
+        let scanning = indexing_fixture();
+        assert_eq!(
+            scan_attention(Some(&scanning), true, true),
+            Some(StatusTone::Running)
+        );
+    }
+
+    #[test]
+    fn bar_ratios_show_the_import_track_at_zero_but_hide_the_scan_bar() {
+        let import_progress = progress_fixture(0, 10);
+        assert_eq!(import_bar_ratio(Some(&import_progress)), Some(0.0));
+        assert_eq!(import_bar_ratio(None), None);
+
+        let scan_idle = ScanProgressView {
+            processed: 0,
+            ..indexing_fixture()
+        };
+        assert_eq!(scan_bar_ratio(Some(&scan_idle)), None);
+        let scan_running = indexing_fixture();
+        assert_eq!(
+            scan_bar_ratio(Some(&scan_running)),
+            Some(scan_progress_ratio(&scan_running))
+        );
+        assert_eq!(scan_bar_ratio(None), None);
     }
 
     #[test]

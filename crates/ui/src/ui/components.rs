@@ -1,8 +1,5 @@
 //! Shared presentation components: buttons, chips, cards, and the small
 //! labelled rows used by more than one screen.
-//!
-//! PR1 keeps every value and layout exactly as it was in `main.rs`; later
-//! tasks consume these helpers from the per-screen modules.
 
 use std::rc::Rc;
 
@@ -38,6 +35,21 @@ pub(crate) struct ButtonState {
 /// stand on their own fill: solid `palette.panel_card`, a 1px border, a top inset
 /// highlight, and a weak drop shadow. There is deliberately no element-level
 /// blur or translucent fill here.
+/// The 42 px header bar shared by the gallery, search results, and
+/// compression cards: fixed height, standard horizontal padding,
+/// vertically centred contents, and the hairline under the bar. Screens
+/// add their title and actions as children.
+pub(crate) fn card_header(palette: &Palette) -> Div {
+    h_flex()
+        .flex_shrink_0()
+        .h(px(GALLERY_HEADER_HEIGHT))
+        .px(px(GALLERY_PAD_X))
+        .gap(px(8.))
+        .items_center()
+        .border_b_1()
+        .border_color(rgba(palette.highlight))
+}
+
 pub(crate) fn glass_panel(palette: &Palette) -> Div {
     let p = palette;
     div()

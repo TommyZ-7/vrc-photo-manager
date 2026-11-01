@@ -14,7 +14,6 @@ use gpui_kit::{ScrollStrategy, UniformListScrollHandle};
 use vrc_photo_core::model::{Photo, PhotoIndexEntry};
 
 use crate::state::year_rail::{YearBucket, build_year_buckets};
-use crate::ui::theme::{MIN_CARD_WIDTH, photo_row_height};
 use crate::ui::year_rail::YearRailLabels;
 
 pub(crate) const PAGE_SIZE: usize = 256;
@@ -251,14 +250,16 @@ pub(crate) struct PhotoBrowser {
 }
 
 impl PhotoBrowser {
-    pub(crate) fn new(index: Arc<PhotoIndex>) -> Self {
+    /// `initial_row_height` only stands in until the first grid render
+    /// replaces it with the current layout's row height; the caller (the
+    /// app layer) computes it so this module stays free of theme types.
+    pub(crate) fn new(index: Arc<PhotoIndex>, initial_row_height: f32) -> Self {
         Self {
             index,
             pages: PhotoPageCache::new(),
             scroll: UniformListScrollHandle::new(),
             columns: 1,
-            // The first grid render replaces this with the current layout.
-            row_height: photo_row_height(MIN_CARD_WIDTH, true, true),
+            row_height: initial_row_height,
             pending_anchor: None,
             generation: 0,
             labels_generation: 0,
@@ -439,7 +440,7 @@ mod tests {
 
     #[test]
     fn invalidate_labels_drops_cached_rail_labels() {
-        let mut browser = PhotoBrowser::new(Arc::new(PhotoIndex::new(Vec::new())));
+        let mut browser = PhotoBrowser::new(Arc::new(PhotoIndex::new(Vec::new())), TEST_ROW_HEIGHT);
         browser.labels = Some(Arc::new(YearRailLabels::empty_for_test()));
         browser.invalidate_labels();
         assert!(browser.labels.is_none());
@@ -522,8 +523,10 @@ mod tests {
 
     #[test]
     fn stale_generation_cannot_insert_or_fail_pages() {
-        let mut browser =
-            PhotoBrowser::new(Arc::new(PhotoIndex::new(vec![index_entry(1, 202601)])));
+        let mut browser = PhotoBrowser::new(
+            Arc::new(PhotoIndex::new(vec![index_entry(1, 202601)])),
+            TEST_ROW_HEIGHT,
+        );
         let stale = browser.generation;
         browser.replace_index(Arc::new(PhotoIndex::new(vec![index_entry(2, 202601)])));
 
@@ -542,10 +545,13 @@ mod tests {
 
     #[test]
     fn failed_library_index_keeps_the_mounted_snapshot_and_pages() {
-        let mut browser = PhotoBrowser::new(Arc::new(PhotoIndex::new(vec![
-            index_entry(1, 202601),
-            index_entry(2, 202512),
-        ])));
+        let mut browser = PhotoBrowser::new(
+            Arc::new(PhotoIndex::new(vec![
+                index_entry(1, 202601),
+                index_entry(2, 202512),
+            ])),
+            TEST_ROW_HEIGHT,
+        );
         let generation = browser.generation;
         browser.insert_page(0, vec![test_photo(1)], generation);
         let mounted = browser.index.clone();
@@ -563,8 +569,10 @@ mod tests {
 
     #[test]
     fn fresh_library_index_replaces_the_snapshot() {
-        let mut browser =
-            PhotoBrowser::new(Arc::new(PhotoIndex::new(vec![index_entry(1, 202601)])));
+        let mut browser = PhotoBrowser::new(
+            Arc::new(PhotoIndex::new(vec![index_entry(1, 202601)])),
+            TEST_ROW_HEIGHT,
+        );
         let generation = browser.generation;
         browser.insert_page(0, vec![test_photo(1)], generation);
 
@@ -581,18 +589,24 @@ mod tests {
 
     #[test]
     fn search_mirror_refreshes_only_when_the_library_snapshot_changed() {
-        let library = PhotoBrowser::new(Arc::new(PhotoIndex::new(vec![index_entry(1, 202601)])));
-        let mut search = PhotoBrowser::new(library.index.clone());
+        let library = PhotoBrowser::new(
+            Arc::new(PhotoIndex::new(vec![index_entry(1, 202601)])),
+            TEST_ROW_HEIGHT,
+        );
+        let mut search = PhotoBrowser::new(library.index.clone(), TEST_ROW_HEIGHT);
         let generation = search.generation;
         search.insert_page(0, vec![test_photo(1)], generation);
 
         assert!(!sync_search_mirror(&mut search, &library));
         assert!(search.pages.get_page(0).is_some());
 
-        let updated = PhotoBrowser::new(Arc::new(PhotoIndex::new(vec![
-            index_entry(2, 202601),
-            index_entry(1, 202601),
-        ])));
+        let updated = PhotoBrowser::new(
+            Arc::new(PhotoIndex::new(vec![
+                index_entry(2, 202601),
+                index_entry(1, 202601),
+            ])),
+            TEST_ROW_HEIGHT,
+        );
         assert!(sync_search_mirror(&mut search, &updated));
         assert!(Arc::ptr_eq(&search.index, &updated.index));
         assert_eq!(search.index.total, 2);
@@ -735,7 +749,7 @@ mod tests {
             index_entry(2, 202601),
             index_entry(3, 202412),
         ];
-        let mut browser = PhotoBrowser::new(Arc::new(PhotoIndex::new(entries)));
+        let mut browser = PhotoBrowser::new(Arc::new(PhotoIndex::new(entries)), TEST_ROW_HEIGHT);
         let generation = browser.generation;
         browser.insert_page(0, vec![test_photo(1)], generation);
         browser.remove_photos(&HashSet::from([2]));
@@ -752,8 +766,10 @@ mod tests {
 
     #[test]
     fn invalidating_pages_keeps_the_index_and_rejects_stale_loads() {
-        let mut browser =
-            PhotoBrowser::new(Arc::new(PhotoIndex::new(vec![index_entry(1, 202601)])));
+        let mut browser = PhotoBrowser::new(
+            Arc::new(PhotoIndex::new(vec![index_entry(1, 202601)])),
+            TEST_ROW_HEIGHT,
+        );
         let generation = browser.generation;
         browser.insert_page(0, vec![test_photo(1)], generation);
         assert!(browser.pages.get_page(0).is_some());
@@ -776,7 +792,7 @@ mod tests {
             index_entry(3, 202512),
             index_entry(4, 202512),
         ];
-        let mut browser = PhotoBrowser::new(Arc::new(PhotoIndex::new(entries)));
+        let mut browser = PhotoBrowser::new(Arc::new(PhotoIndex::new(entries)), TEST_ROW_HEIGHT);
         let generation = browser.generation;
         browser.insert_page(0, vec![test_photo(1)], generation);
 
@@ -798,7 +814,7 @@ mod tests {
     #[test]
     fn removing_a_photo_clamps_a_scroll_past_the_last_row() {
         let entries = (1..=10).map(|id| index_entry(id, 202601)).collect();
-        let mut browser = PhotoBrowser::new(Arc::new(PhotoIndex::new(entries)));
+        let mut browser = PhotoBrowser::new(Arc::new(PhotoIndex::new(entries)), TEST_ROW_HEIGHT);
         browser.columns = 2;
         browser
             .scroll

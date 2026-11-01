@@ -127,6 +127,9 @@ impl App {
                 self.daemon_pid = Some(daemon_pid);
                 self.ipc_error = None;
                 self.daemon_shutdown_armed = false;
+                // A new connection may belong to a restarted daemon whose
+                // version counter started over; adopt its lineage.
+                self.last_status_version = status.version;
                 self.refresh_monitor();
                 self.apply_daemon_status(status);
                 // A batch held while disconnected can now be reported.
@@ -210,8 +213,14 @@ impl App {
                 self.reload_job_state(cx);
             }
             IpcEvent::StatusChanged { status } => {
-                self.apply_daemon_status(status);
-                self.refresh_monitor();
+                if crate::app::daemon::status_snapshot_is_newer(
+                    status.version,
+                    self.last_status_version,
+                ) {
+                    self.last_status_version = self.last_status_version.max(status.version);
+                    self.apply_daemon_status(status);
+                    self.refresh_monitor();
+                }
             }
         }
     }
@@ -566,17 +575,20 @@ impl App {
             Ok(jobs) => self.failed_jobs = jobs,
             Err(error) => tracing::warn!(%error, "cannot load failed compression jobs"),
         }
+        match self.db.count_retryable_failed_jobs() {
+            Ok(count) => self.retryable_failed_count = count,
+            Err(error) => tracing::warn!(%error, "cannot count retryable failed jobs"),
+        }
         let failed_ids: Vec<i64> = self.failed_jobs.iter().map(|job| job.photo_id).collect();
-        self.failed_job_names = self
-            .db
-            .photos_by_ids(&failed_ids)
-            .map(|photos| {
-                photos
+        match self.db.photos_by_ids(&failed_ids) {
+            Ok(photos) => {
+                self.failed_job_names = photos
                     .into_iter()
                     .map(|photo| (photo.id, photo.file_name))
-                    .collect()
-            })
-            .unwrap_or_default();
+                    .collect();
+            }
+            Err(error) => tracing::warn!(%error, "cannot load failed job photo names"),
+        }
         let daemon_count = match self.db.daemon_errors() {
             Ok(errors) => {
                 let count = errors.len();
@@ -618,12 +630,20 @@ impl App {
         });
     }
 
+    /// Reloads the compression profiles, keeping the current list when the
+    /// read fails so a transient error cannot empty the UI.
+    pub(crate) fn reload_profiles(&mut self) {
+        match self.db.list_profiles() {
+            Ok(profiles) => self.profiles = profiles,
+            Err(error) => {
+                tracing::warn!(%error, "cannot load compression profiles");
+            }
+        }
+    }
+
     /// Refreshes side panels without touching the library snapshot or pages.
     pub(crate) fn reload_aux(&mut self, cx: &mut Context<Self>) {
-        self.profiles = self.db.list_profiles().unwrap_or_else(|error| {
-            tracing::warn!(%error, "cannot load compression profiles");
-            Vec::new()
-        });
+        self.reload_profiles();
         if self.profile_index >= self.profiles.len() {
             self.profile_index = 0;
         }

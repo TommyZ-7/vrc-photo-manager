@@ -38,7 +38,10 @@ pub(crate) struct ImportReportView {
     pub(crate) remaining: Vec<PathBuf>,
     pub(crate) cancelled: bool,
     pub(crate) scan_failures: Vec<ScanFailure>,
-    pub(crate) scan_error: Option<String>,
+    /// Hard errors from registering / scanning the destination, kept as
+    /// separate entries so the report renders one line per error instead
+    /// of a single newline-joined blob.
+    pub(crate) scan_errors: Vec<String>,
     /// Cached `(failed, partial)` counts. Reports can carry thousands of
     /// issues and the sidebar status card is rebuilt on every render; recount
     /// only after a merge mutates `issues`.
@@ -414,7 +417,7 @@ impl App {
                             remaining,
                             cancelled: result.cancelled,
                             scan_failures: Vec::new(),
-                            scan_error: None,
+                            scan_errors: Vec::new(),
                             issue_counts: Cell::new(None),
                         }
                     }
@@ -429,13 +432,12 @@ impl App {
                 self.import_scan_target = None;
                 if import_should_index(imported) {
                     report.scan_failures.clear();
-                    report.scan_error = None;
+                    report.scan_errors.clear();
                     self.index_import_destination(&mut report, cx);
                 }
                 let summary = import_summary(&report);
                 let (failed, partial) = report.issue_counts();
-                let scan_failed =
-                    report.scan_failures.len() + usize::from(report.scan_error.is_some());
+                let scan_failed = report.scan_failures.len() + report.scan_errors.len();
                 let tone = if failed == 0
                     && partial == 0
                     && scan_failed == 0
@@ -504,6 +506,9 @@ impl App {
                     report,
                     tr_args!("import.error.register_destination", error = error),
                 );
+                // Without a registered root there is nothing to scan or
+                // link against, so the import ends here; the error above
+                // is the report's final word for this destination.
                 return;
             }
         };
@@ -638,14 +643,7 @@ pub(crate) fn import_issue_counts(issues: &[ImportIssue]) -> (usize, usize) {
 
 /// Keeps every hard error that occurred while indexing the destination.
 fn append_scan_error(report: &mut ImportReportView, message: impl Into<String>) {
-    let message = message.into();
-    match &mut report.scan_error {
-        Some(existing) => {
-            existing.push('\n');
-            existing.push_str(&message);
-        }
-        None => report.scan_error = Some(message),
-    }
+    report.scan_errors.push(message.into());
 }
 
 /// Queues a scan of only the directory the import wrote to.
@@ -781,9 +779,10 @@ fn import_summary(report: &ImportReportView) -> String {
 mod tests {
     use super::{
         IMPORT_PROGRESS_NOTIFY_INTERVAL, ImportDialogError, ImportDialogOrigin, ImportDialogPhase,
-        ImportDialogState, ImportReportView, add_photo_root_and_save, import_remaining,
-        import_should_index, import_summary, merge_resume_report, merge_retry_report,
-        request_import_scan, reserve_import_dialog, should_notify_import_progress,
+        ImportDialogState, ImportReportView, add_photo_root_and_save, append_scan_error,
+        import_remaining, import_should_index, import_summary, merge_resume_report,
+        merge_retry_report, request_import_scan, reserve_import_dialog,
+        should_notify_import_progress,
     };
     use crate::ui::import::retryable_sources;
     use std::cell::Cell;
@@ -886,10 +885,23 @@ mod tests {
             remaining: Vec::new(),
             cancelled: false,
             scan_failures: Vec::new(),
-            scan_error: None,
+            scan_errors: Vec::new(),
             issue_counts: Cell::new(None),
         }
     }
+    #[test]
+    fn scan_errors_accumulate_as_separate_entries() {
+        // The report renders one line per entry; joining with '\n' into a
+        // single string (the old shape) collapsed them into one text node.
+        let mut report = import_report_fixture();
+        append_scan_error(&mut report, "first".to_string());
+        append_scan_error(&mut report, "second".to_string());
+        assert_eq!(
+            report.scan_errors,
+            vec!["first".to_string(), "second".to_string()]
+        );
+    }
+
     #[test]
     fn import_remaining_slices_from_the_processed_prefix() {
         let files = vec![
@@ -973,7 +985,7 @@ mod tests {
                 path: PathBuf::from("/dest"),
                 message: "scan failed".to_string(),
             }],
-            scan_error: Some("scan error".to_string()),
+            scan_errors: vec!["scan error".to_string()],
             ..import_report_fixture()
         };
         let result = ImportResult {
@@ -1011,7 +1023,7 @@ mod tests {
                 .any(|issue| issue.source.as_path() == Path::new("/a.png"))
         );
         assert_eq!(merged.renamed.len(), 2);
-        assert!(merged.scan_error.is_some());
+        assert_eq!(merged.scan_errors, vec!["scan error".to_string()]);
         assert_eq!(merged.scan_failures.len(), 1);
     }
 

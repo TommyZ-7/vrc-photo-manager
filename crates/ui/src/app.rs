@@ -50,7 +50,7 @@ use crate::ui::chrome::{ChromeLayout, chrome_layout};
 use crate::ui::gallery::GalleryView;
 use crate::ui::notifications::{ToastSpec, toast_flush_needed};
 use crate::ui::palette::resolve;
-use crate::ui::theme::{Palette, WORKSPACE_GAP, WORKSPACE_PAD};
+use crate::ui::theme::{MIN_CARD_WIDTH, Palette, WORKSPACE_GAP, WORKSPACE_PAD, photo_row_height};
 use crate::update_view;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,12 +100,9 @@ pub struct App {
     pub(crate) nav_epoch: u64,
     pub(crate) screen_epoch: u64,
     pub(crate) screen_direction: f32,
-    /// Scroll position of the settings section column. The category card uses
-    /// it both to jump to a section and to highlight the current one.
+    /// Scroll position of the settings section column, shared with its
+    /// scrollbar.
     pub(crate) settings_scroll: ScrollHandle,
-    /// Last section the user jumped to. Sections near the bottom cannot always
-    /// reach the top of the column, so the highlight falls back to this when
-    /// the scroll position alone would point at an earlier section.
     pub(crate) ribbon_collapsed: bool,
     pub(crate) ribbon_epoch: u64,
     pub(crate) render_epoch: u64,
@@ -131,6 +128,11 @@ pub struct App {
     pub(crate) daemon_age_secs: Option<i64>,
     pub(crate) daemon_supervisor: Option<String>,
     pub(crate) daemon_pid: Option<u32>,
+    /// Version of the last daemon status snapshot applied from the event
+    /// stream. Snapshots stamped with an older version are stale (read
+    /// before a state change but published after it) and must not revive
+    /// state the daemon has already moved past.
+    pub(crate) last_status_version: u64,
     pub(crate) ipc_endpoint: Option<Endpoint>,
     pub(crate) ipc_connected: bool,
     pub(crate) ipc_error: Option<String>,
@@ -228,6 +230,10 @@ pub struct App {
     pub(crate) waiting_job_count: i64,
     pub(crate) daemon_errors: Vec<DaemonError>,
     pub(crate) failed_job_count: i64,
+    /// Failed jobs still below the retry cap, from a DB aggregate. Retry
+    /// affordances read this rather than scanning the loaded page of
+    /// failed jobs, which is capped at 100 entries.
+    pub(crate) retryable_failed_count: i64,
     pub(crate) failed_jobs: Vec<CompressionJob>,
     pub(crate) failed_job_names: HashMap<i64, String>,
     pub(crate) deletion_requests: Vec<DeletionRequest>,
@@ -416,7 +422,10 @@ impl App {
         let db_path = db.path().and_then(|path| std::fs::canonicalize(path).ok());
         let health_token = std::env::var("VRC_PHOTO_HEALTH_TOKEN").ok();
         let updating = health_token.is_some();
-        let mut initial_settings = AppSettings::load(&db).unwrap_or_default();
+        let mut initial_settings = AppSettings::load(&db).unwrap_or_else(|error| {
+            tracing::warn!(%error, "cannot load app settings; using defaults");
+            AppSettings::default()
+        });
         initial_settings.language = vrc_photo_i18n::set_locale(&initial_settings.language);
         let initial_palette = resolve(
             &initial_settings.ui_theme_main,
@@ -556,8 +565,15 @@ impl App {
         let search_bounds = Rc::new(RefCell::new(HashMap::new()));
         let library_bounds_epoch = Rc::new(Cell::new(0));
         let search_bounds_epoch = Rc::new(Cell::new(0));
-        let library = Rc::new(RefCell::new(PhotoBrowser::new(empty_index.clone())));
-        let search_view = Rc::new(RefCell::new(PhotoBrowser::new(empty_index)));
+        let initial_row_height = photo_row_height(MIN_CARD_WIDTH, true, true);
+        let library = Rc::new(RefCell::new(PhotoBrowser::new(
+            empty_index.clone(),
+            initial_row_height,
+        )));
+        let search_view = Rc::new(RefCell::new(PhotoBrowser::new(
+            empty_index,
+            initial_row_height,
+        )));
         let thumbnails = Rc::new(RefCell::new(ThumbnailCache::default()));
         let app_entity = cx.entity();
         let library_gallery = cx.new(|cx| {
@@ -629,6 +645,7 @@ impl App {
             daemon_age_secs: None,
             daemon_supervisor: None,
             daemon_pid: None,
+            last_status_version: 0,
             ipc_endpoint: None,
             ipc_connected: false,
             ipc_error: None,
@@ -707,6 +724,7 @@ impl App {
             waiting_job_count: 0,
             daemon_errors: Vec::new(),
             failed_job_count: 0,
+            retryable_failed_count: 0,
             failed_jobs: Vec::new(),
             failed_job_names: HashMap::new(),
             import_report: None,

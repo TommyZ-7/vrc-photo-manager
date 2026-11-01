@@ -359,28 +359,13 @@ impl Db {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))?;
         if version < 1 {
-            self.conn.execute_batch(SCHEMA_V1)?;
-            self.conn.execute(
-                "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (1, ?1)",
-                params![now_string()],
-            )?;
-            self.conn.pragma_update(None, "user_version", 1)?;
+            self.migrate_v1()?;
         }
         if version < 2 {
-            self.conn.execute_batch(SCHEMA_V2)?;
-            self.conn.execute(
-                "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (2, ?1)",
-                params![now_string()],
-            )?;
-            self.conn.pragma_update(None, "user_version", 2)?;
+            self.migrate_v2()?;
         }
         if version < 3 {
-            self.conn.execute_batch(SCHEMA_V3)?;
-            self.conn.execute(
-                "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (3, ?1)",
-                params![now_string()],
-            )?;
-            self.conn.pragma_update(None, "user_version", 3)?;
+            self.migrate_v3()?;
         }
         if version < 4 {
             self.migrate_v4()?;
@@ -403,6 +388,80 @@ impl Db {
         if version < 10 {
             self.migrate_v10()?;
         }
+        Ok(())
+    }
+
+    /// Applies schema version 1 in one immediate transaction. The write lock
+    /// serializes concurrent UI/daemon startups, and the `IF NOT EXISTS` DDL
+    /// makes the step safe to retry after an interrupted upgrade.
+    fn migrate_v1(&self) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        // Re-read under the write lock: another process may have completed V1
+        // between the caller's version check and this transaction.
+        let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version >= 1 {
+            tx.commit()?;
+            return Ok(());
+        }
+
+        tx.execute_batch(SCHEMA_V1)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (1, ?1)",
+            params![now_string()],
+        )?;
+        tx.pragma_update(None, "user_version", 1)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Applies schema version 2 in one immediate transaction. The column
+    /// check makes the step safe to retry after a crash between the ALTER
+    /// and `user_version`, which the pre-transaction runner could leave
+    /// behind as a duplicate column on the next open.
+    fn migrate_v2(&self) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version >= 2 {
+            tx.commit()?;
+            return Ok(());
+        }
+
+        let has_author: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('photo_context') \
+             WHERE name = 'author')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_author {
+            tx.execute_batch(SCHEMA_V2)?;
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (2, ?1)",
+            params![now_string()],
+        )?;
+        tx.pragma_update(None, "user_version", 2)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Applies schema version 3 in one immediate transaction. The index uses
+    /// `IF NOT EXISTS`, so the step is safe to retry after an interrupted
+    /// upgrade.
+    fn migrate_v3(&self) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version >= 3 {
+            tx.commit()?;
+            return Ok(());
+        }
+
+        tx.execute_batch(SCHEMA_V3)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (3, ?1)",
+            params![now_string()],
+        )?;
+        tx.pragma_update(None, "user_version", 3)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1238,6 +1297,30 @@ impl Db {
             )
             .optional()?;
         Ok(session)
+    }
+
+    /// Sessions that do not contain `timestamp` but end or start within
+    /// `window_seconds` of it. At most two are returned: callers only need
+    /// to distinguish none, exactly one, and ambiguous.
+    pub fn sessions_near(&self, timestamp: i64, window_seconds: i64) -> Result<Vec<Session>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, log_file, started_at, ended_at, world_id, instance_id \
+             FROM sessions \
+             WHERE (ended_at IS NOT NULL AND ?1 - ended_at BETWEEN 0 AND ?2) \
+                OR (started_at - ?1 BETWEEN 0 AND ?2) \
+             ORDER BY started_at LIMIT 2",
+        )?;
+        let rows = stmt.query_map(params![timestamp, window_seconds], |row| {
+            Ok(Session {
+                id: row.get(0)?,
+                log_file: row.get(1)?,
+                started_at: row.get(2)?,
+                ended_at: row.get(3)?,
+                world_id: row.get(4)?,
+                instance_id: row.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     pub fn upsert_session_player(
@@ -2420,26 +2503,35 @@ impl Db {
         Ok(())
     }
 
+    /// Columns read for every `compression_jobs` row, in `row_to_job` order.
+    const JOB_COLUMNS: &str = "id, photo_id, profile_id, status, progress, error, \
+        output_path, policy, output_dir, retry_count, created_at, started_at, finished_at";
+
+    /// Lists the newest jobs first. `limit` is clamped to at least 1, so a
+    /// non-positive limit returns the single newest job.
     pub fn list_jobs(&self, limit: i64) -> Result<Vec<CompressionJob>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, photo_id, profile_id, status, progress, error, output_path, policy, \
-                output_dir, retry_count, created_at, started_at, finished_at FROM compression_jobs \
-             ORDER BY created_at DESC LIMIT ?1",
-        )?;
+        let sql = format!(
+            "SELECT {} FROM compression_jobs ORDER BY created_at DESC LIMIT ?1",
+            Self::JOB_COLUMNS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![limit.max(1)], row_to_job)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Lists the newest jobs with `status` first. `limit` is clamped to at
+    /// least 1, so a non-positive limit returns the single newest match.
     pub fn list_jobs_by_status(
         &self,
         status: QueueStatus,
         limit: i64,
     ) -> Result<Vec<CompressionJob>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, photo_id, profile_id, status, progress, error, output_path, policy, \
-                output_dir, retry_count, created_at, started_at, finished_at FROM compression_jobs \
-             WHERE status = ?1 ORDER BY created_at DESC LIMIT ?2",
-        )?;
+        let sql = format!(
+            "SELECT {} FROM compression_jobs WHERE status = ?1 \
+             ORDER BY created_at DESC LIMIT ?2",
+            Self::JOB_COLUMNS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![status.as_str(), limit.max(1)], row_to_job)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
@@ -2457,32 +2549,38 @@ impl Db {
         Ok(changed)
     }
 
+    /// Assignments that return a failed job to the queue.
+    const RETRY_JOB_SET: &str = "status = 'pending', progress = 0, error = NULL, \
+        started_at = NULL, finished_at = NULL, retry_count = retry_count + 1";
+
+    /// Guard that keeps a job queued while its photo is being deleted.
+    const NO_RUNNING_DELETION_GUARD: &str = "NOT EXISTS (SELECT 1 FROM deletion_requests dr \
+        WHERE dr.photo_id = compression_jobs.photo_id AND dr.status = 'running')";
+
     /// Returns a failed job to the queue once, incrementing its retry count.
     /// Returns false when the job is missing, not failed, or already at the
     /// retry cap.
     pub fn retry_job(&self, id: &str) -> Result<bool> {
-        let changed = self.conn.execute(
-            "UPDATE compression_jobs SET status = 'pending', progress = 0, error = NULL, \
-                started_at = NULL, finished_at = NULL, retry_count = retry_count + 1 \
-             WHERE id = ?1 AND status = 'failed' AND retry_count < ?2 \
-               AND NOT EXISTS (SELECT 1 FROM deletion_requests dr \
-                   WHERE dr.photo_id = compression_jobs.photo_id AND dr.status = 'running')",
-            params![id, MAX_JOB_RETRIES],
-        )?;
+        let sql = format!(
+            "UPDATE compression_jobs SET {} WHERE id = ?1 AND status = 'failed' \
+             AND retry_count < ?2 AND {}",
+            Self::RETRY_JOB_SET,
+            Self::NO_RUNNING_DELETION_GUARD
+        );
+        let changed = self.conn.execute(&sql, params![id, MAX_JOB_RETRIES])?;
         Ok(changed == 1)
     }
 
     /// Returns every eligible failed job to the queue and reports how many
     /// rows changed. Jobs at the retry cap are left untouched.
     pub fn retry_failed_jobs(&self) -> Result<usize> {
-        let changed = self.conn.execute(
-            "UPDATE compression_jobs SET status = 'pending', progress = 0, error = NULL, \
-                started_at = NULL, finished_at = NULL, retry_count = retry_count + 1 \
-             WHERE status = 'failed' AND retry_count < ?1 \
-               AND NOT EXISTS (SELECT 1 FROM deletion_requests dr \
-                   WHERE dr.photo_id = compression_jobs.photo_id AND dr.status = 'running')",
-            params![MAX_JOB_RETRIES],
-        )?;
+        let sql = format!(
+            "UPDATE compression_jobs SET {} WHERE status = 'failed' \
+             AND retry_count < ?1 AND {}",
+            Self::RETRY_JOB_SET,
+            Self::NO_RUNNING_DELETION_GUARD
+        );
+        let changed = self.conn.execute(&sql, params![MAX_JOB_RETRIES])?;
         Ok(changed)
     }
 
@@ -2490,6 +2588,20 @@ impl Db {
         let count = self.conn.query_row(
             "SELECT COUNT(*) FROM compression_jobs WHERE status = ?1",
             params![status.as_str()],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Counts failed jobs that can still return to the queue. Callers use
+    /// this aggregate — not a page of failed jobs — to decide whether a
+    /// retry-all action exists, so the answer stays correct past the
+    /// page size.
+    pub fn count_retryable_failed_jobs(&self) -> Result<i64> {
+        let count = self.conn.query_row(
+            "SELECT COUNT(*) FROM compression_jobs \
+             WHERE status = 'failed' AND retry_count < ?1",
+            params![MAX_JOB_RETRIES],
             |row| row.get(0),
         )?;
         Ok(count)
@@ -3110,6 +3222,124 @@ mod tests {
             .unwrap();
         }
         conn.pragma_update(None, "user_version", 3).unwrap();
+    }
+
+    #[test]
+    fn interrupted_v1_migration_recovers() {
+        // The V1 DDL committed but the crash hit before user_version moved:
+        // the database still reports version 0 with the tables present.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("photos.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 10);
+    }
+
+    #[test]
+    fn interrupted_v2_migration_recovers() {
+        // The V2 ALTER committed but user_version stayed at 1: the old
+        // autocommit runner failed the next open with a duplicate column.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("photos.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (1, ?1)",
+                params![now_string()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO library_roots(path, kind, created_at) \
+                 VALUES ('/photos', 'reference', ?1)",
+                params![now_string()],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO photos(root_id, rel_path, abs_path, file_name, captured_at_utc, \
+                    captured_at_local, tz_offset_sec, width, height, file_size, mtime, blake3, \
+                    status, created_at, updated_at) \
+                 VALUES (1, 'a.png', '/photos/a.png', 'a.png', 100, '2026-10-21 21:14:03', 32400, \
+                    3840, 2160, 12400000, 100, NULL, 'present', ?1, ?1)",
+                params![now_string()],
+            )
+            .unwrap();
+            conn.execute_batch(SCHEMA_V2).unwrap();
+            conn.execute(
+                "INSERT INTO photo_context(photo_id, link_method, confidence, linked_at, author) \
+                 VALUES (1, 'auto', 0, ?1, 'alice')",
+                params![now_string()],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 10);
+        let author_columns: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('photo_context') WHERE name = 'author'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(author_columns, 1);
+        let author: String = db
+            .conn
+            .query_row(
+                "SELECT author FROM photo_context WHERE photo_id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(author, "alice");
+        let recorded: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 2",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(recorded, 1);
+    }
+
+    #[test]
+    fn concurrent_open_of_a_fresh_database_succeeds() {
+        // UI and daemon opening the same new database at once must both
+        // succeed: the immediate transactions serialize the migrations.
+        for round in 0..3 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(format!("photos-{round}.db"));
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let mut handles = Vec::new();
+            for _ in 0..2 {
+                let barrier = barrier.clone();
+                let path = path.clone();
+                handles.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    Db::open(&path).map(|db| {
+                        db.conn
+                            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                    })
+                }));
+            }
+            for handle in handles {
+                let opened = handle.join().unwrap();
+                assert_eq!(opened.unwrap().unwrap(), 10);
+            }
+        }
     }
 
     #[test]
@@ -4201,6 +4431,7 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let root = db.add_root("/photos", "reference").unwrap();
         let mut paths = Vec::new();
+        let mut first_id = 0;
         let mut missing_id = 0;
         for index in 0..501i64 {
             let path = format!("/photos/{index:04}.png");
@@ -4220,6 +4451,9 @@ mod tests {
                     blake3: (index == 0).then(|| "hash".to_string()),
                 })
                 .unwrap();
+            if index == 0 {
+                first_id = id;
+            }
             if index == 500 {
                 missing_id = id;
             }
@@ -4230,11 +4464,34 @@ mod tests {
         let states = db.photo_scan_states(&paths).unwrap();
         assert_eq!(states.len(), 501);
         let first = &states["/photos/0000.png"];
+        assert_eq!(first.id, first_id);
         assert_eq!(first.file_size, 100);
         assert_eq!(first.mtime, 200);
         assert_eq!(first.blake3.as_deref(), Some("hash"));
         assert_eq!(first.status, PhotoStatus::Present);
+        assert_eq!(first.display_derivative_id, None);
         assert_eq!(states["/photos/0500.png"].status, PhotoStatus::Missing);
+
+        let derivative = db
+            .add_derivative(
+                first_id,
+                "/photos/0000_webp.webp",
+                "webp",
+                4,
+                3,
+                10,
+                "p",
+                "replace",
+            )
+            .unwrap();
+        db.set_replaced(first_id, derivative).unwrap();
+        let states = db
+            .photo_scan_states(&["/photos/0000.png".to_string()])
+            .unwrap();
+        let replaced = &states["/photos/0000.png"];
+        assert_eq!(replaced.id, first_id);
+        assert_eq!(replaced.display_derivative_id, Some(derivative));
+        assert_eq!(replaced.status, PhotoStatus::Replaced);
     }
 
     /// Seeds 100k synthetic rows in one transaction and measures the shipped
@@ -4671,6 +4928,40 @@ mod tests {
     }
 
     #[test]
+    fn retry_resets_progress_and_rejects_non_failed_jobs() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        let job = db.enqueue_job(photo, "p", "keep").unwrap();
+
+        // A job that never failed cannot be retried, and neither can a
+        // missing one.
+        assert!(!db.retry_job(&job).unwrap());
+        assert!(!db.retry_job("missing-job").unwrap());
+
+        db.next_pending_job().unwrap();
+        db.update_job(&job, QueueStatus::Failed, 0.5, Some("boom"), None)
+            .unwrap();
+        assert!(db.retry_job(&job).unwrap());
+        let row = &db.list_jobs(1).unwrap()[0];
+        assert_eq!(row.status, QueueStatus::Pending);
+        assert_eq!(row.progress, 0.0);
+        assert!(row.error.is_none());
+
+        // The bulk retry resets progress the same way.
+        db.next_pending_job().unwrap();
+        db.update_job(&job, QueueStatus::Failed, 0.75, Some("boom again"), None)
+            .unwrap();
+        assert_eq!(db.retry_failed_jobs().unwrap(), 1);
+        let row = &db.list_jobs(1).unwrap()[0];
+        assert_eq!(row.status, QueueStatus::Pending);
+        assert_eq!(row.progress, 0.0);
+        assert!(row.error.is_none());
+    }
+
+    #[test]
     fn retry_failed_jobs_returns_only_eligible_rows() {
         let db = Db::open_in_memory().unwrap();
         let root = db.add_root("/photos", "reference").unwrap();
@@ -4708,6 +4999,36 @@ mod tests {
     }
 
     #[test]
+    fn count_retryable_failed_jobs_skips_capped_and_non_failed() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        let first = db.enqueue_job(photo, "p", "keep").unwrap();
+        let second = db.enqueue_job(photo, "p", "keep").unwrap();
+        let capped = db.enqueue_job(photo, "p", "keep").unwrap();
+        let completed = db.enqueue_job(photo, "p", "keep").unwrap();
+        for job in [&first, &second, &capped, &completed] {
+            db.next_pending_job().unwrap();
+            db.update_job(job, QueueStatus::Failed, 0.0, Some("boom"), None)
+                .unwrap();
+        }
+        db.connection()
+            .execute(
+                "UPDATE compression_jobs SET retry_count = ?1 WHERE id = ?2",
+                params![MAX_JOB_RETRIES, capped],
+            )
+            .unwrap();
+        db.update_job(&completed, QueueStatus::Completed, 1.0, None, None)
+            .unwrap();
+
+        assert_eq!(db.count_retryable_failed_jobs().unwrap(), 2);
+        assert_eq!(db.retry_failed_jobs().unwrap(), 2);
+        assert_eq!(db.count_retryable_failed_jobs().unwrap(), 0);
+    }
+
+    #[test]
     fn list_jobs_by_status_filters_and_limits() {
         let db = Db::open_in_memory().unwrap();
         let root = db.add_root("/photos", "reference").unwrap();
@@ -4727,6 +5048,41 @@ mod tests {
                 .unwrap()
                 .len()
                 == 1
+        );
+    }
+
+    #[test]
+    fn list_jobs_by_status_clamps_non_positive_limits() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        let first = db.enqueue_job(photo, "p", "keep").unwrap();
+        let second = db.enqueue_job(photo, "p", "keep").unwrap();
+        for job in [&first, &second] {
+            db.update_job(job, QueueStatus::Failed, 0.0, Some("boom"), None)
+                .unwrap();
+        }
+
+        // The documented contract: the limit never drops below 1.
+        assert_eq!(
+            db.list_jobs_by_status(QueueStatus::Failed, 0)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            db.list_jobs_by_status(QueueStatus::Failed, -5)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            db.list_jobs_by_status(QueueStatus::Failed, 2)
+                .unwrap()
+                .len(),
+            2
         );
     }
 
