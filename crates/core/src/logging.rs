@@ -87,4 +87,12 @@ mod tests {
         prepare_log_file_in(dir.path(), "ui", 8).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"abc");
     }
+
+    #[test]
+    fn prepare_reports_an_unusable_directory() {
+        let dir = tempdir().unwrap();
+        let not_a_dir = dir.path().join("not-a-dir");
+        std::fs::write(&not_a_dir, b"x").unwrap();
+        assert!(prepare_log_file_in(&not_a_dir, "ui", 8).is_err());
+    }
 }

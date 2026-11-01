@@ -617,12 +617,20 @@ impl App {
         });
     }
 
+    /// Reloads the compression profiles, keeping the current list when the
+    /// read fails so a transient error cannot empty the UI.
+    pub(crate) fn reload_profiles(&mut self) {
+        match self.db.list_profiles() {
+            Ok(profiles) => self.profiles = profiles,
+            Err(error) => {
+                tracing::warn!(%error, "cannot load compression profiles");
+            }
+        }
+    }
+
     /// Refreshes side panels without touching the library snapshot or pages.
     pub(crate) fn reload_aux(&mut self, cx: &mut Context<Self>) {
-        self.profiles = self.db.list_profiles().unwrap_or_else(|error| {
-            tracing::warn!(%error, "cannot load compression profiles");
-            Vec::new()
-        });
+        self.reload_profiles();
         if self.profile_index >= self.profiles.len() {
             self.profile_index = 0;
         }
