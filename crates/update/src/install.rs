@@ -924,7 +924,7 @@ mod tests {
             },
             from_version: "0.3.0".to_string(),
             to_version: "0.4.0".to_string(),
-            target: "/usr/bin/vrc-photo-manager".into(),
+            target: dir.join("vrc-photo-manager"),
             staged,
             signature: "c2ln".to_string(),
             sha256: "a".repeat(64),
