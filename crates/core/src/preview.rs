@@ -11,6 +11,9 @@ const PREVIEW_QUALITY: f32 = 85.0;
 const PREVIEW_CACHE_MAX_FILES: usize = 2048;
 const PREVIEW_CACHE_PRUNE_TO: usize = 1536;
 const PRUNE_EVERY: usize = 32;
+/// Temp files left behind by a crash between write and rename are pruned
+/// once they are older than this; younger ones may still be in flight.
+const TEMP_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
 static WRITES: AtomicUsize = AtomicUsize::new(0);
 static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -163,32 +166,60 @@ fn maybe_prune(cache_dir: &Path) {
     }
 }
 
+/// Whether `name` is a preview temp file, in the current unique form
+/// (`<name>.webp.tmp-<pid>-<seq>`) or the legacy shared form
+/// (`<name>.webp.tmp`).
+fn is_preview_temp_name(name: &str) -> bool {
+    name.contains(".webp.tmp")
+}
+
 fn prune_previews_in(
     cache_dir: &Path,
     max_files: usize,
     prune_to: usize,
 ) -> std::io::Result<usize> {
+    let now = SystemTime::now();
+    let mut removed = 0;
     let mut entries = Vec::new();
     for entry in fs::read_dir(cache_dir)? {
         let Ok(entry) = entry else {
             continue;
         };
         let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("webp") {
-            continue;
-        }
         let Ok(metadata) = entry.metadata() else {
             continue;
         };
         let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        if is_preview_temp_name(&entry.file_name().to_string_lossy()) {
+            // Stale temps never count toward the cache cap; they are swept
+            // purely by age so an in-flight write is never removed.
+            if now
+                .duration_since(modified)
+                .is_ok_and(|age| age > TEMP_MAX_AGE)
+            {
+                match fs::remove_file(&path) {
+                    Ok(()) => removed += 1,
+                    Err(error) => {
+                        tracing::debug!(
+                            %error,
+                            path = %path.display(),
+                            "cannot remove stale preview temp file"
+                        );
+                    }
+                }
+            }
+            continue;
+        }
+        if path.extension().and_then(|ext| ext.to_str()) != Some("webp") {
+            continue;
+        }
         entries.push((modified, path));
     }
     if entries.len() <= max_files {
-        return Ok(0);
+        return Ok(removed);
     }
     entries.sort_by_key(|(modified, _)| *modified);
     let remove_count = entries.len().saturating_sub(prune_to);
-    let mut removed = 0;
     for (_, path) in entries.into_iter().take(remove_count) {
         match fs::remove_file(&path) {
             Ok(()) => removed += 1,
@@ -342,6 +373,36 @@ mod tests {
             let name = entry.unwrap().file_name().to_string_lossy().to_string();
             assert!(!name.contains(".tmp"), "leftover temp file: {name}");
         }
+    }
+
+    #[test]
+    fn prunes_stale_temp_files_but_keeps_fresh_ones() {
+        let dir = tempdir().unwrap();
+        let cache = dir.path().join("previews");
+        fs::create_dir_all(&cache).unwrap();
+        let now = SystemTime::now();
+        let stale = now - TEMP_MAX_AGE - Duration::from_secs(60);
+        // Current unique form and the legacy shared form are both swept.
+        let stale_unique = cache.join("1-0.webp.tmp-4242-0");
+        let stale_legacy = cache.join("2-0.webp.tmp");
+        let fresh_unique = cache.join("3-0.webp.tmp-4242-1");
+        let kept = cache.join("4-0.webp");
+        for path in [&stale_unique, &stale_legacy, &kept] {
+            fs::write(path, b"preview").unwrap();
+            set_mtime(path, stale);
+        }
+        fs::write(&fresh_unique, b"preview").unwrap();
+        set_mtime(&fresh_unique, now);
+
+        // The cap is not exceeded, so only the stale temps are removed.
+        let removed =
+            prune_previews_in(&cache, PREVIEW_CACHE_MAX_FILES, PREVIEW_CACHE_PRUNE_TO).unwrap();
+        assert_eq!(removed, 2);
+        assert!(!stale_unique.exists());
+        assert!(!stale_legacy.exists());
+        assert!(fresh_unique.exists());
+        // The temp sweep never touches real cache entries, however old.
+        assert!(kept.exists());
     }
 
     #[test]
