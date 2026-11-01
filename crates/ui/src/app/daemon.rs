@@ -102,39 +102,35 @@ pub(crate) fn open_path(path: &Path) -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 pub(crate) fn open_path(path: &Path) -> Result<(), String> {
-    let status = Command::new("open")
+    // Like the Windows branch, success is the process starting: waiting
+    // for `open` to exit would stall the UI thread on the handler.
+    Command::new("open")
         .arg(path)
-        .status()
-        .map_err(|error| format!("open を起動できません: {error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("open が終了コード {status} で失敗しました"))
-    }
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("open を起動できません: {error}"))
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
 pub(crate) fn open_path(path: &Path) -> Result<(), String> {
-    match open_status("xdg-open", &[], path) {
+    match open_spawn("xdg-open", &[], path) {
         Ok(()) => Ok(()),
         Err(first) => {
-            open_status("gio", &["open"], path).map_err(|second| format!("{first} / {second}"))
+            open_spawn("gio", &["open"], path).map_err(|second| format!("{first} / {second}"))
         }
     }
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn open_status(program: &str, args: &[&str], path: &Path) -> Result<(), String> {
-    let status = Command::new(program)
+fn open_spawn(program: &str, args: &[&str], path: &Path) -> Result<(), String> {
+    // Success is the opener starting (see the macOS branch); the opener
+    // hands the path to the desktop handler and exits on its own.
+    Command::new(program)
         .args(args)
         .arg(path)
-        .status()
-        .map_err(|error| format!("{program} を起動できません: {error}"))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("{program} が終了コード {status} で失敗しました"))
-    }
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("{program} を起動できません: {error}"))
 }
 
 #[cfg(not(any(unix, target_os = "windows")))]

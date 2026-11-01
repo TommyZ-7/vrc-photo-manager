@@ -2553,6 +2553,20 @@ impl Db {
         Ok(count)
     }
 
+    /// Counts failed jobs that can still return to the queue. Callers use
+    /// this aggregate — not a page of failed jobs — to decide whether a
+    /// retry-all action exists, so the answer stays correct past the
+    /// page size.
+    pub fn count_retryable_failed_jobs(&self) -> Result<i64> {
+        let count = self.conn.query_row(
+            "SELECT COUNT(*) FROM compression_jobs \
+             WHERE status = 'failed' AND retry_count < ?1",
+            params![MAX_JOB_RETRIES],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
     /// Counts jobs a user still expects to run or finish: waiting, pending,
     /// and processing. Failed and completed jobs are excluded.
     pub fn count_active_jobs(&self) -> Result<i64> {
@@ -4914,6 +4928,36 @@ mod tests {
                 .retry_count,
             1
         );
+    }
+
+    #[test]
+    fn count_retryable_failed_jobs_skips_capped_and_non_failed() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        let first = db.enqueue_job(photo, "p", "keep").unwrap();
+        let second = db.enqueue_job(photo, "p", "keep").unwrap();
+        let capped = db.enqueue_job(photo, "p", "keep").unwrap();
+        let completed = db.enqueue_job(photo, "p", "keep").unwrap();
+        for job in [&first, &second, &capped, &completed] {
+            db.next_pending_job().unwrap();
+            db.update_job(job, QueueStatus::Failed, 0.0, Some("boom"), None)
+                .unwrap();
+        }
+        db.connection()
+            .execute(
+                "UPDATE compression_jobs SET retry_count = ?1 WHERE id = ?2",
+                params![MAX_JOB_RETRIES, capped],
+            )
+            .unwrap();
+        db.update_job(&completed, QueueStatus::Completed, 1.0, None, None)
+            .unwrap();
+
+        assert_eq!(db.count_retryable_failed_jobs().unwrap(), 2);
+        assert_eq!(db.retry_failed_jobs().unwrap(), 2);
+        assert_eq!(db.count_retryable_failed_jobs().unwrap(), 0);
     }
 
     #[test]

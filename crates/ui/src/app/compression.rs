@@ -15,6 +15,7 @@ use vrc_photo_core::model::{CompressionProfile, MAX_JOB_RETRIES, MAX_PROFILE_NAM
 
 use crate::app::App;
 use crate::ui::components::release_confirmation;
+use crate::ui::compression::job_retry_available;
 use crate::ui::theme::{compression_policy, moved_profile_order, step_index};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -580,10 +581,22 @@ impl App {
                 self.send_wake_jobs(cx);
             }
             Ok(false) => {
-                self.toast_warning(
-                    format!("再試行の上限（{MAX_JOB_RETRIES}回）に達しました"),
-                    cx,
-                );
+                // The update matched nothing: the job is either at the
+                // retry cap or no longer failed (already requeued, running,
+                // or removed). The loaded page tells the two apart.
+                let at_cap = self
+                    .failed_jobs
+                    .iter()
+                    .any(|job| job.id == id && !job_retry_available(job));
+                if at_cap {
+                    self.toast_warning(
+                        format!("再試行の上限（{MAX_JOB_RETRIES}回）に達しました"),
+                        cx,
+                    );
+                } else {
+                    self.toast_warning("ジョブの状態が変わったため再試行できませんでした", cx);
+                }
+                self.reload_job_state(cx);
             }
             Err(error) => {
                 tracing::warn!(%error, %id, "cannot retry compression job");
@@ -595,6 +608,10 @@ impl App {
 
     pub(crate) fn retry_all_failed_jobs(&mut self, cx: &mut Context<Self>) {
         match self.db.retry_failed_jobs() {
+            Ok(0) => {
+                self.toast_warning("再試行できる失敗ジョブがありませんでした", cx);
+                self.reload_job_state(cx);
+            }
             Ok(count) => {
                 self.toast_success(
                     format!("{count} 件を再試行に戻しました（上限到達は除外）"),
