@@ -42,6 +42,10 @@ const PARSER_VERSION: &str = "1";
 const MAX_SKIPPED_DETAILS: usize = 5;
 const SCAN_INTERVAL: Duration = Duration::from_millis(500);
 const LOG_INTERVAL: Duration = Duration::from_millis(750);
+/// Consecutive log-poll misses required before a missing VRChat process closes
+/// the active session. This tolerates one-off process-table read failures and
+/// short restart gaps.
+const VRCHAT_MISSING_POLLS_BEFORE_CLOSE: u8 = 3;
 /// How often the daemon re-reads the compression settings and thumbnail
 /// cache limit the UI saved. Runs on every loop iteration, paused or not,
 /// so a change is applied within roughly one interval plus one loop wait.
@@ -215,6 +219,7 @@ pub struct Daemon {
     /// `--once`); the caller generates their thumbnails directly.
     deferred_thumbnail_ids: Vec<i64>,
     log_tail: Option<LogTail>,
+    vrchat_missing_polls: u8,
     workers: Vec<JoinHandle<()>>,
     dirty_paths: Vec<PathBuf>,
     last_log_poll: std::time::Instant,
@@ -365,6 +370,7 @@ impl Daemon {
             watcher_error,
             deferred_thumbnail_ids: Vec::new(),
             log_tail: None,
+            vrchat_missing_polls: 0,
             workers: Vec::new(),
             dirty_paths: Vec::new(),
             last_log_poll: std::time::Instant::now() - LOG_INTERVAL,
@@ -743,6 +749,7 @@ impl Daemon {
             self.thumbnail_cache_limit.load(Ordering::Relaxed),
         );
         self.ingest_logs()?;
+        self.poll_vrchat_presence()?;
         self.link_unlinked()?;
         self.refresh_status()?;
         self.process_deletions()?;
@@ -815,6 +822,7 @@ impl Daemon {
             return Ok(());
         }
         self.ingest_logs()?;
+        self.poll_vrchat_presence()?;
         self.link_unlinked()?;
         if self.stopping() {
             self.shutdown();
@@ -862,6 +870,9 @@ impl Daemon {
             if self.last_log_poll.elapsed() >= LOG_INTERVAL {
                 if let Err(error) = self.ingest_logs() {
                     tracing::error!(%error, "log ingestion failed");
+                }
+                if let Err(error) = self.poll_vrchat_presence() {
+                    tracing::error!(%error, "VRChat process check failed");
                 }
                 self.last_log_poll = std::time::Instant::now();
             }
@@ -1334,6 +1345,53 @@ impl Daemon {
             repaired += 1;
         }
         Ok(repaired)
+    }
+
+    fn poll_vrchat_presence(&mut self) -> Result<()> {
+        let has_session = self
+            .log_tail
+            .as_ref()
+            .and_then(|tail| tail.ingestor.session_id())
+            .is_some();
+        if !has_session {
+            self.vrchat_missing_polls = 0;
+            return Ok(());
+        }
+        self.observe_vrchat_presence(vrchat_process::is_running())
+    }
+
+    fn observe_vrchat_presence(&mut self, running: Option<bool>) -> Result<()> {
+        let Some(running) = running else {
+            return Ok(());
+        };
+        if running {
+            self.vrchat_missing_polls = 0;
+            return Ok(());
+        }
+        self.vrchat_missing_polls = self.vrchat_missing_polls.saturating_add(1);
+        if self.vrchat_missing_polls < VRCHAT_MISSING_POLLS_BEFORE_CLOSE {
+            return Ok(());
+        }
+
+        let ended_at = self
+            .log_tail
+            .as_ref()
+            .and_then(|tail| modified_utc(&tail.path))
+            .unwrap_or_else(|| chrono::Utc::now().timestamp());
+        let closed = {
+            let db = self.db.lock().unwrap();
+            self.log_tail
+                .as_mut()
+                .map(|tail| tail.ingestor.close_current_session(&db, ended_at))
+                .transpose()?
+                .unwrap_or(false)
+        };
+        self.vrchat_missing_polls = 0;
+        if closed {
+            tracing::info!(ended_at, "closed session after VRChat exited");
+            self.refresh_status()?;
+        }
+        Ok(())
     }
 
     fn ingest_logs(&mut self) -> Result<()> {
@@ -3785,6 +3843,87 @@ mod tests {
         assert!(db.open_sessions().unwrap().is_empty());
         let session = db.session_at(mtime - 60).unwrap().unwrap();
         assert_eq!(session.ended_at, Some(mtime));
+    }
+
+    #[test]
+    fn vrchat_exit_closes_the_session_at_the_log_mtime_after_consecutive_misses() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let log_path = dir
+            .path()
+            .join("logs/output_log_2026-10-21_21-00-00.txt");
+        let join =
+            "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)";
+        let name =
+            "2026.10.21 21:23:13 Debug      -  [Behaviour] Joining or Creating Room: Test World";
+        std::fs::write(&log_path, format!("{join}\n{name}\n")).unwrap();
+        daemon.ingest_logs().unwrap();
+        let started = vrc_photo_core::log_parser::parse_line(join)
+            .unwrap()
+            .timestamp_utc();
+        let mtime = started + 120;
+        let file = File::options().write(true).open(&log_path).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(mtime as u64))
+            .unwrap();
+        assert!(
+            daemon
+                .log_tail
+                .as_ref()
+                .unwrap()
+                .ingestor
+                .session_id()
+                .is_some()
+        );
+
+        daemon.observe_vrchat_presence(Some(false)).unwrap();
+        daemon.observe_vrchat_presence(Some(false)).unwrap();
+        daemon.observe_vrchat_presence(Some(true)).unwrap();
+        daemon.observe_vrchat_presence(Some(false)).unwrap();
+        daemon.observe_vrchat_presence(Some(false)).unwrap();
+        {
+            let db = daemon.db.lock().unwrap();
+            assert!(db.session_at(started + 1).unwrap().is_some());
+        }
+        daemon.observe_vrchat_presence(Some(false)).unwrap();
+
+        assert!(
+            daemon
+                .log_tail
+                .as_ref()
+                .unwrap()
+                .ingestor
+                .session_id()
+                .is_none()
+        );
+        let db = daemon.db.lock().unwrap();
+        let session = db.session_at(started + 1).unwrap().unwrap();
+        assert_eq!(session.ended_at, Some(mtime));
+        drop(db);
+        let status = daemon.status.lock().unwrap();
+        assert_eq!(status.world_name, None);
+    }
+
+    #[test]
+    fn unknown_vrchat_presence_does_not_count_as_a_miss() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let log_path = dir
+            .path()
+            .join("logs/output_log_2026-10-21_21-00-00.txt");
+        let join =
+            "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)";
+        std::fs::write(&log_path, format!("{join}\n")).unwrap();
+        daemon.ingest_logs().unwrap();
+
+        for _ in 0..10 {
+            daemon.observe_vrchat_presence(None).unwrap();
+        }
+
+        let db = daemon.db.lock().unwrap();
+        let started = vrc_photo_core::log_parser::parse_line(join)
+            .unwrap()
+            .timestamp_utc();
+        assert!(db.session_at(started + 1).unwrap().is_some());
     }
 
     fn save_daemon_settings(daemon: &Daemon, update: impl FnOnce(&mut AppSettings)) {
