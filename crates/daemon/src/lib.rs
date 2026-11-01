@@ -684,6 +684,7 @@ impl Daemon {
     }
 
     pub fn run_once(&mut self) -> Result<()> {
+        self.repair_open_sessions()?;
         let initial_scan = {
             let db = self.db.lock().unwrap();
             db.count_photos()? == 0
@@ -801,6 +802,7 @@ impl Daemon {
             &self.thumbnail_dir,
             self.thumbnail_cache_limit.load(Ordering::Relaxed),
         );
+        self.repair_open_sessions()?;
         self.start_ipc();
         if self.stopping() {
             self.shutdown();
@@ -1305,6 +1307,33 @@ impl Daemon {
             LocalizedError::new("daemon.scan_failed").arg("count", report.failures.len()),
             Some(&detail),
         )
+    }
+
+    /// Closes sessions left open by a previous daemon. Only the owner of the
+    /// single-instance lock may repair them: a maintenance run must not close
+    /// the live daemon's active session.
+    fn repair_open_sessions(&mut self) -> Result<usize> {
+        if !self.owns_deletion_executor {
+            return Ok(0);
+        }
+        let db = self.db.lock().unwrap();
+        let sessions = db.open_sessions()?;
+        let mut repaired = 0;
+        for session in sessions {
+            let ended_at = modified_utc(Path::new(&session.log_file))
+                .or_else(|| db.log_mtime(&session.log_file).ok().flatten())
+                .unwrap_or(session.started_at)
+                .max(session.started_at);
+            db.close_session(session.id, ended_at)?;
+            tracing::info!(
+                session_id = session.id,
+                log_file = %session.log_file,
+                ended_at,
+                "closed stale session at startup"
+            );
+            repaired += 1;
+        }
+        Ok(repaired)
     }
 
     fn ingest_logs(&mut self) -> Result<()> {
@@ -2821,6 +2850,15 @@ fn process_job(db: &Arc<Mutex<Db>>, job: &CompressionJob) -> Result<()> {
     }
 }
 
+fn modified_utc(path: &Path) -> Option<i64> {
+    path.metadata()
+        .ok()?
+        .modified()
+        .ok()
+        .map(vrc_photo_core::time::from_system_time)
+        .map(|stamp| stamp.utc)
+}
+
 fn latest_log_file(dir: &Path) -> Result<Option<PathBuf>> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -3711,6 +3749,42 @@ mod tests {
         daemon.run_once().unwrap();
         let photo = db.photo_by_id(photo.id).unwrap().unwrap();
         assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Missing);
+    }
+
+    #[test]
+    fn startup_repairs_open_sessions_at_the_log_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let log_path = log_dir.join("output_log_2026-10-21_21-00-00.txt");
+        std::fs::write(&log_path, "").unwrap();
+        let mtime: i64 = 1_700_000_500;
+        let file = File::options().write(true).open(&log_path).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(mtime as u64))
+            .unwrap();
+
+        let db_path = dir.path().join("library.db");
+        {
+            let db = Db::open(&db_path).unwrap();
+            let world = db
+                .upsert_world("wrld_test", Some("Test World"), Some("log"))
+                .unwrap();
+            let session = db
+                .create_session(log_path.to_str().unwrap(), mtime - 120, world, None)
+                .unwrap();
+            db.upsert_session_player(session, "usr_a", "Mio", mtime - 60)
+                .unwrap();
+        }
+
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        daemon.run_once().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        assert!(db.open_sessions().unwrap().is_empty());
+        let session = db.session_at(mtime - 60).unwrap().unwrap();
+        assert_eq!(session.ended_at, Some(mtime));
     }
 
     fn save_daemon_settings(daemon: &Daemon, update: impl FnOnce(&mut AppSettings)) {
