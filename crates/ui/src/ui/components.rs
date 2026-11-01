@@ -435,8 +435,9 @@ impl App {
             )
     }
 
-    pub(crate) fn stat_card(&self, label: &str, value: String) -> impl IntoElement {
+    pub(crate) fn stat_card(&self, label: impl Into<String>, value: String) -> impl IntoElement {
         let p = self.palette;
+        let label: String = label.into();
         glass_panel(&self.palette)
             .flex()
             .flex_col()
@@ -449,7 +450,7 @@ impl App {
                 div()
                     .text_size(px(10.))
                     .text_color(rgb(p.muted_2))
-                    .child(label.to_string()),
+                    .child(label),
             )
             .child(
                 div()

@@ -9,6 +9,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use vrc_photo_core::logging::{DAEMON_LOG_FILE, UI_LOG_FILE, logs_dir};
 use vrc_photo_core::model::DeletionStatus;
+use vrc_photo_i18n::{tr, tr_args};
 
 use crate::app::App;
 use crate::app::daemon::{
@@ -19,6 +20,7 @@ use crate::app::deletion::{
     deletion_actions, deletion_blocked_label, deletion_reason_label, deletion_status_label,
 };
 use crate::ui::components::glass_panel;
+use crate::ui::daemon_error::daemon_error_message;
 use crate::ui::shell::{scan_progress_label, scan_progress_ratio};
 use crate::ui::theme::*;
 
@@ -28,17 +30,29 @@ impl App {
         let stats = h_flex()
             .flex_shrink_0()
             .gap(px(CARD_GAP))
-            .child(self.stat_card("写真", format!("{} 枚", self.stats.photo_count)))
-            .child(self.stat_card("未完了ジョブ", format!("{} 件", self.active_job_count)))
-            .child(self.stat_card("ライブラリ容量", format_bytes(self.stats.total_bytes)))
             .child(self.stat_card(
-                "デーモン",
+                tr!("dashboard.stat.photos"),
+                tr_args!(
+                    "dashboard.stat.photos_value",
+                    count = self.stats.photo_count
+                ),
+            ))
+            .child(self.stat_card(
+                tr!("dashboard.stat.active_jobs"),
+                tr_args!("dashboard.stat.jobs_value", count = self.active_job_count),
+            ))
+            .child(self.stat_card(
+                tr!("dashboard.stat.library_size"),
+                format_bytes(self.stats.total_bytes),
+            ))
+            .child(self.stat_card(
+                tr!("dashboard.daemon.title"),
                 if self.daemon_active {
                     daemon_state_label(true, self.daemon_paused).to_string()
                 } else if self.settings.log_dir.is_some() {
-                    "停止中".to_string()
+                    tr!("dashboard.daemon.stopped")
                 } else {
-                    "未設定".to_string()
+                    tr!("dashboard.daemon.unset")
                 },
             ));
         v_flex()
@@ -69,7 +83,7 @@ impl App {
                                     .border_color(rgba(with_alpha(p.amber, 0x40)))
                                     .text_size(px(11.))
                                     .text_color(rgb(p.amber))
-                                    .child("VRChat本体は出力ログを24時間で削除します。アプリ側には解析済みイベントだけを保存します。"),
+                                    .child(tr!("dashboard.log_retention_hint")),
                             ),
                     )
                     .child(
@@ -107,11 +121,11 @@ impl App {
                     .text_size(px(13.))
                     .font_semibold()
                     .text_color(rgb(p.text))
-                    .child("現在のセッション"),
+                    .child(tr!("dashboard.session.title")),
             )
             .child(
                 self.meta_row(
-                    "ワールド",
+                    tr!("dashboard.meta.world"),
                     self.monitor_world
                         .clone()
                         .unwrap_or_else(|| "—".to_string()),
@@ -119,17 +133,23 @@ impl App {
             )
             .child(
                 self.meta_row(
-                    "インスタンス",
+                    tr!("dashboard.meta.instance"),
                     self.monitor_instance
                         .clone()
                         .unwrap_or_else(|| "—".to_string()),
                 ),
             )
-            .child(self.meta_row("同接", format!("{} 人", self.monitor_players.len())))
+            .child(self.meta_row(
+                tr!("dashboard.meta.players"),
+                tr_args!(
+                    "dashboard.players.count",
+                    count = self.monitor_players.len()
+                ),
+            ))
             .child(self.section_label(if self.monitor_players.is_empty() {
-                "プレイヤー情報はまだありません"
+                tr!("dashboard.players.empty")
             } else {
-                "入室中のプレイヤー"
+                tr!("dashboard.players.title")
             }))
             .children(self.monitor_players.iter().map(|player| {
                 div()
@@ -153,7 +173,7 @@ impl App {
                     .text_size(px(13.))
                     .font_semibold()
                     .text_color(rgb(p.text))
-                    .child("監視パス"),
+                    .child(tr!("dashboard.monitor.path")),
             )
             .children(self.settings.photo_roots.iter().map(|path| {
                 div()
@@ -175,7 +195,7 @@ impl App {
                         self.settings
                             .log_dir
                             .clone()
-                            .unwrap_or_else(|| "ログフォルダ未設定".to_string()),
+                            .unwrap_or_else(|| tr!("dashboard.log_dir.unset")),
                     ),
             )
     }
@@ -200,25 +220,25 @@ impl App {
                             .text_size(px(13.))
                             .font_semibold()
                             .text_color(rgb(p.text))
-                            .child("削除待ち"),
+                            .child(tr!("dashboard.deletion.title")),
                     )
                     .when(counts.pending > 0, |this| {
                         this.child(self.badge(
-                            &format!("待機 {}", counts.pending),
+                            tr_args!("dashboard.deletion.pending", count = counts.pending),
                             p.amber,
                             p.amber_soft,
                         ))
                     })
                     .when(counts.blocked > 0, |this| {
                         this.child(self.badge(
-                            &format!("保留 {}", counts.blocked),
+                            tr_args!("dashboard.deletion.blocked", count = counts.blocked),
                             p.red,
                             p.red_soft,
                         ))
                     })
                     .when(counts.running > 0, |this| {
                         this.child(self.badge(
-                            &format!("実行中 {}", counts.running),
+                            tr_args!("dashboard.deletion.running", count = counts.running),
                             p.accent,
                             p.accent_soft,
                         ))
@@ -290,7 +310,7 @@ impl App {
                         .when(actions.can_cancel, |this| {
                             this.child(
                                 Button::new(SharedString::from(format!("cancel-deletion-{id}")))
-                                    .label("取消")
+                                    .label(tr!("dashboard.deletion.cancel"))
                                     .small()
                                     .ghost()
                                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -301,7 +321,7 @@ impl App {
                         .when(actions.retryable, |this| {
                             this.child(
                                 Button::new(SharedString::from(format!("retry-deletion-{id}")))
-                                    .label("再試行")
+                                    .label(tr!("common.retry"))
                                     .small()
                                     .ghost()
                                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -312,7 +332,7 @@ impl App {
                         .when(actions.forceable, |this| {
                             this.child(
                                 Button::new(SharedString::from(format!("force-deletion-{id}")))
-                                    .label("強制削除")
+                                    .label(tr!("dashboard.deletion.force"))
                                     .small()
                                     .danger()
                                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -328,18 +348,18 @@ impl App {
             div()
                 .text_size(px(10.))
                 .text_color(rgb(p.muted_2))
-                .child("デーモンが依存ジョブの完了後にOSゴミ箱へ移動します"),
+                .child(tr!("dashboard.deletion.hint")),
         )
     }
 
     pub(crate) fn daemon_card(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.palette;
         let status = if !self.daemon_active {
-            ("停止中", p.muted, p.panel_2)
+            (tr!("dashboard.daemon.state.stopped"), p.muted, p.panel_2)
         } else if self.daemon_paused {
-            ("一時停止中", p.amber, p.amber_soft)
+            (tr!("dashboard.daemon.state.paused"), p.amber, p.amber_soft)
         } else {
-            ("稼働中", p.green, p.green_soft)
+            (tr!("dashboard.daemon.state.running"), p.green, p.green_soft)
         };
         let sync = daemon_sync_label(
             self.daemon_age_secs,
@@ -347,9 +367,9 @@ impl App {
             self.ipc_connected,
         );
         let ipc = if self.ipc_connected {
-            "IPC 接続中"
+            tr!("dashboard.ipc.connected")
         } else {
-            "IPC 未接続"
+            tr!("dashboard.ipc.disconnected")
         };
         let ipc_detail = ipc_status_label(self.ipc_connected, self.ipc_error.as_deref());
         let ipc_color = if self.ipc_connected { p.green } else { p.red };
@@ -361,9 +381,9 @@ impl App {
         let scan = self.scan_progress;
         let armed = self.daemon_shutdown_armed;
         let pause_label = if self.daemon_paused {
-            "監視を再開"
+            tr!("dashboard.daemon.resume")
         } else {
-            "監視を一時停止"
+            tr!("dashboard.daemon.pause")
         };
 
         let mut card = glass_panel(&self.palette)
@@ -382,15 +402,15 @@ impl App {
                             .text_size(px(13.))
                             .font_semibold()
                             .text_color(rgb(p.text))
-                            .child("デーモン"),
+                            .child(tr!("dashboard.daemon.title")),
                     )
                     .child(self.badge(status.0, status.1, status.2))
                     .child(self.badge(ipc, ipc_color, ipc_bg)),
             )
-            .child(self.meta_row("最終同期", sync))
+            .child(self.meta_row(tr!("dashboard.daemon.last_sync"), sync))
             .child(self.meta_row("IPC", ipc_detail))
             .child(self.meta_row(
-                "監視",
+                tr!("dashboard.daemon.watching"),
                 daemon_state_label(self.daemon_active, self.daemon_paused).to_string(),
             ));
 
@@ -427,7 +447,7 @@ impl App {
                 .gap(px(8.))
                 .child(
                     Button::new("daemon-rescan")
-                        .label("再スキャン")
+                        .label(tr!("dashboard.daemon.rescan"))
                         .small()
                         .on_click(cx.listener(|this, _, _, cx| this.request_daemon_rescan(cx))),
                 )
@@ -441,9 +461,9 @@ impl App {
                 .child(
                     Button::new("daemon-shutdown")
                         .label(if armed {
-                            "もう一度押して終了"
+                            tr!("dashboard.daemon.quit_armed")
                         } else {
-                            "デーモンを終了"
+                            tr!("dashboard.daemon.quit")
                         })
                         .small()
                         .disabled(!self.ipc_connected)
@@ -470,10 +490,10 @@ impl App {
                             .text_size(px(13.))
                             .font_semibold()
                             .text_color(rgb(p.text))
-                            .child("処理エラー"),
+                            .child(tr!("dashboard.errors.title")),
                     )
                     .child(self.badge(
-                        &format!("{} 件", self.daemon_errors.len()),
+                        tr_args!("dashboard.errors.count", count = self.daemon_errors.len()),
                         p.red,
                         p.red_soft,
                     )),
@@ -504,14 +524,14 @@ impl App {
                                         .min_w_0()
                                         .text_size(px(12.))
                                         .text_color(rgb(p.red))
-                                        .child(error.message.clone()),
+                                        .child(daemon_error_message(error)),
                                 )
                                 .child(
                                     Button::new(SharedString::from(format!(
                                         "retry-daemon-{}",
                                         error.operation.as_str()
                                     )))
-                                    .label("再試行")
+                                    .label(tr!("common.retry"))
                                     .small()
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.request_daemon_command(command.clone(), cx)
@@ -537,12 +557,9 @@ impl App {
                             h_flex()
                                 .items_center()
                                 .gap(px(12.))
-                                .child(
-                                    div()
-                                        .text_size(px(10.))
-                                        .text_color(rgb(p.muted_2))
-                                        .child(format!("検出回数 {}", error.attempts)),
-                                )
+                                .child(div().text_size(px(10.)).text_color(rgb(p.muted_2)).child(
+                                    tr_args!("dashboard.errors.attempts", count = error.attempts),
+                                ))
                                 .child(
                                     div()
                                         .text_size(px(10.))
@@ -557,7 +574,7 @@ impl App {
                 div()
                     .text_size(px(10.))
                     .text_color(rgb(p.muted_2))
-                    .child("デーモン停止中です。起動後に実行されます。"),
+                    .child(tr!("dashboard.errors.daemon_stopped")),
             )
         })
     }
@@ -577,12 +594,12 @@ impl App {
                     .text_size(px(13.))
                     .font_semibold()
                     .text_color(rgb(p.text))
-                    .child("ログ"),
+                    .child(tr!("dashboard.log.title")),
             )
             .child(
                 v_flex()
                     .gap(px(6.))
-                    .child(self.section_label("保存先"))
+                    .child(self.section_label(tr!("dashboard.log.location")))
                     .child(match &dir {
                         Some(dir) => div()
                             .min_w_0()
@@ -593,13 +610,13 @@ impl App {
                         None => div()
                             .text_size(px(10.))
                             .text_color(rgb(p.red))
-                            .child("ログフォルダを特定できません"),
+                            .child(tr!("dashboard.log.location_missing")),
                     }),
             )
             .child(
                 v_flex()
                     .gap(px(4.))
-                    .child(self.section_label("ファイル"))
+                    .child(self.section_label(tr!("dashboard.log.file")))
                     .child(
                         div()
                             .font_family("monospace")
@@ -612,7 +629,10 @@ impl App {
                             .font_family("monospace")
                             .text_size(px(10.))
                             .text_color(rgb(p.muted_2))
-                            .child(format!("デーモン: {DAEMON_LOG_FILE}")),
+                            .child(tr_args!(
+                                "dashboard.log.daemon_file",
+                                file = DAEMON_LOG_FILE
+                            )),
                     ),
             );
         if dir.is_some() {
@@ -622,7 +642,7 @@ impl App {
                     .gap(px(12.))
                     .child(
                         Button::new("open-logs-folder")
-                            .label("ログフォルダを開く")
+                            .label(tr!("dashboard.log.open_folder"))
                             .small()
                             .on_click(cx.listener(|this, _, _, cx| this.open_logs_folder(cx))),
                     )
@@ -630,7 +650,7 @@ impl App {
                         div()
                             .text_size(px(10.))
                             .text_color(rgb(p.muted_2))
-                            .child("OSのファイラーで開きます"),
+                            .child(tr!("dashboard.log.open_hint")),
                     ),
             );
         } else {
@@ -638,7 +658,7 @@ impl App {
                 div()
                     .text_size(px(10.))
                     .text_color(rgb(p.muted_2))
-                    .child("ファイルへのログ出力は利用できません。"),
+                    .child(tr!("dashboard.log.unavailable")),
             );
         }
         card
@@ -646,7 +666,7 @@ impl App {
 
     pub(crate) fn open_logs_folder(&mut self, cx: &mut Context<Self>) {
         let Some(dir) = logs_dir() else {
-            self.toast_error("ログフォルダを特定できません", cx);
+            self.toast_error(tr!("dashboard.log.location_missing"), cx);
             cx.notify();
             return;
         };
@@ -655,9 +675,9 @@ impl App {
             .and_then(|()| open_path(&dir));
         match result {
             Ok(()) => {
-                self.toast_success(format!("ログフォルダを開きました: {}", dir.display()), cx)
+                self.toast_success(tr_args!("dashboard.log.opened", path = dir.display()), cx)
             }
-            Err(error) => self.toast_error(format!("ログフォルダを開けません: {error}"), cx),
+            Err(error) => self.toast_error(tr_args!("dashboard.log.open_error", error = error), cx),
         }
         cx.notify();
     }

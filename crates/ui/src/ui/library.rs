@@ -323,7 +323,7 @@ impl App {
         let world = photo
             .world_name
             .clone()
-            .unwrap_or_else(|| tr!("photos.unlinked").to_string());
+            .unwrap_or_else(|| tr!("photos.unlinked"));
         let players = self
             .selected_players
             .iter()
@@ -639,7 +639,7 @@ impl App {
         let world = photo
             .world_name
             .clone()
-            .unwrap_or_else(|| tr!("photos.unlinked").to_string());
+            .unwrap_or_else(|| tr!("photos.unlinked"));
         let players = self
             .selected_players
             .iter()
@@ -957,10 +957,7 @@ impl App {
                                 .border_color(rgb(p.border))
                                 .text_size(px(10.))
                                 .text_color(rgb(p.muted))
-                                .child(
-                                    note.clone()
-                                        .unwrap_or_else(|| tr!("photos.note.empty").to_string()),
-                                ),
+                                .child(note.clone().unwrap_or_else(|| tr!("photos.note.empty"))),
                         )
                     }),
             )

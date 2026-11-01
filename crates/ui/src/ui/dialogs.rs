@@ -9,6 +9,8 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use vrc_photo_i18n::{tr, tr_args};
+
 use crate::app::App;
 use crate::app::compression::{ManualOutputTarget, manual_output_available};
 use crate::ui::components::{dialog_panel, manual_option_row};
@@ -41,9 +43,9 @@ impl App {
                     .output_dir
                     .clone()
                     .filter(|dir| !dir.trim().is_empty())
-                    .unwrap_or_else(|| "プロファイル既定（元画像の隣の compressed/）".to_string())
+                    .unwrap_or_else(|| tr!("dialog.output.profile_default"))
             })
-            .unwrap_or_else(|| "プロファイルを選択してください".to_string());
+            .unwrap_or_else(|| tr!("dialog.profile.select"));
         let folder_ready = dialog.folder.is_some();
         let can_confirm = match dialog.output {
             ManualOutputTarget::Folder => folder_ready,
@@ -74,8 +76,8 @@ impl App {
         let folder_row = manual_option_row(
             &self.palette,
             "manual-output-folder",
-            "指定したフォルダに出力",
-            "実行のたびに出力先を選びます",
+            tr!("dialog.output.folder"),
+            tr!("dialog.output.folder_hint"),
             dialog.output == ManualOutputTarget::Folder,
             true,
         )
@@ -89,7 +91,7 @@ impl App {
         let profile_row = manual_option_row(
             &self.palette,
             "manual-output-profile",
-            "プロファイル指定のフォルダに出力",
+            tr!("dialog.output.profile_folder"),
             profile_description,
             dialog.output == ManualOutputTarget::Profile,
             true,
@@ -105,11 +107,11 @@ impl App {
         let clipboard_row = manual_option_row(
             &self.palette,
             "manual-output-clipboard",
-            "クリップボードに出力",
+            tr!("dialog.output.clipboard"),
             if clipboard_enabled {
-                "PNG 1枚をクリップボードへコピーします（元画像は保持）"
+                tr!("dialog.output.clipboard_hint")
             } else {
-                "クリップボード出力は1枚選択時のみ使えます"
+                tr!("dialog.output.clipboard_single")
             },
             dialog.output == ManualOutputTarget::Clipboard,
             clipboard_enabled,
@@ -126,8 +128,8 @@ impl App {
         let keep_row = manual_option_row(
             &self.palette,
             "manual-keep-original",
-            "元画像を保持",
-            "圧縮版を別ファイルで出力します",
+            tr!("dialog.keep_original"),
+            tr!("dialog.keep_original_hint"),
             dialog.keep_original,
             true,
         )
@@ -140,8 +142,8 @@ impl App {
         let trash_row = manual_option_row(
             &self.palette,
             "manual-trash-original",
-            "元画像をゴミ箱へ移動",
-            "圧縮に成功した場合だけOSゴミ箱へ移動します",
+            tr!("dialog.trash_original"),
+            tr!("dialog.trash_original_hint"),
             !dialog.keep_original,
             true,
         )
@@ -155,11 +157,11 @@ impl App {
         let folder_path = dialog
             .folder
             .clone()
-            .unwrap_or_else(|| "フォルダが選択されていません".to_string());
+            .unwrap_or_else(|| tr!("dialog.folder.not_selected"));
         let confirm_label = if dialog.output == ManualOutputTarget::Clipboard {
-            "クリップボードへコピー".to_string()
+            tr!("dialog.output.clipboard_target")
         } else {
-            format!("{count} 件を圧縮")
+            tr_args!("dialog.compress_count", count = count)
         };
 
         let header = v_flex()
@@ -173,21 +175,21 @@ impl App {
                             .text_size(px(20.))
                             .font_semibold()
                             .text_color(rgb(p.text))
-                            .child("手動圧縮"),
+                            .child(tr!("dialog.title")),
                     )
                     .child(div().flex_1())
                     .child(
                         div()
                             .text_size(px(11.))
                             .text_color(rgb(p.muted_2))
-                            .child(format!("{count} 枚を対象")),
+                            .child(tr_args!("dialog.target_count", count = count)),
                     ),
             )
             .child(div().text_size(px(11.)).text_color(rgb(p.muted)).child(
                 if dialog.hide_output {
-                    "プロファイルと元画像の扱いを確認して実行します。"
+                    tr!("dialog.description")
                 } else {
-                    "使用するプロファイル、出力先、元画像の扱いを選んでから実行します。"
+                    tr!("dialog.description_no_profile")
                 },
             ));
 
@@ -196,7 +198,7 @@ impl App {
             .min_h_0()
             .gap(px(16.))
             .overflow_y_scrollbar()
-            .child(self.section_label("プロファイル"))
+            .child(self.section_label(tr!("dialog.section.profile")))
             .child(
                 v_flex()
                     .id("manual-profile-list")
@@ -206,7 +208,7 @@ impl App {
                     .children(profile_rows),
             )
             .when(!dialog.hide_output, |this| {
-                this.child(self.section_label("出力先"))
+                this.child(self.section_label(tr!("dialog.section.output")))
                     .child(v_flex().gap(px(6.)).child(folder_row).when(
                         dialog.output == ManualOutputTarget::Folder,
                         |this| {
@@ -230,7 +232,7 @@ impl App {
                                     )
                                     .child(
                                         Button::new("manual-choose-folder")
-                                            .label("フォルダを選択")
+                                            .label(tr!("dialog.choose_folder"))
                                             .small()
                                             .ghost()
                                             .on_click(cx.listener(|this, _, _, cx| {
@@ -244,13 +246,13 @@ impl App {
                     .child(clipboard_row)
             })
             .when(dialog.output != ManualOutputTarget::Clipboard, |this| {
-                this.child(self.section_label("元画像"))
+                this.child(self.section_label(tr!("dialog.section.original")))
                     .child(v_flex().gap(px(6.)).child(keep_row).child(trash_row))
                     .child(
                         div()
                             .text_size(px(10.))
                             .text_color(rgb(p.muted_2))
-                            .child("「ゴミ箱へ移動」は圧縮ファイルの検証に成功した場合だけ実行します。"),
+                            .child(tr!("dialog.trash_note")),
                     )
             })
             .when(dialog.output == ManualOutputTarget::Clipboard, |this| {
@@ -261,7 +263,7 @@ impl App {
                         .bg(rgb(p.panel_2))
                         .text_size(px(10.))
                         .text_color(rgb(p.muted))
-                        .child("クリップボード出力では元画像を変更しません。形式はPNG、リサイズ設定のみ反映します。"),
+                        .child(tr!("dialog.clipboard_note")),
                 )
             });
 
@@ -271,7 +273,7 @@ impl App {
             .gap(px(8.))
             .child(
                 Button::new("manual-cancel")
-                    .label("キャンセル")
+                    .label(tr!("common.cancel"))
                     .small()
                     .ghost()
                     .on_click(cx.listener(|this, _, _, cx| this.close_manual_compression(cx))),

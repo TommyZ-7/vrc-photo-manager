@@ -19,6 +19,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 mimalloc.workspace = true
 rfd = "0.17"
 semver.workspace = true
+serde_json.workspace = true
 smallvec = "1"
 tracing.workspace = true
 tracing-subscriber.workspace = true

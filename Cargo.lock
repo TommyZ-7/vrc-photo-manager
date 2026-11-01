@@ -8041,6 +8041,7 @@ dependencies = [
  "mimalloc",
  "rfd",
  "semver",
+ "serde_json",
  "smallvec",
  "tempfile",
  "tracing",
