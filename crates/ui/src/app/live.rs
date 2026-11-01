@@ -17,6 +17,7 @@ use vrc_photo_core::db::Db;
 use vrc_photo_core::model::{
     CompressionJob, DaemonError, DeletionCounts, DeletionRequest, LibraryStats, QueueStatus,
 };
+use vrc_photo_i18n::tr_args;
 
 use crate::app::App;
 use crate::app::daemon::daemon_liveness;
@@ -168,12 +169,7 @@ impl App {
                 notify = true;
             }
             if let Some(blocked) = update.blocked {
-                self.toast_warning(
-                    format!(
-                        "{blocked} 件の削除が保留されています。ダッシュボードを確認してください"
-                    ),
-                    cx,
-                );
+                self.toast_warning(tr_args!("daemon.deletion.blocked", blocked = blocked), cx);
                 notify = true;
             }
         }
@@ -186,12 +182,12 @@ impl App {
                 match notice {
                     FailureNotice::Compression { count } => self.toast_actionable(
                         NotificationType::Error,
-                        format!("圧縮に {count} 件の失敗があります"),
+                        tr_args!("daemon.compression.failures", count = count),
                         cx,
                     ),
                     FailureNotice::Daemon { count } => self.toast_actionable(
                         NotificationType::Error,
-                        format!("デーモンで {count} 件の処理エラーがあります"),
+                        tr_args!("daemon.errors.count", count = count),
                         cx,
                     ),
                 }

@@ -11,6 +11,7 @@ use chrono::Utc;
 use vrc_photo_core::db::Db;
 use vrc_photo_core::model::{NewPhoto, PhotoContext, PhotoPlayer};
 use vrc_photo_core::time;
+use vrc_photo_i18n::tr_args;
 
 use crate::app::cli::LaunchOptions;
 use crate::ui::theme::lerp_color;
@@ -29,9 +30,10 @@ fn prepare_demo(reset: bool) -> Result<(Db, DemoAssets), String> {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
-                return Err(format!(
-                    "demo ディレクトリを削除できません ({}): {error}",
-                    root.display()
+                return Err(tr_args!(
+                    "demo.remove_error",
+                    path = root.display(),
+                    error = error
                 ));
             }
         }
@@ -74,9 +76,7 @@ pub(crate) fn open_database(
                 empty_database(),
                 true,
                 false,
-                Some(format!(
-                    "デモデータを準備できませんでした（{error}）。空のライブラリで起動します。"
-                )),
+                Some(tr_args!("demo.prepare_error", error = error)),
                 None,
             ),
         };
@@ -89,15 +89,17 @@ pub(crate) fn open_database(
     match Db::open(&path) {
         Ok(db) => (db, false, true, None, None),
         Err(error) => {
-            let message = format!("DBを開けませんでした（{error}）。デモデータで起動します。");
+            let message = tr_args!("demo.db_error", error = error);
             match prepare_demo(true) {
                 Ok((db, assets)) => (db, true, false, Some(message), Some(assets)),
                 Err(demo_error) => (
                     empty_database(),
                     true,
                     false,
-                    Some(format!(
-                        "DBを開けませんでした（{error}）。デモデータも準備できませんでした（{demo_error}）。空のライブラリで起動します。"
+                    Some(tr_args!(
+                        "demo.db_and_prepare_error",
+                        error = error,
+                        demo_error = demo_error
                     )),
                     None,
                 ),

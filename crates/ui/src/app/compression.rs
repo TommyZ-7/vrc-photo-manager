@@ -12,6 +12,7 @@ use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::*;
 use vrc_photo_core::compressor;
 use vrc_photo_core::model::{CompressionProfile, MAX_JOB_RETRIES, MAX_PROFILE_NAME_CHARS};
+use vrc_photo_i18n::{tr, tr_args};
 
 use crate::app::App;
 use crate::ui::components::release_confirmation;
@@ -37,10 +38,8 @@ pub(crate) enum ProfileNameError {
 impl ProfileNameError {
     pub(crate) fn message(self) -> String {
         match self {
-            Self::Empty => "名前を入力してください".to_string(),
-            Self::TooLong => {
-                format!("名前は{MAX_PROFILE_NAME_CHARS}文字以内で入力してください")
-            }
+            Self::Empty => tr!("compression.name.empty"),
+            Self::TooLong => tr_args!("compression.name.too_long", max = MAX_PROFILE_NAME_CHARS),
         }
     }
 }
@@ -142,7 +141,7 @@ impl App {
     pub(crate) fn open_manual_compression(&mut self, photo_ids: Vec<i64>, cx: &mut Context<Self>) {
         let ids = self.existing_photo_ids(photo_ids);
         if ids.is_empty() {
-            self.toast_error("先に写真を選択してください", cx);
+            self.toast_error(tr!("compression.select_photos"), cx);
             cx.notify();
             return;
         }
@@ -151,7 +150,7 @@ impl App {
             .get(self.profile_index)
             .or_else(|| self.profiles.first())
         else {
-            self.toast_error("圧縮プロファイルがありません", cx);
+            self.toast_error(tr!("compression.no_profiles"), cx);
             cx.notify();
             return;
         };
@@ -169,7 +168,7 @@ impl App {
     pub(crate) fn compress_selection_to_folder(&mut self, cx: &mut Context<Self>) {
         let ids = self.selected_action_ids();
         if ids.is_empty() {
-            self.toast_error("先に写真を選択してください", cx);
+            self.toast_error(tr!("compression.select_photos"), cx);
             cx.notify();
             return;
         }
@@ -191,7 +190,7 @@ impl App {
     pub(crate) fn compress_selection_to_profile_folder(&mut self, cx: &mut Context<Self>) {
         let ids = self.selected_action_ids();
         if ids.is_empty() {
-            self.toast_error("先に写真を選択してください", cx);
+            self.toast_error(tr!("compression.select_photos"), cx);
             cx.notify();
             return;
         }
@@ -201,14 +200,14 @@ impl App {
     pub(crate) fn compress_selection_to_clipboard(&mut self, cx: &mut Context<Self>) {
         let ids = self.selected_action_ids();
         if ids.is_empty() {
-            self.toast_error("先に写真を選択してください", cx);
+            self.toast_error(tr!("compression.select_photos"), cx);
             cx.notify();
             return;
         }
         if ids.len() != 1 {
             // A clipboard holds one image. Opening the normal modal would hide
             // the output selector and leave the confirm button disabled.
-            self.toast_error("クリップボード圧縮は1枚選択時のみ使えます", cx);
+            self.toast_error(tr!("compression.clipboard_single"), cx);
             cx.notify();
             return;
         }
@@ -241,7 +240,7 @@ impl App {
     ) {
         let ids = self.existing_photo_ids(photo_ids);
         if ids.is_empty() {
-            self.toast_error("先に写真を選択してください", cx);
+            self.toast_error(tr!("compression.select_photos"), cx);
             cx.notify();
             return;
         }
@@ -250,7 +249,7 @@ impl App {
             .get(self.profile_index)
             .or_else(|| self.profiles.first())
         else {
-            self.toast_error("圧縮プロファイルがありません", cx);
+            self.toast_error(tr!("compression.no_profiles"), cx);
             cx.notify();
             return;
         };
@@ -298,12 +297,12 @@ impl App {
             .find(|profile| profile.id == dialog.profile_id)
             .cloned()
         else {
-            self.toast_error("選択したプロファイルが見つかりません", cx);
+            self.toast_error(tr!("compression.profile_missing"), cx);
             cx.notify();
             return;
         };
         if !manual_output_available(dialog.photo_ids.len(), dialog.output) {
-            self.toast_error("クリップボード出力は1枚選択時のみ使えます", cx);
+            self.toast_error(tr!("compression.clipboard_single"), cx);
             cx.notify();
             return;
         }
@@ -312,13 +311,13 @@ impl App {
             let photo_id = dialog.photo_ids[0];
             let Some(photo) = self.db.photo_by_id(photo_id).ok().flatten() else {
                 self.manual_compress = None;
-                self.toast_error("写真が見つかりません", cx);
+                self.toast_error(tr!("compression.photo_missing"), cx);
                 cx.notify();
                 return;
             };
             let source = PathBuf::from(photo.effective_path());
             self.manual_compress = None;
-            self.toast_info("クリップボードへコピーしています…", cx);
+            self.toast_info(tr!("compression.clipboard_copying"), cx);
             cx.notify();
             cx.spawn(async move |this, cx| {
                 let bytes = cx
@@ -331,11 +330,11 @@ impl App {
                             cx.write_to_clipboard(gpui_kit::ClipboardItem::new_image(
                                 &gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, bytes),
                             ));
-                            this.toast_success("圧縮画像をクリップボードへコピーしました", cx);
+                            this.toast_success(tr!("compression.clipboard_copied"), cx);
                         }
                         Err(error) => {
                             this.toast_error(
-                                format!("クリップボードへコピーできません: {error}"),
+                                tr_args!("compression.clipboard_error", error = error),
                                 cx,
                             );
                         }
@@ -350,7 +349,7 @@ impl App {
 
         let output_dir = if dialog.output == ManualOutputTarget::Folder {
             let Some(folder) = dialog.folder.as_deref() else {
-                self.toast_warning("出力フォルダを選択してください", cx);
+                self.toast_warning(tr!("compression.choose_output"), cx);
                 cx.notify();
                 return;
             };
@@ -379,23 +378,28 @@ impl App {
         self.manual_compress = None;
         if enqueued > 0 {
             let policy_note = if dialog.keep_original {
-                "元画像を保持"
+                tr!("compression.policy.keep")
             } else {
-                "成功後に元画像をゴミ箱へ移動"
+                tr!("compression.policy.replace")
             };
             let failure_note = if failed > 0 {
-                format!("（{failed} 件は追加できませんでした）")
+                tr_args!("compression.enqueue.failed_note", count = failed)
             } else {
                 String::new()
             };
             self.toast_success(
-                format!("{enqueued} 件を圧縮キューに追加しました（{policy_note}）{failure_note}"),
+                tr_args!(
+                    "compression.enqueue.success",
+                    count = enqueued,
+                    policy = policy_note,
+                    failures = failure_note
+                ),
                 cx,
             );
             self.reload_aux(cx);
             self.send_wake_jobs(cx);
         } else {
-            self.toast_error("圧縮ジョブを追加できませんでした", cx);
+            self.toast_error(tr!("compression.enqueue.error"), cx);
         }
         cx.notify();
     }
@@ -429,7 +433,10 @@ impl App {
             let profile = profile.clone();
             if let Err(error) = self.db.save_profile(&profile) {
                 tracing::warn!(%error, profile = %profile.id, "cannot save compression profile");
-                self.toast_error(format!("プロファイルを保存できません: {error}"), cx);
+                self.toast_error(
+                    tr_args!("compression.profile.save_error", error = error),
+                    cx,
+                );
             }
         }
         cx.notify();
@@ -450,7 +457,10 @@ impl App {
                     self.profile_index = index;
                 }
             }
-            Err(error) => self.toast_error(format!("並び替えを保存できません: {error}"), cx),
+            Err(error) => self.toast_error(
+                tr_args!("compression.reorder.save_error", error = error),
+                cx,
+            ),
         }
         cx.notify();
     }
@@ -469,11 +479,14 @@ impl App {
                     .position(|profile| profile.id == copy.id)
                     .unwrap_or(0);
                 self.toast_success(
-                    format!("「{}」を複製しました（自動適用はOFF）", copy.name),
+                    tr_args!("compression.profile.duplicated", name = copy.name),
                     cx,
                 );
             }
-            Err(error) => self.toast_error(format!("複製に失敗: {error}"), cx),
+            Err(error) => self.toast_error(
+                tr_args!("compression.profile.duplicate_error", error = error),
+                cx,
+            ),
         }
         cx.notify();
     }
@@ -493,7 +506,7 @@ impl App {
             return;
         };
         if self.profiles.len() <= 1 {
-            self.toast_error("最後のプロファイルは削除できません", cx);
+            self.toast_error(tr!("compression.profile.last_delete"), cx);
             cx.notify();
             return;
         }
@@ -507,15 +520,16 @@ impl App {
                     let entity = entity.clone();
                     let id = id.clone();
                     alert
-                        .title("プロファイルを削除")
+                        .title(tr!("compression.profile.delete.title"))
                         .bg(rgb(panel_deep))
-                        .description(format!(
-                            "「{name}」を削除します。この操作は元に戻せません。"
+                        .description(tr_args!(
+                            "compression.profile.delete.description",
+                            name = name
                         ))
                         .confirm()
-                        .ok_text("削除")
+                        .ok_text(tr!("compression.profile.delete.ok"))
                         .ok_variant(ButtonVariant::Danger)
-                        .cancel_text("キャンセル")
+                        .cancel_text(tr!("common.cancel"))
                         .on_ok(move |_, _, cx| {
                             entity.update(cx, |this, cx| this.delete_profile(&id, cx));
                             true
@@ -524,16 +538,20 @@ impl App {
             }
             Ok(count) => {
                 self.toast_error(
-                    format!(
-                        "「{}」は未完了のジョブが{}件あるため削除できません",
-                        profile.name, count
+                    tr_args!(
+                        "compression.profile.delete.active_jobs",
+                        name = profile.name,
+                        count = count
                     ),
                     cx,
                 );
                 cx.notify();
             }
             Err(error) => {
-                self.toast_error(format!("削除前の確認に失敗: {error}"), cx);
+                self.toast_error(
+                    tr_args!("compression.profile.delete.confirm_error", error = error),
+                    cx,
+                );
                 cx.notify();
             }
         }
@@ -555,17 +573,19 @@ impl App {
             Ok(()) => {
                 self.profiles = self.db.list_profiles().unwrap_or_default();
                 self.profile_index = removed_index.min(self.profiles.len().saturating_sub(1));
-                self.toast_success("プロファイルを削除しました", cx);
+                self.toast_success(tr!("compression.profile.deleted"), cx);
             }
             Err(error) => {
                 let message = match self.db.active_job_count_for_profile(id) {
-                    Ok(count) if count > 0 => {
-                        format!("「{name}」は未完了のジョブが{count}件あるため削除できません")
-                    }
+                    Ok(count) if count > 0 => tr_args!(
+                        "compression.profile.delete.active_jobs",
+                        name = name,
+                        count = count
+                    ),
                     _ if self.profiles.len() <= 1 => {
-                        "最後のプロファイルは削除できません".to_string()
+                        tr!("compression.profile.last_delete")
                     }
-                    _ => format!("プロファイルを削除できません: {error}"),
+                    _ => tr_args!("compression.profile.delete_error", error = error),
                 };
                 self.toast_error(message, cx);
             }
@@ -575,19 +595,19 @@ impl App {
     pub(crate) fn retry_job(&mut self, id: String, cx: &mut Context<Self>) {
         match self.db.retry_job(&id) {
             Ok(true) => {
-                self.toast_success("再試行をキューに戻しました", cx);
+                self.toast_success(tr!("compression.retry.requeued"), cx);
                 self.reload_job_state(cx);
                 self.send_wake_jobs(cx);
             }
             Ok(false) => {
                 self.toast_warning(
-                    format!("再試行の上限（{MAX_JOB_RETRIES}回）に達しました"),
+                    tr_args!("compression.retry_limit", max = MAX_JOB_RETRIES),
                     cx,
                 );
             }
             Err(error) => {
                 tracing::warn!(%error, %id, "cannot retry compression job");
-                self.toast_error(format!("再試行できません: {error}"), cx);
+                self.toast_error(tr_args!("compression.retry.error", error = error), cx);
             }
         }
         cx.notify();
@@ -597,7 +617,7 @@ impl App {
         match self.db.retry_failed_jobs() {
             Ok(count) => {
                 self.toast_success(
-                    format!("{count} 件を再試行に戻しました（上限到達は除外）"),
+                    tr_args!("compression.retry.all_requeued", count = count),
                     cx,
                 );
                 self.reload_job_state(cx);
@@ -605,7 +625,7 @@ impl App {
             }
             Err(error) => {
                 tracing::warn!(%error, "cannot retry failed compression jobs");
-                self.toast_error(format!("再試行できません: {error}"), cx);
+                self.toast_error(tr_args!("compression.retry.error", error = error), cx);
             }
         }
         cx.notify();
@@ -629,13 +649,13 @@ impl App {
             let entity = entity.clone();
             let description = description.clone();
             alert
-                .title("待機ジョブを圧縮")
+                .title(tr!("compression.release.title"))
                 .bg(rgb(panel_deep))
                 .description(description)
                 .confirm()
-                .ok_text("圧縮する")
+                .ok_text(tr!("compression.release.ok"))
                 .ok_variant(ButtonVariant::Danger)
-                .cancel_text("キャンセル")
+                .cancel_text(tr!("common.cancel"))
                 .on_ok(move |_, _, cx| {
                     entity.update(cx, |this, cx| this.release_waiting_jobs(cx));
                     true
@@ -646,15 +666,15 @@ impl App {
     fn release_waiting_jobs(&mut self, cx: &mut Context<Self>) {
         let policy = compression_policy(self.settings.auto_compress_keep_original);
         match self.db.release_waiting_jobs(policy) {
-            Ok(0) => self.toast_info("未実行のジョブはありません", cx),
+            Ok(0) => self.toast_info(tr!("compression.release.none"), cx),
             Ok(count) => {
-                self.toast_success(format!("{count} 件を圧縮キューに戻しました"), cx);
+                self.toast_success(tr_args!("compression.release.requeued", count = count), cx);
                 self.reload_job_state(cx);
                 self.send_wake_jobs(cx);
             }
             Err(error) => {
                 tracing::warn!(%error, "cannot release waiting compression jobs");
-                self.toast_error(format!("待機ジョブを開始できません: {error}"), cx);
+                self.toast_error(tr_args!("compression.release.error", error = error), cx);
             }
         }
         cx.notify();

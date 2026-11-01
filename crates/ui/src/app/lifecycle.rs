@@ -9,6 +9,7 @@ use gpui_kit::component::notification::NotificationType;
 use gpui_kit::*;
 use vrc_photo_core::model::{LibraryStats, PhotoSort, QueueStatus};
 use vrc_photo_core::settings::AppSettings;
+use vrc_photo_i18n::{tr, tr_args};
 use vrc_photo_ipc::{
     Endpoint, Event as IpcEvent, JobStatus, Request as IpcRequest, ScanPhase as IpcScanPhase,
 };
@@ -250,7 +251,7 @@ impl App {
             return;
         }
         let Some(endpoint) = self.ipc_endpoint.clone() else {
-            self.toast_error("IPCの接続先を解決できません", cx);
+            self.toast_error(tr!("daemon.ipc.resolve_error"), cx);
             cx.notify();
             return;
         };
@@ -596,12 +597,12 @@ impl App {
                 match notice {
                     FailureNotice::Compression { count } => self.toast_actionable(
                         NotificationType::Error,
-                        format!("圧縮に {count} 件の失敗があります"),
+                        tr_args!("daemon.compression.failures", count = count),
                         cx,
                     ),
                     FailureNotice::Daemon { count } => self.toast_actionable(
                         NotificationType::Error,
-                        format!("デーモンで {count} 件の処理エラーがあります"),
+                        tr_args!("daemon.errors.count", count = count),
                         cx,
                     ),
                 }

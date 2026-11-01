@@ -357,11 +357,7 @@ impl App {
         let notify = should_notify_library_error(self.library_error.as_deref(), &error);
         self.library_error = Some(error);
         if notify {
-            self.toast_actionable(
-                NotificationType::Error,
-                "ライブラリを読み込めませんでした。通知から再読込できます",
-                cx,
-            );
+            self.toast_actionable(NotificationType::Error, tr!("app.library_error"), cx);
         }
     }
 
@@ -766,10 +762,7 @@ impl App {
             }
         }
         if app.library_error.is_none() && app.library.borrow().index.total == 0 {
-            app.toast_info(
-                "写真がありません。VRChatの写真フォルダを設定するか、--demo で起動してください。",
-                cx,
-            );
+            app.toast_info(tr!("app.empty_library"), cx);
         }
         if let Some(notice) = app.update.notice() {
             app.toast_info(notice.message(), cx);
@@ -795,7 +788,7 @@ impl App {
             && !updating
             && let Err(error) = spawn_daemon_process()
         {
-            app.toast_error(format!("デーモンを起動できません: {error}"), cx);
+            app.toast_error(tr_args!("app.daemon_start_error", error = error), cx);
         }
         app.start_auto_refresh(cx);
         if !app.demo {
