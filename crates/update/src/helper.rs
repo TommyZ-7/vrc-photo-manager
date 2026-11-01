@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::{IoOperation, LastErrorCode, Result, UpdateError};
-use crate::install::{ApplyJob, ApplyKind, UpdatePaths};
+use crate::install::{ApplyJob, ApplyKind, PackageFamily, UpdatePaths};
 use crate::manifest::{Manifest, PlatformAsset};
 use crate::native::NativeString;
 use crate::verify::{decode_signature_base64, effective_public_keys, verify_bytes, verify_file};
@@ -615,8 +615,6 @@ fn copy_and_verify(
 
 /// Verifies the staging directory, the signed manifest, and the package
 /// signature, then returns the root-owned copy to install.
-// Consumed by the privileged `--apply-system-package` mode.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn verify_system_package(
     job: &ApplyJob,
     options: &HelperOptions,
@@ -625,6 +623,200 @@ pub(crate) fn verify_system_package(
     verify_staging(job, uid)?;
     let (_, _, asset) = verify_manifest(job, options)?;
     copy_and_verify(job, &asset, options)
+}
+
+/// The package name and version reported by the package manager.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageMetadata {
+    pub name: String,
+    pub version: String,
+}
+
+/// Whether a package manager version matches the manifest version.
+///
+/// pacman appends `-pkgrel`, deb appends `-revision`, and both may carry an
+/// epoch (`1:`) that is not part of the application version.
+fn package_version_matches(raw: &str, expected: &str) -> bool {
+    let raw = raw.split_once(':').map(|(_, value)| value).unwrap_or(raw);
+    raw == expected
+        || raw
+            .strip_prefix(expected)
+            .is_some_and(|rest| rest.starts_with('-'))
+}
+
+/// The package manager binaries used by the metadata and install steps.
+fn pacman_program(options: &HelperOptions) -> PathBuf {
+    #[cfg(test)]
+    if let Some(path) = &options.pacman_path {
+        return path.clone();
+    }
+    let _ = options;
+    PathBuf::from("/usr/bin/pacman")
+}
+
+fn dpkg_program(options: &HelperOptions) -> PathBuf {
+    #[cfg(test)]
+    if let Some(path) = &options.dpkg_path {
+        return path.clone();
+    }
+    let _ = options;
+    PathBuf::from("/usr/bin/dpkg")
+}
+
+fn dpkg_deb_program(options: &HelperOptions) -> PathBuf {
+    #[cfg(test)]
+    if let Some(path) = &options.dpkg_deb_path {
+        return path.clone();
+    }
+    let _ = options;
+    PathBuf::from("/usr/bin/dpkg-deb")
+}
+
+fn read_package_metadata(
+    family: PackageFamily,
+    path: &Path,
+    options: &HelperOptions,
+) -> Result<PackageMetadata> {
+    let (program, args) = match family {
+        PackageFamily::Pacman => (
+            pacman_program(options),
+            vec!["-Qip".to_string(), path.display().to_string()],
+        ),
+        PackageFamily::Deb => (
+            dpkg_deb_program(options),
+            vec!["-f".to_string(), path.display().to_string()],
+        ),
+        PackageFamily::Unknown => return Err(UpdateError::PackageManagerUnavailable),
+    };
+    let output = Command::new(&program)
+        .args(&args)
+        .env("LC_ALL", "C")
+        .output()
+        .map_err(|error| UpdateError::io(&program, error))?;
+    if !output.status.success() {
+        return Err(UpdateError::PackageManagerFailed {
+            family,
+            status: output.status.to_string(),
+            output: truncate_output(&output.stderr),
+        });
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let name_key = if family == PackageFamily::Pacman {
+        "Name"
+    } else {
+        "Package"
+    };
+    let name = parse_field(&text, name_key).ok_or_else(|| {
+        UpdateError::PackageMetadataMismatch("package name is missing".to_string())
+    })?;
+    let version = parse_field(&text, "Version").ok_or_else(|| {
+        UpdateError::PackageMetadataMismatch("package version is missing".to_string())
+    })?;
+    Ok(PackageMetadata { name, version })
+}
+
+fn parse_field(text: &str, key: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        (name.trim() == key).then(|| value.trim().to_string())
+    })
+}
+
+fn truncate_output(bytes: &[u8]) -> String {
+    const LIMIT: usize = 64 * 1024;
+    String::from_utf8_lossy(&bytes[..bytes.len().min(LIMIT)]).to_string()
+}
+
+fn install_package(family: PackageFamily, path: &Path, options: &HelperOptions) -> Result<()> {
+    let (program, args) = match family {
+        PackageFamily::Pacman => (
+            pacman_program(options),
+            vec![
+                "-U".to_string(),
+                "--noconfirm".to_string(),
+                path.display().to_string(),
+            ],
+        ),
+        PackageFamily::Deb => (
+            dpkg_program(options),
+            vec!["-i".to_string(), path.display().to_string()],
+        ),
+        PackageFamily::Unknown => return Err(UpdateError::PackageManagerUnavailable),
+    };
+    let mut command = Command::new(&program);
+    command.args(&args).env("LC_ALL", "C");
+    if family == PackageFamily::Deb {
+        command.env("DEBIAN_FRONTEND", "noninteractive");
+    }
+    let output = command
+        .output()
+        .map_err(|error| UpdateError::io(&program, error))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if is_lock_error(family, &stderr) {
+        return Err(UpdateError::PackageManagerLocked);
+    }
+    Err(UpdateError::PackageManagerFailed {
+        family,
+        status: output.status.to_string(),
+        output: truncate_output(&output.stderr),
+    })
+}
+
+fn is_lock_error(family: PackageFamily, stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    match family {
+        PackageFamily::Pacman => {
+            lower.contains("unable to lock database")
+                || lower.contains("failed to init transaction")
+                || lower.contains("could not lock database")
+        }
+        PackageFamily::Deb => {
+            lower.contains("unable to lock the administration directory")
+                || lower.contains("frontend lock was locked")
+                || lower.contains("is another process using it")
+        }
+        PackageFamily::Unknown => false,
+    }
+}
+
+/// Reads and validates the job, then verifies and installs the package.
+pub fn run_system_package(job_path: &Path, options: &HelperOptions) -> Result<()> {
+    let bytes = std::fs::read(job_path)
+        .map_err(|error| UpdateError::io_at(IoOperation::Job, job_path, error))?;
+    let job: ApplyJob = serde_json::from_slice(&bytes)
+        .map_err(|error| UpdateError::InvalidJob(format!("cannot parse apply job: {error}")))?;
+    job.validate()?;
+    run_system_package_from_job(&job, options)
+}
+
+pub(crate) fn run_system_package_from_job(job: &ApplyJob, options: &HelperOptions) -> Result<()> {
+    let temp = verify_system_package(job, options)?;
+    let family = match job.kind {
+        ApplyKind::SystemPackage { family } => family,
+        _ => {
+            return Err(UpdateError::InvalidJob(
+                "not a system package job".to_string(),
+            ));
+        }
+    };
+    let metadata = read_package_metadata(family, temp.path(), options)?;
+    if metadata.name != "vrc-photo-manager" {
+        return Err(UpdateError::PackageMetadataMismatch(format!(
+            "unexpected package name {}",
+            metadata.name
+        )));
+    }
+    let expected = job.to_version.trim_start_matches('v');
+    if !package_version_matches(&metadata.version, expected) {
+        return Err(UpdateError::PackageMetadataMismatch(format!(
+            "package version {} does not match {expected}",
+            metadata.version
+        )));
+    }
+    install_package(family, temp.path(), options)
 }
 
 enum Backup {
@@ -1523,6 +1715,46 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn write_script(path: &Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn fake_pacman(dir: &Path, metadata: &str, install_exit: i32, install_stderr: &str) -> PathBuf {
+        let path = dir.join("pacman");
+        write_script(
+            &path,
+            &format!(
+                "#!/bin/sh\nif [ \"$1\" = \"-Qip\" ]; then\ncat <<'EOF'\n{metadata}\nEOF\nexit 0\nfi\nif [ \"$1\" = \"-U\" ]; then\necho \"$@\" >> \"{log}\"\necho \"{install_stderr}\" >&2\nexit {install_exit}\nfi\nexit 2\n",
+                log = dir.join("pacman-args.log").display(),
+            ),
+        );
+        path
+    }
+
+    #[cfg(unix)]
+    fn fake_dpkg_deb(dir: &Path, metadata: &str) -> PathBuf {
+        let path = dir.join("dpkg-deb");
+        write_script(&path, &format!("#!/bin/sh\ncat <<'EOF'\n{metadata}\nEOF\n"));
+        path
+    }
+
+    #[cfg(unix)]
+    fn fake_dpkg(dir: &Path, install_exit: i32, install_stderr: &str) -> PathBuf {
+        let path = dir.join("dpkg");
+        write_script(
+            &path,
+            &format!(
+                "#!/bin/sh\necho \"$@\" >> \"{log}\"\necho \"{install_stderr}\" >&2\nexit {install_exit}\n",
+                log = dir.join("dpkg-args.log").display(),
+            ),
+        );
+        path
+    }
+
+    #[cfg(unix)]
     fn signed_job(dir: &Path, staged: &Path, token: &str) -> (ApplyJob, String) {
         let keypair = KeyPair::generate_unencrypted_keypair().unwrap();
         let public_key = keypair
@@ -1950,6 +2182,15 @@ mod tests {
 
     #[cfg(unix)]
     fn system_package_fixture(dir: &Path, version: &str) -> (ApplyJob, HelperOptions) {
+        system_package_fixture_for(PackageFamily::Pacman, dir, version)
+    }
+
+    #[cfg(unix)]
+    fn system_package_fixture_for(
+        family: PackageFamily,
+        dir: &Path,
+        version: &str,
+    ) -> (ApplyJob, HelperOptions) {
         use base64::Engine as _;
         use minisign::KeyPair;
         use sha2::Sha256;
@@ -1965,27 +2206,40 @@ mod tests {
             .find(|line| line.starts_with("RW"))
             .unwrap()
             .to_string();
-        let package = b"fake pacman package";
+        let (manifest_key, package, file_name) = match family {
+            PackageFamily::Pacman => (
+                "pacman",
+                &b"fake pacman package"[..],
+                format!("vrc-photo-manager-{version}-1-x86_64.pkg.tar.zst"),
+            ),
+            PackageFamily::Deb => (
+                "deb",
+                &b"fake deb package"[..],
+                format!("vrc-photo-manager_{version}_amd64.deb"),
+            ),
+            PackageFamily::Unknown => unreachable!(),
+        };
         let asset_signature =
             minisign::sign(None, &keypair.sk, std::io::Cursor::new(package), None, None)
                 .unwrap()
                 .into_string();
+        let mut system_packages = serde_json::Map::new();
+        system_packages.insert(
+            manifest_key.to_string(),
+            serde_json::json!({
+                "url": format!("https://example.com/{file_name}"),
+                "format": manifest_key,
+                "size": package.len(),
+                "sha256": hex::encode(Sha256::digest(package)),
+                "signature": base64::engine::general_purpose::STANDARD
+                    .encode(asset_signature.as_bytes())
+            }),
+        );
         let manifest = serde_json::to_vec(&serde_json::json!({
             "schema": 1,
             "version": version,
             "platforms": {},
-            "system_packages": {
-                "pacman": {
-                    "url": format!(
-                        "https://example.com/vrc-photo-manager-{version}-1-x86_64.pkg.tar.zst"
-                    ),
-                    "format": "pacman",
-                    "size": package.len(),
-                    "sha256": hex::encode(Sha256::digest(package)),
-                    "signature": base64::engine::general_purpose::STANDARD
-                        .encode(asset_signature.as_bytes())
-                }
-            }
+            "system_packages": system_packages,
         }))
         .unwrap();
         let manifest_signature = minisign::sign(
@@ -2001,14 +2255,12 @@ mod tests {
         let data_dir = dir.join("data");
         let staged = data_dir
             .join(format!("updates/downloads/{version}"))
-            .join(format!("vrc-photo-manager-{version}-1-x86_64.pkg.tar.zst"));
+            .join(file_name);
         std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
         std::fs::write(&staged, package).unwrap();
         let job = ApplyJob {
             schema: APPLY_SCHEMA,
-            kind: ApplyKind::SystemPackage {
-                family: PackageFamily::Pacman,
-            },
+            kind: ApplyKind::SystemPackage { family },
             from_version: "0.3.0".to_string(),
             to_version: version.to_string(),
             target: "/usr/bin/vrc-photo-manager".into(),
@@ -2173,6 +2425,224 @@ mod tests {
         );
         drop(temp);
         assert!(!path.exists(), "the temp package must be removed on drop");
+    }
+
+    #[test]
+    fn package_version_normalization_accepts_revisions() {
+        assert!(package_version_matches("0.4.0", "0.4.0"));
+        assert!(package_version_matches("0.4.0-1", "0.4.0"));
+        assert!(package_version_matches("1:0.4.0-1ubuntu1", "0.4.0"));
+        assert!(!package_version_matches("0.4.1-1", "0.4.0"));
+
+        assert!(package_version_matches("0.9.3", "0.9.3"));
+        assert!(package_version_matches("0.9.3-1", "0.9.3"));
+        assert!(package_version_matches("1:0.9.3-1ubuntu1", "0.9.3"));
+        assert!(!package_version_matches("0.9.30-1", "0.9.3"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_package_rejects_a_package_name_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let (job, mut options) = system_package_fixture(dir.path(), &next_version());
+        options.pacman_path = Some(fake_pacman(
+            dir.path(),
+            "Name            : evil\nVersion         : 0.4.0-1",
+            0,
+            "",
+        ));
+        assert!(matches!(
+            run_system_package_from_job(&job, &options),
+            Err(UpdateError::PackageMetadataMismatch(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_package_rejects_a_package_version_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let (job, mut options) = system_package_fixture(dir.path(), &next_version());
+        options.pacman_path = Some(fake_pacman(
+            dir.path(),
+            "Name            : vrc-photo-manager\nVersion         : 0.3.0-1",
+            0,
+            "",
+        ));
+        assert!(matches!(
+            run_system_package_from_job(&job, &options),
+            Err(UpdateError::PackageMetadataMismatch(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_package_maps_pacman_lock_to_package_manager_locked() {
+        let dir = tempfile::tempdir().unwrap();
+        let version = next_version();
+        let (job, mut options) = system_package_fixture(dir.path(), &version);
+        let metadata =
+            format!("Name            : vrc-photo-manager\nVersion         : {version}-1");
+        options.pacman_path = Some(fake_pacman(
+            dir.path(),
+            &metadata,
+            1,
+            "error: failed to init transaction (unable to lock database)",
+        ));
+        assert!(matches!(
+            run_system_package_from_job(&job, &options),
+            Err(UpdateError::PackageManagerLocked)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_package_maps_pacman_failure_to_package_manager_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let version = next_version();
+        let (job, mut options) = system_package_fixture(dir.path(), &version);
+        let metadata =
+            format!("Name            : vrc-photo-manager\nVersion         : {version}-1");
+        options.pacman_path = Some(fake_pacman(
+            dir.path(),
+            &metadata,
+            1,
+            "error: failed to commit transaction (conflicting files)",
+        ));
+        assert!(matches!(
+            run_system_package_from_job(&job, &options),
+            Err(UpdateError::PackageManagerFailed {
+                family: PackageFamily::Pacman,
+                ..
+            })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_package_runs_the_fixed_pacman_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let version = next_version();
+        let (job, mut options) = system_package_fixture(dir.path(), &version);
+        let metadata =
+            format!("Name            : vrc-photo-manager\nVersion         : {version}-1");
+        options.pacman_path = Some(fake_pacman(dir.path(), &metadata, 0, ""));
+        run_system_package_from_job(&job, &options).unwrap();
+        let args = std::fs::read_to_string(dir.path().join("pacman-args.log")).unwrap();
+        assert!(args.contains("-U --noconfirm"));
+        assert!(args.contains("vrc-photo-update-"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_package_runs_from_a_job_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let version = next_version();
+        let (job, mut options) = system_package_fixture(dir.path(), &version);
+        let metadata =
+            format!("Name            : vrc-photo-manager\nVersion         : {version}-1");
+        options.pacman_path = Some(fake_pacman(dir.path(), &metadata, 0, ""));
+        let job_file = dir.path().join("job.json");
+        std::fs::write(&job_file, serde_json::to_vec(&job).unwrap()).unwrap();
+        run_system_package(&job_file, &options).unwrap();
+        let args = std::fs::read_to_string(dir.path().join("pacman-args.log")).unwrap();
+        assert!(args.contains("-U --noconfirm"));
+        assert!(args.contains("vrc-photo-update-"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_package_runs_the_fixed_dpkg_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let version = next_version();
+        let (job, mut options) =
+            system_package_fixture_for(PackageFamily::Deb, dir.path(), &version);
+        let metadata = format!("Package: vrc-photo-manager\nVersion: {version}");
+        options.dpkg_deb_path = Some(fake_dpkg_deb(dir.path(), &metadata));
+        options.dpkg_path = Some(fake_dpkg(dir.path(), 0, ""));
+        run_system_package_from_job(&job, &options).unwrap();
+        let args = std::fs::read_to_string(dir.path().join("dpkg-args.log")).unwrap();
+        assert!(args.contains("-i "));
+        assert!(args.contains("vrc-photo-update-"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_package_maps_dpkg_lock_to_package_manager_locked() {
+        let dir = tempfile::tempdir().unwrap();
+        let version = next_version();
+        let (job, mut options) =
+            system_package_fixture_for(PackageFamily::Deb, dir.path(), &version);
+        let metadata = format!("Package: vrc-photo-manager\nVersion: {version}-1");
+        options.dpkg_deb_path = Some(fake_dpkg_deb(dir.path(), &metadata));
+        options.dpkg_path = Some(fake_dpkg(
+            dir.path(),
+            1,
+            "dpkg: error: dpkg frontend lock was locked by another process with pid 42",
+        ));
+        assert!(matches!(
+            run_system_package_from_job(&job, &options),
+            Err(UpdateError::PackageManagerLocked)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_package_maps_dpkg_failure_to_package_manager_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let version = next_version();
+        let (job, mut options) =
+            system_package_fixture_for(PackageFamily::Deb, dir.path(), &version);
+        let metadata = format!("Package: vrc-photo-manager\nVersion: {version}");
+        options.dpkg_deb_path = Some(fake_dpkg_deb(dir.path(), &metadata));
+        options.dpkg_path = Some(fake_dpkg(
+            dir.path(),
+            1,
+            "dpkg: dependency problems prevent configuration",
+        ));
+        assert!(matches!(
+            run_system_package_from_job(&job, &options),
+            Err(UpdateError::PackageManagerFailed {
+                family: PackageFamily::Deb,
+                ..
+            })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_package_uses_the_c_locale_and_a_noninteractive_deb_frontend() {
+        let dir = tempfile::tempdir().unwrap();
+        let version = next_version();
+        let (job, mut options) =
+            system_package_fixture_for(PackageFamily::Deb, dir.path(), &version);
+
+        let metadata_log = dir.path().join("dpkg-deb-env.log");
+        let dpkg_deb = dir.path().join("dpkg-deb-env");
+        write_script(
+            &dpkg_deb,
+            &format!(
+                "#!/bin/sh\nprintf '%s|%s' \"$LC_ALL\" \"$1\" > \"{}\"\nprintf 'Package: vrc-photo-manager\\nVersion: {version}\\n'\n",
+                metadata_log.display()
+            ),
+        );
+        let install_log = dir.path().join("dpkg-env.log");
+        let dpkg = dir.path().join("dpkg-env");
+        write_script(
+            &dpkg,
+            &format!(
+                "#!/bin/sh\nprintf '%s|%s|%s' \"$LC_ALL\" \"$DEBIAN_FRONTEND\" \"$1\" > \"{}\"\n",
+                install_log.display()
+            ),
+        );
+        options.dpkg_deb_path = Some(dpkg_deb);
+        options.dpkg_path = Some(dpkg);
+
+        run_system_package_from_job(&job, &options).unwrap();
+        assert_eq!(std::fs::read_to_string(&metadata_log).unwrap(), "C|-f");
+        assert_eq!(
+            std::fs::read_to_string(&install_log).unwrap(),
+            "C|noninteractive|-i"
+        );
     }
 
     #[test]
