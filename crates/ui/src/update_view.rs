@@ -10,8 +10,9 @@ use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
 use semver::Version;
 use vrc_photo_i18n::{tr, tr_args};
 use vrc_photo_update::{
-    ApplyJob, ApplyKind, AvailableUpdate, FeedConfig, InstallKind, IoOperation, LastResult,
-    LastStatus, NativeString, UpdateError, UpdatePaths, UreqClient, check, download, start_apply,
+    ApplyJob, ApplyKind, AvailableUpdate, FeedConfig, InstallKind, IoOperation, LastErrorCode,
+    LastResult, LastStatus, NativeString, UpdateError, UpdatePaths, UreqClient, check, download,
+    start_apply,
 };
 
 use crate::app::App;
@@ -95,18 +96,21 @@ mod tests {
             version: "1.0.0".into(),
             reason: None,
             status: LastStatus::Success,
+            code: None,
         };
         let rolled_back = UpdateNotice {
             kind: UpdateNoticeKind::RolledBack,
             version: "1.0.0".into(),
             reason: None,
             status: LastStatus::RolledBack,
+            code: None,
         };
         let failed = UpdateNotice {
             kind: UpdateNoticeKind::Failed,
             version: "1.0.0".into(),
             reason: None,
             status: LastStatus::Failed,
+            code: None,
         };
         let p = crate::ui::palette::resolve("charcoal", "sky");
         assert_eq!(success.color(&p), p.green);
@@ -174,12 +178,86 @@ mod tests {
             },
             true,
             false,
+            false,
             false
         ));
-        assert!(can_apply(&appimage(), true, false, false));
-        assert!(!can_apply(&appimage(), true, true, false));
-        assert!(can_apply(&appimage(), true, true, true));
-        assert!(!can_apply(&appimage(), false, false, false));
+        assert!(can_apply(&appimage(), true, false, false, false));
+        assert!(!can_apply(&appimage(), true, true, false, false));
+        assert!(can_apply(&appimage(), true, true, true, false));
+        assert!(!can_apply(&appimage(), false, false, false, false));
+    }
+
+    #[test]
+    fn system_package_can_apply_only_when_ready() {
+        let install = InstallKind::SystemPackage {
+            family: PackageFamily::Pacman,
+        };
+        assert!(can_apply(&install, true, false, false, true));
+        assert!(!can_apply(&install, true, false, false, false));
+        assert!(can_apply(&appimage(), true, false, false, false));
+    }
+
+    #[test]
+    fn system_package_without_auto_apply_shows_the_package_command() {
+        assert!(should_show_package_command(
+            &InstallKind::SystemPackage {
+                family: PackageFamily::Pacman
+            },
+            false,
+            true,
+        ));
+        assert!(!should_show_package_command(
+            &InstallKind::SystemPackage {
+                family: PackageFamily::Pacman
+            },
+            true,
+            true,
+        ));
+        assert!(should_show_package_command(
+            &InstallKind::SystemPackage {
+                family: PackageFamily::Pacman
+            },
+            true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn result_notice_maps_auth_and_lock_codes() {
+        let cancelled = LastResult {
+            status: LastStatus::Failed,
+            from: "0.9.2".to_string(),
+            to: "0.10.0".to_string(),
+            reason: None,
+            code: Some(LastErrorCode::AuthCancelled),
+        };
+        let notice = result_notice(&cancelled, "0.9.2").unwrap();
+        assert!(notice.message_in("ja").contains("キャンセル"));
+        assert!(notice.message_in("en").contains("cancel"));
+
+        let locked = LastResult {
+            status: LastStatus::Failed,
+            from: "0.9.2".to_string(),
+            to: "0.10.0".to_string(),
+            reason: None,
+            code: Some(LastErrorCode::PackageManagerLocked),
+        };
+        let notice = result_notice(&locked, "0.9.2").unwrap();
+        assert!(notice.message_in("ja").contains("ロック"));
+    }
+
+    #[test]
+    fn failed_notice_is_shown_on_the_new_version() {
+        let result = LastResult {
+            status: LastStatus::Failed,
+            from: "0.9.2".to_string(),
+            to: "0.10.0".to_string(),
+            reason: Some("health".to_string()),
+            code: Some(LastErrorCode::HealthCheckFailed),
+        };
+        assert!(result_notice(&result, "0.10.0").is_some());
+        assert!(result_notice(&result, "0.9.2").is_some());
+        assert!(result_notice(&result, "0.8.0").is_none());
     }
 
     #[test]
@@ -411,6 +489,7 @@ pub(crate) struct UpdateNotice {
     version: String,
     reason: Option<String>,
     status: LastStatus,
+    code: Option<LastErrorCode>,
 }
 
 impl UpdateNotice {
@@ -440,13 +519,39 @@ impl UpdateNotice {
                     &[("version", self.version.clone())],
                 ),
             },
-            UpdateNoticeKind::Failed => match &self.reason {
-                Some(reason) => vrc_photo_i18n::tr_args_in(
-                    locale,
-                    "update.notice.failed",
-                    &[("reason", reason.clone())],
-                ),
-                None => vrc_photo_i18n::tr_in(locale, "update.notice.failed_no_reason"),
+            UpdateNoticeKind::Failed => match self.code {
+                Some(LastErrorCode::AuthCancelled) => {
+                    vrc_photo_i18n::tr_in(locale, "update.notice.auth_cancelled")
+                }
+                Some(LastErrorCode::AuthUnavailable) => {
+                    vrc_photo_i18n::tr_in(locale, "update.notice.auth_unavailable")
+                }
+                Some(LastErrorCode::PackageManagerLocked) => {
+                    vrc_photo_i18n::tr_in(locale, "update.notice.package_locked")
+                }
+                Some(LastErrorCode::PackageManagerFailed) => {
+                    vrc_photo_i18n::tr_in(locale, "update.notice.package_failed")
+                }
+                Some(LastErrorCode::PackageVerificationFailed) => {
+                    vrc_photo_i18n::tr_in(locale, "update.error.package_verify")
+                }
+                Some(LastErrorCode::PackageMetadataMismatch) => {
+                    vrc_photo_i18n::tr_in(locale, "update.notice.package_mismatch")
+                }
+                Some(LastErrorCode::Downgrade) => {
+                    vrc_photo_i18n::tr_in(locale, "update.notice.downgrade")
+                }
+                Some(LastErrorCode::HealthCheckFailed) => {
+                    vrc_photo_i18n::tr_in(locale, "update.notice.health_failed")
+                }
+                Some(LastErrorCode::HelperFailed) | None => match &self.reason {
+                    Some(reason) => vrc_photo_i18n::tr_args_in(
+                        locale,
+                        "update.notice.failed",
+                        &[("reason", reason.clone())],
+                    ),
+                    None => vrc_photo_i18n::tr_in(locale, "update.notice.failed_no_reason"),
+                },
             },
         }
     }
@@ -464,6 +569,8 @@ impl UpdateNotice {
 pub struct UpdateState {
     pub phase: UpdatePhase,
     pub install: InstallKind,
+    /// Whether a system package can be downloaded and applied in-app.
+    pub system_apply_available: bool,
     notice: Option<UpdateNotice>,
     resume_available: Option<AvailableUpdate>,
     tx: Sender<UpdateMessage>,
@@ -490,18 +597,28 @@ impl UpdateState {
             vrc_photo_update::install_kind()
         };
         let data_dir = vrc_photo_core::data_dir();
-        let notice = if demo || !database_ok {
+        let last_result = if demo || !database_ok {
             None
         } else {
-            data_dir.as_deref().and_then(|dir| {
-                let result = LastResult::take(&UpdatePaths::new(dir))?;
-                result_notice(&result, vrc_photo_update::CURRENT_VERSION)
-            })
+            data_dir
+                .as_deref()
+                .and_then(|dir| LastResult::take(&UpdatePaths::new(dir)))
         };
+        let auth_unavailable = last_result
+            .as_ref()
+            .is_some_and(|result| result.code == Some(LastErrorCode::AuthUnavailable));
+        let system_apply_available = install.system_package_apply(
+            vrc_photo_update::pkexec_available(),
+            vrc_photo_update::system_helper_available(),
+            vrc_photo_update::system_policy_available(),
+        ) && !auth_unavailable;
+        let notice = last_result
+            .and_then(|result| result_notice(&result, vrc_photo_update::CURRENT_VERSION));
         let (tx, rx) = async_channel::unbounded();
         Self {
             phase: UpdatePhase::Idle,
             install,
+            system_apply_available,
             notice,
             resume_available: None,
             tx,
@@ -604,18 +721,15 @@ fn update_error_message(error: &UpdateError) -> UpdateText {
         UpdateError::Other(message) => {
             UpdateText::key("update.error.other").arg("message", message)
         }
-        // Dedicated messages for these arrive with the privileged apply flow.
-        UpdateError::SystemHelperMissing => {
-            UpdateText::key("update.error.helper_missing_reinstall")
-        }
+        UpdateError::SystemHelperMissing => UpdateText::key("update.error.system_helper_missing"),
+        UpdateError::PackageManagerLocked => UpdateText::key("update.error.package_locked"),
+        UpdateError::PackageMetadataMismatch(_) => UpdateText::key("update.error.package_mismatch"),
+        UpdateError::PackageVerificationFailed(_) => UpdateText::key("update.error.package_verify"),
+        UpdateError::Downgrade { .. } => UpdateText::key("update.error.downgrade"),
+        UpdateError::PackageManagerFailed { .. } => UpdateText::key("update.error.package_failed"),
         UpdateError::NotPrivileged
         | UpdateError::StagingRejected(_)
-        | UpdateError::PackageManagerLocked
-        | UpdateError::PackageManagerUnavailable
-        | UpdateError::PackageMetadataMismatch(_)
-        | UpdateError::PackageVerificationFailed(_)
-        | UpdateError::Downgrade { .. }
-        | UpdateError::PackageManagerFailed { .. } => {
+        | UpdateError::PackageManagerUnavailable => {
             UpdateText::key("update.error.other").arg("message", error.to_string())
         }
     }
@@ -838,6 +952,13 @@ impl App {
             cx.notify();
             return;
         };
+        if matches!(self.update.install, InstallKind::SystemPackage { .. })
+            && !self.update.system_apply_available
+        {
+            self.toast_warning(tr!("update.error.not_supported"), cx);
+            cx.notify();
+            return;
+        }
         if !appimage_writable(&self.update.install) {
             self.toast_error(tr!("update.error.appimage_not_writable"), cx);
             cx.notify();
@@ -848,6 +969,7 @@ impl App {
             true,
             self.daemon_active,
             self.ipc_connected,
+            self.update.system_apply_available,
         ) {
             if self.daemon_active && !self.ipc_connected {
                 self.toast_error(tr!("update.error.daemon_connected"), cx);
@@ -889,11 +1011,32 @@ impl App {
         let (kind, target) = match &self.update.install {
             InstallKind::AppImage { path } => (ApplyKind::AppImage, path.clone()),
             InstallKind::WindowsCurrentUser { .. } => (ApplyKind::Windows, current_exe.clone()),
+            InstallKind::SystemPackage { family } => (
+                ApplyKind::SystemPackage { family: *family },
+                current_exe.clone(),
+            ),
             _ => {
                 self.toast_warning(tr!("update.error.not_supported"), cx);
                 cx.notify();
                 return;
             }
+        };
+        let (signed_manifest, manifest_signature) = match &kind {
+            ApplyKind::SystemPackage { .. } => {
+                let bytes = match String::from_utf8(update.signed_manifest.bytes.clone()) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        tracing::error!(%error, "signed manifest is not valid UTF-8");
+                        let message = UpdateText::key("update.error.manifest");
+                        self.update.phase = UpdatePhase::Error(message.clone());
+                        self.toast_error(message.message(), cx);
+                        cx.notify();
+                        return;
+                    }
+                };
+                (Some(bytes), Some(update.signed_manifest.signature.clone()))
+            }
+            _ => (None, None),
         };
         let job = ApplyJob {
             schema: vrc_photo_update::APPLY_SCHEMA,
@@ -916,8 +1059,8 @@ impl App {
             health_token: ApplyJob::new_health_token(),
             data_dir,
             created_at: Utc::now().to_rfc3339(),
-            signed_manifest: None,
-            manifest_signature: None,
+            signed_manifest,
+            manifest_signature,
         };
 
         let endpoint = self.ipc_endpoint.clone();
@@ -1052,6 +1195,12 @@ impl App {
         let last_checked = last_checked_label(self.settings.update_last_checked_at);
         let demo = self.demo;
         let busy = self.update.busy();
+        let has_asset = match &phase {
+            UpdatePhase::Available(update)
+            | UpdatePhase::Downloading { update, .. }
+            | UpdatePhase::Ready { update, .. } => update.asset.is_some(),
+            _ => false,
+        };
         let (status, fg, bg) = phase.badge(&p);
 
         let mut card = glass_panel(&self.palette)
@@ -1128,30 +1277,39 @@ impl App {
 
         card = card.child(self.update_phase_view(&phase, cx));
 
-        if let Some(command) = package_command(&install) {
-            card = card.child(
-                v_flex()
-                    .gap(px(4.))
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(p.muted))
-                            .child(tr!("update.package_manager")),
-                    )
-                    .child(
-                        div()
-                            .font_family("monospace")
-                            .text_size(px(10.))
-                            .text_color(rgb(p.text))
-                            .child(command),
-                    ),
-            );
+        if should_show_package_command(&install, self.update.system_apply_available, has_asset) {
+            if let Some(command) = package_command(&install) {
+                card = card.child(
+                    v_flex()
+                        .gap(px(4.))
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(p.muted))
+                                .child(tr!("update.package_manager")),
+                        )
+                        .child(
+                            div()
+                                .font_family("monospace")
+                                .text_size(px(10.))
+                                .text_color(rgb(p.text))
+                                .child(command),
+                        ),
+                );
+            } else {
+                card = card.child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(rgb(p.muted_2))
+                        .child(tr!("update.package_manager_hint")),
+                );
+            }
         } else if matches!(install, InstallKind::SystemPackage { .. }) {
             card = card.child(
                 div()
                     .text_size(px(10.))
                     .text_color(rgb(p.muted_2))
-                    .child(tr!("update.package_manager_hint")),
+                    .child(tr!("update.system_update_hint")),
             );
         } else if matches!(
             install,
@@ -1200,6 +1358,18 @@ impl App {
 
     fn update_available_view(&mut self, update: &AvailableUpdate, cx: &mut Context<Self>) -> Div {
         let p = self.palette;
+        let install = self.update.install.clone();
+        let can_download = update.asset.is_some()
+            && match &install {
+                InstallKind::AppImage { .. } => appimage_writable(&install),
+                InstallKind::SystemPackage { .. } => self.update.system_apply_available,
+                InstallKind::WindowsCurrentUser { .. } => true,
+                _ => false,
+            };
+        let show_not_writable = update.asset.is_some()
+            && !can_download
+            && matches!(install, InstallKind::AppImage { .. });
+        let show_fallback = matches!(install, InstallKind::SystemPackage { .. }) && !can_download;
         v_flex()
             .gap(px(10.))
             .child(
@@ -1226,31 +1396,33 @@ impl App {
                         })),
                 )
             })
-            .when(
-                update.asset.is_some() && appimage_writable(&self.update.install),
-                |this| {
-                    this.child(
-                        Button::new("update-download")
-                            .label(tr!("update.download"))
-                            .small()
-                            .primary()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.start_update_download(cx);
-                            })),
-                    )
-                },
-            )
-            .when(
-                update.asset.is_some() && !appimage_writable(&self.update.install),
-                |this| {
-                    this.child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(p.amber))
-                            .child(tr!("update.appimage_not_writable_short")),
-                    )
-                },
-            )
+            .when(can_download, |this| {
+                this.child(
+                    Button::new("update-download")
+                        .label(tr!("update.download"))
+                        .small()
+                        .primary()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.start_update_download(cx);
+                        })),
+                )
+            })
+            .when(show_not_writable, |this| {
+                this.child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(rgb(p.amber))
+                        .child(tr!("update.appimage_not_writable_short")),
+                )
+            })
+            .when(show_fallback, |this| {
+                this.child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(rgb(p.muted_2))
+                        .child(tr!("update.package_manager_fallback")),
+                )
+            })
     }
 
     fn update_ready_view(&mut self, update: &AvailableUpdate, cx: &mut Context<Self>) -> Div {
@@ -1260,6 +1432,7 @@ impl App {
             update.asset.is_some(),
             self.daemon_active,
             self.ipc_connected,
+            self.update.system_apply_available,
         ) && appimage_writable(&self.update.install);
         v_flex()
             .gap(px(8.))
@@ -1361,19 +1534,24 @@ fn result_notice(result: &LastResult, current_version: &str) -> Option<UpdateNot
             version: result.to.clone(),
             reason: None,
             status: LastStatus::Success,
+            code: result.code,
         }),
         LastStatus::RolledBack if result.from == current_version => Some(UpdateNotice {
             kind: UpdateNoticeKind::RolledBack,
             version: result.from.clone(),
             reason: result.reason.clone(),
             status: LastStatus::RolledBack,
+            code: result.code,
         }),
-        LastStatus::Failed if result.from == current_version => Some(UpdateNotice {
-            kind: UpdateNoticeKind::Failed,
-            version: result.from.clone(),
-            reason: result.reason.clone(),
-            status: LastStatus::Failed,
-        }),
+        LastStatus::Failed if result.from == current_version || result.to == current_version => {
+            Some(UpdateNotice {
+                kind: UpdateNoticeKind::Failed,
+                version: result.from.clone(),
+                reason: result.reason.clone(),
+                status: LastStatus::Failed,
+                code: result.code,
+            })
+        }
         _ => None,
     }
 }
@@ -1383,8 +1561,19 @@ fn can_apply(
     has_asset: bool,
     daemon_active: bool,
     ipc_connected: bool,
+    system_apply_available: bool,
 ) -> bool {
-    install.automatic_apply() && has_asset && (!daemon_active || ipc_connected)
+    let automatic = install.automatic_apply()
+        || (matches!(install, InstallKind::SystemPackage { .. }) && system_apply_available);
+    automatic && has_asset && (!daemon_active || ipc_connected)
+}
+
+fn should_show_package_command(
+    install: &InstallKind,
+    system_apply_available: bool,
+    has_asset: bool,
+) -> bool {
+    matches!(install, InstallKind::SystemPackage { .. }) && (!system_apply_available || !has_asset)
 }
 
 fn appimage_writable(install: &InstallKind) -> bool {
