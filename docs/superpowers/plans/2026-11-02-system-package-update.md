@@ -2604,7 +2604,11 @@ git commit -m "docs: document in-app system package updates"
 - Test: workspace 全体
 - 手動: pacman 環境
 
-- [ ] **Step 1: fmt / clippy / test を実行する**
+> **Status (2026-11-02):** ローカル検証（fmt / clippy / test）と Release workflow の
+> 静的確認は完了。特権を伴う pacman / deb の手動 QA はユーザーの明示承認待ちのため
+> 未実施。計画全体の完了マークは保留する。
+
+- [x] **Step 1: fmt / clippy / test を実行する**
 
 Run:
 
@@ -2616,7 +2620,9 @@ cargo test --workspace
 
 Expected: すべて PASS
 
-- [ ] **Step 2: release workflow の bundle を確認する**
+結果: 3コマンドとも PASS（2026-11-02、774 passed / 1 ignored）。
+
+- [x] **Step 2: release workflow の bundle を確認する**
 
 PR に `bundle-check` ラベルを付けるか、packaging 変更を含むため Release workflow の
 `build` ジョブが走ることを確認する。`build` で以下を確認:
@@ -2626,7 +2632,13 @@ PR に `bundle-check` ラベルを付けるか、packaging 変更を含むため
 - deb / pacman に policy が入る
 - `latest.json` の `system_packages` が 2 件
 
+結果: workflow の静的確認のみ実施（Docker 不在のため Release workflow は未実行）。
+bundle 生成条件、`makepkg`、`pacman -Qip` の Name / Version / Architecture 検証、
+deb / pacman の policy 検証、`system_packages` の件数チェックを確認した。
+
 - [ ] **Step 3: pacman の手動 QA を行う**
+
+> **Pending:** ユーザーの明示承認が必要なため未実施。
 
 ユーザーの明示承認を得てから、以下を確認する。
 
@@ -2641,15 +2653,24 @@ PR に `bundle-check` ラベルを付けるか、packaging 変更を含むため
 
 - [ ] **Step 4: deb の手動 QA を行う（可能な場合）**
 
+> **Pending:** 特権を伴う deb 実機 QA は未実施。Task 5 の偽 `dpkg` / `dpkg-deb`
+> テストと Release workflow のパッケージ検証で代替している。
+
 Debian コンテナ / VM で同じ流れを確認する。難しい場合は、Task 5 の偽 `dpkg` /
 `dpkg-deb` テストと Release workflow のパッケージ検証で代替し、未実施として記録する。
 
 - [ ] **Step 5: 計画のチェックボックスを更新する**
 
+> **Pending:** 手動 QA が未完了のため、計画全体の完了チェックは保留。
+> 本検証で完了した Step 1 / Step 2 のみ `- [x]` にした。
+
 実行完了時に `docs/superpowers/plans/2026-11-02-system-package-update.md` の
 チェックボックスを `- [x]` に更新する（AGENTS.md §4）。
 
 - [ ] **Step 6: 最終 commit**
+
+> **Pending:** 手動 QA 完了後に計画完了マークの最終コミットを行う。
+> 本検証時点の状態は `docs: record system package update verification status` で記録済み。
 
 ```bash
 git add docs/superpowers/plans/2026-11-02-system-package-update.md
