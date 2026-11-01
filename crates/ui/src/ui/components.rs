@@ -12,6 +12,7 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use vrc_photo_core::settings::AppSettings;
+use vrc_photo_i18n::{tr, tr_args};
 
 use crate::app::App;
 use crate::ui::theme::*;
@@ -160,18 +161,12 @@ pub(crate) fn manual_option_row(
 pub(crate) fn compression_policy_warning(
     keep_original: bool,
     auto_compress: bool,
-) -> Option<&'static str> {
-    (auto_compress && !keep_original).then_some(
-        "自動圧縮で圧縮に成功すると元画像をOSゴミ箱へ移動します。取り消すにはゴミ箱から復元してください。",
-    )
+) -> Option<String> {
+    (auto_compress && !keep_original).then(|| tr!("components.compression_warning.keep"))
 }
 
 pub(crate) fn release_confirmation(keep_original: bool, count: i64) -> Option<String> {
-    (!keep_original).then(|| {
-        format!(
-            "待機中の自動圧縮 {count} 件を実行し、成功した元画像をOSゴミ箱へ移動します。取り消すにはゴミ箱から復元してください。"
-        )
-    })
+    (!keep_original).then(|| tr_args!("components.compression_warning.replace", count = count))
 }
 
 impl App {

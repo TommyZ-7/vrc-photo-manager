@@ -772,7 +772,7 @@ impl App {
             );
         }
         if let Some(notice) = app.update.notice() {
-            app.toast_info(notice.message.clone(), cx);
+            app.toast_info(notice.message(), cx);
         }
         let first_photo_id = app
             .library
