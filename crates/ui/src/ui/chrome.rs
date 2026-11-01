@@ -458,7 +458,7 @@ impl App {
                     "ribbon-manual-compress",
                     "圧縮",
                     IconName::Minimize,
-                    selection_look(!self.selected_action_ids().is_empty()),
+                    selection_look(self.has_action_selection()),
                     metrics,
                     cx,
                     |this, _, cx| {
@@ -481,7 +481,7 @@ impl App {
     }
 
     fn ribbon_compression(&mut self, metrics: RibbonMetrics, cx: &mut Context<Self>) -> AnyElement {
-        let has_selection = !self.selected_action_ids().is_empty();
+        let has_selection = self.has_action_selection();
         let waiting = self.waiting_job_count;
         let run_group = ribbon_group(
             &self.palette,
