@@ -18,6 +18,7 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use vrc_photo_core::model::Photo;
+use vrc_photo_i18n::{tr, tr_args};
 
 use crate::app::{App, CardBoundsMap, Screen, retain_recent_bounds};
 use crate::state::photo_browser::{
@@ -139,7 +140,7 @@ fn render_header(app: &App, shared: &Rc<GalleryShared>, window: &Window) -> AnyE
         total,
     );
     let (month, month_count) = if total == 0 {
-        ("写真なし".to_string(), 0)
+        (tr!("gallery.no_photos"), 0)
     } else {
         let (month, count) = visible_month(&browser.index, first_visible);
         (format_captured_month(month), count)
@@ -172,10 +173,10 @@ fn render_header(app: &App, shared: &Rc<GalleryShared>, window: &Window) -> AnyE
                         .font_family("monospace")
                         .text_size(px(10.))
                         .text_color(rgb(p.muted_2))
-                        .child(format!(
-                            "{}枚 / {}",
-                            format_count(month_count as i64),
-                            format_count(total as i64)
+                        .child(tr_args!(
+                            "gallery.month_count",
+                            count = format_count(month_count as i64),
+                            total = format_count(total as i64)
                         )),
                 ),
         )
@@ -274,7 +275,7 @@ fn render_grid(
                     .p(px(20.))
                     .text_size(px(12.))
                     .text_color(rgb(p.muted))
-                    .child("条件に一致する写真がありません")
+                    .child(tr!("gallery.no_match"))
                     .into_any_element()
             } else {
                 // Before a search runs the browser mirrors the library, so an
@@ -298,7 +299,7 @@ fn render_grid(
                         .pt(px(4.))
                         .text_size(px(10.))
                         .text_color(rgb(p.muted_2))
-                        .child("リボンの「再読込」で再試行できます。"),
+                        .child(tr!("gallery.reload_hint")),
                 )
                 .into_any_element()
         } else {
@@ -312,9 +313,7 @@ fn render_grid(
                 .border_color(rgb(p.border))
                 .text_size(px(12.))
                 .text_color(rgb(p.muted))
-                .child(
-                    "写真がありません。VRChatの写真フォルダを設定するか、--demo でサンプルを表示できます。",
-                )
+                .child(tr!("gallery.empty"))
                 .into_any_element()
         };
         let container = v_flex()
@@ -517,7 +516,7 @@ fn render_card(
     let world = photo
         .world_name
         .clone()
-        .unwrap_or_else(|| "未紐付け".to_string());
+        .unwrap_or_else(|| tr!("gallery.unlinked"));
     let thumbnail = shared.thumbnails.borrow_mut().get(id);
     if thumbnail.is_none() {
         missing_thumbnails.push(photo.clone());
@@ -606,13 +605,13 @@ fn render_card(
                         .font_medium()
                         .text_color(rgb(status_color))
                         .child(if replaced {
-                            "圧縮版のみ"
+                            tr!("gallery.badge.compressed_only")
                         } else if duplicate {
-                            "重複"
+                            tr!("gallery.badge.duplicate")
                         } else if compressed {
-                            "圧縮済"
+                            tr!("gallery.badge.compressed")
                         } else {
-                            "未圧縮"
+                            tr!("gallery.badge.uncompressed")
                         }),
                 ),
         );

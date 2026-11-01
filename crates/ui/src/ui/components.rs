@@ -357,12 +357,13 @@ impl App {
 
     pub(crate) fn preset_button(
         &self,
-        label: &str,
+        label: impl Into<String>,
         days: Option<i64>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let label: String = label.into();
         let active = self.search_days == days;
-        chip(&self.palette, label, active)
+        chip(&self.palette, &label, active)
             .id(SharedString::from(format!("preset-{label}")))
             .cursor_pointer()
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -460,8 +461,9 @@ impl App {
             )
     }
 
-    pub(crate) fn meta_row(&self, label: &str, value: String) -> impl IntoElement {
+    pub(crate) fn meta_row(&self, label: impl Into<String>, value: String) -> impl IntoElement {
         let p = self.palette;
+        let label: String = label.into();
         h_flex()
             .gap(px(8.))
             .text_size(px(10.))
@@ -471,7 +473,7 @@ impl App {
                     .flex_shrink_0()
                     .text_size(px(10.))
                     .text_color(rgb(p.muted_2))
-                    .child(label.to_string()),
+                    .child(label),
             )
             .child(
                 div()
@@ -484,16 +486,16 @@ impl App {
             )
     }
 
-    pub(crate) fn section_label(&self, label: &str) -> impl IntoElement {
+    pub(crate) fn section_label(&self, label: impl Into<String>) -> impl IntoElement {
         let p = self.palette;
         div()
             .text_size(px(10.))
             .font_semibold()
             .text_color(rgb(p.muted_2))
-            .child(label.to_string())
+            .child(label.into())
     }
 
-    pub(crate) fn badge(&self, text: &str, fg: u32, bg: u32) -> impl IntoElement {
+    pub(crate) fn badge(&self, text: impl Into<String>, fg: u32, bg: u32) -> impl IntoElement {
         div()
             .px(px(7.))
             .py(px(2.))
@@ -502,7 +504,7 @@ impl App {
             .text_size(px(10.))
             .font_medium()
             .text_color(rgb(fg))
-            .child(text.to_string())
+            .child(text.into())
     }
 }
 

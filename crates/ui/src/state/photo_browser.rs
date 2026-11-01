@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::{ScrollStrategy, UniformListScrollHandle};
 use vrc_photo_core::model::{Photo, PhotoIndexEntry};
+use vrc_photo_i18n::tr;
 
 use crate::state::year_rail::{YearBucket, build_year_buckets};
 use crate::ui::theme::{MIN_CARD_WIDTH, photo_row_height};
@@ -380,7 +381,7 @@ pub(crate) fn apply_library_index(
         }
         Err(error) => {
             tracing::error!(%error, "photo_index failed");
-            Some("写真一覧を読み込めませんでした".to_string())
+            Some(tr!("photos.index_error"))
         }
     }
 }
