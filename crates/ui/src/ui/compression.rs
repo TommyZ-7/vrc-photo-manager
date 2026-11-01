@@ -42,7 +42,7 @@ fn queue_status_badge(status: &QueueStatus, p: &Palette) -> (&'static str, u32, 
 }
 
 /// Whether a failed job can return to the queue without exceeding the cap.
-fn job_retry_available(job: &CompressionJob) -> bool {
+pub(crate) fn job_retry_available(job: &CompressionJob) -> bool {
     job.status == QueueStatus::Failed && job.retry_count < MAX_JOB_RETRIES
 }
 
