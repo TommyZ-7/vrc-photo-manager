@@ -269,12 +269,15 @@ CREATE INDEX idx_deletion_requests_status
 | 列 | 型 | 説明 |
 |---|---|---|
 | operation | TEXT PK | `scan` / `log` / `link` |
-| message | TEXT | UIに出す短文（例: 「ログフォルダが見つかりません: ...」） |
+| message | TEXT | UIに出す短文。書き込み時の言語で保存するフォールバック（例: 「ログフォルダが見つかりません: ...」） |
 | detail | TEXT | パスやパーサエラーなどの詳細。NULL可 |
 | occurred_at | TEXT | 最後に記録した日時（RFC3339） |
 | attempts | INTEGER | 検出回数。同じ操作の失敗を記録するたびに1増える |
+| message_key | TEXT | 翻訳カタログのキー（例: `daemon.log_dir_missing`）。NULL可 |
+| message_args | TEXT | `message_key` に渡す引数のJSONオブジェクト。NULL可 |
 
-- 同じ操作の新しい失敗は `message` / `detail` / `occurred_at` を置き換える。
+- 同じ操作の新しい失敗は `message` / `detail` / `occurred_at` / `message_key` / `message_args` を置き換える。
+- schema v10 で `message_key` / `message_args` を追加した。キーがある行はUIが現在の言語で描画し、キーがない旧行は `message` をそのまま表示する。
 - デーモンはメッセージと詳細の署名が変わったときだけ書き込むため、`attempts` はポーリング回数ではなく「異なる失敗を検出した回数」になる。
 - 操作が成功すると行を削除する。`scan` は失敗のないフルスキャン、`log` は新しく処理できた行が1行以上あり、失敗もスキップもない取り込み、`link` は紐付け成功で消える。
 - UIは発生時刻の降順、同時刻なら `operation` 順で読む。
