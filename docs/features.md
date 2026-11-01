@@ -276,8 +276,9 @@
 ## 10. アプリのアップデート
 
 - フィードは GitHub Releases の署名付き `latest.json`。マニフェストは
-  `linux-x86_64`（AppImage）と `windows-x86_64`（NSIS）の成果物URL、サイズ、
-  SHA-256、minisign署名を持つ。
+  `linux-x86_64`（AppImage）と `windows-x86_64`（NSIS）に加えて、任意の
+  `system_packages`（`pacman` / `deb`）を持つ。各成果物はURL、サイズ、
+  SHA-256、minisign署名を含む。
 - UI起動15秒後に自動確認し、以後1時間ごとに期限（24時間）を確認する。
   設定「アップデートを自動確認」でOFFにできる。手動の「今すぐ確認」は常に使える。
 - 自動確認の失敗はログだけに残し、UIには出さない。手動確認の失敗は設定画面に出す。
@@ -290,11 +291,35 @@
   旧版を退避して置換し、新UIの健康マーカーを確認する。45秒以内に確認できない
   場合は旧版へ戻して再起動する。旧版は `<AppImage>.previous` または
   `<data_dir>/updates/backup/<version>/` に残る。
-- deb / pacman は自己置換しない。更新があるとパッケージマネージャのコマンドと
-  リリースページを表示する。開発ビルド、ポータブル、Windowsのper-machine
-  インストールも自動適用の対象外。
-- 更新の結果（成功・ロールバック・失敗）は `last-result.json` に残り、次回起動時に
-  一度だけ表示する。詳細は `<data_dir>/updates/updater.log`。
+- deb / pacman は、`pkexec`、`/usr/bin/vrc-photo-updater`、polkit policy の
+  3つが揃っている場合にアプリ内更新できる。UIは成果物をダウンロードし、
+  ユーザー権限ヘルパーが `pkexec --disable-internal-agent` で
+  `/usr/bin/vrc-photo-updater --apply-system-package` を起動する。
+  - 特権側は staging の所有者・symlink・署名済み manifest・パッケージ名・
+    バージョンを再検証し、`pacman -U --noconfirm` または `dpkg -i` の固定
+    コマンドでインストールする。シェルは使わない。
+  - 認証キャンセル、認証不能、pacman / dpkg の DB ロック、署名不正、
+    パッケージ名・バージョン不一致、ダウングレードではシステムに変更を入れず、
+    理由を表示して再試行できる。
+  - インストール後の健康確認に失敗しても自動ロールバックしない。失敗を記録し、
+    新UIを一度だけ起動して手動復旧を案内する。
+  - `system_packages` がない旧フィード、`pkexec` がない、polkit エージェントが
+    ない、policy がない環境では、パッケージマネージャのコマンド
+    （pacman: `sudo pacman -Syu vrc-photo-manager`、deb:
+    `sudo apt install --only-upgrade vrc-photo-manager`）を表示する。
+    認証不能でフォールバックした場合、その UI セッションでは自動適用を隠す。
+    次回起動時は再試行できる。
+- 開発ビルド、ポータブル、Windowsのper-machineインストールは自動適用の対象外。
+- 更新の結果（成功・ロールバック・失敗）は `last-result.json` に残り、次回起動時に一度だけ
+  表示する。失敗コードは `auth_cancelled` / `auth_unavailable` /
+  `package_manager_locked` / `package_manager_failed` /
+  `package_verification_failed` / `package_metadata_mismatch` / `downgrade` /
+  `health_check_failed` / `helper_failed`。詳細は
+  `<data_dir>/updates/updater.log`。
+- 更新後、デーモンが systemd ユーザーサービス管理なら
+  `systemctl --user daemon-reload` と `systemctl --user restart
+  vrc-photo-daemon.service` で再起動する。失敗時は従来のプロセス起動に
+  フォールバックする。
 - 自動確認はUI起動中のみ。デーモンだけが動いている間は確認しない。
 
 ## 11. 現行の制約
@@ -308,4 +333,10 @@
 - 稼働判定はハートビートが20秒以内、またはIPC購読が接続中であること。長時間スキャン中にハートビートが古くなっても「デーモン停止」と誤表示しない。
 - Windows実機のトレイ・IME・自動起動は未検証。
 - AppImageの実起動、deb/pacmanのインストール確認は未実施。
+- pacman / deb のアプリ内更新は、認証キャンセル・DB ロック・署名不正・
+  systemd 管理デーモン・deb の実機 QA が未検証。ユニットテストと Release
+  ワークフローのパッケージ検証で代替している。
+- システムパッケージの自動ロールバックは行わない。失敗時は
+  `last-result.json` と `updater.log` を確認して手動で再インストールする。
+- polkit policy の description / message は英語のみ。
 - ディスク上のサムネイルキャッシュはデーモンが `thumbnail_cache_mb` までLRU削除する（0は無制限）。メモリ上の表示サムネイルは192件LRU。

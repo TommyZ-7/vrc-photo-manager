@@ -100,6 +100,47 @@ jobs:
       - name: Build Linux packages
         run: cargo packager --release
 
+      - name: Read package version
+        id: package-version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Packager.toml | head -n1)
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Build pacman package
+        env:
+          PACKAGE_VERSION: ${{ steps.package-version.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker run --rm -e PACKAGE_VERSION \
+            -v "$PWD/dist:/dist" -w /dist archlinux:base-devel bash -c '
+            set -euxo pipefail
+            owner=$(stat -c "%u:%g" /dist)
+            trap "chown -R $owner /dist" EXIT
+            useradd -m builder
+            chown -R builder:builder /dist
+            sed -i "s/^options=(!lto)$/options=(!lto !debug)/" /dist/PKGBUILD
+            su builder -c "makepkg -f --nodeps" || {
+              status=$?
+              echo "makepkg exited with $status; checking whether the package was still created"
+            }
+            rm -f /dist/*-debug-*.pkg.tar.zst
+            ls -l /dist/*.pkg.tar.zst || true
+            pkg=$(find /dist -maxdepth 1 -type f -name "vrc-photo-manager-[0-9]*.pkg.tar.zst" -print -quit)
+            printf "pkg=[%s]\n" "$pkg"
+            test -n "$pkg"
+            metadata=$(LC_ALL=C pacman -Qip "$pkg") || { echo "pacman -Qip failed for $pkg"; exit 1; }
+            printf "%s\n" "$metadata"
+            name=$(printf "%s\n" "$metadata" | sed -n "s/^Name[[:space:]]*: //p")
+            version=$(printf "%s\n" "$metadata" | sed -n "s/^Version[[:space:]]*: //p")
+            arch=$(printf "%s\n" "$metadata" | sed -n "s/^Architecture[[:space:]]*: //p")
+            test "$name" = "vrc-photo-manager"
+            test "$version" = "${PACKAGE_VERSION}-1"
+            test "$arch" = "x86_64"
+            rm -rf /dist/src /dist/pkg
+          '
+          ls -lh dist/*.pkg.tar.zst
+
       - name: List artifacts
         run: ls -lh dist
 
@@ -154,6 +195,29 @@ jobs:
           grep -qx 'ExecStart=/usr/bin/vrc-photo-daemon' "$tmp/pacman/$unit" \
             || { echo "unexpected ExecStart in pacman unit"; exit 1; }
           echo "systemd user unit verified"
+
+      - name: Verify polkit policy
+        run: |
+          set -euo pipefail
+          policy="usr/share/polkit-1/actions/com.tommyz.vrc-photo-manager.update.policy"
+          deb=$(ls dist/*.deb)
+          pkg=$(ls dist/vrc-photo-manager-[0-9]*.pkg.tar.zst)
+          tmp=$(mktemp -d)
+          mkdir -p "$tmp/deb"
+          dpkg-deb --extract "$deb" "$tmp/deb"
+          test -f "$tmp/deb/$policy" \
+            || { echo "missing $policy in deb"; exit 1; }
+          grep -q 'org.freedesktop.policykit.exec.path' "$tmp/deb/$policy"
+          grep -q 'org.freedesktop.policykit.exec.path.*/usr/bin/vrc-photo-updater' "$tmp/deb/$policy" \
+            || { echo "unexpected pkexec path in $policy"; exit 1; }
+          docker run --rm -v "$PWD/dist:/dist" archlinux:base-devel bash -c "
+            set -euo pipefail
+            package=/dist/$(basename "$pkg")
+            pacman -Qlp \"\$package\" | grep -q '$policy$'
+            bsdtar -xOf \"\$package\" '$policy' \
+              | grep -q 'org.freedesktop.policykit.exec.path.*/usr/bin/vrc-photo-updater'
+          "
+          echo "polkit policy verified"
 
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
@@ -294,7 +358,7 @@ jobs:
             --output dist/latest.json
           ./target/debug/vrc-photo-update-manifest sign --key "$KEY" --file dist/latest.json
           ./target/debug/vrc-photo-update-manifest verify "${PUB_ARGS[@]}" --file dist/latest.json
-          jq -e '.schema == 1 and (.platforms | length == 2)' dist/latest.json
+          jq -e '.schema == 1 and (.platforms | length == 2) and (.system_packages | length == 2) and (.system_packages | has("pacman") and has("deb")) and (.system_packages.pacman.format == "pacman") and (.system_packages.deb.format == "deb")' dist/latest.json
 
       - name: Publish release (tags only)
         env:

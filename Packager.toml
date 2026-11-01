@@ -45,6 +45,7 @@ depends = [
 
 [deb.files]
 "packaging/systemd/vrc-photo-daemon.service" = "usr/lib/systemd/user/vrc-photo-daemon.service"
+"packaging/polkit/com.tommyz.vrc-photo-manager.update.policy" = "usr/share/polkit-1/actions/com.tommyz.vrc-photo-manager.update.policy"
 
 [pacman]
 depends = [
@@ -59,3 +60,4 @@ depends = [
 
 [pacman.files]
 "packaging/systemd/vrc-photo-daemon.service" = "usr/lib/systemd/user/vrc-photo-daemon.service"
+"packaging/polkit/com.tommyz.vrc-photo-manager.update.policy" = "usr/share/polkit-1/actions/com.tommyz.vrc-photo-manager.update.policy"

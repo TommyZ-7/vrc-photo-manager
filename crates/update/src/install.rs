@@ -7,12 +7,14 @@ use uuid::Uuid;
 
 use crate::error::{IoOperation, Result, UpdateError};
 use crate::helper::write_atomic;
+use crate::manifest::{MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES};
 use crate::native::NativeString;
 
 pub const APPLY_SCHEMA: u32 = 1;
 
 /// The package family used to show the right update command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PackageFamily {
     Deb,
     Pacman,
@@ -20,6 +22,24 @@ pub enum PackageFamily {
 }
 
 impl PackageFamily {
+    /// The key used for this family in the manifest's `system_packages` map.
+    pub fn manifest_key(self) -> Option<&'static str> {
+        match self {
+            Self::Pacman => Some("pacman"),
+            Self::Deb => Some("deb"),
+            Self::Unknown => None,
+        }
+    }
+
+    /// Resolves a `system_packages` key to its package family.
+    pub fn from_manifest_key(key: &str) -> Option<Self> {
+        match key {
+            "pacman" => Some(Self::Pacman),
+            "deb" => Some(Self::Deb),
+            _ => None,
+        }
+    }
+
     /// Reads `ID` and `ID_LIKE` from `/etc/os-release`-style text.
     pub fn from_os_release(text: &str) -> Self {
         let mut id = String::new();
@@ -57,11 +77,23 @@ impl PackageFamily {
 /// How this copy of the application was installed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallKind {
-    AppImage { path: PathBuf },
-    WindowsCurrentUser { install_dir: PathBuf },
-    WindowsPerMachine { install_dir: PathBuf },
+    AppImage {
+        path: PathBuf,
+    },
+    WindowsCurrentUser {
+        install_dir: PathBuf,
+    },
+    WindowsPerMachine {
+        install_dir: PathBuf,
+    },
     WindowsOther,
-    SystemPackage { family: PackageFamily },
+    SystemPackage {
+        family: PackageFamily,
+        /// Whether this is the package-managed `/usr/bin` install. A binary in
+        /// `/usr/local/bin` shadows the packaged one, so it only gets the
+        /// package-manager command.
+        managed: bool,
+    },
     Development,
 }
 
@@ -80,6 +112,37 @@ impl InstallKind {
             self,
             Self::AppImage { .. } | Self::WindowsCurrentUser { .. } | Self::SystemPackage { .. }
         )
+    }
+
+    /// Whether a system package may be applied through `pkexec` and the
+    /// installed helper. Requires the helper and its polkit policy.
+    pub fn system_package_apply(
+        &self,
+        pkexec_available: bool,
+        helper_available: bool,
+        policy_available: bool,
+    ) -> bool {
+        matches!(
+            self,
+            Self::SystemPackage {
+                family: PackageFamily::Pacman | PackageFamily::Deb,
+                managed: true,
+            }
+        ) && pkexec_available
+            && helper_available
+            && policy_available
+    }
+
+    /// Whether an update may be applied without showing a package manager
+    /// command.
+    pub fn can_apply_automatically(
+        &self,
+        pkexec_available: bool,
+        helper_available: bool,
+        policy_available: bool,
+    ) -> bool {
+        self.automatic_apply()
+            || self.system_package_apply(pkexec_available, helper_available, policy_available)
     }
 }
 
@@ -101,6 +164,61 @@ pub fn install_kind() -> InstallKind {
     }
 }
 
+/// The helper path installed by the pacman and deb packages.
+pub const SYSTEM_HELPER_PATH: &str = "/usr/bin/vrc-photo-updater";
+/// The polkit policy installed by the pacman and deb packages.
+pub const SYSTEM_POLICY_PATH: &str =
+    "/usr/share/polkit-1/actions/com.tommyz.vrc-photo-manager.update.policy";
+
+/// Whether an executable named `name` exists in one of `dirs`.
+pub fn find_executable_in(dirs: &[PathBuf], name: &str) -> bool {
+    dirs.iter().any(|dir| {
+        let path = dir.join(name);
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            return false;
+        };
+        if !metadata.is_file() {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            metadata.permissions().mode() & 0o111 != 0
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
+    })
+}
+
+/// Whether `pkexec` is available for privilege escalation.
+#[cfg(target_os = "linux")]
+pub fn pkexec_available() -> bool {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|value| std::env::split_paths(&value).collect())
+        .unwrap_or_default();
+    for dir in ["/usr/bin", "/bin", "/usr/local/bin"] {
+        dirs.push(PathBuf::from(dir));
+    }
+    find_executable_in(&dirs, "pkexec")
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn pkexec_available() -> bool {
+    false
+}
+
+/// Whether the system-wide update helper is installed.
+pub fn system_helper_available() -> bool {
+    std::path::Path::new(SYSTEM_HELPER_PATH).is_file()
+}
+
+/// Whether the polkit policy for the system update helper is installed.
+pub fn system_policy_available() -> bool {
+    std::path::Path::new(SYSTEM_POLICY_PATH).is_file()
+}
+
 /// Classifies a Linux install from its executable path and environment.
 pub fn classify_linux(
     current_exe: &Path,
@@ -112,9 +230,14 @@ pub fn classify_linux(
             path: std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()),
         };
     }
+    // Only the package-managed `/usr/bin` install may auto-apply. A binary in
+    // `/usr/local/bin` shadows the packaged one, so installing the system
+    // package would not replace what the user is running; it keeps the
+    // package-manager command fallback instead.
     if current_exe.starts_with("/usr/bin") || current_exe.starts_with("/usr/local/bin") {
         return InstallKind::SystemPackage {
             family: PackageFamily::from_os_release(os_release),
+            managed: current_exe.starts_with("/usr/bin"),
         };
     }
     InstallKind::Development
@@ -184,17 +307,20 @@ fn install_kind_windows() -> InstallKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdatePaths {
     pub root: PathBuf,
+    data_dir: PathBuf,
 }
 
 impl UpdatePaths {
     pub fn new(data_dir: &Path) -> Self {
         Self {
             root: data_dir.join("updates"),
+            data_dir: data_dir.to_path_buf(),
         }
     }
 
     /// Creates the directories the UI and helper write to.
     pub fn ensure(&self) -> Result<()> {
+        create_private_dir(&self.data_dir)?;
         for path in [&self.root, &self.downloads_dir(), &self.bin_dir()] {
             create_private_dir(path)?;
         }
@@ -257,8 +383,12 @@ fn safe_component(value: &str) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApplyKind {
+    #[serde(rename = "appimage", alias = "app_image")]
     AppImage,
     Windows,
+    SystemPackage {
+        family: PackageFamily,
+    },
 }
 
 /// The handoff file written by the UI and consumed by the helper.
@@ -280,6 +410,12 @@ pub struct ApplyJob {
     pub health_token: String,
     pub data_dir: PathBuf,
     pub created_at: String,
+    /// The raw `latest.json` bytes covered by `manifest_signature`.
+    #[serde(default)]
+    pub signed_manifest: Option<String>,
+    /// The raw `latest.json.minisig` text.
+    #[serde(default)]
+    pub manifest_signature: Option<String>,
 }
 
 impl ApplyJob {
@@ -348,6 +484,61 @@ impl ApplyJob {
                 "restart arguments contain a NUL".to_string(),
             ));
         }
+        if let ApplyKind::SystemPackage { family } = self.kind {
+            if !matches!(family, PackageFamily::Pacman | PackageFamily::Deb) {
+                return Err(UpdateError::InvalidJob(
+                    "unsupported system package family".to_string(),
+                ));
+            }
+            let manifest = self
+                .signed_manifest
+                .as_deref()
+                .ok_or_else(|| UpdateError::InvalidJob("signed manifest is missing".to_string()))?;
+            let signature = self.manifest_signature.as_deref().ok_or_else(|| {
+                UpdateError::InvalidJob("manifest signature is missing".to_string())
+            })?;
+            if manifest.is_empty() || manifest.len() as u64 > MAX_MANIFEST_BYTES {
+                return Err(UpdateError::InvalidJob(
+                    "signed manifest is empty or too large".to_string(),
+                ));
+            }
+            if signature.is_empty() || signature.len() as u64 > MAX_SIGNATURE_BYTES {
+                return Err(UpdateError::InvalidJob(
+                    "manifest signature is empty or too large".to_string(),
+                ));
+            }
+            let version = parse_job_version(&self.to_version)?;
+            let expected_dir = UpdatePaths::new(&self.data_dir)
+                .downloads_dir()
+                .join(version.to_string());
+            if self.staged.parent() != Some(expected_dir.as_path())
+                || self
+                    .staged
+                    .components()
+                    .any(|component| component == std::path::Component::ParentDir)
+            {
+                return Err(UpdateError::InvalidJob(
+                    "staged package is outside the downloads directory".to_string(),
+                ));
+            }
+            let suffix = match family {
+                PackageFamily::Pacman => ".pkg.tar.zst",
+                PackageFamily::Deb => ".deb",
+                PackageFamily::Unknown => unreachable!(),
+            };
+            let file_name = self
+                .staged
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| {
+                    UpdateError::InvalidJob("staged package has no file name".to_string())
+                })?;
+            if !file_name.ends_with(suffix) {
+                return Err(UpdateError::InvalidJob(format!(
+                    "staged package must end with {suffix}"
+                )));
+            }
+        }
         Ok(())
     }
 }
@@ -407,11 +598,21 @@ pub fn prepare_apply(job: &ApplyJob, current_exe: &Path, data_dir: &Path) -> Res
 pub fn start_apply(job: &ApplyJob, current_exe: &Path, data_dir: &Path) -> Result<()> {
     let helper = prepare_apply(job, current_exe, data_dir)?;
     let paths = UpdatePaths::new(data_dir);
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let log = options
         .open(paths.log_file())
         .map_err(|error| UpdateError::io_at(IoOperation::Job, paths.log_file(), error))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(paths.log_file(), std::fs::Permissions::from_mode(0o600));
+    }
     let stderr = log
         .try_clone()
         .map_err(|error| UpdateError::io_at(IoOperation::Job, paths.log_file(), error))?;
@@ -483,7 +684,19 @@ mod tests {
                 "ID=ubuntu\nID_LIKE=debian\n"
             ),
             InstallKind::SystemPackage {
-                family: PackageFamily::Deb
+                family: PackageFamily::Deb,
+                managed: true,
+            }
+        );
+        assert_eq!(
+            classify_linux(
+                Path::new("/usr/local/bin/vrc-photo-manager"),
+                None,
+                "ID=arch\n"
+            ),
+            InstallKind::SystemPackage {
+                family: PackageFamily::Pacman,
+                managed: false,
             }
         );
         assert_eq!(
@@ -536,7 +749,8 @@ mod tests {
         );
         assert!(
             !InstallKind::SystemPackage {
-                family: PackageFamily::Deb
+                family: PackageFamily::Deb,
+                managed: true,
             }
             .automatic_apply()
         );
@@ -547,7 +761,8 @@ mod tests {
     fn automatic_check_excludes_unsupported_windows_and_development() {
         assert!(
             InstallKind::SystemPackage {
-                family: PackageFamily::Pacman
+                family: PackageFamily::Pacman,
+                managed: true,
             }
             .automatic_check()
         );
@@ -559,6 +774,22 @@ mod tests {
         );
         assert!(!InstallKind::WindowsOther.automatic_check());
         assert!(!InstallKind::Development.automatic_check());
+    }
+
+    #[test]
+    fn package_family_manifest_keys_round_trip() {
+        for family in [PackageFamily::Pacman, PackageFamily::Deb] {
+            let key = family.manifest_key().unwrap();
+            assert_eq!(PackageFamily::from_manifest_key(key), Some(family));
+            let json = serde_json::to_string(&family).unwrap();
+            assert_eq!(json, format!("\"{key}\""));
+            assert_eq!(
+                serde_json::from_str::<PackageFamily>(&json).unwrap(),
+                family
+            );
+        }
+        assert_eq!(PackageFamily::Unknown.manifest_key(), None);
+        assert_eq!(PackageFamily::from_manifest_key("rpm"), None);
     }
 
     #[test]
@@ -606,7 +837,8 @@ mod tests {
         assert!(
             manifest
                 .asset_for(&InstallKind::SystemPackage {
-                    family: PackageFamily::Deb
+                    family: PackageFamily::Deb,
+                    managed: true,
                 })
                 .is_none()
         );
@@ -615,6 +847,11 @@ mod tests {
     #[test]
     fn update_paths_create_private_directories() {
         let dir = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         let paths = UpdatePaths::new(dir.path());
         paths.ensure().unwrap();
         assert!(paths.root.is_dir());
@@ -633,6 +870,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
             for path in [&paths.root, &paths.downloads_dir(), &paths.bin_dir()] {
                 assert_eq!(
                     std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
@@ -664,7 +905,177 @@ mod tests {
             health_token: "abc-123".to_string(),
             data_dir: dir.to_path_buf(),
             created_at: "2026-10-24T12:00:00Z".to_string(),
+            signed_manifest: None,
+            manifest_signature: None,
         }
+    }
+
+    fn system_job(dir: &Path) -> ApplyJob {
+        let data_dir = dir.join("data");
+        let staged = data_dir
+            .join("updates/downloads/0.4.0")
+            .join("vrc-photo-manager-0.4.0-1-x86_64.pkg.tar.zst");
+        std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
+        std::fs::write(&staged, b"package").unwrap();
+        ApplyJob {
+            schema: APPLY_SCHEMA,
+            kind: ApplyKind::SystemPackage {
+                family: PackageFamily::Pacman,
+            },
+            from_version: "0.3.0".to_string(),
+            to_version: "0.4.0".to_string(),
+            target: dir.join("vrc-photo-manager"),
+            staged,
+            signature: "c2ln".to_string(),
+            sha256: "a".repeat(64),
+            ui_pid: 1,
+            daemon_pid: Some(2),
+            restart_args: Vec::new(),
+            working_dir: dir.to_path_buf(),
+            database: None,
+            health_token: "abc-123".to_string(),
+            data_dir,
+            created_at: "2026-10-24T12:00:00Z".to_string(),
+            signed_manifest: Some("{\"schema\":1}".to_string()),
+            manifest_signature: Some("signature".to_string()),
+        }
+    }
+
+    #[test]
+    fn apply_kind_serializes_appimage_windows_and_system_package() {
+        assert_eq!(
+            serde_json::to_string(&ApplyKind::AppImage).unwrap(),
+            "\"appimage\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ApplyKind::Windows).unwrap(),
+            "\"windows\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ApplyKind::SystemPackage {
+                family: PackageFamily::Pacman
+            })
+            .unwrap(),
+            "{\"system_package\":{\"family\":\"pacman\"}}"
+        );
+    }
+
+    #[test]
+    fn apply_kind_accepts_the_legacy_app_image_alias() {
+        assert_eq!(
+            serde_json::from_str::<ApplyKind>("\"app_image\"").unwrap(),
+            ApplyKind::AppImage
+        );
+    }
+
+    #[test]
+    fn system_package_job_requires_manifest_and_signature() {
+        let dir = tempfile::tempdir().unwrap();
+        let job = system_job(dir.path());
+        job.validate().unwrap();
+
+        let mut missing = job.clone();
+        missing.signed_manifest = None;
+        assert!(missing.validate().is_err());
+
+        let mut empty_signature = job.clone();
+        empty_signature.manifest_signature = Some(String::new());
+        assert!(empty_signature.validate().is_err());
+    }
+
+    #[test]
+    fn system_package_job_rejects_staging_outside_downloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut job = system_job(dir.path());
+        job.staged = dir.path().join("elsewhere.pkg.tar.zst");
+        assert!(job.validate().is_err());
+    }
+
+    #[test]
+    fn system_package_job_rejects_nested_staging_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut job = system_job(dir.path());
+        let nested = job.staged.parent().unwrap().join("sub");
+        std::fs::create_dir_all(&nested).unwrap();
+        let nested_file = nested.join(job.staged.file_name().unwrap());
+        std::fs::write(&nested_file, b"package").unwrap();
+        job.staged = nested_file;
+        assert!(job.validate().is_err());
+    }
+
+    #[test]
+    fn system_package_job_rejects_parent_dir_components() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut job = system_job(dir.path());
+        let version_dir = job.staged.parent().unwrap().to_path_buf();
+        let file_name = job.staged.file_name().unwrap().to_os_string();
+        job.staged = version_dir.join("..").join("0.4.0").join(file_name);
+        assert!(job.validate().is_err());
+    }
+
+    #[test]
+    fn system_package_job_rejects_wrong_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut job = system_job(dir.path());
+        job.staged.set_extension("deb");
+        assert!(job.validate().is_err());
+    }
+
+    #[test]
+    fn system_package_apply_requires_pkexec_helper_and_policy() {
+        let install = InstallKind::SystemPackage {
+            family: PackageFamily::Pacman,
+            managed: true,
+        };
+        assert!(install.system_package_apply(true, true, true));
+        assert!(!install.system_package_apply(false, true, true));
+        assert!(!install.system_package_apply(true, false, true));
+        assert!(!install.system_package_apply(true, true, false));
+        assert!(!InstallKind::Development.system_package_apply(true, true, true));
+        assert!(
+            !InstallKind::SystemPackage {
+                family: PackageFamily::Unknown,
+                managed: true,
+            }
+            .system_package_apply(true, true, true)
+        );
+        assert!(
+            !InstallKind::SystemPackage {
+                family: PackageFamily::Pacman,
+                managed: false,
+            }
+            .system_package_apply(true, true, true)
+        );
+    }
+
+    #[test]
+    fn can_apply_automatically_accepts_appimage_and_capable_system_packages() {
+        assert!(
+            InstallKind::AppImage {
+                path: "/tmp/VRC.AppImage".into()
+            }
+            .can_apply_automatically(false, false, false)
+        );
+        let install = InstallKind::SystemPackage {
+            family: PackageFamily::Deb,
+            managed: true,
+        };
+        assert!(install.can_apply_automatically(true, true, true));
+        assert!(!install.can_apply_automatically(true, true, false));
+        assert!(!InstallKind::Development.can_apply_automatically(true, true, true));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn finds_pkexec_in_a_path_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let pkexec = dir.path().join("pkexec");
+        std::fs::write(&pkexec, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&pkexec, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(find_executable_in(&[dir.path().to_path_buf()], "pkexec"));
+        std::fs::set_permissions(&pkexec, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!find_executable_in(&[dir.path().to_path_buf()], "pkexec"));
     }
 
     #[test]

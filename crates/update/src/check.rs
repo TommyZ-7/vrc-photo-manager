@@ -3,7 +3,9 @@ use semver::Version;
 use crate::error::{Result, UpdateError};
 use crate::fetch::HttpClient;
 use crate::install::InstallKind;
-use crate::manifest::{AvailableUpdate, MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES, Manifest};
+use crate::manifest::{
+    AvailableUpdate, MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES, Manifest, SignedManifest,
+};
 use crate::verify::{effective_public_keys, verify_bytes};
 
 /// The default feed on the latest GitHub Release.
@@ -86,6 +88,10 @@ pub fn check(
         notes_url: manifest.notes_url,
         asset,
         public_keys: feed.public_keys.clone(),
+        signed_manifest: SignedManifest {
+            bytes: manifest_bytes,
+            signature: signature_text,
+        },
     }))
 }
 
@@ -172,18 +178,9 @@ mod tests {
             .to_string()
     }
 
-    fn fixture_with_keypair(
-        keypair: &KeyPair,
-        version: &str,
-        platforms: serde_json::Value,
-    ) -> Fixture {
+    fn fixture_from_body(keypair: &KeyPair, body: serde_json::Value) -> Fixture {
         let public_key = public_key(keypair);
-        let manifest = serde_json::to_vec(&serde_json::json!({
-            "schema": 1,
-            "version": version,
-            "platforms": platforms,
-        }))
-        .unwrap();
+        let manifest = serde_json::to_vec(&body).unwrap();
         let signature = minisign::sign(
             None,
             &keypair.sk,
@@ -203,9 +200,42 @@ mod tests {
         }
     }
 
+    fn fixture_with_keypair(
+        keypair: &KeyPair,
+        version: &str,
+        platforms: serde_json::Value,
+    ) -> Fixture {
+        fixture_from_body(
+            keypair,
+            serde_json::json!({
+                "schema": 1,
+                "version": version,
+                "platforms": platforms,
+            }),
+        )
+    }
+
     fn fixture(version: &str, platforms: serde_json::Value) -> Fixture {
         let keypair = KeyPair::generate_unencrypted_keypair().unwrap();
         fixture_with_keypair(&keypair, version, platforms)
+    }
+
+    /// Builds a fixture from a `platforms` map that may also carry a
+    /// `system_packages` entry at the same level.
+    fn fixture_with_system_packages(version: &str, mut body: serde_json::Value) -> Fixture {
+        let system_packages = body
+            .as_object_mut()
+            .and_then(|object| object.remove("system_packages"));
+        let mut manifest = serde_json::json!({
+            "schema": 1,
+            "version": version,
+            "platforms": body,
+        });
+        if let Some(packages) = system_packages {
+            manifest["system_packages"] = packages;
+        }
+        let keypair = KeyPair::generate_unencrypted_keypair().unwrap();
+        fixture_from_body(&keypair, manifest)
     }
 
     fn linux_platform() -> serde_json::Value {
@@ -216,6 +246,34 @@ mod tests {
                 "size": 1024,
                 "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "signature": crate::verify::test_signature()
+            }
+        })
+    }
+
+    fn system_platforms() -> serde_json::Value {
+        serde_json::json!({
+            "linux-x86_64": {
+                "url": "https://example.com/vrc-photo-manager_0.4.0_x86_64.AppImage",
+                "format": "appimage",
+                "size": 1024,
+                "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "signature": crate::verify::test_signature()
+            },
+            "system_packages": {
+                "pacman": {
+                    "url": "https://example.com/vrc-photo-manager-0.4.0-1-x86_64.pkg.tar.zst",
+                    "format": "pacman",
+                    "size": 1024,
+                    "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                    "signature": crate::verify::test_signature()
+                },
+                "deb": {
+                    "url": "https://example.com/vrc-photo-manager_0.4.0_amd64.deb",
+                    "format": "deb",
+                    "size": 1024,
+                    "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                    "signature": crate::verify::test_signature()
+                }
             }
         })
     }
@@ -412,7 +470,97 @@ mod tests {
     }
 
     #[test]
-    fn system_packages_get_the_version_without_an_asset() {
+    fn system_package_check_selects_the_pacman_asset_and_keeps_the_manifest() {
+        let fixture = fixture_with_system_packages("0.4.0", system_platforms());
+        let client = FakeHttpClient::new(HashMap::from([
+            (fixture.manifest_url.clone(), Ok(fixture.manifest.clone())),
+            (
+                fixture.signature_url.clone(),
+                Ok(fixture.signature.clone().into_bytes()),
+            ),
+        ]));
+        let feed = FeedConfig::for_tests(
+            fixture.manifest_url.clone(),
+            vec![fixture.public_key.clone()],
+            false,
+        );
+        let update = check(
+            &client,
+            &feed,
+            &Version::new(0, 3, 0),
+            &InstallKind::SystemPackage {
+                family: PackageFamily::Pacman,
+                managed: true,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(update.asset.unwrap().format, UpdateFormat::Pacman);
+        assert_eq!(update.signed_manifest.bytes, fixture.manifest);
+        assert_eq!(update.signed_manifest.signature, fixture.signature);
+    }
+
+    #[test]
+    fn system_packages_select_the_asset_for_the_install_kind() {
+        let fixture = fixture_with_system_packages("0.4.0", system_platforms());
+        let client = FakeHttpClient::new(HashMap::from([
+            (fixture.manifest_url.clone(), Ok(fixture.manifest.clone())),
+            (
+                fixture.signature_url.clone(),
+                Ok(fixture.signature.into_bytes()),
+            ),
+        ]));
+        let feed = FeedConfig::for_tests(
+            fixture.manifest_url.clone(),
+            vec![fixture.public_key.clone()],
+            false,
+        );
+        let update = check(
+            &client,
+            &feed,
+            &Version::new(0, 3, 0),
+            &InstallKind::SystemPackage {
+                family: PackageFamily::Pacman,
+                managed: true,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(update.version, Version::new(0, 4, 0));
+        assert_eq!(update.asset.unwrap().format, UpdateFormat::Pacman);
+    }
+
+    #[test]
+    fn system_packages_select_the_deb_asset() {
+        let fixture = fixture_with_system_packages("0.4.0", system_platforms());
+        let client = FakeHttpClient::new(HashMap::from([
+            (fixture.manifest_url.clone(), Ok(fixture.manifest.clone())),
+            (
+                fixture.signature_url.clone(),
+                Ok(fixture.signature.into_bytes()),
+            ),
+        ]));
+        let feed = FeedConfig::for_tests(
+            fixture.manifest_url.clone(),
+            vec![fixture.public_key.clone()],
+            false,
+        );
+        let update = check(
+            &client,
+            &feed,
+            &Version::new(0, 3, 0),
+            &InstallKind::SystemPackage {
+                family: PackageFamily::Deb,
+                managed: true,
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(update.asset.unwrap().format, UpdateFormat::Deb);
+    }
+
+    #[test]
+    fn old_manifest_without_system_packages_has_no_asset() {
         let fixture = fixture("0.4.0", linux_platform());
         let client = FakeHttpClient::new(HashMap::from([
             (fixture.manifest_url.clone(), Ok(fixture.manifest.clone())),
@@ -432,6 +580,7 @@ mod tests {
             &Version::new(0, 3, 0),
             &InstallKind::SystemPackage {
                 family: PackageFamily::Deb,
+                managed: true,
             },
         )
         .unwrap()

@@ -165,6 +165,60 @@ pub(crate) fn spawn_daemon_process() -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// A daemon managed by a systemd user unit must be started through
+/// `systemctl`: spawning the binary from the UI would leave it outside the
+/// unit, so the supervisor could no longer observe or restart it.
+pub(crate) fn should_use_systemd(supervisor: Option<&str>) -> bool {
+    supervisor == Some("systemd")
+}
+
+fn systemctl(args: &[&str]) -> Result<(), String> {
+    let status = Command::new("systemctl")
+        .args(args)
+        .status()
+        .map_err(|error| error.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("systemctl {} failed: {status}", args.join(" ")))
+    }
+}
+
+/// Replaces a package reloads its unit files, so the user manager must
+/// re-read them before the unit is started again. A failed reload is not
+/// fatal: the start either succeeds with the previously loaded unit or
+/// falls back to spawning the process.
+fn reload_user_units() {
+    if let Err(error) = systemctl(&["--user", "daemon-reload"]) {
+        tracing::warn!(%error, "cannot reload systemd user units");
+    }
+}
+
+/// Starts the daemon on a normal launch. The daemon may have been stopped
+/// through IPC before an update and `Restart=on-failure` does not revive a
+/// clean exit, so an existing unit is started explicitly.
+pub(crate) fn start_daemon(supervisor: Option<&str>) -> Result<(), String> {
+    if should_use_systemd(supervisor) {
+        reload_user_units();
+        if systemctl(&["--user", "start", "vrc-photo-daemon.service"]).is_ok() {
+            return Ok(());
+        }
+    }
+    spawn_daemon_process()
+}
+
+/// Restarts the daemon after the UI was replaced by an update, keeping it
+/// under the unit that owned the previous process.
+pub(crate) fn restart_daemon_after_update(supervisor: Option<&str>) -> Result<(), String> {
+    if should_use_systemd(supervisor) {
+        reload_user_units();
+        if systemctl(&["--user", "restart", "vrc-photo-daemon.service"]).is_ok() {
+            return Ok(());
+        }
+    }
+    spawn_daemon_process()
+}
+
 pub(crate) fn run_background_supervisor() -> Result<(), String> {
     let path = daemon_binary_path().ok_or_else(|| "daemon binary path not found".to_string())?;
     if !path.is_file() {
@@ -302,7 +356,8 @@ impl App {
 mod tests {
     use super::{
         autostart_description, daemon_liveness, daemon_operation_label, daemon_state_label,
-        daemon_sync_label, format_timestamp, ipc_status_label, status_snapshot_is_newer,
+        daemon_sync_label, format_timestamp, ipc_status_label, should_use_systemd,
+        status_snapshot_is_newer,
     };
     use vrc_photo_core::model::DaemonOperation;
 
@@ -380,6 +435,18 @@ mod tests {
         assert_eq!(daemon_sync_label(None, None, false), "デーモン停止");
         assert_eq!(daemon_sync_label(None, None, true), "IPC 接続中");
         assert_eq!(daemon_sync_label(Some(30), None, true), "IPC 接続中");
+    }
+
+    #[test]
+    fn systemd_supervisor_uses_systemctl() {
+        assert!(should_use_systemd(Some("systemd")));
+        assert!(!should_use_systemd(Some("app")));
+        assert!(!should_use_systemd(None));
+    }
+
+    #[test]
+    fn daemon_start_uses_spawn_for_app_supervisor() {
+        assert!(!should_use_systemd(Some("app")));
     }
 
     #[test]

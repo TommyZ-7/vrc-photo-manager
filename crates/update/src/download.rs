@@ -37,6 +37,12 @@ pub fn download(
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| UpdateError::io_at(IoOperation::Download, parent, error))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| UpdateError::io_at(IoOperation::Download, parent, error))?;
+        }
     }
 
     let result = (|| -> Result<()> {
@@ -51,12 +57,22 @@ pub fn download(
             .find_map(|key| key.verify_stream(&signature).ok())
             .ok_or(UpdateError::Signature)?;
 
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
             .open(&part)
             .map_err(|error| UpdateError::io_at(IoOperation::Download, &part, error))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&part, std::fs::Permissions::from_mode(0o600))
+                .map_err(|error| UpdateError::io_at(IoOperation::Download, &part, error))?;
+        }
         let mut hasher = Sha256::new();
         let mut total = 0u64;
 
@@ -127,7 +143,7 @@ mod tests {
     use super::*;
     use crate::error::UpdateError;
     use crate::fetch::HttpClient;
-    use crate::manifest::{AvailableUpdate, PlatformAsset, UpdateFormat};
+    use crate::manifest::{AvailableUpdate, PlatformAsset, SignedManifest, UpdateFormat};
 
     struct FakeClient {
         body: Vec<u8>,
@@ -200,6 +216,10 @@ mod tests {
             notes_url: None,
             asset: Some(asset),
             public_keys: vec![keys.public_key.clone()],
+            signed_manifest: SignedManifest {
+                bytes: Vec::new(),
+                signature: String::new(),
+            },
         }
     }
 
@@ -229,6 +249,40 @@ mod tests {
         assert_eq!(last_progress, body.len() as u64);
         assert!(!dest.with_extension("AppImage.part").exists());
         assert!(!std::path::Path::new(&format!("{}.part", dest.display())).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn downloads_use_private_directories_and_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let keys = test_keys();
+        let body = b"new appimage bytes";
+        let update = available(asset(&keys, body, body, None), &keys);
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir
+            .path()
+            .join("updates/downloads/0.4.0/vrc-photo-manager.AppImage");
+        download(
+            &FakeClient {
+                body: body.to_vec(),
+            },
+            &update,
+            &dest,
+            &mut |_, _| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+
+        let version_dir = dest.parent().unwrap();
+        assert_eq!(
+            std::fs::metadata(version_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 
     #[test]
@@ -328,6 +382,10 @@ mod tests {
             notes_url: None,
             asset: None,
             public_keys: Vec::new(),
+            signed_manifest: SignedManifest {
+                bytes: Vec::new(),
+                signature: String::new(),
+            },
         };
         let dir = tempfile::tempdir().unwrap();
         let error = download(

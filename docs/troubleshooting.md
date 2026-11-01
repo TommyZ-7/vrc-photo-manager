@@ -164,9 +164,26 @@ systemctl --user add-wants default.target vrc-photo-daemon.service
 ## 9. パッケージ
 
 - deb: `dpkg -i` で依存不足が出る場合は `apt-get install -f`。
-- pacman: `PKGBUILD` と `.tar.gz` の両方が成果物。`makepkg` でビルドするか、`pacman -U` でパッケージを入れる。
+- pacman: リリースには `.pkg.tar.zst` と、手動ビルド / AUR 用の
+  `.tar.gz` + `PKGBUILD` がある。
+  - インストールには `.pkg.tar.zst` を使う:
+    `sudo pacman -U vrc-photo-manager-<version>-1-x86_64.pkg.tar.zst`
+  - `.tar.gz` は `makepkg` の入力であり、`pacman -U` では直接インストール
+    できない。`PKGBUILD` と `.tar.gz` を同じディレクトリに置いて
+    `makepkg -f` を実行する。
 - AppImage: 実行権限が必要。`chmod +x`。GPUドライバはホスト側が必要。
 - パッケージ版でデーモンが見つからない: UIと同じディレクトリに `vrc-photo-daemon` があるか確認する。
+- アプリ内更新が使えない（コマンド表示になる）: `pkexec`、
+  `/usr/bin/vrc-photo-updater`、polkit policy の3つが揃っているか確認する。
+
+```bash
+command -v pkexec
+ls -l /usr/bin/vrc-photo-updater
+ls -l /usr/share/polkit-1/actions/com.tommyz.vrc-photo-manager.update.policy
+```
+
+policy がない、または `pkexec` がない場合は、パッケージを再インストールするか
+パッケージマネージャのコマンドで更新する。AppImage には policy を同梱しない。
 
 ## 10. アプリのアップデート
 
@@ -176,19 +193,65 @@ systemctl --user add-wants default.target vrc-photo-daemon.service
   現行版はそのまま動く。
 - 署名検証に失敗した場合は「署名の検証に失敗したため、更新を中止しました」と出る。
   ダウンロード済みの `.part` は削除される。適用はされない。
-- 「このインストール形式は自動更新の対象外です」:
-  - deb / pacman はパッケージマネージャで更新する。
+- 「このインストール形式では自動更新を適用できません」:
   - 開発ビルド（`target/debug`）、ポータブルWindows、per-machine NSISは対象外。
+  - deb / pacman でも、`pkexec`・`/usr/bin/vrc-photo-updater`・polkit policy の
+    いずれかが欠ける場合はコマンド表示にフォールバックする。
 - 「デーモンに接続できないため更新できません」:
   - デーモンが動いているがIPCが切れている。デーモンを停止して再試行する。
 - AppImageの置き場所に書き込めない場合:
   - `~/Applications` など書き込み可能な場所へ移動してから再試行する。
 - 更新後に起動しない場合:
-  - ヘルパーが `<AppImage>.previous` または
+  - AppImage / Windows はヘルパーが `<AppImage>.previous` または
     `<data_dir>/updates/backup/<version>/` から旧版へ戻す。
-  - 自動復元に失敗した場合は [release.md](release.md#104-手動復旧) の手順で戻す。
+  - 自動復元に失敗した場合は
+    [release.md](release.md#105-手動復旧) の手順で戻す。
   - `<data_dir>/updates/updater.log` と `last-result.json` を確認する。
 - 最初の署名付きリリースより前のバージョンは自動更新できない。手動で更新する。
+
+### pacman / deb の更新失敗
+
+システムパッケージは自動ロールバックしない。失敗時は
+`<data_dir>/updates/last-result.json` の `code` と `reason`、および
+`<data_dir>/updates/updater.log` を確認する。Linux のデータディレクトリは
+`~/.local/share/vrc-photo-manager/`。
+
+| 表示 / code | 意味 | 対処 |
+|---|---|---|
+| 更新の認証がキャンセルされました。再試行できます / `auth_cancelled` | polkit ダイアログでキャンセルした | もう一度「更新して再起動」を押す。システムは変更されていない |
+| polkit 認証エージェントが見つかりません。パッケージマネージャのコマンドで更新してください / `auth_unavailable` | `pkexec` または認証エージェントがない | パッケージマネージャのコマンドで更新する。次回起動時は再試行できる |
+| pacman のデータベースがロックされています。ロック解除後に再試行してください / `package_manager_locked` | 他の pacman / dpkg 操作が進行中（deb でも UI 文言は pacman 固有） | 他の操作の完了を待つ。pacman は `/var/lib/pacman/db.lck`、deb は `/var/lib/dpkg/lock-frontend` を確認する。実行中プロセスがないことを確認してからロックを解放する |
+| パッケージの検証に失敗しました / `package_verification_failed` | SHA-256 または minisign 署名が一致しない | ダウンロードをやり直す。再発する場合はフィードとリリース成果物を確認する |
+| パッケージ名またはバージョンが署名済み情報と一致しません / `package_metadata_mismatch` | 成果物の `Name` / `Package` または `Version` が manifest と違う | 手動でインストールせず、リリース担当に連絡する |
+| このバージョンへのダウングレードはできません / `downgrade` | 現在と同じ、または古いバージョン | 新しいバージョンのリリースを待つ |
+| パッケージのインストールに失敗しました / `package_manager_failed` | `pacman -U` / `dpkg -i` が非ゼロ終了 | `updater.log` のパッケージマネージャ出力を確認し、下記の手動復旧を行う |
+| インストール後の起動確認に失敗しました / `health_check_failed` | 新バージョンはインストール済みだが UI が健康マーカーを書かない | `updater.log` を確認して UI を手動起動する。必要なら再インストールする |
+| 更新に失敗しました（<reason>） / `helper_failed` | `/usr/bin/vrc-photo-updater` がない、または特権側の検証に失敗した | `updater.log` の理由を確認する。ヘルパー欠落なら deb / pacman を再インストールする |
+| 更新に失敗しました（<reason>） / `install_outcome_unknown` | 特権ヘルパーが exit 16 / シグナル / 不明な終了で終わり、部分インストールの可能性がある | `updater.log` とパッケージマネージャの状態を確認する。job と staged は調査用に残る |
+
+手動復旧:
+
+```bash
+# pacman
+sudo pacman -U /path/to/vrc-photo-manager-<version>-1-x86_64.pkg.tar.zst
+
+# deb
+sudo dpkg -i /path/to/vrc-photo-manager_<version>_amd64.deb
+sudo apt-get install -f
+```
+
+- インストール前の失敗（認証キャンセル、認証不能、DB ロック、署名不正、
+  メタデータ不一致、ダウングレード、ヘルパー欠落）では、job と staged は
+  掃除され、システムは変更されていない。
+- `package_manager_failed` / `health_check_failed` / `install_outcome_unknown`
+  では、調査用に job / staged / log が残る。復旧後に手動で削除してよい。
+- デーモンが systemd 管理の場合、更新後に
+  `systemctl --user is-active vrc-photo-daemon.service` を確認する。
+  `inactive` なら `systemctl --user daemon-reload` と
+  `systemctl --user restart vrc-photo-daemon.service` を実行する。
+- polkit policy がない、または `pkexec` がない場合は、generic な
+  `org.freedesktop.policykit.exec` にはフォールバックしない。パッケージを
+  再インストールするか、表示されたコマンドで更新する。
 
 ## 11. ログとエラー表示
 
@@ -231,3 +294,9 @@ systemctl --user add-wants default.target vrc-photo-daemon.service
 - VRChatのログファイル名と該当行
 - `library.db` の `PRAGMA user_version`
 - パッケージ形式（deb / AppImage / pacman / devビルド）
+- 更新の失敗時: `updates/last-result.json`、`updates/updater.log`、
+  `updates/job.json` と `updates/downloads/<version>/` の残存ファイル
+- システムパッケージ更新時: `pacman -Qip` / `dpkg-deb -f` の結果、
+  `/var/lib/pacman/db.lck` や `/var/lib/dpkg/lock-frontend` の有無、
+  polkit policy と `pkexec` の有無、`systemctl --user is-active
+  vrc-photo-daemon.service`

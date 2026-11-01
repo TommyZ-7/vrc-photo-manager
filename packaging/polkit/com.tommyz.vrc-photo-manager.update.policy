@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <vendor>TommyZ7</vendor>
+  <vendor_url>https://github.com/TommyZ-7/vrc-photo-manager</vendor_url>
+  <action id="com.tommyz.vrc-photo-manager.update-package">
+    <description>Update VRC Photo Manager</description>
+    <message>Authentication is required to update VRC Photo Manager</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotations>
+      <annotation key="org.freedesktop.policykit.exec.path">/usr/bin/vrc-photo-updater</annotation>
+    </annotations>
+  </action>
+</policyconfig>
