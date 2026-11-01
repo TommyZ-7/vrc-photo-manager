@@ -40,7 +40,16 @@ pub struct AppSettings {
     pub auto_compress_immediate: bool,
     pub estimated_link: bool,
     pub thumbnail_cache_mb: u64,
+    /// WebP quality used for newly generated thumbnails (10–100).
+    #[serde(default = "default_thumbnail_quality")]
+    pub thumbnail_quality: u8,
+    /// Long edge of newly generated thumbnails (256, 384, or 512).
+    #[serde(default = "default_thumbnail_size")]
+    pub thumbnail_size: u32,
     pub compression_workers: usize,
+    /// Whether the clipboard compression action is available.
+    #[serde(default = "default_true")]
+    pub clipboard_enabled: bool,
     #[serde(default)]
     pub ui_sidebar_collapsed: bool,
     #[serde(default = "default_true")]
@@ -83,6 +92,14 @@ fn default_max_fps() -> u32 {
     60
 }
 
+fn default_thumbnail_quality() -> u8 {
+    crate::thumbnail::THUMBNAIL_QUALITY_DEFAULT
+}
+
+fn default_thumbnail_size() -> u32 {
+    crate::thumbnail::THUMBNAIL_SIZE_DEFAULT
+}
+
 fn default_auto_update_check() -> bool {
     true
 }
@@ -122,7 +139,10 @@ impl Default for AppSettings {
             auto_compress_immediate: true,
             estimated_link: true,
             thumbnail_cache_mb: 2048,
+            thumbnail_quality: crate::thumbnail::THUMBNAIL_QUALITY_DEFAULT,
+            thumbnail_size: crate::thumbnail::THUMBNAIL_SIZE_DEFAULT,
             compression_workers: 1,
+            clipboard_enabled: true,
             ui_sidebar_collapsed: false,
             ui_inspector_collapsed: true,
             ui_reduce_motion: false,
@@ -168,6 +188,10 @@ impl AppSettings {
 
     pub fn photo_roots(&self) -> Vec<PathBuf> {
         self.photo_roots.iter().map(PathBuf::from).collect()
+    }
+
+    pub fn thumbnail_spec(&self) -> crate::thumbnail::ThumbnailSpec {
+        crate::thumbnail::ThumbnailSpec::new(self.thumbnail_quality, self.thumbnail_size)
     }
 
     pub fn log_dir(&self) -> Option<PathBuf> {
@@ -463,6 +487,43 @@ mod tests {
         let loaded = AppSettings::load(&db).unwrap();
         assert_eq!(loaded.ui_theme_main, "forest");
         assert_eq!(loaded.ui_theme_accent, "rose");
+    }
+
+    #[test]
+    fn missing_thumbnail_settings_default_to_the_legacy_values() {
+        let json = r#"{
+            "photo_roots": [],
+            "log_dir": null,
+            "managed_dir": null,
+            "language": "ja",
+            "autostart": true,
+            "tray": true,
+            "auto_compress": true,
+            "auto_compress_backlog": false,
+            "estimated_link": true,
+            "thumbnail_cache_mb": 2048,
+            "compression_workers": 1
+        }"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(settings.thumbnail_quality, 80);
+        assert_eq!(settings.thumbnail_size, 256);
+        assert!(settings.clipboard_enabled);
+    }
+
+    #[test]
+    fn thumbnail_and_clipboard_settings_roundtrip() {
+        let db = Db::open_in_memory().unwrap();
+        let settings = AppSettings {
+            thumbnail_quality: 95,
+            thumbnail_size: 512,
+            clipboard_enabled: false,
+            ..Default::default()
+        };
+        settings.save(&db).unwrap();
+        let loaded = AppSettings::load(&db).unwrap();
+        assert_eq!(loaded.thumbnail_quality, 95);
+        assert_eq!(loaded.thumbnail_size, 512);
+        assert!(!loaded.clipboard_enabled);
     }
 
     #[test]

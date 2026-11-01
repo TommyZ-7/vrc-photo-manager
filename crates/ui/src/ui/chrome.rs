@@ -10,7 +10,6 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use std::time::Duration;
 use vrc_photo_core::importer::ImportMode;
 use vrc_photo_core::settings::CardSize;
 use vrc_photo_i18n::tr;
@@ -152,30 +151,21 @@ impl App {
     ) -> AnyElement {
         let p = self.palette;
         let titlebar = self.titlebar(cx);
-        let collapsed = self.ribbon_collapsed;
-        let epoch = self.ribbon_epoch;
+        let motion = self.ribbon_motion;
         let body_height = layout.ribbon_height;
         let body = self.ribbon_body(layout, cx);
         let body = div()
             .w_full()
             .overflow_hidden()
             .with_animation(
-                ("ribbon-body", epoch),
-                Animation::new(if epoch == 0 {
-                    Duration::ZERO
-                } else {
-                    Duration::from_millis(220)
-                })
-                .with_easing(ease_motion)
-                .with_max_fps(self.motion_fps(window, cx)),
-                move |el, t| {
-                    let height = if collapsed {
-                        body_height * (1.0 - t)
-                    } else {
-                        body_height * t
-                    };
-                    el.h(px(height))
-                        .opacity(if collapsed { 1.0 - t } else { t })
+                ("ribbon-body", motion.epoch()),
+                Animation::new(motion.driver_duration())
+                    .with_easing(ease_motion)
+                    .with_max_fps(self.motion_fps(window, cx)),
+                move |el, _| {
+                    let collapsed = motion.value();
+                    let height = body_height * (1.0 - collapsed);
+                    el.h(px(height)).opacity(1.0 - collapsed)
                 },
             )
             .child(body);
@@ -256,8 +246,14 @@ impl App {
                     .child(screen.title()),
             )
             .child(div().flex_1().min_w_0())
-            .child(collapse_button(collapsed, &self.palette, cx))
-            .child(self.notification_button(cx));
+            .child(drag_exempt(
+                "titlebar-ribbon-collapse-drag",
+                collapse_button(collapsed, &self.palette, cx),
+            ))
+            .child(drag_exempt(
+                "titlebar-notifications-drag",
+                self.notification_button(cx),
+            ));
 
         TitleBar::new()
             .h(px(46.))
@@ -524,7 +520,11 @@ impl App {
                     "ribbon-compress-clipboard",
                     tr!("chrome.output.clipboard"),
                     IconName::Copy,
-                    selection_look(has_selection),
+                    if self.settings.clipboard_enabled {
+                        selection_look(has_selection)
+                    } else {
+                        RibbonLook::Disabled
+                    },
                     metrics,
                     cx,
                     |this, _, cx| this.compress_selection_to_clipboard(cx),
@@ -559,6 +559,23 @@ impl App {
             self.library.borrow().index.entries.is_empty()
         }
     }
+}
+
+/// Keeps a titlebar control out of the window's drag surface.
+///
+/// `TitleBar` marks its whole bar as a platform drag area and also starts a
+/// move on mouse-down. `occlude` removes the enclosing bar hitbox from the
+/// hit-test path, while stopping propagation keeps the bar's mouse-down
+/// listener from arming a move under the control.
+pub(crate) fn drag_exempt(id: &'static str, child: AnyElement) -> AnyElement {
+    div()
+        .id(id)
+        .flex_shrink_0()
+        .occlude()
+        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .on_double_click(|_, _, cx| cx.stop_propagation())
+        .child(child)
+        .into_any_element()
 }
 
 fn collapse_button(collapsed: bool, palette: &Palette, cx: &mut Context<App>) -> AnyElement {

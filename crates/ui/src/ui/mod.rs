@@ -7,6 +7,7 @@ pub(crate) mod dashboard;
 pub(crate) mod dialogs;
 pub(crate) mod gallery;
 pub(crate) mod import;
+pub(crate) mod integrations;
 pub(crate) mod library;
 pub(crate) mod notifications;
 pub(crate) mod palette;

@@ -335,7 +335,6 @@ impl App {
             .count();
         let p = self.palette;
         let profile_id = profile.id.clone();
-        let clipboard_profile_id = profile.id.clone();
         let suffix_value = self.profile_suffix_input.read(cx).value();
         if suffix_value.as_ref() != profile.suffix.as_str() {
             self.profile_suffix_input.update(cx, |input, cx| {
@@ -427,38 +426,6 @@ impl App {
                                             max = MAX_PROFILE_NAME_CHARS
                                         ),
                                     }),
-                            ),
-                    )
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                v_flex()
-                                    .gap(px(2.))
-                                    .child(
-                                        div()
-                                            .text_size(px(12.))
-                                            .text_color(rgb(p.text))
-                                            .child(tr!("compression.use_for_auto")),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(10.))
-                                            .text_color(rgb(p.muted_2))
-                                            .child(tr!("compression.use_for_auto_hint")),
-                                    ),
-                            )
-                            .child(div().flex_1())
-                            .child(
-                                Switch::new("profile-auto")
-                                    .checked(profile.auto_enabled)
-                                    .on_click(cx.listener(move |this, checked, _, cx| {
-                                        this.edit_profile(
-                                            |profile| profile.auto_enabled = *checked,
-                                            cx,
-                                        );
-                                    })),
                             ),
                     )
                     .child(section_divider(&p))
@@ -903,40 +870,6 @@ impl App {
                             ),
                     )
                     .child(section_divider(&p))
-                    .child(
-                        h_flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(
-                                v_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .gap(px(2.))
-                                    .child(
-                                        div()
-                                            .text_size(px(12.))
-                                            .text_color(rgb(p.text))
-                                            .child(tr!("compression.clipboard_for")),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(10.))
-                                            .text_color(rgb(p.muted_2))
-                                            .child(tr!("compression.clipboard_system")),
-                                    ),
-                            )
-                            .child(
-                                Switch::new("profile-clipboard")
-                                    .checked(profile.clipboard)
-                                    .on_click(cx.listener(move |this, checked, _, cx| {
-                                        this.set_clipboard_profile(
-                                            &clipboard_profile_id,
-                                            *checked,
-                                            cx,
-                                        );
-                                    })),
-                            ),
-                    )
                     .child(
                         div()
                             .p(px(12.))

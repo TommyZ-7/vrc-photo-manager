@@ -7,6 +7,7 @@
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::scroll::Scrollbar;
+use gpui_kit::component::slider::Slider;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::*;
@@ -15,12 +16,14 @@ use gpui_kit::prelude::StatefulInteractiveElement as _;
 use gpui_kit::*;
 use vrc_photo_core::model::DaemonCommand;
 use vrc_photo_core::settings::CardSize;
+use vrc_photo_core::thumbnail;
 use vrc_photo_i18n::{tr, tr_args};
+use vrc_photo_ipc::Response;
 
 use crate::app::App;
 use crate::app::daemon::autostart_description;
+use crate::ipc_bridge;
 use crate::state::photo_browser::{anchor_photo_id, list_scroll_top};
-use crate::ui::components::compression_policy_warning;
 use crate::ui::components::glass_panel;
 use crate::ui::palette::{
     accent_colors, find_accent, find_main, main_colors, preview_accent, preview_main, readable_on,
@@ -351,6 +354,133 @@ impl App {
                                     .text_size(px(13.))
                                     .font_semibold()
                                     .text_color(rgb(p.text))
+                                    .child(tr!("settings.thumbnail.title")),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap(px(6.))
+                                    .child(
+                                        h_flex()
+                                            .items_baseline()
+                                            .gap(px(6.))
+                                            .child(
+                                                div()
+                                                    .text_size(px(12.))
+                                                    .text_color(rgb(p.text))
+                                                    .child(tr!("settings.thumbnail.quality")),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_size(px(10.))
+                                                    .text_color(rgb(p.muted_2))
+                                                    .child(tr!("settings.thumbnail.quality_hint")),
+                                            )
+                                            .child(div().flex_1())
+                                            .child(
+                                                div()
+                                                    .text_size(px(12.))
+                                                    .font_semibold()
+                                                    .text_color(rgb(p.text))
+                                                    .child(
+                                                        self.settings.thumbnail_quality.to_string(),
+                                                    ),
+                                            ),
+                                    )
+                                    .child(Slider::new(&self.thumbnail_quality_slider).w_full()),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap(px(6.))
+                                    .child(
+                                        div()
+                                            .text_size(px(12.))
+                                            .text_color(rgb(p.text))
+                                            .child(tr!("settings.thumbnail.size")),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(10.))
+                                            .text_color(rgb(p.muted_2))
+                                            .child(tr!("settings.thumbnail.size_hint")),
+                                    )
+                                    .child(h_flex().gap(px(4.)).children(
+                                        thumbnail::THUMBNAIL_SIZES.into_iter().map(|size| {
+                                            let active = self.settings.thumbnail_size == size;
+                                            div()
+                                                .id(SharedString::from(format!(
+                                                    "thumbnail-size-{size}"
+                                                )))
+                                                .px(px(10.))
+                                                .py(px(5.))
+                                                .rounded(px(8.))
+                                                .bg(if active {
+                                                    rgb(p.accent_soft)
+                                                } else {
+                                                    rgba(0x00000000)
+                                                })
+                                                .text_size(px(11.))
+                                                .font_medium()
+                                                .text_color(if active {
+                                                    rgb(p.accent)
+                                                } else {
+                                                    rgb(p.muted)
+                                                })
+                                                .cursor_pointer()
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.set_thumbnail_size(size, cx)
+                                                }))
+                                                .child(format!("{size} px"))
+                                        }),
+                                    )),
+                            )
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap(px(8.))
+                                    .pt(px(2.))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_size(px(10.))
+                                            .text_color(rgb(p.muted))
+                                            .child(match self.thumbnail_cache_usage {
+                                                Some(usage) => tr_args!(
+                                                    "settings.thumbnail.usage",
+                                                    files = usage.files,
+                                                    size = format_bytes(usage.bytes)
+                                                ),
+                                                None => tr!("settings.thumbnail.usage_loading"),
+                                            }),
+                                    )
+                                    .child(
+                                        Button::new("clear-thumbnail-cache")
+                                            .label(tr!("settings.thumbnail.clear"))
+                                            .small()
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.clear_thumbnail_cache(cx)
+                                            })),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(p.muted_2))
+                                    .child(tr!("settings.thumbnail.clear_hint")),
+                            ),
+                    )
+                    .child(
+                        glass_panel(&self.palette)
+                            .flex()
+                            .flex_col()
+                            .p(px(14.))
+                            .gap(px(12.))
+                            .rounded(px(17.))
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .font_semibold()
+                                    .text_color(rgb(p.text))
                                     .child(tr!("settings.startup.title")),
                             )
                             .child(self.setting_switch(
@@ -369,51 +499,6 @@ impl App {
                                 cx,
                                 |settings, value| settings.tray = value,
                             ))
-                            .child(self.setting_switch(
-                                tr!("settings.startup.auto_compress"),
-                                tr!("settings.startup.auto_compress_hint"),
-                                self.settings.auto_compress,
-                                false,
-                                cx,
-                                |settings, value| settings.auto_compress = value,
-                            ))
-                            .when(self.settings.auto_compress, |this| {
-                                this.child(self.setting_switch(
-                                    tr!("settings.startup.immediate"),
-                                    tr!("settings.startup.immediate_hint"),
-                                    self.settings.auto_compress_immediate,
-                                    false,
-                                    cx,
-                                    |settings, value| settings.auto_compress_immediate = value,
-                                ))
-                            })
-                            .child(self.setting_switch(
-                                tr!("settings.startup.keep_original"),
-                                tr!("settings.startup.keep_original_hint"),
-                                self.settings.auto_compress_keep_original,
-                                false,
-                                cx,
-                                |settings, value| settings.auto_compress_keep_original = value,
-                            ))
-                            .when_some(
-                                compression_policy_warning(
-                                    self.settings.auto_compress_keep_original,
-                                    self.settings.auto_compress,
-                                ),
-                                |this, warning| {
-                                    this.child(
-                                        div()
-                                            .p(px(12.))
-                                            .rounded(px(8.))
-                                            .bg(rgb(p.red_soft))
-                                            .border_1()
-                                            .border_color(rgb(p.red_border))
-                                            .text_size(px(10.))
-                                            .text_color(rgb(p.red))
-                                            .child(warning),
-                                    )
-                                },
-                            )
                             .child(
                                 h_flex()
                                     .items_center()
@@ -762,6 +847,101 @@ impl App {
                 search.row_height,
             );
         }
+    }
+
+    /// Persists a thumbnail quality or size change. The in-memory images were
+    /// generated with the previous spec, so drop them and let the grid request
+    /// the new variant on its next frame.
+    pub(crate) fn save_thumbnail_settings(&mut self, cx: &mut Context<Self>) {
+        if let Err(error) = self.settings.save(&self.db) {
+            tracing::warn!(%error, "cannot save thumbnail settings");
+            self.toast_error(tr_args!("settings.language.save_failed", error = error), cx);
+        }
+        self.thumbnails.borrow_mut().clear();
+        cx.notify();
+    }
+
+    pub(crate) fn set_thumbnail_size(&mut self, size: u32, cx: &mut Context<Self>) {
+        if self.settings.thumbnail_size == size {
+            return;
+        }
+        self.settings.thumbnail_size = size;
+        self.save_thumbnail_settings(cx);
+    }
+
+    pub(crate) fn refresh_thumbnail_cache_usage(&mut self, cx: &mut Context<Self>) {
+        let Some(dir) = thumbnail::thumbnails_dir() else {
+            self.thumbnail_cache_usage = Some(thumbnail::ThumbnailCacheUsage::default());
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let usage = cx
+                .background_executor()
+                .spawn(async move { thumbnail::thumbnail_cache_usage_in(&dir).ok() })
+                .await;
+            this.update(cx, |this, cx| {
+                this.thumbnail_cache_usage = usage;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn clear_thumbnail_cache(&mut self, cx: &mut Context<Self>) {
+        if !self.ipc_connected {
+            self.toast_error(tr!("settings.thumbnail.clear_daemon_required"), cx);
+            cx.notify();
+            return;
+        }
+        let Some(endpoint) = self.ipc_endpoint.clone() else {
+            self.toast_error(tr!("daemon.ipc.resolve_error"), cx);
+            cx.notify();
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let (result, usage) = cx
+                .background_executor()
+                .spawn(async move {
+                    let result =
+                        ipc_bridge::request(endpoint, vrc_photo_ipc::Request::ClearThumbnailCache);
+                    let usage = thumbnail::thumbnail_cache_usage().ok();
+                    (result, usage)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(Response::ThumbnailCacheCleared {
+                        removed_files,
+                        removed_bytes,
+                        ..
+                    }) => {
+                        this.thumbnails.borrow_mut().clear();
+                        this.thumbnail_cache_usage = usage;
+                        this.toast_success(
+                            tr_args!(
+                                "settings.thumbnail.cleared",
+                                files = removed_files,
+                                size = format_bytes(removed_bytes)
+                            ),
+                            cx,
+                        );
+                    }
+                    Ok(Response::Error { message, .. }) => {
+                        this.toast_error(message, cx);
+                    }
+                    Ok(_) => {
+                        this.toast_error(tr!("settings.thumbnail.clear_error"), cx);
+                    }
+                    Err(error) => {
+                        this.toast_error(ipc_bridge::error_message(&error), cx);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn set_reduce_motion(&mut self, enabled: bool, cx: &mut Context<Self>) {
