@@ -32,6 +32,7 @@ use vrc_photo_ipc::{Endpoint, Event, JobStatus, Operation, ScanPhase as IpcScanP
 mod ipc_server;
 mod signals;
 mod tray;
+mod vrchat_process;
 use ipc_server::{EventBus, IpcControl, IpcServer, status_snapshot};
 use signals::{JobSignal, WakeSignal};
 use tray::{Tray, TrayAction};
