@@ -18,7 +18,7 @@ use vrc_photo_core::model::{
 };
 
 use crate::app::App;
-use crate::ui::components::glass_panel;
+use crate::ui::components::{card_header, glass_panel};
 use crate::ui::theme::*;
 
 fn section_divider(palette: &Palette) -> AnyElement {
@@ -232,14 +232,7 @@ impl App {
     /// header; the add action keeps its original save/reload path.
     fn profile_list_header(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let p = self.palette;
-        h_flex()
-            .flex_shrink_0()
-            .h(px(GALLERY_HEADER_HEIGHT))
-            .px(px(GALLERY_PAD_X))
-            .gap(px(8.))
-            .items_center()
-            .border_b_1()
-            .border_color(rgba(p.highlight))
+        card_header(&p)
             .child(
                 div()
                     .flex_1()
@@ -343,14 +336,7 @@ impl App {
             .overflow_hidden()
             .rounded(px(17.))
             .child(
-                h_flex()
-                    .flex_shrink_0()
-                    .h(px(GALLERY_HEADER_HEIGHT))
-                    .px(px(GALLERY_PAD_X))
-                    .gap(px(8.))
-                    .items_center()
-                    .border_b_1()
-                    .border_color(rgba(p.highlight))
+                card_header(&p)
                     .child(
                         div()
                             .min_w_0()
