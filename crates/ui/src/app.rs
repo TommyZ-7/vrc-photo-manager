@@ -224,6 +224,10 @@ pub struct App {
     pub(crate) waiting_job_count: i64,
     pub(crate) daemon_errors: Vec<DaemonError>,
     pub(crate) failed_job_count: i64,
+    /// Failed jobs still below the retry cap, from a DB aggregate. Retry
+    /// affordances read this rather than scanning the loaded page of
+    /// failed jobs, which is capped at 100 entries.
+    pub(crate) retryable_failed_count: i64,
     pub(crate) failed_jobs: Vec<CompressionJob>,
     pub(crate) failed_job_names: HashMap<i64, String>,
     pub(crate) deletion_requests: Vec<DeletionRequest>,
@@ -671,6 +675,7 @@ impl App {
             waiting_job_count: 0,
             daemon_errors: Vec::new(),
             failed_job_count: 0,
+            retryable_failed_count: 0,
             failed_jobs: Vec::new(),
             failed_job_names: HashMap::new(),
             import_report: None,

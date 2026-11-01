@@ -46,6 +46,18 @@ pub(crate) fn job_retry_available(job: &CompressionJob) -> bool {
     job.status == QueueStatus::Failed && job.retry_count < MAX_JOB_RETRIES
 }
 
+/// The failure reason shown on a failed job's row. A job that failed
+/// without a recorded reason still gets a line, so the row never reads
+/// as if nothing went wrong.
+fn job_error_label(job: &CompressionJob) -> String {
+    job.error
+        .as_deref()
+        .map(str::trim)
+        .filter(|error| !error.is_empty())
+        .unwrap_or("原因不明")
+        .to_string()
+}
+
 /// Retry usage for a failed job, or the cap explanation once exhausted.
 fn job_retry_label(job: &CompressionJob) -> String {
     if job_retry_available(job) {
@@ -959,7 +971,10 @@ impl App {
 
     pub(crate) fn queue_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.palette;
-        let retryable_jobs = self.failed_jobs.iter().any(job_retry_available);
+        // The loaded page holds at most 100 failed jobs; the aggregate
+        // count keeps the retry-all action available when the retryable
+        // failures sit beyond that page.
+        let retryable_jobs = self.retryable_failed_count > 0;
         glass_panel(&self.palette)
             .flex()
             .flex_col()
@@ -1148,7 +1163,7 @@ impl App {
                     .iter()
                     .find(|profile| profile.id == job.profile_id)
                     .map(|profile| profile.name.clone());
-                let error = job.error.clone().unwrap_or_default();
+                let error = job_error_label(job);
                 let retryable = job_retry_available(job);
                 let id = job.id.clone();
                 v_flex()
@@ -1236,7 +1251,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{job_retry_available, job_retry_label, queue_status_badge};
+    use super::{job_error_label, job_retry_available, job_retry_label, queue_status_badge};
     use vrc_photo_core::model::{CompressionJob, QueueStatus};
 
     fn test_job(status: QueueStatus, retry_count: i64) -> CompressionJob {
@@ -1264,6 +1279,21 @@ mod tests {
         assert!(!job_retry_available(&test_job(QueueStatus::Failed, 3)));
         assert!(!job_retry_available(&test_job(QueueStatus::Completed, 0)));
         assert!(job_retry_label(&test_job(QueueStatus::Failed, 3)).contains("上限"));
+    }
+
+    #[test]
+    fn job_error_label_falls_back_when_no_reason_was_recorded() {
+        assert_eq!(job_error_label(&test_job(QueueStatus::Failed, 0)), "boom");
+        let missing = CompressionJob {
+            error: None,
+            ..test_job(QueueStatus::Failed, 0)
+        };
+        assert_eq!(job_error_label(&missing), "原因不明");
+        let blank = CompressionJob {
+            error: Some("  ".to_string()),
+            ..test_job(QueueStatus::Failed, 0)
+        };
+        assert_eq!(job_error_label(&blank), "原因不明");
     }
 
     #[test]

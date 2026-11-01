@@ -11,14 +11,12 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use vrc_photo_core::importer::ImportProgress;
-use vrc_photo_core::model::CompressionJob;
 use vrc_photo_ipc::ScanPhase as IpcScanPhase;
 
 use crate::app::import::{ImportDialogPhase, ImportDialogState, ImportReportView};
 use crate::app::lifecycle::ScanProgressView;
 use crate::app::{App, Screen, SidebarStatusTab};
 use crate::ui::components::status_progress_bar;
-use crate::ui::compression::job_retry_available;
 use crate::ui::import::import_progress_ratio;
 use crate::ui::theme::*;
 
@@ -419,7 +417,7 @@ impl App {
         let footer = match tab {
             SidebarStatusTab::Compression => {
                 let mut row = h_flex().items_center().h(px(24.)).gap(px(6.));
-                let retry_available = sidebar_retry_available(&self.failed_jobs);
+                let retry_available = sidebar_retry_available(self.retryable_failed_count);
                 if self.waiting_job_count > 0 {
                     row = row.child(
                         Button::new("sidebar-status-release-waiting")
@@ -988,12 +986,13 @@ fn scan_card_status(
     }
 }
 
-/// Whether the sidebar compression card offers its retry action: at
-/// least one failed job must still have attempts left. When every failure
-/// is at the retry cap the action would retry nothing, so the card offers
-/// the queue instead — the same gate the dashboard applies.
-fn sidebar_retry_available(failed_jobs: &[CompressionJob]) -> bool {
-    failed_jobs.iter().any(job_retry_available)
+/// Whether the sidebar compression card offers its retry action. The
+/// input is the DB aggregate of retryable failures, not the loaded page
+/// of failed jobs: when every failure is at the retry cap the action
+/// would retry nothing, so the card offers the queue instead — the same
+/// gate the dashboard applies.
+fn sidebar_retry_available(retryable_failed: i64) -> bool {
+    retryable_failed > 0
 }
 
 fn compression_attention(active: i64, waiting: i64, failed: i64) -> Option<StatusTone> {
@@ -1112,7 +1111,6 @@ mod tests {
     use vrc_photo_core::importer::{
         ImportIssue, ImportIssueKind, ImportMode, ImportProgress, ImportRename,
     };
-    use vrc_photo_core::model::{CompressionJob, MAX_JOB_RETRIES, QueueStatus};
     use vrc_photo_core::scanner::ScanFailure;
     use vrc_photo_ipc::ScanPhase as IpcScanPhase;
 
@@ -1250,35 +1248,15 @@ mod tests {
         assert_eq!(running_job_count(0, 0), 0);
     }
 
-    fn failed_job(retry_count: i64) -> CompressionJob {
-        CompressionJob {
-            id: "job".to_string(),
-            photo_id: 1,
-            profile_id: "p".to_string(),
-            status: QueueStatus::Failed,
-            progress: 0.0,
-            error: Some("boom".to_string()),
-            output_path: None,
-            policy: "keep".to_string(),
-            output_dir: None,
-            created_at: "now".to_string(),
-            started_at: None,
-            finished_at: None,
-            retry_count,
-        }
+    #[test]
+    fn sidebar_retry_needs_a_retryable_failure() {
+        // The aggregate count excludes failures at the retry cap, so any
+        // positive count means the retry action has work to do.
+        assert!(!sidebar_retry_available(0));
+        assert!(sidebar_retry_available(1));
+        assert!(sidebar_retry_available(120));
     }
 
-    #[test]
-    fn sidebar_retry_needs_a_failed_job_below_the_cap() {
-        assert!(!sidebar_retry_available(&[]));
-        // Every failure at the cap: the retry action must not be offered.
-        assert!(!sidebar_retry_available(&[failed_job(MAX_JOB_RETRIES)]));
-        assert!(sidebar_retry_available(&[failed_job(MAX_JOB_RETRIES - 1)]));
-        assert!(sidebar_retry_available(&[
-            failed_job(MAX_JOB_RETRIES),
-            failed_job(0)
-        ]));
-    }
     #[test]
     fn compression_card_status_prioritizes_waiting_running_and_failed() {
         let waiting = compression_card_status(6, 5, 2);

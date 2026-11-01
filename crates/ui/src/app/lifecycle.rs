@@ -574,17 +574,20 @@ impl App {
             Ok(jobs) => self.failed_jobs = jobs,
             Err(error) => tracing::warn!(%error, "cannot load failed compression jobs"),
         }
+        match self.db.count_retryable_failed_jobs() {
+            Ok(count) => self.retryable_failed_count = count,
+            Err(error) => tracing::warn!(%error, "cannot count retryable failed jobs"),
+        }
         let failed_ids: Vec<i64> = self.failed_jobs.iter().map(|job| job.photo_id).collect();
-        self.failed_job_names = self
-            .db
-            .photos_by_ids(&failed_ids)
-            .map(|photos| {
-                photos
+        match self.db.photos_by_ids(&failed_ids) {
+            Ok(photos) => {
+                self.failed_job_names = photos
                     .into_iter()
                     .map(|photo| (photo.id, photo.file_name))
-                    .collect()
-            })
-            .unwrap_or_default();
+                    .collect();
+            }
+            Err(error) => tracing::warn!(%error, "cannot load failed job photo names"),
+        }
         let daemon_count = match self.db.daemon_errors() {
             Ok(errors) => {
                 let count = errors.len();
