@@ -20,6 +20,7 @@ use vrc_photo_core::linker;
 use vrc_photo_core::scanner;
 use vrc_photo_core::scanner::ScanFailure;
 use vrc_photo_core::settings::AppSettings;
+use vrc_photo_i18n::{tr, tr_args};
 
 use crate::app::App;
 use crate::ui::import::retryable_sources;
@@ -87,10 +88,12 @@ impl ImportSource {
 
     pub(crate) fn summary(&self) -> String {
         match self {
-            Self::Files(files) => format!("{} 件のファイル", files.len()),
-            Self::Folder { folder, files, .. } => {
-                format!("{} · {} 件", folder.display(), files.len())
-            }
+            Self::Files(files) => tr_args!("import.source.files", count = files.len()),
+            Self::Folder { folder, files, .. } => tr_args!(
+                "import.source.folder",
+                path = folder.display(),
+                count = files.len()
+            ),
         }
     }
 }
@@ -112,8 +115,12 @@ impl ImportDialogOrigin {
     pub(crate) fn run_summary(&self) -> Option<String> {
         match self {
             Self::New => None,
-            Self::Retry { sources, .. } => Some(format!("失敗分 {} 件", sources.len())),
-            Self::Resume { sources, .. } => Some(format!("残り {} 件", sources.len())),
+            Self::Retry { sources, .. } => {
+                Some(tr_args!("import.origin.retry", count = sources.len()))
+            }
+            Self::Resume { sources, .. } => {
+                Some(tr_args!("import.origin.resume", count = sources.len()))
+            }
         }
     }
 }
@@ -178,7 +185,7 @@ impl App {
 
     pub(crate) fn pick_import_files(&mut self, cx: &mut Context<Self>) {
         let Some(files) = rfd::FileDialog::new()
-            .add_filter("画像", &["png", "jpg", "jpeg"])
+            .add_filter(tr!("import.dialog.filter.images"), &["png", "jpg", "jpeg"])
             .pick_files()
         else {
             return;
@@ -203,7 +210,7 @@ impl App {
             Err(error) => {
                 tracing::warn!(%error, path = %folder.display(), "cannot scan import folder");
                 if let Some(dialog) = &mut self.import_dialog {
-                    dialog.error = Some(format!("フォルダを読み込めません: {error}"));
+                    dialog.error = Some(tr_args!("import.dialog.folder_error", error = error));
                 }
                 cx.notify();
                 return;
@@ -213,7 +220,7 @@ impl App {
             dialog.error = scan
                 .files
                 .is_empty()
-                .then(|| "対象画像が見つかりません".to_string());
+                .then(|| tr!("import.no_target_images"));
             dialog.source = Some(ImportSource::Folder {
                 folder,
                 files: scan.files,
@@ -338,21 +345,22 @@ impl App {
         match result {
             Err(error) => match dialog.origin {
                 ImportDialogOrigin::New => {
-                    self.toast_error(format!("取り込みに失敗: {error}"), cx);
+                    let message = tr_args!("import.error.failed", error = error);
+                    self.toast_error(message.clone(), cx);
                     self.import_dialog = Some(ImportDialogState {
                         origin: ImportDialogOrigin::New,
                         mode: dialog.mode,
                         dest: dialog.dest,
                         source: dialog.source,
-                        error: Some(format!("取り込みに失敗: {error}")),
+                        error: Some(message),
                         phase: ImportDialogPhase::Ready,
                     });
                 }
                 ImportDialogOrigin::Retry { .. } => {
-                    self.toast_error(format!("再試行に失敗: {error}"), cx);
+                    self.toast_error(tr_args!("import.error.retry", error = error), cx);
                 }
                 ImportDialogOrigin::Resume { .. } => {
-                    self.toast_error(format!("再開に失敗: {error}"), cx);
+                    self.toast_error(tr_args!("import.error.resume", error = error), cx);
                 }
             },
             Ok(result) => {
@@ -464,13 +472,19 @@ impl App {
             settings.save(&self.db)
         }) {
             tracing::warn!(%error, "cannot save photo roots after import");
-            append_scan_error(report, format!("取り込み先の設定を保存できません: {error}"));
+            append_scan_error(
+                report,
+                tr_args!("import.error.save_destination", error = error),
+            );
         }
         let root_id = match self.db.add_root(&dest_string, "managed") {
             Ok(id) => id,
             Err(error) => {
                 tracing::warn!(%error, "cannot register import destination");
-                append_scan_error(report, format!("取り込み先を登録できません: {error}"));
+                append_scan_error(
+                    report,
+                    tr_args!("import.error.register_destination", error = error),
+                );
                 return;
             }
         };
@@ -490,18 +504,12 @@ impl App {
                 self.import_scan_target = Some(report.dest.to_string_lossy().to_string());
                 self.send_wake_commands(cx);
                 if !self.ipc_connected {
-                    self.toast_warning(
-                        "デーモンに接続できないため、取り込み先のスキャンは起動後に行われます",
-                        cx,
-                    );
+                    self.toast_warning(tr!("import.daemon_offline_scan"), cx);
                 }
             }
             Err(error) => {
                 tracing::warn!(%error, "cannot request scan for import destination");
-                append_scan_error(
-                    report,
-                    format!("取り込み先のスキャンを要求できません: {error}"),
-                );
+                append_scan_error(report, tr_args!("import.error.request_scan", error = error));
             }
         }
     }
@@ -516,13 +524,16 @@ impl App {
             Ok(scan) => report.scan_failures.extend(scan.failures),
             Err(error) => {
                 tracing::warn!(%error, "cannot scan import destination");
-                append_scan_error(report, format!("取り込み先をスキャンできません: {error}"));
+                append_scan_error(
+                    report,
+                    tr_args!("import.error.scan_destination", error = error),
+                );
                 return;
             }
         }
         if let Err(error) = linker::relink_unlinked(&self.db, 1000) {
             tracing::warn!(%error, "cannot link imported photos");
-            append_scan_error(report, format!("写真の紐付けに失敗しました: {error}"));
+            append_scan_error(report, tr_args!("import.error.link", error = error));
         }
         let revision = self.db.library_revision().ok();
         if !self.apply_library_snapshot(revision, cx)
@@ -715,23 +726,33 @@ fn import_summary(report: &ImportReportView) -> String {
     let (failed, _) = report.issue_counts();
     let mut details = Vec::new();
     if report.skipped > 0 {
-        details.push(format!("{} 枚スキップ", report.skipped));
+        details.push(tr_args!("import.summary.skipped", count = report.skipped));
     }
     if failed > 0 {
-        details.push(format!("失敗 {failed} 件"));
+        details.push(tr_args!("import.summary.failed", count = failed));
     }
     if !report.renamed.is_empty() {
-        details.push(format!("連番 {} 件", report.renamed.len()));
+        details.push(tr_args!(
+            "import.summary.renamed",
+            count = report.renamed.len()
+        ));
     }
-    let mut summary = format!(
-        "{} 件中 {} 枚を取り込みました",
-        report.total, report.imported
+    let mut summary = tr_args!(
+        "import.summary.imported",
+        total = report.total,
+        imported = report.imported
     );
     if !details.is_empty() {
-        summary.push_str(&format!("（{}）", details.join("、")));
+        summary.push_str(&tr_args!(
+            "import.summary.details",
+            details = details.join(&tr!("import.summary.separator"))
+        ));
     }
     if !report.remaining.is_empty() {
-        summary.push_str(&format!("。残り {} 件は未処理です", report.remaining.len()));
+        summary.push_str(&tr_args!(
+            "import.summary.remaining",
+            count = report.remaining.len()
+        ));
     }
     summary
 }

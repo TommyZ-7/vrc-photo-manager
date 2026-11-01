@@ -15,6 +15,7 @@ use gpui_kit::component::*;
 use gpui_kit::*;
 use vrc_photo_core::model::{DeletionJobSummary, DeletionReason, Photo};
 use vrc_photo_core::{preview, thumbnail};
+use vrc_photo_i18n::{tr, tr_args};
 use vrc_photo_ipc::Request as IpcRequest;
 
 use crate::app::cli::log_timing;
@@ -515,7 +516,7 @@ impl App {
         let note = normalize_note(&value);
         if let Err(error) = self.db.set_note(id, note) {
             tracing::warn!(%error, photo_id = id, "cannot save photo note");
-            self.toast_error(format!("メモを保存できません: {error}"), cx);
+            self.toast_error(tr_args!("photos.note.save_error", error = error), cx);
             cx.notify();
             return;
         }
@@ -556,17 +557,10 @@ impl App {
         let description = if count == 1 {
             self.selected_photo
                 .as_ref()
-                .map(|photo| {
-                    format!(
-                        "「{}」を削除待ちに追加します。デーモンがOSゴミ箱へ移動します。",
-                        photo.captured_at_local
-                    )
-                })
-                .unwrap_or_else(|| {
-                    "写真を削除待ちに追加します。デーモンがOSゴミ箱へ移動します。".to_string()
-                })
+                .map(|photo| tr_args!("photos.delete.confirm_one", name = photo.captured_at_local))
+                .unwrap_or_else(|| tr!("photos.delete.confirm_none"))
         } else {
-            format!("{count} 枚を削除待ちに追加します。デーモンがOSゴミ箱へ移動します。")
+            tr_args!("photos.delete.confirm_count", count = count)
         };
         let entity = cx.entity();
         let panel_deep = self.palette.panel_deep;
@@ -576,13 +570,13 @@ impl App {
                 let entity = entity.clone();
                 let ids = ids.clone();
                 alert
-                    .title("写真を削除")
+                    .title(tr!("photos.delete.title"))
                     .bg(rgb(panel_deep))
                     .description(description.clone())
                     .confirm()
-                    .ok_text("削除待ちに追加")
+                    .ok_text(tr!("photos.delete.ok"))
                     .ok_variant(ButtonVariant::Danger)
-                    .cancel_text("キャンセル")
+                    .cancel_text(tr!("common.cancel"))
                     .on_ok(move |_, _, cx| {
                         entity.update(cx, |this, cx| {
                             this.request_trash_photos(ids.clone(), cx);
@@ -606,13 +600,13 @@ impl App {
                         .map(|line| div().text_size(px(11.)).child(line)),
                 );
             alert
-                .title("未完了のジョブがあります")
+                .title(tr!("photos.jobs.title"))
                 .bg(rgb(panel_deep))
                 .description(content)
                 .confirm()
-                .ok_text("削除待ちに追加")
+                .ok_text(tr!("photos.delete.ok"))
                 .ok_variant(ButtonVariant::Danger)
-                .cancel_text("キャンセル")
+                .cancel_text(tr!("common.cancel"))
                 .on_ok(move |_, _, cx| {
                     entity.update(cx, |this, cx| {
                         this.request_trash_photos(ids.clone(), cx);
@@ -644,9 +638,9 @@ impl App {
         if !removed.is_empty() || !promoted.is_empty() {
             self.remove_photos_from_ui(&removed, !promoted.is_empty(), cx);
             let moved = removed.len() + promoted.len();
-            let mut message = format!("{moved} 枚をゴミ箱へ移動しました");
+            let mut message = tr_args!("photos.trash.moved", count = moved);
             if !promoted.is_empty() {
-                message.push_str(&format!("（{} 枚は圧縮版を表示中）", promoted.len()));
+                message.push_str(&tr_args!("photos.trash.promoted", count = promoted.len()));
             }
             self.toast_success(message, cx);
         }
@@ -655,9 +649,9 @@ impl App {
             let detail = if failures.len() == 1 {
                 format!(": {}", failures[0])
             } else {
-                format!("（{} 件）", failures.len())
+                tr_args!("photos.trash.failures", count = failures.len())
             };
-            self.toast_error(format!("ゴミ箱へ移動できませんでした{detail}"), cx);
+            self.toast_error(tr_args!("photos.trash.error", detail = detail), cx);
         }
         cx.notify();
     }
@@ -676,13 +670,13 @@ impl App {
             Ok(ids) => ids,
             Err(error) => {
                 tracing::warn!(%error, "cannot request photo deletion");
-                self.toast_error(format!("削除を登録できません: {error}"), cx);
+                self.toast_error(tr_args!("photos.delete.register_error", error = error), cx);
                 cx.notify();
                 return;
             }
         };
         if requested.is_empty() {
-            self.toast_warning("削除できる写真がありません", cx);
+            self.toast_warning(tr!("photos.delete.none"), cx);
             cx.notify();
             return;
         }
@@ -690,14 +684,14 @@ impl App {
         self.remove_photos_from_ui(&removed, false, cx);
         if self.daemon_active {
             self.toast_success(
-                format!("{} 枚を削除待ちに追加しました", requested.len()),
+                tr_args!("photos.delete.registered", count = requested.len()),
                 cx,
             );
         } else {
             self.toast_warning(
-                format!(
-                    "{} 枚を削除待ちに追加しました。デーモン起動後に実行されます",
-                    requested.len()
+                tr_args!(
+                    "photos.delete.registered_after_start",
+                    count = requested.len()
                 ),
                 cx,
             );
@@ -794,7 +788,7 @@ impl App {
             && let Err(error) = self.db.set_replaced(id, derivative.id)
         {
             tracing::warn!(%error, photo_id = id, "cannot promote compressed derivative");
-            return TrashOutcome::Failed(format!("圧縮版を表示に設定できません: {error}"));
+            return TrashOutcome::Failed(tr_args!("photos.trash.promote_error", error = error));
         }
 
         match trash::delete(&effective_path) {
@@ -816,7 +810,7 @@ impl App {
                     let _ = self.db.restore_present(id);
                 }
                 tracing::warn!(%error, photo_id = id, "cannot move photo to trash");
-                TrashOutcome::Failed(format!("ゴミ箱へ移動できません: {error}"))
+                TrashOutcome::Failed(tr_args!("photos.trash.move_error", error = error))
             }
         }
     }
@@ -824,7 +818,7 @@ impl App {
     fn commit_tags(&mut self, photo_id: i64, tags: Vec<String>, cx: &mut Context<Self>) {
         if let Err(error) = self.db.set_photo_tags(photo_id, &tags) {
             tracing::warn!(%error, photo_id, "cannot save photo tags");
-            self.toast_error(format!("タグを保存できません: {error}"), cx);
+            self.toast_error(tr_args!("photos.tags.save_error", error = error), cx);
             cx.notify();
             return;
         }
@@ -842,7 +836,7 @@ impl App {
             Ok(tags) => tags,
             Err(error) => {
                 tracing::warn!(%error, photo_id, "cannot load photo tags");
-                self.toast_error(format!("タグを読み込めません: {error}"), cx);
+                self.toast_error(tr_args!("photos.tags.load_error", error = error), cx);
                 cx.notify();
                 return;
             }
@@ -858,7 +852,7 @@ impl App {
             Ok(tags) => tags,
             Err(error) => {
                 tracing::warn!(%error, photo_id, "cannot load photo tags");
-                self.toast_error(format!("タグを読み込めません: {error}"), cx);
+                self.toast_error(tr_args!("photos.tags.load_error", error = error), cx);
                 cx.notify();
                 return;
             }
@@ -875,9 +869,13 @@ impl App {
 fn deletion_warning_heading(affected: i64, selected: usize) -> String {
     let selected = selected as i64;
     if affected < selected {
-        format!("{affected} 枚に未完了のジョブがあります（選択 {selected} 枚）。")
+        tr_args!(
+            "photos.jobs.affected_selected",
+            affected = affected,
+            selected = selected
+        )
     } else {
-        format!("{selected} 枚に未完了のジョブがあります。")
+        tr_args!("photos.jobs.affected", selected = selected)
     }
 }
 
@@ -888,30 +886,37 @@ fn deletion_warning_lines(summary: &DeletionJobSummary) -> Vec<String> {
         return Vec::new();
     }
     vec![
-        job_status_line("圧縮", summary.compression),
-        job_status_line("送信", summary.send),
-        "・全ジョブの完了後に削除されます。".to_string(),
-        "・送信ジョブはキャンセルされます。".to_string(),
-        "・失敗したジョブがある場合、削除は保留され、通知されます。".to_string(),
+        job_status_line(tr!("photos.jobs.compression"), summary.compression),
+        job_status_line(tr!("photos.jobs.send"), summary.send),
+        tr!("photos.jobs.note_all"),
+        tr!("photos.jobs.note_send_cancelled"),
+        tr!("photos.jobs.note_failed"),
     ]
 }
 
-fn job_status_line(label: &str, counts: vrc_photo_core::model::JobStatusCounts) -> String {
+fn job_status_line(
+    label: impl Into<String>,
+    counts: vrc_photo_core::model::JobStatusCounts,
+) -> String {
+    let label: String = label.into();
     if counts.total() == 0 {
-        return format!("{label}: なし");
+        return tr_args!("photos.jobs.none", label = label);
     }
     let mut parts = Vec::new();
     if counts.pending > 0 {
-        parts.push(format!("実行待ち {}", counts.pending));
+        parts.push(tr_args!("photos.jobs.pending", count = counts.pending));
     }
     if counts.processing > 0 {
-        parts.push(format!("処理中 {}", counts.processing));
+        parts.push(tr_args!(
+            "photos.jobs.processing",
+            count = counts.processing
+        ));
     }
     if counts.waiting > 0 {
-        parts.push(format!("未実行 {}", counts.waiting));
+        parts.push(tr_args!("photos.jobs.waiting", count = counts.waiting));
     }
     if counts.failed > 0 {
-        parts.push(format!("失敗 {}", counts.failed));
+        parts.push(tr_args!("photos.jobs.failed", count = counts.failed));
     }
     format!("{label}: {}", parts.join(" / "))
 }

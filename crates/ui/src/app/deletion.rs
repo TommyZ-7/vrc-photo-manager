@@ -4,45 +4,41 @@ use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::*;
 use vrc_photo_core::model::{DeletionReason, DeletionRequest, DeletionStatus};
+use vrc_photo_i18n::{tr, tr_args};
 
 use crate::app::App;
 
-pub(crate) fn deletion_reason_label(reason: DeletionReason) -> &'static str {
+pub(crate) fn deletion_reason_label(reason: DeletionReason) -> String {
     match reason {
-        DeletionReason::AutoReplace => "自動置換",
-        DeletionReason::Manual => "手動削除",
-        DeletionReason::Unknown => "不明な理由",
+        DeletionReason::AutoReplace => tr!("deletion.reason.auto_replace"),
+        DeletionReason::Manual => tr!("deletion.reason.manual"),
+        DeletionReason::Unknown => tr!("deletion.reason.unknown"),
     }
 }
 
-pub(crate) fn deletion_status_label(status: DeletionStatus) -> &'static str {
+pub(crate) fn deletion_status_label(status: DeletionStatus) -> String {
     match status {
-        DeletionStatus::Pending => "待機中",
-        DeletionStatus::Blocked => "保留",
-        DeletionStatus::Running => "実行中",
-        DeletionStatus::Completed => "完了",
-        DeletionStatus::Cancelled => "取消",
+        DeletionStatus::Pending => tr!("deletion.status.pending"),
+        DeletionStatus::Blocked => tr!("deletion.status.blocked"),
+        DeletionStatus::Running => tr!("deletion.status.running"),
+        DeletionStatus::Completed => tr!("deletion.status.completed"),
+        DeletionStatus::Cancelled => tr!("deletion.status.cancelled"),
     }
 }
 
 pub(crate) fn deletion_blocked_label(request: &DeletionRequest) -> Option<String> {
     match request.blocked_reason.as_deref() {
-        Some("job_failed") => {
-            Some("圧縮ジョブの失敗で保留中（圧縮画面で再試行してください）".to_string())
-        }
-        Some("file_error") => Some(format!(
-            "ファイルをゴミ箱へ移動できませんでした{}",
-            request
+        Some("job_failed") => Some(tr!("deletion.blocked.compression_failed")),
+        Some("file_error") => Some(tr_args!(
+            "deletion.blocked.move_failed",
+            detail = request
                 .error
                 .as_deref()
                 .map(|error| format!(": {error}"))
                 .unwrap_or_default()
         )),
-        Some("missing_asset") => Some("表示用の圧縮版が見つからないため保留中".to_string()),
-        Some("unknown_reason") => Some(
-            "新しいバージョンで追加された削除理由のため保留中。アプリを更新してください"
-                .to_string(),
-        ),
+        Some("missing_asset") => Some(tr!("deletion.blocked.missing_asset")),
+        Some("unknown_reason") => Some(tr!("deletion.blocked.unknown_reason")),
         _ => None,
     }
 }
@@ -81,12 +77,12 @@ impl App {
                 let revision = self.db.library_revision().ok();
                 self.apply_library_snapshot(revision, cx);
                 self.reload_aux(cx);
-                self.toast_success("削除待ちを取り消しました", cx);
+                self.toast_success(tr!("deletion.cancel.success"), cx);
             }
-            Ok(false) => self.toast_warning("この削除は取り消せません", cx),
+            Ok(false) => self.toast_warning(tr!("deletion.cancel.not_possible"), cx),
             Err(error) => {
                 tracing::warn!(%error, request = id, "cannot cancel deletion");
-                self.toast_error(format!("削除待ちを取り消せません: {error}"), cx);
+                self.toast_error(tr_args!("deletion.cancel.error", error = error), cx);
             }
         }
         cx.notify();
@@ -97,12 +93,12 @@ impl App {
             Ok(true) => {
                 self.reload_job_state(cx);
                 self.send_wake_jobs(cx);
-                self.toast_success("削除を再試行します", cx);
+                self.toast_success(tr!("deletion.retry.success"), cx);
             }
-            Ok(false) => self.toast_warning("削除は既に実行中です", cx),
+            Ok(false) => self.toast_warning(tr!("deletion.retry.running"), cx),
             Err(error) => {
                 tracing::warn!(%error, request = id, "cannot retry deletion");
-                self.toast_error(format!("削除を再試行できません: {error}"), cx);
+                self.toast_error(tr_args!("deletion.retry.error", error = error), cx);
             }
         }
         cx.notify();
@@ -119,15 +115,13 @@ impl App {
         window.open_alert_dialog(cx, move |alert, _, _| {
             let entity = entity.clone();
             alert
-                .title("強制削除")
+                .title(tr!("deletion.force.title"))
                 .bg(rgb(panel_deep))
-                .description(
-                    "失敗したジョブを無視して削除します。この写真が唯一のコピーの場合、写真を失う可能性があります。",
-                )
+                .description(tr!("deletion.force.description"))
                 .confirm()
-                .ok_text("強制削除")
+                .ok_text(tr!("deletion.force.ok"))
                 .ok_variant(ButtonVariant::Danger)
-                .cancel_text("キャンセル")
+                .cancel_text(tr!("common.cancel"))
                 .on_ok(move |_, _, cx| {
                     entity.update(cx, |this, cx| this.force_deletion(id, cx));
                     true
@@ -146,12 +140,12 @@ impl App {
                 self.apply_library_snapshot(revision, cx);
                 self.reload_aux(cx);
                 self.send_wake_jobs(cx);
-                self.toast_success("強制削除を開始しました", cx);
+                self.toast_success(tr!("deletion.force.started"), cx);
             }
-            Ok(false) => self.toast_warning("削除は既に実行中です", cx),
+            Ok(false) => self.toast_warning(tr!("deletion.retry.running"), cx),
             Err(error) => {
                 tracing::warn!(%error, request = id, "cannot force deletion");
-                self.toast_error(format!("強制削除できません: {error}"), cx);
+                self.toast_error(tr_args!("deletion.force.error", error = error), cx);
             }
         }
         cx.notify();
