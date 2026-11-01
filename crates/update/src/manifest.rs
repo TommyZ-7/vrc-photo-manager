@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::error::{Result, UpdateError};
-use crate::install::InstallKind;
+use crate::install::{InstallKind, PackageFamily};
 
 pub const MANIFEST_SCHEMA: u32 = 1;
 pub const MAX_MANIFEST_BYTES: u64 = 512 * 1024;
@@ -26,6 +26,9 @@ pub struct Manifest {
     #[serde(default)]
     pub notes_url: Option<String>,
     pub platforms: BTreeMap<String, PlatformAsset>,
+    /// Optional system package artifacts keyed by package family.
+    #[serde(default)]
+    pub system_packages: BTreeMap<String, PlatformAsset>,
 }
 
 /// One downloadable artifact in the manifest.
@@ -46,6 +49,10 @@ pub enum UpdateFormat {
     AppImage,
     #[serde(rename = "nsis")]
     Nsis,
+    #[serde(rename = "pacman")]
+    Pacman,
+    #[serde(rename = "deb")]
+    Deb,
 }
 
 /// A newer release selected for the current installation.
@@ -90,6 +97,13 @@ impl Manifest {
             asset.validate(platform, allow_http)?;
         }
 
+        for (key, asset) in &manifest.system_packages {
+            let family = PackageFamily::from_manifest_key(key).ok_or_else(|| {
+                UpdateError::InvalidManifest(format!("unknown system package key {key}"))
+            })?;
+            asset.validate_system_package(family, allow_http)?;
+        }
+
         if let Some(notes_url) = &manifest.notes_url {
             validate_url(notes_url, allow_http, "notes_url")?;
         }
@@ -110,19 +124,25 @@ impl Manifest {
         let (platform, format) = match kind {
             InstallKind::AppImage { .. } => (LINUX_PLATFORM, UpdateFormat::AppImage),
             InstallKind::WindowsCurrentUser { .. } => (WINDOWS_PLATFORM, UpdateFormat::Nsis),
+            InstallKind::SystemPackage { family } => return self.system_package_for(*family),
             _ => return None,
         };
         self.platforms
             .get(platform)
             .filter(|asset| asset.format == format)
     }
+
+    /// Returns the system package artifact for a package family.
+    pub fn system_package_for(&self, family: PackageFamily) -> Option<&PlatformAsset> {
+        self.system_packages.get(family.manifest_key()?)
+    }
 }
 
 impl PlatformAsset {
-    fn validate(&self, platform: &str, allow_http: bool) -> Result<()> {
+    fn validate_common(&self, label: &str, allow_http: bool) -> Result<(Url, String)> {
         if self.size == 0 || self.size > MAX_ARTIFACT_BYTES {
             return Err(UpdateError::InvalidManifest(format!(
-                "{platform}: artifact size {} is out of range",
+                "{label}: artifact size {} is out of range",
                 self.size
             )));
         }
@@ -134,26 +154,29 @@ impl PlatformAsset {
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         {
             return Err(UpdateError::InvalidManifest(format!(
-                "{platform}: sha256 must be 64 lowercase hex characters"
+                "{label}: sha256 must be 64 lowercase hex characters"
             )));
         }
 
         if self.signature.trim().is_empty() {
             return Err(UpdateError::InvalidManifest(format!(
-                "{platform}: signature is empty"
+                "{label}: signature is empty"
             )));
         }
         let signature = crate::verify::decode_signature_base64(&self.signature).map_err(|_| {
-            UpdateError::InvalidManifest(format!("{platform}: signature is not valid base64"))
+            UpdateError::InvalidManifest(format!("{label}: signature is not valid base64"))
         })?;
         minisign_verify::Signature::decode(&signature).map_err(|_| {
-            UpdateError::InvalidManifest(format!(
-                "{platform}: signature is not a minisign signature"
-            ))
+            UpdateError::InvalidManifest(format!("{label}: signature is not a minisign signature"))
         })?;
 
         let url = validate_url(&self.url, allow_http, "artifact url")?;
         let file_name = artifact_file_name(&url)?;
+        Ok((url, file_name))
+    }
+
+    fn validate(&self, platform: &str, allow_http: bool) -> Result<()> {
+        let (_, file_name) = self.validate_common(platform, allow_http)?;
         let expected_format = match platform {
             LINUX_PLATFORM => UpdateFormat::AppImage,
             WINDOWS_PLATFORM => UpdateFormat::Nsis,
@@ -170,6 +193,7 @@ impl PlatformAsset {
             .ends_with(match expected_format {
                 UpdateFormat::AppImage => ".appimage",
                 UpdateFormat::Nsis => ".exe",
+                UpdateFormat::Pacman | UpdateFormat::Deb => unreachable!(),
             })
         {
             return Err(UpdateError::InvalidManifest(format!(
@@ -177,6 +201,31 @@ impl PlatformAsset {
             )));
         }
 
+        Ok(())
+    }
+
+    fn validate_system_package(&self, family: PackageFamily, allow_http: bool) -> Result<()> {
+        let (expected_format, suffix) = match family {
+            PackageFamily::Pacman => (UpdateFormat::Pacman, ".pkg.tar.zst"),
+            PackageFamily::Deb => (UpdateFormat::Deb, ".deb"),
+            PackageFamily::Unknown => {
+                return Err(UpdateError::InvalidManifest(
+                    "unknown system package family".to_string(),
+                ));
+            }
+        };
+        let (_, file_name) = self.validate_common("system package", allow_http)?;
+        if self.format != expected_format {
+            return Err(UpdateError::InvalidManifest(format!(
+                "system package format {:?} does not match {family:?}",
+                self.format
+            )));
+        }
+        if !file_name.to_ascii_lowercase().ends_with(suffix) {
+            return Err(UpdateError::InvalidManifest(format!(
+                "unexpected system package file name {file_name}"
+            )));
+        }
         Ok(())
     }
 
@@ -286,6 +335,112 @@ mod tests {
     fn parse(value: &Value, allow_http: bool) -> Result<(Manifest, semver::Version)> {
         let bytes = serde_json::to_vec(value).unwrap();
         Manifest::parse_and_validate(&bytes, allow_http)
+    }
+
+    fn system_packages() -> Value {
+        serde_json::json!({
+            "pacman": {
+                "url": "https://example.com/vrc-photo-manager-0.4.0-1-x86_64.pkg.tar.zst",
+                "format": "pacman",
+                "size": 1024,
+                "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                "signature": crate::verify::test_signature()
+            },
+            "deb": {
+                "url": "https://example.com/vrc-photo-manager_0.4.0_amd64.deb",
+                "format": "deb",
+                "size": 1024,
+                "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                "signature": crate::verify::test_signature()
+            }
+        })
+    }
+
+    #[test]
+    fn validates_pacman_and_deb_system_packages() {
+        let mut value = valid_manifest();
+        value["system_packages"] = system_packages();
+        let (manifest, _) = parse(&value, false).unwrap();
+        assert_eq!(manifest.system_packages.len(), 2);
+        assert_eq!(
+            manifest.system_packages["pacman"].format,
+            UpdateFormat::Pacman
+        );
+        assert_eq!(manifest.system_packages["deb"].format, UpdateFormat::Deb);
+    }
+
+    #[test]
+    fn accepts_a_manifest_without_system_packages() {
+        let value = valid_manifest();
+        assert!(parse(&value, false).is_ok());
+    }
+
+    #[test]
+    fn rejects_unknown_system_package_keys() {
+        let mut value = valid_manifest();
+        let mut packages = system_packages();
+        packages["rpm"] = packages["deb"].clone();
+        value["system_packages"] = packages;
+        assert!(matches!(
+            parse(&value, false),
+            Err(UpdateError::InvalidManifest(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_a_system_package_with_the_wrong_format() {
+        let mut value = valid_manifest();
+        let mut packages = system_packages();
+        packages["pacman"]["format"] = serde_json::json!("deb");
+        value["system_packages"] = packages;
+        assert!(matches!(
+            parse(&value, false),
+            Err(UpdateError::InvalidManifest(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_a_system_package_with_the_wrong_extension() {
+        let mut value = valid_manifest();
+        let mut packages = system_packages();
+        packages["pacman"]["url"] =
+            serde_json::json!("https://example.com/vrc-photo-manager_0.4.0_x86_64.tar.gz");
+        value["system_packages"] = packages;
+        assert!(matches!(
+            parse(&value, false),
+            Err(UpdateError::InvalidManifest(_))
+        ));
+    }
+
+    #[test]
+    fn selects_system_package_assets_by_family() {
+        let mut value = valid_manifest();
+        value["system_packages"] = system_packages();
+        let (manifest, _) = parse(&value, false).unwrap();
+
+        assert_eq!(
+            manifest
+                .system_package_for(PackageFamily::Pacman)
+                .unwrap()
+                .format,
+            UpdateFormat::Pacman
+        );
+        assert_eq!(
+            manifest
+                .asset_for(&InstallKind::SystemPackage {
+                    family: PackageFamily::Deb
+                })
+                .unwrap()
+                .format,
+            UpdateFormat::Deb
+        );
+        assert!(
+            manifest
+                .asset_for(&InstallKind::SystemPackage {
+                    family: PackageFamily::Unknown
+                })
+                .is_none()
+        );
     }
 
     #[test]

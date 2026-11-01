@@ -20,7 +20,13 @@ pub fn build_manifest(dist: &Path, tag: &str, repo: &str, notes_url: &str) -> Re
 
     let appimage = unique_artifact(dist, |name| name.ends_with(".AppImage"), "AppImage")?;
     let nsis = unique_artifact(dist, |name| name.ends_with("-setup.exe"), "NSIS installer")?;
-    for path in [&appimage, &nsis] {
+    let pacman = unique_artifact(
+        dist,
+        |name| name.ends_with(".pkg.tar.zst"),
+        "pacman package",
+    )?;
+    let deb = unique_artifact(dist, |name| name.ends_with(".deb"), "Debian package")?;
+    for path in [&appimage, &nsis, &pacman, &deb] {
         let name = file_name(path)?;
         if !name.contains(version) {
             bail!("artifact name {name} does not contain the tag version {version}");
@@ -37,12 +43,23 @@ pub fn build_manifest(dist: &Path, tag: &str, repo: &str, notes_url: &str) -> Re
         asset(dist, &nsis, tag, repo, UpdateFormat::Nsis)?,
     );
 
+    let mut system_packages = BTreeMap::new();
+    system_packages.insert(
+        "pacman".to_string(),
+        asset(dist, &pacman, tag, repo, UpdateFormat::Pacman)?,
+    );
+    system_packages.insert(
+        "deb".to_string(),
+        asset(dist, &deb, tag, repo, UpdateFormat::Deb)?,
+    );
+
     Ok(Manifest {
         schema: 1,
         version: version.to_string(),
         pub_date: Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
         notes_url: Some(notes_url.to_string()),
         platforms,
+        system_packages,
     })
 }
 
@@ -189,6 +206,12 @@ mod tests {
             "vrc-photo-manager_0.4.0_x64-setup.exe",
             b"installer",
         );
+        write_artifact(
+            dir.path(),
+            "vrc-photo-manager-0.4.0-1-x86_64.pkg.tar.zst",
+            b"pacman",
+        );
+        write_artifact(dir.path(), "vrc-photo-manager_0.4.0_amd64.deb", b"deb");
         let manifest = build_manifest(
             dir.path(),
             "v0.4.0",
@@ -221,6 +244,118 @@ mod tests {
         let (parsed, version) = Manifest::parse_and_validate(&json, false).unwrap();
         assert_eq!(version.to_string(), "0.4.0");
         assert_eq!(parsed.platforms.len(), 2);
+        assert_eq!(parsed.system_packages.len(), 2);
+    }
+
+    #[test]
+    fn builds_a_manifest_with_system_packages() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in [
+            (
+                "vrc-photo-manager_0.4.0_x86_64.AppImage",
+                b"appimage".as_slice(),
+            ),
+            (
+                "vrc-photo-manager_0.4.0_x64-setup.exe",
+                b"installer".as_slice(),
+            ),
+            (
+                "vrc-photo-manager-0.4.0-1-x86_64.pkg.tar.zst",
+                b"pacman".as_slice(),
+            ),
+            ("vrc-photo-manager_0.4.0_amd64.deb", b"deb".as_slice()),
+        ] {
+            write_artifact(dir.path(), name, body);
+        }
+        let manifest = build_manifest(
+            dir.path(),
+            "v0.4.0",
+            "TommyZ-7/vrc-photo-manager",
+            "https://example.com/notes",
+        )
+        .unwrap();
+        assert_eq!(manifest.platforms.len(), 2);
+        assert_eq!(manifest.system_packages.len(), 2);
+        assert_eq!(
+            manifest.system_packages["pacman"].format,
+            UpdateFormat::Pacman
+        );
+        assert_eq!(manifest.system_packages["deb"].format, UpdateFormat::Deb);
+        assert!(
+            manifest.system_packages["pacman"]
+                .url
+                .ends_with("vrc-photo-manager-0.4.0-1-x86_64.pkg.tar.zst")
+        );
+
+        let json = serde_json::to_vec(&manifest).unwrap();
+        let (parsed, version) = Manifest::parse_and_validate(&json, false).unwrap();
+        assert_eq!(version.to_string(), "0.4.0");
+        assert_eq!(parsed.system_packages.len(), 2);
+    }
+
+    #[test]
+    fn rejects_a_missing_system_package() {
+        let dir = tempfile::tempdir().unwrap();
+        write_artifact(
+            dir.path(),
+            "vrc-photo-manager_0.4.0_x86_64.AppImage",
+            b"appimage",
+        );
+        write_artifact(
+            dir.path(),
+            "vrc-photo-manager_0.4.0_x64-setup.exe",
+            b"installer",
+        );
+        assert!(build_manifest(dir.path(), "v0.4.0", "x/y", "https://example.com").is_err());
+    }
+
+    #[test]
+    fn rejects_duplicate_system_packages() {
+        let dir = tempfile::tempdir().unwrap();
+        write_artifact(
+            dir.path(),
+            "vrc-photo-manager_0.4.0_x86_64.AppImage",
+            b"appimage",
+        );
+        write_artifact(
+            dir.path(),
+            "vrc-photo-manager_0.4.0_x64-setup.exe",
+            b"installer",
+        );
+        write_artifact(
+            dir.path(),
+            "vrc-photo-manager-0.4.0-1-x86_64.pkg.tar.zst",
+            b"pacman",
+        );
+        write_artifact(
+            dir.path(),
+            "vrc-photo-manager-0.4.0-2-x86_64.pkg.tar.zst",
+            b"other pacman",
+        );
+        write_artifact(dir.path(), "vrc-photo-manager_0.4.0_amd64.deb", b"deb");
+        assert!(build_manifest(dir.path(), "v0.4.0", "x/y", "https://example.com").is_err());
+    }
+
+    #[test]
+    fn rejects_an_unversioned_system_package_name() {
+        let dir = tempfile::tempdir().unwrap();
+        write_artifact(
+            dir.path(),
+            "vrc-photo-manager_0.4.0_x86_64.AppImage",
+            b"appimage",
+        );
+        write_artifact(
+            dir.path(),
+            "vrc-photo-manager_0.4.0_x64-setup.exe",
+            b"installer",
+        );
+        write_artifact(
+            dir.path(),
+            "vrc-photo-manager-x86_64.pkg.tar.zst",
+            b"pacman",
+        );
+        write_artifact(dir.path(), "vrc-photo-manager_0.4.0_amd64.deb", b"deb");
+        assert!(build_manifest(dir.path(), "v0.4.0", "x/y", "https://example.com").is_err());
     }
 
     #[test]
@@ -236,6 +371,12 @@ mod tests {
             "vrc-photo-manager_0.4.0_x64-setup.exe",
             b"installer",
         );
+        write_artifact(
+            dir.path(),
+            "vrc-photo-manager-0.4.0-1-x86_64.pkg.tar.zst",
+            b"pacman",
+        );
+        write_artifact(dir.path(), "vrc-photo-manager_0.4.0_amd64.deb", b"deb");
         assert!(build_manifest(dir.path(), "v0.4.0", "x/y", "https://example.com").is_err());
     }
 
@@ -248,6 +389,12 @@ mod tests {
             "vrc-photo-manager_0.4.0_x64-setup.exe",
             b"installer",
         );
+        write_artifact(
+            dir.path(),
+            "vrc-photo-manager-0.4.0-1-x86_64.pkg.tar.zst",
+            b"pacman",
+        );
+        write_artifact(dir.path(), "vrc-photo-manager_0.4.0_amd64.deb", b"deb");
         assert!(build_manifest(dir.path(), "v0.4.0", "x/y", "https://example.com").is_err());
     }
 
@@ -269,6 +416,12 @@ mod tests {
             "vrc-photo-manager_0.4.0_x64-setup.exe",
             b"installer",
         );
+        write_artifact(
+            dir.path(),
+            "vrc-photo-manager-0.4.0-1-x86_64.pkg.tar.zst",
+            b"pacman",
+        );
+        write_artifact(dir.path(), "vrc-photo-manager_0.4.0_amd64.deb", b"deb");
         assert!(build_manifest(dir.path(), "v0.4.0", "x/y", "https://example.com").is_err());
     }
 

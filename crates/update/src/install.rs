@@ -12,7 +12,8 @@ use crate::native::NativeString;
 pub const APPLY_SCHEMA: u32 = 1;
 
 /// The package family used to show the right update command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PackageFamily {
     Deb,
     Pacman,
@@ -20,6 +21,24 @@ pub enum PackageFamily {
 }
 
 impl PackageFamily {
+    /// The key used for this family in the manifest's `system_packages` map.
+    pub fn manifest_key(self) -> Option<&'static str> {
+        match self {
+            Self::Pacman => Some("pacman"),
+            Self::Deb => Some("deb"),
+            Self::Unknown => None,
+        }
+    }
+
+    /// Resolves a `system_packages` key to its package family.
+    pub fn from_manifest_key(key: &str) -> Option<Self> {
+        match key {
+            "pacman" => Some(Self::Pacman),
+            "deb" => Some(Self::Deb),
+            _ => None,
+        }
+    }
+
     /// Reads `ID` and `ID_LIKE` from `/etc/os-release`-style text.
     pub fn from_os_release(text: &str) -> Self {
         let mut id = String::new();
@@ -559,6 +578,22 @@ mod tests {
         );
         assert!(!InstallKind::WindowsOther.automatic_check());
         assert!(!InstallKind::Development.automatic_check());
+    }
+
+    #[test]
+    fn package_family_manifest_keys_round_trip() {
+        for family in [PackageFamily::Pacman, PackageFamily::Deb] {
+            let key = family.manifest_key().unwrap();
+            assert_eq!(PackageFamily::from_manifest_key(key), Some(family));
+            let json = serde_json::to_string(&family).unwrap();
+            assert_eq!(json, format!("\"{key}\""));
+            assert_eq!(
+                serde_json::from_str::<PackageFamily>(&json).unwrap(),
+                family
+            );
+        }
+        assert_eq!(PackageFamily::Unknown.manifest_key(), None);
+        assert_eq!(PackageFamily::from_manifest_key("rpm"), None);
     }
 
     #[test]
