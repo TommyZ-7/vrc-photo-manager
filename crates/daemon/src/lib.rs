@@ -1948,7 +1948,9 @@ impl Daemon {
         self.wake.notify();
         if let Some(mut tail) = self.log_tail.take() {
             let db = self.db.lock().unwrap();
-            if let Err(error) = tail.ingestor.finish(&db, chrono::Utc::now().timestamp()) {
+            let ended_at =
+                modified_utc(&tail.path).unwrap_or_else(|| chrono::Utc::now().timestamp());
+            if let Err(error) = tail.ingestor.finish(&db, ended_at) {
                 tracing::warn!(%error, "cannot finish log ingestion on shutdown");
             }
         }
@@ -3924,6 +3926,32 @@ mod tests {
             .unwrap()
             .timestamp_utc();
         assert!(db.session_at(started + 1).unwrap().is_some());
+    }
+
+    #[test]
+    fn shutdown_closes_the_session_at_the_log_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let log_path = dir
+            .path()
+            .join("logs/output_log_2026-10-21_21-00-00.txt");
+        let join =
+            "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)";
+        std::fs::write(&log_path, format!("{join}\n")).unwrap();
+        daemon.ingest_logs().unwrap();
+        let started = vrc_photo_core::log_parser::parse_line(join)
+            .unwrap()
+            .timestamp_utc();
+        let mtime = started + 120;
+        let file = File::options().write(true).open(&log_path).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(mtime as u64))
+            .unwrap();
+
+        daemon.shutdown();
+
+        let db = daemon.db.lock().unwrap();
+        let session = db.session_at(started + 1).unwrap().unwrap();
+        assert_eq!(session.ended_at, Some(mtime));
     }
 
     fn save_daemon_settings(daemon: &Daemon, update: impl FnOnce(&mut AppSettings)) {
