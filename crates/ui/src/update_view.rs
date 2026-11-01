@@ -16,7 +16,7 @@ use vrc_photo_update::{
 };
 
 use crate::app::App;
-use crate::app::daemon::{open_path, spawn_daemon_process};
+use crate::app::daemon::{open_path, restart_daemon_after_update, start_daemon};
 
 #[cfg(test)]
 mod tests {
@@ -1063,6 +1063,12 @@ impl App {
             manifest_signature,
         };
 
+        // The supervisor is not loaded into App until the first monitor
+        // refresh, so read the recorded value from the database.
+        let supervisor = self
+            .daemon_supervisor
+            .clone()
+            .or_else(|| self.db.get_setting("daemon_supervisor").ok().flatten());
         let endpoint = self.ipc_endpoint.clone();
         let shutdown = self.ipc_connected;
         let apply_data_dir = job.data_dir.clone();
@@ -1090,7 +1096,7 @@ impl App {
                         this.update.phase = UpdatePhase::Error(message.clone());
                         this.toast_error(message.message(), cx);
                         if this.daemon_active {
-                            let _ = spawn_daemon_process();
+                            let _ = start_daemon(supervisor.as_deref());
                         }
                         cx.notify();
                     }
@@ -1111,8 +1117,14 @@ impl App {
             cx.notify();
             return;
         }
+        // A restarted UI has not refreshed the monitor yet, so the recorded
+        // supervisor is read from the database when the field is empty.
+        let supervisor = self
+            .daemon_supervisor
+            .clone()
+            .or_else(|| self.db.get_setting("daemon_supervisor").ok().flatten());
         if !self.demo
-            && let Err(error) = spawn_daemon_process()
+            && let Err(error) = restart_daemon_after_update(supervisor.as_deref())
         {
             self.toast_error(tr_args!("update.error.daemon_start", error = error), cx);
         }

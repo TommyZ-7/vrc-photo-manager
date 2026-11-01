@@ -33,7 +33,7 @@ use vrc_photo_ipc::Endpoint;
 
 use crate::app::cli::{log_timing, process_start, timing_enabled};
 use crate::app::compression::{ManualCompressionDialog, profile_name_update};
-use crate::app::daemon::spawn_daemon_process;
+use crate::app::daemon::start_daemon;
 use crate::app::demo::{DemoAssets, open_database};
 use crate::app::import::{ImportDialogState, ImportReportView};
 use crate::app::lifecycle::ScanProgressView;
@@ -810,10 +810,13 @@ impl App {
                 window.focus(&photo_grid_focus, cx);
             });
         }
+        // The supervisor is not loaded into App until the first monitor
+        // refresh, so read the recorded value from the database.
+        let supervisor = app.db.get_setting("daemon_supervisor").ok().flatten();
         if !app.demo
             && !app.daemon_active
             && !updating
-            && let Err(error) = spawn_daemon_process()
+            && let Err(error) = start_daemon(supervisor.as_deref())
         {
             app.toast_error(tr_args!("app.daemon_start_error", error = error), cx);
         }
