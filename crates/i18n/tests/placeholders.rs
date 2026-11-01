@@ -142,6 +142,8 @@ const CALL_SITES: &[(&str, &[&str])] = &[
     ("search.error", &["error"]),
     ("settings.footer.summary", &["cache", "language"]),
     ("settings.language.save_failed", &["error"]),
+    ("settings.thumbnail.cleared", &["files", "size"]),
+    ("settings.thumbnail.usage", &["files", "size"]),
     ("sidebar.import.done.headline", &["count"]),
     ("sidebar.import.done_renamed.detail", &["count"]),
     ("sidebar.import.failed.detail", &["imported", "total"]),

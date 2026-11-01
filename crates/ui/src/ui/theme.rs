@@ -63,6 +63,7 @@ pub(crate) const RAIL_WIDTH: f32 = 20.0;
 pub(crate) const MOTION_FAST: Duration = Duration::from_millis(160);
 pub(crate) const MOTION_BASE: Duration = Duration::from_millis(220);
 pub(crate) const MOTION_SLOW: Duration = Duration::from_millis(300);
+pub(crate) const MOTION_SIDEBAR: Duration = Duration::from_millis(440);
 pub(crate) const MOTION_MORPH: Duration = Duration::from_millis(340);
 pub(crate) const SCREEN_SLIDE: f32 = 14.0;
 pub(crate) const VIEWER_NAV_SLIDE: f32 = 28.0;
@@ -253,13 +254,9 @@ pub(crate) fn sidebar_width(collapsed: bool) -> f32 {
     }
 }
 
-pub(crate) fn sidebar_reveal_width(collapsed: bool, t: f32) -> f32 {
-    let (from, to) = if collapsed {
-        (130.0, 0.0)
-    } else {
-        (0.0, 130.0)
-    };
-    from + (to - from) * t
+/// Label width for a sidebar collapsed-progress of `0.0..=1.0`.
+pub(crate) fn sidebar_reveal_width(collapsed: f32) -> f32 {
+    130.0 * (1.0 - collapsed.clamp(0.0, 1.0))
 }
 
 /// §8.2: the sidebar's progress card is omitted once the content height is
@@ -655,10 +652,9 @@ mod tests {
     fn sidebar_widths_match_the_rail() {
         assert_eq!(sidebar_width(false), 238.0);
         assert_eq!(sidebar_width(true), 78.0);
-        assert_eq!(sidebar_reveal_width(false, 0.0), 0.0);
-        assert_eq!(sidebar_reveal_width(false, 1.0), 130.0);
-        assert_eq!(sidebar_reveal_width(true, 0.0), 130.0);
-        assert_eq!(sidebar_reveal_width(true, 1.0), 0.0);
+        assert_eq!(sidebar_reveal_width(0.0), 130.0);
+        assert_eq!(sidebar_reveal_width(1.0), 0.0);
+        assert_eq!(sidebar_reveal_width(0.5), 65.0);
     }
 
     #[test]

@@ -26,6 +26,8 @@ pub enum Request {
         files: u64,
         bytes: u64,
     },
+    /// Delete the whole thumbnail cache and reset the daemon's byte ledger.
+    ClearThumbnailCache,
     Shutdown,
     Subscribe,
 }
@@ -45,6 +47,12 @@ pub enum Response {
     },
     Subscribed {
         status: StatusSnapshot,
+    },
+    ThumbnailCacheCleared {
+        removed_files: u64,
+        removed_bytes: u64,
+        remaining_files: u64,
+        remaining_bytes: u64,
     },
     Ok,
     Error {
@@ -207,6 +215,20 @@ mod tests {
         };
         let json = serde_json::to_string(&value).unwrap();
         assert!(json.contains("\"thumbnails_generated\""));
+        assert_eq!(
+            serde_json::from_str::<RequestEnvelope>(&json).unwrap(),
+            value
+        );
+    }
+
+    #[test]
+    fn clear_thumbnail_cache_round_trips() {
+        let value = RequestEnvelope {
+            id: 9,
+            request: Request::ClearThumbnailCache,
+        };
+        let json = serde_json::to_string(&value).unwrap();
+        assert!(json.contains("\"clear_thumbnail_cache\""));
         assert_eq!(
             serde_json::from_str::<RequestEnvelope>(&json).unwrap(),
             value
