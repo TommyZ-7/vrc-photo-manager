@@ -114,6 +114,39 @@ mod tests {
     use super::*;
     use vrc_photo_core::model::PhotoStatus;
 
+    fn key(photo_id: i64) -> PreviewKey {
+        PreviewKey {
+            photo_id,
+            variant: 0,
+        }
+    }
+
+    #[test]
+    fn queue_starts_one_decode_and_holds_the_latest_request() {
+        let mut queue = PreviewQueue::default();
+        assert!(queue.want(key(1)));
+        assert_eq!(queue.begin(), Some(key(1)));
+        // A second request while one is in flight is held, not started.
+        assert!(!queue.want(key(2)));
+        assert_eq!(queue.begin(), None);
+        queue.finish(key(1));
+        assert_eq!(queue.begin(), Some(key(2)));
+    }
+
+    #[test]
+    fn cancel_wanted_drops_the_queued_request() {
+        // The reset path (selection clear / viewer close / removal) relies
+        // on this: after a cancel, no decode starts for the old selection.
+        let mut queue = PreviewQueue::default();
+        assert!(queue.want(key(1)));
+        assert_eq!(queue.begin(), Some(key(1)));
+        assert!(!queue.want(key(2)));
+        queue.cancel_wanted();
+        queue.finish(key(1));
+        assert_eq!(queue.begin(), None);
+        assert!(!queue.pending_for(2));
+    }
+
     fn test_photo(id: i64) -> Photo {
         Photo {
             id,
