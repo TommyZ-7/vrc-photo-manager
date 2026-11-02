@@ -8,10 +8,10 @@ VRC PhotoN がバイナリに含むサードパーティ製クレートと、そ
 
 | ライセンス | 名称 | クレート数 |
 |---|---|---:|
-| MIT | MIT License | 763 |
+| MIT | MIT License | 760 |
 | Apache-2.0 | Apache License 2.0 | 55 |
 | ISC | ISC License | 26 |
-| Unicode-3.0 | Unicode License v3 | 19 |
+| Unicode-3.0 | Unicode License v3 | 23 |
 | BSD-3-Clause | BSD 3-Clause "New" or "Revised" License | 16 |
 | GPL-3.0-or-later | GNU General Public License v3.0 or later | 9 |
 | BSD-2-Clause | BSD 2-Clause "Simplified" License | 5 |
@@ -1387,7 +1387,7 @@ Apache License
    See the License for the specific language governing permissions and
    limitations under the License.
 ```
-### blake3 1.8.7, gl_generator 0.14.0, gpui-fast-apple 0.1.12, gpui-fast-linux 0.1.12, gpui-fast-macos 0.1.12, gpui-fast-macros 0.1.12, gpui-fast-platform 0.1.12, gpui-fast-web 0.1.12, gpui-fast-wgpu 0.1.12, gpui-fast-windows 0.1.12, gpui-fast 0.1.12, gpui-kit-assets 0.8.1, gpui-kit 0.8.1, interprocess 2.4.7, khronos_api 3.1.0, rpassword 7.5.4, rtoolbox 0.0.6, ryu 1.0.23, spirv 0.4.0+sdk-1.4.341.0, sync_wrapper 1.0.2
+### blake3 1.8.7, gl_generator 0.14.0, gpui-fast-apple 0.1.13, gpui-fast-linux 0.1.13, gpui-fast-macos 0.1.13, gpui-fast-macros 0.1.13, gpui-fast-platform 0.1.13, gpui-fast-web 0.1.13, gpui-fast-wgpu 0.1.13, gpui-fast-windows 0.1.13, gpui-fast 0.1.13, gpui-kit-assets 0.9.0, gpui-kit 0.9.0, interprocess 2.4.7, khronos_api 3.1.0, rpassword 7.5.4, rtoolbox 0.0.6, ryu 1.0.23, spirv 0.4.0+sdk-1.4.341.0, sync_wrapper 1.0.2
 
 ```
 Apache License
@@ -1465,7 +1465,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 ```
-### gpui-pre-apple 0.3.10, gpui-pre-collections 0.3.10, gpui-pre-derive-refineable 0.3.10, gpui-pre-http-client 0.3.10, gpui-pre-ios 0.3.10, gpui-pre-linux 0.3.10, gpui-pre-macos 0.3.10, gpui-pre-macros 0.3.10, gpui-pre-platform 0.3.10, gpui-pre-refineable 0.3.10, gpui-pre-scheduler 0.3.10, gpui-pre-shared-string 0.3.10, gpui-pre-sum-tree 0.3.10, gpui-pre-util 0.3.10, gpui-pre-web 0.3.10, gpui-pre-wgpu 0.3.10, gpui-pre-windows 0.3.10, gpui-pre-ztracing-macro 0.3.10, gpui-pre-ztracing 0.3.10, gpui-pre 0.3.10
+### gpui-pre-apple 0.3.11, gpui-pre-collections 0.3.11, gpui-pre-derive-refineable 0.3.11, gpui-pre-http-client 0.3.11, gpui-pre-ios 0.3.11, gpui-pre-linux 0.3.11, gpui-pre-macos 0.3.11, gpui-pre-macros 0.3.11, gpui-pre-platform 0.3.11, gpui-pre-refineable 0.3.11, gpui-pre-scheduler 0.3.11, gpui-pre-shared-string 0.3.11, gpui-pre-sum-tree 0.3.11, gpui-pre-util 0.3.11, gpui-pre-web 0.3.11, gpui-pre-wgpu 0.3.11, gpui-pre-windows 0.3.11, gpui-pre-ztracing-macro 0.3.11, gpui-pre-ztracing 0.3.11, gpui-pre 0.3.11
 
 ```
 Copyright 2022 - 2025 Zed Industries, Inc.
@@ -1692,7 +1692,7 @@ Apache License
    END OF TERMS AND CONDITIONS
 
 ```
-### gpui-base 0.8.1, gpui-component-macros 0.8.1, gpui-component 0.8.1
+### gpui-base 0.9.0, gpui-component-macros 0.9.0, gpui-component 0.9.0
 
 ```
 Copyright 2024 - 2026 Longbridge <https://longbridge.com>
@@ -3450,7 +3450,7 @@ the library.  If this is what you want to do, use the GNU Lesser General
 Public License instead of this License.  But first, please read
 <https://www.gnu.org/licenses/why-not-lgpl.html>.
 ```
-### vrc-photon-core 0.9.2, vrc-photon-daemon 0.9.2, vrc-photon-i18n 0.9.2, vrc-photon-ipc 0.9.2, vrc-photon-release-tool 0.9.2, vrc-photon-ui 0.9.2, vrc-photon-update 0.9.2
+### vrc-photon-core 0.10.1, vrc-photon-daemon 0.10.1, vrc-photon-i18n 0.10.1, vrc-photon-ipc 0.10.1, vrc-photon-release-tool 0.10.1, vrc-photon-ui 0.10.1, vrc-photon-update 0.10.1
 
 ```
 GNU GENERAL PUBLIC LICENSE
@@ -5231,7 +5231,7 @@ OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
 WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ```
-### libfuzzer-sys 0.4.13, metal 0.33.0, rayon-core 1.13.0, rayon 1.12.0
+### libfuzzer-sys 0.4.13, rayon-core 1.13.0, rayon 1.12.0
 
 ```
 Copyright (c) 2010 The Rust Project Developers
@@ -11144,7 +11144,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ```
-### accesskit 0.24.1, accesskit_atspi_common 0.19.1, accesskit_consumer 0.38.0, accesskit_macos 0.26.3, accesskit_unix 0.22.1, accesskit_windows 0.34.0, block2 0.6.2, block 0.1.6, chrono 0.4.45, dispatch2 0.3.1, dpi 0.1.2, granit-parser 1.3.0, harfrust 0.5.2, jni-sys-macros 0.4.1, libm 0.2.16, libwebp-sys 0.9.6, lyon 1.0.19, lyon_algorithms 1.0.22, lyon_geom 1.0.20, lyon_path 1.0.19, lyon_tessellation 1.0.23, mac-notification-sys 0.6.15, mac 0.1.1, malloc_buf 0.0.6, minisign-verify 0.3.0, minisign 0.10.0, ndk-sys 0.6.0+11769913, objc-sys 0.3.5, objc2-app-kit 0.2.2, objc2-app-kit 0.3.2, objc2-cloud-kit 0.3.2, objc2-core-data 0.3.2, objc2-core-foundation 0.3.2, objc2-core-graphics 0.3.2, objc2-core-image 0.3.2, objc2-core-location 0.3.2, objc2-core-services 0.3.2, objc2-core-text 0.3.2, objc2-core-video 0.3.2, objc2-encode 4.1.0, objc2-foundation 0.2.2, objc2-foundation 0.3.2, objc2-metal 0.3.2, objc2-quartz-core 0.3.2, objc2-security 0.3.2, objc2-service-management 0.3.2, objc2-ui-kit 0.3.2, objc2-user-notifications 0.3.2, objc2 0.5.3, objc2 0.6.5, pathfinder_geometry 0.5.1, pathfinder_simd 0.5.6, profiling-procmacros 1.0.18, profiling 1.0.18, pulp-wasm-simd-flag 0.1.1, r-efi 5.3.0, r-efi 6.0.0, rsqlite-vfs 0.2.0, rust-i18n-macro 4.2.4, rust-i18n-support 4.2.4, seahash 4.1.0, simd_helpers 0.1.0, single-instance 0.3.3, svg_fmt 0.4.5, taffy 0.15.0, tauri-winrt-notification 0.8.1, winapi-i686-pc-windows-gnu 0.4.0, winapi-x86_64-pc-windows-gnu 0.4.0, windows-collections 0.3.2, windows-core 0.58.0, windows-core 0.62.2, windows-future 0.3.2, windows-implement 0.58.0, windows-implement 0.60.2, windows-interface 0.58.0, windows-interface 0.59.3, windows-link 0.1.3, windows-link 0.2.1, windows-numerics 0.3.1, windows-registry 0.4.0, windows-registry 0.6.1, windows-result 0.2.0, windows-result 0.3.4, windows-result 0.4.1, windows-strings 0.1.0, windows-strings 0.3.1, windows-strings 0.5.1, windows-sys 0.48.0, windows-sys 0.52.0, windows-sys 0.61.2, windows-targets 0.48.5, windows-targets 0.52.6, windows-targets 0.53.5, windows-threading 0.2.1, windows-version 0.1.7, windows 0.58.0, windows 0.62.2, windows_aarch64_gnullvm 0.48.5, windows_aarch64_gnullvm 0.52.6, windows_aarch64_gnullvm 0.53.1, windows_aarch64_msvc 0.48.5, windows_aarch64_msvc 0.52.6, windows_aarch64_msvc 0.53.1, windows_i686_gnu 0.48.5, windows_i686_gnu 0.52.6, windows_i686_gnu 0.53.1, windows_i686_gnullvm 0.52.6, windows_i686_gnullvm 0.53.1, windows_i686_msvc 0.48.5, windows_i686_msvc 0.52.6, windows_i686_msvc 0.53.1, windows_x86_64_gnu 0.48.5, windows_x86_64_gnu 0.52.6, windows_x86_64_gnu 0.53.1, windows_x86_64_gnullvm 0.48.5, windows_x86_64_gnullvm 0.52.6, windows_x86_64_gnullvm 0.53.1, windows_x86_64_msvc 0.48.5, windows_x86_64_msvc 0.52.6, windows_x86_64_msvc 0.53.1, xim-ctext 0.3.0, xim-parser 0.2.2, zune-core 0.4.12, zune-inflate 0.2.54, zune-jpeg 0.4.21
+### accesskit 0.24.1, accesskit_atspi_common 0.19.1, accesskit_consumer 0.38.0, accesskit_macos 0.26.3, accesskit_unix 0.22.1, accesskit_windows 0.34.0, block2 0.6.2, chrono 0.4.45, dispatch2 0.3.1, dpi 0.1.2, granit-parser 1.3.0, harfrust 0.5.2, jni-sys-macros 0.4.1, libm 0.2.16, libwebp-sys 0.9.6, lyon 1.0.19, lyon_algorithms 1.0.22, lyon_geom 1.0.20, lyon_path 1.0.19, lyon_tessellation 1.0.23, mac-notification-sys 0.6.15, mac 0.1.1, minisign-verify 0.3.0, minisign 0.10.0, ndk-sys 0.6.0+11769913, objc-sys 0.3.5, objc2-app-kit 0.2.2, objc2-app-kit 0.3.2, objc2-cloud-kit 0.3.2, objc2-core-data 0.3.2, objc2-core-foundation 0.3.2, objc2-core-graphics 0.3.2, objc2-core-image 0.3.2, objc2-core-location 0.3.2, objc2-core-services 0.3.2, objc2-core-text 0.3.2, objc2-core-video 0.3.2, objc2-encode 4.1.0, objc2-foundation 0.2.2, objc2-foundation 0.3.2, objc2-metal 0.3.2, objc2-quartz-core 0.3.2, objc2-security 0.3.2, objc2-service-management 0.3.2, objc2-ui-kit 0.3.2, objc2-uniform-type-identifiers 0.3.2, objc2-user-notifications 0.3.2, objc2 0.5.3, objc2 0.6.5, pathfinder_geometry 0.5.1, pathfinder_simd 0.5.6, profiling-procmacros 1.0.18, profiling 1.0.18, pulp-wasm-simd-flag 0.1.1, r-efi 5.3.0, r-efi 6.0.0, rsqlite-vfs 0.2.0, rust-i18n-macro 4.2.4, rust-i18n-support 4.2.4, seahash 4.1.0, simd_helpers 0.1.0, single-instance 0.3.3, svg_fmt 0.4.5, taffy 0.15.0, tauri-winrt-notification 0.8.1, winapi-i686-pc-windows-gnu 0.4.0, winapi-x86_64-pc-windows-gnu 0.4.0, windows-collections 0.3.2, windows-core 0.58.0, windows-core 0.62.2, windows-future 0.3.2, windows-implement 0.58.0, windows-implement 0.60.2, windows-interface 0.58.0, windows-interface 0.59.3, windows-link 0.1.3, windows-link 0.2.1, windows-numerics 0.3.1, windows-registry 0.4.0, windows-registry 0.6.1, windows-result 0.2.0, windows-result 0.3.4, windows-result 0.4.1, windows-strings 0.1.0, windows-strings 0.3.1, windows-strings 0.5.1, windows-sys 0.48.0, windows-sys 0.52.0, windows-sys 0.61.2, windows-targets 0.48.5, windows-targets 0.52.6, windows-targets 0.53.5, windows-threading 0.2.1, windows-version 0.1.7, windows 0.58.0, windows 0.62.2, windows_aarch64_gnullvm 0.48.5, windows_aarch64_gnullvm 0.52.6, windows_aarch64_gnullvm 0.53.1, windows_aarch64_msvc 0.48.5, windows_aarch64_msvc 0.52.6, windows_aarch64_msvc 0.53.1, windows_i686_gnu 0.48.5, windows_i686_gnu 0.52.6, windows_i686_gnu 0.53.1, windows_i686_gnullvm 0.52.6, windows_i686_gnullvm 0.53.1, windows_i686_msvc 0.48.5, windows_i686_msvc 0.52.6, windows_i686_msvc 0.53.1, windows_x86_64_gnu 0.48.5, windows_x86_64_gnu 0.52.6, windows_x86_64_gnu 0.53.1, windows_x86_64_gnullvm 0.48.5, windows_x86_64_gnullvm 0.52.6, windows_x86_64_gnullvm 0.53.1, windows_x86_64_msvc 0.48.5, windows_x86_64_msvc 0.52.6, windows_x86_64_msvc 0.53.1, xim-ctext 0.3.0, xim-parser 0.2.2, zune-core 0.4.12, zune-inflate 0.2.54, zune-jpeg 0.4.21
 
 ```
 MIT License
@@ -11165,32 +11165,6 @@ LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE A
 EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
 IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-```
-### objc 0.2.7
-
-```
-MIT License
-
-Copyright (c) Steven Sheldon
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
 
 ```
 ### tokio-util 0.7.20, tokio 1.54.1
@@ -13972,7 +13946,7 @@ dealings in these Data Files or Software without prior written
 authorization of the copyright holder.
 
 ```
-### icu_collections 2.4.0, icu_locale_core 2.4.0, icu_normalizer 2.4.0, icu_normalizer_data 2.4.0, icu_properties 2.4.0, icu_properties_data 2.4.0, icu_provider 2.4.0, litemap 0.8.3, potential_utf 0.1.6, tinystr 0.8.5, writeable 0.6.4, yoke-derive 0.8.4, yoke 0.8.4, zerofrom-derive 0.1.8, zerofrom 0.1.8, zerotrie 0.2.5, zerovec-derive 0.11.7, zerovec 0.11.9
+### icu_collections 2.4.0, icu_locale_core 2.4.0, icu_locale_fallback 2.4.0, icu_locale_fallback_data 2.4.0, icu_normalizer 2.4.0, icu_normalizer_data 2.4.0, icu_properties 2.4.0, icu_properties_data 2.4.0, icu_provider 2.4.0, icu_segmenter 2.4.0, icu_segmenter_data 2.4.0, litemap 0.8.3, potential_utf 0.1.6, tinystr 0.8.5, writeable 0.6.4, yoke-derive 0.8.4, yoke 0.8.4, zerofrom-derive 0.1.8, zerofrom 0.1.8, zerotrie 0.2.5, zerovec-derive 0.11.7, zerovec 0.11.9
 
 ```
 UNICODE LICENSE V3
