@@ -1128,6 +1128,26 @@ mod tests {
     }
 
     #[test]
+    fn deletion_warning_lines_list_send_counts() {
+        let summary = DeletionJobSummary {
+            compression: JobStatusCounts::default(),
+            send: JobStatusCounts {
+                waiting: 1,
+                pending: 2,
+                processing: 0,
+                failed: 1,
+            },
+            affected_photos: 3,
+        };
+        let lines = deletion_warning_lines(&summary);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("送信") && line.contains("失敗 1"))
+        );
+    }
+
+    #[test]
     fn deletion_warning_lines_are_empty_without_jobs() {
         assert!(deletion_warning_lines(&DeletionJobSummary::default()).is_empty());
     }

@@ -214,7 +214,9 @@ impl App {
                 self.reload_job_state(cx);
             }
             IpcEvent::SendProgress { .. } => {
-                // TODO(#142, task 13): reload the send history here.
+                // A send moved between waiting / pending / processing /
+                // terminal; the history page and the waiting badge follow it.
+                self.reload_send_history(cx);
             }
             IpcEvent::StatusChanged { status } => {
                 if crate::app::daemon::status_snapshot_is_newer(

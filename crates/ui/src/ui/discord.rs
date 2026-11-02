@@ -1,9 +1,12 @@
-//! Discord integration card: webhook editing, destination label, test send,
-//! and the single-select compression profile used for uploads.
+//! Discord integration cards: webhook editing, destination label, test send,
+//! the single-select compression profile used for uploads, and the send
+//! history with its retry/cancel actions.
 //!
 //! The full webhook URL never reaches the screen: a stored URL is rendered
 //! through [`mask_webhook_url`] and only the edit field shows what the user is
 //! typing.
+
+use std::path::Path;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
@@ -13,15 +16,112 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use vrc_photon_core::discord::mask_webhook_url;
-use vrc_photon_i18n::tr;
+use vrc_photon_core::model::{SendErrorCode, SendHistoryEntry, SendKind, SendSource, SendStatus};
+use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::App;
+use crate::app::daemon::{format_timestamp, open_path};
 use crate::ui::components::{glass_panel, manual_option_row};
 use crate::ui::theme::*;
 
 /// Phase 2 adds the automatic-send section to this body, so the bound is
 /// generous enough that the newer content is not clipped by the animation.
 const DISCORD_BODY_MAX: f32 = 900.0;
+
+/// The database read and the card both cap the history at the newest rows;
+/// the design keeps 500 terminal rows and shows the latest 100.
+const SEND_HISTORY_LIMIT: usize = 100;
+
+/// The history scrolls above this height so the card stays usable inside the
+/// integrations column.
+const SEND_HISTORY_MAX: f32 = 340.0;
+
+/// Badge label for a send outbox status.
+pub(crate) fn send_status_label(status: SendStatus) -> String {
+    match status {
+        SendStatus::Waiting => tr!("send.status.waiting"),
+        SendStatus::Pending => tr!("send.status.pending"),
+        SendStatus::Processing => tr!("send.status.processing"),
+        SendStatus::Sent => tr!("send.status.sent"),
+        SendStatus::Failed => tr!("send.status.failed"),
+        SendStatus::Cancelled => tr!("send.status.cancelled"),
+        SendStatus::Unknown => tr!("send.status.unknown"),
+    }
+}
+
+/// History label for the image a send uploaded.
+pub(crate) fn send_source_label(source: SendSource) -> String {
+    match source {
+        SendSource::Original => tr!("integrations.discord.source.original"),
+        SendSource::Profile => tr!("integrations.discord.source.profile"),
+        SendSource::Derivative => tr!("integrations.discord.source.derivative"),
+    }
+}
+
+/// Translated failure reason for a stable `error_code`. Rows without a code
+/// (still queued, or sent) render nothing; a code written by a newer version
+/// falls back to the unknown label instead of leaking the raw token.
+pub(crate) fn send_error_label(code: Option<&str>) -> String {
+    let Some(code) = code.map(str::trim).filter(|code| !code.is_empty()) else {
+        return String::new();
+    };
+    match SendErrorCode::parse(code) {
+        SendErrorCode::Network => tr!("send.error.network"),
+        SendErrorCode::RateLimited => tr!("send.error.rate_limited"),
+        SendErrorCode::Http400 => tr!("send.error.http_400"),
+        SendErrorCode::Http401 => tr!("send.error.http_401"),
+        SendErrorCode::Http403 => tr!("send.error.http_403"),
+        SendErrorCode::Http404 => tr!("send.error.http_404"),
+        SendErrorCode::Http413 => tr!("send.error.http_413"),
+        SendErrorCode::Http5xx => tr!("send.error.http_5xx"),
+        SendErrorCode::TooLarge => tr!("send.error.too_large"),
+        SendErrorCode::PhotoMissing => tr!("send.error.photo_missing"),
+        SendErrorCode::ProfileMissing => tr!("send.error.profile_missing"),
+        SendErrorCode::EncodeFailed => tr!("send.error.encode_failed"),
+        SendErrorCode::Interrupted => tr!("send.error.interrupted"),
+        SendErrorCode::WebhookInvalid => tr!("send.error.webhook_invalid"),
+        SendErrorCode::Unknown => tr!("send.error.unknown"),
+    }
+}
+
+/// Discord deep link for a sent message. Guild, channel, and message are all
+/// required; the IDs must be decimal snowflakes so a malformed or hostile
+/// database value cannot become an arbitrary URL.
+pub(crate) fn discord_message_url(
+    guild_id: Option<&str>,
+    channel_id: Option<&str>,
+    message_id: &str,
+) -> Option<String> {
+    fn snowflake(value: &str) -> Option<&str> {
+        let value = value.trim();
+        (!value.is_empty() && value.chars().all(|c| c.is_ascii_digit())).then_some(value)
+    }
+
+    let guild = snowflake(guild_id?)?;
+    let channel = snowflake(channel_id?)?;
+    let message = snowflake(message_id)?;
+    Some(format!(
+        "https://discord.com/channels/{guild}/{channel}/{message}"
+    ))
+}
+
+/// Status colours matching the compression queue badges so the two history
+/// lists read the same way.
+fn send_status_colors(status: SendStatus, p: &Palette) -> (u32, u32) {
+    match status {
+        SendStatus::Waiting => (p.amber, p.amber_soft),
+        SendStatus::Pending => (p.muted, p.panel_2),
+        SendStatus::Processing => (p.accent, p.accent_soft),
+        SendStatus::Sent => (p.green, p.green_soft),
+        SendStatus::Failed => (p.red, p.red_soft),
+        SendStatus::Cancelled | SendStatus::Unknown => (p.muted, p.panel_2),
+    }
+}
+
+fn non_empty(value: String) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
 
 /// The masked URL when a webhook is stored, otherwise the "not configured"
 /// prompt. Never returns the raw value.
@@ -110,8 +210,8 @@ impl App {
             )
             .child(self.discord_toggle_row(
                 "discord-send-original",
-                tr!("integrations.discord.source.original"),
-                tr!("integrations.discord.source.original_hint"),
+                tr!("integrations.discord.source.prefer_original"),
+                tr!("integrations.discord.source.prefer_original_hint"),
                 send_original,
                 cx,
                 App::set_discord_send_original,
@@ -223,6 +323,279 @@ impl App {
                 cx,
                 body,
             ))
+            .into_any_element()
+    }
+
+    /// Send history: the newest rows plus the retry/cancel actions and the
+    /// dialog that clears terminal rows. The card has no enable switch because
+    /// the history is observational; it follows the Discord feature state but
+    /// stays readable after the feature is turned off.
+    pub(crate) fn send_history_card(
+        &mut self,
+        _window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let p = self.palette;
+        let history: Vec<SendHistoryEntry> = self
+            .send_history
+            .iter()
+            .take(SEND_HISTORY_LIMIT)
+            .cloned()
+            .collect();
+        let waiting = self.send_waiting_count;
+
+        glass_panel(&self.palette)
+            .flex()
+            .flex_col()
+            .p(px(14.))
+            .rounded(px(17.))
+            .gap(px(10.))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .font_semibold()
+                                    .text_color(rgb(p.text))
+                                    .child(tr!("integrations.discord.history.title")),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(p.muted_2))
+                                    .child(tr!("integrations.discord.history.hint")),
+                            ),
+                    )
+                    .when(waiting > 0, |this| {
+                        this.child(self.badge(
+                            format!("{} {waiting}", tr!("send.status.waiting")),
+                            p.amber,
+                            p.amber_soft,
+                        ))
+                    })
+                    .child(
+                        Button::new("discord-history-clear")
+                            .label(tr!("integrations.discord.history.clear"))
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.clear_send_history(window, cx);
+                            })),
+                    ),
+            )
+            .child(if history.is_empty() {
+                div()
+                    .px(px(4.))
+                    .py(px(8.))
+                    .text_size(px(11.))
+                    .text_color(rgb(p.muted_2))
+                    .child(tr!("integrations.discord.history.empty"))
+                    .into_any_element()
+            } else {
+                v_flex()
+                    .id("integrations-send-history")
+                    .max_h(px(SEND_HISTORY_MAX))
+                    .overflow_y_scrollbar()
+                    .children(
+                        history
+                            .into_iter()
+                            .map(|entry| self.send_history_row(entry, cx)),
+                    )
+                    .into_any_element()
+            })
+            .into_any_element()
+    }
+
+    fn send_history_row(&self, entry: SendHistoryEntry, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
+        let item = &entry.entry;
+        let status = item.status;
+        let (fg, bg) = send_status_colors(status, &p);
+        let name = match item.kind {
+            SendKind::Test => tr!("integrations.discord.history.test_label"),
+            SendKind::Photo => entry
+                .photo_name
+                .clone()
+                .and_then(non_empty)
+                .unwrap_or_else(|| match item.photo_id {
+                    Some(photo_id) => tr_args!("compression.job.photo", id = photo_id),
+                    None => tr!("integrations.discord.history.unknown_photo"),
+                }),
+        };
+        let world = entry.world_name.clone().and_then(non_empty);
+        let destination = item.destination.clone().and_then(non_empty);
+        let source = item.source.map(send_source_label);
+        // The finish time is the useful one for terminal rows; queued rows
+        // only have a creation time.
+        let timestamp = item
+            .finished_at
+            .as_deref()
+            .or(item.started_at.as_deref())
+            .unwrap_or(&item.created_at);
+        let message = item.discord_message_id.clone().and_then(non_empty);
+        let message_url = message.as_deref().and_then(|message| {
+            discord_message_url(
+                item.discord_guild_id.as_deref(),
+                item.discord_channel_id.as_deref(),
+                message,
+            )
+        });
+        let error = send_error_label(item.error_code.as_deref());
+        let detail = item.error_detail.clone().and_then(non_empty);
+        let retryable = status == SendStatus::Failed;
+        let cancellable = matches!(
+            status,
+            SendStatus::Waiting | SendStatus::Pending | SendStatus::Failed
+        );
+        let id = item.id;
+
+        v_flex()
+            .px(px(4.))
+            .py(px(9.))
+            .gap(px(5.))
+            .border_b_1()
+            .border_color(rgb(p.border))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(self.badge(send_status_label(status), fg, bg))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(12.))
+                            .text_color(rgb(p.text))
+                            .truncate()
+                            .child(name),
+                    )
+                    .when_some(world, |this, world| {
+                        this.child(
+                            div()
+                                .max_w(px(160.))
+                                .truncate()
+                                .text_size(px(10.))
+                                .text_color(rgb(p.muted_2))
+                                .child(world),
+                        )
+                    })
+                    .when_some(destination, |this, destination| {
+                        this.child(
+                            div()
+                                .max_w(px(120.))
+                                .truncate()
+                                .text_size(px(10.))
+                                .text_color(rgb(p.muted_2))
+                                .child(destination),
+                        )
+                    })
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(p.muted_2))
+                            .child(format_timestamp(timestamp)),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(8.))
+                    .when_some(source, |this, source| {
+                        this.child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(p.muted))
+                                .child(source),
+                        )
+                    })
+                    .when(item.attempts > 0, |this| {
+                        this.child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(p.muted_2))
+                                .child(format!(
+                                    "{}: {}",
+                                    tr!("integrations.discord.history.attempts"),
+                                    item.attempts
+                                )),
+                        )
+                    })
+                    .when_some(message, |this, message| {
+                        this.child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(p.muted_2))
+                                .child(format!(
+                                    "{}: {message}",
+                                    tr!("integrations.discord.history.message_id")
+                                )),
+                        )
+                    })
+                    .when_some(message_url, |this, url| {
+                        this.child(
+                            Button::new(SharedString::from(format!("send-message-{id}")))
+                                .label(tr!("integrations.discord.history.message_link"))
+                                .small()
+                                .ghost()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Err(error) = open_path(Path::new(&url)) {
+                                        tracing::warn!(%error, %url, "cannot open a Discord message");
+                                        this.toast_error(error, cx);
+                                    }
+                                })),
+                        )
+                    })
+                    .child(div().flex_1())
+                    .when(retryable, |this| {
+                        this.child(
+                            Button::new(SharedString::from(format!("send-retry-{id}")))
+                                .label(tr!("integrations.discord.history.retry"))
+                                .small()
+                                .ghost()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.retry_send(id, cx);
+                                })),
+                        )
+                    })
+                    .when(cancellable, |this| {
+                        this.child(
+                            Button::new(SharedString::from(format!("send-cancel-{id}")))
+                                .label(tr!("integrations.discord.history.cancel"))
+                                .small()
+                                .ghost()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.cancel_send(id, cx);
+                                })),
+                        )
+                    }),
+            )
+            .when(!error.is_empty(), |this| {
+                this.child(
+                    div()
+                        .w_full()
+                        .text_size(px(10.))
+                        .text_color(rgb(p.red))
+                        .child(error),
+                )
+            })
+            .when_some(detail, |this, detail| {
+                this.child(
+                    div()
+                        .w_full()
+                        .truncate()
+                        .text_size(px(10.))
+                        .text_color(rgb(p.muted_2))
+                        .child(detail),
+                )
+            })
             .into_any_element()
     }
 
@@ -364,8 +737,35 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{discord_profile_label, webhook_state_label};
+    use super::{
+        discord_message_url, discord_profile_label, send_error_label, send_source_label,
+        send_status_label, webhook_state_label,
+    };
+    use vrc_photon_core::model::{SendSource, SendStatus};
     use vrc_photon_i18n::tr;
+
+    #[test]
+    fn history_helpers_describe_status_and_source() {
+        assert_eq!(send_status_label(SendStatus::Sent), tr!("send.status.sent"));
+        assert_eq!(
+            send_source_label(SendSource::Derivative),
+            tr!("integrations.discord.source.derivative")
+        );
+        assert_eq!(
+            send_error_label(Some("http_401")),
+            tr!("send.error.http_401")
+        );
+        assert_eq!(send_error_label(None), "");
+    }
+
+    #[test]
+    fn message_url_is_built_only_with_guild_and_channel() {
+        assert_eq!(
+            discord_message_url(Some("9"), Some("7"), "42").as_deref(),
+            Some("https://discord.com/channels/9/7/42")
+        );
+        assert_eq!(discord_message_url(None, Some("7"), "42"), None);
+    }
 
     #[test]
     fn webhook_state_label_distinguishes_missing_and_configured() {

@@ -4,6 +4,8 @@
 //! Rendering stays in `ui::discord`; these methods only touch App fields and
 //! the send outbox.
 
+use gpui_kit::component::WindowExt;
+use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::*;
 use vrc_photon_core::discord::{WebhookUrlError, validate_webhook_url};
 use vrc_photon_core::model::SendStatus;
@@ -63,7 +65,6 @@ pub(crate) fn webhook_error_key(error: WebhookUrlError) -> &'static str {
     }
 }
 
-#[allow(dead_code)] // Consumed by the Discord card, history, and send UI in later #142 tasks.
 impl App {
     pub(crate) fn set_discord_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         if self.settings.discord_enabled == enabled {
@@ -198,9 +199,14 @@ impl App {
                     self.pending_test_send = None;
                     self.toast_success(tr!("integrations.discord.test.success"), cx);
                 }
-                Some(SendStatus::Failed | SendStatus::Cancelled) => {
+                Some(SendStatus::Failed) => {
                     self.pending_test_send = None;
                     self.toast_error(tr!("integrations.discord.test.failed"), cx);
+                }
+                // A cancelled test send is not a webhook failure; the cancel
+                // action already reported success, so clear it silently.
+                Some(SendStatus::Cancelled) => {
+                    self.pending_test_send = None;
                 }
                 _ => {}
             }
@@ -219,6 +225,102 @@ impl App {
             Err(error) => {
                 tracing::warn!(%error, "cannot enqueue a Discord test send");
                 self.toast_error(tr!("integrations.discord.test.enqueue_failed"), cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Returns a failed row to the queue. The database rejects the retry when
+    /// the photo already has an active send, which the warning toast covers.
+    pub(crate) fn retry_send(&mut self, id: i64, cx: &mut Context<Self>) {
+        match self.db.retry_send(id) {
+            Ok(true) => {
+                self.reload_send_history(cx);
+                self.send_wake_sends(cx);
+                self.toast_success(tr!("integrations.discord.history.retry.queued"), cx);
+            }
+            Ok(false) => {
+                self.reload_send_history(cx);
+                self.toast_warning(tr!("integrations.discord.history.retry.unavailable"), cx);
+            }
+            Err(error) => {
+                tracing::warn!(%error, id, "cannot retry a Discord send");
+                self.toast_error(
+                    format!(
+                        "{}: {error}",
+                        tr!("integrations.discord.history.retry.error")
+                    ),
+                    cx,
+                );
+            }
+        }
+        cx.notify();
+    }
+
+    /// Cancels a queued or failed row. `processing` is not cancellable because
+    /// the upload is already in flight; the warning toast covers a row that
+    /// changed state after the click.
+    pub(crate) fn cancel_send(&mut self, id: i64, cx: &mut Context<Self>) {
+        match self.db.cancel_send(id) {
+            Ok(true) => {
+                self.reload_send_history(cx);
+                self.toast_success(tr!("integrations.discord.history.cancel.done"), cx);
+            }
+            Ok(false) => {
+                self.reload_send_history(cx);
+                self.toast_warning(tr!("integrations.discord.history.cancel.unavailable"), cx);
+            }
+            Err(error) => {
+                tracing::warn!(%error, id, "cannot cancel a Discord send");
+                self.toast_error(
+                    format!(
+                        "{}: {error}",
+                        tr!("integrations.discord.history.cancel.error")
+                    ),
+                    cx,
+                );
+            }
+        }
+        cx.notify();
+    }
+
+    /// Asks before deleting every terminal row. Active sends stay in the
+    /// outbox, so clearing history never drops pending work.
+    pub(crate) fn clear_send_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let entity = cx.entity();
+        let panel_deep = self.palette.panel_deep;
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let entity = entity.clone();
+            alert
+                .title(tr!("integrations.discord.history.clear.title"))
+                .bg(rgb(panel_deep))
+                .description(tr!("integrations.discord.history.clear.description"))
+                .confirm()
+                .ok_text(tr!("integrations.discord.history.clear.ok"))
+                .ok_variant(ButtonVariant::Danger)
+                .cancel_text(tr!("common.cancel"))
+                .on_ok(move |_, _, cx| {
+                    entity.update(cx, |this, cx| this.delete_send_history(cx));
+                    true
+                })
+        });
+    }
+
+    fn delete_send_history(&mut self, cx: &mut Context<Self>) {
+        match self.db.clear_send_history() {
+            Ok(_) => {
+                self.reload_send_history(cx);
+                self.toast_success(tr!("integrations.discord.history.clear.done"), cx);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "cannot clear the Discord send history");
+                self.toast_error(
+                    format!(
+                        "{}: {error}",
+                        tr!("integrations.discord.history.clear.error")
+                    ),
+                    cx,
+                );
             }
         }
         cx.notify();

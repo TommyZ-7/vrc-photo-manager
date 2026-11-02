@@ -41,7 +41,8 @@ impl App {
                     .gap(px(CARD_GAP))
                     .child(self.discord_card(window, cx))
                     .child(self.auto_compression_card(window, cx))
-                    .child(self.clipboard_card(window, cx)),
+                    .child(self.clipboard_card(window, cx))
+                    .child(self.send_history_card(window, cx)),
             )
             .child(
                 div()
