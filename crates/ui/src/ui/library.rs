@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, Textarea};
@@ -37,17 +37,12 @@ impl App {
         if let Some(selection) = selection {
             screen = screen.child(selection);
         }
-        let mut layout = h_flex().flex_1().min_h_0();
-        if !self.inspector_collapsed {
-            layout = layout.gap(px(INSPECTOR_GAP));
-        }
-        screen
-            .child(
-                layout
-                    .child(self.library_gallery.clone())
-                    .child(self.inspector_column(window, cx)),
-            )
-            .into_any_element()
+        let layout = h_flex()
+            .flex_1()
+            .min_h_0()
+            .child(self.library_gallery.clone())
+            .child(self.inspector_column(window, cx));
+        screen.child(layout).into_any_element()
     }
 
     pub(crate) fn selection_bar(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
@@ -247,28 +242,28 @@ impl App {
     }
 
     fn inspector_column(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let collapsed = self.inspector_collapsed;
+        let motion = self.inspector_motion;
         let inset = window.client_inset().map(f32::from).unwrap_or(0.0);
         let content_width = window_content_extent(f32::from(window.viewport_size().width), inset);
         let column_width = inspector_column_width(content_width);
+        // Keep the body mounted for the whole collapse so it can be clipped by
+        // the shrinking column, and from the first expanded frame so the
+        // reveal never starts blank.
+        let revealed = !self.inspector_collapsed || motion.value() < 1.0;
         let mut column = v_flex().h_full().flex_shrink_0().overflow_hidden();
-        if !collapsed {
+        if revealed {
             column = column.child(self.inspector(window, cx));
         }
         column
             .with_animation(
-                ("inspector-column", self.inspector_epoch),
-                Animation::new(if self.inspector_epoch == 0 {
-                    Duration::ZERO
-                } else {
-                    Duration::from_millis(300)
-                })
-                .with_easing(ease_motion)
-                .with_max_fps(self.motion_fps(window, cx)),
-                move |el, t| {
-                    let from = if collapsed { column_width } else { 0.0 };
-                    let to = if collapsed { 0.0 } else { column_width };
-                    el.w(px(from + (to - from) * t))
+                ("inspector-column", motion.epoch()),
+                Animation::new(motion.driver_duration())
+                    .with_easing(ease_motion)
+                    .with_max_fps(self.motion_fps(window, cx)),
+                move |el, _| {
+                    let collapsed = motion.value();
+                    el.w(px(inspector_reveal_width(column_width, collapsed)))
+                        .ml(px(inspector_reveal_gap(collapsed)))
                 },
             )
             .into_any_element()
