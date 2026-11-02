@@ -36,6 +36,18 @@ fn link_photo_with(db: &Db, photo: &Photo, estimated_enabled: bool) -> Result<bo
 
     if let Some(session) = session {
         let world = db.world_by_id(session.world_id)?;
+        let xmp_name = xmp.as_ref().and_then(|xmp| xmp.world_name.as_deref());
+        if let (Some(world), Some(xmp_name)) = (world.as_ref(), xmp_name) {
+            let world_matches = xmp
+                .as_ref()
+                .and_then(|xmp| xmp.world_id.as_deref())
+                .is_none_or(|world_id| world_id == world.world_id);
+            let name_writable =
+                world.name.is_none() || world.name_source.as_deref() == Some("vrchat-api");
+            if world_matches && name_writable {
+                db.upsert_world(&world.world_id, Some(xmp_name), Some("xmp"))?;
+            }
+        }
         let log_name = world
             .as_ref()
             .and_then(|world| world.alias.clone().or_else(|| world.name.clone()));
@@ -203,11 +215,15 @@ mod tests {
     use crate::model::NewPhoto;
 
     fn insert_photo(db: &Db, ts: i64) -> i64 {
+        insert_photo_at(db, ts, Path::new("/photos/a.png"))
+    }
+
+    fn insert_photo_at(db: &Db, ts: i64, path: &Path) -> i64 {
         let root = db.add_root("/photos", "reference").unwrap();
         db.upsert_photo(&NewPhoto {
             root_id: root,
             rel_path: "a.png".to_string(),
-            abs_path: "/photos/a.png".to_string(),
+            abs_path: path.to_string_lossy().to_string(),
             file_name: "a.png".to_string(),
             captured_at_utc: ts,
             captured_at_local: "2026-10-21 21:24:00.000".to_string(),
@@ -221,22 +237,24 @@ mod tests {
         .unwrap()
     }
 
+    fn write_png_with_xmp(path: &Path, xmp: &str) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), 1, 1);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .add_itxt_chunk("XML:com.adobe.xmp".to_string(), xmp.to_string())
+            .unwrap();
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&[255, 0, 0, 255]).unwrap();
+    }
+
     #[test]
     fn links_xmp_only_photos() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("VRChat_2026-10-21_21-24-00.000_4x3.png");
         let xmp = r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:vrc="https://vrchat.com/xmp/1.0/" vrc:WorldDisplayName="XMP World" vrc:WorldId="wrld_xmp" Author="Mio"/></rdf:RDF></x:xmpmeta>"#;
-        {
-            let file = std::fs::File::create(&path).unwrap();
-            let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), 1, 1);
-            encoder.set_color(png::ColorType::Rgba);
-            encoder.set_depth(png::BitDepth::Eight);
-            encoder
-                .add_itxt_chunk("XML:com.adobe.xmp".to_string(), xmp.to_string())
-                .unwrap();
-            let mut writer = encoder.write_header().unwrap();
-            writer.write_image_data(&[255, 0, 0, 255]).unwrap();
-        }
+        write_png_with_xmp(&path, xmp);
         let db = Db::open_in_memory().unwrap();
         let root = db.add_root("/photos", "reference").unwrap();
         let id = db
@@ -261,6 +279,55 @@ mod tests {
         assert_eq!(context.world_name.as_deref(), Some("XMP World"));
         assert_eq!(context.author.as_deref(), Some("Mio"));
         assert_eq!(context.link_method, "xmp");
+    }
+
+    #[test]
+    fn confirmed_link_promotes_xmp_world_name_to_worlds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_png_with_xmp(
+            &path,
+            r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:vrc="https://vrchat.com/xmp/1.0/" vrc:WorldDisplayName="XMP World" vrc:WorldId="wrld_xmp"/></rdf:RDF></x:xmpmeta>"#,
+        );
+        let db = Db::open_in_memory().unwrap();
+        let world = db.upsert_world("wrld_xmp", None, None).unwrap();
+        db.create_session("log.txt", 1_700_000_000, world, None)
+            .unwrap();
+        let photo_id = insert_photo_at(&db, 1_700_000_001, &path);
+        let photo = db.photo_by_id(photo_id).unwrap().unwrap();
+
+        assert!(link_photo(&db, &photo).unwrap());
+        let stored = db.world_by_id(world).unwrap().unwrap();
+        assert_eq!(stored.name.as_deref(), Some("XMP World"));
+        assert_eq!(stored.name_source.as_deref(), Some("xmp"));
+    }
+
+    #[test]
+    fn estimated_link_does_not_promote_xmp_world_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_png_with_xmp(
+            &path,
+            r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:vrc="https://vrchat.com/xmp/1.0/" vrc:WorldDisplayName="XMP World" vrc:WorldId="wrld_xmp"/></rdf:RDF></x:xmpmeta>"#,
+        );
+        let db = Db::open_in_memory().unwrap();
+        let world = db.upsert_world("wrld_guessed", None, None).unwrap();
+        db.create_session("log.txt", 1_700_000_000, world, None)
+            .unwrap();
+        // photo はセッション開始の3秒以内だが、セッションには含まれない時刻にする
+        let photo_id = insert_photo_at(&db, 1_699_999_998, &path);
+        let photo = db.photo_by_id(photo_id).unwrap().unwrap();
+
+        assert!(link_photo(&db, &photo).unwrap());
+        assert_eq!(db.world_by_id(world).unwrap().unwrap().name, None);
+        assert_eq!(
+            db.photo_context(photo_id)
+                .unwrap()
+                .unwrap()
+                .world_name
+                .as_deref(),
+            Some("XMP World")
+        );
     }
 
     fn ts_at(hms: &str) -> i64 {

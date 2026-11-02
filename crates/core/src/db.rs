@@ -1319,18 +1319,77 @@ impl Db {
         name: Option<&str>,
         source: Option<&str>,
     ) -> Result<i64> {
+        let tx = self.conn.unchecked_transaction()?;
         let now = now_string();
-        let id = self.conn.query_row(
-            "INSERT INTO worlds(world_id, name, name_source, first_seen, last_seen) \
-             VALUES (?1, ?2, ?3, ?4, ?4) \
-             ON CONFLICT(world_id) DO UPDATE SET \
-                name = COALESCE(excluded.name, worlds.name), \
-                name_source = COALESCE(excluded.name_source, worlds.name_source), \
-                last_seen = excluded.last_seen \
-             RETURNING id",
-            params![world_id, name, source, now],
-            |row| row.get(0),
+        let existing = tx
+            .query_row(
+                "SELECT id, name, name_source, alias FROM worlds WHERE world_id = ?1",
+                params![world_id],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+
+        let Some((id, old_name, old_source, alias)) = existing else {
+            let id = tx.query_row(
+                "INSERT INTO worlds(world_id, name, name_source, first_seen, last_seen) \
+                 VALUES (?1, ?2, ?3, ?4, ?4) RETURNING id",
+                params![world_id, name, source, now],
+                |row| row.get(0),
+            )?;
+            tx.commit()?;
+            return Ok(id);
+        };
+
+        // A missing name is always filled. An API name may be replaced by a
+        // later log/XMP name; log/XMP names keep the first one seen.
+        let replaces_api_name =
+            old_source.as_deref() == Some("vrchat-api") && matches!(source, Some("log" | "xmp"));
+        let stored_name = if old_name.is_none() || replaces_api_name {
+            name.map(str::to_string).or_else(|| old_name.clone())
+        } else {
+            old_name.clone()
+        };
+        let stored_source = if name.is_some() && (old_name.is_none() || replaces_api_name) {
+            source.map(str::to_string).or_else(|| old_source.clone())
+        } else {
+            old_source.clone()
+        };
+        tx.execute(
+            "UPDATE worlds SET name = ?1, name_source = ?2, last_seen = ?3 WHERE id = ?4",
+            params![stored_name, stored_source, now, id],
         )?;
+
+        // Alias always wins for display. When an API name is replaced, photos
+        // that already show that API name must follow the new name too.
+        let effective_name = alias.as_deref().or(stored_name.as_deref());
+        let updated = match effective_name {
+            Some(effective_name) if replaces_api_name => tx.execute(
+                "UPDATE photo_context SET world_name = ?1 \
+                 WHERE world_id = ?2 AND (world_name IS NULL OR world_name = ?3)",
+                params![effective_name, id, old_name],
+            )?,
+            Some(effective_name) => tx.execute(
+                "UPDATE photo_context SET world_name = ?1 \
+                 WHERE world_id = ?2 AND world_name IS NULL",
+                params![effective_name, id],
+            )?,
+            None => 0,
+        };
+
+        if stored_name.is_some() && matches!(source, Some("log" | "xmp")) {
+            self.mark_world_name_lookup_satisfied(id)?;
+        }
+        if updated > 0 {
+            self.bump_library_revision()?;
+        }
+        tx.commit()?;
         Ok(id)
     }
 
@@ -1340,21 +1399,47 @@ impl Db {
             .query_row(
                 "SELECT id, world_id, name, name_source, alias FROM worlds WHERE id = ?1",
                 params![id],
-                |row| {
-                    Ok(World {
-                        id: row.get(0)?,
-                        world_id: row.get(1)?,
-                        name: row.get(2)?,
-                        name_source: row.get(3)?,
-                        alias: row.get(4)?,
-                    })
-                },
+                row_to_world,
+            )
+            .optional()?;
+        Ok(world)
+    }
+
+    pub fn world_by_world_id(&self, world_id: &str) -> Result<Option<World>> {
+        let world = self
+            .conn
+            .query_row(
+                "SELECT id, world_id, name, name_source, alias FROM worlds WHERE world_id = ?1",
+                params![world_id],
+                row_to_world,
             )
             .optional()?;
         Ok(world)
     }
 
     // ---------- world name lookups ----------
+
+    /// Fills NULL `photo_context.world_name` rows from the stored world name,
+    /// preferring the user alias. Returns the number of updated contexts.
+    pub fn backfill_photo_context_world_names(&self) -> Result<usize> {
+        let tx = self.conn.unchecked_transaction()?;
+        let updated = tx.execute(
+            "UPDATE photo_context SET world_name = ( \
+                 SELECT COALESCE(w.alias, w.name) FROM worlds w \
+                 WHERE w.id = photo_context.world_id \
+             ) \
+             WHERE world_name IS NULL AND world_id IS NOT NULL \
+               AND EXISTS (SELECT 1 FROM worlds w \
+                           WHERE w.id = photo_context.world_id \
+                             AND COALESCE(w.alias, w.name) IS NOT NULL)",
+            [],
+        )?;
+        if updated > 0 {
+            self.bump_library_revision()?;
+        }
+        tx.commit()?;
+        Ok(updated)
+    }
 
     /// Queues a world for name resolution unless it is already queued.
     pub fn enqueue_world_name_lookup(&self, world_db_id: i64) -> Result<()> {
@@ -1433,6 +1518,17 @@ impl Db {
              WHERE world_db_id = ?3 AND status IN ('pending', 'retry', 'not_found')",
             params![now, now_string(), world_db_id],
         )?;
+        Ok(())
+    }
+
+    /// Stores an API result without overriding a log/XMP name. NULL photo
+    /// contexts are filled with the effective stored name either way.
+    pub fn record_world_name_resolved(&self, world_db_id: i64, name: &str, now: i64) -> Result<()> {
+        let Some(world) = self.world_by_id(world_db_id)? else {
+            return Ok(());
+        };
+        self.upsert_world(&world.world_id, Some(name), Some("vrchat-api"))?;
+        self.mark_world_name_lookup_resolved(world_db_id, now)?;
         Ok(())
     }
 
@@ -3821,6 +3917,16 @@ fn row_to_send_outbox(row: &Row<'_>) -> rusqlite::Result<SendOutboxEntry> {
         created_at: row.get(15)?,
         started_at: row.get(16)?,
         finished_at: row.get(17)?,
+    })
+}
+
+fn row_to_world(row: &Row<'_>) -> rusqlite::Result<World> {
+    Ok(World {
+        id: row.get(0)?,
+        world_id: row.get(1)?,
+        name: row.get(2)?,
+        name_source: row.get(3)?,
+        alias: row.get(4)?,
     })
 }
 
@@ -6559,6 +6665,190 @@ mod tests {
         assert_eq!(counts.pending, 2);
         assert_eq!(counts.resolved, 1);
         assert_eq!(counts.failed, 1);
+    }
+
+    #[test]
+    fn backfill_photo_context_world_names_fills_nulls_with_alias_then_name() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo = db.upsert_photo(&sample_photo(root, "a.png", 100)).unwrap();
+        let world = db
+            .upsert_world("wrld_test", Some("World Name"), Some("log"))
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE worlds SET alias = ?1 WHERE id = ?2",
+                params!["Alias Name", world],
+            )
+            .unwrap();
+        db.set_photo_context(&PhotoContext {
+            photo_id: photo,
+            session_id: None,
+            world_id: Some(world),
+            world_name: None,
+            instance_id: None,
+            link_method: "log".to_string(),
+            confidence: 0.9,
+            author: None,
+            linked_at: "2026-11-03T00:00:00+00:00".to_string(),
+        })
+        .unwrap();
+        let before = db.library_revision().unwrap();
+
+        assert_eq!(db.backfill_photo_context_world_names().unwrap(), 1);
+        assert_eq!(
+            db.photo_context(photo)
+                .unwrap()
+                .unwrap()
+                .world_name
+                .as_deref(),
+            Some("Alias Name")
+        );
+        assert!(db.library_revision().unwrap() > before);
+        assert_eq!(db.backfill_photo_context_world_names().unwrap(), 0);
+    }
+
+    #[test]
+    fn record_world_name_resolved_fills_only_nulls_and_keeps_log_names() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let null_photo = db.upsert_photo(&sample_photo(root, "a.png", 100)).unwrap();
+        let xmp_photo = db.upsert_photo(&sample_photo(root, "b.png", 200)).unwrap();
+        let world = db.upsert_world("wrld_test", None, None).unwrap();
+        for (photo, name) in [(null_photo, None), (xmp_photo, Some("XMP World"))] {
+            db.set_photo_context(&PhotoContext {
+                photo_id: photo,
+                session_id: None,
+                world_id: Some(world),
+                world_name: name.map(str::to_string),
+                instance_id: None,
+                link_method: "log".to_string(),
+                confidence: 0.9,
+                author: None,
+                linked_at: "2026-11-03T00:00:00+00:00".to_string(),
+            })
+            .unwrap();
+        }
+        db.enqueue_world_name_lookup(world).unwrap();
+
+        db.record_world_name_resolved(world, "API World", 1_000)
+            .unwrap();
+        let stored = db.world_by_id(world).unwrap().unwrap();
+        assert_eq!(stored.name.as_deref(), Some("API World"));
+        assert_eq!(stored.name_source.as_deref(), Some("vrchat-api"));
+        assert_eq!(
+            db.photo_context(null_photo)
+                .unwrap()
+                .unwrap()
+                .world_name
+                .as_deref(),
+            Some("API World")
+        );
+        assert_eq!(
+            db.photo_context(xmp_photo)
+                .unwrap()
+                .unwrap()
+                .world_name
+                .as_deref(),
+            Some("XMP World")
+        );
+        assert_eq!(
+            db.world_name_lookup(world).unwrap().unwrap().status,
+            WorldNameLookupStatus::Resolved
+        );
+
+        db.record_world_name_resolved(world, "Ignored API World", 2_000)
+            .unwrap();
+        assert_eq!(
+            db.world_by_id(world).unwrap().unwrap().name.as_deref(),
+            Some("API World")
+        );
+    }
+
+    #[test]
+    fn api_result_after_log_name_fills_null_contexts_with_the_log_name() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo = db.upsert_photo(&sample_photo(root, "a.png", 100)).unwrap();
+        let world = db
+            .upsert_world("wrld_test", Some("Log World"), Some("log"))
+            .unwrap();
+        db.set_photo_context(&PhotoContext {
+            photo_id: photo,
+            session_id: None,
+            world_id: Some(world),
+            world_name: None,
+            instance_id: None,
+            link_method: "log".to_string(),
+            confidence: 0.9,
+            author: None,
+            linked_at: "2026-11-03T00:00:00+00:00".to_string(),
+        })
+        .unwrap();
+        db.enqueue_world_name_lookup(world).unwrap();
+
+        db.record_world_name_resolved(world, "API World", 1_000)
+            .unwrap();
+        assert_eq!(
+            db.world_by_id(world).unwrap().unwrap().name.as_deref(),
+            Some("Log World")
+        );
+        assert_eq!(
+            db.photo_context(photo)
+                .unwrap()
+                .unwrap()
+                .world_name
+                .as_deref(),
+            Some("Log World")
+        );
+    }
+
+    #[test]
+    fn log_name_overwrites_api_name_and_updates_contexts() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo = db.upsert_photo(&sample_photo(root, "a.png", 100)).unwrap();
+        let world = db
+            .upsert_world("wrld_test", Some("API World"), Some("vrchat-api"))
+            .unwrap();
+        db.set_photo_context(&PhotoContext {
+            photo_id: photo,
+            session_id: None,
+            world_id: Some(world),
+            world_name: Some("API World".to_string()),
+            instance_id: None,
+            link_method: "log".to_string(),
+            confidence: 0.9,
+            author: None,
+            linked_at: "2026-11-03T00:00:00+00:00".to_string(),
+        })
+        .unwrap();
+        db.enqueue_world_name_lookup(world).unwrap();
+
+        db.upsert_world("wrld_test", Some("Log World"), Some("log"))
+            .unwrap();
+        let stored = db.world_by_id(world).unwrap().unwrap();
+        assert_eq!(stored.name.as_deref(), Some("Log World"));
+        assert_eq!(stored.name_source.as_deref(), Some("log"));
+        assert_eq!(
+            db.photo_context(photo)
+                .unwrap()
+                .unwrap()
+                .world_name
+                .as_deref(),
+            Some("Log World")
+        );
+        assert_eq!(
+            db.world_name_lookup(world).unwrap().unwrap().status,
+            WorldNameLookupStatus::Resolved
+        );
+
+        db.upsert_world("wrld_test", Some("XMP World"), Some("xmp"))
+            .unwrap();
+        assert_eq!(
+            db.world_by_id(world).unwrap().unwrap().name.as_deref(),
+            Some("Log World")
+        );
     }
 
     #[test]
