@@ -13,8 +13,9 @@ use crate::model::{
     DeletionBlockers, DeletionCounts, DeletionJobSummary, DeletionReason, DeletionRequest,
     DeletionStatus, Derivative, JobStatusCounts, LibraryRoot, LibraryStats, MAX_JOB_RETRIES,
     MAX_PROFILE_NAME_CHARS, NewPhoto, Photo, PhotoContext, PhotoFilter, PhotoIndexEntry,
-    PhotoPlayer, PhotoSort, PhotoStatus, PhotoTextFilter, QueueStatus, SendKind, SendOrigin,
-    SendOutboxEntry, SendSource, SendStatus, Session, SessionPlayer, World,
+    PhotoPlayer, PhotoSort, PhotoStatus, PhotoTextFilter, QueueStatus, SendCompletion,
+    SendErrorCode, SendHistoryEntry, SendKind, SendOrigin, SendOutboxEntry, SendSource, SendStatus,
+    Session, SessionPlayer, World,
 };
 
 const SCHEMA_V1: &str = r#"
@@ -2733,10 +2734,17 @@ impl Db {
         destination, attempts, next_attempt_at, discord_message_id, discord_channel_id, \
         discord_guild_id, error_code, error_detail, created_at, started_at, finished_at";
 
+    /// Same columns qualified for the `send_history` join, which also reads
+    /// `photo_name` and `world_name` at indexes 18 and 19.
+    const SEND_COLUMNS_QUALIFIED: &str = "o.id, o.photo_id, o.kind, o.origin, o.status, \
+        o.source, o.profile_id, o.destination, o.attempts, o.next_attempt_at, \
+        o.discord_message_id, o.discord_channel_id, o.discord_guild_id, o.error_code, \
+        o.error_detail, o.created_at, o.started_at, o.finished_at";
+
     /// Queues a photo send unless the photo is being deleted or another active
     /// send already exists. The partial `idx_send_outbox_active_photo` index is
     /// what dedupes active rows; `INSERT OR IGNORE` turns that conflict into a
-    /// quiet `None`.
+    /// quiet `None`. Only `waiting` and `pending` rows may be enqueued.
     pub fn enqueue_send(
         &self,
         photo_id: i64,
@@ -2744,6 +2752,12 @@ impl Db {
         origin: SendOrigin,
         status: SendStatus,
     ) -> Result<Option<i64>> {
+        if !matches!(status, SendStatus::Waiting | SendStatus::Pending) {
+            return Err(CoreError::Invalid(format!(
+                "send status '{}' cannot be enqueued",
+                status.as_str()
+            )));
+        }
         self.conn.execute(
             "INSERT OR IGNORE INTO send_outbox(photo_id, kind, origin, status, created_at) \
              SELECT ?1, ?2, ?3, ?4, ?5 \
@@ -2848,6 +2862,206 @@ impl Db {
             |row| row.get(0),
         )?;
         Ok(count)
+    }
+
+    /// Marks a claimed send as sent and stores the Discord identity produced by
+    /// the upload. Rows that are not `processing` are left untouched.
+    pub fn complete_send(&self, id: i64, completion: &SendCompletion) -> Result<()> {
+        let source = completion.source.map(SendSource::as_str);
+        self.conn.execute(
+            "UPDATE send_outbox SET status = 'sent', source = ?1, profile_id = ?2, \
+                destination = ?3, discord_message_id = ?4, discord_channel_id = ?5, \
+                discord_guild_id = ?6, error_code = NULL, error_detail = NULL, \
+                finished_at = ?7 \
+             WHERE id = ?8 AND status = 'processing'",
+            params![
+                source,
+                completion.profile_id,
+                completion.destination,
+                completion.message_id,
+                completion.channel_id,
+                completion.guild_id,
+                now_string(),
+                id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Delays a send and records the last error without increasing `attempts`
+    /// beyond what the caller computed.
+    pub fn reschedule_send(
+        &self,
+        id: i64,
+        attempts: i64,
+        next_attempt_at: i64,
+        error_code: SendErrorCode,
+        error_detail: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE send_outbox SET status = 'pending', attempts = ?1, \
+                next_attempt_at = ?2, error_code = ?3, error_detail = ?4, \
+                started_at = NULL \
+             WHERE id = ?5",
+            params![
+                attempts,
+                next_attempt_at,
+                error_code.as_str(),
+                error_detail,
+                id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Returns a claimed send to the queue without uploading. Used when the
+    /// Discord integration was disabled between claim and upload.
+    pub fn release_send(&self, id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE send_outbox SET status = 'pending', started_at = NULL \
+             WHERE id = ?1 AND status = 'processing'",
+            params![id],
+        )?;
+        Ok(())
+    }
+
+    /// Marks a send as failed and stores the error plus whatever Discord
+    /// identity was known. Pending rows are accepted: a send can be abandoned
+    /// before it is ever claimed.
+    pub fn fail_send(
+        &self,
+        id: i64,
+        error_code: SendErrorCode,
+        error_detail: Option<&str>,
+        source: Option<SendSource>,
+        profile_id: Option<&str>,
+        destination: Option<&str>,
+    ) -> Result<()> {
+        let source = source.map(SendSource::as_str);
+        self.conn.execute(
+            "UPDATE send_outbox SET status = 'failed', error_code = ?1, \
+                error_detail = ?2, source = ?3, profile_id = ?4, destination = ?5, \
+                finished_at = ?6 \
+             WHERE id = ?7",
+            params![
+                error_code.as_str(),
+                error_detail,
+                source,
+                profile_id,
+                destination,
+                now_string(),
+                id,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Returns a failed send to the queue with a clean slate. Refuses when the
+    /// same photo already has another active row, since that would violate the
+    /// partial `idx_send_outbox_active_photo` index.
+    pub fn retry_send(&self, id: i64) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE send_outbox SET status = 'pending', attempts = 0, \
+                next_attempt_at = NULL, error_code = NULL, error_detail = NULL, \
+                started_at = NULL, finished_at = NULL \
+             WHERE id = ?1 AND status = 'failed' \
+               AND (photo_id IS NULL OR NOT EXISTS ( \
+                   SELECT 1 FROM send_outbox active \
+                   WHERE active.photo_id = send_outbox.photo_id \
+                     AND active.id <> send_outbox.id \
+                     AND active.status IN ('waiting', 'pending', 'processing') \
+               ))",
+            params![id],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Cancels a queued or failed send. Claimed (`processing`) rows are left
+    /// alone so an upload in flight can finish.
+    pub fn cancel_send(&self, id: i64) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE send_outbox SET status = 'cancelled', finished_at = ?1 \
+             WHERE id = ?2 AND status IN ('waiting', 'pending', 'failed')",
+            params![now_string(), id],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Cancels every automatic send still held in `waiting` mode.
+    pub fn cancel_waiting_auto_sends(&self) -> Result<usize> {
+        let changed = self.conn.execute(
+            "UPDATE send_outbox SET status = 'cancelled', finished_at = ?1 \
+             WHERE status = 'waiting' AND origin = 'auto'",
+            params![now_string()],
+        )?;
+        Ok(changed)
+    }
+
+    /// Promotes every waiting send to pending so workers can pick it up.
+    pub fn release_waiting_sends(&self) -> Result<usize> {
+        let changed = self.conn.execute(
+            "UPDATE send_outbox SET status = 'pending' WHERE status = 'waiting'",
+            [],
+        )?;
+        Ok(changed)
+    }
+
+    /// Fails sends that were still `processing` when the process stopped.
+    /// They are not retried automatically, so a possibly delivered message is
+    /// not sent twice.
+    pub fn reset_processing_sends(&self) -> Result<usize> {
+        let changed = self.conn.execute(
+            "UPDATE send_outbox SET status = 'failed', error_code = 'interrupted', \
+                error_detail = NULL, finished_at = ?1 \
+             WHERE status = 'processing'",
+            params![now_string()],
+        )?;
+        Ok(changed)
+    }
+
+    /// Newest-first send history joined with the photo file name and world name.
+    pub fn send_history(&self, limit: i64) -> Result<Vec<SendHistoryEntry>> {
+        let sql = format!(
+            "SELECT {}, p.file_name, c.world_name \
+             FROM send_outbox o \
+             LEFT JOIN photos p ON p.id = o.photo_id \
+             LEFT JOIN photo_context c ON c.photo_id = o.photo_id \
+             ORDER BY o.id DESC LIMIT ?1",
+            Self::SEND_COLUMNS_QUALIFIED
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![limit.max(0)], |row| {
+            Ok(SendHistoryEntry {
+                entry: row_to_send_outbox(row)?,
+                photo_name: row.get(18)?,
+                world_name: row.get(19)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Deletes every terminal send row and returns how many were removed.
+    pub fn clear_send_history(&self) -> Result<usize> {
+        let changed = self.conn.execute(
+            "DELETE FROM send_outbox WHERE status IN ('sent', 'failed', 'cancelled')",
+            [],
+        )?;
+        Ok(changed)
+    }
+
+    /// Deletes terminal send rows older than the newest `keep` ones. Active
+    /// rows are never pruned.
+    pub fn prune_send_history(&self, keep: i64) -> Result<usize> {
+        let changed = self.conn.execute(
+            "DELETE FROM send_outbox WHERE status IN ('sent', 'failed', 'cancelled') \
+               AND id NOT IN ( \
+                   SELECT id FROM send_outbox \
+                   WHERE status IN ('sent', 'failed', 'cancelled') \
+                   ORDER BY id DESC LIMIT ?1 \
+               )",
+            params![keep.max(0)],
+        )?;
+        Ok(changed)
     }
 
     // ---------- daemon errors and commands ----------
@@ -5547,14 +5761,7 @@ mod tests {
             .unwrap()
             .is_none()
         );
-        // Task 3 owns `cancel_send`; mark the row terminal directly so this
-        // test stays focused on the partial UNIQUE index.
-        db.conn
-            .execute(
-                "UPDATE send_outbox SET status = 'cancelled', finished_at = ?1 WHERE id = ?2",
-                params![now_string(), id],
-            )
-            .unwrap();
+        assert!(db.cancel_send(id).unwrap());
         let again = db
             .enqueue_send(
                 photo,
@@ -5669,6 +5876,472 @@ mod tests {
         assert_eq!(SendStatus::parse("future_state"), SendStatus::Unknown);
         assert_eq!(SendStatus::Unknown.as_str(), "unknown");
         assert!(!SendStatus::Unknown.is_terminal());
+        assert_eq!(SendErrorCode::parse("http_413"), SendErrorCode::Http413);
+        assert_eq!(SendErrorCode::parse("future_error"), SendErrorCode::Unknown);
+    }
+
+    #[test]
+    fn enqueue_send_rejects_statuses_other_than_waiting_or_pending() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        for status in [
+            SendStatus::Processing,
+            SendStatus::Sent,
+            SendStatus::Failed,
+            SendStatus::Cancelled,
+            SendStatus::Unknown,
+        ] {
+            assert!(matches!(
+                db.enqueue_send(photo, SendKind::Photo, SendOrigin::Manual, status),
+                Err(CoreError::Invalid(_))
+            ));
+        }
+        assert_eq!(db.count_pending_sends().unwrap(), 0);
+    }
+
+    #[test]
+    fn claim_next_send_claims_oldest_due_row_first() {
+        let db = Db::open_in_memory().unwrap();
+        let first = seed_photo(&db);
+        let second = seed_other_photo(&db);
+        let first_id = db
+            .enqueue_send(
+                first,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        let second_id = db
+            .enqueue_send(
+                second,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(db.claim_next_send(100).unwrap().unwrap().id, first_id);
+        assert_eq!(db.claim_next_send(100).unwrap().unwrap().id, second_id);
+        assert!(db.claim_next_send(100).unwrap().is_none());
+    }
+
+    #[test]
+    fn complete_send_stores_message_identity_and_source() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        let id = db
+            .enqueue_send(
+                photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        db.claim_next_send(100).unwrap();
+        db.complete_send(
+            id,
+            &SendCompletion {
+                source: Some(SendSource::Original),
+                profile_id: None,
+                destination: "My server".into(),
+                message_id: Some("42".into()),
+                channel_id: Some("7".into()),
+                guild_id: Some("9".into()),
+            },
+        )
+        .unwrap();
+        let entry = db.send_entry_by_id(id).unwrap().unwrap();
+        assert_eq!(entry.status, SendStatus::Sent);
+        assert_eq!(entry.discord_message_id.as_deref(), Some("42"));
+        assert_eq!(entry.discord_channel_id.as_deref(), Some("7"));
+        assert_eq!(entry.discord_guild_id.as_deref(), Some("9"));
+        assert_eq!(entry.source, Some(SendSource::Original));
+        assert_eq!(entry.destination.as_deref(), Some("My server"));
+        assert!(entry.finished_at.is_some());
+    }
+
+    #[test]
+    fn complete_send_leaves_unclaimed_rows_alone() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        let id = db
+            .enqueue_send(
+                photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        db.complete_send(
+            id,
+            &SendCompletion {
+                source: None,
+                profile_id: None,
+                destination: "D".into(),
+                message_id: None,
+                channel_id: None,
+                guild_id: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            db.send_entry_by_id(id).unwrap().unwrap().status,
+            SendStatus::Pending
+        );
+    }
+
+    #[test]
+    fn fail_send_stores_error_and_identity() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        let id = db
+            .enqueue_send(
+                photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        db.fail_send(
+            id,
+            SendErrorCode::Http401,
+            Some("unauthorized"),
+            Some(SendSource::Profile),
+            Some("profile-a"),
+            Some("My server"),
+        )
+        .unwrap();
+        let entry = db.send_entry_by_id(id).unwrap().unwrap();
+        assert_eq!(entry.status, SendStatus::Failed);
+        assert_eq!(entry.error_code.as_deref(), Some("http_401"));
+        assert_eq!(entry.error_detail.as_deref(), Some("unauthorized"));
+        assert_eq!(entry.source, Some(SendSource::Profile));
+        assert_eq!(entry.profile_id.as_deref(), Some("profile-a"));
+        assert_eq!(entry.destination.as_deref(), Some("My server"));
+        assert!(entry.finished_at.is_some());
+    }
+
+    #[test]
+    fn reschedule_send_delays_and_records_the_last_error() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        let id = db
+            .enqueue_send(
+                photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        db.claim_next_send(100).unwrap();
+        db.reschedule_send(id, 2, 300, SendErrorCode::Network, Some("timeout"))
+            .unwrap();
+        let entry = db.send_entry_by_id(id).unwrap().unwrap();
+        assert_eq!(entry.status, SendStatus::Pending);
+        assert_eq!(entry.attempts, 2);
+        assert_eq!(entry.next_attempt_at, Some(300));
+        assert_eq!(entry.error_code.as_deref(), Some("network"));
+        assert_eq!(entry.error_detail.as_deref(), Some("timeout"));
+        assert_eq!(entry.started_at, None);
+        assert!(db.claim_next_send(299).unwrap().is_none());
+        assert_eq!(db.claim_next_send(300).unwrap().unwrap().id, id);
+    }
+
+    #[test]
+    fn release_send_returns_a_claimed_row_to_the_queue() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        let id = db
+            .enqueue_send(
+                photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        db.claim_next_send(100).unwrap();
+        db.release_send(id).unwrap();
+        let entry = db.send_entry_by_id(id).unwrap().unwrap();
+        assert_eq!(entry.status, SendStatus::Pending);
+        assert_eq!(entry.started_at, None);
+        assert_eq!(db.claim_next_send(200).unwrap().unwrap().id, id);
+    }
+
+    #[test]
+    fn retry_send_resets_attempts_and_errors_only_for_failed() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        let id = db
+            .enqueue_send(
+                photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        db.claim_next_send(100).unwrap();
+        db.reschedule_send(id, 3, 200, SendErrorCode::Network, Some("timeout"))
+            .unwrap();
+        db.claim_next_send(200).unwrap();
+        db.fail_send(
+            id,
+            SendErrorCode::Http401,
+            Some("unauthorized"),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(db.retry_send(id).unwrap());
+        let entry = db.send_entry_by_id(id).unwrap().unwrap();
+        assert_eq!(entry.status, SendStatus::Pending);
+        assert_eq!(entry.attempts, 0);
+        assert_eq!(entry.next_attempt_at, None);
+        assert_eq!(entry.error_code, None);
+        assert_eq!(entry.error_detail, None);
+        assert_eq!(entry.started_at, None);
+        assert_eq!(entry.finished_at, None);
+        assert!(!db.retry_send(id).unwrap());
+    }
+
+    #[test]
+    fn cancel_send_refuses_processing_rows() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        let id = db
+            .enqueue_send(
+                photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        db.claim_next_send(100).unwrap();
+        assert!(!db.cancel_send(id).unwrap());
+        assert_eq!(
+            db.send_entry_by_id(id).unwrap().unwrap().status,
+            SendStatus::Processing
+        );
+    }
+
+    #[test]
+    fn cancel_send_cancels_waiting_pending_and_failed_rows() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        let waiting = db
+            .enqueue_send(
+                photo,
+                SendKind::Photo,
+                SendOrigin::Auto,
+                SendStatus::Waiting,
+            )
+            .unwrap()
+            .unwrap();
+        let pending = db.enqueue_test_send().unwrap();
+        let failed = db.enqueue_test_send().unwrap();
+        db.fail_send(failed, SendErrorCode::Unknown, None, None, None, None)
+            .unwrap();
+
+        for id in [waiting, pending, failed] {
+            assert!(db.cancel_send(id).unwrap());
+            let entry = db.send_entry_by_id(id).unwrap().unwrap();
+            assert_eq!(entry.status, SendStatus::Cancelled);
+            assert!(entry.finished_at.is_some());
+        }
+        assert!(!db.cancel_send(waiting).unwrap());
+    }
+
+    #[test]
+    fn retry_send_refuses_when_another_active_row_exists() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        let failed = db
+            .enqueue_send(
+                photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        db.claim_next_send(100).unwrap();
+        db.fail_send(failed, SendErrorCode::Http401, None, None, None, None)
+            .unwrap();
+        let active = db
+            .enqueue_send(
+                photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(!db.retry_send(failed).unwrap());
+        assert_eq!(
+            db.send_entry_by_id(failed).unwrap().unwrap().status,
+            SendStatus::Failed
+        );
+        assert_eq!(
+            db.send_entry_by_id(active).unwrap().unwrap().status,
+            SendStatus::Pending
+        );
+    }
+
+    #[test]
+    fn reset_processing_sends_marks_interrupted_without_resending() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        let id = db
+            .enqueue_send(
+                photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        db.claim_next_send(100).unwrap();
+        assert_eq!(db.reset_processing_sends().unwrap(), 1);
+        let entry = db.send_entry_by_id(id).unwrap().unwrap();
+        assert_eq!(entry.status, SendStatus::Failed);
+        assert_eq!(entry.error_code.as_deref(), Some("interrupted"));
+        assert_eq!(entry.error_detail, None);
+        assert!(entry.finished_at.is_some());
+        assert!(db.claim_next_send(200).unwrap().is_none());
+    }
+
+    #[test]
+    fn release_waiting_and_cancel_waiting_auto_sends() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        let waiting = db
+            .enqueue_send(
+                photo,
+                SendKind::Photo,
+                SendOrigin::Auto,
+                SendStatus::Waiting,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(db.release_waiting_sends().unwrap(), 1);
+        assert_eq!(
+            db.send_entry_by_id(waiting).unwrap().unwrap().status,
+            SendStatus::Pending
+        );
+        let photo2 = seed_other_photo(&db);
+        db.enqueue_send(
+            photo2,
+            SendKind::Photo,
+            SendOrigin::Auto,
+            SendStatus::Waiting,
+        )
+        .unwrap();
+        assert_eq!(db.cancel_waiting_auto_sends().unwrap(), 1);
+        assert_eq!(
+            db.send_entry_by_id(waiting).unwrap().unwrap().status,
+            SendStatus::Pending
+        );
+    }
+
+    #[test]
+    fn send_history_joins_photo_and_world_and_prunes_to_cap() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        db.set_photo_context(&PhotoContext {
+            photo_id: photo,
+            session_id: None,
+            world_id: None,
+            world_name: Some("Test World".to_string()),
+            instance_id: None,
+            link_method: "manual".to_string(),
+            confidence: 1.0,
+            author: None,
+            linked_at: now_string(),
+        })
+        .unwrap();
+        for _ in 0..3 {
+            let id = db
+                .enqueue_send(
+                    photo,
+                    SendKind::Photo,
+                    SendOrigin::Manual,
+                    SendStatus::Pending,
+                )
+                .unwrap()
+                .unwrap();
+            db.claim_next_send(100).unwrap();
+            db.complete_send(
+                id,
+                &SendCompletion {
+                    source: Some(SendSource::Original),
+                    profile_id: None,
+                    destination: "D".into(),
+                    message_id: Some(id.to_string()),
+                    channel_id: None,
+                    guild_id: None,
+                },
+            )
+            .unwrap();
+        }
+        let history = db.send_history(10).unwrap();
+        assert_eq!(history.len(), 3);
+        assert_eq!(history[0].entry.discord_message_id.as_deref(), Some("3"));
+        assert_eq!(history[0].photo_name.as_deref(), Some("a.png"));
+        assert_eq!(history[0].world_name.as_deref(), Some("Test World"));
+        assert_eq!(db.send_history(1).unwrap().len(), 1);
+        assert_eq!(db.prune_send_history(2).unwrap(), 1);
+        assert_eq!(db.send_history(10).unwrap().len(), 2);
+        assert_eq!(db.clear_send_history().unwrap(), 2);
+        assert!(db.send_history(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn prune_and_clear_send_history_keep_active_rows() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        let waiting = db
+            .enqueue_send(
+                photo,
+                SendKind::Photo,
+                SendOrigin::Auto,
+                SendStatus::Waiting,
+            )
+            .unwrap()
+            .unwrap();
+        for _ in 0..3 {
+            let id = db.enqueue_test_send().unwrap();
+            db.claim_next_send(100).unwrap();
+            db.complete_send(
+                id,
+                &SendCompletion {
+                    source: None,
+                    profile_id: None,
+                    destination: "D".into(),
+                    message_id: None,
+                    channel_id: None,
+                    guild_id: None,
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(db.prune_send_history(1).unwrap(), 2);
+        assert_eq!(db.send_history(10).unwrap().len(), 2);
+        assert_eq!(
+            db.send_entry_by_id(waiting).unwrap().unwrap().status,
+            SendStatus::Waiting
+        );
+        assert_eq!(db.clear_send_history().unwrap(), 1);
+        assert!(db.send_entry_by_id(waiting).unwrap().is_some());
+        assert_eq!(db.send_history(10).unwrap().len(), 1);
     }
 
     #[test]

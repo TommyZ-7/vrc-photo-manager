@@ -429,6 +429,28 @@ pub struct SendOutboxEntry {
     pub finished_at: Option<String>,
 }
 
+/// The Discord identity produced by a successful send.
+///
+/// `source` stays optional because test sends have no image source, and
+/// `profile_id` is only set when a compression profile produced the upload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendCompletion {
+    pub source: Option<SendSource>,
+    pub profile_id: Option<String>,
+    pub destination: String,
+    pub message_id: Option<String>,
+    pub channel_id: Option<String>,
+    pub guild_id: Option<String>,
+}
+
+/// A send outbox row joined with the photo and world names shown in history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendHistoryEntry {
+    pub entry: SendOutboxEntry,
+    pub photo_name: Option<String>,
+    pub world_name: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct LibraryRoot {
     pub id: i64,
