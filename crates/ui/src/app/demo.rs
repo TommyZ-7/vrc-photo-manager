@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::{Local, NaiveDate, Utc};
+use chrono::{DateTime, Local, Utc};
 use vrc_photon_core::db::Db;
 use vrc_photon_core::model::{NewPhoto, PhotoContext};
 use vrc_photon_i18n::tr_args;
@@ -33,6 +33,64 @@ fn demo_data_is_current(root: &Path) -> bool {
         == Some(DEMO_DATA_VERSION)
 }
 
+/// Entries a demo root may contain. Anything else means the directory is
+/// not (only) demo data and must not be deleted.
+const DEMO_ROOT_ENTRIES: [&str; 9] = [
+    "photos",
+    "thumbnails",
+    "previews",
+    "image_pool",
+    "library.db",
+    "library.db-wal",
+    "library.db-shm",
+    DEMO_VERSION_FILE,
+    "demo.version.tmp",
+];
+
+/// First entry of `root` that demo data never creates, if any.
+fn demo_root_foreign_entry(root: &Path) -> Option<String> {
+    let entries = std::fs::read_dir(root).ok()?;
+    for entry in entries {
+        let entry = entry.ok()?;
+        let name = entry.file_name();
+        match name.to_str() {
+            Some(name) if DEMO_ROOT_ENTRIES.contains(&name) => {}
+            _ => return Some(name.to_string_lossy().into_owned()),
+        }
+    }
+    None
+}
+
+fn remove_demo_root_checked(root: &Path) -> Result<(), String> {
+    if let Some(entry) = demo_root_foreign_entry(root) {
+        return Err(tr_args!(
+            "demo.unexpected_contents",
+            path = root.display(),
+            entry = entry
+        ));
+    }
+    remove_demo_root(root)
+}
+
+/// Writes the version marker via a temporary file and rename, so a crash
+/// mid-write cannot leave a truncated marker behind.
+fn write_demo_marker(root: &Path) -> Result<(), String> {
+    let tmp = root.join("demo.version.tmp");
+    std::fs::write(&tmp, DEMO_DATA_VERSION.to_string())
+        .map_err(|error| format!("{}: {error}", tmp.display()))?;
+    let marker = root.join(DEMO_VERSION_FILE);
+    std::fs::rename(&tmp, &marker).map_err(|error| format!("{}: {error}", marker.display()))?;
+    Ok(())
+}
+
+fn create_demo_dirs(root: &Path) -> Result<(), String> {
+    for name in ["photos", "thumbnails", "previews"] {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+    }
+    Ok(())
+}
+
 fn remove_demo_root(root: &Path) -> Result<(), String> {
     match std::fs::remove_dir_all(root) {
         Ok(()) => Ok(()),
@@ -47,21 +105,48 @@ fn remove_demo_root(root: &Path) -> Result<(), String> {
 
 fn prepare_demo(reset: bool) -> Result<(Db, DemoAssets), String> {
     let root = std::env::temp_dir().join("vrc-photon-demo");
-    if reset || !demo_data_is_current(&root) {
-        remove_demo_root(&root)?;
-    }
+    prepare_demo_at(&root, reset, Local::now())
+}
+
+fn prepare_demo_at(
+    root: &Path,
+    reset: bool,
+    now: DateTime<Local>,
+) -> Result<(Db, DemoAssets), String> {
     let photo_dir = root.join("photos");
     let thumb_dir = root.join("thumbnails");
     let preview_dir = root.join("previews");
-    std::fs::create_dir_all(&photo_dir).map_err(|error| error.to_string())?;
-    std::fs::create_dir_all(&thumb_dir).map_err(|error| error.to_string())?;
-    std::fs::create_dir_all(&preview_dir).map_err(|error| error.to_string())?;
-    let db = Db::open(root.join("library.db")).map_err(|error| error.to_string())?;
-    if db.count_photos().map_err(|error| error.to_string())? == 0 {
-        seed_demo(&db, &photo_dir, Local::now().date_naive())?;
+    let db_path = root.join("library.db");
+    let current = demo_data_is_current(root);
+    if reset || !current {
+        remove_demo_root_checked(root)?;
     }
-    std::fs::write(root.join(DEMO_VERSION_FILE), DEMO_DATA_VERSION.to_string())
-        .map_err(|error| error.to_string())?;
+    create_demo_dirs(root)?;
+    let mut db = match Db::open(&db_path) {
+        Ok(db) => db,
+        Err(_) if current && !reset => {
+            // The marker claims the data is current, but the database
+            // cannot even be opened: rebuild instead of leaving demo
+            // mode broken.
+            remove_demo_root_checked(root)?;
+            create_demo_dirs(root)?;
+            Db::open(&db_path).map_err(|error| format!("{}: {error}", db_path.display()))?
+        }
+        Err(error) => return Err(format!("{}: {error}", db_path.display())),
+    };
+    let mut count = db.count_photos();
+    if current && !reset && count.is_err() {
+        // Same repair for a database that opens but cannot be read.
+        drop(db);
+        remove_demo_root_checked(root)?;
+        create_demo_dirs(root)?;
+        db = Db::open(&db_path).map_err(|error| format!("{}: {error}", db_path.display()))?;
+        count = db.count_photos();
+    }
+    if count.map_err(|error| error.to_string())? == 0 {
+        seed_demo(&db, &photo_dir, now)?;
+    }
+    write_demo_marker(root)?;
     Ok((
         db,
         DemoAssets {
@@ -166,25 +251,16 @@ fn demo_image(index: usize) -> image::RgbaImage {
     image
 }
 
-fn seed_demo(db: &Db, photo_dir: &Path, reference: NaiveDate) -> Result<(), String> {
-    std::fs::create_dir_all(photo_dir).map_err(|error| error.to_string())?;
+fn seed_demo(db: &Db, photo_dir: &Path, now: DateTime<Local>) -> Result<(), String> {
+    std::fs::create_dir_all(photo_dir)
+        .map_err(|error| format!("{}: {error}", photo_dir.display()))?;
     let root = photo_dir.parent().unwrap_or(photo_dir);
     let thumb_dir = root.join("thumbnails");
-    std::fs::create_dir_all(&thumb_dir).map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&thumb_dir)
+        .map_err(|error| format!("{}: {error}", thumb_dir.display()))?;
     let pool_dir = root.join("image_pool");
-    std::fs::create_dir_all(&pool_dir).map_err(|error| error.to_string())?;
-
-    let root_id = db
-        .add_root(&photo_dir.display().to_string(), "reference")
-        .map_err(|error| error.to_string())?;
-
-    let mut world_ids = Vec::with_capacity(DEMO_WORLDS.len());
-    for (index, name) in DEMO_WORLDS.iter().enumerate() {
-        world_ids.push(
-            db.upsert_world(&format!("wrld_demo_{index}"), Some(name), Some("demo"))
-                .map_err(|error| error.to_string())?,
-        );
-    }
+    std::fs::create_dir_all(&pool_dir)
+        .map_err(|error| format!("{}: {error}", pool_dir.display()))?;
 
     let mut pool_images = Vec::with_capacity(DEMO_PALETTE.len());
     let mut pool_thumbnails = Vec::with_capacity(DEMO_PALETTE.len());
@@ -197,7 +273,7 @@ fn seed_demo(db: &Db, photo_dir: &Path, reference: NaiveDate) -> Result<(), Stri
         pool_sizes.push(
             std::fs::metadata(&image_path)
                 .map(|metadata| metadata.len())
-                .map_err(|error| error.to_string())?,
+                .map_err(|error| format!("{}: {error}", image_path.display()))?,
         );
         let thumb_path = pool_dir.join(format!("thumb_{variant}.png"));
         image::open(&image_path)
@@ -209,18 +285,35 @@ fn seed_demo(db: &Db, photo_dir: &Path, reference: NaiveDate) -> Result<(), Stri
         pool_thumbnails.push(thumb_path);
     }
 
-    for (index, photo) in demo_fixture::demo_fixture(reference)
-        .into_iter()
-        .enumerate()
-    {
-        let variant = photo.palette % pool_images.len();
-        let file_name = format!("VRChat_demo_{index:03}.png");
-        let file_path = photo_dir.join(&file_name);
-        std::fs::copy(&pool_images[variant], &file_path)
-            .map_err(|error| format!("{}: {error}", file_path.display()))?;
+    // All database writes run as one transaction, so an interrupted seed
+    // leaves an empty library that the next launch reseeds instead of a
+    // half-written one. The seed moment is recorded as a setting so the
+    // fixture can be compared against older seeds.
+    let seeded_at = now.with_timezone(&Utc).to_rfc3339();
+    db.in_transaction(|db| {
+        let root_id = db.add_root(&photo_dir.display().to_string(), "reference")?;
 
-        let id = db
-            .upsert_photo(&NewPhoto {
+        let mut world_ids = Vec::with_capacity(DEMO_WORLDS.len());
+        for (index, name) in DEMO_WORLDS.iter().enumerate() {
+            world_ids.push(db.upsert_world(
+                &format!("wrld_demo_{index}"),
+                Some(name),
+                Some("demo"),
+            )?);
+        }
+
+        for (index, photo) in demo_fixture::demo_fixture_at(now.naive_local())
+            .into_iter()
+            .enumerate()
+        {
+            let variant = photo.palette % pool_images.len();
+            let file_name = format!("VRChat_demo_{index:03}.png");
+            let file_path = photo_dir.join(&file_name);
+            std::fs::copy(&pool_images[variant], &file_path).map_err(|error| {
+                vrc_photon_core::CoreError::Invalid(format!("{}: {error}", file_path.display()))
+            })?;
+
+            let id = db.upsert_photo(&NewPhoto {
                 root_id,
                 rel_path: file_name.clone(),
                 abs_path: file_path.display().to_string(),
@@ -233,53 +326,50 @@ fn seed_demo(db: &Db, photo_dir: &Path, reference: NaiveDate) -> Result<(), Stri
                 file_size: pool_sizes[variant],
                 mtime: photo.captured_at.utc,
                 blake3: None,
-            })
-            .map_err(|error| error.to_string())?;
+            })?;
 
-        let thumb_path = thumb_dir.join(format!("{id}.png"));
-        std::fs::copy(&pool_thumbnails[variant], &thumb_path)
-            .map_err(|error| format!("{}: {error}", thumb_path.display()))?;
+            let thumb_path = thumb_dir.join(format!("{id}.png"));
+            std::fs::copy(&pool_thumbnails[variant], &thumb_path).map_err(|error| {
+                vrc_photon_core::CoreError::Invalid(format!("{}: {error}", thumb_path.display()))
+            })?;
 
-        if let Some(world_index) = photo.world {
-            db.set_photo_context(&PhotoContext {
-                photo_id: id,
-                session_id: None,
-                world_id: Some(world_ids[world_index]),
-                world_name: Some(DEMO_WORLDS[world_index].to_string()),
-                instance_id: Some(format!("{}~region(jp)", 12000 + index)),
-                link_method: "demo".to_string(),
-                confidence: 1.0,
-                author: Some("TommyZ".to_string()),
-                linked_at: Utc::now().to_rfc3339(),
-            })
-            .map_err(|error| error.to_string())?;
+            if let Some(world_index) = photo.world {
+                db.set_photo_context(&PhotoContext {
+                    photo_id: id,
+                    session_id: None,
+                    world_id: Some(world_ids[world_index]),
+                    world_name: Some(DEMO_WORLDS[world_index].to_string()),
+                    instance_id: Some(format!("{}~region(jp)", 12000 + index)),
+                    link_method: "demo".to_string(),
+                    confidence: 1.0,
+                    author: Some("TommyZ".to_string()),
+                    linked_at: Utc::now().to_rfc3339(),
+                })?;
+            }
+            if !photo.players.is_empty() {
+                db.set_photo_players(id, &photo.players)?;
+            }
+            db.set_photo_tags(id, &photo.tags)?;
+            if photo.favorite {
+                db.set_favorite(id, true)?;
+            }
+            if photo.compressed {
+                db.add_derivative(
+                    id,
+                    &format!("/demo/compressed/{index}.webp"),
+                    "webp",
+                    1280,
+                    800,
+                    1_800_000,
+                    "demo",
+                    "keep",
+                )?;
+            }
         }
-        if !photo.players.is_empty() {
-            db.set_photo_players(id, &photo.players)
-                .map_err(|error| error.to_string())?;
-        }
-        db.set_photo_tags(id, &photo.tags)
-            .map_err(|error| error.to_string())?;
-        if photo.favorite {
-            db.set_favorite(id, true)
-                .map_err(|error| error.to_string())?;
-        }
-        if photo.compressed {
-            db.add_derivative(
-                id,
-                &format!("/demo/compressed/{index}.webp"),
-                "webp",
-                1280,
-                800,
-                1_800_000,
-                "demo",
-                "keep",
-            )
-            .map_err(|error| error.to_string())?;
-        }
-    }
-
-    Ok(())
+        db.set_setting("demo_seeded_at", &seeded_at)?;
+        Ok(())
+    })
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -324,6 +414,14 @@ mod tests {
         assert!(!demo_data_is_current(temp.path()));
     }
 
+    fn moment(reference: NaiveDate) -> DateTime<Local> {
+        use chrono::TimeZone;
+        Local
+            .from_local_datetime(&reference.and_hms_opt(23, 59, 0).unwrap())
+            .single()
+            .unwrap()
+    }
+
     #[test]
     fn seed_demo_populates_three_years_of_library() {
         let temp = tempfile::tempdir().unwrap();
@@ -331,7 +429,12 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         let reference = NaiveDate::from_ymd_opt(2026, 11, 2).unwrap();
 
-        seed_demo(&db, &photo_dir, reference).unwrap();
+        seed_demo(&db, &photo_dir, moment(reference)).unwrap();
+        let seeded_at = db
+            .get_setting("demo_seeded_at")
+            .unwrap()
+            .expect("seed baseline is recorded");
+        assert!(DateTime::parse_from_rfc3339(&seeded_at).is_ok());
 
         assert_eq!(db.count_photos().unwrap(), 300);
         let entries = db.photo_index(PhotoSort::Newest).unwrap();
@@ -345,7 +448,7 @@ mod tests {
             .collect();
         assert_eq!(years, vec![2026, 2025, 2024, 2023]);
 
-        let fixture = demo_fixture::demo_fixture(reference);
+        let fixture = demo_fixture::demo_fixture_at(moment(reference).naive_local());
         let mut expected_months: BTreeMap<i32, usize> = BTreeMap::new();
         for photo in &fixture {
             let month = photo.captured_at.local[..7]
@@ -418,5 +521,73 @@ mod tests {
         }
         let pool = temp.path().join("image_pool");
         assert_eq!(std::fs::read_dir(pool).unwrap().count(), 16);
+    }
+
+    #[test]
+    fn demo_root_shape_check_flags_foreign_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        assert_eq!(demo_root_foreign_entry(root), None);
+
+        std::fs::create_dir(root.join("photos")).unwrap();
+        std::fs::write(root.join("library.db"), b"").unwrap();
+        std::fs::write(root.join(DEMO_VERSION_FILE), DEMO_DATA_VERSION.to_string()).unwrap();
+        assert_eq!(demo_root_foreign_entry(root), None);
+
+        std::fs::write(root.join("important.txt"), b"keep me").unwrap();
+        assert_eq!(
+            demo_root_foreign_entry(root),
+            Some("important.txt".to_string())
+        );
+    }
+
+    #[test]
+    fn prepare_demo_at_rebuilds_a_stale_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("demo");
+        std::fs::create_dir_all(root.join("photos")).unwrap();
+        std::fs::write(root.join(DEMO_VERSION_FILE), "1").unwrap();
+        let now = moment(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap());
+
+        let (db, _assets) = prepare_demo_at(&root, false, now).unwrap();
+
+        assert_eq!(db.count_photos().unwrap(), 300);
+        assert!(demo_data_is_current(&root));
+        assert!(!root.join("demo.version.tmp").exists());
+        assert!(db.get_setting("demo_seeded_at").unwrap().is_some());
+    }
+
+    #[test]
+    fn prepare_demo_at_keeps_foreign_files_untouched() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("demo");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(DEMO_VERSION_FILE), "1").unwrap();
+        let foreign = root.join("important.txt");
+        std::fs::write(&foreign, b"keep me").unwrap();
+        let now = moment(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap());
+
+        let error = prepare_demo_at(&root, false, now).err().unwrap();
+
+        assert!(error.contains("important.txt"), "{error}");
+        assert_eq!(std::fs::read(&foreign).unwrap(), b"keep me");
+    }
+
+    #[test]
+    fn prepare_demo_at_repairs_a_broken_database() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("demo");
+        let now = moment(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap());
+        let (db, _assets) = prepare_demo_at(&root, false, now).unwrap();
+        assert_eq!(db.count_photos().unwrap(), 300);
+        drop(db);
+
+        std::fs::write(root.join("library.db"), b"not a database").unwrap();
+        for suffix in ["library.db-wal", "library.db-shm"] {
+            let _ = std::fs::remove_file(root.join(suffix));
+        }
+
+        let (db, _assets) = prepare_demo_at(&root, false, now).unwrap();
+        assert_eq!(db.count_photos().unwrap(), 300);
     }
 }
