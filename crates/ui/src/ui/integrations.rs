@@ -39,6 +39,7 @@ impl App {
                     .overflow_y_scroll()
                     .track_scroll(&self.integrations_scroll)
                     .gap(px(CARD_GAP))
+                    .child(self.discord_card(window, cx))
                     .child(self.auto_compression_card(window, cx))
                     .child(self.clipboard_card(window, cx)),
             )
@@ -286,7 +287,7 @@ impl App {
             .into_any_element()
     }
 
-    fn collapsible_body(
+    pub(crate) fn collapsible_body(
         &self,
         id: &'static str,
         motion: ToggleMotion,
