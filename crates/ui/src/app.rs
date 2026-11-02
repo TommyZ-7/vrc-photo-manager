@@ -139,7 +139,8 @@ pub struct App {
     pub(crate) viewer_frame_bounds: Rc<Cell<Bounds<Pixels>>>,
     pub(crate) viewer_minimap_bounds: Rc<Cell<Bounds<Pixels>>>,
     pub(crate) inspector_collapsed: bool,
-    pub(crate) inspector_epoch: u64,
+    /// 0 = expanded, 1 = collapsed.
+    pub(crate) inspector_motion: ToggleMotion,
     pub(crate) hovered_nav: Option<Screen>,
     pub(crate) daemon_age_secs: Option<i64>,
     pub(crate) daemon_supervisor: Option<String>,
@@ -707,7 +708,11 @@ impl App {
             viewer_frame_bounds: Rc::new(Cell::new(Bounds::default())),
             viewer_minimap_bounds: Rc::new(Cell::new(Bounds::default())),
             inspector_collapsed: initial_settings.ui_inspector_collapsed,
-            inspector_epoch: 0,
+            inspector_motion: ToggleMotion::settled(if initial_settings.ui_inspector_collapsed {
+                1.0
+            } else {
+                0.0
+            }),
             hovered_nav: None,
             daemon_age_secs: None,
             daemon_supervisor: None,

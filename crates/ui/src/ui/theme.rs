@@ -284,6 +284,18 @@ pub(crate) fn inspector_card_width(window_width: f32) -> f32 {
     inspector_column_width(window_width)
 }
 
+/// Visible width of the inspector column for a collapse progress of
+/// `0.0..=1.0`. Progress is owned by `App` so a remount cannot replay the
+/// animation from the wrong end.
+pub(crate) fn inspector_reveal_width(column_width: f32, collapsed: f32) -> f32 {
+    column_width * (1.0 - collapsed.clamp(0.0, 1.0))
+}
+
+/// Gap between the gallery and inspector for the same collapse progress.
+pub(crate) fn inspector_reveal_gap(collapsed: f32) -> f32 {
+    INSPECTOR_GAP * (1.0 - collapsed.clamp(0.0, 1.0))
+}
+
 /// The inspector preview keeps the spec's fixed heights (168 px, 118 px in a
 /// short window). The frame width follows the responsive inspector card, so
 /// the visible ratio approaches 16:10 without being derived from it.
@@ -683,6 +695,24 @@ mod tests {
         assert_eq!(inspector_card_width(1280.0), inspector_column_width(1280.0));
         assert_eq!(inspector_preview_height(760.0), 118.0);
         assert_eq!(inspector_preview_height(761.0), 168.0);
+    }
+
+    #[test]
+    fn inspector_width_and_gap_follow_the_collapse_progress() {
+        let column_width = 276.0;
+
+        close(inspector_reveal_width(column_width, 0.0), column_width);
+        close(
+            inspector_reveal_width(column_width, 0.5),
+            column_width / 2.0,
+        );
+        close(inspector_reveal_width(column_width, 1.0), 0.0);
+        close(inspector_reveal_width(column_width, -1.0), column_width);
+        close(inspector_reveal_width(column_width, 2.0), 0.0);
+
+        close(inspector_reveal_gap(0.0), INSPECTOR_GAP);
+        close(inspector_reveal_gap(0.5), INSPECTOR_GAP / 2.0);
+        close(inspector_reveal_gap(1.0), 0.0);
     }
 
     #[test]
