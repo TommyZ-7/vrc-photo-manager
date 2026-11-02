@@ -302,16 +302,20 @@ pub(crate) fn recover_interrupted_sends(db: &Db) -> Result<usize> {
 ///
 /// Returns the number of rows actually inserted: photos outside the configured
 /// cutoff, photos being deleted, and photos that already have an active send
-/// are skipped. The caller notifies the worker after a successful enqueue.
+/// are skipped. An unconfigured or invalid webhook enqueues nothing. The
+/// caller notifies the worker after a successful enqueue.
 // The scan/index paths call this; it stays public within the crate so the
 // enqueue policy can also be exercised in isolation.
 #[allow(dead_code)]
 pub(crate) fn enqueue_auto_sends(db: &Db, photo_ids: &[i64]) -> Result<usize> {
     let settings = AppSettings::load(db)?;
-    if !settings.discord_enabled
-        || settings.discord_auto_mode == DiscordAutoMode::Off
-        || load_discord_webhook(db)?.is_none()
-    {
+    if !settings.discord_enabled || settings.discord_auto_mode == DiscordAutoMode::Off {
+        return Ok(0);
+    }
+    let Some(url) = load_discord_webhook(db)? else {
+        return Ok(0);
+    };
+    if validate_webhook_url(&url).is_err() {
         return Ok(0);
     }
     let Some(since) = settings.discord_auto_since else {
@@ -905,6 +909,9 @@ mod tests {
         settings.discord_enabled = true;
         settings.save(&db).unwrap();
         clear_discord_webhook(&db).unwrap();
+        assert_eq!(enqueue_auto_sends(&db, &[photo]).unwrap(), 0);
+        // 無効な URL
+        save_discord_webhook(&db, "https://example.com/api/webhooks/1/t").unwrap();
         assert_eq!(enqueue_auto_sends(&db, &[photo]).unwrap(), 0);
         // mode=Off
         save_discord_webhook(&db, "https://discord.com/api/webhooks/1/t").unwrap();
