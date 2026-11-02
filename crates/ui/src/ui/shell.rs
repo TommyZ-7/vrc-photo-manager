@@ -658,8 +658,7 @@ impl App {
             .w(px(sidebar_reveal_width(reveal_progress)))
             .opacity(1.0 - reveal_progress);
 
-        let pad = 18.5 + (11.0 - 18.5) * reveal_progress;
-        let gap = 11.0 * reveal_progress;
+        let (pad, gap) = nav_item_insets(reveal_progress);
         let content = h_flex()
             .w_full()
             .items_center()
@@ -1052,6 +1051,12 @@ fn nav_item_top(index: usize) -> f32 {
     index as f32 * (NAV_ITEM_HEIGHT + NAV_ITEM_GAP)
 }
 
+fn nav_item_insets(reveal_progress: f32) -> (f32, f32) {
+    let pad = 11.0 + (18.5 - 11.0) * reveal_progress;
+    let gap = 11.0 * (1.0 - reveal_progress);
+    (pad, gap)
+}
+
 /// Screen-space origin of the collapsed-sidebar tooltip. The menu starts at
 /// the sidebar's top padding (there is no in-flow toggle row), so the tooltip
 /// tracks the item top plus half of its height.
@@ -1088,8 +1093,8 @@ mod tests {
     use super::{
         NAV_ITEM_GAP, NAV_ITEM_HEIGHT, StatusTone, compression_attention, compression_card_status,
         import_attention, import_bar_ratio, import_card_status, import_running_progress, nav_index,
-        nav_item_top, nav_tooltip_origin, rail_toggle_origin, running_job_count, scan_attention,
-        scan_bar_ratio, scan_card_status, scan_progress_label, scan_progress_ratio,
+        nav_item_insets, nav_item_top, nav_tooltip_origin, rail_toggle_origin, running_job_count,
+        scan_attention, scan_bar_ratio, scan_card_status, scan_progress_label, scan_progress_ratio,
         screen_direction, sidebar_retry_available,
     };
     use crate::app::Screen;
@@ -1122,6 +1127,16 @@ mod tests {
         assert_eq!(nav_item_top(0), 0.0);
         assert_eq!(nav_item_top(1), NAV_ITEM_HEIGHT + NAV_ITEM_GAP);
         assert_eq!(nav_item_top(4), 4.0 * (NAV_ITEM_HEIGHT + NAV_ITEM_GAP));
+    }
+
+    #[test]
+    fn nav_item_insets_follow_sidebar_reveal_progress() {
+        // Expanded: compact left inset with a gap between icon and label.
+        assert_eq!(nav_item_insets(0.0), (11.0, 11.0));
+        // Collapsed: wider inset centers the 17px icon in the 54px row, no label gap.
+        assert_eq!(nav_item_insets(1.0), (18.5, 0.0));
+        // Mid-animation keeps both values monotonic toward the collapsed state.
+        assert_eq!(nav_item_insets(0.5), (14.75, 5.5));
     }
 
     #[test]
