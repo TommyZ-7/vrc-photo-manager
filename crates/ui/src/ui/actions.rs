@@ -20,6 +20,11 @@ gpui_kit::actions!(
         QuickLookNextFocus,
         QuickLookPrevFocus,
         CloseNotifications,
+        GridPreviousPhoto,
+        GridNextPhoto,
+        GridAbovePhoto,
+        GridBelowPhoto,
+        TrashSelectedPhotos,
     ]
 );
 

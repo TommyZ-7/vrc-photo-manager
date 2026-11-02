@@ -51,9 +51,10 @@ use crate::state::viewer::{
     ZOOM_STEP,
 };
 use crate::ui::actions::{
-    CloseNotifications, CloseQuickLook, FocusSearch, OpenQuickLook, QuickLookNextFocus,
-    QuickLookPrevFocus, ToggleInspector, ToggleSidebar, ViewerNextPhoto, ViewerPreviousPhoto,
-    ViewerZoomIn, ViewerZoomOut, ViewerZoomReset,
+    CloseNotifications, CloseQuickLook, FocusSearch, GridAbovePhoto, GridBelowPhoto, GridNextPhoto,
+    GridPreviousPhoto, OpenQuickLook, QuickLookNextFocus, QuickLookPrevFocus, ToggleInspector,
+    ToggleSidebar, TrashSelectedPhotos, ViewerNextPhoto, ViewerPreviousPhoto, ViewerZoomIn,
+    ViewerZoomOut, ViewerZoomReset,
 };
 use crate::ui::chrome::{ChromeLayout, chrome_layout};
 use crate::ui::gallery::GalleryView;
@@ -1042,6 +1043,21 @@ impl Render for App {
             }))
             .on_action(cx.listener(|this, _: &QuickLookPrevFocus, window, cx| {
                 this.cycle_quick_look_focus(true, window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &GridPreviousPhoto, _, cx| this.move_grid_selection(-1, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &GridNextPhoto, _, cx| this.move_grid_selection(1, cx)),
+            )
+            .on_action(cx.listener(|this, _: &GridAbovePhoto, _, cx| {
+                this.move_grid_selection_vertical(-1, cx)
+            }))
+            .on_action(cx.listener(|this, _: &GridBelowPhoto, _, cx| {
+                this.move_grid_selection_vertical(1, cx)
+            }))
+            .on_action(cx.listener(|this, _: &TrashSelectedPhotos, window, cx| {
+                this.trash_selected(window, cx)
             }));
         if should_render_shell(self.quick_look_open) {
             let viewport = window.viewport_size();
