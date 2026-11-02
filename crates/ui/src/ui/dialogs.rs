@@ -27,9 +27,7 @@ impl App {
             return div().into_any_element();
         };
         let count = dialog.photo_ids.len();
-        let viewport = window.viewport_size();
-        let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
-        let content_height = window_content_extent(f32::from(viewport.height), client_inset);
+        let content_height = f32::from(content_viewport(window).height);
         let max_height = dialog_max_height(content_height);
         let selected_profile = self
             .profiles

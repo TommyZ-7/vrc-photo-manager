@@ -123,8 +123,7 @@ fn render_header(app: &App, shared: &Rc<GalleryShared>, window: &Window) -> AnyE
     let browser = shared.browser.borrow();
     let entries = &browser.index.entries;
     let total = entries.len();
-    let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
-    let width = window_content_extent(f32::from(window.viewport_size().width), client_inset);
+    let width = f32::from(content_viewport(window).width);
     let metrics = library_grid_metrics(
         width,
         app.sidebar_collapsed,
@@ -185,8 +184,7 @@ fn render_grid(
 ) -> AnyElement {
     let p = app.palette;
     let search = shared.search;
-    let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
-    let width = window_content_extent(f32::from(window.viewport_size().width), client_inset);
+    let width = f32::from(content_viewport(window).width);
     let metrics = if search {
         search_grid_metrics(
             width,
