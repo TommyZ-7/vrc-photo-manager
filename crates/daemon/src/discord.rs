@@ -8,7 +8,7 @@ use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use vrc_photon_core::compressor::encode_for_send;
@@ -45,6 +45,10 @@ pub(crate) enum ProcessOutcome {
     Sent,
     Rescheduled,
     Failed,
+    /// Discord rate-limited the webhook; every send must wait this long.
+    RateLimited {
+        retry_after: Duration,
+    },
 }
 
 /// Everything needed to perform one upload, collected under the DB lock.
@@ -326,7 +330,19 @@ pub(crate) fn worker_loop(
     }
 
     let mut seen_generation = 0;
+    let mut paused_until: Option<Instant> = None;
     while running.load(Ordering::Relaxed) {
+        // A 429 applies to the webhook, not just the row that received it.
+        // Wait here so no other due row can hammer the same endpoint.
+        if let Some(until) = paused_until {
+            let now = Instant::now();
+            if now < until {
+                sends.wait(&mut seen_generation, until - now);
+                continue;
+            }
+            paused_until = None;
+        }
+
         let now = chrono::Utc::now().timestamp();
         let outcome = match process_next_send(&db, transport.as_ref(), &events, now) {
             Ok(outcome) => outcome,
@@ -340,9 +356,14 @@ pub(crate) fn worker_loop(
             ProcessOutcome::Idle => {
                 sends.wait(&mut seen_generation, POLL_INTERVAL);
             }
-            ProcessOutcome::Sent => thread::sleep(SUCCESS_INTERVAL),
-            // Another due row can follow immediately; both outcomes updated it.
-            ProcessOutcome::Rescheduled | ProcessOutcome::Failed => {}
+            // Keep at least 400 ms between requests, whatever the result.
+            ProcessOutcome::Sent | ProcessOutcome::Rescheduled | ProcessOutcome::Failed => {
+                thread::sleep(SUCCESS_INTERVAL);
+            }
+            ProcessOutcome::RateLimited { retry_after } => {
+                paused_until = Some(Instant::now() + retry_after);
+                continue;
+            }
         }
     }
 }
@@ -602,7 +623,7 @@ fn record_outcome(
                 "Discord send rate limited"
             );
             Ok(SendUpdate {
-                outcome: ProcessOutcome::Rescheduled,
+                outcome: ProcessOutcome::RateLimited { retry_after },
                 status: SendStatus::Pending,
                 error_code: Some(SendErrorCode::RateLimited.as_str()),
             })
@@ -685,7 +706,8 @@ mod tests {
     use std::path::Path;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     use vrc_photon_core::model::{
         NewPhoto, SendErrorCode, SendKind, SendOrigin, SendSource, SendStatus,
@@ -695,6 +717,7 @@ mod tests {
     use super::*;
     use crate::discord_http::{SendOutcome, SendRequest, SendTransport};
     use crate::ipc_server::EventBus;
+    use crate::signals::JobSignal;
 
     #[derive(Default)]
     struct FakeTransport {
@@ -703,6 +726,7 @@ mod tests {
         /// When set, `send` checks that the daemon DB lock is free.
         db: Option<Arc<Mutex<Db>>>,
         lock_was_free: AtomicBool,
+        attempts_at: Mutex<Vec<Instant>>,
     }
 
     impl SendTransport for FakeTransport {
@@ -712,6 +736,7 @@ mod tests {
             {
                 self.lock_was_free.store(true, Ordering::SeqCst);
             }
+            self.attempts_at.lock().unwrap().push(Instant::now());
             self.requests.lock().unwrap().push(request.clone());
             self.outcomes
                 .lock()
@@ -916,7 +941,7 @@ mod tests {
         let events = EventBus::default();
         assert!(matches!(
             process_next_send(&db, &transport, &events, 100).unwrap(),
-            ProcessOutcome::Rescheduled
+            ProcessOutcome::RateLimited { .. }
         ));
         let entry = with_db(&db, |db| db.send_entry_by_id(id).unwrap().unwrap());
         assert_eq!(entry.status, SendStatus::Pending);
@@ -928,6 +953,51 @@ mod tests {
             ProcessOutcome::Idle
         ));
         assert_eq!(transport.requests.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn rate_limit_pauses_every_send_until_retry_after() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, photo) = discord_db(&dir);
+        enable_discord(&db, "https://discord.com/api/webhooks/1/t");
+        enqueue_photo(&db, photo);
+        let transport = Arc::new(FakeTransport::default());
+        transport
+            .outcomes
+            .lock()
+            .unwrap()
+            .push_back(SendOutcome::RateLimited {
+                retry_after: Duration::from_millis(300),
+            });
+        transport.outcomes.lock().unwrap().push_back(sent_outcome());
+
+        let running = Arc::new(AtomicBool::new(true));
+        let sends = Arc::new(JobSignal::default());
+        let events = EventBus::default();
+        let worker_transport: Arc<dyn SendTransport> = transport.clone();
+        let handle = thread::spawn({
+            let db = db.clone();
+            let running = running.clone();
+            let sends = sends.clone();
+            let events = events.clone();
+            move || worker_loop(db, running, sends, events, worker_transport)
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while transport.requests.lock().unwrap().len() < 2 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        running.store(false, Ordering::Relaxed);
+        sends.notify();
+        handle.join().unwrap();
+
+        let times = transport.attempts_at.lock().unwrap();
+        assert_eq!(times.len(), 2, "worker did not issue the retry");
+        let gap = times[1] - times[0];
+        assert!(
+            gap >= Duration::from_millis(150),
+            "second send started after only {gap:?}; the 300 ms webhook pause was ignored"
+        );
     }
 
     #[test]
