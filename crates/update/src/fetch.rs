@@ -56,7 +56,7 @@ impl UreqClient {
             // Never allow an HTTPS→HTTP redirect in release builds. Debug/QA
             // loopback tests opt in through `allow_http`.
             .https_only(!self.allow_http)
-            .user_agent(format!("vrc-photo-manager/{}", crate::CURRENT_VERSION))
+            .user_agent(format!("vrc-photon/{}", crate::CURRENT_VERSION))
             .http_status_as_error(false)
             .build();
         config.into()
@@ -213,7 +213,7 @@ mod tests {
             .unwrap();
         assert_eq!(body, b"hello");
         let request = request_rx.recv().unwrap();
-        let expected = format!("vrc-photo-manager/{}", crate::CURRENT_VERSION);
+        let expected = format!("vrc-photon/{}", crate::CURRENT_VERSION);
         assert!(
             request.to_ascii_lowercase().contains(&expected),
             "{request}"

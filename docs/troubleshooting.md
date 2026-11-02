@@ -37,7 +37,7 @@ CI/Releaseワークフローにも同じ依存を入れてある。
 - 画像寸法を取得できないファイルはスキップされる。
 - DBに `status='missing'` で残っていないか。
 - ダッシュボードの「処理エラー」に写真スキャンの失敗が出ていないか。詳細のパスと理由を確認し、直してから「再試行」を押す。
-- デーモンが起動しているか。UI上部が「デーモン停止」なら、同じディレクトリに `vrc-photo-daemon` があるか確認する。
+- デーモンが起動しているか。UI上部が「デーモン停止」なら、同じディレクトリに `vrc-photon-daemon` があるか確認する。
 - パッケージ版でUIだけを起動した場合、UIがデーモンを自動起動する。起動に失敗すると上部にメッセージが出る。
 
 ## 3. ワールド・プレイヤーが付かない
@@ -68,36 +68,36 @@ CI/Releaseワークフローにも同じ依存を入れてある。
 - デーモンが10秒以内に設定を拾う。UIで変更後、少し待つ。
 - Linux: `~/.config/autostart/` のdesktopファイルを確認。
 - AppImage: `$APPIMAGE --background` が登録されているか。AppImageのパスを移動した場合は再登録が必要。
-- devビルドで有効にすると `target/debug/vrc-photo-daemon` が登録される。リリース版で再度ON/OFFすると更新される。
+- devビルドで有効にすると `target/debug/vrc-photon-daemon` が登録される。リリース版で再度ON/OFFすると更新される。
 - systemdユーザーサービスを使っている場合は、下の「systemdユーザーサービス」を確認する。
 
 ### systemdユーザーサービス（deb / pacman）
 
-- unit は `/usr/lib/systemd/user/vrc-photo-daemon.service`。インストール直後は無効で、自動では enable されない。
+- unit は `/usr/lib/systemd/user/vrc-photon-daemon.service`。インストール直後は無効で、自動では enable されない。
 - 有効化の前に、UIの「設定 → 起動と圧縮 → 自動起動」をOFFにする。ONのままだとログイン時にXDG側が先に起動し、systemdサービスがinactiveのまま残ることがある。
 - 有効化と状態確認:
 
 ```bash
 systemctl --user daemon-reload
-systemctl --user enable --now vrc-photo-daemon.service
-systemctl --user is-active vrc-photo-daemon.service
+systemctl --user enable --now vrc-photon-daemon.service
+systemctl --user is-active vrc-photon-daemon.service
 ```
 
-- ログ: `journalctl --user -u vrc-photo-daemon.service -f`
+- ログ: `journalctl --user -u vrc-photon-daemon.service -f`
 - `graphical-session.target` を管理しないデスクトップ環境では、ログイン時に起動しないことがある。`systemctl --user is-active graphical-session.target` を確認し、代わりに `default.target` へリンクする:
 
 ```bash
-systemctl --user add-wants default.target vrc-photo-daemon.service
+systemctl --user add-wants default.target vrc-photon-daemon.service
 ```
 
-- 既にデーモンが動いている状態で `enable --now` すると、`single-instance` によりサービスは inactive になる。既存のデーモンを終了してから `systemctl --user restart vrc-photo-daemon.service` を実行する。ログイン後に `is-active` が `active` でない場合も同じ手順で復旧する。
-- アンインストール前に `systemctl --user disable --now vrc-photo-daemon.service` を実行する。`default.target` へ `add-wants` した場合は `systemctl --user remove-wants default.target vrc-photo-daemon.service` も実行する。unit ファイルはパッケージが削除するが、enable / add-wants のシンボリックリンクはホームに残る。
+- 既にデーモンが動いている状態で `enable --now` すると、`single-instance` によりサービスは inactive になる。既存のデーモンを終了してから `systemctl --user restart vrc-photon-daemon.service` を実行する。ログイン後に `is-active` が `active` でない場合も同じ手順で復旧する。
+- アンインストール前に `systemctl --user disable --now vrc-photon-daemon.service` を実行する。`default.target` へ `add-wants` した場合は `systemctl --user remove-wants default.target vrc-photon-daemon.service` も実行する。unit ファイルはパッケージが削除するが、enable / add-wants のシンボリックリンクはホームに残る。
 
 ### IPCが接続しない / 「IPC 未接続」と出る
 
-- UIとデーモンはローカルソケットで接続する。Unixは `$XDG_RUNTIME_DIR/vrc-photo-manager/daemon.sock`（未設定なら `<data_dir>/run/daemon.sock`）、Windowsはユーザー名の安定ハッシュを含む名前付きパイプ。
+- UIとデーモンはローカルソケットで接続する。Unixは `$XDG_RUNTIME_DIR/vrc-photon/daemon.sock`（未設定なら `<data_dir>/run/daemon.sock`）、Windowsはユーザー名の安定ハッシュを含む名前付きパイプ。
 - デーモンが動いているのにIPCだけ未接続の場合は、ハートビートと3秒ポーリングで表示は継続する。再スキャンなどのコマンドもDBに残り、デーモンが処理する。
-- Unixでソケットのパスと権限を確認する: `ls -l "$XDG_RUNTIME_DIR/vrc-photo-manager/daemon.sock"`。ディレクトリは `0700`、ソケットは `0600` が正常。
+- Unixでソケットのパスと権限を確認する: `ls -l "$XDG_RUNTIME_DIR/vrc-photon/daemon.sock"`。ディレクトリは `0700`、ソケットは `0600` が正常。
 - デーモンが異常終了してstale socketが残った場合、次の起動時に接続確認してから削除する。手動で削除してもよい。
 - バージョン不一致（UIとデーモンの更新時期が違う）は「デーモンの更新が必要です」に相当するエラーになる。UIとデーモンを同じバージョンに更新して再起動する。
 - Windowsの名前付きパイプACLは既定値を使っている。他ユーザーから接続できないことを実機で確認する（未検証）。
@@ -167,19 +167,19 @@ systemctl --user add-wants default.target vrc-photo-daemon.service
 - pacman: リリースには `.pkg.tar.zst` と、手動ビルド / AUR 用の
   `.tar.gz` + `PKGBUILD` がある。
   - インストールには `.pkg.tar.zst` を使う:
-    `sudo pacman -U vrc-photo-manager-<version>-1-x86_64.pkg.tar.zst`
+    `sudo pacman -U vrc-photon-<version>-1-x86_64.pkg.tar.zst`
   - `.tar.gz` は `makepkg` の入力であり、`pacman -U` では直接インストール
     できない。`PKGBUILD` と `.tar.gz` を同じディレクトリに置いて
     `makepkg -f` を実行する。
 - AppImage: 実行権限が必要。`chmod +x`。GPUドライバはホスト側が必要。
-- パッケージ版でデーモンが見つからない: UIと同じディレクトリに `vrc-photo-daemon` があるか確認する。
+- パッケージ版でデーモンが見つからない: UIと同じディレクトリに `vrc-photon-daemon` があるか確認する。
 - アプリ内更新が使えない（コマンド表示になる）: `pkexec`、
-  `/usr/bin/vrc-photo-updater`、polkit policy の3つが揃っているか確認する。
+  `/usr/bin/vrc-photon-updater`、polkit policy の3つが揃っているか確認する。
 
 ```bash
 command -v pkexec
-ls -l /usr/bin/vrc-photo-updater
-ls -l /usr/share/polkit-1/actions/com.tommyz.vrc-photo-manager.update.policy
+ls -l /usr/bin/vrc-photon-updater
+ls -l /usr/share/polkit-1/actions/com.tommyz.vrc-photon.update.policy
 ```
 
 policy がない、または `pkexec` がない場合は、パッケージを再インストールするか
@@ -195,7 +195,7 @@ policy がない、または `pkexec` がない場合は、パッケージを再
   ダウンロード済みの `.part` は削除される。適用はされない。
 - 「このインストール形式では自動更新を適用できません」:
   - 開発ビルド（`target/debug`）、ポータブルWindows、per-machine NSISは対象外。
-  - deb / pacman でも、`pkexec`・`/usr/bin/vrc-photo-updater`・polkit policy の
+  - deb / pacman でも、`pkexec`・`/usr/bin/vrc-photon-updater`・polkit policy の
     いずれかが欠ける場合はコマンド表示にフォールバックする。
 - 「デーモンに接続できないため更新できません」:
   - デーモンが動いているがIPCが切れている。デーモンを停止して再試行する。
@@ -214,7 +214,7 @@ policy がない、または `pkexec` がない場合は、パッケージを再
 システムパッケージは自動ロールバックしない。失敗時は
 `<data_dir>/updates/last-result.json` の `code` と `reason`、および
 `<data_dir>/updates/updater.log` を確認する。Linux のデータディレクトリは
-`~/.local/share/vrc-photo-manager/`。
+`~/.local/share/vrc-photon/`。
 
 | 表示 / code | 意味 | 対処 |
 |---|---|---|
@@ -226,17 +226,17 @@ policy がない、または `pkexec` がない場合は、パッケージを再
 | このバージョンへのダウングレードはできません / `downgrade` | 現在と同じ、または古いバージョン | 新しいバージョンのリリースを待つ |
 | パッケージのインストールに失敗しました / `package_manager_failed` | `pacman -U` / `dpkg -i` が非ゼロ終了 | `updater.log` のパッケージマネージャ出力を確認し、下記の手動復旧を行う |
 | インストール後の起動確認に失敗しました / `health_check_failed` | 新バージョンはインストール済みだが UI が健康マーカーを書かない | `updater.log` を確認して UI を手動起動する。必要なら再インストールする |
-| 更新に失敗しました（<reason>） / `helper_failed` | `/usr/bin/vrc-photo-updater` がない、または特権側の検証に失敗した | `updater.log` の理由を確認する。ヘルパー欠落なら deb / pacman を再インストールする |
+| 更新に失敗しました（<reason>） / `helper_failed` | `/usr/bin/vrc-photon-updater` がない、または特権側の検証に失敗した | `updater.log` の理由を確認する。ヘルパー欠落なら deb / pacman を再インストールする |
 | 更新に失敗しました（<reason>） / `install_outcome_unknown` | 特権ヘルパーが exit 16 / シグナル / 不明な終了で終わり、部分インストールの可能性がある | `updater.log` とパッケージマネージャの状態を確認する。job と staged は調査用に残る |
 
 手動復旧:
 
 ```bash
 # pacman
-sudo pacman -U /path/to/vrc-photo-manager-<version>-1-x86_64.pkg.tar.zst
+sudo pacman -U /path/to/vrc-photon-<version>-1-x86_64.pkg.tar.zst
 
 # deb
-sudo dpkg -i /path/to/vrc-photo-manager_<version>_amd64.deb
+sudo dpkg -i /path/to/vrc-photon_<version>_amd64.deb
 sudo apt-get install -f
 ```
 
@@ -246,9 +246,9 @@ sudo apt-get install -f
 - `package_manager_failed` / `health_check_failed` / `install_outcome_unknown`
   では、調査用に job / staged / log が残る。復旧後に手動で削除してよい。
 - デーモンが systemd 管理の場合、更新後に
-  `systemctl --user is-active vrc-photo-daemon.service` を確認する。
+  `systemctl --user is-active vrc-photon-daemon.service` を確認する。
   `inactive` なら `systemctl --user daemon-reload` と
-  `systemctl --user restart vrc-photo-daemon.service` を実行する。
+  `systemctl --user restart vrc-photon-daemon.service` を実行する。
 - polkit policy がない、または `pkexec` がない場合は、generic な
   `org.freedesktop.policykit.exec` にはフォールバックしない。パッケージを
   再インストールするか、表示されたコマンドで更新する。
@@ -258,13 +258,13 @@ sudo apt-get install -f
 ### ログファイル
 
 - 保存先はユーザーデータディレクトリ配下の `logs/`。
-  - Linux: `~/.local/share/vrc-photo-manager/logs/`
-  - Windows: `%LOCALAPPDATA%\vrc-photo-manager\logs\`
+  - Linux: `~/.local/share/vrc-photon/logs/`
+  - Windows: `%LOCALAPPDATA%\vrc-photon\logs\`
 - ファイルは2つ。
-  - `vrc-photo-manager.log`: UIのログ
-  - `vrc-photo-daemon.log`: デーモンのログ
-- 起動時に10 MiB以上だったファイルは `vrc-photo-manager.log.1` のような `.1` へ退避し、新しいファイルを作る。実行中はローテーションしない。
-- `RUST_LOG` は既定フィルタより優先される。既定は `info,<crate>=debug`（UIは `vrc_photo_manager`、デーモンは `vrc_photo_daemon`）。
+  - `vrc-photon.log`: UIのログ
+  - `vrc-photon-daemon.log`: デーモンのログ
+- 起動時に10 MiB以上だったファイルは `vrc-photon.log.1` のような `.1` へ退避し、新しいファイルを作る。実行中はローテーションしない。
+- `RUST_LOG` は既定フィルタより優先される。既定は `info,<crate>=debug`（UIは `vrc_photonn`、デーモンは `vrc_photon_daemon`）。
 - ダッシュボードと設定画面の「ログ」カードに保存先と2つのファイル名を表示する。「ログフォルダを開く」でOSのファイラーを開ける。
 - データディレクトリを特定できない場合、ログはstderrだけで動作し、カードに「ログフォルダを特定できません」「ファイルへのログ出力は利用できません」と出る。
 - データディレクトリは解決できるがログファイルを開けない場合もログはstderrだけで動作する。ただしカードは保存先とファイル名を表示したままになる。
@@ -286,7 +286,7 @@ sudo apt-get install -f
 
 ## 12. 調査に必要な情報
 
-- `logs/vrc-photo-manager.log` と `logs/vrc-photo-daemon.log`（必要なら `RUST_LOG=debug` で再現）
+- `logs/vrc-photon.log` と `logs/vrc-photon-daemon.log`（必要なら `RUST_LOG=debug` で再現）
 - ダッシュボードの「処理エラー」のメッセージ・詳細・検出回数・発生時刻
 - 圧縮キューの失敗理由、取り込み結果パネルの失敗ファイルと理由
 - OSとバージョン
@@ -299,4 +299,4 @@ sudo apt-get install -f
 - システムパッケージ更新時: `pacman -Qip` / `dpkg-deb -f` の結果、
   `/var/lib/pacman/db.lck` や `/var/lib/dpkg/lock-frontend` の有無、
   polkit policy と `pkexec` の有無、`systemctl --user is-active
-  vrc-photo-daemon.service`
+  vrc-photon-daemon.service`

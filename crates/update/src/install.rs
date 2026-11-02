@@ -67,8 +67,8 @@ impl PackageFamily {
     /// The command shown to package-manager users.
     pub fn update_command(self) -> Option<&'static str> {
         match self {
-            Self::Deb => Some("sudo apt install --only-upgrade vrc-photo-manager"),
-            Self::Pacman => Some("sudo pacman -Syu vrc-photo-manager"),
+            Self::Deb => Some("sudo apt install --only-upgrade vrc-photon"),
+            Self::Pacman => Some("sudo pacman -Syu vrc-photon"),
             Self::Unknown => None,
         }
     }
@@ -165,10 +165,10 @@ pub fn install_kind() -> InstallKind {
 }
 
 /// The helper path installed by the pacman and deb packages.
-pub const SYSTEM_HELPER_PATH: &str = "/usr/bin/vrc-photo-updater";
+pub const SYSTEM_HELPER_PATH: &str = "/usr/bin/vrc-photon-updater";
 /// The polkit policy installed by the pacman and deb packages.
 pub const SYSTEM_POLICY_PATH: &str =
-    "/usr/share/polkit-1/actions/com.tommyz.vrc-photo-manager.update.policy";
+    "/usr/share/polkit-1/actions/com.tommyz.vrc-photon.update.policy";
 
 /// Whether an executable named `name` exists in one of `dirs`.
 pub fn find_executable_in(dirs: &[PathBuf], name: &str) -> bool {
@@ -284,8 +284,7 @@ fn install_kind_windows() -> InstallKind {
     use winreg::RegKey;
     use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 
-    const UNINSTALL_KEY: &str =
-        r"Software\Microsoft\Windows\CurrentVersion\Uninstall\VRC Photo Manager";
+    const UNINSTALL_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\VRC PhotoN";
 
     fn location(root: RegKey) -> Option<PathBuf> {
         root.open_subkey(UNINSTALL_KEY)
@@ -563,9 +562,9 @@ pub fn prepare_apply(job: &ApplyJob, current_exe: &Path, data_dir: &Path) -> Res
     paths.ensure()?;
 
     let helper_name = if cfg!(windows) {
-        "vrc-photo-updater.exe"
+        "vrc-photon-updater.exe"
     } else {
-        "vrc-photo-updater"
+        "vrc-photon-updater"
     };
     let source = current_exe
         .parent()
@@ -679,7 +678,7 @@ mod tests {
 
         assert_eq!(
             classify_linux(
-                Path::new("/usr/bin/vrc-photo-manager"),
+                Path::new("/usr/bin/vrc-photon"),
                 None,
                 "ID=ubuntu\nID_LIKE=debian\n"
             ),
@@ -689,11 +688,7 @@ mod tests {
             }
         );
         assert_eq!(
-            classify_linux(
-                Path::new("/usr/local/bin/vrc-photo-manager"),
-                None,
-                "ID=arch\n"
-            ),
+            classify_linux(Path::new("/usr/local/bin/vrc-photon"), None, "ID=arch\n"),
             InstallKind::SystemPackage {
                 family: PackageFamily::Pacman,
                 managed: false,
@@ -701,7 +696,7 @@ mod tests {
         );
         assert_eq!(
             classify_linux(
-                Path::new("/home/me/project/target/debug/vrc-photo-manager"),
+                Path::new("/home/me/project/target/debug/vrc-photon"),
                 None,
                 ""
             ),
@@ -709,7 +704,7 @@ mod tests {
         );
         assert_eq!(
             classify_linux(
-                Path::new("/home/me/project/target/debug/vrc-photo-manager"),
+                Path::new("/home/me/project/target/debug/vrc-photon"),
                 Some(&appimage),
                 ""
             ),
@@ -719,7 +714,7 @@ mod tests {
         );
         assert_eq!(
             classify_linux(
-                Path::new("/home/me/vrc-photo-manager"),
+                Path::new("/home/me/vrc-photon"),
                 Some(Path::new("/missing/VRC.AppImage")),
                 ""
             ),
@@ -737,13 +732,13 @@ mod tests {
         );
         assert!(
             InstallKind::WindowsCurrentUser {
-                install_dir: "C:\\Users\\me\\AppData\\Local\\VRC Photo Manager".into()
+                install_dir: "C:\\Users\\me\\AppData\\Local\\VRC PhotoN".into()
             }
             .automatic_apply()
         );
         assert!(
             !InstallKind::WindowsPerMachine {
-                install_dir: "C:\\Program Files\\VRC Photo Manager".into()
+                install_dir: "C:\\Program Files\\VRC PhotoN".into()
             }
             .automatic_apply()
         );
@@ -768,7 +763,7 @@ mod tests {
         );
         assert!(
             !InstallKind::WindowsPerMachine {
-                install_dir: "C:\\Program Files\\VRC Photo Manager".into()
+                install_dir: "C:\\Program Files\\VRC PhotoN".into()
             }
             .automatic_check()
         );
@@ -799,14 +794,14 @@ mod tests {
           "version": "0.4.0",
           "platforms": {
             "linux-x86_64": {
-              "url": "https://example.com/vrc-photo-manager_0.4.0_x86_64.AppImage",
+              "url": "https://example.com/vrc-photon_0.4.0_x86_64.AppImage",
               "format": "appimage",
               "size": 10,
               "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
               "signature": "__SIGNATURE__"
             },
             "windows-x86_64": {
-              "url": "https://example.com/vrc-photo-manager_0.4.0_x64-setup.exe",
+              "url": "https://example.com/vrc-photon_0.4.0_x64-setup.exe",
               "format": "nsis",
               "size": 10,
               "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -827,7 +822,7 @@ mod tests {
         );
 
         let windows = InstallKind::WindowsCurrentUser {
-            install_dir: "C:\\Users\\me\\AppData\\Local\\VRC Photo Manager".into(),
+            install_dir: "C:\\Users\\me\\AppData\\Local\\VRC PhotoN".into(),
         };
         assert_eq!(
             manifest.asset_for(&windows).unwrap().format,
@@ -914,7 +909,7 @@ mod tests {
         let data_dir = dir.join("data");
         let staged = data_dir
             .join("updates/downloads/0.4.0")
-            .join("vrc-photo-manager-0.4.0-1-x86_64.pkg.tar.zst");
+            .join("vrc-photon-0.4.0-1-x86_64.pkg.tar.zst");
         std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
         std::fs::write(&staged, b"package").unwrap();
         ApplyJob {
@@ -924,7 +919,7 @@ mod tests {
             },
             from_version: "0.3.0".to_string(),
             to_version: "0.4.0".to_string(),
-            target: dir.join("vrc-photo-manager"),
+            target: dir.join("vrc-photon"),
             staged,
             signature: "c2ln".to_string(),
             sha256: "a".repeat(64),
@@ -1144,14 +1139,14 @@ mod tests {
         let install = dir.path().join("install");
         std::fs::create_dir_all(&install).unwrap();
         let helper_name = if cfg!(windows) {
-            "vrc-photo-updater.exe"
+            "vrc-photon-updater.exe"
         } else {
-            "vrc-photo-updater"
+            "vrc-photon-updater"
         };
         let current_exe = install.join(if cfg!(windows) {
-            "vrc-photo-manager.exe"
+            "vrc-photon.exe"
         } else {
-            "vrc-photo-manager"
+            "vrc-photon"
         });
         std::fs::write(&current_exe, b"ui").unwrap();
         std::fs::write(install.join(helper_name), b"helper").unwrap();
@@ -1179,23 +1174,23 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn classifies_windows_install_locations() {
-        let exe = Path::new(r"C:\Users\me\AppData\Local\VRC Photo Manager\vrc-photo-manager.exe");
+        let exe = Path::new(r"C:\Users\me\AppData\Local\VRC PhotoN\vrc-photon.exe");
         assert_eq!(
             classify_windows(
                 exe,
-                Some(Path::new(r"C:\Users\me\AppData\Local\VRC Photo Manager")),
+                Some(Path::new(r"C:\Users\me\AppData\Local\VRC PhotoN")),
                 None
             ),
             InstallKind::WindowsCurrentUser {
                 install_dir: exe.parent().unwrap().into()
             }
         );
-        let machine_exe = Path::new(r"C:\Program Files\VRC Photo Manager\vrc-photo-manager.exe");
+        let machine_exe = Path::new(r"C:\Program Files\VRC PhotoN\vrc-photon.exe");
         assert_eq!(
             classify_windows(
                 machine_exe,
                 None,
-                Some(Path::new(r"C:\Program Files\VRC Photo Manager"))
+                Some(Path::new(r"C:\Program Files\VRC PhotoN"))
             ),
             InstallKind::WindowsPerMachine {
                 install_dir: machine_exe.parent().unwrap().into()

@@ -9,9 +9,9 @@ use std::time::Duration;
 use interprocess::TryClone as _;
 #[cfg(unix)]
 use interprocess::local_socket::traits::Stream as _;
-use vrc_photo_ipc::framing;
-use vrc_photo_ipc::server::Listener;
-use vrc_photo_ipc::{
+use vrc_photon_ipc::framing;
+use vrc_photon_ipc::server::Listener;
+use vrc_photon_ipc::{
     APP_VERSION, Endpoint, ErrorCode, Event, PROTOCOL_VERSION, Request, RequestEnvelope, Response,
     ServerMessage, StatusSnapshot,
 };
@@ -22,16 +22,16 @@ use crate::signals::{JobSignal, WakeSignal};
 /// Fan-out for daemon events. Dead subscribers are pruned on publish.
 #[derive(Clone, Default)]
 pub(crate) struct EventBus {
-    subscribers: Arc<Mutex<Vec<Sender<vrc_photo_ipc::Event>>>>,
+    subscribers: Arc<Mutex<Vec<Sender<vrc_photon_ipc::Event>>>>,
 }
 
 impl EventBus {
-    pub(crate) fn publish(&self, event: vrc_photo_ipc::Event) {
+    pub(crate) fn publish(&self, event: vrc_photon_ipc::Event) {
         let mut subscribers = self.subscribers.lock().unwrap();
         subscribers.retain(|sender| sender.send(event.clone()).is_ok());
     }
 
-    pub(crate) fn subscribe(&self) -> Receiver<vrc_photo_ipc::Event> {
+    pub(crate) fn subscribe(&self) -> Receiver<vrc_photon_ipc::Event> {
         let (sender, receiver) = mpsc::channel();
         self.subscribers.lock().unwrap().push(sender);
         receiver
@@ -155,7 +155,10 @@ fn accept_loop(listener: Listener, control: IpcControl, stop: Arc<AtomicBool>) {
     }
 }
 
-fn handle_connection(stream: vrc_photo_ipc::server::Stream, control: IpcControl) -> io::Result<()> {
+fn handle_connection(
+    stream: vrc_photon_ipc::server::Stream,
+    control: IpcControl,
+) -> io::Result<()> {
     let mut reader = BufReader::new(stream);
     #[cfg(unix)]
     {
@@ -245,7 +248,7 @@ fn handle_connection(stream: vrc_photo_ipc::server::Stream, control: IpcControl)
                 write_response(reader.get_mut(), id, Response::Ok)?;
             }
             Request::ClearThumbnailCache => {
-                let response = match vrc_photo_core::thumbnail::clear_thumbnail_cache_in(
+                let response = match vrc_photon_core::thumbnail::clear_thumbnail_cache_in(
                     &control.thumbnail_dir,
                 ) {
                     Ok(report) => {
@@ -299,9 +302,9 @@ fn handle_connection(stream: vrc_photo_ipc::server::Stream, control: IpcControl)
 }
 
 fn stream_events(
-    reader: &mut BufReader<vrc_photo_ipc::server::Stream>,
+    reader: &mut BufReader<vrc_photon_ipc::server::Stream>,
     control: &IpcControl,
-    events: Receiver<vrc_photo_ipc::Event>,
+    events: Receiver<vrc_photon_ipc::Event>,
 ) -> io::Result<()> {
     // Watch the read half on a cloned handle: after subscribing, the client
     // sends nothing, so EOF or a read error means it is gone. Without this,
@@ -340,7 +343,7 @@ fn stream_events(
 /// fails. Unexpected post-subscribe bytes are discarded, matching the
 /// previous behavior of never reading from a subscribed connection.
 fn spawn_disconnect_watcher(
-    mut probe: vrc_photo_ipc::server::Stream,
+    mut probe: vrc_photon_ipc::server::Stream,
     disconnected: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
 ) {
@@ -370,7 +373,7 @@ fn spawn_disconnect_watcher(
 }
 
 fn write_response(
-    stream: &mut vrc_photo_ipc::server::Stream,
+    stream: &mut vrc_photon_ipc::server::Stream,
     id: u64,
     response: Response,
 ) -> io::Result<()> {
@@ -383,8 +386,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
-    use vrc_photo_ipc::client::{Subscription, request};
-    use vrc_photo_ipc::{Endpoint, Event, Request, Response};
+    use vrc_photon_ipc::client::{Subscription, request};
+    use vrc_photon_ipc::{Endpoint, Event, Request, Response};
 
     fn test_control() -> (tempfile::TempDir, Endpoint, IpcControl) {
         let dir = tempfile::tempdir().unwrap();

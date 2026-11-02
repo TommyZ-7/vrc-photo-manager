@@ -10,9 +10,9 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use vrc_photo_core::importer::ImportProgress;
-use vrc_photo_i18n::{tr, tr_args};
-use vrc_photo_ipc::ScanPhase as IpcScanPhase;
+use vrc_photon_core::importer::ImportProgress;
+use vrc_photon_i18n::{tr, tr_args};
+use vrc_photon_ipc::ScanPhase as IpcScanPhase;
 
 use crate::app::import::{ImportDialogPhase, ImportDialogState, ImportReportView};
 use crate::app::lifecycle::ScanProgressView;
@@ -1101,11 +1101,11 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
-    use vrc_photo_core::importer::{
+    use vrc_photon_core::importer::{
         ImportIssue, ImportIssueKind, ImportMode, ImportProgress, ImportRename,
     };
-    use vrc_photo_core::scanner::ScanFailure;
-    use vrc_photo_ipc::ScanPhase as IpcScanPhase;
+    use vrc_photon_core::scanner::ScanFailure;
+    use vrc_photon_ipc::ScanPhase as IpcScanPhase;
 
     #[test]
     fn nav_index_matches_sidebar_order() {

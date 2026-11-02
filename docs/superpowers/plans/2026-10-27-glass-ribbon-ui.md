@@ -6,7 +6,7 @@
 
 **Architecture:** 2段階。PR1は**見た目を変えない**モジュール分割（`App`、状態、テーマ、共通部品、画面、ビューア、ダイアログ、CLI/demoを分離）。PR2/PR3で `TitleBar` とウィンドウ背景を使ったシェル、リボン、画面再配置を実装する。データ/DB/IPC/画像処理の意味は変えない。
 
-**Tech Stack:** Rust 2024, `gpui-kit = "=0.8.0"`（`gpui-pre 0.3.9` / `gpui-component 0.8.0`）, SQLite via `vrc-photo-core`, `image` 0.25.
+**Tech Stack:** Rust 2024, `gpui-kit = "=0.8.0"`（`gpui-pre 0.3.9` / `gpui-component 0.8.0`）, SQLite via `vrc-photon-core`, `image` 0.25.
 
 **Spec:** `docs/superpowers/specs/2026-10-27-glass-ribbon-ui-design.md`
 
@@ -66,8 +66,8 @@ Branch: `refactor/ui-module-split`（updated `main` からworktree）。
 Run the demo and save baseline screenshots outside the repo:
 
 ```bash
-cargo run -p vrc-photo-ui -- --demo --window-size 1280x820
-cargo run -p vrc-photo-ui -- --demo --window-size 1440x900
+cargo run -p vrc-photon-ui -- --demo --window-size 1280x820
+cargo run -p vrc-photon-ui -- --demo --window-size 1440x900
 ```
 
 Use the repository's `gnome-wayland-visual-qa` skill or the existing screenshot method. Save as `/tmp/glass-ribbon-baseline/library-1280.png` and `library-1440.png`. Also record the current test count:
@@ -113,8 +113,8 @@ Create `state/mod.rs` and `ui/mod.rs` with no items yet. `main.rs` declares them
 
 ```bash
 cargo fmt --all -- --check
-cargo test -p vrc-photo-ui
-cargo check -p vrc-photo-ui
+cargo test -p vrc-photon-ui
+cargo check -p vrc-photon-ui
 ```
 
 Expected: all existing UI tests pass; no new warnings.
@@ -153,8 +153,8 @@ Move tests such as `sidebar_widths_match_the_rail`, `inspector_card_and_margin_f
 
 ```bash
 cargo fmt --all -- --check
-cargo test -p vrc-photo-ui
-cargo clippy -p vrc-photo-ui --all-targets -- -D warnings
+cargo test -p vrc-photon-ui
+cargo clippy -p vrc-photon-ui --all-targets -- -D warnings
 ```
 
 - [ ] **Step 4: Commit**
@@ -188,7 +188,7 @@ Move `ThumbnailCache`, `decode_thumbnail`, and the image conversion helpers. Mov
 
 ```bash
 cargo fmt --all -- --check
-cargo test -p vrc-photo-ui
+cargo test -p vrc-photon-ui
 ```
 
 - [ ] **Step 4: Commit**
@@ -221,7 +221,7 @@ Move `page_cache_evicts_the_oldest_page`, `page_cache_keeps_recently_touched_pag
 
 ```bash
 cargo fmt --all -- --check
-cargo test -p vrc-photo-ui
+cargo test -p vrc-photon-ui
 git add crates/ui/src
 git commit -m "refactor(ui): extract photo browser state"
 ```
@@ -250,7 +250,7 @@ Move the viewer types/functions. Move `morph_bounds_at_hits_both_ends`, `viewer_
 
 ```bash
 cargo fmt --all -- --check
-cargo test -p vrc-photo-ui
+cargo test -p vrc-photon-ui
 git add crates/ui/src
 git commit -m "refactor(ui): extract year rail and viewer state"
 ```
@@ -278,7 +278,7 @@ Move tests whose subject is a component metric (`inner_corner_radius`, `card_siz
 
 ```bash
 cargo fmt --all -- --check
-cargo test -p vrc-photo-ui
+cargo test -p vrc-photon-ui
 git add crates/ui/src
 git commit -m "refactor(ui): extract shared UI components"
 ```
@@ -307,8 +307,8 @@ Move the GPUI year-rail element and labels into `ui/year_rail.rs`; keep the pure
 
 ```bash
 cargo fmt --all -- --check
-cargo test -p vrc-photo-ui
-cargo clippy -p vrc-photo-ui --all-targets -- -D warnings
+cargo test -p vrc-photon-ui
+cargo clippy -p vrc-photon-ui --all-targets -- -D warnings
 git add crates/ui/src
 git commit -m "refactor(ui): extract library screen"
 ```
@@ -338,8 +338,8 @@ Keep the existing profile order, delete confirmation, output policy, and queue b
 
 ```bash
 cargo fmt --all -- --check
-cargo test -p vrc-photo-ui
-cargo clippy -p vrc-photo-ui --all-targets -- -D warnings
+cargo test -p vrc-photon-ui
+cargo clippy -p vrc-photon-ui --all-targets -- -D warnings
 git add crates/ui/src
 git commit -m "refactor(ui): extract search and compression screens"
 ```
@@ -368,7 +368,7 @@ Keep every existing setting, save path, card size, motion, log, and update behav
 
 ```bash
 cargo fmt --all -- --check
-cargo test -p vrc-photo-ui
+cargo test -p vrc-photon-ui
 git add crates/ui/src
 git commit -m "refactor(ui): extract dashboard and settings screens"
 ```
@@ -399,8 +399,8 @@ Keep copy/move, retry/resume, progress, report panel, manual compression policy/
 
 ```bash
 cargo fmt --all -- --check
-cargo test -p vrc-photo-ui
-cargo clippy -p vrc-photo-ui --all-targets -- -D warnings
+cargo test -p vrc-photon-ui
+cargo clippy -p vrc-photon-ui --all-targets -- -D warnings
 git add crates/ui/src
 git commit -m "refactor(ui): extract import, viewer, and dialogs"
 ```
@@ -440,8 +440,8 @@ Move tests by subject so no giant test module remains in `main.rs`. Keep all 134
 ```bash
 wc -l crates/ui/src/main.rs crates/ui/src/app.rs crates/ui/src/app/*.rs crates/ui/src/state/*.rs crates/ui/src/ui/*.rs
 cargo fmt --all -- --check
-cargo test -p vrc-photo-ui
-cargo clippy -p vrc-photo-ui --all-targets -- -D warnings
+cargo test -p vrc-photon-ui
+cargo clippy -p vrc-photon-ui --all-targets -- -D warnings
 ```
 
 Expected: `main.rs < 400` lines; no module over 2,000 lines; tests all pass.
@@ -513,7 +513,7 @@ let window_options = WindowOptions {
 };
 ```
 
-Keep `window.set_window_title("VRC Photo Manager")`. If `TitleBar` styling cannot reach 46px, record the fallback in the PR and keep the component's native height rather than drawing custom window controls.
+Keep `window.set_window_title("VRC PhotoN")`. If `TitleBar` styling cannot reach 46px, record the fallback in the PR and keep the component's native height rather than drawing custom window controls.
 
 - [ ] **Step 2: Add the ambient layer**
 
@@ -527,8 +527,8 @@ Add only `GLASS_WINDOW`/ambient colors for the background. Add `PANEL_SIDEBAR`, 
 
 ```bash
 cargo fmt --all -- --check
-cargo test -p vrc-photo-ui
-cargo run -p vrc-photo-ui -- --demo --window-size 1280x820
+cargo test -p vrc-photon-ui
+cargo run -p vrc-photon-ui -- --demo --window-size 1280x820
 git add crates/ui/src
 git commit -m "feat(ui): add glass background and opaque panels"
 ```
@@ -551,7 +551,7 @@ git commit -m "feat(ui): add glass background and opaque panels"
 
 - [ ] **Step 1: Add settings with tests first**
 
-In `crates/core/src/settings.rs`, add the field and default. Write tests that old JSON without the field loads with `false` and other fields intact, and that round-trip preserves `true`. Run `cargo test -p vrc-photo-core settings`.
+In `crates/core/src/settings.rs`, add the field and default. Write tests that old JSON without the field loads with `false` and other fields intact, and that round-trip preserves `true`. Run `cargo test -p vrc-photon-core settings`.
 
 - [ ] **Step 2: Add ribbon state helpers and tests**
 
@@ -574,7 +574,7 @@ Implement the three command pages from design §10.2 with 44px icon+label button
 ```bash
 cargo fmt --all -- --check
 cargo test --workspace
-cargo run -p vrc-photo-ui -- --demo --window-size 1280x820
+cargo run -p vrc-photon-ui -- --demo --window-size 1280x820
 git add crates/ui/src crates/core/src/settings.rs
 git commit -m "feat(ui): add titlebar tabs and compact ribbon"
 ```
@@ -651,9 +651,9 @@ Use `GridMetrics` in `photo_grid`, `load_pages`, year-rail jump/scroll, and anch
 
 ```bash
 cargo fmt --all -- --check
-cargo test -p vrc-photo-ui
-cargo run -p vrc-photo-ui -- --demo --window-size 1280x820
-cargo run -p vrc-photo-ui -- --demo --window-size 1440x900
+cargo test -p vrc-photon-ui
+cargo run -p vrc-photon-ui -- --demo --window-size 1280x820
+cargo run -p vrc-photon-ui -- --demo --window-size 1440x900
 git add crates/ui/src
 git commit -m "feat(ui): reflow library into gallery and inspector cards"
 ```
@@ -685,8 +685,8 @@ Remove the page header. Keep the existing settings cards and controls; add the n
 
 ```bash
 cargo fmt --all -- --check
-cargo test -p vrc-photo-ui
-cargo run -p vrc-photo-ui -- --demo --window-size 1280x820
+cargo test -p vrc-photon-ui
+cargo run -p vrc-photon-ui -- --demo --window-size 1280x820
 git add crates/ui/src
 git commit -m "feat(ui): reflow search, compression, dashboard, and settings"
 ```

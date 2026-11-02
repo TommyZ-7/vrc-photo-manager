@@ -30,7 +30,7 @@ AppImage / deb / pacman / NSIS の4種類あり、形式ごとに更新方法が
 ### 1. フィードと署名
 
 - GitHub Releases の `latest.json` を更新フィードにする。URL は
-  `https://github.com/TommyZ-7/vrc-photo-manager/releases/latest/download/latest.json`。
+  `https://github.com/TommyZ-7/vrc-photon/releases/latest/download/latest.json`。
   GitHub API は使わない（レート制限と無署名のため）。
 - マニフェストは `schema`、`version`、`pub_date`、`notes_url`、`platforms` を持つ。
   `platforms` のキーは `linux-x86_64` / `windows-x86_64`、各エントリは `url`、
@@ -51,7 +51,7 @@ AppImage / deb / pacman / NSIS の4種類あり、形式ごとに更新方法が
   ファイルの場所を照合して current-user / per-machine / その他を判定する。
   per-machine、ポータブル、開発ビルドは通知のみ。
 - deb/pacman はパッケージマネージャ所有のため自己置換しない。UI に
-  `sudo apt install --only-upgrade vrc-photo-manager` などのコマンドとリリース
+  `sudo apt install --only-upgrade vrc-photon` などのコマンドとリリース
   ページを表示する。
 - 開発ビルドは自動確認を行わない。
 
@@ -61,7 +61,7 @@ AppImage / deb / pacman / NSIS の4種類あり、形式ごとに更新方法が
   無効化でき、手動確認は常に可能。UI を閉じている間は確認しない。
 - ダウンロードは `<data_dir>/updates/downloads/<version>/` に行い、署名・サイズ・
   SHA-256 を検証してから `.part` を外す。上限は 300 MiB。
-- 適用は専用の `vrc-photo-updater` ヘルパーが行う。UI はヘルパーを
+- 適用は専用の `vrc-photon-updater` ヘルパーが行う。UI はヘルパーを
   `<data_dir>/updates/bin/` にコピーし、ジョブJSONを書いて起動してから終了する。
 - ヘルパーは UI とデーモンの終了を最大30秒待ち、旧版を `.previous`（AppImage）また
   は `updates/backup/<version>/`（Windows）に退避してから置換/インストーラ実行する。
@@ -108,7 +108,7 @@ AppImage / deb / pacman / NSIS の4種類あり、形式ごとに更新方法が
 
 ## References
 
-- [Issue #24](https://github.com/TommyZ-7/vrc-photo-manager/issues/24)
+- [Issue #24](https://github.com/TommyZ-7/vrc-photon/issues/24)
 - [設計書](../superpowers/specs/2026-10-24-auto-update-design.md)
 - [実装計画](../superpowers/plans/2026-10-24-auto-update.md)
 - [リリース手順](../release.md)

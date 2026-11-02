@@ -4,7 +4,7 @@
 
 **Goal:** pacman / deb の既存インストールを、署名済みパッケージと polkit を使ってアプリ内から更新できるようにする。
 
-**Architecture:** `latest.json` に後方互換な `system_packages` を追加し、既存の download / 署名検証パイプラインで `.pkg.tar.zst` / `.deb` を staging する。UI はユーザー権限の `vrc-photo-updater --apply` を起動し、そのヘルパーが `pkexec /usr/bin/vrc-photo-updater --apply-system-package` を呼ぶ。特権側は manifest・staging・パッケージメタデータを再検証し、固定コマンドでインストールするだけに留める。
+**Architecture:** `latest.json` に後方互換な `system_packages` を追加し、既存の download / 署名検証パイプラインで `.pkg.tar.zst` / `.deb` を staging する。UI はユーザー権限の `vrc-photon-updater --apply` を起動し、そのヘルパーが `pkexec /usr/bin/vrc-photon-updater --apply-system-package` を呼ぶ。特権側は manifest・staging・パッケージメタデータを再検証し、固定コマンドでインストールするだけに留める。
 
 **Tech Stack:** Rust stable (edition 2024), serde/serde_json, minisign-verify, semver, sha2, gpui-kit 0.8, polkit/pkexec, pacman, dpkg, cargo-packager 0.11.8, Arch `base-devel` container, GitHub Actions.
 
@@ -13,16 +13,16 @@
 ## Global Constraints
 
 - `latest.json` の `schema` は 1 のまま。`system_packages` は任意フィールドで、既存クライアントの `platforms` 検証を変えない。
-- pacman の更新用成果物は `vrc-photo-manager-<version>-1-x86_64.pkg.tar.zst`。`.tar.gz` + `PKGBUILD` は手動 / AUR 用に残す。
-- deb の更新用成果物は `vrc-photo-manager_<version>_amd64.deb`。
+- pacman の更新用成果物は `vrc-photon-<version>-1-x86_64.pkg.tar.zst`。`.tar.gz` + `PKGBUILD` は手動 / AUR 用に残す。
+- deb の更新用成果物は `vrc-photon_<version>_amd64.deb`。
 - 特権側が実行するインストールコマンドは `pacman -U --noconfirm <file>` と `dpkg -i <file>` に固定する。シェルを使わない。
-- 特権側は `signed_manifest` の minisign 署名、`manifest.version == job.to_version`、`manifest.version > CURRENT_VERSION`、パッケージ名 `vrc-photo-manager`、パッケージバージョン一致を必須にする。
-- 特権側は `/var/tmp/vrc-photo-update-<uuid>.pkg` に root 所有でコピーし、コピー先で SHA-256 と署名を再検証してからインストールする。
+- 特権側は `signed_manifest` の minisign 署名、`manifest.version == job.to_version`、`manifest.version > CURRENT_VERSION`、パッケージ名 `vrc-photon`、パッケージバージョン一致を必須にする。
+- 特権側は `/var/tmp/vrc-photon-update-<uuid>.pkg` に root 所有でコピーし、コピー先で SHA-256 と署名を再検証してからインストールする。
 - `--apply` は euid 0 で拒否する。`--apply-system-package` は euid 0 かつ `PKEXEC_UID` 必須。
-- polkit policy は `usr/share/polkit-1/actions/com.tommyz.vrc-photo-manager.update.policy` に同梱し、`org.freedesktop.policykit.exec.path` を `/usr/bin/vrc-photo-updater` にする。
+- polkit policy は `usr/share/polkit-1/actions/com.tommyz.vrc-photon.update.policy` に同梱し、`org.freedesktop.policykit.exec.path` を `/usr/bin/vrc-photon-updater` にする。
 - システムパッケージの自動ロールバックは行わない。失敗時は `last-result.json` と `updater.log` に理由を残す。
 - 認証キャンセル / DB ロック / 検証失敗では job と staged を掃除する。`PackageManagerFailed` / health 失敗では job / staged / log を残す。
-- UI は `pkexec`、`/usr/bin/vrc-photo-updater`、policy の3つが揃う場合だけ自動適用を出す。欠ける場合は既存のパッケージマネージャコマンドを表示する。
+- UI は `pkexec`、`/usr/bin/vrc-photon-updater`、policy の3つが揃う場合だけ自動適用を出す。欠ける場合は既存のパッケージマネージャコマンドを表示する。
 - systemd 管理のデーモンは `systemctl --user` で start / restart する。`daemon-reload` は失敗しても続行する。
 - DB スキーマは変更しない。設定は既存の `AppSettings` に追加しない。
 - ローカル検証は `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`。
@@ -61,14 +61,14 @@
 fn system_packages() -> Value {
     serde_json::json!({
         "pacman": {
-            "url": "https://example.com/vrc-photo-manager-0.4.0-1-x86_64.pkg.tar.zst",
+            "url": "https://example.com/vrc-photon-0.4.0-1-x86_64.pkg.tar.zst",
             "format": "pacman",
             "size": 1024,
             "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             "signature": crate::verify::test_signature()
         },
         "deb": {
-            "url": "https://example.com/vrc-photo-manager_0.4.0_amd64.deb",
+            "url": "https://example.com/vrc-photon_0.4.0_amd64.deb",
             "format": "deb",
             "size": 1024,
             "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
@@ -125,7 +125,7 @@ fn rejects_a_system_package_with_the_wrong_extension() {
     let mut value = valid_manifest();
     let mut packages = system_packages();
     packages["pacman"]["url"] =
-        serde_json::json!("https://example.com/vrc-photo-manager_0.4.0_x86_64.tar.gz");
+        serde_json::json!("https://example.com/vrc-photon_0.4.0_x86_64.tar.gz");
     value["system_packages"] = packages;
     assert!(matches!(
         parse(&value, false),
@@ -136,7 +136,7 @@ fn rejects_a_system_package_with_the_wrong_extension() {
 
 - [x] **Step 2: manifest テストを失敗させる**
 
-Run: `cargo test -p vrc-photo-update manifest::tests::validates_pacman_and_deb_system_packages`
+Run: `cargo test -p vrc-photon-update manifest::tests::validates_pacman_and_deb_system_packages`
 Expected: FAIL（`system_packages` フィールドがない、または `UpdateFormat::Pacman` がない）
 
 - [x] **Step 3: `PackageFamily` に serde と manifest key を追加する**
@@ -251,7 +251,7 @@ InstallKind::SystemPackage { family } => self.system_package_for(*family),
 
 - [x] **Step 5: manifest テストを通す**
 
-Run: `cargo test -p vrc-photo-update manifest::tests`
+Run: `cargo test -p vrc-photon-update manifest::tests`
 Expected: PASS
 
 - [x] **Step 6: release-tool の失敗テストを書く**
@@ -263,20 +263,20 @@ Expected: PASS
 fn builds_a_manifest_with_system_packages() {
     let dir = tempfile::tempdir().unwrap();
     for (name, body) in [
-        ("vrc-photo-manager_0.4.0_x86_64.AppImage", b"appimage".as_slice()),
-        ("vrc-photo-manager_0.4.0_x64-setup.exe", b"installer".as_slice()),
+        ("vrc-photon_0.4.0_x86_64.AppImage", b"appimage".as_slice()),
+        ("vrc-photon_0.4.0_x64-setup.exe", b"installer".as_slice()),
         (
-            "vrc-photo-manager-0.4.0-1-x86_64.pkg.tar.zst",
+            "vrc-photon-0.4.0-1-x86_64.pkg.tar.zst",
             b"pacman".as_slice(),
         ),
-        ("vrc-photo-manager_0.4.0_amd64.deb", b"deb".as_slice()),
+        ("vrc-photon_0.4.0_amd64.deb", b"deb".as_slice()),
     ] {
         write_artifact(dir.path(), name, body);
     }
     let manifest = build_manifest(
         dir.path(),
         "v0.4.0",
-        "TommyZ-7/vrc-photo-manager",
+        "TommyZ-7/vrc-photon",
         "https://example.com/notes",
     )
     .unwrap();
@@ -290,7 +290,7 @@ fn builds_a_manifest_with_system_packages() {
     assert!(
         manifest.system_packages["pacman"]
             .url
-            .ends_with("vrc-photo-manager-0.4.0-1-x86_64.pkg.tar.zst")
+            .ends_with("vrc-photon-0.4.0-1-x86_64.pkg.tar.zst")
     );
 
     let json = serde_json::to_vec(&manifest).unwrap();
@@ -305,7 +305,7 @@ fn builds_a_manifest_with_system_packages() {
 
 - [x] **Step 7: release-tool テストを失敗させる**
 
-Run: `cargo test -p vrc-photo-release-tool builds_a_manifest_with_system_packages`
+Run: `cargo test -p vrc-photon-release-tool builds_a_manifest_with_system_packages`
 Expected: FAIL（`system_packages` がない、または `.pkg.tar.zst` が見つからない）
 
 - [x] **Step 8: release-tool を実装する**
@@ -346,7 +346,7 @@ Ok(Manifest {
 
 - [x] **Step 9: release-tool テストを通す**
 
-Run: `cargo test -p vrc-photo-release-tool`
+Run: `cargo test -p vrc-photon-release-tool`
 Expected: PASS
 
 - [x] **Step 10: commit**
@@ -385,7 +385,7 @@ fn system_job(dir: &Path) -> ApplyJob {
     let data_dir = dir.join("data");
     let staged = data_dir
         .join("updates/downloads/0.4.0")
-        .join("vrc-photo-manager-0.4.0-1-x86_64.pkg.tar.zst");
+        .join("vrc-photon-0.4.0-1-x86_64.pkg.tar.zst");
     std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
     std::fs::write(&staged, b"package").unwrap();
     ApplyJob {
@@ -395,7 +395,7 @@ fn system_job(dir: &Path) -> ApplyJob {
         },
         from_version: "0.3.0".to_string(),
         to_version: "0.4.0".to_string(),
-        target: "/usr/bin/vrc-photo-manager".into(),
+        target: "/usr/bin/vrc-photon".into(),
         staged,
         signature: "c2ln".to_string(),
         sha256: "a".repeat(64),
@@ -490,7 +490,7 @@ fn finds_pkexec_in_a_path_directory() {
 
 - [x] **Step 2: テストを失敗させる**
 
-Run: `cargo test -p vrc-photo-update install::tests::apply_kind_keeps_existing_json_and_adds_system_package`
+Run: `cargo test -p vrc-photon-update install::tests::apply_kind_keeps_existing_json_and_adds_system_package`
 Expected: FAIL（`SystemPackage` variant がない）
 
 - [x] **Step 3: `ApplyKind` / `ApplyJob` を実装する**
@@ -569,9 +569,9 @@ if let ApplyKind::SystemPackage { family } = self.kind {
 `crates/update/src/install.rs`:
 
 ```rust
-pub const SYSTEM_HELPER_PATH: &str = "/usr/bin/vrc-photo-updater";
+pub const SYSTEM_HELPER_PATH: &str = "/usr/bin/vrc-photon-updater";
 pub const SYSTEM_POLICY_PATH: &str =
-    "/usr/share/polkit-1/actions/com.tommyz.vrc-photo-manager.update.policy";
+    "/usr/share/polkit-1/actions/com.tommyz.vrc-photon.update.policy";
 
 impl InstallKind {
     pub fn system_package_apply(
@@ -655,7 +655,7 @@ pub fn system_policy_available() -> bool {
 
 - [x] **Step 5: テストを通す**
 
-Run: `cargo test -p vrc-photo-update install::tests`
+Run: `cargo test -p vrc-photon-update install::tests`
 Expected: PASS
 
 - [x] **Step 6: commit**
@@ -709,7 +709,7 @@ fn available_update_carries_the_signed_manifest() {
 fn system_platforms() -> serde_json::Value {
     serde_json::json!({
         "linux-x86_64": {
-            "url": "https://example.com/vrc-photo-manager_0.4.0_x86_64.AppImage",
+            "url": "https://example.com/vrc-photon_0.4.0_x86_64.AppImage",
             "format": "appimage",
             "size": 1024,
             "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -717,7 +717,7 @@ fn system_platforms() -> serde_json::Value {
         },
         "system_packages": {
             "pacman": {
-                "url": "https://example.com/vrc-photo-manager-0.4.0-1-x86_64.pkg.tar.zst",
+                "url": "https://example.com/vrc-photon-0.4.0-1-x86_64.pkg.tar.zst",
                 "format": "pacman",
                 "size": 1024,
                 "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
@@ -764,7 +764,7 @@ asset が `Some` になるよう名前と期待値を変更する。`system_pack
 
 - [x] **Step 2: テストを失敗させる**
 
-Run: `cargo test -p vrc-photo-update check::tests::system_package_check_selects_the_pacman_asset_and_keeps_the_manifest`
+Run: `cargo test -p vrc-photon-update check::tests::system_package_check_selects_the_pacman_asset_and_keeps_the_manifest`
 Expected: FAIL（`signed_manifest` がない）
 
 - [x] **Step 3: `SignedManifest` / `AvailableUpdate` を実装する**
@@ -804,7 +804,7 @@ signed_manifest: SignedManifest {
 `AvailableUpdate { ... }` に以下を追加する。
 
 ```rust
-signed_manifest: vrc_photo_update::SignedManifest {
+signed_manifest: vrc_photon_update::SignedManifest {
     bytes: Vec::new(),
     signature: String::new(),
 },
@@ -812,10 +812,10 @@ signed_manifest: vrc_photo_update::SignedManifest {
 
 - [x] **Step 5: テストを通す**
 
-Run: `cargo test -p vrc-photo-update`
+Run: `cargo test -p vrc-photon-update`
 Expected: PASS
 
-Run: `cargo test -p vrc-photo-ui update_view::tests`
+Run: `cargo test -p vrc-photon-ui update_view::tests`
 Expected: PASS
 
 - [x] **Step 6: commit**
@@ -889,7 +889,7 @@ fn system_package_fixture(dir: &Path, version: &str) -> (ApplyJob, HelperOptions
         "system_packages": {
             "pacman": {
                 "url": format!(
-                    "https://example.com/vrc-photo-manager-{version}-1-x86_64.pkg.tar.zst"
+                    "https://example.com/vrc-photon-{version}-1-x86_64.pkg.tar.zst"
                 ),
                 "format": "pacman",
                 "size": package.len(),
@@ -914,7 +914,7 @@ fn system_package_fixture(dir: &Path, version: &str) -> (ApplyJob, HelperOptions
     let staged = data_dir
         .join(format!("updates/downloads/{version}"))
         .join(format!(
-            "vrc-photo-manager-{version}-1-x86_64.pkg.tar.zst"
+            "vrc-photon-{version}-1-x86_64.pkg.tar.zst"
         ));
     std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
     std::fs::write(&staged, package).unwrap();
@@ -925,7 +925,7 @@ fn system_package_fixture(dir: &Path, version: &str) -> (ApplyJob, HelperOptions
         },
         from_version: "0.3.0".to_string(),
         to_version: version.to_string(),
-        target: "/usr/bin/vrc-photo-manager".into(),
+        target: "/usr/bin/vrc-photon".into(),
         staged,
         signature: base64::engine::general_purpose::STANDARD
             .encode(asset_signature.as_bytes()),
@@ -1026,7 +1026,7 @@ fn system_package_rejects_a_symlink() {
 
 - [x] **Step 2: テストを失敗させる**
 
-Run: `cargo test -p vrc-photo-update helper::tests::system_package_rejects_a_bad_manifest_signature`
+Run: `cargo test -p vrc-photon-update helper::tests::system_package_rejects_a_bad_manifest_signature`
 Expected: FAIL（`LastErrorCode` / `verify_system_package` がない）
 
 - [x] **Step 3: error / LastResult の型を追加する**
@@ -1130,7 +1130,7 @@ struct TempPackage {
 impl TempPackage {
     fn create(dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(dir).map_err(|error| UpdateError::io(dir, error))?;
-        let path = dir.join(format!("vrc-photo-update-{}.pkg", uuid::Uuid::new_v4()));
+        let path = dir.join(format!("vrc-photon-update-{}.pkg", uuid::Uuid::new_v4()));
         let file = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -1364,7 +1364,7 @@ pub(crate) fn verify_system_package(
 
 - [x] **Step 6: テストを通す**
 
-Run: `cargo test -p vrc-photo-update helper::tests::system_package`
+Run: `cargo test -p vrc-photon-update helper::tests::system_package`
 Expected: PASS（ダウングレード / 署名 / staging / symlink）
 
 - [x] **Step 7: `LastResult` の code を既存テストに反映する**
@@ -1372,7 +1372,7 @@ Expected: PASS（ダウングレード / 署名 / staging / symlink）
 `helper.rs` の既存 `LastResult` リテラルと `crates/ui/src/update_view.rs` tests の
 `LastResult` リテラルに `code: None` を追加する。
 
-Run: `cargo test -p vrc-photo-update helper::tests`
+Run: `cargo test -p vrc-photon-update helper::tests`
 Expected: PASS
 
 - [x] **Step 8: commit**
@@ -1477,7 +1477,7 @@ fn system_package_rejects_a_package_version_mismatch() {
     let (job, mut options) = system_package_fixture(dir.path(), &next_version());
     options.pacman_path = Some(fake_pacman(
         dir.path(),
-        "Name            : vrc-photo-manager\nVersion         : 0.3.0-1",
+        "Name            : vrc-photon\nVersion         : 0.3.0-1",
         0,
         "",
     ));
@@ -1493,7 +1493,7 @@ fn system_package_maps_pacman_lock_to_package_manager_locked() {
     let dir = tempfile::tempdir().unwrap();
     let version = next_version();
     let (job, mut options) = system_package_fixture(dir.path(), &version);
-    let metadata = format!("Name            : vrc-photo-manager\nVersion         : {version}-1");
+    let metadata = format!("Name            : vrc-photon\nVersion         : {version}-1");
     options.pacman_path = Some(fake_pacman(
         dir.path(),
         &metadata,
@@ -1512,7 +1512,7 @@ fn system_package_runs_the_fixed_pacman_command() {
     let dir = tempfile::tempdir().unwrap();
     let version = next_version();
     let (job, mut options) = system_package_fixture(dir.path(), &version);
-    let metadata = format!("Name            : vrc-photo-manager\nVersion         : {version}-1");
+    let metadata = format!("Name            : vrc-photon\nVersion         : {version}-1");
     options.pacman_path = Some(fake_pacman(
         dir.path(),
         &metadata,
@@ -1530,7 +1530,7 @@ fn system_package_runs_the_fixed_pacman_command() {
 
 - [x] **Step 2: テストを失敗させる**
 
-Run: `cargo test -p vrc-photo-update helper::tests::package_version_normalization_accepts_revisions`
+Run: `cargo test -p vrc-photon-update helper::tests::package_version_normalization_accepts_revisions`
 Expected: FAIL（`package_version_matches` がない）
 
 - [x] **Step 3: メタデータとコマンドを実装する**
@@ -1694,7 +1694,7 @@ pub(crate) fn run_system_package_from_job(
         _ => return Err(UpdateError::InvalidJob("not a system package job".to_string())),
     };
     let metadata = read_package_metadata(family, temp.path(), options)?;
-    if metadata.name != "vrc-photo-manager" {
+    if metadata.name != "vrc-photon" {
         return Err(UpdateError::PackageMetadataMismatch(format!(
             "unexpected package name {}",
             metadata.name
@@ -1713,7 +1713,7 @@ pub(crate) fn run_system_package_from_job(
 
 - [x] **Step 4: テストを通す**
 
-Run: `cargo test -p vrc-photo-update helper::tests::system_package`
+Run: `cargo test -p vrc-photon-update helper::tests::system_package`
 Expected: PASS
 
 - [x] **Step 5: commit**
@@ -1729,7 +1729,7 @@ git commit -m "feat(update): verify package metadata and run fixed install comma
 
 **Files:**
 - Modify: `crates/update/src/helper.rs`
-- Modify: `crates/update/src/bin/vrc-photo-updater.rs`
+- Modify: `crates/update/src/bin/vrc-photon-updater.rs`
 - Modify: `crates/update/Cargo.toml` (`libc` on unix)
 - Modify: `Cargo.toml` (workspace `libc`)
 - Test: `crates/update/src/helper.rs` の `#[cfg(test)]`
@@ -1797,7 +1797,7 @@ fn only_preinstall_failures_cleanup_the_job() {
 
 - [x] **Step 2: テストを失敗させる**
 
-Run: `cargo test -p vrc-photo-update helper::tests::maps_pkexec_exit_codes`
+Run: `cargo test -p vrc-photon-update helper::tests::maps_pkexec_exit_codes`
 Expected: FAIL（`map_pkexec_status` がない）
 
 - [x] **Step 3: libc と root ガードを追加する**
@@ -1827,7 +1827,7 @@ pub fn effective_uid() -> u32 {
 }
 ```
 
-`crates/update/src/bin/vrc-photo-updater.rs`:
+`crates/update/src/bin/vrc-photon-updater.rs`:
 
 ```rust
 fn main() {
@@ -1836,12 +1836,12 @@ fn main() {
     let path = args.next();
     match (command.as_deref(), path) {
         (Some("--apply"), Some(path)) => {
-            if !vrc_photo_update::helper::user_mode_allowed(vrc_photo_update::helper::effective_uid()) {
-                eprintln!("vrc-photo-updater: --apply must not run as root");
+            if !vrc_photon_update::helper::user_mode_allowed(vrc_photon_update::helper::effective_uid()) {
+                eprintln!("vrc-photon-updater: --apply must not run as root");
                 std::process::exit(10);
             }
-            if let Err(error) = vrc_photo_update::helper::run_helper(Path::new(&path)) {
-                eprintln!("vrc-photo-updater: {error}");
+            if let Err(error) = vrc_photon_update::helper::run_helper(Path::new(&path)) {
+                eprintln!("vrc-photon-updater: {error}");
                 std::process::exit(error.helper_exit_code());
             }
         }
@@ -1849,24 +1849,24 @@ fn main() {
             let pkexec_uid = std::env::var("PKEXEC_UID")
                 .ok()
                 .and_then(|value| value.parse::<u32>().ok());
-            if !vrc_photo_update::helper::system_mode_allowed(
-                vrc_photo_update::helper::effective_uid(),
+            if !vrc_photon_update::helper::system_mode_allowed(
+                vrc_photon_update::helper::effective_uid(),
                 pkexec_uid,
             ) {
-                eprintln!("vrc-photo-updater: --apply-system-package requires pkexec");
+                eprintln!("vrc-photon-updater: --apply-system-package requires pkexec");
                 std::process::exit(10);
             }
-            let options = vrc_photo_update::helper::HelperOptions::default();
+            let options = vrc_photon_update::helper::HelperOptions::default();
             if let Err(error) =
-                vrc_photo_update::helper::run_system_package(Path::new(&path), &options)
+                vrc_photon_update::helper::run_system_package(Path::new(&path), &options)
             {
-                eprintln!("vrc-photo-updater: {error}");
+                eprintln!("vrc-photon-updater: {error}");
                 std::process::exit(error.helper_exit_code());
             }
         }
         _ => {
-            eprintln!("usage: vrc-photo-updater --apply <job.json>");
-            eprintln!("       vrc-photo-updater --apply-system-package <job.json>");
+            eprintln!("usage: vrc-photon-updater --apply <job.json>");
+            eprintln!("       vrc-photon-updater --apply-system-package <job.json>");
             std::process::exit(2);
         }
     }
@@ -2057,13 +2057,13 @@ if matches!(job.kind, ApplyKind::SystemPackage { .. }) {
 
 - [x] **Step 5: テストを通す**
 
-Run: `cargo test -p vrc-photo-update helper::tests`
+Run: `cargo test -p vrc-photon-update helper::tests`
 Expected: PASS
 
 - [x] **Step 6: commit**
 
 ```bash
-git add Cargo.toml crates/update/Cargo.toml crates/update/src/helper.rs crates/update/src/bin/vrc-photo-updater.rs
+git add Cargo.toml crates/update/Cargo.toml crates/update/src/helper.rs crates/update/src/bin/vrc-photon-updater.rs
 git commit -m "feat(update): orchestrate system package updates through pkexec"
 ```
 
@@ -2165,7 +2165,7 @@ fn failed_notice_is_shown_on_the_new_version() {
 
 - [x] **Step 2: テストを失敗させる**
 
-Run: `cargo test -p vrc-photo-ui update_view::tests::system_package_can_apply_only_when_ready`
+Run: `cargo test -p vrc-photon-ui update_view::tests::system_package_can_apply_only_when_ready`
 Expected: FAIL（`can_apply` の引数が足りない）
 
 - [x] **Step 3: UpdateState と can_apply を実装する**
@@ -2180,11 +2180,11 @@ let auth_unavailable = last_result
     .as_ref()
     .is_some_and(|result| result.code == Some(LastErrorCode::AuthUnavailable));
 let system_apply_available = install.system_package_apply(
-    vrc_photo_update::pkexec_available(),
-    vrc_photo_update::system_helper_available(),
-    vrc_photo_update::system_policy_available(),
+    vrc_photon_update::pkexec_available(),
+    vrc_photon_update::system_helper_available(),
+    vrc_photon_update::system_policy_available(),
 ) && !auth_unavailable;
-let notice = last_result.and_then(|result| result_notice(&result, vrc_photo_update::CURRENT_VERSION));
+let notice = last_result.and_then(|result| result_notice(&result, vrc_photon_update::CURRENT_VERSION));
 ```
 
 `can_apply`:
@@ -2277,10 +2277,10 @@ update.notice.health_failed: "インストール後の起動確認に失敗し�
 
 - [x] **Step 5: テストを通す**
 
-Run: `cargo test -p vrc-photo-ui update_view::tests`
+Run: `cargo test -p vrc-photon-ui update_view::tests`
 Expected: PASS
 
-Run: `cargo test -p vrc-photo-i18n`
+Run: `cargo test -p vrc-photon-i18n`
 Expected: PASS（ja/en のキーが揃う）
 
 - [x] **Step 6: commit**
@@ -2325,7 +2325,7 @@ fn daemon_start_uses_spawn_for_app_supervisor() {
 
 - [x] **Step 2: テストを失敗させる**
 
-Run: `cargo test -p vrc-photo-ui app::daemon::tests::systemd_supervisor_uses_systemctl`
+Run: `cargo test -p vrc-photon-ui app::daemon::tests::systemd_supervisor_uses_systemctl`
 Expected: FAIL（`should_use_systemd` がない）
 
 - [x] **Step 3: `start_daemon` / `restart_daemon_after_update` を実装する**
@@ -2356,7 +2356,7 @@ fn reload_user_units() {
 pub(crate) fn start_daemon(supervisor: Option<&str>) -> Result<(), String> {
     if should_use_systemd(supervisor) {
         reload_user_units();
-        if systemctl(&["--user", "start", "vrc-photo-daemon.service"]).is_ok() {
+        if systemctl(&["--user", "start", "vrc-photon-daemon.service"]).is_ok() {
             return Ok(());
         }
     }
@@ -2366,7 +2366,7 @@ pub(crate) fn start_daemon(supervisor: Option<&str>) -> Result<(), String> {
 pub(crate) fn restart_daemon_after_update(supervisor: Option<&str>) -> Result<(), String> {
     if should_use_systemd(supervisor) {
         reload_user_units();
-        if systemctl(&["--user", "restart", "vrc-photo-daemon.service"]).is_ok() {
+        if systemctl(&["--user", "restart", "vrc-photon-daemon.service"]).is_ok() {
             return Ok(());
         }
     }
@@ -2410,7 +2410,7 @@ if !self.demo
 
 - [x] **Step 5: テストを通す**
 
-Run: `cargo test -p vrc-photo-ui app::daemon::tests`
+Run: `cargo test -p vrc-photon-ui app::daemon::tests`
 Expected: PASS
 
 - [x] **Step 6: commit**
@@ -2425,7 +2425,7 @@ git commit -m "fix(ui): restart systemd-managed daemons after updates"
 ### Task 9: polkit policy、Packager、Release workflow
 
 **Files:**
-- Create: `packaging/polkit/com.tommyz.vrc-photo-manager.update.policy`
+- Create: `packaging/polkit/com.tommyz.vrc-photon.update.policy`
 - Modify: `Packager.toml`
 - Modify: `.github/workflows/release.yml`
 - Test: release workflow / package inspection
@@ -2437,7 +2437,7 @@ git commit -m "fix(ui): restart systemd-managed daemons after updates"
 
 - [x] **Step 1: policy ファイルを作る**
 
-`packaging/polkit/com.tommyz.vrc-photo-manager.update.policy`:
+`packaging/polkit/com.tommyz.vrc-photon.update.policy`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -2446,17 +2446,17 @@ git commit -m "fix(ui): restart systemd-managed daemons after updates"
  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 <policyconfig>
   <vendor>TommyZ7</vendor>
-  <vendor_url>https://github.com/TommyZ-7/vrc-photo-manager</vendor_url>
-  <action id="com.tommyz.vrc-photo-manager.update-package">
-    <description>Update VRC Photo Manager</description>
-    <message>Authentication is required to update VRC Photo Manager</message>
+  <vendor_url>https://github.com/TommyZ-7/vrc-photon</vendor_url>
+  <action id="com.tommyz.vrc-photon.update-package">
+    <description>Update VRC PhotoN</description>
+    <message>Authentication is required to update VRC PhotoN</message>
     <defaults>
       <allow_any>auth_admin</allow_any>
       <allow_inactive>auth_admin</allow_inactive>
       <allow_active>auth_admin</allow_active>
     </defaults>
     <annotations>
-      <annotation key="org.freedesktop.policykit.exec.path">/usr/bin/vrc-photo-updater</annotation>
+      <annotation key="org.freedesktop.policykit.exec.path">/usr/bin/vrc-photon-updater</annotation>
     </annotations>
   </action>
 </policyconfig>
@@ -2467,7 +2467,7 @@ git commit -m "fix(ui): restart systemd-managed daemons after updates"
 `[deb.files]` と `[pacman.files]` に:
 
 ```toml
-"packaging/polkit/com.tommyz.vrc-photo-manager.update.policy" = "usr/share/polkit-1/actions/com.tommyz.vrc-photo-manager.update.policy"
+"packaging/polkit/com.tommyz.vrc-photon.update.policy" = "usr/share/polkit-1/actions/com.tommyz.vrc-photon.update.policy"
 ```
 
 - [x] **Step 3: Release workflow に makepkg ステップを追加する**
@@ -2496,7 +2496,7 @@ git commit -m "fix(ui): restart systemd-managed daemons after updates"
       - name: Verify polkit policy
         run: |
           set -euo pipefail
-          policy="usr/share/polkit-1/actions/com.tommyz.vrc-photo-manager.update.policy"
+          policy="usr/share/polkit-1/actions/com.tommyz.vrc-photon.update.policy"
           deb=$(ls dist/*.deb)
           pkg=$(ls dist/*.pkg.tar.zst)
           tmp=$(mktemp -d)
@@ -2529,13 +2529,13 @@ jq -e '.schema == 1 and (.platforms | length == 2) and (.system_packages | lengt
 
 - [x] **Step 6: ローカルで policy XML を検証する**
 
-Run: `xmllint --noout packaging/polkit/com.tommyz.vrc-photo-manager.update.policy`
+Run: `xmllint --noout packaging/polkit/com.tommyz.vrc-photon.update.policy`
 Expected: PASS（xmllint がない場合は `python3 -c "import xml.etree.ElementTree as ET; ET.parse('...')"` で代替）
 
 - [x] **Step 7: commit**
 
 ```bash
-git add packaging/polkit/com.tommyz.vrc-photo-manager.update.policy Packager.toml .github/workflows/release.yml
+git add packaging/polkit/com.tommyz.vrc-photon.update.policy Packager.toml .github/workflows/release.yml
 git commit -m "feat(packaging): ship polkit policy and build a real pacman package"
 ```
 
@@ -2630,7 +2630,7 @@ PR に `bundle-check` ラベルを付けるか、packaging 変更を含むため
 `build` ジョブが走ることを確認する。`build` で以下を確認:
 
 - `dist/*.pkg.tar.zst` が存在する
-- `pacman -Qip` が `vrc-photo-manager` / `<version>` を返す
+- `pacman -Qip` が `vrc-photon` / `<version>` を返す
 - deb / pacman に policy が入る
 - `latest.json` の `system_packages` が 2 件
 
@@ -2650,7 +2650,7 @@ deb / pacman の policy 検証、`system_packages` の件数チェックを確�
 4. pacman DB をロックし、エラーが表示され、ロック解除後に再試行できる。
 5. 署名不正のパッケージが通常側 / 特権側の両方で拒否される。
 6. systemd ユーザーサービスでデーモンを動かし、更新後に
-   `systemctl --user is-active vrc-photo-daemon.service` が active。
+   `systemctl --user is-active vrc-photon-daemon.service` が active。
 7. `pkexec` を隠した環境でコマンド表示にフォールバックする。
 
 - [ ] **Step 4: deb の手動 QA を行う（可能な場合）**

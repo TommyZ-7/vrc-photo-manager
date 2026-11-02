@@ -7,7 +7,7 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use vrc_photo_i18n::tr;
+use vrc_photon_i18n::tr;
 
 use crate::app::{App, effective_motion_fps};
 use crate::state::preview::{preview_key, preview_placeholder_label};

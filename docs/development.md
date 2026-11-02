@@ -17,21 +17,21 @@
 ## 2. ビルドと実行
 
 ```bash
-cargo build -p vrc-photo-ui
-cargo build -p vrc-photo-daemon
-cargo build -p vrc-photo-update
+cargo build -p vrc-photon-ui
+cargo build -p vrc-photon-daemon
+cargo build -p vrc-photon-update
 ```
 
 更新の署名・マニフェスト生成ツールはRelease専用:
 
 ```bash
-cargo build -p vrc-photo-release-tool --bin vrc-photo-update-manifest
+cargo build -p vrc-photon-release-tool --bin vrc-photon-update-manifest
 ```
 
 ### デモUI
 
 ```bash
-cargo run -p vrc-photo-ui -- --demo
+cargo run -p vrc-photon-ui -- --demo
 ```
 
 インメモリDBにサンプル18枚を投入する。実DBには触れない。
@@ -39,15 +39,15 @@ cargo run -p vrc-photo-ui -- --demo
 ### 通常起動
 
 ```bash
-cargo run -p vrc-photo-ui
+cargo run -p vrc-photon-ui
 ```
 
-デーモンが未起動（ハートビートが古い）場合、同じディレクトリの `vrc-photo-daemon` を自動起動する。
+デーモンが未起動（ハートビートが古い）場合、同じディレクトリの `vrc-photon-daemon` を自動起動する。
 
 ### デーモン
 
 ```bash
-cargo run -p vrc-photo-daemon -- \
+cargo run -p vrc-photon-daemon -- \
   --photo-dir "/path/to/Pictures/VRChat" \
   --log-dir "/path/to/AppData/LocalLow/VRChat/VRChat"
 ```
@@ -67,27 +67,27 @@ cargo run -p vrc-photo-daemon -- \
 ### ヘッドレス
 
 ```bash
-cargo run -p vrc-photo-daemon -- --no-tray
+cargo run -p vrc-photon-daemon -- --no-tray
 ```
 
 ## 3. 環境変数
 
 | 変数 | 用途 |
 |---|---|
-| `VRC_PHOTO_DIR` | 写真フォルダの上書き |
+| `VRC_PHOTON_DIR` | 写真フォルダの上書き |
 | `VRC_LOG_DIR` | ログフォルダの上書き |
-| `VRC_PHOTO_DB` | DBパスの上書き |
+| `VRC_PHOTON_DB` | DBパスの上書き |
 | `RUST_LOG` | ログレベル（例: `debug`） |
 | `APPIMAGE` | AppImage実行時に自動設定される。自動起動と更新のパス解決に使用 |
-| `VRC_PHOTO_UPDATE_FEED` | 更新マニフェストURLの上書き（ミラー・QA用） |
-| `VRC_PHOTO_UPDATE_PUBLIC_KEY` | デバッグビルドのみ。埋め込み公開鍵を1つ上書き（QA用） |
-| `VRC_PHOTO_HEALTH_TOKEN` | 更新ヘルパーが新UIへ渡す内部トークン。通常は設定しない |
+| `VRC_PHOTON_UPDATE_FEED` | 更新マニフェストURLの上書き（ミラー・QA用） |
+| `VRC_PHOTON_UPDATE_PUBLIC_KEY` | デバッグビルドのみ。埋め込み公開鍵を1つ上書き（QA用） |
+| `VRC_PHOTON_HEALTH_TOKEN` | 更新ヘルパーが新UIへ渡す内部トークン。通常は設定しない |
 
 ## 4. データの場所
 
-- DB: ユーザーデータディレクトリの `vrc-photo-manager/library.db`
-  - Linux: `~/.local/share/vrc-photo-manager/`
-  - Windows: `%LOCALAPPDATA%\vrc-photo-manager\`
+- DB: ユーザーデータディレクトリの `vrc-photon/library.db`
+  - Linux: `~/.local/share/vrc-photon/`
+  - Windows: `%LOCALAPPDATA%\vrc-photon\`
 - サムネイル: 同 `thumbnails/`
 - 取り込み先の既定: 同 `imported/`
 - 更新: 同 `updates/`（ダウンロード、ジョブ、健康マーカー、結果、ログ、
@@ -95,8 +95,8 @@ cargo run -p vrc-photo-daemon -- --no-tray
 
 更新フィードと署名鍵の設定は [release.md](release.md#10-自動アップデートの署名と配信)
 を参照する。ローカルで更新UIを試すときは、デバッグビルドで
-`VRC_PHOTO_UPDATE_FEED` と `VRC_PHOTO_UPDATE_PUBLIC_KEY` を設定する。
-`VRC_PHOTO_UPDATE_PUBLIC_KEY` はリリースビルドでは無視される。
+`VRC_PHOTON_UPDATE_FEED` と `VRC_PHOTON_UPDATE_PUBLIC_KEY` を設定する。
+`VRC_PHOTON_UPDATE_PUBLIC_KEY` はリリースビルドでは無視される。
 
 ## 5. ローカル検証
 
@@ -180,7 +180,7 @@ AVIF はエンコード時間が支配的なため、デコード削減（約40m
 ### ログ
 
 ```bash
-RUST_LOG=debug cargo run -p vrc-photo-daemon -- --once --photo-dir ... --log-dir ...
+RUST_LOG=debug cargo run -p vrc-photon-daemon -- --once --photo-dir ... --log-dir ...
 ```
 
 ### サンプルデータで試す
@@ -189,7 +189,7 @@ RUST_LOG=debug cargo run -p vrc-photo-daemon -- --once --photo-dir ... --log-dir
 mkdir -p /tmp/vrcpm/photos /tmp/vrcpm/logs
 # VRChat_2026-10-21_21-24-00.000_1920x1080.png を置く
 # output_log_2026-10-21_21-00-00.txt に Joining / OnPlayerJoined を書く
-cargo run -p vrc-photo-daemon -- \
+cargo run -p vrc-photon-daemon -- \
   --db /tmp/vrcpm/library.db \
   --photo-dir /tmp/vrcpm/photos \
   --log-dir /tmp/vrcpm/logs \
@@ -201,7 +201,7 @@ cargo run -p vrc-photo-daemon -- \
 `sqlite3` が使える環境では `library.db` を直接確認できる。書き込み中はWALを考慮する。
 
 ```bash
-sqlite3 ~/.local/share/vrc-photo-manager/library.db \
+sqlite3 ~/.local/share/vrc-photon/library.db \
   "select id,file_name,status from photos order by id desc limit 10;"
 ```
 

@@ -23,15 +23,15 @@ use gpui_kit::component::notification::NotificationType;
 use gpui_kit::component::slider::{SliderEvent, SliderState};
 use gpui_kit::component::*;
 use gpui_kit::*;
-use vrc_photo_core::db::Db;
-use vrc_photo_core::model::{
+use vrc_photon_core::db::Db;
+use vrc_photon_core::model::{
     CompressionJob, CompressionProfile, DaemonError, DeletionCounts, DeletionRequest, Derivative,
     LibraryStats, Photo, PhotoPlayer, PhotoTextFilter,
 };
-use vrc_photo_core::settings::AppSettings;
-use vrc_photo_core::thumbnail::ThumbnailCacheUsage;
-use vrc_photo_i18n::{tr, tr_args};
-use vrc_photo_ipc::Endpoint;
+use vrc_photon_core::settings::AppSettings;
+use vrc_photon_core::thumbnail::ThumbnailCacheUsage;
+use vrc_photon_i18n::{tr, tr_args};
+use vrc_photon_ipc::Endpoint;
 
 use crate::app::cli::{log_timing, process_start, timing_enabled};
 use crate::app::compression::{ManualCompressionDialog, profile_name_update};
@@ -83,7 +83,7 @@ pub(crate) enum Screen {
 
 impl Screen {
     pub(crate) fn title(self) -> String {
-        self.title_in(&vrc_photo_i18n::current_locale())
+        self.title_in(&vrc_photon_i18n::current_locale())
     }
 
     pub(crate) fn title_in(self, locale: &str) -> String {
@@ -95,7 +95,7 @@ impl Screen {
             Self::Integrations => "nav.integrations",
             Self::Settings => "nav.settings",
         };
-        vrc_photo_i18n::tr_in(locale, key)
+        vrc_photon_i18n::tr_in(locale, key)
     }
 }
 
@@ -397,7 +397,7 @@ impl App {
     }
 
     pub(crate) fn set_language(&mut self, code: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let code = vrc_photo_i18n::normalize(code);
+        let code = vrc_photon_i18n::normalize(code);
         if self.settings.language == code {
             return;
         }
@@ -409,7 +409,7 @@ impl App {
             cx.notify();
             return;
         }
-        vrc_photo_i18n::set_locale(&code);
+        vrc_photon_i18n::set_locale(&code);
         self.update_input_placeholders(window, cx);
         self.library.borrow_mut().invalidate_labels();
         self.search_view.borrow_mut().invalidate_labels();
@@ -434,11 +434,11 @@ impl App {
         ];
         for (input, key) in inputs {
             input.update(cx, |state, cx| {
-                state.set_placeholder(vrc_photo_i18n::tr(key), window, cx);
+                state.set_placeholder(vrc_photon_i18n::tr(key), window, cx);
             });
         }
         self.note_edit_input.update(cx, |state, cx| {
-            state.set_placeholder(vrc_photo_i18n::tr("input.note"), window, cx);
+            state.set_placeholder(vrc_photon_i18n::tr("input.note"), window, cx);
         });
     }
 
@@ -449,13 +449,13 @@ impl App {
     ) -> Self {
         let (db, demo, database_ok, message, demo_assets) = open_database(options);
         let db_path = db.path().and_then(|path| std::fs::canonicalize(path).ok());
-        let health_token = std::env::var("VRC_PHOTO_HEALTH_TOKEN").ok();
+        let health_token = std::env::var("VRC_PHOTON_HEALTH_TOKEN").ok();
         let updating = health_token.is_some();
         let mut initial_settings = AppSettings::load(&db).unwrap_or_else(|error| {
             tracing::warn!(%error, "cannot load app settings; using defaults");
             AppSettings::default()
         });
-        initial_settings.language = vrc_photo_i18n::set_locale(&initial_settings.language);
+        initial_settings.language = vrc_photon_i18n::set_locale(&initial_settings.language);
         let initial_palette = resolve(
             &initial_settings.ui_theme_main,
             &initial_settings.ui_theme_accent,
@@ -575,8 +575,8 @@ impl App {
         );
         let thumbnail_quality_slider = cx.new(|_| {
             SliderState::new()
-                .min(f32::from(vrc_photo_core::thumbnail::THUMBNAIL_QUALITY_MIN))
-                .max(f32::from(vrc_photo_core::thumbnail::THUMBNAIL_QUALITY_MAX))
+                .min(f32::from(vrc_photon_core::thumbnail::THUMBNAIL_QUALITY_MIN))
+                .max(f32::from(vrc_photon_core::thumbnail::THUMBNAIL_QUALITY_MAX))
                 .step(1.0)
                 .default_value(f32::from(initial_settings.thumbnail_quality))
         });

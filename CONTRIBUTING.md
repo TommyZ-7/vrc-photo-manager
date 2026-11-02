@@ -29,7 +29,7 @@ Issue / PR を歓迎します。English is welcome.
 2. `git worktree` で作業ブランチを切る。
 
    ```bash
-   git worktree add ../vrc-photo-manager-<topic> -b <type>/<topic>
+   git worktree add ../vrc-photon-<topic> -b <type>/<topic>
    ```
 
 3. 変更を実装し、ローカル検証を直列で実行する。
@@ -74,7 +74,7 @@ deb / AppImage / pacmanに影響する変更は、PRでReleaseワークフロー
 
 ## ライセンス
 
-- アプリ本体: MIT（`LICENSE`）
+- アプリ本体: GPL-3.0-or-later（`LICENSE`）
 - バンドルフォント: SIL OFL 1.1（`crates/ui/assets/LICENSE-NotoSansJP.txt`）
 - Lucide アイコン: ISC、Feather 由来分は MIT（`packaging/licenses/LICENSE-LUCIDE`）
 - 一覧とパッケージ内の配置: [docs/licenses.md](docs/licenses.md)

@@ -1,4 +1,4 @@
-# VRC Photo Manager
+# VRC PhotoN
 
 VRChatの写真を、撮影時のワールド・同接プレイヤー・日時と一緒に管理するデスクトップアプリ。
 
@@ -60,8 +60,8 @@ UIとデーモンは同じSQLite（WAL）を共有する。重い書き込みは
 - Windows: MSVC Build Tools、Windows SDK、CMake、Ninja。DirectX 12対応GPUを推奨
 
 ```bash
-cargo build -p vrc-photo-ui
-cargo build -p vrc-photo-daemon
+cargo build -p vrc-photon-ui
+cargo build -p vrc-photon-daemon
 ```
 
 ## 起動
@@ -71,7 +71,7 @@ cargo build -p vrc-photo-daemon
 サンプルデータでUIだけを確認する。
 
 ```bash
-cargo run -p vrc-photo-ui -- --demo
+cargo run -p vrc-photon-ui -- --demo
 ```
 
 ### 実データ
@@ -79,13 +79,13 @@ cargo run -p vrc-photo-ui -- --demo
 1. デーモンを起動する。写真フォルダとログフォルダを自動検出できない場合は明示する。
 
 ```bash
-cargo run -p vrc-photo-daemon -- --photo-dir "/path/to/Pictures/VRChat" --log-dir "/path/to/AppData/LocalLow/VRChat/VRChat"
+cargo run -p vrc-photon-daemon -- --photo-dir "/path/to/Pictures/VRChat" --log-dir "/path/to/AppData/LocalLow/VRChat/VRChat"
 ```
 
 2. UIを起動する。
 
 ```bash
-cargo run -p vrc-photo-ui
+cargo run -p vrc-photon-ui
 ```
 
 デーモンとUIは同じDBを参照する。UIの「再読込」で最新状態を取得する。
@@ -93,36 +93,36 @@ cargo run -p vrc-photo-ui
 ### 1回だけスキャン
 
 ```bash
-cargo run -p vrc-photo-daemon -- --once --photo-dir ... --log-dir ...
+cargo run -p vrc-photon-daemon -- --once --photo-dir ... --log-dir ...
 ```
 
 `--compress-pending` を付けると、キューにある圧縮ジョブを処理して終了する。
 
 ```bash
-cargo run -p vrc-photo-daemon -- --once --compress-pending --photo-dir ...
+cargo run -p vrc-photon-daemon -- --once --compress-pending --photo-dir ...
 ```
 
 ### ヘッドレス
 
 ```bash
-cargo run -p vrc-photo-daemon -- --no-tray
+cargo run -p vrc-photon-daemon -- --no-tray
 ```
 
 ## 環境変数
 
 | 変数 | 用途 |
 |---|---|
-| `VRC_PHOTO_DIR` | 写真フォルダの上書き |
+| `VRC_PHOTON_DIR` | 写真フォルダの上書き |
 | `VRC_LOG_DIR` | VRChatログフォルダの上書き |
-| `VRC_PHOTO_DB` | SQLiteファイルの上書き |
-| `VRC_PHOTO_UPDATE_FEED` | 更新マニフェストURLの上書き（ミラー・QA用） |
+| `VRC_PHOTON_DB` | SQLiteファイルの上書き |
+| `VRC_PHOTON_UPDATE_FEED` | 更新マニフェストURLの上書き（ミラー・QA用） |
 | `RUST_LOG` | ログレベル（例: `debug`） |
 
 ## データの保存先
 
-- DB: OSのユーザーデータディレクトリ配下 `vrc-photo-manager/library.db`
-  - Linux: `~/.local/share/vrc-photo-manager/`
-  - Windows: `%LOCALAPPDATA%\vrc-photo-manager\`
+- DB: OSのユーザーデータディレクトリ配下 `vrc-photon/library.db`
+  - Linux: `~/.local/share/vrc-photon/`
+  - Windows: `%LOCALAPPDATA%\vrc-photon\`
 - サムネイル: 同ディレクトリの `thumbnails/`
 - 更新ファイル・適用ログ・旧版バックアップ: 同ディレクトリの `updates/`
 
@@ -151,7 +151,7 @@ cargo test --workspace
 
 ## ライセンス
 
-MIT。同梱アセットの通知とパッケージ内の配置は [docs/licenses.md](docs/licenses.md) を参照。
+GPL-3.0-or-later（0.9.x 以前は MIT）。同梱アセットの通知とパッケージ内の配置は [docs/licenses.md](docs/licenses.md) を参照。
 
 - Noto Sans JP: SIL Open Font License 1.1（`crates/ui/assets/LICENSE-NotoSansJP.txt`）
 - Lucide アイコン（`gpui-kit-assets` 経由）: ISC、Feather 由来分は MIT（`packaging/licenses/LICENSE-LUCIDE`）

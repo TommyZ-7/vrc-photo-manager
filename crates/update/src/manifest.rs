@@ -328,10 +328,10 @@ mod tests {
             "schema": 1,
             "version": "0.4.0",
             "pub_date": "2026-10-24T12:00:00Z",
-            "notes_url": "https://github.com/TommyZ-7/vrc-photo-manager/releases/tag/v0.4.0",
+            "notes_url": "https://github.com/TommyZ-7/vrc-photon/releases/tag/v0.4.0",
             "platforms": {
                 "linux-x86_64": {
-                    "url": "https://github.com/x/y/releases/download/v0.4.0/vrc-photo-manager_0.4.0_x86_64.AppImage",
+                    "url": "https://github.com/x/y/releases/download/v0.4.0/vrc-photon_0.4.0_x86_64.AppImage",
                     "format": "appimage",
                     "size": 1024,
                     "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -349,14 +349,14 @@ mod tests {
     fn system_packages() -> Value {
         serde_json::json!({
             "pacman": {
-                "url": "https://example.com/vrc-photo-manager-0.4.0-1-x86_64.pkg.tar.zst",
+                "url": "https://example.com/vrc-photon-0.4.0-1-x86_64.pkg.tar.zst",
                 "format": "pacman",
                 "size": 1024,
                 "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
                 "signature": crate::verify::test_signature()
             },
             "deb": {
-                "url": "https://example.com/vrc-photo-manager_0.4.0_amd64.deb",
+                "url": "https://example.com/vrc-photon_0.4.0_amd64.deb",
                 "format": "deb",
                 "size": 1024,
                 "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
@@ -413,7 +413,7 @@ mod tests {
         let mut value = valid_manifest();
         let mut packages = system_packages();
         packages["pacman"]["url"] =
-            serde_json::json!("https://example.com/vrc-photo-manager_0.4.0_x86_64.tar.gz");
+            serde_json::json!("https://example.com/vrc-photon_0.4.0_x86_64.tar.gz");
         value["system_packages"] = packages;
         assert!(matches!(
             parse(&value, false),
@@ -531,7 +531,7 @@ mod tests {
     fn rejects_plain_http_unless_it_is_loopback_and_allowed() {
         let mut value = valid_manifest();
         value["platforms"]["linux-x86_64"]["url"] =
-            serde_json::json!("http://example.com/vrc-photo-manager_0.4.0_x86_64.AppImage");
+            serde_json::json!("http://example.com/vrc-photon_0.4.0_x86_64.AppImage");
         assert!(matches!(
             parse(&value, false),
             Err(UpdateError::InvalidManifest(_))
@@ -542,7 +542,7 @@ mod tests {
         ));
 
         value["platforms"]["linux-x86_64"]["url"] =
-            serde_json::json!("http://127.0.0.1:8000/vrc-photo-manager_0.4.0_x86_64.AppImage");
+            serde_json::json!("http://127.0.0.1:8000/vrc-photon_0.4.0_x86_64.AppImage");
         assert!(parse(&value, true).is_ok());
         assert!(matches!(
             parse(&value, false),

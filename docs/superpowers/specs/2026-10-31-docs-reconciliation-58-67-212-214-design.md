@@ -1,10 +1,10 @@
 # Docs reconciliation for issues 58, 67, 212, and 214
 
 - Date: 2026-10-31
-- Issues: [#58](https://github.com/TommyZ-7/vrc-photo-manager/issues/58),
-  [#67](https://github.com/TommyZ-7/vrc-photo-manager/issues/67),
-  [#212](https://github.com/TommyZ-7/vrc-photo-manager/issues/212),
-  [#214](https://github.com/TommyZ-7/vrc-photo-manager/issues/214)
+- Issues: [#58](https://github.com/TommyZ-7/vrc-photon/issues/58),
+  [#67](https://github.com/TommyZ-7/vrc-photon/issues/67),
+  [#212](https://github.com/TommyZ-7/vrc-photon/issues/212),
+  [#214](https://github.com/TommyZ-7/vrc-photon/issues/214)
 - Status: Approved
 
 ## Intent

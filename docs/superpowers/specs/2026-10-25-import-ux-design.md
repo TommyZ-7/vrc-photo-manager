@@ -1,7 +1,7 @@
 # Import UX: Design
 
 - Date: 2026-10-25
-- Issue: [#16 feat: 取り込みUX改善（フォルダ選択・保存先変更・進捗）](https://github.com/TommyZ-7/vrc-photo-manager/issues/16)
+- Issue: [#16 feat: 取り込みUX改善（フォルダ選択・保存先変更・進捗）](https://github.com/TommyZ-7/vrc-photon/issues/16)
 - Status: Approved in session
 - Target: `crates/core/src/importer.rs`, `crates/ui/src/main.rs`, `docs/features.md`, `docs/ui.md`
 
@@ -50,7 +50,7 @@ user decision on 2026-10-25.
   imported photos before asking the daemon to rescan, so an imported
   photo can miss the daemon's `new_ids` auto-compression path. That is
   existing behavior and is tracked separately in
-  [#97](https://github.com/TommyZ-7/vrc-photo-manager/issues/97).
+  [#97](https://github.com/TommyZ-7/vrc-photon/issues/97).
 - Resuming an import after the result panel is closed.
 - The remaining #56 edge cases: scrolling for the partial-move and scan
   failure sections, thumbnail failure visibility, and `photo_by_id` error

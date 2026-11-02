@@ -10,9 +10,9 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use vrc_photo_core::importer::ImportMode;
-use vrc_photo_core::settings::CardSize;
-use vrc_photo_i18n::tr;
+use vrc_photon_core::importer::ImportMode;
+use vrc_photon_core::settings::CardSize;
+use vrc_photon_i18n::tr;
 
 use crate::app::{App, Screen};
 use crate::ui::theme::*;
@@ -232,7 +232,7 @@ impl App {
                     .truncate()
                     .text_size(px(11.))
                     .text_color(rgb(p.muted))
-                    .child("VRC Photo Manager"),
+                    .child("VRC PhotoN"),
             )
             .child(div().w(px(1.)).h(px(14.)).bg(rgba(p.highlight)))
             .child(

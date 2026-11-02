@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::component::window_paddings;
 use gpui_kit::{Bounds, Edges, Pixels, Size, Window, point, px, size};
-use vrc_photo_core::model::{CompressionFormat, CompressionProfile};
-use vrc_photo_core::settings::CardSize;
-use vrc_photo_i18n::tr;
+use vrc_photon_core::model::{CompressionFormat, CompressionProfile};
+use vrc_photon_core::settings::CardSize;
+use vrc_photon_i18n::tr;
 
 pub(crate) use crate::ui::palette::{Palette, lerp_color, with_alpha};
 

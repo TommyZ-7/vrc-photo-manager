@@ -7,8 +7,8 @@
 
 ## リポジトリ
 
-- GitHub: https://github.com/TommyZ-7/vrc-photo-manager
-- ローカル: `/home/takedatomoya/gh_projects/vrc-photo-manager`
+- GitHub: https://github.com/TommyZ-7/vrc-photon
+- ローカル: `/home/takedatomoya/gh_projects/vrc-photon`
 - ブランチ運用: `AGENTS.md` の通り。`main` へ直接pushしない。
 - 作業は `git worktree` を切って別セッションで行う。
 - リリースは `v*.*.*` タグ。タグ作成・Release公開はユーザーの明示指示があるまで行わない。
@@ -35,7 +35,7 @@
 - コピー/移動の写真取り込み
 - OSゴミ箱への写真移動（2段階確認）
 - トレイ常駐、自動起動
-- deb/pacman向けの任意のsystemdユーザーサービス（`vrc-photo-daemon.service`）
+- deb/pacman向けの任意のsystemdユーザーサービス（`vrc-photon-daemon.service`）
 - パッケージ版UIからのデーモン自動起動
 - AppImageの安定した自動起動（`$APPIMAGE --background`）
 - デーモンの二重起動防止
@@ -48,18 +48,18 @@
 ## 実行
 
 ```bash
-cd /home/takedatomoya/gh_projects/vrc-photo-manager
+cd /home/takedatomoya/gh_projects/vrc-photon
 
 # UIデモ
-cargo run -p vrc-photo-ui -- --demo
+cargo run -p vrc-photon-ui -- --demo
 
 # デーモン
-cargo run -p vrc-photo-daemon -- \
+cargo run -p vrc-photon-daemon -- \
   --photo-dir "/path/to/Pictures/VRChat" \
   --log-dir "/path/to/AppData/LocalLow/VRChat/VRChat"
 
 # UI
-cargo run -p vrc-photo-ui
+cargo run -p vrc-photon-ui
 ```
 
 `cargo check`/`build` はWSLで負荷が高いため並列実行しない。

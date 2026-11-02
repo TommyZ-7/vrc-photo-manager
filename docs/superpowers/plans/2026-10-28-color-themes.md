@@ -130,7 +130,7 @@ Add a `#[cfg(test)] mod tests` with: `hsl_roundtrip`, `contrast_ratio_known_pair
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-ui palette::tests --no-default-features`
+Run: `cargo test -p vrc-photon-ui palette::tests --no-default-features`
 Expected: compile errors for the missing types/functions.
 
 - [ ] **Step 3: Implement the types, catalog, and colour maths**
@@ -139,7 +139,7 @@ Use the catalog and template tables from the spec verbatim. Implement HSL↔RGB 
 
 - [ ] **Step 4: Run the palette tests**
 
-Run: `cargo test -p vrc-photo-ui palette::tests`
+Run: `cargo test -p vrc-photon-ui palette::tests`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -165,7 +165,7 @@ Add `theme_settings_roundtrip`, `missing_theme_fields_default_to_charcoal_and_sk
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-core theme_settings`
+Run: `cargo test -p vrc-photon-core theme_settings`
 Expected: compile errors for missing fields.
 
 - [ ] **Step 3: Add the fields and defaults**
@@ -174,7 +174,7 @@ Add `#[serde(default = "default_ui_theme_main")]` and `default_ui_theme_accent`,
 
 - [ ] **Step 4: Run the core tests**
 
-Run: `cargo test -p vrc-photo-core settings`
+Run: `cargo test -p vrc-photon-core settings`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -212,7 +212,7 @@ In `main.rs`, delete the `Theme::change(..., Dark, ...)` block and its `global_m
 
 - [ ] **Step 4: Check the crate**
 
-Run: `cargo check -p vrc-photo-ui`
+Run: `cargo check -p vrc-photon-ui`
 Expected: PASS (no screen uses the palette yet).
 
 - [ ] **Step 5: Commit**
@@ -250,7 +250,7 @@ It is an `impl App` render path, so use `let p = self.palette;` and map the bell
 
 - [ ] **Step 4: Check**
 
-Run: `cargo check -p vrc-photo-ui`
+Run: `cargo check -p vrc-photon-ui`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -280,7 +280,7 @@ In each `impl App` method add `let p = self.palette;`. Replace `BG`, `PANEL`, `P
 
 - [ ] **Step 3: Check**
 
-Run: `cargo check -p vrc-photo-ui`
+Run: `cargo check -p vrc-photon-ui`
 Expected: PASS.
 
 - [ ] **Step 4: Commit**
@@ -312,8 +312,8 @@ The marker becomes `p.panel_header` with `p.text` and a `p.border_strong` ring; 
 
 - [ ] **Step 3: Check and test**
 
-Run: `cargo check -p vrc-photo-ui`
-Run: `cargo test -p vrc-photo-ui state::year_rail`
+Run: `cargo check -p vrc-photon-ui`
+Run: `cargo test -p vrc-photon-ui state::year_rail`
 Expected: PASS.
 
 - [ ] **Step 4: Commit**
@@ -345,7 +345,7 @@ Same rules. Additionally:
 
 - [ ] **Step 2: Check**
 
-Run: `cargo check -p vrc-photo-ui`
+Run: `cargo check -p vrc-photon-ui`
 Expected: PASS.
 
 - [ ] **Step 3: Commit**
@@ -374,8 +374,8 @@ Update/remove `glass_and_panel_tokens_follow_the_spec` and any test importing th
 
 - [ ] **Step 3: Run the tests**
 
-Run: `cargo test -p vrc-photo-ui palette::tests`
-Run: `cargo test -p vrc-photo-ui no_hardcoded`
+Run: `cargo test -p vrc-photon-ui palette::tests`
+Run: `cargo test -p vrc-photon-ui no_hardcoded`
 Expected: PASS.
 
 - [ ] **Step 4: Commit**
@@ -411,8 +411,8 @@ Each returns early if unchanged; otherwise capture the previous settings + palet
 
 - [ ] **Step 3: Check and test**
 
-Run: `cargo check -p vrc-photo-ui`
-Run: `cargo test -p vrc-photo-core settings`
+Run: `cargo check -p vrc-photon-ui`
+Run: `cargo test -p vrc-photon-core settings`
 Expected: PASS.
 
 - [ ] **Step 4: Manual check (demo mode)**

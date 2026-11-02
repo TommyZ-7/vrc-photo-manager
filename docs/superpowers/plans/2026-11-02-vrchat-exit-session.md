@@ -72,7 +72,7 @@ fn log_mtime_reads_the_last_ingested_mtime() {
 
 - [x] **Step 2: テストが失敗することを確認**
 
-Run: `cargo test -p vrc-photo-core db::tests::open_sessions_returns_only_unfinished_sessions db::tests::log_mtime_reads_the_last_ingested_mtime`
+Run: `cargo test -p vrc-photon-core db::tests::open_sessions_returns_only_unfinished_sessions db::tests::log_mtime_reads_the_last_ingested_mtime`
 Expected: コンパイルエラー（`open_sessions` / `log_mtime` が未定義）
 
 - [x] **Step 3: 最小実装を追加**
@@ -117,7 +117,7 @@ pub fn log_mtime(&self, log_file: &str) -> Result<Option<i64>> {
 
 - [x] **Step 4: テストが通ることを確認**
 
-Run: `cargo test -p vrc-photo-core db::tests::open_sessions_returns_only_unfinished_sessions db::tests::log_mtime_reads_the_last_ingested_mtime`
+Run: `cargo test -p vrc-photon-core db::tests::open_sessions_returns_only_unfinished_sessions db::tests::log_mtime_reads_the_last_ingested_mtime`
 Expected: PASS
 
 - [x] **Step 5: コミット**
@@ -161,7 +161,7 @@ fn close_current_session_closes_at_the_given_time() {
 
 - [x] **Step 2: テストが失敗することを確認**
 
-Run: `cargo test -p vrc-photo-core log_parser::tests::close_current_session_closes_at_the_given_time`
+Run: `cargo test -p vrc-photon-core log_parser::tests::close_current_session_closes_at_the_given_time`
 Expected: コンパイルエラー（`close_current_session` が未定義）
 
 - [x] **Step 3: 実装**
@@ -191,7 +191,7 @@ pub fn finish(&mut self, db: &Db, timestamp_utc: i64) -> Result<()> {
 
 - [x] **Step 4: テストが通ることを確認**
 
-Run: `cargo test -p vrc-photo-core log_parser::tests`
+Run: `cargo test -p vrc-photon-core log_parser::tests`
 Expected: PASS
 
 - [x] **Step 5: コミット**
@@ -239,7 +239,7 @@ mod tests {
 
 - [x] **Step 2: テストが失敗することを確認**
 
-Run: `cargo test -p vrc-photo-daemon vrchat_process::tests::matches_vrchat_comm_with_line_endings`
+Run: `cargo test -p vrc-photon-daemon vrchat_process::tests::matches_vrchat_comm_with_line_endings`
 Expected: コンパイルエラー（モジュール未定義）
 
 - [x] **Step 3: 実装**
@@ -326,8 +326,8 @@ pub fn is_running() -> Option<bool> {
 
 Run:
 ```bash
-cargo test -p vrc-photo-daemon vrchat_process::tests::matches_vrchat_comm_with_line_endings
-cargo check -p vrc-photo-daemon --target x86_64-pc-windows-gnu
+cargo test -p vrc-photon-daemon vrchat_process::tests::matches_vrchat_comm_with_line_endings
+cargo check -p vrc-photon-daemon --target x86_64-pc-windows-gnu
 ```
 Expected: 両方 PASS（Windows はコンパイルのみ）
 
@@ -392,7 +392,7 @@ fn startup_repairs_open_sessions_at_the_log_mtime() {
 
 - [x] **Step 2: テストが失敗することを確認**
 
-Run: `cargo test -p vrc-photo-daemon startup_repairs_open_sessions_at_the_log_mtime`
+Run: `cargo test -p vrc-photon-daemon startup_repairs_open_sessions_at_the_log_mtime`
 Expected: FAIL（`open_sessions` が1件、`ended_at` が `None`）
 
 - [x] **Step 3: 実装**
@@ -403,7 +403,7 @@ fn modified_utc(path: &Path) -> Option<i64> {
         .ok()?
         .modified()
         .ok()
-        .map(vrc_photo_core::time::from_system_time)
+        .map(vrc_photon_core::time::from_system_time)
         .map(|stamp| stamp.utc)
 }
 
@@ -440,7 +440,7 @@ self.repair_open_sessions()?;
 
 - [x] **Step 4: テストが通ることを確認**
 
-Run: `cargo test -p vrc-photo-daemon startup_repairs_open_sessions_at_the_log_mtime`
+Run: `cargo test -p vrc-photon-daemon startup_repairs_open_sessions_at_the_log_mtime`
 Expected: PASS
 
 - [x] **Step 5: コミット**
@@ -477,7 +477,7 @@ fn vrchat_exit_closes_the_session_at_the_log_mtime_after_consecutive_misses() {
     let join = "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)";
     std::fs::write(&log_path, format!("{join}\n")).unwrap();
     daemon.ingest_logs().unwrap();
-    let started = vrc_photo_core::log_parser::parse_line(join)
+    let started = vrc_photon_core::log_parser::parse_line(join)
         .unwrap()
         .timestamp_utc();
     let mtime = started + 120;
@@ -509,7 +509,7 @@ fn vrchat_exit_closes_the_session_at_the_log_mtime_after_consecutive_misses() {
 
 - [x] **Step 2: テストが失敗することを確認**
 
-Run: `cargo test -p vrc-photo-daemon vrchat_exit_closes_the_session_at_the_log_mtime_after_consecutive_misses`
+Run: `cargo test -p vrc-photon-daemon vrchat_exit_closes_the_session_at_the_log_mtime_after_consecutive_misses`
 Expected: コンパイルエラー（`observe_vrchat_presence` が未定義）
 
 - [x] **Step 3: 実装**
@@ -571,7 +571,7 @@ self.poll_vrchat_presence()?;
 
 - [x] **Step 4: テストが通ることを確認**
 
-Run: `cargo test -p vrc-photo-daemon vrchat_exit_closes_the_session_at_the_log_mtime_after_consecutive_misses`
+Run: `cargo test -p vrc-photon-daemon vrchat_exit_closes_the_session_at_the_log_mtime_after_consecutive_misses`
 Expected: PASS
 
 - [x] **Step 5: コミット**
@@ -603,7 +603,7 @@ fn shutdown_closes_the_session_at_the_log_mtime() {
     let join = "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)";
     std::fs::write(&log_path, format!("{join}\n")).unwrap();
     daemon.ingest_logs().unwrap();
-    let started = vrc_photo_core::log_parser::parse_line(join)
+    let started = vrc_photon_core::log_parser::parse_line(join)
         .unwrap()
         .timestamp_utc();
     let mtime = started + 120;
@@ -621,7 +621,7 @@ fn shutdown_closes_the_session_at_the_log_mtime() {
 
 - [x] **Step 2: テストが失敗することを確認**
 
-Run: `cargo test -p vrc-photo-daemon shutdown_closes_the_session_at_the_log_mtime`
+Run: `cargo test -p vrc-photon-daemon shutdown_closes_the_session_at_the_log_mtime`
 Expected: FAIL（`ended_at` が現在時刻）
 
 - [x] **Step 3: 実装**
@@ -635,7 +635,7 @@ if let Err(error) = tail.ingestor.finish(&db, ended_at) {
 
 - [x] **Step 4: テストが通ることを確認**
 
-Run: `cargo test -p vrc-photo-daemon shutdown_closes_the_session_at_the_log_mtime`
+Run: `cargo test -p vrc-photon-daemon shutdown_closes_the_session_at_the_log_mtime`
 Expected: PASS
 
 - [x] **Step 5: コミット**
@@ -664,7 +664,7 @@ Expected: すべて PASS
 
 - [x] **Step 2: Windows ターゲットのコンパイル確認**
 
-Run: `cargo check -p vrc-photo-daemon --target x86_64-pc-windows-gnu`
+Run: `cargo check -p vrc-photon-daemon --target x86_64-pc-windows-gnu`
 Expected: PASS
 
 - [x] **Step 3: 計画のチェックボックスを完了に更新**

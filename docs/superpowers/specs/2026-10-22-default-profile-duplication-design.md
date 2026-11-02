@@ -1,7 +1,7 @@
 # Default Compression Profile Duplication Fix Design
 
 - Date: 2026-10-22
-- Issue: [#40 fix(ui): 起動のたびに既定の圧縮プロファイルが重複登録される](https://github.com/TommyZ-7/vrc-photo-manager/issues/40)
+- Issue: [#40 fix(ui): 起動のたびに既定の圧縮プロファイルが重複登録される](https://github.com/TommyZ-7/vrc-photon/issues/40)
 - Status: Approved in session
 - Target: `crates/core/src/model.rs`, `crates/core/src/db.rs`, `crates/ui/src/main.rs`
 

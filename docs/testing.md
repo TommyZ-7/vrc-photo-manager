@@ -10,11 +10,11 @@ cargo test --workspace
 
 2026-10-30時点:
 
-- `vrc-photo-core`: 177件（1件はignored）
-- `vrc-photo-daemon`: 76件
-- `vrc-photo-ipc`: 12件
-- `vrc-photo-update`: 73件
-- `vrc-photo-release-tool`: 5件
+- `vrc-photon-core`: 177件（1件はignored）
+- `vrc-photon-daemon`: 76件
+- `vrc-photon-ipc`: 12件
+- `vrc-photon-update`: 73件
+- `vrc-photon-release-tool`: 5件
 - UI: 228件（GPUIを起動しない純粋ヘルパーとIPCブリッジの単体テスト）
 
 ### ipcの主なテスト
@@ -213,7 +213,7 @@ GPUIのウィンドウは開かず、表示に使う純粋関数だけを検証�
 
 ### ログ
 
-- [ ] `logs/vrc-photo-manager.log` と `logs/vrc-photo-daemon.log` が作成される
+- [ ] `logs/vrc-photon.log` と `logs/vrc-photon-daemon.log` が作成される
 - [ ] 設定画面とダッシュボードの「ログ」カードに保存先と2ファイル名が出る
 - [ ] 「ログフォルダを開く」でOSのファイラーが開く
 - [ ] 10 MiB以上のログファイルが起動時に `.1` へローテーションされる
@@ -267,14 +267,14 @@ GPUIのウィンドウは開かず、表示に使う純粋関数だけを検証�
 - [ ] パッケージ名・バージョンが manifest と違う成果物を拒否する
 - [ ] 現在と同じ、または古いバージョンへのダウングレードを拒否する
 - [ ] systemd ユーザーサービスでデーモンを動かし、更新後に
-      `systemctl --user is-active vrc-photo-daemon.service` が `active` で、
+      `systemctl --user is-active vrc-photon-daemon.service` が `active` で、
       新バージョンで動いていることを確認する
 - [ ] polkit エージェントのないセッション、または `pkexec` をテスト環境から
       アンインストール / 一時退避した環境で、コマンド表示にフォールバックする。
       `pkexec_available()` は PATH に加えて `/usr/bin`・`/bin`・`/usr/local/bin`
       も検索するため、PATH から外すだけでは不十分。`/usr/bin/pkexec` を
       リネームする場合は、確認後に元へ戻す
-- [ ] `/usr/share/polkit-1/actions/com.tommyz.vrc-photo-manager.update.policy`
+- [ ] `/usr/share/polkit-1/actions/com.tommyz.vrc-photon.update.policy`
       がない環境で、generic な `org.freedesktop.policykit.exec` に
       フォールバックせずコマンド表示になる
 - [ ] `system_packages` のない旧 `latest.json` でコマンド表示になる

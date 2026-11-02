@@ -1,4 +1,4 @@
-//! Signed update checks, downloads, and application for VRC Photo Manager.
+//! Signed update checks, downloads, and application for VRC PhotoN.
 //!
 //! The crate is intentionally independent of the UI, the daemon, and SQLite.
 //! The UI drives checks and downloads; the helper binary applies them.

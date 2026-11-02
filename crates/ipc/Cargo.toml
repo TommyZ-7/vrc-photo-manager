@@ -1,5 +1,5 @@
 [package]
-name = "vrc-photo-ipc"
+name = "vrc-photon-ipc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1,5 +1,5 @@
 [package]
-name = "vrc-photo-i18n"
+name = "vrc-photon-i18n"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

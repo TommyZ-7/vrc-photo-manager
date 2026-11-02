@@ -11,7 +11,7 @@ Verify a GUI app in a native Hyprland session without showing it on the workspac
 
 ## Quick reference
 
-Build first: `cargo build -p vrc-photo-ui`
+Build first: `cargo build -p vrc-photon-ui`
 
 | Step | Command |
 |---|---|
@@ -30,7 +30,7 @@ ws9 defaults to DP-3. If the human is working on DP-3, pass `--monitor DP-2` so 
 
 - Hyprland 0.56 is Lua-config era: `hyprctl dispatch exec '[workspace 9 silent] ...'` is a syntax error. The script uses `hyprctl eval` + `hl.dsp.exec_cmd`.
 - `grim -g` needs a visible window; `grim -T <stableId>` captures the toplevel even on a hidden workspace, so screenshots never require switching or stealing focus. `stableId` comes from `hyprctl clients -j`.
-- GPUI sets no `app_id`, so the Hyprland class is empty — never match by class. The script matches the title `VRC Photo Manager`.
+- GPUI sets no `app_id`, so the Hyprland class is empty — never match by class. The script matches the title `VRC PhotoN`.
 - Keys go to the window via `hl.dsp.send_shortcut` / `send_key_state`. Hidden GPUI windows may render state changes late, so `press` briefly focuses ws9, sends the key, captures, then restores the previous window/workspace/cursor. Use `--hidden` only when a delayed update is acceptable.
 - `--window-size WxH` makes the script float and resize the window so `grim -T` yields the exact requested size.
 
@@ -39,7 +39,7 @@ ws9 defaults to DP-3. If the human is working on DP-3, pass `--monitor DP-2` so 
 - The script aborts if ws9 has windows or is visible on any monitor — do not bypass this.
 - After `start` / `press`, confirm the human's focused monitor, workspace, active window, and cursor are unchanged (`hyprctl monitors -j`, `hyprctl activewindow -j`, `hyprctl cursorpos`).
 - Compare the before/after captures (e.g. `cmp -s` or an image diff) so a missed state change cannot pass as success.
-- Always finish with `stop`; ws9 should disappear and no `VRC Photo Manager` client should remain.
+- Always finish with `stop`; ws9 should disappear and no `VRC PhotoN` client should remain.
 - Keep screenshots in `/tmp/opencode`; never commit them.
 
 ## Common mistakes

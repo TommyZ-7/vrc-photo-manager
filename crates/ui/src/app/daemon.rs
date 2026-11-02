@@ -8,9 +8,9 @@ use std::process::Command;
 
 use chrono::Utc;
 use gpui_kit::*;
-use vrc_photo_core::model::{DaemonCommand, DaemonOperation};
-use vrc_photo_i18n::{tr, tr_args};
-use vrc_photo_ipc::{Request as IpcRequest, ScanPhase as IpcScanPhase, StatusSnapshot};
+use vrc_photon_core::model::{DaemonCommand, DaemonOperation};
+use vrc_photon_i18n::{tr, tr_args};
+use vrc_photon_ipc::{Request as IpcRequest, ScanPhase as IpcScanPhase, StatusSnapshot};
 
 use crate::app::App;
 use crate::app::lifecycle::ScanProgressView;
@@ -144,9 +144,9 @@ pub(crate) fn open_path(path: &Path) -> Result<(), String> {
 
 fn daemon_binary_path() -> Option<PathBuf> {
     let name = if cfg!(target_os = "windows") {
-        "vrc-photo-daemon.exe"
+        "vrc-photon-daemon.exe"
     } else {
-        "vrc-photo-daemon"
+        "vrc-photon-daemon"
     };
     std::env::current_exe()
         .ok()?
@@ -200,7 +200,7 @@ fn reload_user_units() {
 pub(crate) fn start_daemon(supervisor: Option<&str>) -> Result<(), String> {
     if should_use_systemd(supervisor) {
         reload_user_units();
-        if systemctl(&["--user", "start", "vrc-photo-daemon.service"]).is_ok() {
+        if systemctl(&["--user", "start", "vrc-photon-daemon.service"]).is_ok() {
             return Ok(());
         }
     }
@@ -212,7 +212,7 @@ pub(crate) fn start_daemon(supervisor: Option<&str>) -> Result<(), String> {
 pub(crate) fn restart_daemon_after_update(supervisor: Option<&str>) -> Result<(), String> {
     if should_use_systemd(supervisor) {
         reload_user_units();
-        if systemctl(&["--user", "restart", "vrc-photo-daemon.service"]).is_ok() {
+        if systemctl(&["--user", "restart", "vrc-photon-daemon.service"]).is_ok() {
             return Ok(());
         }
     }
@@ -359,7 +359,7 @@ mod tests {
         daemon_sync_label, format_timestamp, ipc_status_label, should_use_systemd,
         status_snapshot_is_newer,
     };
-    use vrc_photo_core::model::DaemonOperation;
+    use vrc_photon_core::model::DaemonOperation;
 
     #[test]
     fn status_snapshot_versions_drop_stale_publishes() {

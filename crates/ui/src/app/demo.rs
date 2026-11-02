@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use chrono::Utc;
-use vrc_photo_core::db::Db;
-use vrc_photo_core::model::{NewPhoto, PhotoContext, PhotoPlayer};
-use vrc_photo_core::time;
-use vrc_photo_i18n::tr_args;
+use vrc_photon_core::db::Db;
+use vrc_photon_core::model::{NewPhoto, PhotoContext, PhotoPlayer};
+use vrc_photon_core::time;
+use vrc_photon_i18n::tr_args;
 
 use crate::app::cli::LaunchOptions;
 use crate::ui::theme::lerp_color;
@@ -24,7 +24,7 @@ pub(crate) struct DemoAssets {
 }
 
 fn prepare_demo(reset: bool) -> Result<(Db, DemoAssets), String> {
-    let root = std::env::temp_dir().join("vrc-photo-manager-demo");
+    let root = std::env::temp_dir().join("vrc-photon-demo");
     if reset {
         match std::fs::remove_dir_all(&root) {
             Ok(()) => {}
@@ -81,11 +81,11 @@ pub(crate) fn open_database(
             ),
         };
     }
-    let path = std::env::var("VRC_PHOTO_DB")
+    let path = std::env::var("VRC_PHOTON_DB")
         .ok()
         .map(PathBuf::from)
-        .or_else(vrc_photo_core::default_db_path)
-        .unwrap_or_else(|| PathBuf::from("vrc-photo-manager.db"));
+        .or_else(vrc_photon_core::default_db_path)
+        .unwrap_or_else(|| PathBuf::from("vrc-photon.db"));
     match Db::open(&path) {
         Ok(db) => (db, false, true, None, None),
         Err(error) => {

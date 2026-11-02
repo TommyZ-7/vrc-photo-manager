@@ -1,6 +1,6 @@
 ## 0. Project profile (fill in per project)
 
-- Project: `vrc-photo-manager`
+- Project: `vrc-photon`
 - Stack / language: `Rust stable (edition 2024) + gpui-kit 0.8 + SQLite`
 - Main branch: `main`
 - Tag pattern: `v*.*.*`

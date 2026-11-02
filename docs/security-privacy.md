@@ -71,15 +71,15 @@ VRChatの表示名・ユーザーID・ワールド名は個人情報になり得
   `.pkg.tar.zst` / `.deb` の成果物を同じく HTTPS で取得する。
 - 特権ヘルパーはネットワークを使わない。検証済みのローカルファイルだけを
   `pacman -U` / `dpkg -i` に渡す。`dpkg -i` は依存関係を取得しない。
-- 送信するのは標準的なHTTPヘッダー（`User-Agent: vrc-photo-manager/<version>`）
+- 送信するのは標準的なHTTPヘッダー（`User-Agent: vrc-photon/<version>`）
   だけ。写真、ログ、DB、識別子、利用統計は送らない。polkit の認証情報は
   ローカルの認証エージェントが扱い、アプリは保存も送信もしない。
 - GitHub には接続元IPと取得したReleaseアセットが見える。これはHTTPS配信に
   固有の情報で、アプリが追加で収集するものではない。
 - 更新確認は設定でOFFにできる。OFFでも手動確認は使える。
 - 署名（minisign）とSHA-256を検証できない成果物は適用しない。
-- `VRC_PHOTO_UPDATE_FEED` はミラーやQA用の上書きで、署名要件は変わらない。
-- デバッグビルドだけ `VRC_PHOTO_UPDATE_PUBLIC_KEY` で公開鍵を差し替えられる。
+- `VRC_PHOTON_UPDATE_FEED` はミラーやQA用の上書きで、署名要件は変わらない。
+- デバッグビルドだけ `VRC_PHOTON_UPDATE_PUBLIC_KEY` で公開鍵を差し替えられる。
   リリースビルドは無視する。
 
 将来、VRChat APIやクラウド同期を追加する場合:
@@ -104,9 +104,9 @@ VRChatの表示名・ユーザーID・ワールド名は個人情報になり得
 | 特権ヘルパー (`--apply-system-package`) | root（`pkexec`） | staging・署名・メタデータの再検証、固定コマンドでのインストール | UI の起動、ネットワーク、結果ファイルの書き込み |
 | パッケージマネージャ | root | `pacman -U` / `dpkg -i` によるファイル配置 | アプリが指定した任意コマンドの実行 |
 
-- polkit action は `com.tommyz.vrc-photo-manager.update-package` で、
+- polkit action は `com.tommyz.vrc-photon.update-package` で、
   `allow_any` / `allow_inactive` / `allow_active` はすべて `auth_admin`。
-  `org.freedesktop.policykit.exec.path` を `/usr/bin/vrc-photo-updater` に
+  `org.freedesktop.policykit.exec.path` を `/usr/bin/vrc-photon-updater` に
   限定する。
 - `pkexec` は `--disable-internal-agent` 付きで起動する。認証エージェントが
   ない環境では、テキストエージェントにフォールバックせず即座に失敗し、
@@ -120,7 +120,7 @@ VRChatの表示名・ユーザーID・ワールド名は個人情報になり得
 ### 8.2 特権側の防御
 
 - `--apply` は effective uid 0 を拒否する。polkit action が
-  `/usr/bin/vrc-photo-updater` の任意引数を許可するため、ユーザーモードを
+  `/usr/bin/vrc-photon-updater` の任意引数を許可するため、ユーザーモードを
   root で動かすと任意ファイル置換の特権昇格になる。
 - `--apply-system-package` は effective uid 0 かつ `PKEXEC_UID` が設定されて
   いることを要求する。`PKEXEC_UID` は `pkexec` が設定する呼び出し元 UID で、
@@ -132,10 +132,10 @@ VRChatの表示名・ユーザーID・ワールド名は個人情報になり得
   job と一致し、ヘルパー自身のバージョンより新しいことを要求する。
   同じ・古いバージョンはダウングレードとして拒否する。
 - 検証済みファイルは root 所有・mode 0600 の一時ファイル
-  （`/var/tmp/vrc-photo-update-<uuid>.pkg`）へコピーし、コピー先で SHA-256 と
+  （`/var/tmp/vrc-photon-update-<uuid>.pkg`）へコピーし、コピー先で SHA-256 と
   minisign 署名を再検証する。以降のメタデータ確認とインストールはコピー先
   だけを使い、TOCTOU を防ぐ。一時ファイルは成功・失敗にかかわらず削除する。
-- パッケージ名 `vrc-photo-manager` と、epoch / pkgrel / revision を正規化した
+- パッケージ名 `vrc-photon` と、epoch / pkgrel / revision を正規化した
   バージョンをパッケージマネージャ自身の出力（`pacman -Qip` /
   `dpkg-deb -f`）で確認する。
 - 実行コマンドは固定で、シェルを経由しない。
@@ -148,9 +148,9 @@ VRChatの表示名・ユーザーID・ワールド名は個人情報になり得
 - 署名鍵が漏洩した場合、特権側も署名済みパッケージを信頼する。鍵管理は
   ADR-0012 の運用に従う。
 - パッケージのインストールスクリプトは root で実行される。現在の
-  vrc-photo-manager パッケージには install script を同梱していないが、将来
+  vrc-photon パッケージには install script を同梱していないが、将来
   追加する場合はレビューを必須とする。
-- polkit action は `/usr/bin/vrc-photo-updater` の任意引数を許可する。
+- polkit action は `/usr/bin/vrc-photon-updater` の任意引数を許可する。
   引数の検証はヘルパー側で行うため、ヘルパーの検証コードはセキュリティ境界
   として扱う。
 - 管理者権限を持つローカルユーザーは、署名済みで現在より新しいパッケージを

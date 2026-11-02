@@ -11,23 +11,23 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use image::DynamicImage;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use vrc_photo_core::compressor;
-use vrc_photo_core::db::Db;
-use vrc_photo_core::hashing;
-use vrc_photo_core::linker;
-use vrc_photo_core::log_parser::LogIngestor;
-use vrc_photo_core::model::{
+use vrc_photon_core::compressor;
+use vrc_photon_core::db::Db;
+use vrc_photon_core::hashing;
+use vrc_photon_core::linker;
+use vrc_photon_core::log_parser::LogIngestor;
+use vrc_photon_core::model::{
     CompressionJob, CompressionProfile, DaemonCommand, DaemonOperation, DeletionReason,
     DeletionRequest, Derivative, Photo, PhotoStatus, QueueStatus,
 };
-use vrc_photo_core::photo_filename::is_source_photo;
-use vrc_photo_core::scanner::{
+use vrc_photon_core::photo_filename::is_source_photo;
+use vrc_photon_core::scanner::{
     ScanFailure, ScanPhase as CoreScanPhase, ScanProgress, ScanReport, scan_and_index_observed,
     scan_one,
 };
-use vrc_photo_core::settings::{AppSettings, detect_vrchat_paths};
-use vrc_photo_core::thumbnail;
-use vrc_photo_ipc::{Endpoint, Event, JobStatus, Operation, ScanPhase as IpcScanPhase};
+use vrc_photon_core::settings::{AppSettings, detect_vrchat_paths};
+use vrc_photon_core::thumbnail;
+use vrc_photon_ipc::{Endpoint, Event, JobStatus, Operation, ScanPhase as IpcScanPhase};
 
 mod ipc_server;
 mod signals;
@@ -63,7 +63,7 @@ pub struct DaemonStatus {
     pub photo_count: i64,
     pub pending_jobs: i64,
     pub scanning: bool,
-    pub scan_phase: Option<vrc_photo_ipc::ScanPhase>,
+    pub scan_phase: Option<vrc_photon_ipc::ScanPhase>,
     pub scan_processed: usize,
     pub scan_total: Option<usize>,
     pub scan_indexed: usize,
@@ -96,11 +96,11 @@ impl LocalizedError {
     }
 
     fn message(&self) -> String {
-        self.message_in(&vrc_photo_i18n::current_locale())
+        self.message_in(&vrc_photon_i18n::current_locale())
     }
 
     fn message_in(&self, locale: &str) -> String {
-        vrc_photo_i18n::tr_args_in(locale, self.key, &self.args)
+        vrc_photon_i18n::tr_args_in(locale, self.key, &self.args)
     }
 
     fn args_json(&self) -> String {
@@ -288,7 +288,7 @@ impl Daemon {
             );
         }
         let mut settings = AppSettings::load(&db).context("cannot load settings")?;
-        settings.language = vrc_photo_i18n::set_locale(&settings.language);
+        settings.language = vrc_photon_i18n::set_locale(&settings.language);
         if let Some(path) = photo_dir {
             settings.photo_roots = vec![path.to_string_lossy().to_string()];
         }
@@ -310,7 +310,7 @@ impl Daemon {
         }
         settings.save(&db).context("cannot save settings")?;
         let tray_enabled = settings.tray;
-        let thumbnail_dir = vrc_photo_core::thumbnail::thumbnails_dir()
+        let thumbnail_dir = vrc_photon_core::thumbnail::thumbnails_dir()
             .unwrap_or_else(|| PathBuf::from("thumbnails"));
         let thumbnail_cache_limit = Arc::new(AtomicU64::new(thumbnail_cache_limit_bytes(
             settings.thumbnail_cache_mb,
@@ -347,7 +347,7 @@ impl Daemon {
             })
             .collect();
         let ipc_endpoint =
-            vrc_photo_core::data_dir().and_then(|dir| match Endpoint::for_data_dir(&dir) {
+            vrc_photon_core::data_dir().and_then(|dir| match Endpoint::for_data_dir(&dir) {
                 Ok(endpoint) => Some(endpoint),
                 Err(error) => {
                     tracing::warn!(%error, "cannot resolve IPC endpoint");
@@ -581,7 +581,7 @@ impl Daemon {
             let db = self.db.lock().unwrap();
             AppSettings::load(&db)?
         };
-        settings.language = vrc_photo_i18n::normalize(&settings.language);
+        settings.language = vrc_photon_i18n::normalize(&settings.language);
         let language_changed = settings.language != self.settings.language;
         if settings.autostart != self.settings.autostart {
             self.apply_autostart(settings.autostart);
@@ -596,7 +596,7 @@ impl Daemon {
         );
         self.settings = settings;
         if language_changed {
-            vrc_photo_i18n::set_locale(&self.settings.language);
+            vrc_photon_i18n::set_locale(&self.settings.language);
             if let Some(tray) = self.tray.as_mut() {
                 tray.set_language();
             }
@@ -941,7 +941,7 @@ impl Daemon {
             }
             if self.settings.photo_roots.is_empty() {
                 tracing::warn!(
-                    "no VRChat photo folder detected; set VRC_PHOTO_DIR or configure settings"
+                    "no VRChat photo folder detected; set VRC_PHOTON_DIR or configure settings"
                 );
             } else {
                 let db = self.db.lock().unwrap();
@@ -1174,7 +1174,7 @@ impl Daemon {
                     tracing::warn!(path = %root.display(), "photo root does not exist");
                     report.failures.push(ScanFailure {
                         path: root,
-                        message: vrc_photo_i18n::tr!("daemon.photo_root_missing"),
+                        message: vrc_photon_i18n::tr!("daemon.photo_root_missing"),
                     });
                     continue;
                 }
@@ -1647,7 +1647,7 @@ impl Daemon {
         let cgroup = std::fs::read_to_string("/proc/self/cgroup").ok();
         let supervisor = if cgroup
             .as_deref()
-            .is_some_and(|cgroup| cgroup_has_unit(cgroup, "vrc-photo-daemon.service"))
+            .is_some_and(|cgroup| cgroup_has_unit(cgroup, "vrc-photon-daemon.service"))
         {
             "systemd"
         } else {
@@ -1738,7 +1738,7 @@ impl Daemon {
         };
         let exe = exe.to_string_lossy();
         let mut builder = auto_launch::AutoLaunchBuilder::new();
-        builder.set_app_name("VRC Photo Manager").set_app_path(&exe);
+        builder.set_app_name("VRC PhotoN").set_app_path(&exe);
         match builder.build() {
             Ok(auto) => {
                 let result = if enabled {
@@ -1876,7 +1876,7 @@ impl Daemon {
             self.thumbnail_handle = Some(handle);
             if let Ok(db) = self.db.lock()
                 && let Ok(photos) =
-                    db.list_photos(5000, 0, vrc_photo_core::model::PhotoSort::Newest)
+                    db.list_photos(5000, 0, vrc_photon_core::model::PhotoSort::Newest)
             {
                 for photo in photos {
                     if let Err(error) = tx.send(photo.id) {
@@ -2760,7 +2760,7 @@ fn process_photo_batch_inner(
         db.lock().unwrap().set_photo_blake3(photo.id, &hash)?;
     }
 
-    let Some(image) = vrc_photo_core::image_decode::decode_image(&source_path) else {
+    let Some(image) = vrc_photon_core::image_decode::decode_image(&source_path) else {
         return fail_batch(
             db,
             jobs,
@@ -2934,7 +2934,7 @@ fn modified_utc(path: &Path) -> Option<i64> {
         .ok()?
         .modified()
         .ok()
-        .map(vrc_photo_core::time::from_system_time)
+        .map(vrc_photon_core::time::from_system_time)
         .map(|stamp| stamp.utc)
 }
 
@@ -3003,7 +3003,7 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::time::SystemTime;
-    use vrc_photo_core::model::DeletionStatus;
+    use vrc_photon_core::model::DeletionStatus;
 
     #[test]
     fn localized_error_builds_text_and_json_args() {
@@ -3450,7 +3450,7 @@ mod tests {
             let root_id = db
                 .add_root(&broken_root.to_string_lossy(), "reference")
                 .unwrap();
-            db.upsert_photo(&vrc_photo_core::model::NewPhoto {
+            db.upsert_photo(&vrc_photon_core::model::NewPhoto {
                 root_id,
                 rel_path: "lost.png".to_string(),
                 abs_path: broken_root.join("lost.png").to_string_lossy().to_string(),
@@ -3543,7 +3543,7 @@ mod tests {
         let db = Db::open(&db_path).unwrap();
         assert!(db.daemon_errors().unwrap().is_empty());
         assert!(db.log_offset(log_path.to_str().unwrap()).unwrap().is_some());
-        let joined_at = vrc_photo_core::log_parser::parse_line(
+        let joined_at = vrc_photon_core::log_parser::parse_line(
             "2026.10.21 21:23:20 Debug      -  [Behaviour] OnPlayerJoined Mio (usr_a)",
         )
         .unwrap()
@@ -3575,7 +3575,7 @@ mod tests {
             ] {
                 ingestor.ingest_line(&db, line).unwrap();
             }
-            let captured_at = vrc_photo_core::log_parser::parse_line(
+            let captured_at = vrc_photon_core::log_parser::parse_line(
                 "2026.10.21 21:24:00 Debug      -  [Behaviour] Unloading scenes",
             )
             .unwrap()
@@ -3589,7 +3589,7 @@ mod tests {
                 .to_string_lossy()
                 .to_string();
             let photo_id = db
-                .upsert_photo(&vrc_photo_core::model::NewPhoto {
+                .upsert_photo(&vrc_photon_core::model::NewPhoto {
                     root_id: root,
                     rel_path: file_name.clone(),
                     abs_path: photo_path.to_string_lossy().to_string(),
@@ -3658,7 +3658,7 @@ mod tests {
             db.save_profile(&CompressionProfile {
                 id: "p".to_string(),
                 name: "retry".to_string(),
-                format: vrc_photo_core::model::CompressionFormat::Webp,
+                format: vrc_photon_core::model::CompressionFormat::Webp,
                 suffix: "_retry".to_string(),
                 ..CompressionProfile::default()
             })
@@ -3735,7 +3735,7 @@ mod tests {
 
         let db = Db::open(&db_path).unwrap();
         let photo = db.photo_by_id(photo.id).unwrap().unwrap();
-        assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Present);
+        assert_eq!(photo.status, vrc_photon_core::model::PhotoStatus::Present);
     }
 
     #[cfg(unix)]
@@ -3783,7 +3783,7 @@ mod tests {
 
         let db = Db::open(&db_path).unwrap();
         let photo = db.photo_by_id(photo.id).unwrap().unwrap();
-        assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Present);
+        assert_eq!(photo.status, vrc_photon_core::model::PhotoStatus::Present);
         let errors = db.daemon_errors().unwrap();
         assert_eq!(errors.len(), 1, "errors: {errors:?}");
         assert_eq!(errors[0].operation, DaemonOperation::Scan);
@@ -3838,7 +3838,7 @@ mod tests {
         std::fs::remove_file(&photo_path).unwrap();
         daemon.run_once().unwrap();
         let photo = db.photo_by_id(photo.id).unwrap().unwrap();
-        assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Missing);
+        assert_eq!(photo.status, vrc_photon_core::model::PhotoStatus::Missing);
     }
 
     #[test]
@@ -3938,7 +3938,7 @@ mod tests {
             "2026.10.21 21:23:13 Debug      -  [Behaviour] Joining or Creating Room: Test World";
         std::fs::write(&log_path, format!("{join}\n{name}\n")).unwrap();
         daemon.ingest_logs().unwrap();
-        let started = vrc_photo_core::log_parser::parse_line(join)
+        let started = vrc_photon_core::log_parser::parse_line(join)
             .unwrap()
             .timestamp_utc();
         let mtime = started + 120;
@@ -3994,7 +3994,7 @@ mod tests {
             "2026.10.21 21:23:13 Debug      -  [Behaviour] Joining or Creating Room: Test World";
         std::fs::write(&log_path, format!("{join}\n{name}\n")).unwrap();
         daemon.ingest_logs().unwrap();
-        let started = vrc_photo_core::log_parser::parse_line(join)
+        let started = vrc_photon_core::log_parser::parse_line(join)
             .unwrap()
             .timestamp_utc();
         let mtime = started + 120;
@@ -4027,7 +4027,7 @@ mod tests {
         let join =
             "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)";
         std::fs::write(&log_path, format!("{join}\n")).unwrap();
-        let started = vrc_photo_core::log_parser::parse_line(join)
+        let started = vrc_photon_core::log_parser::parse_line(join)
             .unwrap()
             .timestamp_utc();
         let mtime = started + 60;
@@ -4054,7 +4054,7 @@ mod tests {
         let join =
             "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)";
         std::fs::write(&log_path, format!("{join}\n")).unwrap();
-        let started = vrc_photo_core::log_parser::parse_line(join)
+        let started = vrc_photon_core::log_parser::parse_line(join)
             .unwrap()
             .timestamp_utc();
         let mtime = started + 60;
@@ -4080,7 +4080,7 @@ mod tests {
             "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)";
         std::fs::write(&log_path, format!("{join}\n")).unwrap();
         daemon.ingest_logs().unwrap();
-        let started = vrc_photo_core::log_parser::parse_line(join)
+        let started = vrc_photon_core::log_parser::parse_line(join)
             .unwrap()
             .timestamp_utc();
         let now = chrono::Utc::now().timestamp();
@@ -4118,7 +4118,7 @@ mod tests {
         daemon.ingest_logs().unwrap();
         daemon.observe_vrchat_presence(Some(false)).unwrap();
 
-        let second_started = vrc_photo_core::log_parser::parse_line(second_join)
+        let second_started = vrc_photon_core::log_parser::parse_line(second_join)
             .unwrap()
             .timestamp_utc();
         let db = daemon.db.lock().unwrap();
@@ -4151,7 +4151,7 @@ mod tests {
         daemon.observe_vrchat_presence(Some(false)).unwrap();
 
         let db = daemon.db.lock().unwrap();
-        let started = vrc_photo_core::log_parser::parse_line(join)
+        let started = vrc_photon_core::log_parser::parse_line(join)
             .unwrap()
             .timestamp_utc();
         assert!(
@@ -4172,7 +4172,7 @@ mod tests {
             "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)";
         std::fs::write(&log_path, format!("{join}\n")).unwrap();
         daemon.ingest_logs().unwrap();
-        let started = vrc_photo_core::log_parser::parse_line(join)
+        let started = vrc_photon_core::log_parser::parse_line(join)
             .unwrap()
             .timestamp_utc();
         let mtime = started + 120;
@@ -4206,7 +4206,7 @@ mod tests {
         let db = Db::open(db_path).unwrap();
         db.save_profile(&CompressionProfile {
             name: "test webp".to_string(),
-            format: vrc_photo_core::model::CompressionFormat::Webp,
+            format: vrc_photon_core::model::CompressionFormat::Webp,
             auto_enabled: true,
             quality: 80,
             suffix: "_test".to_string(),
@@ -4291,7 +4291,7 @@ mod tests {
     fn save_batch_profile(
         db: &Db,
         id: &str,
-        format: vrc_photo_core::model::CompressionFormat,
+        format: vrc_photon_core::model::CompressionFormat,
         suffix: &str,
         resize: Option<(u32, u32)>,
     ) {
@@ -4313,7 +4313,7 @@ mod tests {
             id: "lossy".to_string(),
             name: "lossy".to_string(),
             auto_enabled: true,
-            format: vrc_photo_core::model::CompressionFormat::Webp,
+            format: vrc_photon_core::model::CompressionFormat::Webp,
             quality: 10,
             lossless: false,
             resize_enabled: false,
@@ -4326,7 +4326,7 @@ mod tests {
             id: "lossless".to_string(),
             name: "lossless".to_string(),
             auto_enabled: true,
-            format: vrc_photo_core::model::CompressionFormat::Webp,
+            format: vrc_photon_core::model::CompressionFormat::Webp,
             lossless: true,
             resize_enabled: false,
             output_dir: Some("lossless".to_string()),
@@ -4968,7 +4968,7 @@ mod tests {
         let second = dir.path().join("second.webp");
         std::fs::write(&first, b"a").unwrap();
         std::fs::write(&second, b"b").unwrap();
-        let derivative = |id: i64, profile: &str, path: &Path| vrc_photo_core::model::Derivative {
+        let derivative = |id: i64, profile: &str, path: &Path| vrc_photon_core::model::Derivative {
             id,
             photo_id: 1,
             path: path.to_string_lossy().to_string(),
@@ -5021,7 +5021,7 @@ mod tests {
         for index in 0..=100i64 {
             let name = format!("p{index:03}.png");
             let photo_id = db
-                .upsert_photo(&vrc_photo_core::model::NewPhoto {
+                .upsert_photo(&vrc_photon_core::model::NewPhoto {
                     root_id: root,
                     rel_path: name.clone(),
                     abs_path: format!("/photos/{name}"),
@@ -5068,7 +5068,7 @@ mod tests {
         for index in 0..100i64 {
             let name = format!("auto{index:03}.png");
             let photo_id = db
-                .upsert_photo(&vrc_photo_core::model::NewPhoto {
+                .upsert_photo(&vrc_photon_core::model::NewPhoto {
                     root_id: root,
                     rel_path: name.clone(),
                     abs_path: format!("/photos/{name}"),
@@ -5097,7 +5097,7 @@ mod tests {
         let manual_path = dir.path().join("photos/manual.png");
         write_photo(&manual_path);
         let manual_id = db
-            .upsert_photo(&vrc_photo_core::model::NewPhoto {
+            .upsert_photo(&vrc_photon_core::model::NewPhoto {
                 root_id: root,
                 rel_path: "manual.png".to_string(),
                 abs_path: manual_path.to_string_lossy().to_string(),
@@ -5187,7 +5187,7 @@ mod tests {
         let request = db.active_deletion_request(photo.id).unwrap().unwrap();
         assert_eq!(
             request.reason,
-            vrc_photo_core::model::DeletionReason::Unknown
+            vrc_photon_core::model::DeletionReason::Unknown
         );
         assert_eq!(request.status, DeletionStatus::Blocked);
         assert_eq!(request.blocked_reason.as_deref(), Some("unknown_reason"));
@@ -5220,7 +5220,7 @@ mod tests {
         let request_id = db
             .request_deletion(
                 &[photo.id],
-                vrc_photo_core::model::DeletionReason::Manual,
+                vrc_photon_core::model::DeletionReason::Manual,
                 false,
             )
             .unwrap()[0];
@@ -5234,7 +5234,7 @@ mod tests {
         let request = db.deletion_request_by_id(request_id).unwrap().unwrap();
         assert_eq!(
             request.reason,
-            vrc_photo_core::model::DeletionReason::Manual
+            vrc_photon_core::model::DeletionReason::Manual
         );
         assert_eq!(request.status, DeletionStatus::Completed);
         assert!(request.blocked_reason.is_none());
@@ -5316,7 +5316,7 @@ mod tests {
             });
             let original = original_path(&dir);
             write_gradient_photo(&original);
-            let expected = vrc_photo_core::image_decode::decode_image(&original)
+            let expected = vrc_photon_core::image_decode::decode_image(&original)
                 .unwrap()
                 .to_rgba8();
             daemon.run_once().unwrap();
@@ -5360,7 +5360,7 @@ mod tests {
                 .iter()
                 .find(|d| d.profile_id == "lossless")
                 .unwrap();
-            let actual = vrc_photo_core::image_decode::decode_image(Path::new(&lossless.path))
+            let actual = vrc_photon_core::image_decode::decode_image(Path::new(&lossless.path))
                 .unwrap()
                 .to_rgba8();
             assert_eq!(
@@ -5481,14 +5481,14 @@ mod tests {
         save_batch_profile(
             &db,
             "webp",
-            vrc_photo_core::model::CompressionFormat::Webp,
+            vrc_photon_core::model::CompressionFormat::Webp,
             "_webp",
             None,
         );
         save_batch_profile(
             &db,
             "jpeg",
-            vrc_photo_core::model::CompressionFormat::Jpeg,
+            vrc_photon_core::model::CompressionFormat::Jpeg,
             "_jpeg",
             None,
         );
@@ -5522,14 +5522,14 @@ mod tests {
         save_batch_profile(
             &db,
             "small",
-            vrc_photo_core::model::CompressionFormat::Webp,
+            vrc_photon_core::model::CompressionFormat::Webp,
             "_small",
             Some((8, 8)),
         );
         save_batch_profile(
             &db,
             "full",
-            vrc_photo_core::model::CompressionFormat::Webp,
+            vrc_photon_core::model::CompressionFormat::Webp,
             "_full",
             None,
         );
@@ -5571,14 +5571,14 @@ mod tests {
         save_batch_profile(
             &db,
             "good",
-            vrc_photo_core::model::CompressionFormat::Webp,
+            vrc_photon_core::model::CompressionFormat::Webp,
             "_good",
             None,
         );
         save_batch_profile(
             &db,
             "bad",
-            vrc_photo_core::model::CompressionFormat::Webp,
+            vrc_photon_core::model::CompressionFormat::Webp,
             "_bad",
             None,
         );
@@ -5610,14 +5610,14 @@ mod tests {
         save_batch_profile(
             &db,
             "first",
-            vrc_photo_core::model::CompressionFormat::Webp,
+            vrc_photon_core::model::CompressionFormat::Webp,
             "_first",
             None,
         );
         save_batch_profile(
             &db,
             "second",
-            vrc_photo_core::model::CompressionFormat::Webp,
+            vrc_photon_core::model::CompressionFormat::Webp,
             "_second",
             None,
         );
@@ -5647,14 +5647,14 @@ mod tests {
         save_batch_profile(
             &db,
             "first",
-            vrc_photo_core::model::CompressionFormat::Webp,
+            vrc_photon_core::model::CompressionFormat::Webp,
             "_first",
             None,
         );
         save_batch_profile(
             &db,
             "second",
-            vrc_photo_core::model::CompressionFormat::Webp,
+            vrc_photon_core::model::CompressionFormat::Webp,
             "_second",
             None,
         );
@@ -6117,13 +6117,13 @@ mod tests {
         daemon.set_ipc_endpoint(Some(endpoint.clone()));
         daemon.start_ipc();
 
-        let response = vrc_photo_ipc::client::request(
+        let response = vrc_photon_ipc::client::request(
             &endpoint,
-            vrc_photo_ipc::Request::Status,
+            vrc_photon_ipc::Request::Status,
             Duration::from_secs(1),
         )
         .unwrap();
-        assert!(matches!(response, vrc_photo_ipc::Response::Status { .. }));
+        assert!(matches!(response, vrc_photon_ipc::Response::Status { .. }));
         daemon.ipc = None;
     }
 
@@ -6133,7 +6133,7 @@ mod tests {
         let db = Db::open(dir.path().join("library.db")).unwrap();
         let root = db.add_root("/photos", "reference").unwrap();
         let photo_id = db
-            .upsert_photo(&vrc_photo_core::model::NewPhoto {
+            .upsert_photo(&vrc_photon_core::model::NewPhoto {
                 root_id: root,
                 rel_path: "a.png".to_string(),
                 abs_path: "/photos/a.png".to_string(),
@@ -6443,7 +6443,7 @@ mod tests {
             .photo_by_path(path.to_str().unwrap())
             .unwrap()
             .expect("indexed");
-        assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Present);
+        assert_eq!(photo.status, vrc_photon_core::model::PhotoStatus::Present);
 
         std::fs::remove_file(&path).unwrap();
         daemon.dirty_paths.push(path.clone());
@@ -6452,7 +6452,7 @@ mod tests {
             .photo_by_path(path.to_str().unwrap())
             .unwrap()
             .expect("row");
-        assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Missing);
+        assert_eq!(photo.status, vrc_photon_core::model::PhotoStatus::Missing);
     }
 
     #[test]
@@ -6491,7 +6491,7 @@ mod tests {
 
         let photo = db.photo_by_id(photo_id).unwrap().unwrap();
         assert_eq!(photo.abs_path, new_path.to_string_lossy());
-        assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Present);
+        assert_eq!(photo.status, vrc_photon_core::model::PhotoStatus::Present);
         assert_eq!(db.photo_tags(photo_id).unwrap(), vec!["night".to_string()]);
         assert_eq!(db.count_photos().unwrap(), 1);
         assert!(db.library_revision().unwrap() > revision);
@@ -6527,7 +6527,7 @@ mod tests {
 
         let photo = db.photo_by_id(photo_id).unwrap().unwrap();
         assert_eq!(photo.abs_path, new_path.to_string_lossy());
-        assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Present);
+        assert_eq!(photo.status, vrc_photon_core::model::PhotoStatus::Present);
         assert_eq!(db.photo_tags(photo_id).unwrap(), vec!["night".to_string()]);
         assert_eq!(db.count_photos().unwrap(), 1);
     }
@@ -6566,7 +6566,7 @@ mod tests {
         let photo = db.photo_by_id(photo_id).unwrap().unwrap();
         assert_eq!(photo.abs_path, new_path.to_string_lossy());
         assert_eq!(photo.captured_at_utc, captured_at);
-        assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Present);
+        assert_eq!(photo.status, vrc_photon_core::model::PhotoStatus::Present);
         assert_eq!(db.photo_tags(photo_id).unwrap(), vec!["night".to_string()]);
         assert_eq!(db.count_photos().unwrap(), 1);
     }
@@ -6654,7 +6654,7 @@ mod tests {
         daemon.index_dirty_paths().unwrap();
 
         let photo = db.photo_by_id(photo.id).unwrap().unwrap();
-        assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Replaced);
+        assert_eq!(photo.status, vrc_photon_core::model::PhotoStatus::Replaced);
         assert_eq!(photo.display_derivative_id, Some(derivative_id));
         assert_eq!(photo.effective_path(), compressed.to_str().unwrap());
         assert_eq!(db.count_photos().unwrap(), 1);
@@ -6749,7 +6749,7 @@ mod tests {
         daemon.compress_pending().unwrap();
 
         let photo = db.photo_by_id(photo.id).unwrap().unwrap();
-        assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Replaced);
+        assert_eq!(photo.status, vrc_photon_core::model::PhotoStatus::Replaced);
         assert!(photo.display_derivative_id.is_some());
         assert!(
             photo
@@ -6765,13 +6765,13 @@ mod tests {
         // missing one just because its original path is gone.
         daemon.run_once().unwrap();
         let photo = db.photo_by_id(photo.id).unwrap().unwrap();
-        assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Replaced);
+        assert_eq!(photo.status, vrc_photon_core::model::PhotoStatus::Replaced);
 
         let derivative_path = photo.display_path.clone().expect("display derivative");
         std::fs::remove_file(&derivative_path).unwrap();
         daemon.verify_replaced_assets().unwrap();
         let photo = db.photo_by_id(photo.id).unwrap().unwrap();
-        assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Missing);
+        assert_eq!(photo.status, vrc_photon_core::model::PhotoStatus::Missing);
         assert!(photo.display_derivative_id.is_none());
         assert_eq!(db.count_photos().unwrap(), 0);
     }
@@ -6871,16 +6871,16 @@ mod tests {
     #[test]
     fn cgroup_detects_only_the_daemon_unit() {
         assert!(cgroup_has_unit(
-            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/vrc-photo-daemon.service\n",
-            "vrc-photo-daemon.service"
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/vrc-photon-daemon.service\n",
+            "vrc-photon-daemon.service"
         ));
         assert!(!cgroup_has_unit(
             "0::/user.slice/user-1000.slice/user@1000.service/app.slice/app-gnome-firefox-123.scope\n",
-            "vrc-photo-daemon.service"
+            "vrc-photon-daemon.service"
         ));
         assert!(!cgroup_has_unit(
-            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/foo-vrc-photo-daemon.service\n",
-            "vrc-photo-daemon.service"
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/foo-vrc-photon-daemon.service\n",
+            "vrc-photon-daemon.service"
         ));
     }
 }

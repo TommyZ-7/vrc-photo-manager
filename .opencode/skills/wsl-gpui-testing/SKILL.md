@@ -1,6 +1,6 @@
 ---
 name: WSL GPUI Testing
-description: Launch and visually verify the vrc-photo-manager GPUI app in WSL/WSLg, including the experimental dzn/Dozen GPU path and Windows-side window screenshots. Use whenever the user asks to run the UI in WSL, capture a WSLg window image, compare llvmpipe vs GPU rendering, or debug WSL-only click/performance issues (e.g. 「WSLで起動して」「画面を取得して」「クリックが効かない」).
+description: Launch and visually verify the vrc-photon GPUI app in WSL/WSLg, including the experimental dzn/Dozen GPU path and Windows-side window screenshots. Use whenever the user asks to run the UI in WSL, capture a WSLg window image, compare llvmpipe vs GPU rendering, or debug WSL-only click/performance issues (e.g. 「WSLで起動して」「画面を取得して」「クリックが効かない」).
 ---
 
 # WSL GPUI Testing
@@ -21,11 +21,11 @@ The dzn path is a **development workaround**, not release evidence. dzn reports
 Use the existing debug or release binary:
 
 ```bash
-./target/debug/vrc-photo-manager --demo
+./target/debug/vrc-photon --demo
 ```
 
 `--demo` avoids starting the daemon and uses 18 generated photos. Without
-`--demo`, the app starts `vrc-photo-daemon` from the same directory and reads
+`--demo`, the app starts `vrc-photon-daemon` from the same directory and reads
 the real library; use that only when testing daemon/library behavior.
 
 Run GUI commands in the background (the shell tool's background mode, not a
@@ -82,7 +82,7 @@ Build with the main worktree's target directory so dependencies are reused:
 
 ```bash
 cd ../${REPO}-wsl-dzn
-CARGO_TARGET_DIR=../${REPO}/target cargo build -p vrc-photo-ui
+CARGO_TARGET_DIR=../${REPO}/target cargo build -p vrc-photon-ui
 ```
 
 ### 2.3 Launch and verify
@@ -122,7 +122,7 @@ The app is a Wayland client on WSLg, so Linux-side tools (`grim`, `xwd`,
 Then read the PNG with the `read` tool. The script calls the PowerShell helper,
 which:
 
-1. Finds the Windows process `msrdc` whose title matches `VRC Photo Manager*`
+1. Finds the Windows process `msrdc` whose title matches `VRC PhotoN*`
    (WSLg appends `(Ubuntu)` to the title).
 2. Restores it and temporarily makes it topmost.
 3. Captures the client area with `PrintWindow` (falling back to
@@ -171,7 +171,7 @@ retry. Also check that the window is not minimized.
 Check all three conditions:
 
 ```bash
-grep -n "from_env_or_default" ../vrc-photo-manager-wsl-dzn/vendor/gpui-pre-wgpu/src/wgpu_context.rs
+grep -n "from_env_or_default" ../vrc-photon-wsl-dzn/vendor/gpui-pre-wgpu/src/wgpu_context.rs
 echo "$WGPU_ALLOW_UNDERLYING_NONCOMPLIANT_ADAPTER"
 echo "$VK_ICD_FILENAMES"
 ```

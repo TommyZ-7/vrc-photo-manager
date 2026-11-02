@@ -10,9 +10,9 @@ use std::time::Instant;
 
 use chrono::Utc;
 use gpui_kit::*;
-use vrc_photo_core::db::Db;
-use vrc_photo_core::model::{PhotoIndexEntry, PhotoTextFilter};
-use vrc_photo_i18n::tr_args;
+use vrc_photon_core::db::Db;
+use vrc_photon_core::model::{PhotoIndexEntry, PhotoTextFilter};
+use vrc_photon_i18n::tr_args;
 
 use crate::app::App;
 use crate::app::cli::log_timing;
@@ -112,7 +112,7 @@ impl App {
     fn apply_search_result(
         &mut self,
         generation: u64,
-        result: vrc_photo_core::error::Result<Vec<PhotoIndexEntry>>,
+        result: vrc_photon_core::error::Result<Vec<PhotoIndexEntry>>,
         cx: &mut Context<Self>,
     ) {
         if generation != self.search_request {
@@ -219,7 +219,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::has_tag_filter;
-    use vrc_photo_core::model::PhotoTextFilter;
+    use vrc_photon_core::model::PhotoTextFilter;
 
     #[test]
     fn search_refresh_requires_a_non_empty_tag_filter() {

@@ -2,7 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-10-29
-- Related: [#143](https://github.com/TommyZ-7/vrc-photo-manager/issues/143), [#142](https://github.com/TommyZ-7/vrc-photo-manager/issues/142)
+- Related: [#143](https://github.com/TommyZ-7/vrc-photon/issues/143), [#142](https://github.com/TommyZ-7/vrc-photon/issues/142)
 
 ## Context
 

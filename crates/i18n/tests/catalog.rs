@@ -1,4 +1,4 @@
-use vrc_photo_i18n::{DEFAULT_LOCALE, MISSING, keys, locales, normalize, tr_args_in, tr_in};
+use vrc_photon_i18n::{DEFAULT_LOCALE, MISSING, keys, locales, normalize, tr_args_in, tr_in};
 
 #[test]
 fn normalizes_known_and_unknown_codes() {

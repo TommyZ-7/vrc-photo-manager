@@ -7,9 +7,9 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use vrc_photo_core::logging::{DAEMON_LOG_FILE, UI_LOG_FILE, logs_dir};
-use vrc_photo_core::model::DeletionStatus;
-use vrc_photo_i18n::{tr, tr_args};
+use vrc_photon_core::logging::{DAEMON_LOG_FILE, UI_LOG_FILE, logs_dir};
+use vrc_photon_core::model::DeletionStatus;
+use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::App;
 use crate::app::daemon::{

@@ -187,7 +187,7 @@ mod tests {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-core preview`
+Run: `cargo test -p vrc-photon-core preview`
 Expected: FAIL because `crates/core/src/preview.rs` has no functions yet
 (`cannot find function ...`).
 
@@ -275,7 +275,7 @@ Add `pub mod preview;` to `crates/core/src/lib.rs`.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-core preview`
+Run: `cargo test -p vrc-photon-core preview`
 Expected: PASS (6 tests).
 
 - [ ] **Step 5: Commit**
@@ -293,7 +293,7 @@ git commit -m "feat(core): add 1200px preview cache"
 - Modify: `crates/ui/src/main.rs`
 
 **Interfaces:**
-- Consumes: `vrc_photo_core::preview::{decode_preview, ensure_preview_in, previews_dir}` and `PREVIEW_MAX` from Task 1.
+- Consumes: `vrc_photon_core::preview::{decode_preview, ensure_preview_in, previews_dir}` and `PREVIEW_MAX` from Task 1.
 - Produces:
   - `#[derive(Debug, Clone, Copy, PartialEq, Eq)] struct PreviewKey { photo_id: i64, variant: i64 }`
   - `fn preview_key(photo: &Photo) -> PreviewKey`
@@ -363,7 +363,7 @@ fn preview_key_uses_the_display_derivative() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-ui preview_queue preview_key`
+Run: `cargo test -p vrc-photon-ui preview_queue preview_key`
 Expected: FAIL because `PreviewQueue`, `PreviewKey`, and `preview_key` are not
 defined.
 
@@ -434,14 +434,14 @@ impl PreviewQueue {
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-ui preview_queue preview_key`
+Run: `cargo test -p vrc-photon-ui preview_queue preview_key`
 Expected: PASS (4 tests).
 
 - [ ] **Step 5: Replace the synchronous preview load**
 
 In `crates/ui/src/main.rs`:
 
-- Add `use vrc_photo_core::preview;` next to the existing `thumbnail` import.
+- Add `use vrc_photon_core::preview;` next to the existing `thumbnail` import.
 - Add `preview_key: Option<PreviewKey>` and `preview_queue: PreviewQueue` to the
   `App` struct next to `preview`, and `preview_key: None` /
   `preview_queue: PreviewQueue::default()` to the initializer.
@@ -590,7 +590,7 @@ fn preview_render_image(mut rgba: image::RgbaImage) -> Arc<RenderImage> {
 
 - [ ] **Step 6: Run the UI tests**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: PASS.
 
 - [ ] **Step 7: Commit**
@@ -655,7 +655,7 @@ handler.
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -732,7 +732,7 @@ fn warm_previews(&mut self, jobs: Vec<(PreviewKey, PathBuf)>, cx: &mut Context<S
 
 - [ ] **Step 2: Run the tests**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: PASS.
 
 - [ ] **Step 3: Commit**
@@ -761,8 +761,8 @@ Expected: all commands exit 0.
 Build the debug binary and run the demo with timing enabled:
 
 ```bash
-cargo build -p vrc-photo-ui
-DISPLAY=:0 VRC_PHOTO_TIMING=1 ./target/debug/vrc-photo-manager --demo --demo-reset --window-size 1280x820
+cargo build -p vrc-photon-ui
+DISPLAY=:0 VRC_PHOTON_TIMING=1 ./target/debug/vrc-photon --demo --demo-reset --window-size 1280x820
 ```
 
 Expected in the log:
