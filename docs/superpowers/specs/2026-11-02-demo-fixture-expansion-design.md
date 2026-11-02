@@ -56,7 +56,9 @@ The DB schema and the production import path do not change.
 - Within a month, the day is spread evenly with
   `1 + (index * days_in_month / count + month_offset) % days_in_month`.
   Hours and minutes use deterministic modular arithmetic over 24h/60m.
-  Invalid local times (DST gaps) are moved forward by one hour.
+  Invalid local times (DST gaps) are moved forward by one hour. The current
+  month uses `reference.day()` as its day count so demo photos never land in
+  the future.
 - Eight worlds and eight player names keep their current values. A linked
   photo's world starts at `(month_offset + index_in_month) % 8`; players
   start at `(month_offset * 2 + index_in_month) % 8` and number 3-7.

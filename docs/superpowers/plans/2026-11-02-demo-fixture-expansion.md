@@ -1,6 +1,6 @@
 # Demo Fixture Expansion Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Replace the 18-photo demo fixture with a deterministic 300-photo fixture spanning 36 months, using pooled images and a version marker for automatic reseeding.
 
@@ -22,7 +22,11 @@
 
 ## Review Focus
 
-- **DST gaps:** a local wall-clock time may not exist (spring-forward). The fixture must move it forward instead of dropping the photo, and every `captured_at.local` must stay inside its intended month. Covered by `fixture_spans_36_months_and_300_photos`.
+- **DST gaps and future dates:** a local wall-clock time may not exist
+  (spring-forward). The fixture must move it forward instead of dropping the
+  photo, every `captured_at.local` must stay inside its intended month, and
+  no photo may be dated after the reference day. Covered by
+  `fixture_spans_36_months_and_300_photos`.
 - **Stale demo roots:** an existing 18-photo demo must be rebuilt without requiring a CLI flag. Covered by `demo_version_marker_detects_stale_data`; manual check in Task 3.
 - **Unlinked filter:** the UI's unlinked view depends on a missing `photo_context` row, not just a missing world name. Covered by the `unlinked` assertions in `seed_demo_populates_three_years_of_library`.
 - **Thumbnail coverage:** every photo must have a copied thumbnail, otherwise the gallery shows permanent placeholders. Covered by the thumbnail loop in `seed_demo_populates_three_years_of_library`.
@@ -46,7 +50,7 @@
   - `pub(crate) struct DemoPhoto { pub(crate) captured_at: LocalStamp, pub(crate) palette: usize, pub(crate) world: Option<usize>, pub(crate) players: Vec<PhotoPlayer>, pub(crate) tags: Vec<String>, pub(crate) favorite: bool, pub(crate) compressed: bool }`
   - `pub(crate) fn demo_fixture(reference: NaiveDate) -> Vec<DemoPhoto>`
 
-- [ ] **Step 1: Write the failing fixture tests**
+- [x] **Step 1: Write the failing fixture tests**
 
 Add `crates/ui/src/app/demo_fixture.rs` with only the tests below. The module has no implementation yet, so it fails to compile.
 
@@ -104,6 +108,15 @@ mod tests {
         );
         for (month, count) in &counts {
             assert!((5..=13).contains(count), "{month} has {count} photos");
+        }
+
+        let reference_date = reference().format("%Y-%m-%d").to_string();
+        for photo in &photos {
+            let date = &photo.captured_at.local[..10];
+            assert!(
+                date <= reference_date.as_str(),
+                "{date} is after {reference_date}"
+            );
         }
     }
 
@@ -165,7 +178,7 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Register the module and run the tests to verify failure**
+- [x] **Step 2: Register the module and run the tests to verify failure**
 
 Add `pub(crate) mod demo_fixture;` next to `pub(crate) mod demo;` in `crates/ui/src/app.rs`.
 
@@ -173,7 +186,7 @@ Run: `cargo test -p vrc-photon-ui fixture_ --no-run`
 
 Expected: FAIL because `DemoPhoto`, `demo_fixture`, and the constants do not exist yet.
 
-- [ ] **Step 3: Implement the fixture generator**
+- [x] **Step 3: Implement the fixture generator**
 
 In `crates/ui/src/app/demo_fixture.rs`, add the imports and constants:
 
@@ -208,6 +221,8 @@ Implement `demo_fixture` with this algorithm:
 4. Compute the first day of that month and the first day of the next month
    with a `month_start(reference, months_ago: u32) -> NaiveDate` helper using
    `div_euclid` / `rem_euclid`; `days_in_month` is their difference in days.
+   For `months_ago == 0`, use `reference.day()` instead so the current month
+   never contains future dates.
 5. For `index_in_month in 0..count`:
    - `linked = global % 7 != 0`
    - `day = 1 + (index_in_month * days_in_month / count + months_ago) % days_in_month`
@@ -228,13 +243,13 @@ Add `fn local_stamp(date: NaiveDate, hour: u32, minute: u32) -> LocalStamp`:
 build the naive time, call `time::from_naive`, and on `None` add one hour and
 retry (at most 24 times) so DST gaps do not drop or panic the fixture.
 
-- [ ] **Step 4: Run the fixture tests**
+- [x] **Step 4: Run the fixture tests**
 
 Run: `cargo test -p vrc-photon-ui fixture_ -v`
 
 Expected: all four `fixture_*` tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/ui/src/app.rs crates/ui/src/app/demo_fixture.rs
@@ -257,7 +272,7 @@ git commit -m "feat(ui): add deterministic 300-photo demo fixture"
   - `fn demo_data_is_current(root: &Path) -> bool`
   - `fn seed_demo(db: &Db, photo_dir: &Path, reference: NaiveDate) -> Result<(), String>`
 
-- [ ] **Step 1: Write the failing seed and version tests**
+- [x] **Step 1: Write the failing seed and version tests**
 
 Add these tests to the existing `#[cfg(test)] mod tests` in
 `crates/ui/src/app/demo.rs`:
@@ -372,14 +387,14 @@ fn seed_demo_populates_three_years_of_library() {
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify failure**
+- [x] **Step 2: Run the tests to verify failure**
 
 Run: `cargo test -p vrc-photon-ui demo_version_marker --no-run`
 
 Expected: FAIL because `DEMO_VERSION_FILE`, `DEMO_DATA_VERSION`,
 `demo_data_is_current`, and the new `seed_demo` signature are missing.
 
-- [ ] **Step 3: Implement the version marker and auto-reseed**
+- [x] **Step 3: Implement the version marker and auto-reseed**
 
 In `crates/ui/src/app/demo.rs`:
 
@@ -402,7 +417,7 @@ In `crates/ui/src/app/demo.rs`:
   `DEMO_DATA_VERSION.to_string()` to `root.join(DEMO_VERSION_FILE)`. A failed
   seed therefore leaves no marker and retries next launch.
 
-- [ ] **Step 4: Rewrite `seed_demo` around the fixture and pool**
+- [x] **Step 4: Rewrite `seed_demo` around the fixture and pool**
 
 Change the signature to
 `fn seed_demo(db: &Db, photo_dir: &Path, reference: NaiveDate) -> Result<(), String>`.
@@ -443,7 +458,7 @@ Implementation requirements:
 
 Keep the existing `demo_thumb_path` helper and its test unchanged.
 
-- [ ] **Step 5: Run the new tests**
+- [x] **Step 5: Run the new tests**
 
 Run:
 
@@ -455,7 +470,7 @@ cargo test -p vrc-photon-ui seed_demo_populates -v
 Expected: both PASS. If the seed test is slow, record the elapsed time and
 compare it with the old fixture in Task 3.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/ui/src/app/demo.rs
@@ -469,7 +484,7 @@ git commit -m "feat(ui): seed demo library from 36-month fixture"
 **Files:**
 - Modify: `docs/superpowers/plans/2026-11-02-demo-fixture-expansion.md` (checkboxes)
 
-- [ ] **Step 1: Run formatting, lint, and the full test suite**
+- [x] **Step 1: Run formatting, lint, and the full test suite**
 
 Run:
 
@@ -481,7 +496,7 @@ cargo test --workspace
 
 Expected: all commands exit 0.
 
-- [ ] **Step 2: Measure and inspect a clean demo seed**
+- [x] **Step 2: Measure and inspect a clean demo seed**
 
 Run:
 
@@ -495,7 +510,7 @@ monthly sections are populated, and date-range filtering works. Record the
 seed time; it should be in the same range as the old 18-photo fixture (the
 pool renders eight images instead of eighteen).
 
-- [ ] **Step 3: Verify automatic reseeding**
+- [x] **Step 3: Verify automatic reseeding**
 
 With the app closed, write an old version marker and start without
 `--demo-reset`:
@@ -508,7 +523,7 @@ cargo run -p vrc-photon-ui -- --demo
 Expected: the demo root is rebuilt, the marker becomes `2`, and the library
 shows 300 photos without passing `--demo-reset`.
 
-- [ ] **Step 4: Update the plan and commit**
+- [x] **Step 4: Update the plan and commit**
 
 Mark every completed checkbox in this file as `- [x]`, then:
 
