@@ -17,6 +17,10 @@ use crate::model::{
     SendErrorCode, SendHistoryEntry, SendKind, SendOrigin, SendOutboxEntry, SendSource, SendStatus,
     Session, SessionPlayer, World,
 };
+use crate::world_name::{
+    NOT_FOUND_RETRY_SECONDS, WorldNameFailure, WorldNameLookup, WorldNameLookupCounts,
+    WorldNameLookupStatus, backoff_seconds,
+};
 
 const SCHEMA_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -1348,6 +1352,182 @@ impl Db {
             )
             .optional()?;
         Ok(world)
+    }
+
+    // ---------- world name lookups ----------
+
+    /// Queues a world for name resolution unless it is already queued.
+    pub fn enqueue_world_name_lookup(&self, world_db_id: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO world_name_lookups(world_db_id, status, updated_at) \
+             SELECT ?1, 'pending', ?2 \
+             WHERE EXISTS (SELECT 1 FROM worlds WHERE id = ?1)",
+            params![world_db_id, now_string()],
+        )?;
+        Ok(())
+    }
+
+    /// Queues every world referenced by a photo that has no name anywhere yet.
+    /// Idempotent: existing lookup rows are never modified.
+    pub fn enqueue_missing_world_name_lookups(&self) -> Result<usize> {
+        let changed = self.conn.execute(
+            "INSERT INTO world_name_lookups(world_db_id, status, updated_at) \
+             SELECT w.id, 'pending', ?1 FROM worlds w \
+             WHERE w.alias IS NULL AND w.name IS NULL \
+               AND EXISTS (SELECT 1 FROM photo_context c \
+                           WHERE c.world_id = w.id AND c.world_name IS NULL) \
+               AND NOT EXISTS (SELECT 1 FROM world_name_lookups l \
+                               WHERE l.world_db_id = w.id)",
+            params![now_string()],
+        )?;
+        Ok(changed)
+    }
+
+    /// Oldest due lookup. `pending`, `retry`, and `not_found` rows are
+    /// eligible; rows scheduled in the future are skipped.
+    pub fn next_due_world_name_lookup(&self, now: i64) -> Result<Option<WorldNameLookup>> {
+        let lookup = self
+            .conn
+            .query_row(
+                "SELECT l.world_db_id, w.world_id, l.status, l.attempts, l.next_attempt_at \
+                 FROM world_name_lookups l JOIN worlds w ON w.id = l.world_db_id \
+                 WHERE l.status IN ('pending', 'retry', 'not_found') \
+                   AND (l.next_attempt_at IS NULL OR l.next_attempt_at <= ?1) \
+                 ORDER BY COALESCE(l.next_attempt_at, 0), l.world_db_id LIMIT 1",
+                params![now],
+                row_to_world_name_lookup,
+            )
+            .optional()?;
+        Ok(lookup)
+    }
+
+    pub fn world_name_lookup(&self, world_db_id: i64) -> Result<Option<WorldNameLookup>> {
+        let lookup = self
+            .conn
+            .query_row(
+                "SELECT l.world_db_id, w.world_id, l.status, l.attempts, l.next_attempt_at \
+                 FROM world_name_lookups l JOIN worlds w ON w.id = l.world_db_id \
+                 WHERE l.world_db_id = ?1",
+                params![world_db_id],
+                row_to_world_name_lookup,
+            )
+            .optional()?;
+        Ok(lookup)
+    }
+
+    /// Marks a queued lookup resolved because a log/XMP name already exists.
+    pub fn mark_world_name_lookup_satisfied(&self, world_db_id: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE world_name_lookups SET status = 'resolved', next_attempt_at = NULL, \
+                updated_at = ?1 \
+             WHERE world_db_id = ?2 AND status IN ('pending', 'retry', 'not_found')",
+            params![now_string(), world_db_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_world_name_lookup_resolved(&self, world_db_id: i64, now: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE world_name_lookups SET status = 'resolved', next_attempt_at = NULL, \
+                last_attempt_at = ?1, updated_at = ?2 \
+             WHERE world_db_id = ?3 AND status IN ('pending', 'retry', 'not_found')",
+            params![now, now_string(), world_db_id],
+        )?;
+        Ok(())
+    }
+
+    /// Records the outcome of a failed attempt and schedules the next try
+    /// according to the shared retry policy. 429s do not count as attempts.
+    pub fn record_world_name_failure(
+        &self,
+        world_db_id: i64,
+        failure: WorldNameFailure,
+        now: i64,
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        let attempts = tx
+            .query_row(
+                "SELECT attempts FROM world_name_lookups WHERE world_db_id = ?1 \
+                 AND status IN ('pending', 'retry', 'not_found')",
+                params![world_db_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let Some(attempts) = attempts else {
+            return Ok(());
+        };
+
+        let (status, attempts, next_attempt_at, last_error) = match failure {
+            WorldNameFailure::RateLimited { retry_after } => (
+                WorldNameLookupStatus::Retry,
+                attempts,
+                Some(now + retry_after),
+                "http_429",
+            ),
+            WorldNameFailure::Retryable { code } => {
+                let attempts = attempts + 1;
+                (
+                    WorldNameLookupStatus::Retry,
+                    attempts,
+                    Some(now + backoff_seconds(attempts)),
+                    code,
+                )
+            }
+            WorldNameFailure::NotFound => (
+                WorldNameLookupStatus::NotFound,
+                attempts + 1,
+                Some(now + NOT_FOUND_RETRY_SECONDS),
+                "not_found",
+            ),
+            WorldNameFailure::Invalid { code } => {
+                (WorldNameLookupStatus::Failed, attempts + 1, None, code)
+            }
+        };
+
+        tx.execute(
+            "UPDATE world_name_lookups SET status = ?1, attempts = ?2, next_attempt_at = ?3, \
+                last_attempt_at = ?4, last_error = ?5, updated_at = ?6 \
+             WHERE world_db_id = ?7",
+            params![
+                status.as_str(),
+                attempts,
+                next_attempt_at,
+                now,
+                last_error,
+                now_string(),
+                world_db_id,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn world_name_next_request_at(&self) -> Result<Option<i64>> {
+        Ok(self
+            .get_setting("world_name_next_request_at")?
+            .and_then(|value| value.parse().ok()))
+    }
+
+    pub fn set_world_name_next_request_at(&self, timestamp: i64) -> Result<()> {
+        self.set_setting("world_name_next_request_at", &timestamp.to_string())
+    }
+
+    pub fn world_name_lookup_counts(&self) -> Result<WorldNameLookupCounts> {
+        let (pending, resolved, failed) = self.conn.query_row(
+            "SELECT \
+                COALESCE(SUM(CASE WHEN status IN ('pending', 'retry', 'not_found') \
+                    THEN 1 ELSE 0 END), 0), \
+                COALESCE(SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END), 0), \
+                COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) \
+             FROM world_name_lookups",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        Ok(WorldNameLookupCounts {
+            pending,
+            resolved,
+            failed,
+        })
     }
 
     pub fn create_session(
@@ -3641,6 +3821,24 @@ fn row_to_send_outbox(row: &Row<'_>) -> rusqlite::Result<SendOutboxEntry> {
         created_at: row.get(15)?,
         started_at: row.get(16)?,
         finished_at: row.get(17)?,
+    })
+}
+
+fn row_to_world_name_lookup(row: &Row<'_>) -> rusqlite::Result<WorldNameLookup> {
+    let status: String = row.get(2)?;
+    let status = WorldNameLookupStatus::parse(&status).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            2,
+            rusqlite::types::Type::Text,
+            format!("unknown world name lookup status '{status}'").into(),
+        )
+    })?;
+    Ok(WorldNameLookup {
+        world_db_id: row.get(0)?,
+        world_id: row.get(1)?,
+        status,
+        attempts: row.get(3)?,
+        next_attempt_at: row.get(4)?,
     })
 }
 
@@ -6175,6 +6373,192 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(version, 12);
+    }
+
+    #[test]
+    fn enqueue_missing_world_name_lookups_queues_only_unresolved_referenced_worlds() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo_a = db.upsert_photo(&sample_photo(root, "a.png", 100)).unwrap();
+        let photo_b = db.upsert_photo(&sample_photo(root, "b.png", 200)).unwrap();
+        let photo_c = db.upsert_photo(&sample_photo(root, "c.png", 300)).unwrap();
+
+        let unresolved = db.upsert_world("wrld_unresolved", None, None).unwrap();
+        let known = db
+            .upsert_world("wrld_known", Some("Known"), Some("log"))
+            .unwrap();
+        let xmp_only = db.upsert_world("wrld_xmp", None, None).unwrap();
+        let unreferenced = db.upsert_world("wrld_unreferenced", None, None).unwrap();
+        let aliased = db.upsert_world("wrld_alias", None, None).unwrap();
+        db.conn
+            .execute(
+                "UPDATE worlds SET alias = ?1 WHERE id = ?2",
+                params!["Alias", aliased],
+            )
+            .unwrap();
+
+        for (photo, world, name) in [
+            (photo_a, unresolved, None),
+            (photo_b, known, None),
+            (photo_c, xmp_only, Some("XMP World")),
+        ] {
+            db.set_photo_context(&PhotoContext {
+                photo_id: photo,
+                session_id: None,
+                world_id: Some(world),
+                world_name: name.map(str::to_string),
+                instance_id: None,
+                link_method: "log".to_string(),
+                confidence: 0.9,
+                author: None,
+                linked_at: "2026-11-03T00:00:00+00:00".to_string(),
+            })
+            .unwrap();
+        }
+
+        assert_eq!(db.enqueue_missing_world_name_lookups().unwrap(), 1);
+        assert_eq!(db.enqueue_missing_world_name_lookups().unwrap(), 0);
+        let queued = db.next_due_world_name_lookup(0).unwrap().unwrap();
+        assert_eq!(queued.world_db_id, unresolved);
+        assert_eq!(queued.world_id, "wrld_unresolved");
+        assert_eq!(queued.status, WorldNameLookupStatus::Pending);
+        assert!(db.next_due_world_name_lookup(0).unwrap().is_some());
+        assert!(db.world_by_id(unreferenced).unwrap().is_some());
+    }
+
+    #[test]
+    fn next_due_world_name_lookup_respects_schedule_and_not_found() {
+        let db = Db::open_in_memory().unwrap();
+        let pending = db.upsert_world("wrld_pending", None, None).unwrap();
+        let retry = db.upsert_world("wrld_retry", None, None).unwrap();
+        let not_found = db.upsert_world("wrld_404", None, None).unwrap();
+        db.enqueue_world_name_lookup(pending).unwrap();
+        db.enqueue_world_name_lookup(retry).unwrap();
+        db.enqueue_world_name_lookup(not_found).unwrap();
+        db.record_world_name_failure(retry, WorldNameFailure::Retryable { code: "http_5xx" }, 100)
+            .unwrap();
+        db.record_world_name_failure(not_found, WorldNameFailure::NotFound, 100)
+            .unwrap();
+
+        assert_eq!(
+            db.next_due_world_name_lookup(100)
+                .unwrap()
+                .unwrap()
+                .world_db_id,
+            pending
+        );
+        assert_eq!(
+            db.next_due_world_name_lookup(159)
+                .unwrap()
+                .unwrap()
+                .world_db_id,
+            pending
+        );
+        db.mark_world_name_lookup_resolved(pending, 159).unwrap();
+        assert_eq!(
+            db.next_due_world_name_lookup(160)
+                .unwrap()
+                .unwrap()
+                .world_db_id,
+            retry
+        );
+        assert_eq!(
+            db.next_due_world_name_lookup(86_499)
+                .unwrap()
+                .unwrap()
+                .world_db_id,
+            retry
+        );
+        db.mark_world_name_lookup_resolved(retry, 86_499).unwrap();
+        assert_eq!(
+            db.next_due_world_name_lookup(86_500)
+                .unwrap()
+                .unwrap()
+                .world_db_id,
+            not_found
+        );
+    }
+
+    #[test]
+    fn failures_schedule_the_expected_backoff() {
+        let db = Db::open_in_memory().unwrap();
+        let world = db.upsert_world("wrld_test", None, None).unwrap();
+        db.enqueue_world_name_lookup(world).unwrap();
+
+        db.record_world_name_failure(
+            world,
+            WorldNameFailure::RateLimited { retry_after: 120 },
+            1_000,
+        )
+        .unwrap();
+        let row = db.world_name_lookup(world).unwrap().unwrap();
+        assert_eq!(row.status, WorldNameLookupStatus::Retry);
+        assert_eq!(row.attempts, 0);
+        assert_eq!(row.next_attempt_at, Some(1_120));
+
+        db.record_world_name_failure(
+            world,
+            WorldNameFailure::Retryable { code: "http_5xx" },
+            2_000,
+        )
+        .unwrap();
+        let row = db.world_name_lookup(world).unwrap().unwrap();
+        assert_eq!(row.status, WorldNameLookupStatus::Retry);
+        assert_eq!(row.attempts, 1);
+        assert_eq!(row.next_attempt_at, Some(2_060));
+
+        db.record_world_name_failure(world, WorldNameFailure::NotFound, 3_000)
+            .unwrap();
+        let row = db.world_name_lookup(world).unwrap().unwrap();
+        assert_eq!(row.status, WorldNameLookupStatus::NotFound);
+        assert_eq!(row.next_attempt_at, Some(89_400));
+
+        db.record_world_name_failure(
+            world,
+            WorldNameFailure::Invalid {
+                code: "invalid_response",
+            },
+            4_000,
+        )
+        .unwrap();
+        let row = db.world_name_lookup(world).unwrap().unwrap();
+        assert_eq!(row.status, WorldNameLookupStatus::Failed);
+        assert_eq!(row.next_attempt_at, None);
+    }
+
+    #[test]
+    fn next_request_at_and_counts_roundtrip() {
+        let db = Db::open_in_memory().unwrap();
+        assert_eq!(db.world_name_next_request_at().unwrap(), None);
+        db.set_world_name_next_request_at(1_700_000_000).unwrap();
+        assert_eq!(
+            db.world_name_next_request_at().unwrap(),
+            Some(1_700_000_000)
+        );
+
+        let pending = db.upsert_world("wrld_pending", None, None).unwrap();
+        let retry = db.upsert_world("wrld_retry", None, None).unwrap();
+        let resolved = db.upsert_world("wrld_resolved", None, None).unwrap();
+        let failed = db.upsert_world("wrld_failed", None, None).unwrap();
+        for world in [pending, retry, resolved, failed] {
+            db.enqueue_world_name_lookup(world).unwrap();
+        }
+        db.record_world_name_failure(retry, WorldNameFailure::NotFound, 0)
+            .unwrap();
+        db.mark_world_name_lookup_resolved(resolved, 0).unwrap();
+        db.record_world_name_failure(
+            failed,
+            WorldNameFailure::Invalid {
+                code: "invalid_response",
+            },
+            0,
+        )
+        .unwrap();
+
+        let counts = db.world_name_lookup_counts().unwrap();
+        assert_eq!(counts.pending, 2);
+        assert_eq!(counts.resolved, 1);
+        assert_eq!(counts.failed, 1);
     }
 
     #[test]
