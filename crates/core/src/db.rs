@@ -4272,6 +4272,112 @@ mod tests {
     }
 
     #[test]
+    fn deletion_summary_counts_a_processing_send_as_affected() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        db.enqueue_send(
+            photo,
+            SendKind::Photo,
+            SendOrigin::Manual,
+            SendStatus::Pending,
+        )
+        .unwrap();
+        let claimed = db.claim_next_send(100).unwrap().unwrap();
+        assert_eq!(claimed.status, SendStatus::Processing);
+
+        let summary = db.deletion_job_summary(&[photo]).unwrap();
+        assert_eq!(summary.send.processing, 1);
+        assert_eq!(summary.send.total(), 1);
+        assert_eq!(
+            summary.affected_photos, 1,
+            "a photo with a claimed send is affected"
+        );
+        assert!(summary.needs_warning());
+    }
+
+    #[test]
+    fn deletion_summary_excludes_photos_with_only_terminal_sends() {
+        let db = Db::open_in_memory().unwrap();
+        let sent_photo = seed_photo(&db);
+        let cancelled_photo = seed_other_photo(&db);
+
+        let sent = db
+            .enqueue_send(
+                sent_photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        db.claim_next_send(100).unwrap();
+        db.complete_send(
+            sent,
+            &SendCompletion {
+                source: None,
+                profile_id: None,
+                destination: "D".into(),
+                message_id: None,
+                channel_id: None,
+                guild_id: None,
+            },
+        )
+        .unwrap();
+
+        let cancelled = db
+            .enqueue_send(
+                cancelled_photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(db.cancel_send(cancelled).unwrap());
+
+        let summary = db
+            .deletion_job_summary(&[sent_photo, cancelled_photo])
+            .unwrap();
+        assert_eq!(summary.send.total(), 0);
+        assert_eq!(
+            summary.affected_photos, 0,
+            "sent and cancelled sends are terminal and leave the photo unaffected"
+        );
+        assert!(!summary.needs_warning());
+    }
+
+    #[test]
+    fn deletion_summary_counts_an_unknown_send_status_as_affected() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        let send = db
+            .enqueue_send(
+                photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        db.connection()
+            .execute(
+                "UPDATE send_outbox SET status = 'future_status' WHERE id = ?1",
+                params![send],
+            )
+            .unwrap();
+
+        let summary = db.deletion_job_summary(&[photo]).unwrap();
+        assert_eq!(
+            summary.send.pending, 1,
+            "unknown send statuses parse as pending in the body"
+        );
+        assert_eq!(
+            summary.affected_photos, 1,
+            "a status written by a newer version is never terminal"
+        );
+    }
+
+    #[test]
     fn pending_deletion_requests_skip_requests_with_active_jobs() {
         let db = Db::open_in_memory().unwrap();
         let root = db.add_root("/photos", "reference").unwrap();
