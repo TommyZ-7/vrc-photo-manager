@@ -590,4 +590,108 @@ mod tests {
         let (db, _assets) = prepare_demo_at(&root, false, now).unwrap();
         assert_eq!(db.count_photos().unwrap(), 300);
     }
+
+    #[test]
+    fn prepare_demo_at_reseeds_when_the_marker_version_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("demo");
+        let now = moment(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap());
+        let (db, _assets) = prepare_demo_at(&root, false, now).unwrap();
+        assert_eq!(db.count_photos().unwrap(), 300);
+
+        // Mark the seed observably, then roll the version marker back to
+        // simulate data written by an older fixture version.
+        db.set_setting("demo_seeded_at", "sentinel").unwrap();
+        drop(db);
+        std::fs::write(
+            root.join(DEMO_VERSION_FILE),
+            (DEMO_DATA_VERSION - 1).to_string(),
+        )
+        .unwrap();
+
+        let (db, _assets) = prepare_demo_at(&root, false, now).unwrap();
+        assert_eq!(db.count_photos().unwrap(), 300);
+        assert_ne!(
+            db.get_setting("demo_seeded_at").unwrap().as_deref(),
+            Some("sentinel"),
+            "a stale marker must trigger a full reseed"
+        );
+        assert!(demo_data_is_current(&root));
+
+        // With the marker current again, the next prepare keeps the data.
+        db.set_setting("demo_seeded_at", "sentinel").unwrap();
+        drop(db);
+        let (db, _assets) = prepare_demo_at(&root, false, now).unwrap();
+        assert_eq!(
+            db.get_setting("demo_seeded_at").unwrap().as_deref(),
+            Some("sentinel")
+        );
+    }
+
+    #[test]
+    fn seed_demo_stores_fixture_context_players_and_tags() {
+        let temp = tempfile::tempdir().unwrap();
+        let photo_dir = temp.path().join("photos");
+        let db = Db::open_in_memory().unwrap();
+        let reference = NaiveDate::from_ymd_opt(2026, 11, 2).unwrap();
+        seed_demo(&db, &photo_dir, moment(reference)).unwrap();
+
+        let fixture = demo_fixture::demo_fixture_at(moment(reference).naive_local());
+        let photos = db
+            .search_photos(&PhotoFilter {
+                limit: 500,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(photos.len(), fixture.len());
+
+        for (index, expected) in fixture.iter().enumerate() {
+            let file_name = format!("VRChat_demo_{index:03}.png");
+            let photo = photos
+                .iter()
+                .find(|photo| photo.file_name == file_name)
+                .unwrap_or_else(|| panic!("missing seeded photo {file_name}"));
+            assert_eq!(photo.captured_at_local, expected.captured_at.local);
+            assert_eq!(photo.captured_at_utc, expected.captured_at.utc);
+            assert_eq!(photo.tz_offset_sec, expected.captured_at.offset_sec);
+
+            match expected.world {
+                Some(world_index) => {
+                    let context = db
+                        .photo_context(photo.id)
+                        .unwrap()
+                        .unwrap_or_else(|| panic!("linked photo {file_name} has no context"));
+                    assert_eq!(
+                        context.world_name.as_deref(),
+                        Some(DEMO_WORLDS[world_index])
+                    );
+                    assert!(context.world_id.is_some());
+                    assert_eq!(
+                        context.instance_id.as_deref(),
+                        Some(format!("{}~region(jp)", 12000 + index).as_str())
+                    );
+                    assert_eq!(context.link_method, "demo");
+                    assert_eq!(context.author.as_deref(), Some("TommyZ"));
+                }
+                None => assert!(db.photo_context(photo.id).unwrap().is_none()),
+            }
+
+            let players: BTreeSet<(String, String)> = db
+                .photo_players(photo.id)
+                .unwrap()
+                .iter()
+                .map(|player| (player.user_id.clone(), player.display_name.clone()))
+                .collect();
+            let expected_players: BTreeSet<(String, String)> = expected
+                .players
+                .iter()
+                .map(|player| (player.user_id.clone(), player.display_name.clone()))
+                .collect();
+            assert_eq!(players, expected_players, "players of {file_name}");
+
+            let tags: BTreeSet<String> = db.photo_tags(photo.id).unwrap().into_iter().collect();
+            let expected_tags: BTreeSet<String> = expected.tags.iter().cloned().collect();
+            assert_eq!(tags, expected_tags, "tags of {file_name}");
+        }
+    }
 }

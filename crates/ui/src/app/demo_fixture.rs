@@ -176,19 +176,25 @@ mod tests {
         photo.captured_at.local[..7].to_string()
     }
 
-    fn signature(
-        photo: &DemoPhoto,
-    ) -> (
+    /// Everything the determinism check compares, including the full
+    /// `LocalStamp` (local text, UTC instant, and offset).
+    type Signature = (
         String,
+        i64,
+        i32,
         usize,
         Option<usize>,
         bool,
         bool,
         Vec<String>,
         Vec<String>,
-    ) {
+    );
+
+    fn signature(photo: &DemoPhoto) -> Signature {
         (
             photo.captured_at.local.clone(),
+            photo.captured_at.utc,
+            photo.captured_at.offset_sec,
             photo.palette,
             photo.world,
             photo.favorite,
@@ -231,6 +237,51 @@ mod tests {
             assert!(
                 date <= reference_date.as_str(),
                 "{date} is after {reference_date}"
+            );
+        }
+    }
+
+    #[test]
+    fn fixture_month_counts_follow_the_exact_cycle() {
+        let reference = reference();
+        let photos = demo_fixture_at(reference.and_hms_opt(23, 59, 0).unwrap());
+
+        let mut expected: BTreeMap<String, usize> = BTreeMap::new();
+        for months_ago in 0..DEMO_MONTHS {
+            let month = month_start(reference, months_ago);
+            let count = MONTH_COUNTS[(months_ago + (months_ago / 12) * 4) % MONTH_COUNTS.len()];
+            *expected
+                .entry(month.format("%Y-%m").to_string())
+                .or_default() += count;
+        }
+
+        let mut actual: BTreeMap<String, usize> = BTreeMap::new();
+        for photo in &photos {
+            *actual.entry(month_key(photo)).or_default() += 1;
+        }
+        assert_eq!(actual, expected);
+        // One full year of the cycle sums to exactly 100 photos.
+        assert_eq!(MONTH_COUNTS.iter().sum::<usize>(), 100);
+    }
+
+    #[test]
+    fn fixture_on_the_first_keeps_the_current_month_on_day_one() {
+        let now = NaiveDate::from_ymd_opt(2026, 11, 1)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap();
+        let photos = demo_fixture_at(now);
+
+        let current: Vec<&DemoPhoto> = photos
+            .iter()
+            .filter(|photo| photo.captured_at.local.starts_with("2026-11"))
+            .collect();
+        assert_eq!(current.len(), MONTH_COUNTS[0]);
+        for photo in current {
+            assert!(
+                photo.captured_at.local.starts_with("2026-11-01"),
+                "{} is not on day one",
+                photo.captured_at.local
             );
         }
     }
@@ -279,7 +330,17 @@ mod tests {
         }
 
         for photo in photos.iter().filter(|photo| photo.world.is_some()) {
-            assert!(!photo.players.is_empty());
+            assert!(
+                (3..=7).contains(&photo.players.len()),
+                "linked photo has {} players",
+                photo.players.len()
+            );
+            let unique: BTreeSet<&str> = photo
+                .players
+                .iter()
+                .map(|player| player.user_id.as_str())
+                .collect();
+            assert_eq!(unique.len(), photo.players.len());
             assert_eq!(photo.tags.len(), 2);
         }
     }
