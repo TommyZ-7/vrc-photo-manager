@@ -16,7 +16,7 @@
 
 ## Global Constraints
 
-- Workspace crates: `vrc-photo-core`, `vrc-photo-daemon`, `vrc-photo-ui`.
+- Workspace crates: `vrc-photon-core`, `vrc-photon-daemon`, `vrc-photon-ui`.
 - No new dependencies; no DB schema changes.
 - Keep deletion order `requested_at, id`.
 - UI copy stays Japanese; the exact heading is `{affected} 枚に未完了のジョブがあります（選択 {selected} 枚）。` when `affected < selected`, otherwise `{selected} 枚に未完了のジョブがあります。`.
@@ -80,7 +80,7 @@ fn unknown_deletion_reason_is_preserved_and_cannot_be_requested() {
 
 - [x] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p vrc-photo-core unknown_deletion_reason_is_preserved_and_cannot_be_requested`
+Run: `cargo test -p vrc-photon-core unknown_deletion_reason_is_preserved_and_cannot_be_requested`
 Expected: FAIL (no `DeletionReason::Unknown` variant).
 
 - [x] **Step 3: Implement the enum and guard**
@@ -139,7 +139,7 @@ DeletionReason::Unknown => "不明な理由",
 
 - [x] **Step 4: Run the core test to verify it passes**
 
-Run: `cargo test -p vrc-photo-core unknown_deletion_reason_is_preserved_and_cannot_be_requested`
+Run: `cargo test -p vrc-photon-core unknown_deletion_reason_is_preserved_and_cannot_be_requested`
 Expected: PASS.
 
 - [x] **Step 5: Write the failing daemon regression test**
@@ -172,17 +172,17 @@ fn unknown_deletion_reason_is_blocked_without_deleting() {
 
     assert!(original.exists(), "unknown reason must not delete files");
     let request = db.active_deletion_request(photo.id).unwrap().unwrap();
-    assert_eq!(request.reason, vrc_photo_core::model::DeletionReason::Unknown);
+    assert_eq!(request.reason, vrc_photon_core::model::DeletionReason::Unknown);
     assert_eq!(request.status, DeletionStatus::Blocked);
     assert_eq!(request.blocked_reason.as_deref(), Some("unknown_reason"));
 }
 ```
 
-Use the imports already present in the test module; if `rusqlite` is not imported there, call `vrc_photo_core`'s re-export or add `use rusqlite::params;` inside the test module (the daemon crate already depends on rusqlite).
+Use the imports already present in the test module; if `rusqlite` is not imported there, call `vrc_photon_core`'s re-export or add `use rusqlite::params;` inside the test module (the daemon crate already depends on rusqlite).
 
 - [x] **Step 6: Run the daemon test to verify it fails**
 
-Run: `cargo test -p vrc-photo-daemon unknown_deletion_reason_is_blocked_without_deleting`
+Run: `cargo test -p vrc-photon-daemon unknown_deletion_reason_is_blocked_without_deleting`
 Expected: FAIL (request is treated as Manual and the original is trashed).
 
 - [x] **Step 7: Implement the executor guard**
@@ -212,7 +212,7 @@ if request.reason == DeletionReason::Unknown {
 
 - [x] **Step 8: Run both tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-core unknown_deletion_reason` and `cargo test -p vrc-photo-daemon unknown_deletion_reason`
+Run: `cargo test -p vrc-photon-core unknown_deletion_reason` and `cargo test -p vrc-photon-daemon unknown_deletion_reason`
 Expected: PASS.
 
 - [x] **Step 9: Commit**
@@ -244,7 +244,7 @@ Add near `claim_deletion_requires_no_active_jobs`:
 fn pending_deletion_requests_skip_requests_with_active_jobs() {
     let db = Db::open_in_memory().unwrap();
     let root = db.add_root("/photos", "reference").unwrap();
-    let photo = |name: &str| vrc_photo_core::model::NewPhoto {
+    let photo = |name: &str| vrc_photon_core::model::NewPhoto {
         root_id: root,
         rel_path: name.to_string(),
         abs_path: format!("/photos/{name}"),
@@ -279,7 +279,7 @@ fn pending_deletion_requests_skip_requests_with_active_jobs() {
 
 - [x] **Step 2: Run it to verify it fails**
 
-Run: `cargo test -p vrc-photo-core pending_deletion_requests_skip_requests_with_active_jobs`
+Run: `cargo test -p vrc-photon-core pending_deletion_requests_skip_requests_with_active_jobs`
 Expected: FAIL (returns 2 rows).
 
 - [x] **Step 3: Update the SQL**
@@ -303,7 +303,7 @@ Add a doc comment: requests with failed jobs stay in this list so the executor c
 
 - [x] **Step 4: Run the core test to verify it passes**
 
-Run: `cargo test -p vrc-photo-core pending_deletion_requests_skip_requests_with_active_jobs`
+Run: `cargo test -p vrc-photon-core pending_deletion_requests_skip_requests_with_active_jobs`
 Expected: PASS.
 
 - [x] **Step 5: Write the failing starvation test**
@@ -322,7 +322,7 @@ fn ready_deletion_after_more_than_hundred_blocked_requests_runs() {
     for index in 0..=100i64 {
         let name = format!("p{index:03}.png");
         let photo_id = db
-            .upsert_photo(&vrc_photo_core::model::NewPhoto {
+            .upsert_photo(&vrc_photon_core::model::NewPhoto {
                 root_id: root,
                 rel_path: name.clone(),
                 abs_path: format!("/photos/{name}"),
@@ -361,12 +361,12 @@ Note: the manual requests for the 100 blockers are recorded after the job, and t
 
 - [x] **Step 6: Run it to verify it fails**
 
-Run: `cargo test -p vrc-photo-daemon ready_deletion_after_more_than_hundred_blocked_requests_runs`
+Run: `cargo test -p vrc-photon-daemon ready_deletion_after_more_than_hundred_blocked_requests_runs`
 Expected: FAIL (the 101st request never leaves `Pending`).
 
 - [x] **Step 7: Confirm the implementation from Step 3 fixes it**
 
-Run: `cargo test -p vrc-photo-daemon ready_deletion_after_more_than_hundred_blocked_requests_runs`
+Run: `cargo test -p vrc-photon-daemon ready_deletion_after_more_than_hundred_blocked_requests_runs`
 Expected: PASS.
 
 - [x] **Step 8: Commit**
@@ -401,7 +401,7 @@ fn preferred_display_derivative_uses_profile_order_then_id() {
     let second = dir.path().join("second.webp");
     std::fs::write(&first, b"a").unwrap();
     std::fs::write(&second, b"b").unwrap();
-    let derivative = |id: i64, profile: &str, path: &Path| vrc_photo_core::model::Derivative {
+    let derivative = |id: i64, profile: &str, path: &Path| vrc_photon_core::model::Derivative {
         id,
         photo_id: 1,
         path: path.to_string_lossy().to_string(),
@@ -444,12 +444,12 @@ fn preferred_display_derivative_uses_profile_order_then_id() {
 
 - [x] **Step 2: Run it to verify it fails**
 
-Run: `cargo test -p vrc-photo-daemon preferred_display_derivative_uses_profile_order_then_id`
+Run: `cargo test -p vrc-photon-daemon preferred_display_derivative_uses_profile_order_then_id`
 Expected: FAIL (`preferred_display_derivative` not defined).
 
 - [x] **Step 3: Implement the helper**
 
-Add near `promote_display_derivative` and import `Derivative` from `vrc_photo_core::model`:
+Add near `promote_display_derivative` and import `Derivative` from `vrc_photon_core::model`:
 
 ```rust
 /// Picks the derivative to show for a photo. Profiles are ordered by
@@ -476,7 +476,7 @@ fn preferred_display_derivative<'a>(
 
 - [x] **Step 4: Run the helper test to verify it passes**
 
-Run: `cargo test -p vrc-photo-daemon preferred_display_derivative_uses_profile_order_then_id`
+Run: `cargo test -p vrc-photon-daemon preferred_display_derivative_uses_profile_order_then_id`
 Expected: PASS.
 
 - [x] **Step 5: Extend the existing worker-count regression test**
@@ -495,7 +495,7 @@ assert!(Path::new(&display.path).is_file(), "workers={workers}");
 
 - [x] **Step 6: Run it to verify it fails**
 
-Run: `cargo test -p vrc-photo-daemon multi_profile_replace_is_worker_count_independent`
+Run: `cargo test -p vrc-photon-daemon multi_profile_replace_is_worker_count_independent`
 Expected: FAIL intermittently or consistently for workers > 1 (display follows completion order).
 
 - [x] **Step 7: Use the helper in `process_job`**
@@ -530,7 +530,7 @@ Keep the existing `set_replaced` call and condition below it unchanged.
 
 - [x] **Step 9: Run the daemon deletion/compression tests**
 
-Run: `cargo test -p vrc-photo-daemon`
+Run: `cargo test -p vrc-photon-daemon`
 Expected: PASS, including `multi_profile_replace_is_worker_count_independent` for workers 1–4.
 
 - [x] **Step 10: Commit**
@@ -565,7 +565,7 @@ fn deletion_update_keeps_the_baseline_when_the_snapshot_is_missing() {
 
     let snapshot = DeletionSnapshot {
         requests: Vec::new(),
-        counts: vrc_photo_core::model::DeletionCounts {
+        counts: vrc_photon_core::model::DeletionCounts {
             pending: 1,
             blocked: 2,
             running: 0,
@@ -577,7 +577,7 @@ fn deletion_update_keeps_the_baseline_when_the_snapshot_is_missing() {
 
     let snapshot = DeletionSnapshot {
         requests: Vec::new(),
-        counts: vrc_photo_core::model::DeletionCounts {
+        counts: vrc_photon_core::model::DeletionCounts {
             pending: 1,
             blocked: 2,
             running: 0,
@@ -591,7 +591,7 @@ fn deletion_update_keeps_the_baseline_when_the_snapshot_is_missing() {
 
 - [x] **Step 2: Run it to verify it fails**
 
-Run: `cargo test -p vrc-photo-ui deletion_update_keeps_the_baseline_when_the_snapshot_is_missing`
+Run: `cargo test -p vrc-photon-ui deletion_update_keeps_the_baseline_when_the_snapshot_is_missing`
 Expected: FAIL (`deletion_update` not defined; `deletions` is not optional).
 
 - [x] **Step 3: Make the snapshot optional**
@@ -679,7 +679,7 @@ if let Some((deletions, blocked, next_baseline)) =
 
 - [x] **Step 6: Run the UI tests**
 
-Run: `cargo test -p vrc-photo-ui deletion_update_keeps_the_baseline_when_the_snapshot_is_missing`
+Run: `cargo test -p vrc-photon-ui deletion_update_keeps_the_baseline_when_the_snapshot_is_missing`
 Expected: PASS.
 
 - [x] **Step 7: Commit**
@@ -741,7 +741,7 @@ fn seed_other_photo(db: &Db) -> i64 {
 
 - [x] **Step 2: Run it to verify it fails**
 
-Run: `cargo test -p vrc-photo-core deletion_job_summary_counts_each_status`
+Run: `cargo test -p vrc-photon-core deletion_job_summary_counts_each_status`
 Expected: FAIL (no `affected_photos` field).
 
 - [x] **Step 3: Add the field and SQL count**
@@ -775,7 +775,7 @@ Declare `let mut affected_photos = 0;` before the loop and return it in the stru
 
 - [x] **Step 4: Run the core test to verify it passes**
 
-Run: `cargo test -p vrc-photo-core deletion_job_summary_counts_each_status`
+Run: `cargo test -p vrc-photon-core deletion_job_summary_counts_each_status`
 Expected: PASS.
 
 - [x] **Step 5: Write the failing UI heading test**
@@ -798,7 +798,7 @@ fn deletion_warning_heading_counts_only_photos_with_jobs() {
 
 - [x] **Step 6: Run it to verify it fails**
 
-Run: `cargo test -p vrc-photo-ui deletion_warning_heading_counts_only_photos_with_jobs`
+Run: `cargo test -p vrc-photon-ui deletion_warning_heading_counts_only_photos_with_jobs`
 Expected: FAIL (helper not defined).
 
 - [x] **Step 7: Implement the heading**
@@ -822,7 +822,7 @@ In `trash_selected`, compute `let heading = deletion_warning_heading(summary.aff
 
 - [x] **Step 8: Run the UI tests**
 
-Run: `cargo test -p vrc-photo-ui deletion_warning`
+Run: `cargo test -p vrc-photon-ui deletion_warning`
 Expected: PASS.
 
 - [x] **Step 9: Commit**

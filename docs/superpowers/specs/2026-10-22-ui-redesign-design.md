@@ -1,10 +1,10 @@
 # UI Redesign Design
 
 - Date: 2026-10-22
-- Issue: [#27 feat: UI刷新（ガラス調・背景ぼかし・サイドバー最小化）](https://github.com/TommyZ-7/vrc-photo-manager/issues/27)
+- Issue: [#27 feat: UI刷新（ガラス調・背景ぼかし・サイドバー最小化）](https://github.com/TommyZ-7/vrc-photon/issues/27)
 - Status: Draft for review
 - Target: GPUI UI (`crates/ui/src/main.rs`). The Tauri migration (#29) is withdrawn.
-- Mock: [docs/ui-redesign-mockup.html on `docs/ui-redesign-mockup`](https://github.com/TommyZ-7/vrc-photo-manager/blob/docs/ui-redesign-mockup/docs/ui-redesign-mockup.html)
+- Mock: [docs/ui-redesign-mockup.html on `docs/ui-redesign-mockup`](https://github.com/TommyZ-7/vrc-photon/blob/docs/ui-redesign-mockup/docs/ui-redesign-mockup.html)
 
 ## 1. Intent
 
@@ -323,7 +323,7 @@ an in-memory DB. Extend it so visual QA can exercise the real rendering path:
 - Generate matching 256 px PNG thumbnails into a demo-specific thumbnail
   directory. Do not write into the user's real thumbnail cache; demo photo
   IDs must not collide with real library IDs.
-- Use a stable temp file DB (`vrc-photo-manager-demo.db`) so sidebar/reduced
+- Use a stable temp file DB (`vrc-photon-demo.db`) so sidebar/reduced
   motion settings survive a restart. Seed only when the DB has no photos.
 - Add `--demo-reset` to delete the demo DB and asset directory before
   starting.

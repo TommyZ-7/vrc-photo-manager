@@ -120,9 +120,9 @@ fn migration_v8_adds_the_command_payload_column() {
 
 - [ ] **Step 2: テストが失敗することを確認**
 
-Run: `cargo test -p vrc-photo-core scan_root_command_round_trips_its_payload`
+Run: `cargo test -p vrc-photon-core scan_root_command_round_trips_its_payload`
 
-Run: `cargo test -p vrc-photo-core migration_v8_adds_the_command_payload_column`
+Run: `cargo test -p vrc-photon-core migration_v8_adds_the_command_payload_column`
 
 Expected: コンパイルエラー（`ScanRoot` / `request_daemon_scan_root` / `migrate_v8` が無い）。
 
@@ -193,7 +193,7 @@ SELECT ?1, ?2, ?3 WHERE NOT EXISTS (
 
 - [ ] **Step 4: テストが通ることを確認**
 
-Run: `cargo test -p vrc-photo-core`
+Run: `cargo test -p vrc-photon-core`
 
 Expected: PASS。
 
@@ -273,7 +273,7 @@ fn photo_scan_states_reads_all_chunks_with_metadata() {
 
 - [ ] **Step 2: テストが失敗することを確認**
 
-Run: `cargo test -p vrc-photo-core photo_scan_states_reads_all_chunks_with_metadata`
+Run: `cargo test -p vrc-photon-core photo_scan_states_reads_all_chunks_with_metadata`
 Expected: コンパイルエラー（`photo_scan_states` が無い）。
 
 - [ ] **Step 3: `PhotoScanState` と `photo_scan_states` を実装する**
@@ -440,7 +440,7 @@ fn nested_root_scan_skips_a_photo_owned_by_another_root() {
 
 - [ ] **Step 6: テストが通ることを確認**
 
-Run: `cargo test -p vrc-photo-core`
+Run: `cargo test -p vrc-photon-core`
 Expected: PASS（既存の scanner / db テストを含む）。
 
 - [ ] **Step 7: コミット**
@@ -621,7 +621,7 @@ fn scan_root_photos_reports_a_single_root() {
 
 - [ ] **Step 2: テストが失敗することを確認**
 
-Run: `cargo test -p vrc-photo-daemon scan_root_command_scopes_missing_detection`
+Run: `cargo test -p vrc-photon-daemon scan_root_command_scopes_missing_detection`
 Expected: コンパイルエラー（`request_daemon_scan_root` は Task 1 で追加済み。`scan_root_photos` が無い）。
 
 - [ ] **Step 3: daemon を実装する**
@@ -651,7 +651,7 @@ fn scan_roots(&mut self, roots: Vec<PathBuf>, full_scan: bool) -> Result<ScanRep
 
 - [ ] **Step 4: テストが通ることを確認**
 
-Run: `cargo test -p vrc-photo-daemon`
+Run: `cargo test -p vrc-photon-daemon`
 Expected: PASS（既存の Rescan / 進捗 / 停止テストを含む）。
 
 - [ ] **Step 5: コミット**
@@ -680,12 +680,12 @@ git commit -m "feat: scan only the requested import root"
 ```rust
 #[test]
 fn import_scan_request_targets_the_destination_root() {
-    let db = vrc_photo_core::Db::open_in_memory().unwrap();
+    let db = vrc_photon_core::Db::open_in_memory().unwrap();
     let dest = Path::new("/photos/imported");
     assert!(request_import_scan(&db, dest).unwrap());
     assert_eq!(
         db.take_daemon_commands().unwrap(),
-        vec![vrc_photo_core::model::DaemonCommand::ScanRoot {
+        vec![vrc_photon_core::model::DaemonCommand::ScanRoot {
             path: "/photos/imported".to_string(),
         }]
     );
@@ -694,7 +694,7 @@ fn import_scan_request_targets_the_destination_root() {
 
 - [ ] **Step 2: テストが失敗することを確認**
 
-Run: `cargo test -p vrc-photo-ui import_scan_request_targets_the_destination_root`
+Run: `cargo test -p vrc-photon-ui import_scan_request_targets_the_destination_root`
 Expected: コンパイルエラー（`request_import_scan` が無い）。
 
 - [ ] **Step 3: 実装する**
@@ -703,9 +703,9 @@ Expected: コンパイルエラー（`request_import_scan` が無い）。
 
 ```rust
 pub(crate) fn request_import_scan(
-    db: &vrc_photo_core::Db,
+    db: &vrc_photon_core::Db,
     dest: &Path,
-) -> vrc_photo_core::Result<bool> {
+) -> vrc_photon_core::Result<bool> {
     db.request_daemon_scan_root(&dest.to_string_lossy())
 }
 ```
@@ -714,7 +714,7 @@ pub(crate) fn request_import_scan(
 
 - [ ] **Step 4: テストが通ることを確認**
 
-Run: `cargo test -p vrc-photo-ui import_scan_request_targets_the_destination_root`
+Run: `cargo test -p vrc-photon-ui import_scan_request_targets_the_destination_root`
 Expected: PASS。
 
 - [ ] **Step 5: コミット**
@@ -763,7 +763,7 @@ fn revision_debounce_coalesces_a_burst() {
 
 - [ ] **Step 2: テストが失敗することを確認**
 
-Run: `cargo test -p vrc-photo-ui revision_debounce_coalesces_a_burst`
+Run: `cargo test -p vrc-photon-ui revision_debounce_coalesces_a_burst`
 Expected: PASS してしまう場合は `CountDebounce` の既存挙動で問題ない（このテストは Task 5 の前提固定）。以降の UI 配線はコンパイルと手動確認で検証する。
 
 - [ ] **Step 3: フィールドとヘルパーを実装する**
@@ -802,10 +802,10 @@ fn apply_library_snapshot(
 
 - [ ] **Step 4: テストとビルドを確認**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: PASS。
 
-Run: `cargo clippy -p vrc-photo-ui --all-targets -- -D warnings`
+Run: `cargo clippy -p vrc-photon-ui --all-targets -- -D warnings`
 Expected: PASS。
 
 - [ ] **Step 5: コミット**

@@ -90,7 +90,7 @@ fn rail_marker_sits_on_the_track_at_the_pill_center() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-ui rail_geometry_limits_presses_to_track_and_expanded_pill`
+Run: `cargo test -p vrc-photon-ui rail_geometry_limits_presses_to_track_and_expanded_pill`
 
 Expected: FAIL with `cannot find function 'rail_press_hits'` (and the other missing helpers).
 
@@ -152,7 +152,7 @@ Use the existing `RAIL_TOP_PAD`, `RAIL_TRACK_INSET`, and `RAIL_PILL_HEIGHT` valu
 
 - [ ] **Step 4: Run the geometry tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-ui rail_`
+Run: `cargo test -p vrc-photon-ui rail_`
 
 Expected: PASS, including the two new geometry tests.
 
@@ -202,7 +202,7 @@ assert_eq!(search_available_width(1280.0, false), 578.0);
 
 - [ ] **Step 2: Run the layout tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-ui grid_columns_adapt_to_window_rail_and_inspector`
+Run: `cargo test -p vrc-photon-ui grid_columns_adapt_to_window_rail_and_inspector`
 
 Expected: FAIL; the current widths still produce 5/5/6/4 columns and 988/674.
 
@@ -226,7 +226,7 @@ In the `uniform_list` row builder in `photo_grid`, add `.pr(px(RAIL_WIDTH))` to 
 
 - [ ] **Step 5: Run the UI tests**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 
 Expected: PASS, including the updated column counts and the unchanged search-width tests.
 
@@ -310,13 +310,13 @@ In the `MouseUpEvent` listener, clear `drag_active`, set `hovered` from `bounds.
 
 - [ ] **Step 5: Run the unit tests**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 
 Expected: PASS; existing rail, layout, and anchor tests stay green.
 
 - [ ] **Step 6: Manually verify the interaction in the demo app**
 
-Run: `cargo run -p vrc-photo-ui -- --demo`
+Run: `cargo run -p vrc-photon-ui -- --demo`
 
 Check on both the library and search tabs:
 
@@ -362,7 +362,7 @@ Expected: all tests pass.
 
 - [ ] **Step 4: Re-run the manual demo pass for both grids**
 
-Run: `cargo run -p vrc-photo-ui -- --demo`
+Run: `cargo run -p vrc-photon-ui -- --demo`
 
 Repeat the Task 3 checks at a wide window and at the 1080 px minimum width. Confirm the column count follows the updated tests and the gutter never overlaps a card.
 

@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust 2024, gpui-kit 0.8.0 / gpui-pre 0.3.9, `uniform_list`, SQLite demo fixtures.
 
-**Spec:** GitHub issue [#34](https://github.com/TommyZ-7/vrc-photo-manager/issues/34) plus the Decisions section below.
+**Spec:** GitHub issue [#34](https://github.com/TommyZ-7/vrc-photon/issues/34) plus the Decisions section below.
 
 ## Decisions
 
@@ -26,7 +26,7 @@
 
 - Modify only `crates/ui/src/main.rs` (and tests inside that file). Do not split the UI into modules.
 - Do not add dependencies or bump `gpui-kit = "=0.8.0"`.
-- Do not touch `vrc-photo-core`, the daemon, the DB schema, or `AppSettings` keys.
+- Do not touch `vrc-photon-core`, the daemon, the DB schema, or `AppSettings` keys.
 - Preserve import, search, compression, monitor, settings, tag, favorite, and trash behavior except for the nine items listed here.
 - Every `Animation::new(...)` keeps the existing easing/max-FPS rules from the UI-redesign plan.
 - Disabled viewer buttons must not be reachable with Tab and must not react to hover.
@@ -88,7 +88,7 @@ fn viewer_image_box_fits_inside_padding_and_details() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p vrc-photo-ui viewer_image_box_fits_inside_padding_and_details`
+Run: `cargo test -p vrc-photon-ui viewer_image_box_fits_inside_padding_and_details`
 Expected: FAIL because `viewer_image_box` is not defined.
 
 - [ ] **Step 3: Add the constants and implement `viewer_image_box`**
@@ -120,7 +120,7 @@ fn viewer_image_box(
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `cargo test -p vrc-photo-ui viewer_image_box_fits_inside_padding_and_details`
+Run: `cargo test -p vrc-photon-ui viewer_image_box_fits_inside_padding_and_details`
 Expected: PASS.
 
 - [ ] **Step 5: Add `ButtonTone` and change `focusable_text_button`**
@@ -289,7 +289,7 @@ Expected: all green.
 
 - [ ] **Step 12: Smoke-check the viewer**
 
-Launch `cargo run -p vrc-photo-ui -- --demo` and check:
+Launch `cargo run -p vrc-photon-ui -- --demo` and check:
 
 - Trash the selected photo (two clicks), reopen the viewer on another photo: no stale message.
 - First photo: “前へ” is muted and does not focus with Tab; last photo: “次へ” is muted.
@@ -601,7 +601,7 @@ Expected: all green.
 Use the `wsl-gpui-testing` skill. Use the dzn path for hover/click/scroll checks, and normal mode is acceptable for static layout checks. Build before launching:
 
 ```bash
-cargo build -p vrc-photo-ui
+cargo build -p vrc-photon-ui
 ```
 
 For dzn, the patched `gpui-pre-wgpu` is required. Apply the skill's throwaway-worktree patch to the code worktree, build with the shared target directory, and then remove `vendor/` and run `git restore Cargo.toml Cargo.lock` before committing or pushing. Never commit the vendor copy or the `[patch.crates-io]` entry. If the dzn binary is unavailable, use normal (llvmpipe) mode for layout and click checks, then repeat the hover/scroll checks when dzn is available.
@@ -618,7 +618,7 @@ Repeat for 1440×900, then exercise the Review Focus checklist:
 1. Trash → close → reopen: no stale message, no armed trash.
 2. First/last photo boundary buttons: muted, no pointer, no hover, no Tab stop; arrow keys clamp; Tab order and details focus are coherent.
 3. Letterbox click closes; image click does not; repeat with details open and with portrait/landscape photos.
-4. Delete the selected photo row from the demo DB while the viewer is open (`/tmp/vrc-photo-manager-demo/library.db`), wait one refresh: the viewer closes, selection clears, focus returns.
+4. Delete the selected photo row from the demo DB while the viewer is open (`/tmp/vrc-photon-demo/library.db`), wait one refresh: the viewer closes, selection clears, focus returns.
 5. Open + immediate Esc repeatedly: focus ends on the grid; Tab reaches a mounted control.
 6. Hover during intro and after scrolling: no intro replay. Toggle `Ctrl+B` / `Ctrl+I` after scrolling: offset is preserved.
 7. All four fixed headers at both sizes; Compression scrolls under its header; Photos chips stay below the header; Search still works.

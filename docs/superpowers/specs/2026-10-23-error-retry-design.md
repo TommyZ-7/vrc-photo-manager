@@ -1,7 +1,7 @@
 # Error Detail and Retry: Design
 
 - Date: 2026-10-23
-- Issues: [#17 feat: エラー表示の詳細化と再試行導線](https://github.com/TommyZ-7/vrc-photo-manager/issues/17), [#14 feat: 圧縮失敗ジョブの再試行](https://github.com/TommyZ-7/vrc-photo-manager/issues/14)
+- Issues: [#17 feat: エラー表示の詳細化と再試行導線](https://github.com/TommyZ-7/vrc-photon/issues/17), [#14 feat: 圧縮失敗ジョブの再試行](https://github.com/TommyZ-7/vrc-photon/issues/14)
 - Status: Approved in session
 - Target: `crates/core/src/{db,model,importer,scanner,logging}.rs`, `crates/daemon/src/lib.rs`, `crates/ui/src/main.rs`, docs
 
@@ -73,7 +73,7 @@ retry, so this change also completes the acceptance criteria of #14.
   captured, so those messages are effectively lost. The UI has no tracing
   subscriber at all.
 - Both binaries can resolve the user data directory through
-  `vrc_photo_core::data_dir()`; thumbnails already live there.
+  `vrc_photon_core::data_dir()`; thumbnails already live there.
 - The UI has no GUI test harness. Pure helpers are unit tested and visual
   behaviour is checked in the demo app.
 
@@ -504,8 +504,8 @@ still used.
 **Logging.** Both binaries initialize a tracing subscriber that writes to stderr
 and to a file under `data_dir/logs/`:
 
-- `vrc-photo-manager.log` (UI);
-- `vrc-photo-daemon.log` (daemon);
+- `vrc-photon.log` (UI);
+- `vrc-photon-daemon.log` (daemon);
 - `RUST_LOG` keeps precedence; the default is `info,<crate>=debug`;
 - at startup a log file of 10 MiB or more is renamed to `<name>.1` (replacing an
   older rotated file); no background rotation thread;

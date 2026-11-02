@@ -2,18 +2,18 @@
 
 ## 1. 保存先
 
-- DB: ユーザーデータディレクトリ配下 `vrc-photo-manager/library.db`
-  - Linux: `~/.local/share/vrc-photo-manager/library.db`
-  - Windows: `%LOCALAPPDATA%\vrc-photo-manager\library.db`
+- DB: ユーザーデータディレクトリ配下 `vrc-photon/library.db`
+  - Linux: `~/.local/share/vrc-photon/library.db`
+  - Windows: `%LOCALAPPDATA%\vrc-photon\library.db`
 - サムネイル: 同ディレクトリの `thumbnails/<photo_id>.webp`
 - プレビュー: 同ディレクトリの `previews/<photo_id>-<variant>.webp`（`variant` は表示derivative ID、元画像は `0`）
 - アプリログ: 同ディレクトリの `logs/`
-  - UI: `logs/vrc-photo-manager.log`
-  - デーモン: `logs/vrc-photo-daemon.log`
-  - 起動時に10 MiB以上なら `logs/<name>.log.1` へローテーションする（例: `vrc-photo-manager.log.1`）。
+  - UI: `logs/vrc-photon.log`
+  - デーモン: `logs/vrc-photon-daemon.log`
+  - 起動時に10 MiB以上なら `logs/<name>.log.1` へローテーションする（例: `vrc-photon.log.1`）。
 - 写真ファイルとVRChatログはアプリ管理外。DBにはパスと解析結果だけを保存する。
 
-`VRC_PHOTO_DB` でDBパスを上書きできる。
+`VRC_PHOTON_DB` でDBパスを上書きできる。
 
 ## 2. SQLite設定
 

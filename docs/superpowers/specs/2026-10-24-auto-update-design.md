@@ -1,7 +1,7 @@
 # Automatic application updates: Design
 
 - Date: 2026-10-24
-- Issue: [#24 feat: 自動アップデート](https://github.com/TommyZ-7/vrc-photo-manager/issues/24)
+- Issue: [#24 feat: 自動アップデート](https://github.com/TommyZ-7/vrc-photon/issues/24)
 - Status: Proposed
 - Target: new `crates/update`, `crates/ui`, `crates/ipc` (PID plumbing),
   `Packager.toml`, `.github/workflows/release.yml`, docs
@@ -151,7 +151,7 @@ The family is `Deb` or `Pacman`, detected from `/etc/os-release`
 (`ID`/`ID_LIKE`). Unknown Linux families get generic guidance.
 
 Windows detection reads the NSIS uninstall key
-`Software\Microsoft\Windows\CurrentVersion\Uninstall\VRC Photo Manager` under
+`Software\Microsoft\Windows\CurrentVersion\Uninstall\VRC PhotoN` under
 `HKCU` and `HKLM` (via `winreg`), strips the quotes from `InstallLocation`, and
 compares its canonicalized path with the running executable's parent directory.
 This avoids offering self-update to a `cargo run` binary or a portable copy
@@ -167,8 +167,8 @@ Rules:
   check is still allowed and shows the available version, but the apply button
   is disabled with an explanation.
 - `SystemPackage` auto-checks and notifies; the card shows
-  `sudo apt install --only-upgrade vrc-photo-manager` or
-  `sudo pacman -Syu vrc-photo-manager` and a release-page button.
+  `sudo apt install --only-upgrade vrc-photon` or
+  `sudo pacman -Syu vrc-photon` and a release-page button.
 - `AppImage` checks that the target file is writable before offering apply.
   If the directory is read-only, the card explains how to move the AppImage or
   update manually.
@@ -178,10 +178,10 @@ Rules:
 Default feed:
 
 ```text
-https://github.com/TommyZ-7/vrc-photo-manager/releases/latest/download/latest.json
+https://github.com/TommyZ-7/vrc-photon/releases/latest/download/latest.json
 ```
 
-Signature: the same URL with `.minisig` appended. `VRC_PHOTO_UPDATE_FEED`
+Signature: the same URL with `.minisig` appended. `VRC_PHOTON_UPDATE_FEED`
 overrides the feed URL (useful for mirrors and QA). Production builds accept
 only `https` URLs; debug builds additionally allow `http` for loopback
 testing.
@@ -193,17 +193,17 @@ Manifest schema (version 1):
   "schema": 1,
   "version": "0.4.0",
   "pub_date": "2026-10-24T12:00:00Z",
-  "notes_url": "https://github.com/TommyZ-7/vrc-photo-manager/releases/tag/v0.4.0",
+  "notes_url": "https://github.com/TommyZ-7/vrc-photon/releases/tag/v0.4.0",
   "platforms": {
     "linux-x86_64": {
-      "url": "https://github.com/.../releases/download/v0.4.0/vrc-photo-manager_0.4.0_x86_64.AppImage",
+      "url": "https://github.com/.../releases/download/v0.4.0/vrc-photon_0.4.0_x86_64.AppImage",
       "format": "appimage",
       "size": 12345678,
       "sha256": "64 lowercase hex characters",
       "signature": "base64 of the complete .minisig file"
     },
     "windows-x86_64": {
-      "url": "https://github.com/.../releases/download/v0.4.0/vrc-photo-manager_0.4.0_x64-setup.exe",
+      "url": "https://github.com/.../releases/download/v0.4.0/vrc-photon_0.4.0_x64-setup.exe",
       "format": "nsis",
       "size": 12345678,
       "sha256": "64 lowercase hex characters",
@@ -264,7 +264,7 @@ mismatched artifact name fails generation; there is no runtime guess.
 
 ### 6.4 Crate and module layout
 
-Add `crates/update` (`vrc-photo-update`), which depends on `ureq` (default
+Add `crates/update` (`vrc-photon-update`), which depends on `ureq` (default
 rustls), `minisign-verify`, `semver`, `serde`, `serde_json`, `sha2`, `base64`,
 `thiserror`, `tracing`, and `chrono`. It does not depend on `core`, `ui`, or
 `daemon`.
@@ -278,17 +278,17 @@ crates/update/src/
   download.rs     .part download, size/hash/signature checks, progress
   install.rs      install-kind detection, update directory, apply job model
   helper.rs       apply/rollback engine used by the helper binary
-  bin/vrc-photo-updater.rs           apply helper
+  bin/vrc-photon-updater.rs           apply helper
 ```
 
 The UI depends on the library; the helper binary is not included in the UI
-binary. `Packager.toml` adds `[[binaries]] path = "vrc-photo-updater"` and the
-packaging command builds `-p vrc-photo-update` so the helper ships in every
+binary. `Packager.toml` adds `[[binaries]] path = "vrc-photon-updater"` and the
+packaging command builds `-p vrc-photon-update` so the helper ships in every
 package.
 
 The release-time manifest generator and signer live in a separate
-`crates/release-tool` (`vrc-photo-release-tool`, binary
-`vrc-photo-update-manifest`). It depends on the update crate for the manifest
+`crates/release-tool` (`vrc-photon-release-tool`, binary
+`vrc-photon-update-manifest`). It depends on the update crate for the manifest
 types and on the `minisign` crate for signing, is used only by CI, and is not
 packaged. Keeping it out of `crates/update` keeps clap and the signing key
 code out of the shipped binaries.
@@ -349,7 +349,7 @@ The UI cannot replace itself reliably on Windows (the executable is locked)
 and cannot guarantee a rollback if the new AppImage crashes. A separate helper
 process handles both:
 
-1. Before exiting, the UI copies `vrc-photo-updater` from the app directory to
+1. Before exiting, the UI copies `vrc-photon-updater` from the app directory to
    `<data_dir>/updates/bin/` (mode 0700) and writes an atomic job file.
 2. The helper waits for the UI PID and the daemon PID (if any) to exit, up to
    30 s. If they do not exit, it aborts, relaunches the UI, and records that
@@ -367,8 +367,8 @@ Job file (mode 0600, JSON):
   "kind": "appimage",
   "from_version": "0.3.0",
   "to_version": "0.4.0",
-  "target": "/home/me/Applications/VRC Photo Manager.AppImage",
-  "staged": "/home/me/.local/share/vrc-photo-manager/updates/downloads/0.4.0/vrc-photo-manager_0.4.0_x86_64.AppImage",
+  "target": "/home/me/Applications/VRC PhotoN.AppImage",
+  "staged": "/home/me/.local/share/vrc-photon/updates/downloads/0.4.0/vrc-photon_0.4.0_x86_64.AppImage",
   "signature": "base64 minisign signature",
   "sha256": "…",
   "ui_pid": 1234,
@@ -392,7 +392,7 @@ AppImage apply:
 
 Windows apply:
 
-- Copy the current `vrc-photo-manager.exe` and `vrc-photo-daemon.exe` into
+- Copy the current `vrc-photon.exe` and `vrc-photon-daemon.exe` into
   `<data_dir>/updates/backup/<from_version>/`.
 - Run the staged NSIS installer with `/S` (current-user install, no admin
   prompt). Wait for the installer process, with a 10 minute timeout.
@@ -403,7 +403,7 @@ Windows apply:
 Restart and health check (both kinds):
 
 - Launch the new target with the original UI arguments plus
-  `VRC_PHOTO_HEALTH_TOKEN=<token>`. `restart_args` is
+  `VRC_PHOTON_HEALTH_TOKEN=<token>`. `restart_args` is
   `std::env::args_os().skip(1)` captured before exiting; `--demo` is never
   updateable, so it cannot appear here in a real apply.
 - On the first frame, the new UI writes
@@ -446,7 +446,7 @@ an old UI. The ordering is:
    files. If either is still alive after 30 s, the helper aborts, relaunches
    the old UI, and records a cancellation. It never overwrites files held by a
    running process.
-3. When the new UI starts with `VRC_PHOTO_HEALTH_TOKEN`, it **defers the
+3. When the new UI starts with `VRC_PHOTON_HEALTH_TOKEN`, it **defers the
    daemon auto-spawn** until after it has written the health marker. The
    existing 3 s refresh and IPC reconnect loop still start normally. This means
    a health failure cannot leave a daemon started by the new version holding
@@ -518,7 +518,7 @@ Timing:
 The Windows and Linux build jobs keep building unsigned packages on PRs. The
 tag-only `publish` job:
 
-1. Downloads both artifact sets and builds `vrc-photo-release-tool`.
+1. Downloads both artifact sets and builds `vrc-photon-release-tool`.
 2. Verifies that the tag version (`v` stripped) matches the workspace version
    and `Packager.toml`; fails otherwise.
 3. Requires `MINISIGN_SECRET_KEY`; writes it to a `0700` temp file with a
@@ -526,7 +526,7 @@ tag-only `publish` job:
 4. Signs every release artifact with the release tool's minisign signer
    (prehashed), producing `<asset>.minisig`; verifies each with the same
    tool's `minisign-verify` path.
-5. Runs `vrc-photo-update-manifest generate` to build `dist/latest.json` from
+5. Runs `vrc-photon-update-manifest generate` to build `dist/latest.json` from
    the AppImage and NSIS artifacts, their `.minisig` files, sizes, and SHA-256
    values. The generator rejects missing/duplicate artifacts and artifact file
    names that do not contain the tag version.
@@ -543,17 +543,17 @@ cannot drift. It is not shipped in the app.
 - The only outbound traffic is an HTTPS GET of the manifest, its signature, and
   (after the user starts a download) the artifact. No telemetry, no unique
   identifiers, no query parameters with user data.
-- The User-Agent is `vrc-photo-manager/<version>`.
+- The User-Agent is `vrc-photon/<version>`.
 - GitHub sees the user's IP address and the requested release asset, which is
   inherent to downloading over HTTPS. This is documented in
   `docs/security-privacy.md`.
 - Automatic checking can be disabled in Settings; manual checks still work.
 - Downloads are accepted only from the signed manifest; there is no
   "download from an arbitrary URL" UI.
-- The feed URL may be overridden with `VRC_PHOTO_UPDATE_FEED` (mirrors/QA).
+- The feed URL may be overridden with `VRC_PHOTON_UPDATE_FEED` (mirrors/QA).
   The signature and hash requirements are unchanged.
 - Debug builds (`cfg!(debug_assertions)`) accept
-  `VRC_PHOTO_UPDATE_PUBLIC_KEY`, which replaces the embedded key list for
+  `VRC_PHOTON_UPDATE_PUBLIC_KEY`, which replaces the embedded key list for
   check/download UI testing. Release builds ignore the variable entirely. An
   end-to-end AppImage test that needs to apply an update instead adds the test
   public key to `packaging/update/keys.txt` in a scratch build; that change is
@@ -613,7 +613,7 @@ Manual smoke tests (documented in `docs/testing.md`):
 1. Build two AppImages with different versions, add a test public key to
    `packaging/update/keys.txt` in the scratch build, and sign a local test feed
    with the matching test secret key. A debug build can check/download the same
-   feed with `VRC_PHOTO_UPDATE_PUBLIC_KEY`, but apply is disabled outside a real
+   feed with `VRC_PHOTON_UPDATE_PUBLIC_KEY`, but apply is disabled outside a real
    AppImage.
 2. Check for updates, confirm the release notes link, download, verify the
    signature, apply, and confirm the new version starts and the daemon
@@ -706,7 +706,7 @@ packaged and the bundle stays buildable.
   Settings, and the privacy document explains the request.
 - The update UI lives in **Settings**, with a navigation badge and a header
   message rather than a modal.
-- The helper is shipped as a **separate binary** (`vrc-photo-updater`) rather
+- The helper is shipped as a **separate binary** (`vrc-photon-updater`) rather
   than a hidden mode of the UI, so it can survive the AppImage mount and
   Windows file locks.
 - **deb/pacman are notify-only.** Their files are owned by the package manager.

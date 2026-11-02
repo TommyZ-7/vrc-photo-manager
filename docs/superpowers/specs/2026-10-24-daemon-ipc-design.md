@@ -1,7 +1,7 @@
 # UI⇔デーモンIPC: Design
 
 - Date: 2026-10-24
-- Issue: [#18 feat: UI⇔デーモンIPC](https://github.com/TommyZ-7/vrc-photo-manager/issues/18)
+- Issue: [#18 feat: UI⇔デーモンIPC](https://github.com/TommyZ-7/vrc-photon/issues/18)
 - Status: Proposed
 - Target: new `crates/ipc`, `crates/core/src/scanner.rs`, `crates/daemon/src/{lib,main}.rs`, `crates/ui/src/main.rs`, docs
 
@@ -102,7 +102,7 @@ for photo/job reads and much higher failure risk.
 
 ### 6.1 Crate and dependency direction
 
-Add `crates/ipc` (`vrc-photo-ipc`). It contains only:
+Add `crates/ipc` (`vrc-photon-ipc`). It contains only:
 
 - protocol types and version constant;
 - endpoint resolution (socket path / pipe name);
@@ -122,13 +122,13 @@ daemon ────┼──> ipc
 
 ### 6.2 Endpoint
 
-- Unix: `${XDG_RUNTIME_DIR}/vrc-photo-manager/daemon.sock` when
+- Unix: `${XDG_RUNTIME_DIR}/vrc-photon/daemon.sock` when
   `XDG_RUNTIME_DIR` is set, otherwise `<data_dir>/run/daemon.sock`. The parent
   directory is created with mode 0700 and the socket with mode 0600. If the
   resulting path exceeds the Unix socket path limit, fall back to
-  `/tmp/vrc-photo-manager-<uid>/daemon.sock` (directory 0700, socket 0600).
+  `/tmp/vrc-photon-<uid>/daemon.sock` (directory 0700, socket 0600).
 - Windows: a namespaced pipe name containing the user name, for example
-  `vrc-photo-manager-daemon-<user>`. The pipe is local-only; remote pipe access
+  `vrc-photon-daemon-<user>`. The pipe is local-only; remote pipe access
   is disabled by the transport defaults.
 - Binding probes the existing endpoint **before** unlinking anything:
   - If `hello` succeeds, a live daemon owns the endpoint. Do not unlink it;
@@ -147,7 +147,7 @@ Newline-delimited JSON, one object per line, UTF-8. `PROTOCOL_VERSION = 1`.
 Envelope:
 
 ```json
-{"id":1,"request":{"type":"hello","protocol_version":1,"client":{"name":"vrc-photo-manager","version":"0.3.0"}}}
+{"id":1,"request":{"type":"hello","protocol_version":1,"client":{"name":"vrc-photon","version":"0.3.0"}}}
 {"id":2,"request":{"type":"wake_commands"}}
 {"type":"event","event":{"type":"compression_progress","job_id":"...","photo_id":42,"status":"processing","progress":0.05}}
 {"type":"response","id":2,"response":{"type":"ok"}}

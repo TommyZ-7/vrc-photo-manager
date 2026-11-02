@@ -83,7 +83,7 @@ fn ensure_reports_a_cache_hit_without_creation() {
 
 - [x] **Step 2: 失敗を確認する**
 
-Run: `cargo test -p vrc-photo-core thumbnail::tests`
+Run: `cargo test -p vrc-photon-core thumbnail::tests`
 Expected: `ensure_thumbnail_in_with_status` と `EnsuredThumbnail` が未定義でコンパイル失敗。
 
 - [x] **Step 3: `EnsuredThumbnail` と `ensure_thumbnail_in_with_status` を実装する**
@@ -92,7 +92,7 @@ Expected: `ensure_thumbnail_in_with_status` と `EnsuredThumbnail` が未定義�
 
 - [x] **Step 4: テストが通ることを確認する**
 
-Run: `cargo test -p vrc-photo-core thumbnail::tests`
+Run: `cargo test -p vrc-photon-core thumbnail::tests`
 Expected: PASS。
 
 - [x] **Step 5: 削除失敗の失敗テストを書く**
@@ -118,7 +118,7 @@ fn prune_reports_removal_failures_without_stopping_other_deletions() {
 
 - [x] **Step 6: 失敗を確認する**
 
-Run: `cargo test -p vrc-photo-core thumbnail::tests`
+Run: `cargo test -p vrc-photon-core thumbnail::tests`
 Expected: `prune_thumbnails_with` が未定義でコンパイル失敗。
 
 - [x] **Step 7: `prune_thumbnails_with` を実装する**
@@ -149,7 +149,7 @@ fn prune_retries_a_file_locked_by_another_handle() {
 
 - [x] **Step 9: テストが通ることを確認する**
 
-Run: `cargo test -p vrc-photo-core thumbnail::tests`
+Run: `cargo test -p vrc-photon-core thumbnail::tests`
 Expected: PASS（Windows 固有テストは Linux では未コンパイル）。
 
 - [x] **Step 10: コミット**
@@ -195,7 +195,7 @@ fn thumbnails_generated_round_trips() {
 
 - [x] **Step 2: 失敗を確認する**
 
-Run: `cargo test -p vrc-photo-ipc protocol::tests::thumbnails_generated_round_trips`
+Run: `cargo test -p vrc-photon-ipc protocol::tests::thumbnails_generated_round_trips`
 Expected: `ThumbnailsGenerated` が未定義でコンパイル失敗。
 
 - [x] **Step 3: プロトコルを実装する**
@@ -227,7 +227,7 @@ fn thumbnails_generated_adds_external_bytes() {
 
 - [x] **Step 5: 失敗を確認する**
 
-Run: `cargo test -p vrc-photo-daemon thumbnails_generated_adds_external_bytes`
+Run: `cargo test -p vrc-photon-daemon thumbnails_generated_adds_external_bytes`
 Expected: `IpcControl` にフィールドがなくコンパイル失敗。
 
 - [x] **Step 6: デーモン側の受け口を実装する**
@@ -236,7 +236,7 @@ Expected: `IpcControl` にフィールドがなくコンパイル失敗。
 
 - [x] **Step 7: テストが通ることを確認する**
 
-Run: `cargo test -p vrc-photo-ipc && cargo test -p vrc-photo-daemon thumbnails_generated_adds_external_bytes`
+Run: `cargo test -p vrc-photon-ipc && cargo test -p vrc-photon-daemon thumbnails_generated_adds_external_bytes`
 Expected: PASS。
 
 - [x] **Step 8: コミット**
@@ -305,7 +305,7 @@ fn thumbnail_budget_never_prunes_when_unlimited() {
 
 - [x] **Step 2: 失敗を確認する**
 
-Run: `cargo test -p vrc-photo-daemon thumbnail_budget_`
+Run: `cargo test -p vrc-photon-daemon thumbnail_budget_`
 Expected: `ThumbnailCacheBudget` が未定義でコンパイル失敗。
 
 - [x] **Step 3: budget を実装する**
@@ -314,7 +314,7 @@ Expected: `ThumbnailCacheBudget` が未定義でコンパイル失敗。
 
 - [x] **Step 4: budget テストが通ることを確認する**
 
-Run: `cargo test -p vrc-photo-daemon thumbnail_budget_`
+Run: `cargo test -p vrc-photon-daemon thumbnail_budget_`
 Expected: PASS。
 
 - [x] **Step 5: 外部通知で削除される失敗テストを書く**
@@ -332,7 +332,7 @@ fn external_thumbnail_growth_prunes_over_the_limit() {
 
 - [x] **Step 6: 失敗を確認する**
 
-Run: `cargo test -p vrc-photo-daemon external_thumbnail_growth_prunes_over_the_limit`
+Run: `cargo test -p vrc-photon-daemon external_thumbnail_growth_prunes_over_the_limit`
 Expected: 外部バイト数が worker に渡っておらず削除されないため FAIL。
 
 - [x] **Step 7: worker を budget ベースへ書き換える**
@@ -354,7 +354,7 @@ Expected: 外部バイト数が worker に渡っておらず削除されない�
 
 - [x] **Step 9: 全テストが通ることを確認する**
 
-Run: `cargo test -p vrc-photo-daemon thumbnail`
+Run: `cargo test -p vrc-photon-daemon thumbnail`
 Expected: PASS。
 
 - [x] **Step 10: コミット**
@@ -411,7 +411,7 @@ fn thumbnail_cache_insert_cancels_a_pending_disk_refresh() {
 
 - [x] **Step 2: 失敗を確認する**
 
-Run: `cargo test -p vrc-photo-ui thumbnail_cache_queues_one_disk_refresh_per_hour`
+Run: `cargo test -p vrc-photon-ui thumbnail_cache_queues_one_disk_refresh_per_hour`
 Expected: フィールドとメソッドがなくコンパイル失敗。
 
 - [x] **Step 3: メモリ LRU を実装する**
@@ -425,7 +425,7 @@ Expected: フィールドとメソッドがなくコンパイル失敗。
 
 - [x] **Step 4: UI テストが通ることを確認する**
 
-Run: `cargo test -p vrc-photo-ui thumbnail_cache_`
+Run: `cargo test -p vrc-photon-ui thumbnail_cache_`
 Expected: PASS。
 
 - [x] **Step 5: 描画後の回収とバックグラウンド更新を実装する**
@@ -458,7 +458,7 @@ pub(crate) fn refresh_thumbnail_access(&self, ids: Vec<i64>, cx: &mut Context<Se
 
 - [x] **Step 6: ワークスペースの UI テストが通ることを確認する**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: PASS。
 
 - [x] **Step 7: コミット**
@@ -503,7 +503,7 @@ fn decode_thumbnail_does_not_generate_without_a_cache_dir() {
 
 - [x] **Step 2: 失敗を確認する**
 
-Run: `cargo test -p vrc-photo-ui decode_thumbnail_reports_bytes_only_when_it_creates_the_file`
+Run: `cargo test -p vrc-photon-ui decode_thumbnail_reports_bytes_only_when_it_creates_the_file`
 Expected: `DecodedThumbnail` が未定義でコンパイル失敗。
 
 - [x] **Step 3: `DecodedThumbnail` とサイズ返却を実装する**
@@ -516,7 +516,7 @@ Expected: `DecodedThumbnail` が未定義でコンパイル失敗。
 
 - [x] **Step 4: サイズのテストが通ることを確認する**
 
-Run: `cargo test -p vrc-photo-ui decode_thumbnail`
+Run: `cargo test -p vrc-photon-ui decode_thumbnail`
 Expected: PASS。
 
 - [x] **Step 5: ログ経路の失敗テストを書く**
@@ -541,7 +541,7 @@ fn decode_thumbnail_does_not_regenerate_an_undecodable_existing_file() {
 
 - [x] **Step 6: 失敗を確認する**
 
-Run: `cargo test -p vrc-photo-ui decode_thumbnail_`
+Run: `cargo test -p vrc-photon-ui decode_thumbnail_`
 Expected: 既存実装は再生成後のサイズを返さないため FAIL。
 
 - [x] **Step 7: ログレベルを実装する**
@@ -555,7 +555,7 @@ Expected: 既存実装は再生成後のサイズを返さないため FAIL。
 
 - [x] **Step 8: UI テストが通ることを確認する**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: PASS。
 
 - [x] **Step 9: コミット**
@@ -606,7 +606,7 @@ fn thumbnail_notice_batch_flushes_at_file_and_byte_thresholds() {
 
 - [x] **Step 2: 失敗を確認する**
 
-Run: `cargo test -p vrc-photo-ui thumbnail_notice_batch`
+Run: `cargo test -p vrc-photon-ui thumbnail_notice_batch`
 Expected: `ThumbnailNoticeBatch` が未定義でコンパイル失敗。
 
 - [x] **Step 3: バッチを実装する**
@@ -616,7 +616,7 @@ Expected: `ThumbnailNoticeBatch` が未定義でコンパイル失敗。
 
 - [x] **Step 4: バッチテストが通ることを確認する**
 
-Run: `cargo test -p vrc-photo-ui thumbnail_notice_batch`
+Run: `cargo test -p vrc-photon-ui thumbnail_notice_batch`
 Expected: PASS。
 
 - [x] **Step 5: App の配線を実装する**
@@ -635,14 +635,14 @@ Expected: PASS。
   let Some((files, bytes)) = self.thumbnail_notice.take() else { return; };
   self.wake_daemon(IpcRequest::ThumbnailsGenerated { files, bytes }, cx);
   ```
-  `photos.rs` に `use vrc_photo_ipc::Request as IpcRequest;` を追加する。
+  `photos.rs` に `use vrc_photon_ipc::Request as IpcRequest;` を追加する。
 - デモモード（`self.demo_assets.is_some()`）では何もしない。
 
 `lifecycle.rs` の `Incoming::Connected` 分岐で `self.flush_thumbnail_notice(cx)` を呼ぶ。
 
 - [x] **Step 6: UI テストとビルドを確認する**
 
-Run: `cargo test -p vrc-photo-ui && cargo check --workspace`
+Run: `cargo test -p vrc-photon-ui && cargo check --workspace`
 Expected: PASS。
 
 - [x] **Step 7: コミット**
@@ -660,7 +660,7 @@ git commit -m "feat(ui): notify the daemon about generated thumbnails"
 - Modify: `.github/workflows/ci.yml`
 
 **Interfaces:**
-- Consumes: `cargo test -p vrc-photo-core thumbnail::tests`（Task 1 のテスト）
+- Consumes: `cargo test -p vrc-photon-core thumbnail::tests`（Task 1 のテスト）
 - Produces: `changes` ジョブの `thumbnails` 出力。
 
 - [x] **Step 1: `changes` ジョブに出力を追加する**
@@ -680,7 +680,7 @@ git commit -m "feat(ui): notify the daemon about generated thumbnails"
 ```yaml
       - name: Test thumbnail cache on Windows
         if: needs.changes.outputs.thumbnails == 'true'
-        run: cargo test -p vrc-photo-core thumbnail::tests
+        run: cargo test -p vrc-photon-core thumbnail::tests
 ```
 
 新しい必須チェックは増やさない（既存 `ipc-windows` 内の条件付きステップ）。

@@ -6,7 +6,7 @@
 
 **Architecture:** Keep `crates/ui/src/main.rs` as the single UI file. Replace the token values, add pure layout/motion/color helpers with unit tests, then layer the new shell, sidebar, grid, inspector, and full-screen viewer on top of the existing screens. Move the old detail screen body into a reusable `detail_body` rendered by the viewer. Add three persisted settings fields (sidebar, inspector, reduced motion) and a demo fixture generator so the visual result can be verified end to end.
 
-**Tech Stack:** Rust 2024, gpui-kit 0.8.0 / gpui-pre 0.3.9, SQLite via `vrc_photo_core`, `image` 0.25.
+**Tech Stack:** Rust 2024, gpui-kit 0.8.0 / gpui-pre 0.3.9, SQLite via `vrc_photon_core`, `image` 0.25.
 
 **Spec:** `docs/superpowers/specs/2026-10-22-ui-redesign-design.md`
 
@@ -238,7 +238,7 @@ mod tests {
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: all 11 tests pass.
 
 - [ ] **Step 5: Commit**
@@ -285,7 +285,7 @@ fn settings_deserialize_without_ui_fields() {
 
 - [ ] **Step 2: Run it to confirm failure**
 
-Run: `cargo test -p vrc-photo-core settings_deserialize_without_ui_fields`
+Run: `cargo test -p vrc-photon-core settings_deserialize_without_ui_fields`
 Expected: FAIL with "missing field `ui_sidebar_collapsed`" or a compile error.
 
 - [ ] **Step 3: Add the fields and defaults**
@@ -305,7 +305,7 @@ In `Default`: all three `false`. Do not add a struct-level `#[serde(default)]`; 
 
 - [ ] **Step 4: Run the settings tests**
 
-Run: `cargo test -p vrc-photo-core settings`
+Run: `cargo test -p vrc-photon-core settings`
 Expected: PASS, including the existing roundtrip test.
 
 - [ ] **Step 5: Commit**
@@ -371,7 +371,7 @@ fn launch_options_ignore_unknown_flags() {
 - [ ] **Step 2: Implement the demo fixture generator**
 
 `prepare_demo(reset)`:
-- `let root = std::env::temp_dir().join("vrc-photo-manager-demo");`
+- `let root = std::env::temp_dir().join("vrc-photon-demo");`
 - If `reset`, remove `root` recursively.
 - Create `root/photos` and `root/thumbnails`.
 - Open `root/library.db` with `Db::open`. If `db.count_photos()? == 0`, call `seed_demo(&db, &root.join("photos"))`.
@@ -411,10 +411,10 @@ Use `self.demo_assets.as_ref().map(|assets| demo_thumb_path(assets, photo.id))` 
 
 - [ ] **Step 5: Run the tests and a demo smoke test**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: PASS.
 
-Run: `cargo run -p vrc-photo-ui -- --demo --demo-reset`
+Run: `cargo run -p vrc-photon-ui -- --demo --demo-reset`
 Expected: window opens, 18 generated photos are visible with thumbnails, and no files are written under the real thumbnail cache path.
 
 - [ ] **Step 6: Commit**
@@ -488,10 +488,10 @@ Attach handlers on the root element in `render`:
 
 - [ ] **Step 4: Verify**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: PASS.
 
-Run: `cargo run -p vrc-photo-ui -- --demo`
+Run: `cargo run -p vrc-photon-ui -- --demo`
 Expected: `Ctrl+B` and `Ctrl+I` update the persisted flags without crashing yet (the visual changes land in Tasks 5 and 7); `Ctrl+K` switches to Search and focuses the world input.
 
 - [ ] **Step 5: Commit**
@@ -577,10 +577,10 @@ Each item is a `Stateful<Div>`:
 
 - [ ] **Step 6: Verify**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: PASS.
 
-Run: `cargo run -p vrc-photo-ui -- --demo`
+Run: `cargo run -p vrc-photon-ui -- --demo`
 Expected: toggle collapses to 78 px and expands to 238 px; `Ctrl+B` does the same; labels/counts/storage hide in rail mode; hovering an icon shows its label; restarting preserves the state (demo DB is file-backed now).
 
 - [ ] **Step 7: Commit**
@@ -696,13 +696,13 @@ let hovered = self.hovered_photo == Some(id);
 
 - [ ] **Step 7: Verify**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: PASS.
 
-Run: `cargo run -p vrc-photo-ui -- --demo --window-size 1280x820`
+Run: `cargo run -p vrc-photon-ui -- --demo --window-size 1280x820`
 Expected: 3 columns with the sidebar expanded and the inspector visible; 4 columns with the sidebar collapsed; 5 columns with the inspector hidden. No thumbnail reload on animation.
 
-Run: `cargo run -p vrc-photo-ui -- --demo --window-size 1440x900`
+Run: `cargo run -p vrc-photon-ui -- --demo --window-size 1440x900`
 Expected: 4 columns expanded with the inspector visible; 5 columns with the sidebar collapsed; 6 columns with the inspector hidden.
 
 - [ ] **Step 8: Commit**
@@ -777,10 +777,10 @@ When `inspector_collapsed` is true, render the column empty (no card content); w
 
 - [ ] **Step 4: Verify**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: PASS.
 
-Run: `cargo run -p vrc-photo-ui -- --demo`
+Run: `cargo run -p vrc-photon-ui -- --demo`
 Expected: selecting a photo animates the tint and preview; the inspector background visibly picks up the photo's palette; metadata edits do not flash/re-decode the preview; the header's "詳細" toggle and `Ctrl+I` collapse the column to 0 and expand it back, and the grid gains/loses columns.
 
 - [ ] **Step 5: Commit**
@@ -964,10 +964,10 @@ The panel is `h_full`, `bg(rgba(0x0e131bdc))`, and contains a scrollable `detail
 
 - [ ] **Step 6: Verify**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: PASS.
 
-Run: `cargo run -p vrc-photo-ui -- --demo`
+Run: `cargo run -p vrc-photon-ui -- --demo`
 Expected:
 - Double-click, Space, and the inspector button open the full-screen viewer.
 - "前へ" / "次へ" and Left/Right move through the current Photos list or Search results; they clamp at the first/last photo; the library selection follows. Left/Right do not navigate while the tag input is focused.
@@ -1016,10 +1016,10 @@ Any motion that does not go through `with_animation` must check `cx.reduce_motio
 
 - [ ] **Step 4: Verify**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: PASS.
 
-Run: `cargo run -p vrc-photo-ui -- --demo`
+Run: `cargo run -p vrc-photon-ui -- --demo`
 Expected: toggling the switch makes the UI update instantly; restarting preserves the switch; no animation frames are scheduled when enabled.
 
 - [ ] **Step 5: Commit**
@@ -1049,8 +1049,8 @@ Expected: all pass.
 Run each demo, find the window geometry, and capture it. Start from a clean demo state (`--demo-reset`) so the sidebar starts expanded:
 
 ```bash
-cargo run -p vrc-photo-ui -- --demo --demo-reset --window-size 1280x820
-hyprctl clients -j | jq '.[] | select(.title=="VRC Photo Manager") | {at, size}'
+cargo run -p vrc-photon-ui -- --demo --demo-reset --window-size 1280x820
+hyprctl clients -j | jq '.[] | select(.title=="VRC PhotoN") | {at, size}'
 grim -g "<x>,<y> <w>x<h>" /tmp/opencode/ui-1280-expanded.png
 ```
 
@@ -1113,10 +1113,10 @@ Active profile: `ACCENT_SOFT` background, `BLUE` border, accent text. Inactive: 
 
 - [ ] **Step 4: Verify**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: PASS.
 
-Run: `cargo run -p vrc-photo-ui -- --demo`
+Run: `cargo run -p vrc-photon-ui -- --demo`
 Expected: profile selection, format, quality, resize, policy, and manual compression still work.
 
 - [ ] **Step 5: Commit**
@@ -1146,10 +1146,10 @@ git commit -m "feat: apply redesign tokens to compression screen"
 
 - [ ] **Step 3: Verify**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: PASS.
 
-Run: `cargo run -p vrc-photo-ui -- --demo`
+Run: `cargo run -p vrc-photon-ui -- --demo`
 Expected: world/player/tag/date/favorite search still works; results show fixed-width cards; double-click opens the full-screen viewer (Space is validated on the Photos grid); previous/next stays within the Search results.
 
 - [ ] **Step 4: Commit**
@@ -1189,10 +1189,10 @@ Photos, Monitor, and Settings now have their own headers; Compression keeps its 
 
 - [ ] **Step 4: Verify**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: PASS.
 
-Run: `cargo run -p vrc-photo-ui -- --demo`
+Run: `cargo run -p vrc-photon-ui -- --demo`
 Expected: monitor refresh, settings path save, autostart/tray/auto-compress switches, and reduced-motion switch still work.
 
 - [ ] **Step 5: Commit**

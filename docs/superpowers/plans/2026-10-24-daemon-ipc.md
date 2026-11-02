@@ -45,7 +45,7 @@
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: `vrc_photo_ipc::{PROTOCOL_VERSION, APP_VERSION}`, `protocol::{Request, Response, Event, StatusSnapshot, ScanPhase, JobStatus, Operation, ClientInfo, ErrorCode, RequestEnvelope, ServerMessage}`, `framing::{read_message, write_message}`.
+- Produces: `vrc_photon_ipc::{PROTOCOL_VERSION, APP_VERSION}`, `protocol::{Request, Response, Event, StatusSnapshot, ScanPhase, JobStatus, Operation, ClientInfo, ErrorCode, RequestEnvelope, ServerMessage}`, `framing::{read_message, write_message}`.
 
 - [ ] **Step 1: Write the failing protocol and framing tests**
 
@@ -93,7 +93,7 @@ fn framing_reads_one_newline_delimited_message() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-ipc`
+Run: `cargo test -p vrc-photon-ipc`
 Expected: FAIL because the crate and types do not exist.
 
 - [ ] **Step 3: Create the crate and implement the types**
@@ -102,7 +102,7 @@ Add `crates/ipc` to the workspace. `protocol.rs` defines the types from the spec
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-ipc`
+Run: `cargo test -p vrc-photon-ipc`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -172,12 +172,12 @@ fn stale_socket_is_replaced_but_live_socket_is_not() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-ipc transport`
+Run: `cargo test -p vrc-photon-ipc transport`
 Expected: FAIL because the transport types do not exist.
 
 - [ ] **Step 3: Implement the endpoint and transport**
 
-- `Endpoint::for_data_dir`: Unix uses `$XDG_RUNTIME_DIR/vrc-photo-manager/daemon.sock` or `<data_dir>/run/daemon.sock`, falls back to `/tmp/vrc-photo-manager-<uid>/daemon.sock` when the path exceeds 100 bytes; Windows uses a namespaced pipe name containing the user name.
+- `Endpoint::for_data_dir`: Unix uses `$XDG_RUNTIME_DIR/vrc-photon/daemon.sock` or `<data_dir>/run/daemon.sock`, falls back to `/tmp/vrc-photon-<uid>/daemon.sock` when the path exceeds 100 bytes; Windows uses a namespaced pipe name containing the user name.
 - `Endpoint::for_tests`: Unix uses `<dir>/daemon.sock`; Windows uses a unique namespaced name built from the process id plus an atomic counter.
 - `Listener::bind`: probe with `client::connect` for 200 ms. If the probe succeeds, return `AddrInUse` without unlinking. If it fails with `ConnectionRefused`/`NotFound`, remove the Unix socket file and bind. Create the parent directory `0700` and set the socket `0600`.
 - `client::connect`: `ConnectOptions::new().name(...).wait_mode(ConnectWaitMode::Timeout(timeout)).connect_sync()`.
@@ -188,7 +188,7 @@ Expected: FAIL because the transport types do not exist.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-ipc`
+Run: `cargo test -p vrc-photon-ipc`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -235,7 +235,7 @@ fn observed_scan_reports_walking_and_indexing_progress() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p vrc-photo-core observed_scan_reports_walking_and_indexing_progress`
+Run: `cargo test -p vrc-photon-core observed_scan_reports_walking_and_indexing_progress`
 Expected: FAIL because `scan_and_index_observed` does not exist.
 
 - [ ] **Step 3: Implement the observed scanner**
@@ -244,7 +244,7 @@ Add `walk_with(root, dir, photos, failures, &mut observe)`, call it from `scan_r
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-core scanner`
+Run: `cargo test -p vrc-photon-core scanner`
 Expected: PASS, including the existing scanner tests.
 
 - [ ] **Step 5: Commit**
@@ -265,7 +265,7 @@ git commit -m "feat: report scan progress from the scanner"
 - Test: inline tests in `signals.rs`
 
 **Interfaces:**
-- Consumes: `vrc-photo-ipc` for `ScanPhase`.
+- Consumes: `vrc-photon-ipc` for `ScanPhase`.
 - Produces: `signals::{WakeSignal, JobSignal}`; `DaemonStatus` gains `scanning`, `scan_phase`, `scan_processed`, `scan_total`, `scan_indexed`, `scan_root`, `scan_roots`.
 
 - [ ] **Step 1: Write the failing signal tests**
@@ -293,16 +293,16 @@ fn job_signal_wakes_each_worker_generation() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-daemon signals`
+Run: `cargo test -p vrc-photon-daemon signals`
 Expected: FAIL because the module does not exist.
 
 - [ ] **Step 3: Implement the signals and status fields**
 
-`WakeSignal` is `Mutex<bool>` + `Condvar`; `wait` returns immediately when pending, otherwise waits up to the timeout and clears the flag. `JobSignal` is a generation counter + `Condvar`; each worker keeps its own `seen` generation. Add the status fields with defaults and import `vrc_photo_ipc::ScanPhase` in `DaemonStatus`.
+`WakeSignal` is `Mutex<bool>` + `Condvar`; `wait` returns immediately when pending, otherwise waits up to the timeout and clears the flag. `JobSignal` is a generation counter + `Condvar`; each worker keeps its own `seen` generation. Add the status fields with defaults and import `vrc_photon_ipc::ScanPhase` in `DaemonStatus`.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-daemon signals`
+Run: `cargo test -p vrc-photon-daemon signals`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -365,7 +365,7 @@ Add a test that `hello`/`status` returns the cached snapshot and counts from the
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-daemon ipc_server`
+Run: `cargo test -p vrc-photon-daemon ipc_server`
 Expected: FAIL because the server does not exist.
 
 - [ ] **Step 3: Implement the server**
@@ -378,7 +378,7 @@ Expected: FAIL because the server does not exist.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-daemon ipc_server`
+Run: `cargo test -p vrc-photon-daemon ipc_server`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -436,12 +436,12 @@ fn report_daemon_error_publishes_changed_once() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-daemon`
+Run: `cargo test -p vrc-photon-daemon`
 Expected: FAIL because the events/wake wiring does not exist (the new tests fail; existing tests pass).
 
 - [ ] **Step 3: Integrate the daemon**
 
-- Add `db_path`, `ipc_endpoint`, `wake`, `jobs`, `events`, and `ipc` to `Daemon`. Initialize them in `open`; resolve the endpoint from `vrc_photo_core::data_dir()` and allow `set_ipc_endpoint` for tests.
+- Add `db_path`, `ipc_endpoint`, `wake`, `jobs`, `events`, and `ipc` to `Daemon`. Initialize them in `open`; resolve the endpoint from `vrc_photon_core::data_dir()` and allow `set_ipc_endpoint` for tests.
 - `run`: start `IpcServer` before the initial scan; if binding fails, log and continue. Replace both `thread::sleep(SCAN_INTERVAL)` calls with `self.wake.wait(SCAN_INTERVAL)`.
 - Refactor `scan_photos` into `begin_scan` + `scan_photos_inner` + `finish_scan` so every error path clears `scanning`. Use `scan_and_index_observed` per root; update status and publish throttled `ScanProgress`. Publish one `ScanStarted`/`ScanFinished` pair per full scan. `ScanFinished` carries `failed: bool` and is emitted after the post-scan work.
 - `set_paused`: update status, notify `wake`, publish `StatusChanged`.
@@ -455,7 +455,7 @@ Expected: FAIL because the events/wake wiring does not exist (the new tests fail
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-daemon`
+Run: `cargo test -p vrc-photon-daemon`
 Expected: PASS, including existing daemon tests.
 
 - [ ] **Step 5: Commit**
@@ -505,15 +505,15 @@ fn bridge_reports_disconnected_when_no_daemon_is_listening() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-ui daemon_liveness_uses_heartbeat_or_ipc`
+Run: `cargo test -p vrc-photon-ui daemon_liveness_uses_heartbeat_or_ipc`
 Expected: FAIL because `daemon_liveness` does not exist.
 
 - [ ] **Step 3: Implement the bridge and app wiring**
 
 - `ipc_bridge::Incoming`: `Connected(StatusSnapshot)`, `Disconnected(String)`, `Event(Event)`.
 - `start`: spawn a thread that opens a `Subscription`, sends `Connected`, forwards events, sends `Disconnected` on error, sleeps 2 s, retries until the channel closes.
-- `request`: `vrc_photo_ipc::client::request(&endpoint, request, Duration::from_secs(2))`.
-- In `App::new`, resolve `Endpoint::for_data_dir` from `vrc_photo_core::data_dir()`; if present, start the pump. Store the endpoint, connected/error/paused/scan fields.
+- `request`: `vrc_photon_ipc::client::request(&endpoint, request, Duration::from_secs(2))`.
+- In `App::new`, resolve `Endpoint::for_data_dir` from `vrc_photon_core::data_dir()`; if present, start the pump. Store the endpoint, connected/error/paused/scan fields.
 - `handle_ipc_incoming`: update `ipc_connected`, `ipc_error`, `daemon_paused`, `scan_progress`; apply `StatusSnapshot`; call `refresh_monitor`/`cx.notify`.
 - `handle_ipc_event`: scan events update/clear progress; `ScanFinished` calls `refresh_live`; compression events call `refresh_live`; error changes reload job state; status changes apply the snapshot. Never panic on unknown/disconnected input.
 - `refresh_monitor`: `daemon_active = daemon_liveness(self.daemon_age_secs, self.ipc_connected)`.
@@ -524,7 +524,7 @@ Expected: FAIL because `daemon_liveness` does not exist.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: PASS, including existing UI tests.
 
 - [ ] **Step 5: Commit**
@@ -565,7 +565,7 @@ fn ipc_status_label_distinguishes_disconnected_and_mismatch() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-ui scan_progress_label_uses_root_and_counts`
+Run: `cargo test -p vrc-photon-ui scan_progress_label_uses_root_and_counts`
 Expected: FAIL because the helpers do not exist.
 
 - [ ] **Step 3: Implement the monitor card and controls**
@@ -578,7 +578,7 @@ Expected: FAIL because the helpers do not exist.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -676,7 +676,7 @@ Use an isolated data/runtime directory so the real library is untouched:
 SMOKE=$(mktemp -d /tmp/opencode/vrc-ipc-smoke.XXXXXX)
 mkdir -p "$SMOKE/data" "$SMOKE/runtime" "$SMOKE/photos" "$SMOKE/logs"
 XDG_DATA_HOME="$SMOKE/data" XDG_RUNTIME_DIR="$SMOKE/runtime" \
-  ./target/debug/vrc-photo-daemon --no-tray --photo-dir "$SMOKE/photos" --log-dir "$SMOKE/logs" &
+  ./target/debug/vrc-photon-daemon --no-tray --photo-dir "$SMOKE/photos" --log-dir "$SMOKE/logs" &
 ```
 
 Run the UI with the same `XDG_DATA_HOME`/`XDG_RUNTIME_DIR`, then verify:

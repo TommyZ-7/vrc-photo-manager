@@ -4,7 +4,7 @@
 
 **Goal:** Seed the four built-in compression profiles only when the database has none, so restarts stop duplicating them.
 
-**Architecture:** Move the built-in preset list from the UI into `vrc-photo-core` as `CompressionProfile::defaults()`, add an idempotent `Db::ensure_default_profiles()`, and reduce the UI's `ensure_profiles()` to a call into it. Core gets unit tests against an in-memory SQLite database; the UI change is verified by the existing suite plus a two-launch demo check.
+**Architecture:** Move the built-in preset list from the UI into `vrc-photon-core` as `CompressionProfile::defaults()`, add an idempotent `Db::ensure_default_profiles()`, and reduce the UI's `ensure_profiles()` to a call into it. Core gets unit tests against an in-memory SQLite database; the UI change is verified by the existing suite plus a two-launch demo check.
 
 **Tech Stack:** Rust 2024, SQLite via rusqlite, GPUI (gpui-kit 0.8.0).
 
@@ -110,7 +110,7 @@ fn ensure_default_profiles_does_not_seed_on_read_error() {
 
 - [ ] **Step 2: Run the tests and confirm they fail**
 
-Run: `cargo test -p vrc-photo-core ensure_default_profiles`
+Run: `cargo test -p vrc-photon-core ensure_default_profiles`
 
 Expected: compile error, `no method named ensure_default_profiles found for struct Db`.
 
@@ -175,7 +175,7 @@ pub fn ensure_default_profiles(&self) -> Result<Vec<CompressionProfile>> {
 
 - [ ] **Step 5: Run the core tests**
 
-Run: `cargo test -p vrc-photo-core`
+Run: `cargo test -p vrc-photon-core`
 
 Expected: PASS, including the three new tests.
 
@@ -211,11 +211,11 @@ Delete the `defaults` array and the save loop. Keep the `CompressionProfile` imp
 
 - [ ] **Step 2: Run the UI tests and clippy**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 
 Expected: PASS.
 
-Run: `cargo clippy -p vrc-photo-ui --all-targets -- -D warnings`
+Run: `cargo clippy -p vrc-photon-ui --all-targets -- -D warnings`
 
 Expected: no warnings.
 
@@ -224,11 +224,11 @@ Expected: no warnings.
 If a display is available:
 
 ```bash
-cargo run -p vrc-photo-ui -- --demo --demo-reset
+cargo run -p vrc-photon-ui -- --demo --demo-reset
 # close the window
-cargo run -p vrc-photo-ui -- --demo
+cargo run -p vrc-photon-ui -- --demo
 # close the window
-sqlite3 /tmp/vrc-photo-manager-demo/library.db "SELECT COUNT(*) FROM compression_profiles;"
+sqlite3 /tmp/vrc-photon-demo/library.db "SELECT COUNT(*) FROM compression_profiles;"
 ```
 
 Expected: `4`. Also open the Compression screen and confirm four rows. If `sqlite3` is unavailable, query the same file with any SQLite client. If no display is available, record that this step was skipped and rely on the core tests.
@@ -250,6 +250,6 @@ git commit -m "fix: stop re-seeding compression profiles on startup"
 
 ## Verification
 
-- `cargo test -p vrc-photo-core ensure_default_profiles` covers Review Focus items 1–4.
+- `cargo test -p vrc-photon-core ensure_default_profiles` covers Review Focus items 1–4.
 - The demo restart check covers item 5.
 - Full pre-push command must be green before opening the PR.
