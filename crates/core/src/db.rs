@@ -1498,23 +1498,37 @@ impl Db {
     }
 
     pub fn set_photo_players(&self, photo_id: i64, players: &[PhotoPlayer]) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "DELETE FROM photo_players WHERE photo_id = ?1",
-            params![photo_id],
-        )?;
-        for player in players {
-            if player.user_id.trim().is_empty() {
-                continue;
-            }
-            tx.execute(
-                "INSERT OR REPLACE INTO photo_players(photo_id, user_id, display_name) \
-                 VALUES (?1, ?2, ?3)",
-                params![photo_id, player.user_id, player.display_name],
+        // A savepoint instead of a transaction, so the method also works
+        // inside a caller's transaction (e.g. `in_transaction`).
+        self.conn.execute_batch("SAVEPOINT set_photo_players")?;
+        let result = (|| {
+            self.conn.execute(
+                "DELETE FROM photo_players WHERE photo_id = ?1",
+                params![photo_id],
             )?;
+            for player in players {
+                if player.user_id.trim().is_empty() {
+                    continue;
+                }
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO photo_players(photo_id, user_id, display_name) \
+                     VALUES (?1, ?2, ?3)",
+                    params![photo_id, player.user_id, player.display_name],
+                )?;
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("RELEASE set_photo_players")?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = self.conn.execute_batch("ROLLBACK TO set_photo_players");
+                let _ = self.conn.execute_batch("RELEASE set_photo_players");
+                Err(error)
+            }
         }
-        tx.commit()?;
-        Ok(())
     }
 
     pub fn photo_players(&self, photo_id: i64) -> Result<Vec<PhotoPlayer>> {
@@ -1547,32 +1561,46 @@ impl Db {
     }
 
     pub fn set_photo_tags(&self, photo_id: i64, tags: &[String]) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "DELETE FROM photo_tags WHERE photo_id = ?1",
-            params![photo_id],
-        )?;
-        for name in tags {
-            let name = name.trim();
-            if name.is_empty() {
-                continue;
+        // A savepoint instead of a transaction, so the method also works
+        // inside a caller's transaction (e.g. `in_transaction`).
+        self.conn.execute_batch("SAVEPOINT set_photo_tags")?;
+        let result = (|| {
+            self.conn.execute(
+                "DELETE FROM photo_tags WHERE photo_id = ?1",
+                params![photo_id],
+            )?;
+            for name in tags {
+                let name = name.trim();
+                if name.is_empty() {
+                    continue;
+                }
+                self.conn.execute(
+                    "INSERT INTO tags(name) VALUES (?1) ON CONFLICT(name) DO NOTHING",
+                    params![name],
+                )?;
+                let tag_id: i64 = self.conn.query_row(
+                    "SELECT id FROM tags WHERE name = ?1",
+                    params![name],
+                    |row| row.get(0),
+                )?;
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO photo_tags(photo_id, tag_id) VALUES (?1, ?2)",
+                    params![photo_id, tag_id],
+                )?;
             }
-            tx.execute(
-                "INSERT INTO tags(name) VALUES (?1) ON CONFLICT(name) DO NOTHING",
-                params![name],
-            )?;
-            let tag_id: i64 = tx.query_row(
-                "SELECT id FROM tags WHERE name = ?1",
-                params![name],
-                |row| row.get(0),
-            )?;
-            tx.execute(
-                "INSERT OR IGNORE INTO photo_tags(photo_id, tag_id) VALUES (?1, ?2)",
-                params![photo_id, tag_id],
-            )?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("RELEASE set_photo_tags")?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = self.conn.execute_batch("ROLLBACK TO set_photo_tags");
+                let _ = self.conn.execute_batch("RELEASE set_photo_tags");
+                Err(error)
+            }
         }
-        tx.commit()?;
-        Ok(())
     }
 
     pub fn photo_tags(&self, photo_id: i64) -> Result<Vec<String>> {
@@ -3376,6 +3404,16 @@ impl Db {
             params![log_file, size, mtime, last_offset, parser_version, now_string()],
         )?;
         Ok(())
+    }
+
+    /// Runs `f` as a single transaction: commits when `f` succeeds and
+    /// rolls back when it fails, so bulk writers never leave a
+    /// half-written library behind.
+    pub fn in_transaction<T>(&self, f: impl FnOnce(&Db) -> Result<T>) -> Result<T> {
+        let tx = self.conn.unchecked_transaction()?;
+        let value = f(self)?;
+        tx.commit()?;
+        Ok(value)
     }
 
     pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
