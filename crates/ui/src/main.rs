@@ -7,9 +7,10 @@ use crate::app::App;
 use crate::app::cli::{parse_args, process_start, timing_enabled};
 use crate::app::daemon::run_background_supervisor;
 use crate::ui::actions::{
-    CloseNotifications, CloseQuickLook, FocusSearch, OpenQuickLook, QuickLookNextFocus,
-    QuickLookPrevFocus, ToggleInspector, ToggleSidebar, ViewerNextPhoto, ViewerPreviousPhoto,
-    ViewerZoomIn, ViewerZoomOut, ViewerZoomReset, register_global_actions,
+    CloseNotifications, CloseQuickLook, FocusSearch, GridAbovePhoto, GridBelowPhoto, GridNextPhoto,
+    GridPreviousPhoto, OpenQuickLook, QuickLookNextFocus, QuickLookPrevFocus, ToggleInspector,
+    ToggleSidebar, TrashSelectedPhotos, ViewerNextPhoto, ViewerPreviousPhoto, ViewerZoomIn,
+    ViewerZoomOut, ViewerZoomReset, register_global_actions,
 };
 
 mod app;
@@ -59,8 +60,15 @@ fn main() {
                 KeyBinding::new("cmd-i", ToggleInspector, None),
                 KeyBinding::new("ctrl-k", FocusSearch, None),
                 KeyBinding::new("cmd-k", FocusSearch, None),
+                KeyBinding::new("ctrl-f", FocusSearch, None),
+                KeyBinding::new("cmd-f", FocusSearch, None),
                 KeyBinding::new("space", OpenQuickLook, Some("photo_grid")),
                 KeyBinding::new("enter", OpenQuickLook, Some("photo_grid")),
+                KeyBinding::new("left", GridPreviousPhoto, Some("photo_grid")),
+                KeyBinding::new("right", GridNextPhoto, Some("photo_grid")),
+                KeyBinding::new("up", GridAbovePhoto, Some("photo_grid")),
+                KeyBinding::new("down", GridBelowPhoto, Some("photo_grid")),
+                KeyBinding::new("delete", TrashSelectedPhotos, Some("photo_grid")),
                 KeyBinding::new("escape", CloseQuickLook, Some("quick_look")),
                 KeyBinding::new("escape", CloseNotifications, Some("notification_modal")),
                 KeyBinding::new("left", ViewerPreviousPhoto, Some("viewer_nav")),

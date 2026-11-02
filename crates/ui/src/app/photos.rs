@@ -21,7 +21,7 @@ use vrc_photon_ipc::Request as IpcRequest;
 use crate::app::cli::log_timing;
 use crate::app::demo::demo_thumb_path;
 use crate::app::{App, Screen};
-use crate::state::photo_browser::PhotoBrowser;
+use crate::state::photo_browser::{PhotoBrowser, row_for_photo};
 use crate::state::preview::{
     preview_cache_dir, preview_key, should_apply_preview, should_request_preview,
 };
@@ -656,6 +656,44 @@ impl App {
         cx.notify();
     }
 
+    /// Moves the grid selection by `delta` photos in index order and
+    /// scrolls the target row into view. Bound to the arrow keys in the
+    /// `photo_grid` key context, so it only runs while the grid itself has
+    /// focus; text inputs elsewhere never dispatch it.
+    pub(crate) fn move_grid_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        self.move_grid_selection_by(delta, cx);
+    }
+
+    /// Vertical arrow movement: one row is `columns` photos.
+    pub(crate) fn move_grid_selection_vertical(&mut self, rows: isize, cx: &mut Context<Self>) {
+        let columns = self.library.borrow().columns.max(1) as isize;
+        self.move_grid_selection_by(rows * columns, cx);
+    }
+
+    fn move_grid_selection_by(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.quick_look_open {
+            return;
+        }
+        let target = {
+            let browser = self.library.borrow();
+            let entries = &browser.index.entries;
+            let current = self.selected.and_then(|id| browser.index.row_of_id(id));
+            grid_move_target(current, delta, entries.len()).map(|pos| entries[pos].id)
+        };
+        let Some(target) = target else {
+            return;
+        };
+        if Some(target) == self.selected {
+            return;
+        }
+        self.select_photo(target, cx);
+        let browser = self.library.borrow();
+        let row = row_for_photo(&browser.index, target, browser.columns);
+        browser
+            .scroll
+            .scroll_to_item_strict(row, ScrollStrategy::Nearest);
+    }
+
     pub(crate) fn trash_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let ids = self.selected_action_ids();
         if ids.is_empty() {
@@ -1061,12 +1099,46 @@ fn with_tag(tags: &[String], tag: &str) -> Option<Vec<String>> {
     Some(tags)
 }
 
+/// Target position for a keyboard move in the photo grid. `current` is the
+/// position of the primary selection in index order; with no selection the
+/// first photo is the target. The result is clamped to the list, and `None`
+/// means the list is empty.
+fn grid_move_target(current: Option<usize>, delta: isize, len: usize) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    let Some(current) = current else {
+        return Some(0);
+    };
+    let target = current as isize + delta;
+    Some(target.clamp(0, len as isize - 1) as usize)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        deletion_warning_heading, deletion_warning_lines, normalize_note, with_tag, without_tag,
+        deletion_warning_heading, deletion_warning_lines, grid_move_target, normalize_note,
+        with_tag, without_tag,
     };
     use vrc_photon_core::model::{DeletionJobSummary, JobStatusCounts};
+
+    #[test]
+    fn grid_move_target_steps_and_clamps() {
+        assert_eq!(grid_move_target(Some(3), 1, 10), Some(4));
+        assert_eq!(grid_move_target(Some(3), -1, 10), Some(2));
+        assert_eq!(grid_move_target(Some(3), 4, 10), Some(7));
+        assert_eq!(grid_move_target(Some(0), -1, 10), Some(0));
+        assert_eq!(grid_move_target(Some(9), 1, 10), Some(9));
+        assert_eq!(grid_move_target(Some(8), 4, 10), Some(9));
+    }
+
+    #[test]
+    fn grid_move_target_without_selection_or_photos() {
+        assert_eq!(grid_move_target(None, 1, 10), Some(0));
+        assert_eq!(grid_move_target(None, -1, 10), Some(0));
+        assert_eq!(grid_move_target(Some(0), 1, 0), None);
+        assert_eq!(grid_move_target(None, 1, 0), None);
+    }
 
     #[test]
     fn deletion_warning_heading_counts_only_photos_with_jobs() {
