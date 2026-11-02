@@ -28,18 +28,26 @@ const DEFAULT_DESTINATION: &str = "Discord";
 pub(crate) enum DiscordSendGuardError {
     Disabled,
     MissingWebhook,
+    InvalidWebhook,
 }
 
-/// Blocks a send until the feature is enabled and a webhook is stored.
+/// Blocks a send until the feature is enabled and a valid webhook is stored.
+///
+/// A stored URL is revalidated: the database may have been edited directly or
+/// the URL may predate a validation change, and sending to anything other than
+/// a Discord webhook must fail locally.
 pub(crate) fn discord_send_guard(
     settings: &AppSettings,
-    webhook_present: bool,
+    webhook: Option<&str>,
 ) -> Result<(), DiscordSendGuardError> {
     if !settings.discord_enabled {
         return Err(DiscordSendGuardError::Disabled);
     }
-    if !webhook_present {
+    let Some(webhook) = webhook else {
         return Err(DiscordSendGuardError::MissingWebhook);
+    };
+    if validate_webhook_url(webhook).is_err() {
+        return Err(DiscordSendGuardError::InvalidWebhook);
     }
     Ok(())
 }
@@ -55,7 +63,12 @@ pub(crate) fn manual_send_toast(result: Result<bool, DiscordSendGuardError>) -> 
         Ok(true) => tr!("photos.action.discord_queued"),
         Ok(false) => tr!("photos.action.discord_waiting"),
         Err(DiscordSendGuardError::Disabled) => tr!("photos.action.discord_disabled"),
-        Err(DiscordSendGuardError::MissingWebhook) => tr!("photos.action.discord_missing_webhook"),
+        Err(DiscordSendGuardError::MissingWebhook) => {
+            tr!("photos.action.discord_missing_webhook")
+        }
+        Err(DiscordSendGuardError::InvalidWebhook) => {
+            tr!("integrations.discord.webhook.invalid_url")
+        }
     }
 }
 
@@ -118,12 +131,65 @@ pub(crate) fn apply_discord_auto_mode(
     }
 }
 
+/// Restarts the automatic-send window at `now`.
+///
+/// Only automatic mode owns the cutoff: with the mode off there is nothing to
+/// resume, so the stored timestamp stays untouched.
+fn refresh_auto_since(settings: &mut AppSettings, now: i64) -> bool {
+    if settings.discord_auto_mode == DiscordAutoMode::Off {
+        return false;
+    }
+    settings.discord_auto_since = Some(now);
+    true
+}
+
+/// Applies the master switch resuming from `false` to `true`.
+///
+/// Photos captured while the feature was off must not be posted as a backlog,
+/// so the cutoff moves even when the automatic mode itself did not change.
+pub(crate) fn auto_since_for_feature_resume(
+    settings: &mut AppSettings,
+    was_enabled: bool,
+    enabled: bool,
+    now: i64,
+) -> bool {
+    if was_enabled || !enabled {
+        return false;
+    }
+    refresh_auto_since(settings, now)
+}
+
+/// Applies the first webhook arriving after the integration had none.
+///
+/// The worker only sends while a webhook exists, so storing one is a resume in
+/// the same way as enabling the feature.
+pub(crate) fn auto_since_for_webhook_resume(
+    settings: &mut AppSettings,
+    had_webhook: bool,
+    has_webhook: bool,
+    now: i64,
+) -> bool {
+    if had_webhook || !has_webhook {
+        return false;
+    }
+    refresh_auto_since(settings, now)
+}
+
 impl App {
     pub(crate) fn set_discord_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         if self.settings.discord_enabled == enabled {
             return;
         }
+        let was_enabled = self.settings.discord_enabled;
         self.settings.discord_enabled = enabled;
+        // Enabling again after a pause restarts the automatic window, so
+        // photos captured while the feature was off are not posted.
+        auto_since_for_feature_resume(
+            &mut self.settings,
+            was_enabled,
+            enabled,
+            Utc::now().timestamp(),
+        );
         if let Err(error) = self.settings.save(&self.db) {
             tracing::warn!(%error, "cannot save Discord integration setting");
         }
@@ -152,6 +218,7 @@ impl App {
         match validate_webhook_url(&raw) {
             Ok(parsed) => {
                 let url = parsed.as_str().to_string();
+                let had_webhook = self.discord_url.is_some();
                 if let Err(error) = save_discord_webhook(&self.db, &url) {
                     tracing::warn!(%error, "cannot save the Discord webhook URL");
                     self.toast_error(tr_args!("settings.language.save_failed", error = error), cx);
@@ -161,6 +228,17 @@ impl App {
                 self.discord_url = Some(url);
                 self.discord_url_editing = false;
                 self.discord_url_error = None;
+                // The first webhook resumes automatic sending; the cutoff must
+                // move so photos captured while it was missing stay behind.
+                if auto_since_for_webhook_resume(
+                    &mut self.settings,
+                    had_webhook,
+                    true,
+                    Utc::now().timestamp(),
+                ) && let Err(error) = self.settings.save(&self.db)
+                {
+                    tracing::warn!(%error, "cannot save the Discord automatic-send cutoff");
+                }
                 self.toast_success(tr!("integrations.discord.webhook.saved"), cx);
             }
             Err(error) => {
@@ -348,6 +426,11 @@ impl App {
     }
 
     pub(crate) fn send_test_message(&mut self, cx: &mut Context<Self>) {
+        if let Err(error) = discord_send_guard(&self.settings, self.discord_url.as_deref()) {
+            self.toast_warning(manual_send_toast(Err(error)), cx);
+            cx.notify();
+            return;
+        }
         match self.db.enqueue_test_send() {
             Ok(id) => {
                 self.pending_test_send = Some(id);
@@ -388,7 +471,7 @@ impl App {
     /// navigated to the Integrations screen. A modal viewer uses that to close
     /// itself and reveal the screen; every other outcome returns `false`.
     pub(crate) fn enqueue_photo_send(&mut self, photo_id: i64, cx: &mut Context<Self>) -> bool {
-        if let Err(error) = discord_send_guard(&self.settings, self.discord_url.is_some()) {
+        if let Err(error) = discord_send_guard(&self.settings, self.discord_url.as_deref()) {
             self.toast_warning(manual_send_toast(Err(error)), cx);
             self.switch_screen(Screen::Integrations, cx);
             return true;
@@ -547,7 +630,8 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{
-        DiscordSendGuardError, apply_discord_auto_mode, discord_send_guard, manual_send_toast,
+        DiscordSendGuardError, apply_discord_auto_mode, auto_since_for_feature_resume,
+        auto_since_for_webhook_resume, discord_send_guard, manual_send_toast,
         needs_discord_consent, normalized_destination, waiting_release_toast, webhook_error_key,
     };
     use vrc_photon_core::discord::{WebhookUrlError, mask_webhook_url, validate_webhook_url};
@@ -597,6 +681,94 @@ mod tests {
     }
 
     #[test]
+    fn enabling_the_feature_updates_the_cutoff_only_when_resuming() {
+        let mut settings = AppSettings {
+            discord_auto_mode: DiscordAutoMode::Immediate,
+            discord_auto_since: Some(42),
+            ..AppSettings::default()
+        };
+        // すでに有効なら何もしない。
+        assert!(!auto_since_for_feature_resume(
+            &mut settings,
+            true,
+            true,
+            99
+        ));
+        assert_eq!(settings.discord_auto_since, Some(42));
+        // 無効化してもカットオフは消さない。
+        assert!(!auto_since_for_feature_resume(
+            &mut settings,
+            true,
+            false,
+            99
+        ));
+        assert_eq!(settings.discord_auto_since, Some(42));
+        // false -> true で再開する。
+        assert!(auto_since_for_feature_resume(
+            &mut settings,
+            false,
+            true,
+            99
+        ));
+        assert_eq!(settings.discord_auto_since, Some(99));
+    }
+
+    #[test]
+    fn saving_the_first_webhook_updates_the_cutoff_only_when_resuming() {
+        let mut settings = AppSettings {
+            discord_auto_mode: DiscordAutoMode::Waiting,
+            discord_auto_since: Some(42),
+            ..AppSettings::default()
+        };
+        // 変更（すでにある）では動かさない。
+        assert!(!auto_since_for_webhook_resume(
+            &mut settings,
+            true,
+            true,
+            99
+        ));
+        assert_eq!(settings.discord_auto_since, Some(42));
+        // 削除では動かさない。
+        assert!(!auto_since_for_webhook_resume(
+            &mut settings,
+            true,
+            false,
+            99
+        ));
+        assert_eq!(settings.discord_auto_since, Some(42));
+        // 未設定 -> 設定で再開する。
+        assert!(auto_since_for_webhook_resume(
+            &mut settings,
+            false,
+            true,
+            99
+        ));
+        assert_eq!(settings.discord_auto_since, Some(99));
+    }
+
+    #[test]
+    fn resume_does_not_touch_the_cutoff_when_auto_mode_is_off() {
+        let mut settings = AppSettings {
+            discord_auto_mode: DiscordAutoMode::Off,
+            discord_auto_since: Some(42),
+            ..AppSettings::default()
+        };
+        assert!(!auto_since_for_feature_resume(
+            &mut settings,
+            false,
+            true,
+            99
+        ));
+        assert!(!auto_since_for_webhook_resume(
+            &mut settings,
+            false,
+            true,
+            99
+        ));
+        assert_eq!(settings.discord_auto_since, Some(42));
+    }
+
+    #[test]
     fn manual_send_reports_queued_and_duplicate_states() {
         assert_eq!(
             manual_send_toast(Ok(true)),
@@ -629,18 +801,31 @@ mod tests {
     }
 
     #[test]
-    fn discord_send_guard_requires_enabled_and_webhook() {
+    fn discord_send_guard_requires_enabled_and_a_valid_webhook() {
+        let webhook = "https://discord.com/api/webhooks/1/t";
         let mut settings = AppSettings::default();
         assert_eq!(
-            discord_send_guard(&settings, false),
+            discord_send_guard(&settings, None),
             Err(DiscordSendGuardError::Disabled)
         );
         settings.discord_enabled = true;
         assert_eq!(
-            discord_send_guard(&settings, false),
+            discord_send_guard(&settings, None),
             Err(DiscordSendGuardError::MissingWebhook)
         );
-        assert_eq!(discord_send_guard(&settings, true), Ok(()));
+        assert_eq!(
+            discord_send_guard(&settings, Some("http://discord.com/api/webhooks/1/t")),
+            Err(DiscordSendGuardError::InvalidWebhook)
+        );
+        assert_eq!(discord_send_guard(&settings, Some(webhook)), Ok(()));
+    }
+
+    #[test]
+    fn an_invalid_stored_webhook_maps_to_the_inline_error_toast() {
+        assert_eq!(
+            manual_send_toast(Err(DiscordSendGuardError::InvalidWebhook)),
+            tr!("integrations.discord.webhook.invalid_url")
+        );
     }
 
     #[test]

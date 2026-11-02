@@ -52,8 +52,7 @@ pub(crate) enum ProcessOutcome {
 }
 
 /// Everything needed to perform one upload, collected under the DB lock.
-struct SendPlan {
-    entry: SendOutboxEntry,
+struct ClaimedSend {
     webhook: String,
     destination: String,
     kind: SendPlanKind,
@@ -97,12 +96,48 @@ pub(crate) fn process_next_send(
     events: &EventBus,
     now: i64,
 ) -> Result<ProcessOutcome> {
+    let Some(entry) = ({
+        let db = db.lock().unwrap();
+        claim_ready_send(&db, now)?
+    }) else {
+        return Ok(ProcessOutcome::Idle);
+    };
+
+    // The row is `processing` from here on. Any planning error must terminalise
+    // it, otherwise it would block the photo's deletion forever and look stuck
+    // in the history.
     let plan = {
         let db = db.lock().unwrap();
-        plan_next_send(&db, now)?
+        match plan_claimed_send(&db, &entry) {
+            Ok(plan) => plan,
+            Err(error) => {
+                if let Err(fail_error) = db.fail_send(
+                    entry.id,
+                    SendErrorCode::Unknown,
+                    Some("internal error"),
+                    None,
+                    None,
+                    None,
+                ) {
+                    tracing::warn!(
+                        %fail_error,
+                        outbox_id = entry.id,
+                        "cannot fail a claimed Discord send"
+                    );
+                } else {
+                    prune_history(&db, entry.id);
+                }
+                publish_send(
+                    events,
+                    &entry,
+                    SendStatus::Failed,
+                    Some(SendErrorCode::Unknown.as_str()),
+                );
+                return Err(error);
+            }
+        }
     };
-    let Some(SendPlan {
-        entry,
+    let Some(ClaimedSend {
         webhook,
         destination,
         kind,
@@ -119,7 +154,9 @@ pub(crate) fn process_next_send(
         Err(failure) => {
             let update = {
                 let db = db.lock().unwrap();
-                record_failure(&db, &entry, &destination, failure)?
+                let update = record_failure(&db, &entry, &destination, failure)?;
+                prune_history(&db, entry.id);
+                update
             };
             publish_send(events, &entry, update.status, update.error_code);
             return Ok(update.outcome);
@@ -134,24 +171,30 @@ pub(crate) fn process_next_send(
 
     let update = {
         let db = db.lock().unwrap();
-        record_outcome(&db, &entry, &destination, now, outcome, source, profile_id)?
+        let update = record_outcome(&db, &entry, &destination, now, outcome, source, profile_id)?;
+        if update.status.is_terminal() {
+            prune_history(&db, entry.id);
+        }
+        update
     };
     publish_send(events, &entry, update.status, update.error_code);
     Ok(update.outcome)
 }
 
-/// Phase one: validate the integration, claim a row, and snapshot all DB data.
-fn plan_next_send(db: &Db, now: i64) -> Result<Option<SendPlan>> {
+/// Phase one: validate the integration and claim a row.
+fn claim_ready_send(db: &Db, now: i64) -> Result<Option<SendOutboxEntry>> {
     let settings = AppSettings::load(db)?;
     if ready_webhook(db, &settings)?.is_none() {
         return Ok(None);
     }
+    Ok(db.claim_next_send(now)?)
+}
 
-    let Some(entry) = db.claim_next_send(now)? else {
-        return Ok(None);
-    };
-
-    // The integration can be disabled while the row waited in the queue.
+/// Phase one for a claimed row: snapshot everything the upload needs.
+///
+/// `None` means the integration was disabled while the row waited; the row has
+/// already been released back to `pending`.
+fn plan_claimed_send(db: &Db, entry: &SendOutboxEntry) -> Result<Option<ClaimedSend>> {
     let settings = AppSettings::load(db)?;
     let Some(webhook) = ready_webhook(db, &settings)? else {
         db.release_send(entry.id)?;
@@ -171,8 +214,7 @@ fn plan_next_send(db: &Db, now: i64) -> Result<Option<SendPlan>> {
             )),
         },
     };
-    Ok(Some(SendPlan {
-        entry,
+    Ok(Some(ClaimedSend {
         webhook,
         destination,
         kind,
@@ -628,13 +670,6 @@ fn record_outcome(
                 guild_id,
             };
             db.complete_send(entry.id, &completion)?;
-            if let Err(error) = db.prune_send_history(SEND_HISTORY_LIMIT) {
-                tracing::warn!(
-                    %error,
-                    outbox_id = entry.id,
-                    "cannot prune Discord send history"
-                );
-            }
             tracing::info!(
                 outbox_id = entry.id,
                 photo_id = ?entry.photo_id,
@@ -718,6 +753,21 @@ fn record_outcome(
                 error_code: Some(code.as_str()),
             })
         }
+    }
+}
+
+/// Keeps the newest terminal rows after a send reaches `sent` or `failed`.
+///
+/// Cancellations happen transactionally in the UI/daemon deletion paths and do
+/// not run through the worker; every worker terminal transition is pruned here
+/// so a long offline retry streak cannot grow the history without bound.
+fn prune_history(db: &Db, outbox_id: i64) {
+    if let Err(error) = db.prune_send_history(SEND_HISTORY_LIMIT) {
+        tracing::warn!(
+            %error,
+            outbox_id,
+            "cannot prune Discord send history"
+        );
     }
 }
 
@@ -1321,6 +1371,70 @@ mod tests {
         let entry = with_db(&db, |db| db.send_entry_by_id(id).unwrap().unwrap());
         assert_eq!(entry.status, SendStatus::Pending);
         assert_eq!(entry.attempts, 0);
+    }
+
+    #[test]
+    fn planning_errors_terminalise_the_claimed_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, photo) = discord_db(&dir);
+        enable_discord(&db, "https://discord.com/api/webhooks/1/t");
+        with_db(&db, |db| {
+            db.ensure_default_profiles().unwrap();
+            db.connection()
+                .execute("UPDATE compression_profiles SET json = '{'", [])
+                .unwrap();
+        });
+        let id = enqueue_photo(&db, photo);
+        let transport = FakeTransport::default();
+        let events = EventBus::default();
+        assert!(
+            process_next_send(&db, &transport, &events, 100).is_err(),
+            "the corrupt profile must surface as an error for logging"
+        );
+        let entry = with_db(&db, |db| db.send_entry_by_id(id).unwrap().unwrap());
+        assert_eq!(entry.status, SendStatus::Failed);
+        assert_eq!(entry.error_code.as_deref(), Some("unknown"));
+        assert_eq!(entry.error_detail.as_deref(), Some("internal error"));
+        assert!(
+            transport.requests.lock().unwrap().is_empty(),
+            "no HTTP request may be attempted when planning failed"
+        );
+    }
+
+    #[test]
+    fn failed_send_prunes_terminal_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, photo) = discord_db(&dir);
+        enable_discord(&db, "https://discord.com/api/webhooks/1/t");
+        with_db(&db, |db| {
+            let mut sql = String::new();
+            for _ in 0..500 {
+                sql.push_str(&format!(
+                    "INSERT INTO send_outbox(photo_id, kind, origin, status, created_at, finished_at) \
+                     VALUES ({photo}, 'photo', 'manual', 'sent', \
+                     '2026-11-02T00:00:00Z', '2026-11-02T00:00:00Z');"
+                ));
+            }
+            db.connection().execute_batch(&sql).unwrap();
+        });
+        let id = enqueue_photo(&db, photo);
+        let transport = FakeTransport::default();
+        transport
+            .outcomes
+            .lock()
+            .unwrap()
+            .push_back(SendOutcome::Failed {
+                code: SendErrorCode::Http401,
+                detail: Some("unauthorized".into()),
+            });
+        let events = EventBus::default();
+        assert!(matches!(
+            process_next_send(&db, &transport, &events, 100).unwrap(),
+            ProcessOutcome::Failed
+        ));
+        let history = with_db(&db, |db| db.send_history(1000).unwrap());
+        assert_eq!(history.len(), 500);
+        assert_eq!(history[0].entry.id, id);
     }
 
     #[test]

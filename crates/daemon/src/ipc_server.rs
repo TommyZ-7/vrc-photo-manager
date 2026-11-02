@@ -475,6 +475,14 @@ mod tests {
     }
 
     #[test]
+    fn status_snapshot_copies_pending_sends() {
+        let (_dir, _endpoint, control) = test_control();
+        control.status.lock().unwrap().pending_sends = 3;
+        let snapshot = control.snapshot();
+        assert_eq!(snapshot.pending_sends, 3);
+    }
+
+    #[test]
     fn thumbnails_generated_adds_external_bytes() {
         let (_dir, endpoint, control) = test_control();
         let _server = IpcServer::start(endpoint.clone(), control.clone()).unwrap();

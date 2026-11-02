@@ -15,8 +15,11 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use vrc_photon_core::discord::mask_webhook_url;
-use vrc_photon_core::model::{SendErrorCode, SendHistoryEntry, SendKind, SendSource, SendStatus};
+use vrc_photon_core::discord::{mask_webhook_url, validate_webhook_url};
+use vrc_photon_core::model::{
+    CompressionFormat, CompressionProfile, SendErrorCode, SendHistoryEntry, SendKind, SendSource,
+    SendStatus,
+};
 use vrc_photon_core::settings::DiscordAutoMode;
 use vrc_photon_i18n::{tr, tr_args};
 
@@ -141,6 +144,39 @@ pub(crate) fn discord_profile_label(name: Option<&str>) -> String {
     }
 }
 
+/// Warning shown when the selected profile encodes a format Discord embeds do
+/// not render. Selection is not blocked: the upload still works and Discord
+/// may show a download link instead of an inline preview.
+pub(crate) fn discord_profile_format_warning(
+    profile: Option<&CompressionProfile>,
+) -> Option<String> {
+    let profile = profile?;
+    matches!(
+        profile.format,
+        CompressionFormat::Avif | CompressionFormat::JpegXl
+    )
+    .then(|| tr!("integrations.discord.profile.format_warning"))
+}
+
+/// Localized "retry at" line for a pending row carrying `next_attempt_at`.
+pub(crate) fn retry_at_label(next_attempt_at: Option<i64>) -> Option<String> {
+    let timestamp = next_attempt_at?;
+    let local = chrono::DateTime::<chrono::Utc>::from_timestamp(timestamp, 0)?
+        .with_timezone(&chrono::Local)
+        .format("%m/%d %H:%M")
+        .to_string();
+    Some(tr_args!(
+        "integrations.discord.history.retry_at",
+        time = local
+    ))
+}
+
+/// Inline message for a stored webhook that no longer validates.
+fn stored_webhook_error(url: Option<&str>) -> Option<String> {
+    url.filter(|url| validate_webhook_url(url).is_err())
+        .map(|_| tr!("integrations.discord.webhook.invalid_url"))
+}
+
 impl App {
     pub(crate) fn discord_card(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let p = self.palette;
@@ -151,14 +187,17 @@ impl App {
         let url_error = self.discord_url_error.clone();
         let destination_value = self.discord_destination_input.read(cx).value().to_string();
         let stored_destination = self.settings.discord_destination.clone();
-        let can_test = enabled && webhook.is_some();
+        let can_test = enabled
+            && webhook
+                .as_deref()
+                .is_some_and(|url| validate_webhook_url(url).is_ok());
+        let stored_webhook_error = stored_webhook_error(webhook.as_deref());
         let send_original = self.settings.discord_send_original;
         let include_players = self.settings.discord_include_players;
         let profiles = self.profiles.clone();
-        let selected_profile = profiles
-            .iter()
-            .find(|profile| profile.discord)
-            .map(|profile| profile.name.clone());
+        let selected_discord_profile = profiles.iter().find(|profile| profile.discord);
+        let selected_profile = selected_discord_profile.map(|profile| profile.name.clone());
+        let format_warning = discord_profile_format_warning(selected_discord_profile);
 
         let body = v_flex()
             .pt(px(12.))
@@ -177,6 +216,15 @@ impl App {
                 )
             })
             .child(self.webhook_section(webhook.as_deref(), editing, url_error, cx))
+            .when_some(stored_webhook_error, |this, error| {
+                this.child(
+                    div()
+                        .px(px(4.))
+                        .text_size(px(10.))
+                        .text_color(rgb(p.red))
+                        .child(error),
+                )
+            })
             .child(
                 v_flex()
                     .gap(px(6.))
@@ -248,6 +296,17 @@ impl App {
                                 .child(discord_profile_label(selected_profile.as_deref())),
                         )
                     })
+                    .when_some(format_warning, |this, warning| {
+                        this.child(
+                            div()
+                                .p(px(8.))
+                                .rounded(px(8.))
+                                .bg(rgb(p.amber_soft))
+                                .text_size(px(10.))
+                                .text_color(rgb(p.amber))
+                                .child(warning),
+                        )
+                    })
                     .child(if profiles.is_empty() {
                         div()
                             .text_size(px(10.))
@@ -263,17 +322,20 @@ impl App {
                             .children(profiles.into_iter().map(|profile| {
                                 let id = profile.id.clone();
                                 let selected = profile.discord;
+                                let selectable = profile.enabled;
                                 manual_option_row(
                                     &p,
                                     SharedString::from(format!("discord-profile-{}", profile.id)),
                                     profile.name.clone(),
                                     profile_summary(&profile),
                                     selected,
-                                    true,
+                                    selectable,
                                 )
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.set_discord_profile(&id, !selected, cx);
-                                }))
+                                .when(selectable, |this| {
+                                    this.on_click(cx.listener(move |this, _, _, cx| {
+                                        this.set_discord_profile(&id, !selected, cx);
+                                    }))
+                                })
                                 .into_any_element()
                             }))
                             .into_any_element()
@@ -470,6 +532,9 @@ impl App {
         });
         let error = send_error_label(item.error_code.as_deref());
         let detail = item.error_detail.clone().and_then(non_empty);
+        let retry_at = (status == SendStatus::Pending)
+            .then(|| retry_at_label(item.next_attempt_at))
+            .flatten();
         let retryable = status == SendStatus::Failed;
         let cancellable = matches!(
             status,
@@ -598,6 +663,15 @@ impl App {
                         )
                     }),
             )
+            .when_some(retry_at, |this, retry_at| {
+                this.child(
+                    div()
+                        .w_full()
+                        .text_size(px(10.))
+                        .text_color(rgb(p.amber))
+                        .child(retry_at),
+                )
+            })
             .when(!error.is_empty(), |this| {
                 this.child(
                     div()
@@ -828,11 +902,12 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{
-        discord_message_url, discord_profile_label, send_error_label, send_source_label,
-        send_status_label, webhook_state_label,
+        discord_message_url, discord_profile_format_warning, discord_profile_label, retry_at_label,
+        send_error_label, send_source_label, send_status_label, stored_webhook_error,
+        webhook_state_label,
     };
-    use vrc_photon_core::model::{SendSource, SendStatus};
-    use vrc_photon_i18n::tr;
+    use vrc_photon_core::model::{CompressionFormat, CompressionProfile, SendSource, SendStatus};
+    use vrc_photon_i18n::{tr, tr_args};
 
     #[test]
     fn history_helpers_describe_status_and_source() {
@@ -881,6 +956,53 @@ mod tests {
         assert_eq!(
             discord_profile_label(Some("discord用webp")),
             "discord用webp"
+        );
+    }
+
+    #[test]
+    fn avif_and_jxl_profiles_warn_that_embeds_may_not_render() {
+        let avif = CompressionProfile {
+            format: CompressionFormat::Avif,
+            ..CompressionProfile::default()
+        };
+        assert!(discord_profile_format_warning(Some(&avif)).is_some());
+        let jxl = CompressionProfile {
+            format: CompressionFormat::JpegXl,
+            ..CompressionProfile::default()
+        };
+        assert!(discord_profile_format_warning(Some(&jxl)).is_some());
+        let webp = CompressionProfile {
+            format: CompressionFormat::Webp,
+            ..CompressionProfile::default()
+        };
+        assert!(discord_profile_format_warning(Some(&webp)).is_none());
+        assert!(discord_profile_format_warning(None).is_none());
+    }
+
+    #[test]
+    fn pending_rows_get_a_localized_retry_time() {
+        assert_eq!(retry_at_label(None), None);
+        let local = chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%m/%d %H:%M")
+            .to_string();
+        assert_eq!(
+            retry_at_label(Some(0)),
+            Some(tr_args!(
+                "integrations.discord.history.retry_at",
+                time = local
+            ))
+        );
+    }
+
+    #[test]
+    fn stored_webhooks_that_no_longer_validate_show_the_inline_error() {
+        assert!(stored_webhook_error(None).is_none());
+        assert!(stored_webhook_error(Some("https://discord.com/api/webhooks/1/token")).is_none());
+        assert_eq!(
+            stored_webhook_error(Some("http://discord.com/api/webhooks/1/token")),
+            Some(tr!("integrations.discord.webhook.invalid_url"))
         );
     }
 }

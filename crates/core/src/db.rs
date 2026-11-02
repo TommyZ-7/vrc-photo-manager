@@ -4480,6 +4480,48 @@ mod tests {
     }
 
     #[test]
+    fn claim_deletion_starts_after_an_in_flight_send_reaches_a_terminal_state() {
+        let db = Db::open_in_memory().unwrap();
+        let failed_photo = seed_photo(&db);
+        let cancelled_photo = seed_other_photo(&db);
+        // auto_replace は写真を deleting にしないため、要求後に送信を積める。
+        let failed_request = db
+            .request_deletion(&[failed_photo], DeletionReason::AutoReplace, false)
+            .unwrap()[0];
+        let cancelled_request = db
+            .request_deletion(&[cancelled_photo], DeletionReason::AutoReplace, false)
+            .unwrap()[0];
+        let failed_send = db
+            .enqueue_send(
+                failed_photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        let cancelled_send = db
+            .enqueue_send(
+                cancelled_photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        db.claim_next_send(100).unwrap();
+        assert!(db.claim_deletion(failed_request).unwrap().is_none());
+        assert!(db.claim_deletion(cancelled_request).unwrap().is_none());
+
+        db.fail_send(failed_send, SendErrorCode::Http401, None, None, None, None)
+            .unwrap();
+        assert!(db.claim_deletion(failed_request).unwrap().is_some());
+
+        assert!(db.cancel_send(cancelled_send).unwrap());
+        assert!(db.claim_deletion(cancelled_request).unwrap().is_some());
+    }
+
+    #[test]
     fn force_deletion_cancels_queued_but_not_processing_jobs() {
         let db = Db::open_in_memory().unwrap();
         let id = seed_photo(&db);

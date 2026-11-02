@@ -1067,7 +1067,15 @@ impl Daemon {
             self.link_unlinked()?;
             let enqueued = {
                 let db = self.db.lock().unwrap();
-                discord::enqueue_auto_sends(&db, &new_ids)?
+                match discord::enqueue_auto_sends(&db, &new_ids) {
+                    Ok(count) => count,
+                    Err(error) => {
+                        // Automatic sending is best effort: an outbox error
+                        // must not fail or roll back the photo scan.
+                        tracing::warn!(%error, "cannot enqueue automatic Discord sends");
+                        0
+                    }
+                }
             };
             if enqueued > 0 {
                 self.sends.notify();
@@ -1280,7 +1288,15 @@ impl Daemon {
         if !report.new_ids.is_empty() {
             let enqueued = {
                 let db = self.db.lock().unwrap();
-                discord::enqueue_auto_sends(&db, &report.new_ids)?
+                match discord::enqueue_auto_sends(&db, &report.new_ids) {
+                    Ok(count) => count,
+                    Err(error) => {
+                        // Automatic sending is best effort: an outbox error
+                        // must not fail or roll back the photo scan.
+                        tracing::warn!(%error, "cannot enqueue automatic Discord sends");
+                        0
+                    }
+                }
             };
             if enqueued > 0 {
                 self.sends.notify();
@@ -7042,6 +7058,41 @@ mod tests {
         assert_eq!(
             history[0].photo_name.as_deref(),
             Some("VRChat_2026-10-21_21-24-00.000_4x3.png")
+        );
+    }
+
+    #[test]
+    fn auto_send_enqueue_failure_does_not_fail_the_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        save_daemon_settings(&daemon, |settings| {
+            settings.discord_enabled = true;
+            settings.discord_auto_mode = DiscordAutoMode::Immediate;
+            settings.discord_auto_since = Some(0);
+        });
+        {
+            let db = daemon.db.lock().unwrap();
+            save_discord_webhook(&db, "https://discord.com/api/webhooks/1/t").unwrap();
+            db.connection()
+                .execute_batch(
+                    "CREATE TRIGGER fail_auto_send BEFORE INSERT ON send_outbox \
+                     BEGIN SELECT RAISE(ABORT, 'send outbox unavailable'); END;",
+                )
+                .unwrap();
+        }
+        write_photo(&original_path(&dir));
+        let report = daemon
+            .scan_photos()
+            .expect("an auto-send enqueue error must not fail the scan");
+        assert_eq!(report.indexed, 1);
+        assert!(
+            daemon
+                .db
+                .lock()
+                .unwrap()
+                .send_history(10)
+                .unwrap()
+                .is_empty()
         );
     }
 
