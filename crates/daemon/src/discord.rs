@@ -306,7 +306,6 @@ pub(crate) fn recover_interrupted_sends(db: &Db) -> Result<usize> {
 /// caller notifies the worker after a successful enqueue.
 // The scan/index paths call this; it stays public within the crate so the
 // enqueue policy can also be exercised in isolation.
-#[allow(dead_code)]
 pub(crate) fn enqueue_auto_sends(db: &Db, photo_ids: &[i64]) -> Result<usize> {
     let settings = AppSettings::load(db)?;
     if !settings.discord_enabled || settings.discord_auto_mode == DiscordAutoMode::Off {
