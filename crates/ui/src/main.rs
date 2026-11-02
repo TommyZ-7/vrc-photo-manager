@@ -25,7 +25,7 @@ mod update_view;
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() {
-    if logging::init("vrc-photo-manager", "info,vrc_photo_manager=debug").is_none() {
+    if logging::init("vrc-photon", "info,vrc_photonn=debug").is_none() {
         tracing::warn!("file logging is unavailable; using stderr only");
     }
     if timing_enabled() {
@@ -89,7 +89,7 @@ fn main() {
                 ..TitleBar::window_options()
             };
             let (_, app) = gpui_kit::open_window(window_options, cx, |window, cx| {
-                window.set_window_title("VRC Photo Manager");
+                window.set_window_title("VRC PhotoN");
                 cx.new(|cx| App::new(window, cx, &options))
             })
             .expect("open window");

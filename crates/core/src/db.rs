@@ -4528,7 +4528,7 @@ mod tests {
     /// index and page queries. Ignored by default because it is a timing
     /// benchmark, not a correctness gate:
     ///
-    /// `cargo test -p vrc-photo-core photo_index_scales_to_100k -- --ignored --nocapture`
+    /// `cargo test -p vrc-photon-core photo_index_scales_to_100k -- --ignored --nocapture`
     #[test]
     #[ignore = "100k timing benchmark"]
     fn photo_index_scales_to_100k() {

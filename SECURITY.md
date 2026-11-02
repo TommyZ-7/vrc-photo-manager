@@ -4,7 +4,7 @@
 
 脆弱性や個人情報の漏えいは、公開 Issue に書かず、GitHub の非公開レポートから報告してください。
 
-<https://github.com/TommyZ-7/vrc-photo-manager/security/advisories/new>
+<https://github.com/TommyZ-7/vrc-photon/security/advisories/new>
 
 - 対象: 最新リリースと `main`
 - 対応は best-effort（返信の保証はありません）

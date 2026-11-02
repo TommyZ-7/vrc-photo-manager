@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use base64::Engine;
 use sha2::{Digest, Sha256};
 use url::Url;
-use vrc_photo_update::{Manifest, PlatformAsset, UpdateFormat};
+use vrc_photon_update::{Manifest, PlatformAsset, UpdateFormat};
 
 /// Builds the signed-feed manifest from the packaged artifacts.
 pub fn build_manifest(dist: &Path, tag: &str, repo: &str, notes_url: &str) -> Result<Manifest> {
@@ -155,7 +155,7 @@ pub fn verify_file(path: &Path, public_keys: &[String]) -> Result<()> {
     let signature_path = path.with_file_name(format!("{}.minisig", file_name(path)?));
     let signature = std::fs::read_to_string(&signature_path)
         .with_context(|| format!("missing signature {}", signature_path.display()))?;
-    vrc_photo_update::verify_file(path, &signature, public_keys)?;
+    vrc_photon_update::verify_file(path, &signature, public_keys)?;
     Ok(())
 }
 
@@ -196,27 +196,19 @@ mod tests {
     #[test]
     fn builds_a_manifest_for_both_platforms() {
         let dir = tempfile::tempdir().unwrap();
+        write_artifact(dir.path(), "vrc-photon_0.4.0_x86_64.AppImage", b"appimage");
+        write_artifact(dir.path(), "vrc-photon_0.4.0_x64-setup.exe", b"installer");
         write_artifact(
             dir.path(),
-            "vrc-photo-manager_0.4.0_x86_64.AppImage",
-            b"appimage",
-        );
-        write_artifact(
-            dir.path(),
-            "vrc-photo-manager_0.4.0_x64-setup.exe",
-            b"installer",
-        );
-        write_artifact(
-            dir.path(),
-            "vrc-photo-manager-0.4.0-1-x86_64.pkg.tar.zst",
+            "vrc-photon-0.4.0-1-x86_64.pkg.tar.zst",
             b"pacman",
         );
-        write_artifact(dir.path(), "vrc-photo-manager_0.4.0_amd64.deb", b"deb");
+        write_artifact(dir.path(), "vrc-photon_0.4.0_amd64.deb", b"deb");
         let manifest = build_manifest(
             dir.path(),
             "v0.4.0",
-            "TommyZ-7/vrc-photo-manager",
-            "https://github.com/TommyZ-7/vrc-photo-manager/releases/tag/v0.4.0",
+            "TommyZ-7/vrc-photon",
+            "https://github.com/TommyZ-7/vrc-photon/releases/tag/v0.4.0",
         )
         .unwrap();
         assert_eq!(manifest.schema, 1);
@@ -227,11 +219,11 @@ mod tests {
         assert_eq!(linux.size, 8);
         assert_eq!(
             linux.url,
-            "https://github.com/TommyZ-7/vrc-photo-manager/releases/download/v0.4.0/vrc-photo-manager_0.4.0_x86_64.AppImage"
+            "https://github.com/TommyZ-7/vrc-photon/releases/download/v0.4.0/vrc-photon_0.4.0_x86_64.AppImage"
         );
         assert_eq!(
             linux.sha256,
-            sha256_file(&dir.path().join("vrc-photo-manager_0.4.0_x86_64.AppImage")).unwrap()
+            sha256_file(&dir.path().join("vrc-photon_0.4.0_x86_64.AppImage")).unwrap()
         );
         assert!(!linux.signature.is_empty());
         assert_eq!(
@@ -251,26 +243,20 @@ mod tests {
     fn builds_a_manifest_with_system_packages() {
         let dir = tempfile::tempdir().unwrap();
         for (name, body) in [
+            ("vrc-photon_0.4.0_x86_64.AppImage", b"appimage".as_slice()),
+            ("vrc-photon_0.4.0_x64-setup.exe", b"installer".as_slice()),
             (
-                "vrc-photo-manager_0.4.0_x86_64.AppImage",
-                b"appimage".as_slice(),
-            ),
-            (
-                "vrc-photo-manager_0.4.0_x64-setup.exe",
-                b"installer".as_slice(),
-            ),
-            (
-                "vrc-photo-manager-0.4.0-1-x86_64.pkg.tar.zst",
+                "vrc-photon-0.4.0-1-x86_64.pkg.tar.zst",
                 b"pacman".as_slice(),
             ),
-            ("vrc-photo-manager_0.4.0_amd64.deb", b"deb".as_slice()),
+            ("vrc-photon_0.4.0_amd64.deb", b"deb".as_slice()),
         ] {
             write_artifact(dir.path(), name, body);
         }
         let manifest = build_manifest(
             dir.path(),
             "v0.4.0",
-            "TommyZ-7/vrc-photo-manager",
+            "TommyZ-7/vrc-photon",
             "https://example.com/notes",
         )
         .unwrap();
@@ -284,7 +270,7 @@ mod tests {
         assert!(
             manifest.system_packages["pacman"]
                 .url
-                .ends_with("vrc-photo-manager-0.4.0-1-x86_64.pkg.tar.zst")
+                .ends_with("vrc-photon-0.4.0-1-x86_64.pkg.tar.zst")
         );
 
         let json = serde_json::to_vec(&manifest).unwrap();
@@ -296,65 +282,37 @@ mod tests {
     #[test]
     fn rejects_a_missing_system_package() {
         let dir = tempfile::tempdir().unwrap();
-        write_artifact(
-            dir.path(),
-            "vrc-photo-manager_0.4.0_x86_64.AppImage",
-            b"appimage",
-        );
-        write_artifact(
-            dir.path(),
-            "vrc-photo-manager_0.4.0_x64-setup.exe",
-            b"installer",
-        );
+        write_artifact(dir.path(), "vrc-photon_0.4.0_x86_64.AppImage", b"appimage");
+        write_artifact(dir.path(), "vrc-photon_0.4.0_x64-setup.exe", b"installer");
         assert!(build_manifest(dir.path(), "v0.4.0", "x/y", "https://example.com").is_err());
     }
 
     #[test]
     fn rejects_duplicate_system_packages() {
         let dir = tempfile::tempdir().unwrap();
+        write_artifact(dir.path(), "vrc-photon_0.4.0_x86_64.AppImage", b"appimage");
+        write_artifact(dir.path(), "vrc-photon_0.4.0_x64-setup.exe", b"installer");
         write_artifact(
             dir.path(),
-            "vrc-photo-manager_0.4.0_x86_64.AppImage",
-            b"appimage",
-        );
-        write_artifact(
-            dir.path(),
-            "vrc-photo-manager_0.4.0_x64-setup.exe",
-            b"installer",
-        );
-        write_artifact(
-            dir.path(),
-            "vrc-photo-manager-0.4.0-1-x86_64.pkg.tar.zst",
+            "vrc-photon-0.4.0-1-x86_64.pkg.tar.zst",
             b"pacman",
         );
         write_artifact(
             dir.path(),
-            "vrc-photo-manager-0.4.0-2-x86_64.pkg.tar.zst",
+            "vrc-photon-0.4.0-2-x86_64.pkg.tar.zst",
             b"other pacman",
         );
-        write_artifact(dir.path(), "vrc-photo-manager_0.4.0_amd64.deb", b"deb");
+        write_artifact(dir.path(), "vrc-photon_0.4.0_amd64.deb", b"deb");
         assert!(build_manifest(dir.path(), "v0.4.0", "x/y", "https://example.com").is_err());
     }
 
     #[test]
     fn rejects_an_unversioned_system_package_name() {
         let dir = tempfile::tempdir().unwrap();
-        write_artifact(
-            dir.path(),
-            "vrc-photo-manager_0.4.0_x86_64.AppImage",
-            b"appimage",
-        );
-        write_artifact(
-            dir.path(),
-            "vrc-photo-manager_0.4.0_x64-setup.exe",
-            b"installer",
-        );
-        write_artifact(
-            dir.path(),
-            "vrc-photo-manager-x86_64.pkg.tar.zst",
-            b"pacman",
-        );
-        write_artifact(dir.path(), "vrc-photo-manager_0.4.0_amd64.deb", b"deb");
+        write_artifact(dir.path(), "vrc-photon_0.4.0_x86_64.AppImage", b"appimage");
+        write_artifact(dir.path(), "vrc-photon_0.4.0_x64-setup.exe", b"installer");
+        write_artifact(dir.path(), "vrc-photon-x86_64.pkg.tar.zst", b"pacman");
+        write_artifact(dir.path(), "vrc-photon_0.4.0_amd64.deb", b"deb");
         assert!(build_manifest(dir.path(), "v0.4.0", "x/y", "https://example.com").is_err());
     }
 
@@ -362,66 +320,46 @@ mod tests {
     fn rejects_a_missing_signature() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
-            dir.path().join("vrc-photo-manager_0.4.0_x86_64.AppImage"),
+            dir.path().join("vrc-photon_0.4.0_x86_64.AppImage"),
             b"appimage",
         )
         .unwrap();
+        write_artifact(dir.path(), "vrc-photon_0.4.0_x64-setup.exe", b"installer");
         write_artifact(
             dir.path(),
-            "vrc-photo-manager_0.4.0_x64-setup.exe",
-            b"installer",
-        );
-        write_artifact(
-            dir.path(),
-            "vrc-photo-manager-0.4.0-1-x86_64.pkg.tar.zst",
+            "vrc-photon-0.4.0-1-x86_64.pkg.tar.zst",
             b"pacman",
         );
-        write_artifact(dir.path(), "vrc-photo-manager_0.4.0_amd64.deb", b"deb");
+        write_artifact(dir.path(), "vrc-photon_0.4.0_amd64.deb", b"deb");
         assert!(build_manifest(dir.path(), "v0.4.0", "x/y", "https://example.com").is_err());
     }
 
     #[test]
     fn rejects_an_unversioned_artifact_name() {
         let dir = tempfile::tempdir().unwrap();
-        write_artifact(dir.path(), "vrc-photo-manager_x86_64.AppImage", b"appimage");
+        write_artifact(dir.path(), "vrc-photon_x86_64.AppImage", b"appimage");
+        write_artifact(dir.path(), "vrc-photon_0.4.0_x64-setup.exe", b"installer");
         write_artifact(
             dir.path(),
-            "vrc-photo-manager_0.4.0_x64-setup.exe",
-            b"installer",
-        );
-        write_artifact(
-            dir.path(),
-            "vrc-photo-manager-0.4.0-1-x86_64.pkg.tar.zst",
+            "vrc-photon-0.4.0-1-x86_64.pkg.tar.zst",
             b"pacman",
         );
-        write_artifact(dir.path(), "vrc-photo-manager_0.4.0_amd64.deb", b"deb");
+        write_artifact(dir.path(), "vrc-photon_0.4.0_amd64.deb", b"deb");
         assert!(build_manifest(dir.path(), "v0.4.0", "x/y", "https://example.com").is_err());
     }
 
     #[test]
     fn rejects_duplicate_artifacts() {
         let dir = tempfile::tempdir().unwrap();
+        write_artifact(dir.path(), "vrc-photon_0.4.0_x86_64.AppImage", b"one");
+        write_artifact(dir.path(), "vrc-photon_0.4.0_other_x86_64.AppImage", b"two");
+        write_artifact(dir.path(), "vrc-photon_0.4.0_x64-setup.exe", b"installer");
         write_artifact(
             dir.path(),
-            "vrc-photo-manager_0.4.0_x86_64.AppImage",
-            b"one",
-        );
-        write_artifact(
-            dir.path(),
-            "vrc-photo-manager_0.4.0_other_x86_64.AppImage",
-            b"two",
-        );
-        write_artifact(
-            dir.path(),
-            "vrc-photo-manager_0.4.0_x64-setup.exe",
-            b"installer",
-        );
-        write_artifact(
-            dir.path(),
-            "vrc-photo-manager-0.4.0-1-x86_64.pkg.tar.zst",
+            "vrc-photon-0.4.0-1-x86_64.pkg.tar.zst",
             b"pacman",
         );
-        write_artifact(dir.path(), "vrc-photo-manager_0.4.0_amd64.deb", b"deb");
+        write_artifact(dir.path(), "vrc-photon_0.4.0_amd64.deb", b"deb");
         assert!(build_manifest(dir.path(), "v0.4.0", "x/y", "https://example.com").is_err());
     }
 

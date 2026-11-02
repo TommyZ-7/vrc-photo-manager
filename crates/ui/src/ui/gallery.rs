@@ -17,8 +17,8 @@ use std::sync::Arc;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use vrc_photo_core::model::Photo;
-use vrc_photo_i18n::{tr, tr_args};
+use vrc_photon_core::model::Photo;
+use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::{App, CardBoundsMap, Screen, retain_recent_bounds};
 use crate::state::photo_browser::{

@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use vrc_photo_core::model::Photo;
+use vrc_photon_core::model::Photo;
 
 /// Identifies a cached preview by photo and displayed file variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,16 +103,16 @@ pub(crate) fn preview_cache_dir(
 
 pub(crate) fn preview_placeholder_label(pending: bool) -> String {
     if pending {
-        vrc_photo_i18n::tr!("preview.loading")
+        vrc_photon_i18n::tr!("preview.loading")
     } else {
-        vrc_photo_i18n::tr!("preview.error")
+        vrc_photon_i18n::tr!("preview.error")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vrc_photo_core::model::PhotoStatus;
+    use vrc_photon_core::model::PhotoStatus;
 
     fn key(photo_id: i64) -> PreviewKey {
         PreviewKey {

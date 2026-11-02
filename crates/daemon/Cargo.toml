@@ -1,5 +1,5 @@
 [package]
-name = "vrc-photo-daemon"
+name = "vrc-photon-daemon"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,11 +7,11 @@ repository.workspace = true
 authors.workspace = true
 
 [[bin]]
-name = "vrc-photo-daemon"
+name = "vrc-photon-daemon"
 path = "src/main.rs"
 
 [lib]
-name = "vrc_photo_daemon"
+name = "vrc_photon_daemon"
 path = "src/lib.rs"
 
 [dependencies]
@@ -28,9 +28,9 @@ single-instance = "0.3"
 trash = "5"
 tracing.workspace = true
 tracing-subscriber.workspace = true
-vrc-photo-core = { path = "../core" }
-vrc-photo-i18n = { path = "../i18n" }
-vrc-photo-ipc = { path = "../ipc" }
+vrc-photon-core = { path = "../core" }
+vrc-photon-i18n = { path = "../i18n" }
+vrc-photon-ipc = { path = "../ipc" }
 
 [dev-dependencies]
 tempfile = "3"

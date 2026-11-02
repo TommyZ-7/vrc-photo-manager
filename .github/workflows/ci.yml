@@ -115,13 +115,13 @@ jobs:
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
       - name: Test IPC transport on Windows
-        run: cargo test -p vrc-photo-ipc
+        run: cargo test -p vrc-photon-ipc
       - name: Clippy IPC transport on Windows
-        run: cargo clippy -p vrc-photo-ipc --all-targets -- -D warnings
+        run: cargo clippy -p vrc-photon-ipc --all-targets -- -D warnings
       - name: Test updater on Windows
-        run: cargo test -p vrc-photo-update
+        run: cargo test -p vrc-photon-update
       - name: Clippy updater on Windows
-        run: cargo clippy -p vrc-photo-update --all-targets -- -D warnings
+        run: cargo clippy -p vrc-photon-update --all-targets -- -D warnings
       - name: Test thumbnail cache on Windows
         if: needs.changes.outputs.thumbnails == 'true'
-        run: cargo test -p vrc-photo-core thumbnail::tests
+        run: cargo test -p vrc-photon-core thumbnail::tests

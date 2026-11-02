@@ -1,5 +1,5 @@
 [package]
-name = "vrc-photo-update"
+name = "vrc-photon-update"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,12 +7,12 @@ repository.workspace = true
 authors.workspace = true
 
 [lib]
-name = "vrc_photo_update"
+name = "vrc_photon_update"
 path = "src/lib.rs"
 
 [[bin]]
-name = "vrc-photo-updater"
-path = "src/bin/vrc-photo-updater.rs"
+name = "vrc-photon-updater"
+path = "src/bin/vrc-photon-updater.rs"
 
 [dependencies]
 base64.workspace = true

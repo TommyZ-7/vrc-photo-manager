@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use vrc_photo_daemon::Daemon;
+use vrc_photon_daemon::Daemon;
 
 mod logging;
 
@@ -13,9 +13,9 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "vrc-photo-daemon",
+    name = "vrc-photon-daemon",
     version,
-    about = "VRC Photo Manager background daemon"
+    about = "VRC PhotoN background daemon"
 )]
 struct Args {
     /// Path to the SQLite library database.
@@ -58,7 +58,7 @@ fn open_daemon(
 }
 
 fn main() -> Result<()> {
-    if logging::init("vrc-photo-daemon", "info,vrc_photo_daemon=debug").is_none() {
+    if logging::init("vrc-photon-daemon", "info,vrc_photon_daemon=debug").is_none() {
         tracing::warn!("file logging is unavailable; using stderr only");
     }
 
@@ -66,17 +66,17 @@ fn main() -> Result<()> {
     if args.print_data_dir {
         println!(
             "{}",
-            vrc_photo_core::data_dir().unwrap_or_default().display()
+            vrc_photon_core::data_dir().unwrap_or_default().display()
         );
         return Ok(());
     }
 
     let db_path = args
         .db
-        .or_else(vrc_photo_core::default_db_path)
-        .unwrap_or_else(|| PathBuf::from("vrc-photo-manager.db"));
+        .or_else(vrc_photon_core::default_db_path)
+        .unwrap_or_else(|| PathBuf::from("vrc-photon.db"));
     let maintenance = args.once || args.compress_pending;
-    let instance = match single_instance::SingleInstance::new("vrc-photo-manager-daemon") {
+    let instance = match single_instance::SingleInstance::new("vrc-photon-daemon") {
         Ok(instance) if instance.is_single() => Some(instance),
         Ok(_) if maintenance => {
             tracing::info!(
@@ -85,7 +85,7 @@ fn main() -> Result<()> {
             None
         }
         Ok(_) => {
-            eprintln!("vrc-photo-daemon is already running");
+            eprintln!("vrc-photon-daemon is already running");
             return Ok(());
         }
         Err(error) if !maintenance => {
@@ -101,7 +101,7 @@ fn main() -> Result<()> {
     };
 
     let mut daemon = open_daemon(instance.is_some(), db_path, args.photo_dir, args.log_dir)
-        .context("cannot start VRC Photo Manager daemon")?;
+        .context("cannot start VRC PhotoN daemon")?;
     if args.no_tray {
         daemon.set_tray_enabled(false);
     }
@@ -120,8 +120,8 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vrc_photo_core::db::Db;
-    use vrc_photo_core::model::{DeletionReason, DeletionStatus, NewPhoto};
+    use vrc_photon_core::db::Db;
+    use vrc_photon_core::model::{DeletionReason, DeletionStatus, NewPhoto};
 
     fn seed_running_deletion(db_path: &std::path::Path) -> i64 {
         let db = Db::open(db_path).unwrap();

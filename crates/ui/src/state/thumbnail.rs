@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use gpui_kit::RenderImage;
 use smallvec::SmallVec;
-use vrc_photo_core::thumbnail::{self, ThumbnailSpec};
+use vrc_photon_core::thumbnail::{self, ThumbnailSpec};
 
 use crate::ui::theme::average_bgra;
 
@@ -274,7 +274,7 @@ where
         &Path,
         &Path,
         ThumbnailSpec,
-    ) -> vrc_photo_core::error::Result<Option<thumbnail::EnsuredThumbnail>>,
+    ) -> vrc_photon_core::error::Result<Option<thumbnail::EnsuredThumbnail>>,
     Decode: Fn(i64, &Path) -> Option<(u32, image::RgbaImage)>,
 {
     let Some(cache_dir) = cache_dir else {
@@ -391,7 +391,7 @@ where
 }
 
 fn decode_thumbnail_file(_id: i64, path: &Path) -> Option<(u32, image::RgbaImage)> {
-    let buffer = vrc_photo_core::image_decode::decode_image(path)?.to_rgba8();
+    let buffer = vrc_photon_core::image_decode::decode_image(path)?.to_rgba8();
     let buffer = rgba_to_bgra(buffer);
     let color = average_bgra(buffer.as_raw());
     Some((color, buffer))
@@ -731,7 +731,7 @@ mod tests {
 
     #[test]
     fn decode_thumbnail_uses_the_cached_file_and_swaps_channels() {
-        let dir = std::env::temp_dir().join(format!("vrc-photo-ui-decode-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("vrc-photon-ui-decode-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let cache_path = dir.join("thumb.png");
         image::RgbaImage::from_pixel(2, 2, image::Rgba([10, 20, 30, 255]))
