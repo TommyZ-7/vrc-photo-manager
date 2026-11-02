@@ -1551,6 +1551,9 @@ impl Db {
         if profile.clipboard {
             Self::clear_other_clipboard_profiles(conn, &profile.id)?;
         }
+        if profile.discord {
+            Self::clear_other_discord_profiles(conn, &profile.id)?;
+        }
         let json = serde_json::to_string(profile)?;
         conn.execute(
             "INSERT INTO compression_profiles(id, name, enabled, auto_enabled, json, sort_order) \
@@ -1582,6 +1585,32 @@ impl Db {
             let mut profile: CompressionProfile = serde_json::from_str(&json)?;
             if profile.clipboard {
                 profile.clipboard = false;
+                updates.push((id, serde_json::to_string(&profile)?));
+            }
+        }
+        drop(stmt);
+        for (id, json) in updates {
+            conn.execute(
+                "UPDATE compression_profiles SET json = ?1 WHERE id = ?2",
+                params![json, id],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Keeps the Discord target unique even when a caller other than the
+    /// profile switch saves a flagged profile.
+    fn clear_other_discord_profiles(conn: &Connection, keep_id: &str) -> Result<()> {
+        let mut stmt = conn.prepare("SELECT id, json FROM compression_profiles WHERE id != ?1")?;
+        let rows = stmt.query_map(params![keep_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut updates = Vec::new();
+        for row in rows {
+            let (id, json) = row?;
+            let mut profile: CompressionProfile = serde_json::from_str(&json)?;
+            if profile.discord {
+                profile.discord = false;
                 updates.push((id, serde_json::to_string(&profile)?));
             }
         }
@@ -1707,6 +1736,8 @@ impl Db {
             // The clipboard target is unique system-wide (the UI switch clears
             // every other profile). A duplicate must not bypass that invariant.
             clipboard: false,
+            // The Discord target is unique for the same reason.
+            discord: false,
             ..ordered[source_index].1.clone()
         };
         Self::write_profile(&tx, &copy, source_index as i64 + 1)?;
@@ -2907,6 +2938,12 @@ impl Db {
             )
             .optional()?;
         Ok(value)
+    }
+
+    pub fn delete_setting(&self, key: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM app_settings WHERE key = ?1", params![key])?;
+        Ok(())
     }
 }
 
@@ -5750,6 +5787,58 @@ mod tests {
                 .clipboard
         );
         assert_eq!(stored.iter().filter(|profile| profile.clipboard).count(), 1);
+    }
+
+    #[test]
+    fn saving_a_discord_profile_clears_the_previous_one() {
+        let db = Db::open_in_memory().unwrap();
+        let mut first = profile("a", "A");
+        first.discord = true;
+        db.save_profile(&first).unwrap();
+        let mut second = profile("b", "B");
+        second.discord = true;
+        db.save_profile(&second).unwrap();
+        let stored = db.list_profiles().unwrap();
+        assert_eq!(stored.iter().filter(|p| p.discord).count(), 1);
+        assert!(stored.iter().find(|p| p.id == "b").unwrap().discord);
+    }
+
+    #[test]
+    fn duplicating_a_discord_profile_clears_the_copy_flag() {
+        let db = Db::open_in_memory().unwrap();
+        let mut source = profile("a", "A");
+        source.discord = true;
+        db.save_profile(&source).unwrap();
+        let copy = db.duplicate_profile("a").unwrap();
+        assert!(!copy.discord);
+        assert_eq!(
+            db.list_profiles()
+                .unwrap()
+                .iter()
+                .filter(|p| p.discord)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn the_default_discord_preset_is_selected() {
+        let db = Db::open_in_memory().unwrap();
+        let profiles = db.ensure_default_profiles().unwrap();
+        let discord = profiles.iter().find(|p| p.name == "discord用webp").unwrap();
+        assert!(discord.discord);
+        assert_eq!(profiles.iter().filter(|p| p.discord).count(), 1);
+    }
+
+    #[test]
+    fn delete_setting_removes_only_the_requested_key() {
+        let db = Db::open_in_memory().unwrap();
+        db.set_setting("keep", "value").unwrap();
+        db.set_setting("remove", "value").unwrap();
+        db.delete_setting("remove").unwrap();
+        assert_eq!(db.get_setting("remove").unwrap(), None);
+        assert_eq!(db.get_setting("keep").unwrap().as_deref(), Some("value"));
+        db.delete_setting("missing").unwrap();
     }
 
     #[test]

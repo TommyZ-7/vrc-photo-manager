@@ -106,6 +106,10 @@ pub struct CompressionProfile {
     /// compresses with it immediately, without opening the manual modal.
     #[serde(default)]
     pub clipboard: bool,
+    /// At most one profile system-wide may use this flag. It is the profile
+    /// used when posting to Discord.
+    #[serde(default)]
+    pub discord: bool,
     pub format: CompressionFormat,
     pub quality: u8,
     pub lossless: bool,
@@ -129,6 +133,7 @@ impl Default for CompressionProfile {
             enabled: true,
             auto_enabled: true,
             clipboard: false,
+            discord: false,
             format: CompressionFormat::Webp,
             quality: 82,
             lossless: false,
@@ -163,6 +168,7 @@ impl CompressionProfile {
                 name: "discord用webp".to_string(),
                 auto_enabled: false,
                 clipboard: true,
+                discord: true,
                 format: CompressionFormat::Webp,
                 lossless: true,
                 resize_enabled: true,
