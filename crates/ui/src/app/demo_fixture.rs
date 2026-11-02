@@ -47,7 +47,13 @@ pub(crate) fn demo_fixture(reference: NaiveDate) -> Vec<DemoPhoto> {
         let next_month = start
             .checked_add_months(Months::new(1))
             .expect("next demo month is valid");
-        let days_in_month = (next_month - start).num_days() as usize;
+        // Keep the current month in the past: spread its photos over the days
+        // already elapsed instead of the whole month.
+        let days_in_month = if months_ago == 0 {
+            reference.day() as usize
+        } else {
+            (next_month - start).num_days() as usize
+        };
         let count = MONTH_COUNTS[(months_ago + (months_ago / 12) * 4) % MONTH_COUNTS.len()];
 
         for index_in_month in 0..count {
@@ -191,6 +197,15 @@ mod tests {
         );
         for (month, count) in &counts {
             assert!((5..=13).contains(count), "{month} has {count} photos");
+        }
+
+        let reference_date = reference().format("%Y-%m-%d").to_string();
+        for photo in &photos {
+            let date = &photo.captured_at.local[..10];
+            assert!(
+                date <= reference_date.as_str(),
+                "{date} is after {reference_date}"
+            );
         }
     }
 
