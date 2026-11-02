@@ -23,7 +23,7 @@ use crate::state::photo_browser::{
 use crate::ui::notifications::{FailureNotice, failure_transition};
 use crate::ui::palette::{Palette, apply_component_theme, resolve};
 use crate::ui::shell::screen_direction;
-use crate::ui::theme::{MOTION_BASE, MOTION_SIDEBAR};
+use crate::ui::theme::{MOTION_BASE, MOTION_SIDEBAR, MOTION_SLOW};
 
 /// Current daemon scan progress, shown by the sidebar status card and the
 /// dashboard.
@@ -807,7 +807,8 @@ impl App {
             self.nav_previous = self.screen;
             self.nav_epoch = self.nav_epoch.wrapping_add(1);
             self.screen_direction = screen_direction(self.screen, screen);
-            self.screen_epoch = self.screen_epoch.wrapping_add(1);
+            self.screen_motion = crate::state::motion::ToggleMotion::settled(0.0);
+            self.screen_motion.animate_to(1.0, MOTION_BASE);
         }
         // The two photo grids have separate snapshots, so a selection made in
         // one tab cannot stay meaningful in the other. Keep it when visiting
@@ -868,7 +869,12 @@ impl App {
             return;
         }
         self.inspector_collapsed = !self.inspector_collapsed;
-        self.inspector_epoch = self.inspector_epoch.wrapping_add(1);
+        let target = if self.inspector_collapsed { 1.0 } else { 0.0 };
+        if cx.reduce_motion() {
+            self.inspector_motion = crate::state::motion::ToggleMotion::settled(target);
+        } else {
+            self.inspector_motion.animate_to(target, MOTION_SLOW);
+        }
         self.settings.ui_inspector_collapsed = self.inspector_collapsed;
         if let Err(error) = self.settings.save(&self.db) {
             tracing::warn!(%error, "cannot save inspector state");

@@ -658,8 +658,7 @@ impl App {
             .w(px(sidebar_reveal_width(reveal_progress)))
             .opacity(1.0 - reveal_progress);
 
-        let pad = 18.5 + (11.0 - 18.5) * reveal_progress;
-        let gap = 11.0 * reveal_progress;
+        let (pad, gap) = nav_item_insets(reveal_progress);
         let content = h_flex()
             .w_full()
             .items_center()
@@ -743,18 +742,18 @@ impl App {
             Screen::Integrations => self.integrations_screen(window, cx).into_any_element(),
             Screen::Settings => self.settings_screen(cx).into_any_element(),
         };
-        let enter = Animation::new(if self.screen_epoch == 0 {
-            Duration::ZERO
-        } else {
-            MOTION_BASE
-        })
-        .with_easing(ease_motion)
-        .with_max_fps(self.motion_fps(window, cx));
+        let motion = self.screen_motion;
+        let enter = Animation::new(motion.driver_duration())
+            .with_easing(ease_motion)
+            .with_max_fps(self.motion_fps(window, cx));
         let direction = self.screen_direction;
         let screen = v_flex().flex_1().min_h_0().child(screen).with_animation(
-            ("screen-enter", self.screen_epoch),
+            ("screen-enter", motion.epoch()),
             enter,
-            move |el, t| el.relative().left(px(direction * SCREEN_SLIDE * (1.0 - t))),
+            move |el, _| {
+                el.relative()
+                    .left(px(screen_enter_offset(direction, motion.value())))
+            },
         );
         v_flex().flex_1().min_h_0().child(screen).into_any_element()
     }
@@ -1052,6 +1051,12 @@ fn nav_item_top(index: usize) -> f32 {
     index as f32 * (NAV_ITEM_HEIGHT + NAV_ITEM_GAP)
 }
 
+fn nav_item_insets(reveal_progress: f32) -> (f32, f32) {
+    let pad = 11.0 + (18.5 - 11.0) * reveal_progress;
+    let gap = 11.0 * (1.0 - reveal_progress);
+    (pad, gap)
+}
+
 /// Screen-space origin of the collapsed-sidebar tooltip. The menu starts at
 /// the sidebar's top padding (there is no in-flow toggle row), so the tooltip
 /// tracks the item top plus half of its height.
@@ -1083,20 +1088,26 @@ pub(crate) fn screen_direction(from: Screen, to: Screen) -> f32 {
     }
 }
 
+/// Horizontal offset of the entering screen for a `0.0..=1.0` motion progress.
+pub(crate) fn screen_enter_offset(direction: f32, progress: f32) -> f32 {
+    direction * SCREEN_SLIDE * (1.0 - progress.clamp(0.0, 1.0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         NAV_ITEM_GAP, NAV_ITEM_HEIGHT, StatusTone, compression_attention, compression_card_status,
         import_attention, import_bar_ratio, import_card_status, import_running_progress, nav_index,
-        nav_item_top, nav_tooltip_origin, rail_toggle_origin, running_job_count, scan_attention,
-        scan_bar_ratio, scan_card_status, scan_progress_label, scan_progress_ratio,
-        screen_direction, sidebar_retry_available,
+        nav_item_insets, nav_item_top, nav_tooltip_origin, rail_toggle_origin, running_job_count,
+        scan_attention, scan_bar_ratio, scan_card_status, scan_progress_label, scan_progress_ratio,
+        screen_direction, screen_enter_offset, sidebar_retry_available,
     };
     use crate::app::Screen;
     use crate::app::import::{
         ImportDialogOrigin, ImportDialogPhase, ImportDialogState, ImportReportView,
     };
     use crate::app::lifecycle::ScanProgressView;
+    use crate::ui::theme::SCREEN_SLIDE;
     use std::cell::Cell;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -1125,6 +1136,16 @@ mod tests {
     }
 
     #[test]
+    fn nav_item_insets_follow_sidebar_reveal_progress() {
+        // Expanded: compact left inset with a gap between icon and label.
+        assert_eq!(nav_item_insets(0.0), (11.0, 11.0));
+        // Collapsed: wider inset centers the 17px icon in the 54px row, no label gap.
+        assert_eq!(nav_item_insets(1.0), (18.5, 0.0));
+        // Mid-animation keeps both values monotonic toward the collapsed state.
+        assert_eq!(nav_item_insets(0.5), (14.75, 5.5));
+    }
+
+    #[test]
     fn nav_tooltip_origin_follows_the_top_aligned_menu() {
         assert_eq!(nav_tooltip_origin(0), (112.0, 38.5));
         assert_eq!(nav_tooltip_origin(1), (112.0, 81.5));
@@ -1141,6 +1162,17 @@ mod tests {
         assert_eq!(screen_direction(Screen::Photos, Screen::Settings), 1.0);
         assert_eq!(screen_direction(Screen::Settings, Screen::Photos), -1.0);
         assert_eq!(screen_direction(Screen::Search, Screen::Search), 1.0);
+    }
+
+    #[test]
+    fn screen_enter_offset_follows_the_motion_progress() {
+        assert_eq!(screen_enter_offset(1.0, 0.0), SCREEN_SLIDE);
+        assert_eq!(screen_enter_offset(-1.0, 0.0), -SCREEN_SLIDE);
+        assert_eq!(screen_enter_offset(1.0, 0.5), SCREEN_SLIDE / 2.0);
+        assert_eq!(screen_enter_offset(-1.0, 0.5), -SCREEN_SLIDE / 2.0);
+        assert_eq!(screen_enter_offset(1.0, 1.0), 0.0);
+        assert_eq!(screen_enter_offset(-1.0, 1.0), 0.0);
+        assert_eq!(screen_enter_offset(1.0, 2.0), 0.0);
     }
     #[test]
     fn scan_progress_label_uses_root_and_counts() {
