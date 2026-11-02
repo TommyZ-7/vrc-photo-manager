@@ -59,7 +59,7 @@ The DB schema and the production import path do not change.
   Invalid local times (DST gaps) are moved forward by one hour. Hours stay
   below 23 so a one-hour shift cannot roll into the next day or month. The
   current month uses `reference.day()` as its day count so demo photos never
-  land in the future.
+  carry a future date.
 - Eight worlds and eight player names keep their current values. A linked
   photo's world starts at `(month_offset + index_in_month) % 8`; players
   start at `(month_offset * 2 + index_in_month) % 8` and number 3-7.
