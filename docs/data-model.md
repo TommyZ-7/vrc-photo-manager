@@ -27,7 +27,7 @@ PRAGMA busy_timeout = 5000;
 ```
 
 - `user_version` でスキーマバージョンを管理する。
-- 現在のバージョンは **5**。
+- 現在のバージョンは **11**。
 - マイグレーションは `Db::migrate` で起動時に自動実行する。
 
 ## 3. テーブル
@@ -180,6 +180,13 @@ VRChatの1滞在。
 
 `sort_order` は挿入時に末尾へ割り当て、編集では変わらない。並び替え・複製時に全行を `0..n-1` へ正規化する。削除後の欠番は許容する。
 
+`CompressionProfile.discord`（JSON 内、`#[serde(default)]`）は Discord 送信に使う
+プロファイルの単一選択フラグ。`Db::save_profile` は `clipboard` と同様に、
+`discord == true` の行を保存するとき他のプロファイルの `discord` を false にする。
+複製したプロファイルは `discord = false` で作る。新規 DB では既定プロファイル
+`discord用webp`（WebP、2560×1440、`discord/` 出力、`_discord`）だけが
+`discord = true`。既存 DB はユーザーが連携タブで選ぶ。
+
 ### `derivatives`
 
 圧縮生成物。元写真1枚に複数。
@@ -231,6 +238,71 @@ WHERE id = (
 RETURNING ...;
 ```
 
+### `send_outbox`
+
+Discord 送信の耐久キュー。UI と自動検出は enqueue だけを行い、デーモンの
+`discord-send` ワーカーが送信する。テスト送信も同じ経路を通る。
+
+| 列 | 型 | 説明 |
+|---|---|---|
+| id | INTEGER PK AUTOINCREMENT | |
+| photo_id | INTEGER FK | `photos.id`。テスト送信だけ `NULL` |
+| kind | TEXT NOT NULL | `photo` / `test` |
+| origin | TEXT NOT NULL | `manual` / `auto` |
+| status | TEXT NOT NULL | `waiting` / `pending` / `processing` / `sent` / `failed` / `cancelled`。未知の値は読み込み時に `unknown` として扱う |
+| source | TEXT | 送信時に確定する `original` / `profile` / `derivative` |
+| profile_id | TEXT | 実際に使った `compression_profiles.id`。原画送信と表示用派生の送信では `NULL` |
+| destination | TEXT | 送信時点の送信先名のスナップショット |
+| attempts | INTEGER NOT NULL DEFAULT 0 | 再試行可能な失敗（5xx／ネットワーク）の回数。429 と terminal の 4xx では増やさない |
+| next_attempt_at | INTEGER | 次回試行時刻（epoch 秒）。`NULL` は即時 |
+| discord_message_id | TEXT | `wait=true` の応答から取得 |
+| discord_channel_id | TEXT | 同上 |
+| discord_guild_id | TEXT | 同上 |
+| error_code | TEXT | UI が翻訳する安定 ID（`http_401`、`too_large`、`interrupted` など） |
+| error_detail | TEXT | サニタイズ済みの短文（最大 200 文字）。URL・トークンを含めない |
+| created_at | TEXT NOT NULL | RFC3339 |
+| started_at | TEXT | RFC3339。未取得は `NULL` |
+| finished_at | TEXT | RFC3339。terminal 以外は `NULL` |
+
+制約・インデックス:
+
+```sql
+CREATE UNIQUE INDEX idx_send_outbox_active_photo
+    ON send_outbox(photo_id)
+    WHERE photo_id IS NOT NULL
+      AND status IN ('waiting', 'pending', 'processing');
+
+CREATE INDEX idx_send_outbox_due
+    ON send_outbox(status, next_attempt_at, id);
+
+CREATE INDEX idx_send_outbox_photo
+    ON send_outbox(photo_id);
+```
+
+- 部分 UNIQUE インデックスにより、1 写真につきアクティブな送信は 1 件だけ。
+  `sent` / `failed` / `cancelled` の後は再送できる。テスト送信は `photo_id` が
+  `NULL` のためこの制約を受けない。未知の `status` は新しい版が書いた値として
+  `unknown` で読み、terminal として扱わない。
+- 取得は `pending` かつ `next_attempt_at` が到来した行を 1 件、単一 UPDATE で
+  `processing` にする。`waiting` は取得しない。
+- `attempts` は 5xx／ネットワークの失敗で増える。429 は `retry_after` 後に
+  再送し、`attempts` を据え置く。`error_code` は `network`、`rate_limited`、
+  `http_400` / `http_401` / `http_403` / `http_404` / `http_413`、`http_5xx`、
+  `too_large`、`photo_missing`、`profile_missing`、`encode_failed`、
+  `interrupted`、`webhook_invalid`、`unknown`。
+- `error_detail` は失敗理由の短文（最大 200 文字）。HTTP エラーでは Discord の
+  `message` を切り詰めたものを使う。生のレスポンス本文、Webhook URL、トークンは
+  保存しない。
+- ワーカー起動時に `processing` が残っていれば、自動再送せず
+  `failed`（`error_code='interrupted'`）にする。Discord に冪等キーがないため。
+- terminal 行（`sent` / `failed` / `cancelled`）は最新 500 件を上限として、
+  送信完了後に古い行を削除する。UI は最新 100 件を表示し、「履歴を消去」で
+  terminal 行を全削除できる。
+- 削除要求と強制削除は、対象写真の `waiting` / `pending` / `failed` を
+  `cancelled` にする。`processing` は完了まで残す。削除の実行はアクティブな
+  送信がなくなるまで待つが、`failed` はブロックしない。
+- 写真が `deleting` の間は新しい送信を enqueue しない。
+
 ### `deletion_requests`
 
 写真の削除要求。デーモンが依存ジョブのドレイン後に実行する。写真1枚につき同時に1件だけ active（`pending` / `blocked` / `running`）になれる。
@@ -259,6 +331,7 @@ CREATE INDEX idx_deletion_requests_status
 - `reason='manual'` は要求時に `photos.status='deleting'` にし、全派生ファイル→元画像→DB（`missing`）の順で実行する。
 - `reason='auto_replace'` は `replace` 圧縮成功後に作られ、元画像だけを削除する。写真は `replaced` のまま一覧に残る。実行直前に表示用の圧縮版が実在するか再確認し、なければ元画像を残して `missing_asset` で保留する。
 - `pending` はジョブの完了待ち。`blocked` は失敗ジョブ、ファイル移動エラー、圧縮版消失で停止中。`running` は実行中で、デーモン起動時に `started_at` を保持したまま `pending` へ戻す。
+- 実行可能かの判定には、圧縮ジョブに加えて `send_outbox` のアクティブな行（`waiting` / `pending` / `processing`）を含める。要求時に `waiting` / `pending` / `failed` の送信はキャンセルし、`processing` は完了まで残す。
 - 依存ジョブの失敗で `blocked` になった要求は、その写真の全ジョブが成功／取消になると `pending` に戻る。ファイル移動エラーと `missing_asset` はユーザーの再試行または強制削除まで `blocked` のままにする。
 - 取消は `reason='manual'` かつ `started_at IS NULL` の要求だけに許可する。自動置換の取消は、残っている置換ジョブが要求を再作成するため提供しない。
 
@@ -317,6 +390,7 @@ UIからデーモンへの再実行要求。FIFOの小さなキュー。
 | key | value |
 |---|---|
 | `app_settings` | `AppSettings` のJSON |
+| `discord_webhook_url` | Discord Webhook URL（トークンを含む認証情報）。UI・ログにはマスクして出す |
 | `daemon_heartbeat` | デーモンの最終ハートビート（epoch秒） |
 | `daemon_supervisor` | 稼働中のデーモンの起動元。`systemd` または `app` |
 | `library_revision` | 一覧変更の単調増加カウンタ。UIのページキャッシュ無効化に使う |
@@ -325,14 +399,33 @@ UIからデーモンへの再実行要求。FIFOの小さなキュー。
 
 `daemon_heartbeat` はUIの稼働判定に使う。UIはハートビートが20秒以内、またはIPC購読が接続中なら稼働中とみなす（長時間スキャン対策）。IPCが使えない場合は従来どおりハートビートだけに戻る。処理エラーの表示と再実行要求は `daemon_errors` / `daemon_commands` に分離し、`app_settings` には入れない。
 
+`discord_webhook_url` は Discord 連携の Webhook URL を `AppSettings` の JSON とは
+別のキーに保存する。読み書きは core の `load_discord_webhook` /
+`save_discord_webhook` / `clear_discord_webhook` だけに閉じ込め、空文字は未設定と
+みなす。URL を削除しても `discord_enabled` は残す。認証情報のため、DB バックアップ
+にはこのキーが含まれる。
+
 `AppSettings` の主なフィールド:
 
 ```text
 photo_roots, log_dir, managed_dir, language,
 autostart, tray, auto_compress, auto_compress_backlog,
 auto_compress_immediate, auto_compress_keep_original,
-estimated_link, thumbnail_cache_mb, compression_workers
+estimated_link, thumbnail_cache_mb, compression_workers,
+discord_enabled, discord_destination, discord_include_players,
+discord_send_original, discord_auto_mode, discord_auto_since,
+discord_consent_at
 ```
+
+Discord 関連の既定値:
+
+- `discord_enabled = false`
+- `discord_destination = "Discord"`（空・空白のみは保存時に `"Discord"` へ戻す）
+- `discord_include_players = false`
+- `discord_send_original = true`
+- `discord_auto_mode = Off`（`Off` / `Immediate` / `Waiting`）
+- `discord_auto_since = None`（自動送信の対象にする撮影時刻の下限）
+- `discord_consent_at = None`（初回同意の記録）
 
 ## 4. 不変条件
 
@@ -350,6 +443,9 @@ estimated_link, thumbnail_cache_mb, compression_workers
 12. activeな `deletion_requests` がある写真には新しい圧縮ジョブを積まない。UIは要求をSQLiteに書き、`wake_jobs` でデーモンを起こすだけ。
 13. `deletion_requests` は1写真につきactive 1件。実行列はデーモン起動時に `started_at` を保持したまま `pending` へ戻し、冪等なファイル手順で再開する。activeな要求がある写真は、スキャン時の再結合（rebind）でも新しいパスに付け替えない。
 14. 強制削除（`force=1`）は `failed` を無視し、`waiting` / `pending` をキャンセルし、`processing` の完了を待つ。`processing` 中の入力ファイルを消さない。
+15. `send_outbox` は1写真につき `waiting` / `pending` / `processing` のいずれか1件だけ。`sent` / `failed` / `cancelled` の後は再送できる。テスト送信は `photo_id=NULL` でこの制約を受けない。
+16. `send_outbox.processing` はデーモン再起動時に `failed(interrupted)` へ移し、自動再送しない。送信結果が不明なメッセージを二重投稿しないため。
+17. アクティブな送信がある写真は削除を開始しない。削除要求は `waiting` / `pending` / `failed` をキャンセルし、`processing` は完了まで残す。`failed` は削除をブロックしない。
 
 ## 5. タイムゾーンと時刻
 
@@ -373,8 +469,13 @@ estimated_link, thumbnail_cache_mb, compression_workers
 | 7 | `deletion_requests` と active/status インデックス追加 |
 | 8 | `daemon_commands.payload` 追加 |
 | 9 | `idx_jobs_photo_profile` 追加（自動圧縮の重複判定用） |
+| 10 | `daemon_errors.message_key` / `message_args` 追加（翻訳キーと引数） |
+| 11 | `send_outbox` と active / due / photo インデックス追加（Discord 送信 outbox） |
 
 V4以降は `IMMEDIATE` トランザクションで適用する。UIとデーモンが同時に起動しても、書き込みロックで直列化し、`user_version` と列・テーブルの存在を再確認してから進めるため、中断後の再実行でも安全。
+
+v11 の `send_outbox` は `CREATE TABLE IF NOT EXISTS` とインデックス追加だけで、
+既存データを変更しない。ロールバック時はテーブルを残しても既存機能は動く。
 
 追加手順:
 

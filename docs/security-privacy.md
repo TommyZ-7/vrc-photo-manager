@@ -2,7 +2,7 @@
 
 ## 1. 基本方針
 
-- ローカル完結。テレメトリなし。写真やログを外部へ送信しない。
+- ローカル完結。テレメトリなし。既定では写真やログを外部へ送信しない。Discord 連携を明示的に有効化した場合だけ、対象の写真を Discord Webhook へ送る。
 - VRChatアカウントの認証情報を保存しない。
 - 公式WebSocket（pipeline）へ接続しない。
 - 生ログを保存しない。解析済みイベントのみDBに保存する。
@@ -16,16 +16,22 @@
 | 文脈 | ワールドID/名前、インスタンス、撮影者 | `photo_context` |
 | プレイヤー | ユーザーID、表示名、入退室時刻 | `session_players` / `photo_players` |
 | 圧縮 | プロファイル、生成物、ジョブ | DB / 生成ファイル |
+| Discord 送信履歴 | 写真ID、送信先名、状態、送信元、メッセージID、エラー | `send_outbox` |
+| Discord Webhook URL | 投稿先の URL（トークンを含む認証情報） | `app_settings.discord_webhook_url` |
 | 設定 | パス、自動化設定、最終更新確認時刻 | `app_settings` |
 | サムネイル | 256px WebP | `thumbnails/` |
 | プレビュー | 1200px WebP | `previews/` |
 | 更新 | ダウンロードした成果物、適用ジョブ（署名対象の `latest.json` を含む）、結果、ヘルパーのログ | `updates/` |
 
+Discord の Webhook URL は `AppSettings` の JSON とは別の `app_settings`
+（`discord_webhook_url`）キーに保存し、UI ではマスクする。DB バックアップには
+このキーが含まれる。
+
 保存しないもの:
 
 - VRChatの生ログ全文
 - VRChatのパスワード、Cookie、2FAシークレット
-- 写真の内容を外部へ送る処理
+- Discord 連携が無効な状態での写真・ログの外部送信
 
 ## 3. 個人情報
 
@@ -33,6 +39,7 @@ VRChatの表示名・ユーザーID・ワールド名は個人情報になり得
 
 - DBはユーザーのローカルデータディレクトリに保存される。
 - DBや設定を共有・バックアップすると、これらの情報も含まれる。
+- Discord の Webhook URL は投稿先を操作できる認証情報で、DB バックアップに含まれる。UI ではマスクし、ログ・outbox・IPC イベント・エラートーストには出さない。
 - スクリーンショットやログを公開するときは、表示名・パス・ユーザー名に注意する。
 - エクスポート機能を追加する場合は、個人情報の警告と範囲選択を必須にする。
 
@@ -62,7 +69,8 @@ VRChatの表示名・ユーザーID・ワールド名は個人情報になり得
 
 ## 7. ネットワーク
 
-現行実装のネットワーク通信は、アプリのアップデート確認と成果物の取得だけに限定される。
+現行実装のネットワーク通信は、アプリのアップデート確認と成果物の取得、および
+ユーザーが明示的に有効化した Discord 連携の Webhook 送信に限定される。
 
 - 画像・ログ・DBの解析はローカルのみ。
 - 更新確認は GitHub Releases の署名付き `latest.json` と
@@ -81,6 +89,33 @@ VRChatの表示名・ユーザーID・ワールド名は個人情報になり得
 - `VRC_PHOTON_UPDATE_FEED` はミラーやQA用の上書きで、署名要件は変わらない。
 - デバッグビルドだけ `VRC_PHOTON_UPDATE_PUBLIC_KEY` で公開鍵を差し替えられる。
   リリースビルドは無視する。
+
+### 7.1 Discord 連携（オプトイン）
+
+- 既定は無効。機能オフ、Webhook URL 未設定、URL 不正のときは送信ワーカーが
+  1 件も取得せず、ネットワーク送信しない。有効化は連携・自動タブの明示操作で行う。
+- 送信先は HTTPS の Discord ホスト（`discord.com` / `discordapp.com` /
+  `ptb.discord.com` / `canary.discord.com`）の
+  `/api/webhooks/<id>/<token>` だけ。ポートは 443（省略可）。リダイレクトは
+  追わない（3xx は失敗）。HTTP や別ホスト、拡張パスの URL は保存しない。
+- Webhook URL・トークンは `tracing`、outbox の `error_detail`、IPC イベント、
+  エラートーストに出さない。`SendRequest` の `Debug` は URL を `<redacted>` にし、
+  ネットワークエラーは `ureq::Error` の `Display` をそのまま保存しない。
+  UI では `https://discord.com/api/webhooks/<id>…/••••` のようにマスクする。
+- 送信上限は 20 MiB（`20 * 1024 * 1024` バイト）。原画を優先し、超える場合は
+  連携プロファイルの既存 derivative、なければメモリ上エンコードへフォールバック
+  する。上限超過はアップロード前に `too_large` で失敗する。
+- 送る内容は写真、ワールド名、撮影日時、任意でプレイヤー名（既定オフ）、
+  アプリ名と元ファイル名。送信先名はローカルのラベルで Discord へは送らない。
+- 非公開インスタンスの写真も対象になる。カードに注意書きを表示し、投稿先の
+  確認を促す。非公開インスタンスの自動除外は未実装。
+- 削除要求時は `waiting` / `pending` / `failed` の送信をキャンセルし、
+  `processing` は完了まで残す。送信中のファイルを削除しない。
+- 429 は `retry_after` に従ってワーカー全体を停止し、5xx／ネットワークは
+  指数バックオフで再試行する。429 を除く 4xx は terminal。デーモン再起動時の
+  `processing` は `failed(interrupted)` にし、二重投稿を避けるため自動再送しない。
+- Webhook URL は DB バックアップに含まれる。バックアップの共有・公開時は
+  認証情報として扱う。OS の資格情報ストア保存は将来対応。
 
 将来、VRChat APIやクラウド同期を追加する場合:
 

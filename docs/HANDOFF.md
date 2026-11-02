@@ -1,6 +1,6 @@
 # 引き継ぎメモ
 
-最終更新: 2026-10-24
+最終更新: 2026-11-02
 
 > 詳細な開発ドキュメントは [docs/README.md](README.md) を参照。
 > このファイルは短期引き継ぎ用の要約。
@@ -41,6 +41,12 @@
 - デーモンの二重起動防止
 - デーモンハートビート表示
 - UI⇔デーモンのローカルIPC（即時wake、スキャン/圧縮/エラーイベント、一時停止/再開、終了）
+- Discord Webhook 連携（Phase 1 / Phase 2: #142 / #284 / #285）
+  - 連携・自動タブの Discord カード、Webhook URL のマスク保存、テスト送信、送信履歴、手動送信
+  - デーモンの単一送信ワーカーと SQLite outbox、削除キュー連携
+  - 自動送信（オフ／即時／待機）、初回同意、`discord_auto_since` によるバックログ防止
+  - 送信上限は 20 MiB（`20 * 1024 * 1024` バイト）。原画優先で、超過時は連携プロファイルへフォールバック
+  - 設計・ADR・機能ドキュメントの docs PR は未作成（Task 21）
 - 署名付き自動アップデート（AppImage / Windows current-user NSIS。deb/pacmanはpolkit経由、ADR-0012 / ADR-0016）
 - 外部削除された写真の `missing` 検出
 - notifyによる増分スキャン
@@ -100,6 +106,7 @@ cargo packager --release
 7. ログはVRChat本体が24時間で削除する。過去復元は残存ログのみ。
 8. 初回デーモン起動で自動起動が登録される。開発用バイナリのパスが入る点に注意。
 9. 自動アップデートは署名付き `latest.json`（GitHub Releases）を使う。初回の署名付きリリースより前のバージョンは手動更新が必要。AppImage/Windowsの実更新とロールバック、Windows実機のSmartScreenは未検証。deb/pacmanはpolkit経由でアプリ内更新できる（ADR-0016）。システムパッケージは自動ロールバックしない。
+10. Discord 連携は単一 Webhook。複数 Webhook、OS の資格情報ストア、非公開インスタンスの自動除外、写真の右クリック送信は未実装。Webhook URL は DB バックアップに含まれる。デーモン再起動で送信中だった送信は `failed(interrupted)` になり、自動再送しない。
 
 ## 重要な設計メモ
 

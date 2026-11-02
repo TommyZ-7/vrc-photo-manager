@@ -21,7 +21,7 @@ VRChatの写真を、撮影時のワールド・同接プレイヤー・撮影�
         ┌────────────────────────────────────────────────────────┐
         │ SQLite (WAL)                                           │
         │ photos / photo_context / sessions / jobs / settings …  │
-        │ daemon_errors / daemon_commands                        │
+        │ send_outbox / daemon_errors / daemon_commands          │
         └────────────────────────────────────────────────────────┘
                ▲                                          ▲
                │                                          │
@@ -34,12 +34,19 @@ UIとデーモンは同じSQLite（WAL）に加えて、ローカルIPC（Unix d
 
 | プロセス | バイナリ | 役割 |
 |---|---|---|
-| UI | `crates/ui` → `vrc-photon` | 画面表示、検索、タグ・お気に入り・メモ編集、手動圧縮のキュー投入、取り込み |
-| デーモン | `crates/daemon` → `vrc-photon-daemon` | 写真・ログの監視、索引、文脈紐付け、サムネイル、自動圧縮、トレイ、自動起動、IPCサーバー |
+| UI | `crates/ui` → `vrc-photon` | 画面表示、検索、タグ・お気に入り・メモ編集、手動圧縮のキュー投入、取り込み、Discord 設定と送信 enqueue |
+| デーモン | `crates/daemon` → `vrc-photon-daemon` | 写真・ログの監視、索引、文脈紐付け、サムネイル、自動圧縮、Discord 送信、トレイ、自動起動、IPCサーバー |
 | 共通IPC | `crates/ipc` | プロトコル型、エンドポイント、改行区切りJSON、ローカルソケットの送受信 |
-| 共通コア | `crates/core` | DB、スキャン、ログ解析、XMP、圧縮、設定、サムネイル |
+| 共通コア | `crates/core` | DB、スキャン、ログ解析、XMP、圧縮、Discord の URL 検証・payload・送信元選択、設定、サムネイル |
 
-UIとデーモンは同じSQLite（WAL）を共有し、状態とジョブをやり取りする。これに加えて、即時コマンドのwake-upとイベント配信のためにローカルIPCを使う（ADR-0011）。UIはデーモンのハートビート（`app_settings.daemon_heartbeat`）とIPC購読のどちらかが生きていれば稼働中と判定する。デーモンの処理エラーは `daemon_errors`、UIからの再実行要求は `daemon_commands` に置く。IPCは `daemon_commands` / `compression_jobs` を置き換えず、デーモンを起こすだけ。デーモン停止中も要求はDBに残り、起動後に処理される。
+UIとデーモンは同じSQLite（WAL）を共有し、状態とジョブをやり取りする。これに加えて、即時コマンドのwake-upとイベント配信のためにローカルIPCを使う（ADR-0011）。UIはデーモンのハートビート（`app_settings.daemon_heartbeat`）とIPC購読のどちらかが生きていれば稼働中と判定する。デーモンの処理エラーは `daemon_errors`、UIからの再実行要求は `daemon_commands` に置く。IPCは `daemon_commands` / `compression_jobs` / `send_outbox` を置き換えず、デーモンを起こすだけ。デーモン停止中も要求はDBに残り、起動後に処理される。
+
+IPCは `PROTOCOL_VERSION = 4`。`WakeSends` で Discord 送信ワーカーを起床し、
+`SendProgress`（outbox_id、photo_id、status、error_code）を配信する。
+`StatusSnapshot.pending_sends` は待機・実行待ちの送信件数。旧デーモンと新UIは
+`hello` のバージョン不一致で切断され、UIは既存どおり3秒ポーリングへ
+フォールバックする。`WakeSends` が届かなくても、送信ワーカーは500 msごとに
+DBを見るため送信が遅れるだけで失われない。
 
 ## 3. クレート構成
 
@@ -59,11 +66,14 @@ crates/
     src/linker.rs         # 写真とログ/XMPの紐付け
     src/metadata.rs       # PNG XMPの読み取り
     src/compressor.rs     # JPEG / WebP / AVIF / JXL
+    src/discord.rs        # Webhook URL検証、送信元選択、embed payload
     src/thumbnail.rs      # 256px WebPサムネイル
     src/importer.rs       # コピー/移動取り込み
     src/settings.rs       # 設定、VRChatパス検出
   daemon/
     src/lib.rs            # 監視ループ、ジョブワーカー、トレイ制御
+    src/discord.rs        # Discord 送信ワーカー、outbox、自動 enqueue
+    src/discord_http.rs   # multipart POST、429/4xx/5xx の分類
     src/main.rs           # CLI、単一インスタンス
     src/tray.rs           # Windows tray-icon / Linux ksni
   update/
@@ -119,6 +129,7 @@ crates/ui/src/
     photos.rs             # 選択、サムネイル/プレビュー要求、ライブラリ状態
     search.rs             # 検索実行・結果適用
     compression.rs        # プロファイル/手動圧縮
+    discord.rs            # Discord 設定・送信 enqueue・履歴更新
     daemon.rs             # デーモン操作、ログ、プロセス起動
     import.rs             # 取り込みダイアログ/実行/再試行/再開
     viewer.rs             # ビューア開閉、フォーカス、前後移動
@@ -139,6 +150,7 @@ crates/ui/src/
     search.rs             # 検索画面
     compression.rs        # 圧縮設定画面
     dashboard.rs          # ダッシュボード
+    discord.rs            # Discord 連携カード、送信履歴
     settings.rs           # 設定
     import.rs             # 取り込みモーダル/結果パネル
     viewer.rs             # フルスクリーンビューア/モーフ
@@ -269,14 +281,50 @@ crates/ui/src/
 
 ### 4.8 削除キュー
 
-1. UIは手動削除の `deletion_requests`（`reason='manual'`）を書き、`photos.status='deleting'`、`library_revision` 更新、`wake_jobs` を行う。UIはファイルを移動しない。
+1. UIは手動削除の `deletion_requests`（`reason='manual'`）を書き、`photos.status='deleting'`、`library_revision` 更新、`wake_jobs` を行う。同じトランザクションで、対象写真の `waiting` / `pending` / `failed` の送信をキャンセルする。UIはファイルを移動しない。
 2. 自動置換は圧縮ワーカーが `reason='auto_replace'` の要求を書く。写真は `replaced` のまま残る。
 3. デーモンの `deletion-executor` スレッドは `JobSignal` で起動し、`pending` の要求を読む。
-4. `waiting` / `pending` / `processing` のジョブが残っていれば待つ。`failed` が残り、`force=0` なら `blocked` にして理由を残す。自動置換は実行直前に表示用の圧縮版が実在するか確認し、なければ `missing_asset` で保留する。
+4. `waiting` / `pending` / `processing` の圧縮ジョブ、またはアクティブな `send_outbox`（`waiting` / `pending` / `processing`）が残っていれば待つ。`failed` の圧縮ジョブが残り、`force=0` なら `blocked` にして理由を残す。送信の `failed` はブロックしない。自動置換は実行直前に表示用の圧縮版が実在するか確認し、なければ `missing_asset` で保留する。
 5. 実行可能な要求を `pending` → `running` に原子的に変え、ファイルを移動する。手動削除は派生ファイル→元画像、自動置換は元画像だけ。存在しないパスはスキップする。
 6. 手動削除は派生行を削除し、写真を `missing` にする。自動置換は `replaced` を維持する。要求を `completed` にし、`library_revision` を更新する。
 7. 再起動時は `started_at` を保持したまま `running` を `pending` に戻して同じ手順を再実行する。途中まで移動済みでも、欠けたパスをスキップして完了できる。
 8. `blocked` の取消・再試行・強制削除はダッシュボードから行う。強制削除は失敗を無視し、待機／実行待ちをキャンセルし、処理中の完了を待つ。
+
+### 4.9 Discord 送信
+
+1. UIの手動送信・テスト送信、またはデーモンの自動検出が `send_outbox` に積む。
+   UIは書き込み後に `wake_sends` を送り、デーモンを起こす。自動検出は
+   写真の索引・紐付けが終わってから enqueue する。
+2. `discord-send` ワーカーは設定と Webhook URL を読み、機能オフ／URL未設定／
+   URL不正なら1件も取得しない。
+3. `pending` かつ `next_attempt_at` が到来した行を1件、単一の UPDATE で
+   `processing` にする。取得後に設定を再確認し、無効化されていれば `pending`
+   に戻して送信しない。取得後の計画でエラーが出た行は `failed`（`unknown` /
+   `internal error`）にし、`processing` のまま残さない。
+4. 写真・文脈・プレイヤー・derivative・選択プロファイルを短いDBロックで読み、
+   送信元を決める。ロックを解放してからファイルを読み、必要ならメモリ上で
+   エンコードする。ファイル読み込み・エンコード・HTTP中はDBロックを持たない。
+5. 送信元は原画優先。原画が存在し置換されていなければ、原画優先ONかつ
+   20 MiB（`20 * 1024 * 1024` バイト）以下なら原画を送る。それ以外は連携
+   プロファイルの既存derivative、なければ同じプロファイルでメモリ上エンコード
+   した結果を送る。原画が置換・消失している場合は表示用derivative、なければ
+   連携プロファイルのderivativeを使う。
+6. 選択したファイル、またはエンコード結果が20 MiBを超える場合は送信せず
+   `too_large` で失敗する。プロファイル未選択・無効・消失は `profile_missing`、
+   原画も派生もない場合は `photo_missing`。
+7. `payload_json`（ワールド名、撮影日時、任意でプレイヤー名）と画像を multipart
+   で `POST <webhook>?wait=true` する。HTTPSのみ、Discordのホスト許可リスト、
+   リダイレクト追従なし、接続10秒・全体120秒、レスポンスは最大64 KiB。
+8. 結果を outbox に記録し、`SendProgress` を配信する。成功時はメッセージID、
+   チャンネルID、ギルドIDを保存し、terminal履歴を最新500件に切り詰める。
+   429は `retry_after`（1〜900秒）でワーカー全体を停止し、attemptsを増やさない。
+   5xx／ネットワークは2, 4, 8, …秒（最大300秒）のバックオフ、429を除く4xxは
+   `failed`。
+9. ワーカー起動時に `processing` が残っていた場合は、二重投稿を避けるため
+   `failed(interrupted)` にする。自動再送はしない。
+10. 削除要求は対象写真の `waiting` / `pending` / `failed` をキャンセルする。
+    `processing` は完了まで残し、削除エグゼキュータはアクティブな送信がなくなる
+    まで待つ。`failed` は削除をブロックしない。
 
 ## 5. 並行性
 
@@ -293,12 +341,14 @@ crates/ui/src/
 | デーモンIPCサーバー | 接続ごとにスレッド。hello/status/wake/pause/shutdown/subscribeを処理 | `DaemonStatus`、`WakeSignal`、`JobSignal`、`EventBus` |
 | 圧縮ワーカー | 1〜4スレッド。ジョブを原子的に取得 | `Arc<Mutex<Db>>` |
 | 削除エグゼキュータ | 1スレッド。依存ジョブの完了後に要求を実行 | `Arc<Mutex<Db>>`、`JobSignal` |
+| Discord送信ワーカー | 1スレッド（`discord-send`）。outboxを原子的に取得し、HTTP中はDBロックを持たない | `Arc<Mutex<Db>>`、`JobSignal`、`EventBus` |
 | サムネイルワーカー | 1スレッド。キューを順次処理 | `Arc<Mutex<Db>>` |
 | トレイ | Windowsメッセージポンプ / Linux StatusNotifierItem | `DaemonStatus` |
 
 - SQLiteはWALで読み書きを並行化する。書き込みは短く保つ。
 - 圧縮のエンコード中はDBロックを持たない（写真・プロファイルを読んでから解放し、完了後に再ロック）。
 - 削除のファイル移動中もDBロックを持たない。対象パスを読んで解放し、移動後に再ロックしてDBを更新する。
+- Discordのファイル読み込み・エンコード・アップロード中もDBロックを持たない。結果の記録時だけ再ロックする。
 - ジョブ取得は `UPDATE ... WHERE status='pending' RETURNING` で二重取得を防ぐ。
 - デーモンは `single-instance` で二重起動を防ぐ。
 
