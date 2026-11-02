@@ -209,15 +209,6 @@ pub(crate) fn moved_profile_order(
     Some(order)
 }
 
-/// Usable window extent after the platform's client-side decoration inset.
-///
-/// X11 reports the outer window (including the shadow/resize inset) from
-/// `viewport_size`, so layout maths must use the inner extent. Wayland and
-/// X11 without a client inset report `0`.
-pub(crate) fn window_content_extent(viewport: f32, client_inset: f32) -> f32 {
-    (viewport - client_inset * 2.0).max(0.0)
-}
-
 /// Actual frame inset per edge. A tiled edge has zero padding even though the
 /// platform keeps `client_inset` set for window sizing.
 pub(crate) fn content_insets(window: &Window) -> Edges<Pixels> {
@@ -619,14 +610,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn window_content_extent_removes_the_client_inset() {
-        assert_eq!(window_content_extent(1320.0, 20.0), 1280.0);
-        assert_eq!(window_content_extent(1480.0, 20.0), 1440.0);
-        assert_eq!(window_content_extent(1280.0, 0.0), 1280.0);
-        assert_eq!(window_content_extent(10.0, 20.0), 0.0);
-    }
-
-    #[test]
     fn content_bounds_convert_card_bounds_into_overlay_space() {
         let card = Bounds::new(point(px(301.), px(228.)), size(px(215.), px(144.)));
         let converted = content_bounds(card, Edges::all(px(20.)));
@@ -639,6 +622,16 @@ mod tests {
     fn content_size_uses_each_edge_independently() {
         let viewport = size(px(1920.), px(1080.));
         assert_eq!(content_size(viewport, Edges::default()), viewport);
+
+        // An untiled window keeps the uniform CSD inset on every edge.
+        assert_eq!(
+            content_size(size(px(1320.), px(860.)), Edges::all(px(20.))),
+            size(px(1280.), px(820.))
+        );
+        assert_eq!(
+            content_size(size(px(1480.), px(940.)), Edges::all(px(20.))),
+            size(px(1440.), px(900.))
+        );
 
         let partial = Edges {
             top: px(20.),

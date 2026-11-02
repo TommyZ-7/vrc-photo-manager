@@ -60,7 +60,9 @@ use crate::ui::chrome::{ChromeLayout, chrome_layout};
 use crate::ui::gallery::GalleryView;
 use crate::ui::notifications::{ToastSpec, toast_flush_needed};
 use crate::ui::palette::resolve;
-use crate::ui::theme::{MIN_CARD_WIDTH, Palette, WORKSPACE_GAP, WORKSPACE_PAD, photo_row_height};
+use crate::ui::theme::{
+    MIN_CARD_WIDTH, Palette, WORKSPACE_GAP, WORKSPACE_PAD, content_insets, photo_row_height,
+};
 use crate::update_view;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1061,11 +1063,10 @@ impl Render for App {
             }));
         if should_render_shell(self.quick_look_open) {
             let viewport = window.viewport_size();
-            let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
             let mut layout: ChromeLayout = chrome_layout(
                 f32::from(viewport.width),
                 f32::from(viewport.height),
-                client_inset,
+                content_insets(window),
                 self.sidebar_collapsed,
             );
             if self.ribbon_collapsed {

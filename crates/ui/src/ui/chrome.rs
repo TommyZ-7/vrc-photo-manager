@@ -5,6 +5,7 @@
 //! three command pages from design §10.2. Both stay opaque on top of the
 //! window's glass backdrop.
 
+use gpui_kit::Edges;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::*;
@@ -68,8 +69,9 @@ pub(crate) const RIBBON_LABELS_MIN_WIDTH: f32 = 1004.0;
 ///
 /// X11 client-side decorations report the outer window through
 /// `viewport_size`, so the responsive thresholds must see the same inner size
-/// the gallery and inspector use. `client_inset` is 0 on Wayland and on X11
-/// without CSD.
+/// the gallery and inspector use. `insets` is the window's real per-edge
+/// decoration inset: a tiled or maximized edge contributes 0 even though the
+/// platform still reports a scalar `client_inset` for window sizing.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ChromeLayout {
     pub(crate) content_width: f32,
@@ -81,11 +83,12 @@ pub(crate) struct ChromeLayout {
 pub(crate) fn chrome_layout(
     viewport_width: f32,
     viewport_height: f32,
-    client_inset: f32,
+    insets: Edges<Pixels>,
     sidebar_collapsed: bool,
 ) -> ChromeLayout {
-    let content_width = window_content_extent(viewport_width, client_inset);
-    let content_height = window_content_extent(viewport_height, client_inset);
+    let content = content_size(size(px(viewport_width), px(viewport_height)), insets);
+    let content_width = f32::from(content.width);
+    let content_height = f32::from(content.height);
     let header_width =
         (content_width - WORKSPACE_PAD * 2.0 - sidebar_width(sidebar_collapsed) - WORKSPACE_GAP)
             .max(0.0);
@@ -775,8 +778,8 @@ fn large_button(
 #[cfg(test)]
 mod tests {
     use super::{
-        CHROME_ICONS, RibbonLook, chrome_layout, inspector_button_look, is_bundled, ribbon_height,
-        ribbon_metrics,
+        CHROME_ICONS, Edges, RibbonLook, chrome_layout, inspector_button_look, is_bundled, px,
+        ribbon_height, ribbon_metrics,
     };
     use crate::app::Screen;
 
@@ -836,24 +839,24 @@ mod tests {
     #[test]
     fn ribbon_uses_icons_below_1280() {
         assert!(
-            chrome_layout(1279.0, 820.0, 0.0, false)
+            chrome_layout(1279.0, 820.0, Edges::default(), false)
                 .ribbon_metrics
                 .compact
         );
         assert!(
-            !chrome_layout(1280.0, 820.0, 0.0, false)
+            !chrome_layout(1280.0, 820.0, Edges::default(), false)
                 .ribbon_metrics
                 .compact
         );
         // Collapsed sidebar: 1080 - 28 - 78 - 14 = 960 (compact), while
         // 1280 - 28 - 78 - 14 = 1160 leaves room for labels.
         assert!(
-            chrome_layout(1080.0, 700.0, 0.0, true)
+            chrome_layout(1080.0, 700.0, Edges::default(), true)
                 .ribbon_metrics
                 .compact
         );
         assert!(
-            !chrome_layout(1280.0, 820.0, 0.0, true)
+            !chrome_layout(1280.0, 820.0, Edges::default(), true)
                 .ribbon_metrics
                 .compact
         );
@@ -863,7 +866,7 @@ mod tests {
     fn chrome_layout_uses_the_content_extent() {
         // The requested 1080x700 is the content size; X11 reports the outer
         // 1120x740 window, and the 20 px CSD inset on each edge is removed.
-        let minimum = chrome_layout(1120.0, 740.0, 20.0, false);
+        let minimum = chrome_layout(1120.0, 740.0, Edges::all(px(20.0)), false);
         assert_eq!(minimum.content_width, 1080.0);
         assert_eq!(minimum.content_height, 700.0);
         assert_eq!(minimum.ribbon_height, 62.0);
@@ -872,19 +875,47 @@ mod tests {
         assert_eq!(minimum.ribbon_metrics, expected_metrics);
 
         // 1280x820 content keeps the regular ribbon.
-        let regular = chrome_layout(1320.0, 860.0, 20.0, false);
+        let regular = chrome_layout(1320.0, 860.0, Edges::all(px(20.0)), false);
         assert_eq!(regular.content_width, 1280.0);
         assert_eq!(regular.content_height, 820.0);
         assert_eq!(regular.ribbon_height, 68.0);
 
-        let large = chrome_layout(1480.0, 940.0, 20.0, false);
+        let large = chrome_layout(1480.0, 940.0, Edges::all(px(20.0)), false);
         assert_eq!(large.content_width, 1440.0);
         assert_eq!(large.ribbon_height, 68.0);
     }
 
     #[test]
     fn chrome_layout_thresholds_sit_on_the_content_edge() {
-        assert_eq!(chrome_layout(1200.0, 760.0, 0.0, false).ribbon_height, 62.0);
-        assert_eq!(chrome_layout(1200.0, 761.0, 0.0, false).ribbon_height, 68.0);
+        assert_eq!(
+            chrome_layout(1200.0, 760.0, Edges::default(), false).ribbon_height,
+            62.0
+        );
+        assert_eq!(
+            chrome_layout(1200.0, 761.0, Edges::default(), false).ribbon_height,
+            68.0
+        );
+    }
+
+    #[test]
+    fn chrome_layout_keeps_tiled_edges_at_full_extent() {
+        // Maximized: the compositor zeroes every edge padding, so the
+        // content extent is the full outer size even though the platform
+        // still reports a scalar client inset for sizing.
+        let maximized = chrome_layout(1920.0, 1080.0, Edges::default(), false);
+        assert_eq!(maximized.content_width, 1920.0);
+        assert_eq!(maximized.content_height, 1080.0);
+
+        // Tiled against the left and top screen edges: those edges lose
+        // their inset, the remaining edges keep the 20 px CSD inset.
+        let tiled = Edges {
+            top: px(0.0),
+            bottom: px(20.0),
+            left: px(0.0),
+            right: px(20.0),
+        };
+        let layout = chrome_layout(960.0, 1060.0, tiled, false);
+        assert_eq!(layout.content_width, 940.0);
+        assert_eq!(layout.content_height, 1040.0);
     }
 }
