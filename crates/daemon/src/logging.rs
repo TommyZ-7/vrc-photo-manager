@@ -60,10 +60,17 @@ pub fn init(process: &str, default_filter: &str) -> Option<PathBuf> {
 
 /// Resolves the effective filter: a parsable `RUST_LOG` value wins, anything
 /// else (unset, empty, unparsable) falls back to `default_filter`.
+///
+/// `ureq` is always forced off. At trace level it logs the full request URI,
+/// which contains the webhook token; a user-supplied `RUST_LOG=trace` must not
+/// be able to leak it into the log file.
 fn filter_from(env_value: Option<&str>, default_filter: &str) -> EnvFilter {
-    env_value
+    let filter = env_value
         .and_then(|value| EnvFilter::try_new(value).ok())
-        .unwrap_or_else(|| EnvFilter::new(default_filter))
+        .unwrap_or_else(|| EnvFilter::new(default_filter));
+    // The directive is added after the environment one, so it wins when both
+    // name the same target (the last equally specific directive is kept).
+    filter.add_directive("ureq=off".parse().expect("static ureq directive"))
 }
 
 /// Opens the process log file in the default log directory.
@@ -98,13 +105,56 @@ mod tests {
 
     #[test]
     fn rust_log_wins_when_parsable_and_default_applies_otherwise() {
-        assert_eq!(filter_from(Some("debug"), "info").to_string(), "debug");
-        assert_eq!(
-            filter_from(Some("vrc_photonn=trace"), "info").to_string(),
-            "vrc_photonn=trace"
+        let debug = filter_from(Some("debug"), "info").to_string();
+        assert!(
+            debug.contains("debug") && debug.contains("ureq=off"),
+            "{debug}"
         );
-        assert_eq!(filter_from(Some("!!!"), "info").to_string(), "info");
-        assert_eq!(filter_from(None, "info").to_string(), "info");
+        let trace = filter_from(Some("vrc_photonn=trace"), "info").to_string();
+        assert!(
+            trace.contains("vrc_photonn=trace") && trace.contains("ureq=off"),
+            "{trace}"
+        );
+        // An explicit ureq directive in RUST_LOG is overridden.
+        let ureq_trace = filter_from(Some("ureq=trace"), "info").to_string();
+        assert!(ureq_trace.contains("ureq=off"), "{ureq_trace}");
+        assert!(!ureq_trace.contains("ureq=trace"), "{ureq_trace}");
+
+        let fallback = filter_from(Some("!!!"), "info").to_string();
+        assert!(
+            fallback.contains("info") && fallback.contains("ureq=off"),
+            "{fallback}"
+        );
+        let default = filter_from(None, "info").to_string();
+        assert!(
+            default.contains("info") && default.contains("ureq=off"),
+            "{default}"
+        );
+    }
+
+    #[test]
+    fn ureq_trace_records_stay_disabled_even_with_rust_log_trace() {
+        let filter = filter_from(Some("trace"), "info");
+        let buf = SharedBuf::default();
+        let subscriber = Registry::default()
+            .with(filter)
+            .with(fmt::layer().with_ansi(false).with_writer(buf.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::trace!(
+                target: "ureq",
+                "https://discord.com/api/webhooks/1/SECRET"
+            );
+            tracing::trace!(target: "vrc_photon_daemon", "visible-probe");
+        });
+        let contents = buf.contents();
+        assert!(
+            !contents.contains("SECRET"),
+            "ureq's full-URI trace record reached the log: {contents}"
+        );
+        assert!(
+            contents.contains("visible-probe"),
+            "the trace filter was disabled entirely: {contents}"
+        );
     }
 
     #[test]

@@ -31,11 +31,24 @@ pub struct SendImage {
 }
 
 /// One webhook POST. `payload_json` is the Discord message body.
-#[derive(Debug, Clone)]
+///
+/// The `Debug` implementation redacts `url` because it carries the webhook
+/// token and `SendRequest` may be logged while debugging.
+#[derive(Clone)]
 pub struct SendRequest {
     pub url: String,
     pub payload_json: String,
     pub image: Option<SendImage>,
+}
+
+impl std::fmt::Debug for SendRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SendRequest")
+            .field("url", &"<redacted>")
+            .field("payload_json", &self.payload_json)
+            .field("image", &self.image)
+            .finish()
+    }
 }
 
 /// The result of one webhook POST.
@@ -153,30 +166,34 @@ impl SendTransport for UreqTransport {
 
 /// Builds the POST target with Discord's `wait=true` query parameter.
 ///
-/// Only the `#[cfg(test)]` loopback path reaches the string fallback; the
-/// production path always parses and validates the URL first and lets the
-/// URL parser decide how to append the query.
+/// Any `wait` parameter already present is replaced so `wait=false` cannot win
+/// over the `wait=true` the response reader needs.
 fn webhook_url(request: &SendRequest, allow_loopback: bool) -> Option<String> {
-    if allow_loopback {
-        return Some(append_wait_parameter(&request.url));
-    }
-    let mut url = validate_webhook_url(&request.url).ok()?;
-    url.query_pairs_mut().append_pair("wait", "true");
+    let mut url = if allow_loopback {
+        url::Url::parse(&request.url).ok()?
+    } else {
+        validate_webhook_url(&request.url).ok()?
+    };
+    set_wait_parameter(&mut url);
     Some(url.into())
 }
 
-/// Appends `wait=true` to an already-built loopback URL, keeping any existing
-/// query or fragment intact.
-fn append_wait_parameter(raw: &str) -> String {
-    let mut url = raw.to_string();
-    let fragment = url.find('#').map(|index| url.split_off(index));
-    let separator = if url.contains('?') { '&' } else { '?' };
-    url.push(separator);
-    url.push_str("wait=true");
-    if let Some(fragment) = fragment {
-        url.push_str(&fragment);
+/// Replaces every existing `wait` pair with a single `wait=true`, keeping the
+/// other query parameters and the fragment intact.
+fn set_wait_parameter(url: &mut url::Url) {
+    let other_pairs: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| key != "wait")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.set_query(None);
+    {
+        let mut query = url.query_pairs_mut();
+        for (key, value) in other_pairs {
+            query.append_pair(&key, &value);
+        }
+        query.append_pair("wait", "true");
     }
-    url
 }
 
 /// The production agent never follows redirects and refuses plain HTTP.
@@ -483,6 +500,41 @@ mod tests {
             }
             other => panic!("expected Retryable, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn debug_redacts_the_webhook_token() {
+        let request = SendRequest {
+            url: "https://discord.com/api/webhooks/1/SECRET".into(),
+            payload_json: "{}".into(),
+            image: None,
+        };
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("SECRET"), "{debug}");
+        assert!(debug.contains("redacted"), "{debug}");
+    }
+
+    #[test]
+    fn wait_parameter_is_replaced_instead_of_duplicated() {
+        let request = SendRequest {
+            url: "https://discord.com/api/webhooks/1/token?wait=false&foo=1".into(),
+            payload_json: "{}".into(),
+            image: None,
+        };
+        let url = webhook_url(&request, false).unwrap();
+        assert!(!url.contains("wait=false"), "{url}");
+        assert_eq!(url.matches("wait=true").count(), 1, "{url}");
+        assert!(url.contains("foo=1"), "{url}");
+
+        let loopback = SendRequest {
+            url: "http://127.0.0.1:1/api/webhooks/1/token?wait=false#frag".into(),
+            payload_json: "{}".into(),
+            image: None,
+        };
+        let url = webhook_url(&loopback, true).unwrap();
+        assert!(!url.contains("wait=false"), "{url}");
+        assert_eq!(url.matches("wait=true").count(), 1, "{url}");
+        assert!(url.ends_with("#frag"), "{url}");
     }
 
     /// Serves one request, returning the URL and the raw request the server

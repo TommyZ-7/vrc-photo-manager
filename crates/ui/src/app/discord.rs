@@ -1,15 +1,19 @@
 //! App-side Discord integration state: webhook editing, destination label,
-//! integration toggles, profile selection, and send-history refresh.
+//! integration toggles, profile selection, automatic-send mode and consent,
+//! and send-history refresh.
 //!
 //! Rendering stays in `ui::discord`; these methods only touch App fields and
 //! the send outbox.
 
+use chrono::Utc;
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::*;
 use vrc_photon_core::discord::{WebhookUrlError, validate_webhook_url};
 use vrc_photon_core::model::{PhotoStatus, SendKind, SendOrigin, SendStatus};
-use vrc_photon_core::settings::{AppSettings, clear_discord_webhook, save_discord_webhook};
+use vrc_photon_core::settings::{
+    AppSettings, DiscordAutoMode, clear_discord_webhook, save_discord_webhook,
+};
 use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::{App, Screen};
@@ -24,18 +28,26 @@ const DEFAULT_DESTINATION: &str = "Discord";
 pub(crate) enum DiscordSendGuardError {
     Disabled,
     MissingWebhook,
+    InvalidWebhook,
 }
 
-/// Blocks a send until the feature is enabled and a webhook is stored.
+/// Blocks a send until the feature is enabled and a valid webhook is stored.
+///
+/// A stored URL is revalidated: the database may have been edited directly or
+/// the URL may predate a validation change, and sending to anything other than
+/// a Discord webhook must fail locally.
 pub(crate) fn discord_send_guard(
     settings: &AppSettings,
-    webhook_present: bool,
+    webhook: Option<&str>,
 ) -> Result<(), DiscordSendGuardError> {
     if !settings.discord_enabled {
         return Err(DiscordSendGuardError::Disabled);
     }
-    if !webhook_present {
+    let Some(webhook) = webhook else {
         return Err(DiscordSendGuardError::MissingWebhook);
+    };
+    if validate_webhook_url(webhook).is_err() {
+        return Err(DiscordSendGuardError::InvalidWebhook);
     }
     Ok(())
 }
@@ -51,7 +63,24 @@ pub(crate) fn manual_send_toast(result: Result<bool, DiscordSendGuardError>) -> 
         Ok(true) => tr!("photos.action.discord_queued"),
         Ok(false) => tr!("photos.action.discord_waiting"),
         Err(DiscordSendGuardError::Disabled) => tr!("photos.action.discord_disabled"),
-        Err(DiscordSendGuardError::MissingWebhook) => tr!("photos.action.discord_missing_webhook"),
+        Err(DiscordSendGuardError::MissingWebhook) => {
+            tr!("photos.action.discord_missing_webhook")
+        }
+        Err(DiscordSendGuardError::InvalidWebhook) => {
+            tr!("integrations.discord.webhook.invalid_url")
+        }
+    }
+}
+
+/// Toast text after releasing the waiting queue.
+///
+/// `0` means nothing was waiting, so the action is reported as a warning
+/// rather than a success with a count of zero.
+pub(crate) fn waiting_release_toast(count: usize) -> String {
+    if count == 0 {
+        tr!("integrations.discord.history.release_none")
+    } else {
+        tr_args!("integrations.discord.history.release_done", count = count)
     }
 }
 
@@ -78,12 +107,89 @@ pub(crate) fn webhook_error_key(error: WebhookUrlError) -> &'static str {
     }
 }
 
+/// Automatic sending needs an explicit opt-in once. The stored timestamp is
+/// the only signal, so upgrades never show the dialog again after consent.
+pub(crate) fn needs_discord_consent(settings: &AppSettings) -> bool {
+    settings.discord_consent_at.is_none()
+}
+
+/// Applies an automatic-send mode in place.
+///
+/// `was_off` is the mode observed before the click. The capture-time cutoff
+/// only moves when automatic sending leaves `Off`, so switching between
+/// `Immediate` and `Waiting` keeps the backlog boundary, and turning the mode
+/// off never clears it.
+pub(crate) fn apply_discord_auto_mode(
+    settings: &mut AppSettings,
+    mode: DiscordAutoMode,
+    now: i64,
+    was_off: bool,
+) {
+    settings.discord_auto_mode = mode;
+    if mode != DiscordAutoMode::Off && was_off {
+        settings.discord_auto_since = Some(now);
+    }
+}
+
+/// Restarts the automatic-send window at `now`.
+///
+/// Only automatic mode owns the cutoff: with the mode off there is nothing to
+/// resume, so the stored timestamp stays untouched.
+fn refresh_auto_since(settings: &mut AppSettings, now: i64) -> bool {
+    if settings.discord_auto_mode == DiscordAutoMode::Off {
+        return false;
+    }
+    settings.discord_auto_since = Some(now);
+    true
+}
+
+/// Applies the master switch resuming from `false` to `true`.
+///
+/// Photos captured while the feature was off must not be posted as a backlog,
+/// so the cutoff moves even when the automatic mode itself did not change.
+pub(crate) fn auto_since_for_feature_resume(
+    settings: &mut AppSettings,
+    was_enabled: bool,
+    enabled: bool,
+    now: i64,
+) -> bool {
+    if was_enabled || !enabled {
+        return false;
+    }
+    refresh_auto_since(settings, now)
+}
+
+/// Applies the first webhook arriving after the integration had none.
+///
+/// The worker only sends while a webhook exists, so storing one is a resume in
+/// the same way as enabling the feature.
+pub(crate) fn auto_since_for_webhook_resume(
+    settings: &mut AppSettings,
+    had_webhook: bool,
+    has_webhook: bool,
+    now: i64,
+) -> bool {
+    if had_webhook || !has_webhook {
+        return false;
+    }
+    refresh_auto_since(settings, now)
+}
+
 impl App {
     pub(crate) fn set_discord_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         if self.settings.discord_enabled == enabled {
             return;
         }
+        let was_enabled = self.settings.discord_enabled;
         self.settings.discord_enabled = enabled;
+        // Enabling again after a pause restarts the automatic window, so
+        // photos captured while the feature was off are not posted.
+        auto_since_for_feature_resume(
+            &mut self.settings,
+            was_enabled,
+            enabled,
+            Utc::now().timestamp(),
+        );
         if let Err(error) = self.settings.save(&self.db) {
             tracing::warn!(%error, "cannot save Discord integration setting");
         }
@@ -112,6 +218,7 @@ impl App {
         match validate_webhook_url(&raw) {
             Ok(parsed) => {
                 let url = parsed.as_str().to_string();
+                let had_webhook = self.discord_url.is_some();
                 if let Err(error) = save_discord_webhook(&self.db, &url) {
                     tracing::warn!(%error, "cannot save the Discord webhook URL");
                     self.toast_error(tr_args!("settings.language.save_failed", error = error), cx);
@@ -121,6 +228,17 @@ impl App {
                 self.discord_url = Some(url);
                 self.discord_url_editing = false;
                 self.discord_url_error = None;
+                // The first webhook resumes automatic sending; the cutoff must
+                // move so photos captured while it was missing stay behind.
+                if auto_since_for_webhook_resume(
+                    &mut self.settings,
+                    had_webhook,
+                    true,
+                    Utc::now().timestamp(),
+                ) && let Err(error) = self.settings.save(&self.db)
+                {
+                    tracing::warn!(%error, "cannot save the Discord automatic-send cutoff");
+                }
                 self.toast_success(tr!("integrations.discord.webhook.saved"), cx);
             }
             Err(error) => {
@@ -181,6 +299,86 @@ impl App {
         cx.notify();
     }
 
+    /// Switches the automatic-send mode.
+    ///
+    /// Turning it off also cancels queued waiting rows, because those are the
+    /// automatic sends the user no longer wants. The first switch away from
+    /// `Off` asks for consent and only applies the mode when the dialog is
+    /// accepted.
+    pub(crate) fn set_discord_auto_mode(
+        &mut self,
+        mode: DiscordAutoMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let was_off = self.settings.discord_auto_mode == DiscordAutoMode::Off;
+
+        if mode == DiscordAutoMode::Off {
+            self.settings.discord_auto_mode = DiscordAutoMode::Off;
+            if let Err(error) = self.settings.save(&self.db) {
+                tracing::warn!(%error, "cannot save the Discord automatic-send mode");
+            }
+            match self.db.cancel_waiting_auto_sends() {
+                Ok(0) => {}
+                Ok(count) => {
+                    tracing::info!(count, "cancelled waiting automatic Discord sends");
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "cannot cancel waiting automatic Discord sends");
+                }
+            }
+            self.reload_send_history(cx);
+            return;
+        }
+
+        if needs_discord_consent(&self.settings) {
+            let entity = cx.entity();
+            let panel_deep = self.palette.panel_deep;
+            window.open_alert_dialog(cx, move |alert, _, _| {
+                let entity = entity.clone();
+                alert
+                    .title(tr!("integrations.discord.auto.consent.title"))
+                    .bg(rgb(panel_deep))
+                    .description(tr!("integrations.discord.auto.consent.body"))
+                    .confirm()
+                    .ok_text(tr!("integrations.discord.auto.consent.ok"))
+                    .ok_variant(ButtonVariant::Primary)
+                    .cancel_text(tr!("common.cancel"))
+                    .on_ok(move |_, _, cx| {
+                        entity.update(cx, |this, cx| this.confirm_discord_auto_mode(mode, cx));
+                        true
+                    })
+            });
+            return;
+        }
+
+        self.save_discord_auto_mode(mode, was_off, cx);
+    }
+
+    /// Records consent and applies the mode chosen in the consent dialog.
+    pub(crate) fn confirm_discord_auto_mode(
+        &mut self,
+        mode: DiscordAutoMode,
+        cx: &mut Context<Self>,
+    ) {
+        let was_off = self.settings.discord_auto_mode == DiscordAutoMode::Off;
+        self.settings.discord_consent_at = Some(Utc::now().timestamp());
+        self.save_discord_auto_mode(mode, was_off, cx);
+    }
+
+    fn save_discord_auto_mode(
+        &mut self,
+        mode: DiscordAutoMode,
+        was_off: bool,
+        cx: &mut Context<Self>,
+    ) {
+        apply_discord_auto_mode(&mut self.settings, mode, Utc::now().timestamp(), was_off);
+        if let Err(error) = self.settings.save(&self.db) {
+            tracing::warn!(%error, "cannot save the Discord automatic-send mode");
+        }
+        cx.notify();
+    }
+
     /// Refreshes the history page and the waiting-queue badge. A queued test
     /// send reports its result once its row reaches a terminal state.
     pub(crate) fn reload_send_history(&mut self, cx: &mut Context<Self>) {
@@ -228,6 +426,11 @@ impl App {
     }
 
     pub(crate) fn send_test_message(&mut self, cx: &mut Context<Self>) {
+        if let Err(error) = discord_send_guard(&self.settings, self.discord_url.as_deref()) {
+            self.toast_warning(manual_send_toast(Err(error)), cx);
+            cx.notify();
+            return;
+        }
         match self.db.enqueue_test_send() {
             Ok(id) => {
                 self.pending_test_send = Some(id);
@@ -243,13 +446,32 @@ impl App {
         cx.notify();
     }
 
+    /// Promotes every waiting send (manual or automatic) so the daemon picks
+    /// them up. An empty queue is reported as a warning: the button is
+    /// disabled at zero, so only a stale count reaches this path.
+    pub(crate) fn release_waiting_sends(&mut self, cx: &mut Context<Self>) {
+        match self.db.release_waiting_sends() {
+            Ok(0) => self.toast_warning(waiting_release_toast(0), cx),
+            Ok(count) => {
+                self.reload_send_history(cx);
+                self.send_wake_sends(cx);
+                self.toast_success(waiting_release_toast(count), cx);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "cannot release waiting Discord sends");
+                self.toast_error(tr!("integrations.discord.history.release_error"), cx);
+            }
+        }
+        cx.notify();
+    }
+
     /// Queues one photo for a manual Discord send.
     ///
     /// Returns `true` when the integration guard rejected the send and the app
     /// navigated to the Integrations screen. A modal viewer uses that to close
     /// itself and reveal the screen; every other outcome returns `false`.
     pub(crate) fn enqueue_photo_send(&mut self, photo_id: i64, cx: &mut Context<Self>) -> bool {
-        if let Err(error) = discord_send_guard(&self.settings, self.discord_url.is_some()) {
+        if let Err(error) = discord_send_guard(&self.settings, self.discord_url.as_deref()) {
             self.toast_warning(manual_send_toast(Err(error)), cx);
             self.switch_screen(Screen::Integrations, cx);
             return true;
@@ -408,12 +630,143 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{
-        DiscordSendGuardError, discord_send_guard, manual_send_toast, normalized_destination,
-        webhook_error_key,
+        DiscordSendGuardError, apply_discord_auto_mode, auto_since_for_feature_resume,
+        auto_since_for_webhook_resume, discord_send_guard, manual_send_toast,
+        needs_discord_consent, normalized_destination, waiting_release_toast, webhook_error_key,
     };
     use vrc_photon_core::discord::{WebhookUrlError, mask_webhook_url, validate_webhook_url};
-    use vrc_photon_core::settings::AppSettings;
-    use vrc_photon_i18n::tr;
+    use vrc_photon_core::settings::{AppSettings, DiscordAutoMode};
+    use vrc_photon_i18n::{tr, tr_args};
+
+    #[test]
+    fn waiting_release_result_messages() {
+        assert_eq!(
+            waiting_release_toast(0),
+            tr!("integrations.discord.history.release_none")
+        );
+        assert_eq!(
+            waiting_release_toast(3),
+            tr_args!("integrations.discord.history.release_done", count = 3)
+        );
+    }
+
+    #[test]
+    fn enabling_auto_requires_consent_only_the_first_time() {
+        let mut settings = AppSettings::default();
+        assert!(needs_discord_consent(&settings));
+        settings.discord_consent_at = Some(1);
+        assert!(!needs_discord_consent(&settings));
+    }
+
+    #[test]
+    fn enabling_auto_sets_auto_since_only_when_leaving_off() {
+        let mut settings = AppSettings::default();
+        let now = 1234;
+        apply_discord_auto_mode(&mut settings, DiscordAutoMode::Immediate, now, true);
+        assert_eq!(settings.discord_auto_since, Some(now));
+        assert_eq!(settings.discord_auto_mode, DiscordAutoMode::Immediate);
+        apply_discord_auto_mode(&mut settings, DiscordAutoMode::Waiting, 5678, false);
+        assert_eq!(settings.discord_auto_since, Some(now)); // 即時→待機ではリセットしない
+    }
+
+    #[test]
+    fn disabling_auto_keeps_the_capture_cutoff() {
+        let mut settings = AppSettings {
+            discord_auto_since: Some(42),
+            ..AppSettings::default()
+        };
+        apply_discord_auto_mode(&mut settings, DiscordAutoMode::Off, 99, false);
+        assert_eq!(settings.discord_auto_mode, DiscordAutoMode::Off);
+        assert_eq!(settings.discord_auto_since, Some(42));
+    }
+
+    #[test]
+    fn enabling_the_feature_updates_the_cutoff_only_when_resuming() {
+        let mut settings = AppSettings {
+            discord_auto_mode: DiscordAutoMode::Immediate,
+            discord_auto_since: Some(42),
+            ..AppSettings::default()
+        };
+        // すでに有効なら何もしない。
+        assert!(!auto_since_for_feature_resume(
+            &mut settings,
+            true,
+            true,
+            99
+        ));
+        assert_eq!(settings.discord_auto_since, Some(42));
+        // 無効化してもカットオフは消さない。
+        assert!(!auto_since_for_feature_resume(
+            &mut settings,
+            true,
+            false,
+            99
+        ));
+        assert_eq!(settings.discord_auto_since, Some(42));
+        // false -> true で再開する。
+        assert!(auto_since_for_feature_resume(
+            &mut settings,
+            false,
+            true,
+            99
+        ));
+        assert_eq!(settings.discord_auto_since, Some(99));
+    }
+
+    #[test]
+    fn saving_the_first_webhook_updates_the_cutoff_only_when_resuming() {
+        let mut settings = AppSettings {
+            discord_auto_mode: DiscordAutoMode::Waiting,
+            discord_auto_since: Some(42),
+            ..AppSettings::default()
+        };
+        // 変更（すでにある）では動かさない。
+        assert!(!auto_since_for_webhook_resume(
+            &mut settings,
+            true,
+            true,
+            99
+        ));
+        assert_eq!(settings.discord_auto_since, Some(42));
+        // 削除では動かさない。
+        assert!(!auto_since_for_webhook_resume(
+            &mut settings,
+            true,
+            false,
+            99
+        ));
+        assert_eq!(settings.discord_auto_since, Some(42));
+        // 未設定 -> 設定で再開する。
+        assert!(auto_since_for_webhook_resume(
+            &mut settings,
+            false,
+            true,
+            99
+        ));
+        assert_eq!(settings.discord_auto_since, Some(99));
+    }
+
+    #[test]
+    fn resume_does_not_touch_the_cutoff_when_auto_mode_is_off() {
+        let mut settings = AppSettings {
+            discord_auto_mode: DiscordAutoMode::Off,
+            discord_auto_since: Some(42),
+            ..AppSettings::default()
+        };
+        assert!(!auto_since_for_feature_resume(
+            &mut settings,
+            false,
+            true,
+            99
+        ));
+        assert!(!auto_since_for_webhook_resume(
+            &mut settings,
+            false,
+            true,
+            99
+        ));
+        assert_eq!(settings.discord_auto_since, Some(42));
+    }
 
     #[test]
     fn manual_send_reports_queued_and_duplicate_states() {
@@ -448,18 +801,31 @@ mod tests {
     }
 
     #[test]
-    fn discord_send_guard_requires_enabled_and_webhook() {
+    fn discord_send_guard_requires_enabled_and_a_valid_webhook() {
+        let webhook = "https://discord.com/api/webhooks/1/t";
         let mut settings = AppSettings::default();
         assert_eq!(
-            discord_send_guard(&settings, false),
+            discord_send_guard(&settings, None),
             Err(DiscordSendGuardError::Disabled)
         );
         settings.discord_enabled = true;
         assert_eq!(
-            discord_send_guard(&settings, false),
+            discord_send_guard(&settings, None),
             Err(DiscordSendGuardError::MissingWebhook)
         );
-        assert_eq!(discord_send_guard(&settings, true), Ok(()));
+        assert_eq!(
+            discord_send_guard(&settings, Some("http://discord.com/api/webhooks/1/t")),
+            Err(DiscordSendGuardError::InvalidWebhook)
+        );
+        assert_eq!(discord_send_guard(&settings, Some(webhook)), Ok(()));
+    }
+
+    #[test]
+    fn an_invalid_stored_webhook_maps_to_the_inline_error_toast() {
+        assert_eq!(
+            manual_send_toast(Err(DiscordSendGuardError::InvalidWebhook)),
+            tr!("integrations.discord.webhook.invalid_url")
+        );
     }
 
     #[test]
