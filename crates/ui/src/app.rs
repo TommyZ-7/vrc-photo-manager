@@ -20,6 +20,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use gpui_kit::component::WindowExt;
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::notification::NotificationType;
 use gpui_kit::component::slider::{SliderEvent, SliderState};
@@ -59,7 +60,8 @@ use crate::ui::actions::{
 use crate::ui::chrome::{ChromeLayout, chrome_layout};
 use crate::ui::gallery::GalleryView;
 use crate::ui::notifications::{ToastSpec, toast_flush_needed};
-use crate::ui::palette::resolve;
+use crate::ui::palette::{accent_colors, main_colors, resolve};
+use crate::ui::settings::ThemeAxis;
 use crate::ui::theme::{
     MIN_CARD_WIDTH, Palette, WORKSPACE_GAP, WORKSPACE_PAD, content_insets, photo_row_height,
 };
@@ -333,6 +335,31 @@ pub struct App {
     pub(crate) notification_return_focus: Option<FocusHandle>,
     pub(crate) notification_close_focus: FocusHandle,
     pub(crate) notification_modal_focus: FocusHandle,
+    /// Titlebar controls, in tab order: ribbon collapse, then the bell.
+    pub(crate) ribbon_collapse_focus: FocusHandle,
+    pub(crate) notification_bell_focus: FocusHandle,
+    /// Ribbon command focus handles, in visual (tab) order.
+    pub(crate) ribbon_import_copy_focus: FocusHandle,
+    pub(crate) ribbon_import_move_focus: FocusHandle,
+    pub(crate) ribbon_reload_focus: FocusHandle,
+    pub(crate) card_size_focus: [FocusHandle; 4],
+    pub(crate) ribbon_inspector_focus: FocusHandle,
+    pub(crate) ribbon_select_all_focus: FocusHandle,
+    pub(crate) ribbon_clear_selection_focus: FocusHandle,
+    pub(crate) ribbon_trash_focus: FocusHandle,
+    pub(crate) ribbon_manual_compress_focus: FocusHandle,
+    pub(crate) ribbon_compress_folder_focus: FocusHandle,
+    pub(crate) ribbon_compress_profile_focus: FocusHandle,
+    pub(crate) ribbon_compress_clipboard_focus: FocusHandle,
+    pub(crate) ribbon_release_waiting_focus: FocusHandle,
+    /// Theme swatch focus handles, one per palette color, per axis.
+    pub(crate) theme_main_focus: Vec<FocusHandle>,
+    pub(crate) theme_accent_focus: Vec<FocusHandle>,
+    /// Swatch that currently holds keyboard focus, if any. Drives the
+    /// focused color name shown in the theme axis heading, since GPUI
+    /// tooltips only appear on hover.
+    pub(crate) theme_focused: Option<(ThemeAxis, usize)>,
+    pub(crate) _theme_focus_subscriptions: Vec<Subscription>,
     pub(crate) failure_baseline: Option<(i64, usize)>,
     pub(crate) demo: bool,
     pub(crate) demo_assets: Option<DemoAssets>,
@@ -348,6 +375,14 @@ pub(crate) fn any_overlay_open(
     notification_modal_open: bool,
 ) -> bool {
     quick_look_open || manual_compression_open || import_dialog_open || notification_modal_open
+}
+
+/// Whether a global shortcut (sidebar / inspector / search / quick look)
+/// must stay inert. Alert dialogs from `open_alert_dialog` live in the
+/// component dialog layer, outside `any_overlay_open`, so action handlers
+/// combine both signals through this predicate.
+pub(crate) fn global_shortcut_blocked(overlay_open: bool, dialog_open: bool) -> bool {
+    overlay_open || dialog_open
 }
 
 /// The quick-look overlay paints an opaque full-window surface, so the shell
@@ -407,6 +442,16 @@ impl App {
             self.import_dialog.is_some(),
             self.notification_modal_open,
         )
+    }
+
+    /// Whether global shortcuts must stay inert right now: a full-window
+    /// overlay is open, or an alert dialog owns the component dialog layer.
+    pub(crate) fn global_shortcuts_blocked(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        global_shortcut_blocked(self.overlay_open(), window.has_active_dialog(cx))
     }
 
     pub(crate) fn note_library_error(&mut self, error: &'static str, cx: &mut Context<Self>) {
@@ -671,6 +716,50 @@ impl App {
         let quick_look_note_cancel_focus = cx.focus_handle();
         let notification_close_focus = cx.focus_handle();
         let notification_modal_focus = cx.focus_handle();
+        let ribbon_collapse_focus = cx.focus_handle();
+        let notification_bell_focus = cx.focus_handle();
+        let ribbon_import_copy_focus = cx.focus_handle();
+        let ribbon_import_move_focus = cx.focus_handle();
+        let ribbon_reload_focus = cx.focus_handle();
+        let card_size_focus = [
+            cx.focus_handle(),
+            cx.focus_handle(),
+            cx.focus_handle(),
+            cx.focus_handle(),
+        ];
+        let ribbon_inspector_focus = cx.focus_handle();
+        let ribbon_select_all_focus = cx.focus_handle();
+        let ribbon_clear_selection_focus = cx.focus_handle();
+        let ribbon_trash_focus = cx.focus_handle();
+        let ribbon_manual_compress_focus = cx.focus_handle();
+        let ribbon_compress_folder_focus = cx.focus_handle();
+        let ribbon_compress_profile_focus = cx.focus_handle();
+        let ribbon_compress_clipboard_focus = cx.focus_handle();
+        let ribbon_release_waiting_focus = cx.focus_handle();
+        let theme_main_focus: Vec<FocusHandle> =
+            main_colors().iter().map(|_| cx.focus_handle()).collect();
+        let theme_accent_focus: Vec<FocusHandle> =
+            accent_colors().iter().map(|_| cx.focus_handle()).collect();
+        // Track which theme swatch holds focus so its color name can be
+        // shown in the axis heading; subscriptions live as long as the app.
+        let mut theme_focus_subscriptions = Vec::new();
+        for (axis, handles) in [
+            (ThemeAxis::Main, &theme_main_focus),
+            (ThemeAxis::Accent, &theme_accent_focus),
+        ] {
+            for (index, handle) in handles.iter().enumerate() {
+                theme_focus_subscriptions.push(cx.on_focus(handle, window, move |this, _, cx| {
+                    this.theme_focused = Some((axis, index));
+                    cx.notify();
+                }));
+                theme_focus_subscriptions.push(cx.on_blur(handle, window, move |this, _, cx| {
+                    if this.theme_focused == Some((axis, index)) {
+                        this.theme_focused = None;
+                        cx.notify();
+                    }
+                }));
+            }
+        }
         let empty_index = Arc::new(PhotoIndex::new(Vec::new()));
         let library_bounds = Rc::new(RefCell::new(HashMap::new()));
         let search_bounds = Rc::new(RefCell::new(HashMap::new()));
@@ -926,6 +1015,25 @@ impl App {
             notification_return_focus: None,
             notification_close_focus,
             notification_modal_focus,
+            ribbon_collapse_focus,
+            notification_bell_focus,
+            ribbon_import_copy_focus,
+            ribbon_import_move_focus,
+            ribbon_reload_focus,
+            card_size_focus,
+            ribbon_inspector_focus,
+            ribbon_select_all_focus,
+            ribbon_clear_selection_focus,
+            ribbon_trash_focus,
+            ribbon_manual_compress_focus,
+            ribbon_compress_folder_focus,
+            ribbon_compress_profile_focus,
+            ribbon_compress_clipboard_focus,
+            ribbon_release_waiting_focus,
+            theme_main_focus,
+            theme_accent_focus,
+            theme_focused: None,
+            _theme_focus_subscriptions: theme_focus_subscriptions,
             deletion_requests: Vec::new(),
             deletion_counts: DeletionCounts::default(),
             deletion_baseline: None,
@@ -1011,16 +1119,28 @@ impl Render for App {
             .size_full()
             .bg(rgba(self.palette.glass))
             .font_family("Noto Sans JP")
-            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
-            .on_action(cx.listener(|this, _: &ToggleInspector, _, cx| this.toggle_inspector(cx)))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| {
+                if !this.global_shortcuts_blocked(window, cx) {
+                    this.toggle_sidebar(cx)
+                }
+            }))
+            .on_action(cx.listener(|this, _: &ToggleInspector, window, cx| {
+                if !this.global_shortcuts_blocked(window, cx) {
+                    this.toggle_inspector(cx)
+                }
+            }))
             .on_action(cx.listener(|this, _: &CloseNotifications, window, cx| {
                 this.close_notification_modal(window, cx)
             }))
-            .on_action(
-                cx.listener(|this, _: &FocusSearch, window, cx| this.focus_search(window, cx)),
-            )
+            .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
+                if !this.global_shortcuts_blocked(window, cx) {
+                    this.focus_search(window, cx)
+                }
+            }))
             .on_action(cx.listener(|this, _: &OpenQuickLook, window, cx| {
-                this.open_quick_look(window, cx, ViewerOpenSource::Auto)
+                if !this.global_shortcuts_blocked(window, cx) {
+                    this.open_quick_look(window, cx, ViewerOpenSource::Auto)
+                }
             }))
             .on_action(cx.listener(|this, _: &CloseQuickLook, window, cx| {
                 this.handle_viewer_escape(window, cx)
@@ -1115,8 +1235,8 @@ impl Render for App {
 #[cfg(test)]
 mod tests {
     use super::{
-        Screen, any_overlay_open, effective_motion_fps, retain_recent_bounds,
-        should_notify_library_error, should_render_shell,
+        Screen, any_overlay_open, effective_motion_fps, global_shortcut_blocked,
+        retain_recent_bounds, should_notify_library_error, should_render_shell,
     };
     use crate::ui::notifications::{FailureNotice, failure_transition};
     use gpui_kit::{Bounds, point, px, size};
@@ -1124,6 +1244,14 @@ mod tests {
 
     fn refresh_rate(hz: f32) -> Option<Duration> {
         Some(Duration::from_secs_f32(1.0 / hz))
+    }
+
+    #[test]
+    fn global_shortcut_blocked_only_by_overlay_or_dialog() {
+        assert!(!global_shortcut_blocked(false, false));
+        assert!(global_shortcut_blocked(true, false));
+        assert!(global_shortcut_blocked(false, true));
+        assert!(global_shortcut_blocked(true, true));
     }
 
     #[test]
