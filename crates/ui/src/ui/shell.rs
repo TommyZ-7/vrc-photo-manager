@@ -742,18 +742,18 @@ impl App {
             Screen::Integrations => self.integrations_screen(window, cx).into_any_element(),
             Screen::Settings => self.settings_screen(cx).into_any_element(),
         };
-        let enter = Animation::new(if self.screen_epoch == 0 {
-            Duration::ZERO
-        } else {
-            MOTION_BASE
-        })
-        .with_easing(ease_motion)
-        .with_max_fps(self.motion_fps(window, cx));
+        let motion = self.screen_motion;
+        let enter = Animation::new(motion.driver_duration())
+            .with_easing(ease_motion)
+            .with_max_fps(self.motion_fps(window, cx));
         let direction = self.screen_direction;
         let screen = v_flex().flex_1().min_h_0().child(screen).with_animation(
-            ("screen-enter", self.screen_epoch),
+            ("screen-enter", motion.epoch()),
             enter,
-            move |el, t| el.relative().left(px(direction * SCREEN_SLIDE * (1.0 - t))),
+            move |el, _| {
+                el.relative()
+                    .left(px(screen_enter_offset(direction, motion.value())))
+            },
         );
         v_flex().flex_1().min_h_0().child(screen).into_any_element()
     }
@@ -1088,6 +1088,11 @@ pub(crate) fn screen_direction(from: Screen, to: Screen) -> f32 {
     }
 }
 
+/// Horizontal offset of the entering screen for a `0.0..=1.0` motion progress.
+pub(crate) fn screen_enter_offset(direction: f32, progress: f32) -> f32 {
+    direction * SCREEN_SLIDE * (1.0 - progress.clamp(0.0, 1.0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1095,13 +1100,14 @@ mod tests {
         import_attention, import_bar_ratio, import_card_status, import_running_progress, nav_index,
         nav_item_insets, nav_item_top, nav_tooltip_origin, rail_toggle_origin, running_job_count,
         scan_attention, scan_bar_ratio, scan_card_status, scan_progress_label, scan_progress_ratio,
-        screen_direction, sidebar_retry_available,
+        screen_direction, screen_enter_offset, sidebar_retry_available,
     };
     use crate::app::Screen;
     use crate::app::import::{
         ImportDialogOrigin, ImportDialogPhase, ImportDialogState, ImportReportView,
     };
     use crate::app::lifecycle::ScanProgressView;
+    use crate::ui::theme::SCREEN_SLIDE;
     use std::cell::Cell;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -1156,6 +1162,17 @@ mod tests {
         assert_eq!(screen_direction(Screen::Photos, Screen::Settings), 1.0);
         assert_eq!(screen_direction(Screen::Settings, Screen::Photos), -1.0);
         assert_eq!(screen_direction(Screen::Search, Screen::Search), 1.0);
+    }
+
+    #[test]
+    fn screen_enter_offset_follows_the_motion_progress() {
+        assert_eq!(screen_enter_offset(1.0, 0.0), SCREEN_SLIDE);
+        assert_eq!(screen_enter_offset(-1.0, 0.0), -SCREEN_SLIDE);
+        assert_eq!(screen_enter_offset(1.0, 0.5), SCREEN_SLIDE / 2.0);
+        assert_eq!(screen_enter_offset(-1.0, 0.5), -SCREEN_SLIDE / 2.0);
+        assert_eq!(screen_enter_offset(1.0, 1.0), 0.0);
+        assert_eq!(screen_enter_offset(-1.0, 1.0), 0.0);
+        assert_eq!(screen_enter_offset(1.0, 2.0), 0.0);
     }
     #[test]
     fn scan_progress_label_uses_root_and_counts() {

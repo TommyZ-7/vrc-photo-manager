@@ -807,7 +807,8 @@ impl App {
             self.nav_previous = self.screen;
             self.nav_epoch = self.nav_epoch.wrapping_add(1);
             self.screen_direction = screen_direction(self.screen, screen);
-            self.screen_epoch = self.screen_epoch.wrapping_add(1);
+            self.screen_motion = crate::state::motion::ToggleMotion::settled(0.0);
+            self.screen_motion.animate_to(1.0, MOTION_BASE);
         }
         // The two photo grids have separate snapshots, so a selection made in
         // one tab cannot stay meaningful in the other. Keep it when visiting

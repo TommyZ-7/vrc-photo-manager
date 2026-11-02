@@ -108,7 +108,8 @@ pub struct App {
     pub(crate) sidebar_motion: ToggleMotion,
     pub(crate) nav_previous: Screen,
     pub(crate) nav_epoch: u64,
-    pub(crate) screen_epoch: u64,
+    /// Screen-enter progress: 0 = entering, 1 = settled.
+    pub(crate) screen_motion: ToggleMotion,
     pub(crate) screen_direction: f32,
     /// Scroll position of the settings section column, shared with its
     /// scrollbar.
@@ -665,7 +666,7 @@ impl App {
             }),
             nav_previous: Screen::Photos,
             nav_epoch: 0,
-            screen_epoch: 0,
+            screen_motion: ToggleMotion::settled(1.0),
             screen_direction: 1.0,
             settings_scroll: ScrollHandle::new(),
             integrations_scroll: ScrollHandle::new(),
