@@ -36,3 +36,4 @@
 | [0014](0014-manual-compression-policy.md) | 手動圧縮は実行時ポリシー、自動圧縮は設定ポリシー | Accepted |
 | [0015](0015-deferred-deletion-queue.md) | 削除は依存ジョブのドレイン後に実行する | Accepted |
 | [0016](0016-system-package-update.md) | pacman / deb も polkit 経由でアプリ内更新する | Accepted |
+| [0017](0017-discord-webhook.md) | Discord 連携は単一 Webhook と耐久 outbox で行う | Accepted |
