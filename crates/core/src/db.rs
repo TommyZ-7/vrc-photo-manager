@@ -1878,7 +1878,9 @@ impl Db {
 
     /// Records one durable deletion request per photo. Manual requests hide the
     /// photo immediately; auto-replace requests leave `replaced` visible until
-    /// the executor removes only the original file.
+    /// the executor removes only the original file. Queued and failed sends are
+    /// cancelled in the same transaction: they carry no data-loss risk, while a
+    /// `processing` upload is left to finish.
     pub fn request_deletion(
         &self,
         photo_ids: &[i64],
@@ -1958,6 +1960,11 @@ impl Db {
                     params![now, photo_id],
                 )?;
             }
+            tx.execute(
+                "UPDATE send_outbox SET status = 'cancelled', finished_at = ?1 \
+                 WHERE photo_id = ?2 AND status IN ('waiting', 'pending', 'failed')",
+                params![now, photo_id],
+            )?;
             request_ids.push(request_id);
         }
         tx.commit()?;
@@ -2015,12 +2022,15 @@ impl Db {
         })
     }
 
-    /// Counts compression jobs per status for the warning modal. Unknown
-    /// statuses count as affected because `QueueStatus::parse` reports them as
-    /// pending in the body. The `send` bucket stays empty until #142 adds the
-    /// outbox.
+    /// Counts compression and send work per status for the warning modal.
+    /// Unknown compression statuses count as pending in the body. Unknown send
+    /// statuses also count as pending: a status written by a newer version is
+    /// never terminal. `affected_photos` is the union of distinct selected
+    /// photos with non-terminal compression jobs and photos with a send that
+    /// has not ended as `sent`/`cancelled`, so a photo with both counts once.
     pub fn deletion_job_summary(&self, photo_ids: &[i64]) -> Result<DeletionJobSummary> {
         let mut compression = JobStatusCounts::default();
+        let mut send = JobStatusCounts::default();
         let mut affected_photos = 0;
         for chunk in photo_ids.chunks(500) {
             if chunk.is_empty() {
@@ -2045,29 +2055,61 @@ impl Db {
                     QueueStatus::Completed | QueueStatus::Cancelled => {}
                 }
             }
+
+            let sql = format!(
+                "SELECT status, COUNT(*) FROM send_outbox \
+                 WHERE photo_id IN ({placeholders}) GROUP BY status"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(params_from_iter(chunk.iter().copied()), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            for row in rows {
+                let (status, count) = row?;
+                match SendStatus::parse(&status) {
+                    SendStatus::Waiting => send.waiting += count,
+                    SendStatus::Pending => send.pending += count,
+                    SendStatus::Processing => send.processing += count,
+                    SendStatus::Failed => send.failed += count,
+                    SendStatus::Unknown => send.pending += count,
+                    SendStatus::Sent | SendStatus::Cancelled => {}
+                }
+            }
+
+            let union_params: Vec<i64> =
+                chunk.iter().copied().chain(chunk.iter().copied()).collect();
             affected_photos += self.conn.query_row(
                 &format!(
-                    "SELECT COUNT(DISTINCT photo_id) FROM compression_jobs \
-                     WHERE photo_id IN ({placeholders}) \
-                       AND status NOT IN ('completed', 'cancelled')"
+                    "SELECT COUNT(*) FROM ( \
+                         SELECT photo_id FROM compression_jobs \
+                         WHERE photo_id IN ({placeholders}) \
+                           AND status NOT IN ('completed', 'cancelled') \
+                         UNION \
+                         SELECT photo_id FROM send_outbox \
+                         WHERE photo_id IN ({placeholders}) \
+                           AND status NOT IN ('sent', 'cancelled') \
+                     )"
                 ),
-                params_from_iter(chunk.iter().copied()),
+                params_from_iter(union_params),
                 |row| row.get::<_, i64>(0),
             )?;
         }
         Ok(DeletionJobSummary {
             compression,
-            send: JobStatusCounts::default(),
+            send,
             affected_photos,
         })
     }
 
-    /// Counts work that still blocks a deletion. The #142 outbox will add its
-    /// own active/failed counts here.
+    /// Counts work that still blocks a deletion. Active sends block like active
+    /// compression jobs; failed sends do not, because they carry no data-loss
+    /// risk and are cancelled when the request is recorded.
     pub fn deletion_blockers(&self, photo_id: i64) -> Result<DeletionBlockers> {
         let blockers = self.conn.query_row(
             "SELECT \
                 (SELECT COUNT(*) FROM compression_jobs \
+                 WHERE photo_id = ?1 AND status IN ('waiting', 'pending', 'processing')) \
+              + (SELECT COUNT(*) FROM send_outbox \
                  WHERE photo_id = ?1 AND status IN ('waiting', 'pending', 'processing')), \
                 (SELECT COUNT(*) FROM compression_jobs \
                  WHERE photo_id = ?1 AND status = 'failed')",
@@ -2085,11 +2127,11 @@ impl Db {
     /// Pending requests the executor can try now, ordered so manual requests
     /// come first: a manual deletion must not wait behind any auto_replace
     /// backlog, and the row limit must not hide it. Each group keeps
-    /// `requested_at` order. Known reasons with an active compression job are
-    /// skipped so they cannot starve ready requests behind the row limit,
-    /// while unknown reasons are always returned so they can be blocked
-    /// immediately. Requests with failed jobs stay in the list: the executor
-    /// still needs to transition them to `blocked`.
+    /// `requested_at` order. Known reasons with an active compression job or an
+    /// active send are skipped so they cannot starve ready requests behind the
+    /// row limit, while unknown reasons are always returned so they can be
+    /// blocked immediately. Requests with failed jobs stay in the list: the
+    /// executor still needs to transition them to `blocked`.
     pub fn pending_deletion_requests(&self, limit: i64) -> Result<Vec<DeletionRequest>> {
         let sql = "SELECT dr.id, dr.photo_id, p.file_name, dr.reason, dr.status, dr.force, \
                 dr.blocked_reason, dr.error, dr.requested_at, dr.started_at, dr.finished_at \
@@ -2097,9 +2139,16 @@ impl Db {
              WHERE dr.status = 'pending' \
                AND ( \
                    dr.reason NOT IN ('auto_replace', 'manual') \
-                   OR dr.photo_id NOT IN ( \
-                       SELECT j.photo_id FROM compression_jobs j \
-                       WHERE j.status IN ('waiting', 'pending', 'processing') \
+                   OR ( \
+                       dr.photo_id NOT IN ( \
+                           SELECT j.photo_id FROM compression_jobs j \
+                           WHERE j.status IN ('waiting', 'pending', 'processing') \
+                       ) \
+                       AND dr.photo_id NOT IN ( \
+                           SELECT s.photo_id FROM send_outbox s \
+                           WHERE s.photo_id IS NOT NULL \
+                             AND s.status IN ('waiting', 'pending', 'processing') \
+                       ) \
                    ) \
                ) \
              ORDER BY (dr.reason = 'manual') DESC, dr.requested_at, dr.id LIMIT ?1";
@@ -2122,7 +2171,8 @@ impl Db {
     /// Atomically claims a pending request and returns the current row. The
     /// caller must execute from the returned object, not from an earlier
     /// snapshot: a UI request may have upgraded `auto_replace` to `manual`
-    /// between the snapshot and this call.
+    /// between the snapshot and this call. An active send blocks the claim even
+    /// when the request is forced; a failed send never does.
     pub fn claim_deletion(&self, request_id: i64) -> Result<Option<DeletionRequest>> {
         let changed = self.conn.execute(
             "UPDATE deletion_requests \
@@ -2132,6 +2182,11 @@ impl Db {
                    SELECT 1 FROM compression_jobs j \
                    WHERE j.photo_id = deletion_requests.photo_id \
                      AND j.status IN ('waiting', 'pending', 'processing') \
+               ) \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM send_outbox s \
+                   WHERE s.photo_id = deletion_requests.photo_id \
+                     AND s.status IN ('waiting', 'pending', 'processing') \
                ) \
                AND ( \
                    force = 1 OR NOT EXISTS ( \
@@ -2221,7 +2276,8 @@ impl Db {
     }
 
     /// Ignores failed jobs and cancels queued work. A running compression job
-    /// still has to finish before `claim_deletion` can advance.
+    /// or send still has to finish before `claim_deletion` can advance, so
+    /// queued and failed sends are cancelled without touching `processing`.
     pub fn force_deletion(&self, request_id: i64) -> Result<bool> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let request: Option<(i64, String)> = tx
@@ -2249,10 +2305,17 @@ impl Db {
              WHERE photo_id = ?2 AND status IN ('waiting', 'pending')",
             params![now, photo_id],
         )?;
+        tx.execute(
+            "UPDATE send_outbox SET status = 'cancelled', finished_at = ?1 \
+             WHERE photo_id = ?2 AND status IN ('waiting', 'pending', 'failed')",
+            params![now, photo_id],
+        )?;
         tx.commit()?;
         Ok(true)
     }
 
+    /// Cancels a still-pending manual request. Sends cancelled when the request
+    /// was recorded stay cancelled: they are not restored.
     pub fn cancel_deletion(&self, request_id: i64) -> Result<bool> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let request: Option<(i64, String, String, Option<String>)> = tx
@@ -4118,6 +4181,97 @@ mod tests {
     }
 
     #[test]
+    fn deletion_blockers_count_active_sends_but_not_failed_sends() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        let id = db
+            .enqueue_send(
+                photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(db.deletion_blockers(photo).unwrap().active, 1);
+        db.claim_next_send(100).unwrap();
+        db.fail_send(id, SendErrorCode::Network, None, None, None, None)
+            .unwrap();
+        assert_eq!(db.deletion_blockers(photo).unwrap().active, 0);
+    }
+
+    #[test]
+    fn deletion_summary_includes_send_statuses() {
+        let db = Db::open_in_memory().unwrap();
+        let waiting_photo = seed_photo(&db);
+        let pending_photo = seed_other_photo(&db);
+        db.enqueue_send(
+            waiting_photo,
+            SendKind::Photo,
+            SendOrigin::Auto,
+            SendStatus::Waiting,
+        )
+        .unwrap();
+        db.enqueue_send(
+            pending_photo,
+            SendKind::Photo,
+            SendOrigin::Manual,
+            SendStatus::Pending,
+        )
+        .unwrap();
+        let summary = db
+            .deletion_job_summary(&[waiting_photo, pending_photo])
+            .unwrap();
+        assert_eq!(summary.send.waiting, 1);
+        assert_eq!(summary.send.pending, 1);
+        assert_eq!(
+            summary.affected_photos, 2,
+            "both photos have a pending send"
+        );
+    }
+
+    #[test]
+    fn deletion_summary_counts_a_photo_with_jobs_and_sends_once() {
+        let db = Db::open_in_memory().unwrap();
+        let both = seed_photo(&db);
+        let send_only = seed_other_photo(&db);
+
+        // Create and fail the send-only photo's row first so the claim below
+        // cannot pick the combined photo's send.
+        let failed = db
+            .enqueue_send(
+                send_only,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        db.claim_next_send(100).unwrap();
+        db.fail_send(failed, SendErrorCode::Network, None, None, None, None)
+            .unwrap();
+
+        db.save_profile(&profile("p", "P")).unwrap();
+        db.enqueue_job(both, "p", "keep").unwrap();
+        db.enqueue_send(
+            both,
+            SendKind::Photo,
+            SendOrigin::Manual,
+            SendStatus::Pending,
+        )
+        .unwrap();
+
+        let summary = db.deletion_job_summary(&[both, send_only]).unwrap();
+        assert_eq!(summary.compression.pending, 1);
+        assert_eq!(summary.send.pending, 1);
+        assert_eq!(summary.send.failed, 1);
+        assert_eq!(
+            summary.affected_photos, 2,
+            "a photo with both kinds of work counts once, and a failed send alone counts"
+        );
+    }
+
+    #[test]
     fn pending_deletion_requests_skip_requests_with_active_jobs() {
         let db = Db::open_in_memory().unwrap();
         let root = db.add_root("/photos", "reference").unwrap();
@@ -4158,6 +4312,36 @@ mod tests {
             "unknown reasons must be returned even while jobs are active"
         );
         assert!(!pending.iter().any(|request| request.id == blocked_request));
+    }
+
+    #[test]
+    fn pending_deletion_requests_skip_active_sends_and_ignore_test_rows() {
+        let db = Db::open_in_memory().unwrap();
+        let blocked = seed_photo(&db);
+        let ready = seed_other_photo(&db);
+        db.enqueue_test_send().unwrap();
+        // auto_replace keeps the photo visible so a send can be queued after
+        // the request is recorded.
+        let blocked_request = db
+            .request_deletion(&[blocked], DeletionReason::AutoReplace, false)
+            .unwrap()[0];
+        let ready_request = db
+            .request_deletion(&[ready], DeletionReason::AutoReplace, false)
+            .unwrap()[0];
+        db.enqueue_send(
+            blocked,
+            SendKind::Photo,
+            SendOrigin::Manual,
+            SendStatus::Pending,
+        )
+        .unwrap();
+
+        let pending = db.pending_deletion_requests(10).unwrap();
+        assert!(pending.iter().any(|request| request.id == ready_request));
+        assert!(
+            !pending.iter().any(|request| request.id == blocked_request),
+            "an active send must hide the request"
+        );
     }
 
     #[test]
@@ -4277,6 +4461,25 @@ mod tests {
     }
 
     #[test]
+    fn claim_deletion_will_not_start_while_a_send_is_processing() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        // auto_replace は写真を deleting にしないため、要求後に送信を積める。
+        let request = db
+            .request_deletion(&[photo], DeletionReason::AutoReplace, false)
+            .unwrap()[0];
+        db.enqueue_send(
+            photo,
+            SendKind::Photo,
+            SendOrigin::Manual,
+            SendStatus::Pending,
+        )
+        .unwrap();
+        db.claim_next_send(100).unwrap();
+        assert!(db.claim_deletion(request).unwrap().is_none());
+    }
+
+    #[test]
     fn force_deletion_cancels_queued_but_not_processing_jobs() {
         let db = Db::open_in_memory().unwrap();
         let id = seed_photo(&db);
@@ -4303,6 +4506,97 @@ mod tests {
     }
 
     #[test]
+    fn manual_deletion_cancels_waiting_pending_and_failed_sends() {
+        let db = Db::open_in_memory().unwrap();
+        let waiting_photo = seed_photo(&db);
+        let pending_photo = seed_other_photo(&db);
+        let failed_root = db.add_root("/photos-c", "reference").unwrap();
+        let failed_photo = db
+            .upsert_photo(&photo_at(
+                failed_root,
+                "c.png",
+                1_700_000_002,
+                "2026-10-21 21:14:05",
+            ))
+            .unwrap();
+        // 最初に failed 行を作って claim し、processing から failed にする。
+        let failed = db
+            .enqueue_send(
+                failed_photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        db.claim_next_send(100).unwrap();
+        db.fail_send(failed, SendErrorCode::Http401, None, None, None, None)
+            .unwrap();
+        // その後で待機・実行待ちを積む。
+        let waiting = db
+            .enqueue_send(
+                waiting_photo,
+                SendKind::Photo,
+                SendOrigin::Auto,
+                SendStatus::Waiting,
+            )
+            .unwrap()
+            .unwrap();
+        let pending = db
+            .enqueue_send(
+                pending_photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        db.request_deletion(
+            &[waiting_photo, pending_photo, failed_photo],
+            DeletionReason::Manual,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            db.send_entry_by_id(waiting).unwrap().unwrap().status,
+            SendStatus::Cancelled
+        );
+        assert_eq!(
+            db.send_entry_by_id(pending).unwrap().unwrap().status,
+            SendStatus::Cancelled
+        );
+        assert_eq!(
+            db.send_entry_by_id(failed).unwrap().unwrap().status,
+            SendStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn force_deletion_leaves_a_processing_send_running() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        let request = db
+            .request_deletion(&[photo], DeletionReason::AutoReplace, false)
+            .unwrap()[0];
+        let id = db
+            .enqueue_send(
+                photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        db.claim_next_send(100).unwrap();
+        db.force_deletion(request).unwrap();
+        assert_eq!(
+            db.send_entry_by_id(id).unwrap().unwrap().status,
+            SendStatus::Processing
+        );
+        assert!(db.claim_deletion(request).unwrap().is_none());
+    }
+
+    #[test]
     fn cancel_deletion_restores_visible_status_until_running() {
         let db = Db::open_in_memory().unwrap();
         let id = seed_photo(&db);
@@ -4320,6 +4614,29 @@ mod tests {
             .unwrap()[0];
         assert!(db.claim_deletion(second).unwrap().is_some());
         assert!(!db.cancel_deletion(second).unwrap());
+    }
+
+    #[test]
+    fn cancelling_a_deletion_does_not_restore_cancelled_sends() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        let send = db
+            .enqueue_send(
+                photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        let request = db
+            .request_deletion(&[photo], DeletionReason::Manual, false)
+            .unwrap()[0];
+        db.cancel_deletion(request).unwrap();
+        assert_eq!(
+            db.send_entry_by_id(send).unwrap().unwrap().status,
+            SendStatus::Cancelled
+        );
     }
 
     #[test]
