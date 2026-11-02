@@ -51,7 +51,7 @@ pub(crate) fn demo_fixture(reference: NaiveDate) -> Vec<DemoPhoto> {
         let count = MONTH_COUNTS[(months_ago + (months_ago / 12) * 4) % MONTH_COUNTS.len()];
 
         for index_in_month in 0..count {
-            let linked = global % 7 != 0;
+            let linked = !global.is_multiple_of(7);
             let day = 1 + (index_in_month * days_in_month / count + months_ago) % days_in_month;
             let hour = (8 + index_in_month * 3 + months_ago * 5) % 24;
             let minute = (index_in_month * 13 + months_ago * 7) % 60;
@@ -78,7 +78,7 @@ pub(crate) fn demo_fixture(reference: NaiveDate) -> Vec<DemoPhoto> {
             };
             let palette = world.unwrap_or((months_ago + index_in_month) % DEMO_WORLDS.len());
 
-            let mut tags = vec![if hour < 6 || hour >= 18 {
+            let mut tags = vec![if !(6..18).contains(&hour) {
                 "夜".to_string()
             } else {
                 "昼".to_string()
@@ -99,8 +99,8 @@ pub(crate) fn demo_fixture(reference: NaiveDate) -> Vec<DemoPhoto> {
                 world,
                 players,
                 tags,
-                favorite: global % 4 == 0,
-                compressed: global % 3 == 0,
+                favorite: global.is_multiple_of(4),
+                compressed: global.is_multiple_of(3),
             });
             global += 1;
         }
