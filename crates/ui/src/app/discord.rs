@@ -8,11 +8,11 @@ use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::*;
 use vrc_photon_core::discord::{WebhookUrlError, validate_webhook_url};
-use vrc_photon_core::model::SendStatus;
+use vrc_photon_core::model::{PhotoStatus, SendKind, SendOrigin, SendStatus};
 use vrc_photon_core::settings::{AppSettings, clear_discord_webhook, save_discord_webhook};
 use vrc_photon_i18n::{tr, tr_args};
 
-use crate::app::App;
+use crate::app::{App, Screen};
 use crate::state::motion::ToggleMotion;
 use crate::ui::theme::MOTION_FAST;
 
@@ -20,7 +20,6 @@ use crate::ui::theme::MOTION_FAST;
 const DEFAULT_DESTINATION: &str = "Discord";
 
 /// Why a manual or test send cannot start.
-#[allow(dead_code)] // Consumed by the manual send action (task 14).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DiscordSendGuardError {
     Disabled,
@@ -28,7 +27,6 @@ pub(crate) enum DiscordSendGuardError {
 }
 
 /// Blocks a send until the feature is enabled and a webhook is stored.
-#[allow(dead_code)] // Consumed by the manual send action (task 14).
 pub(crate) fn discord_send_guard(
     settings: &AppSettings,
     webhook_present: bool,
@@ -40,6 +38,17 @@ pub(crate) fn discord_send_guard(
         return Err(DiscordSendGuardError::MissingWebhook);
     }
     Ok(())
+}
+
+/// Toast text for a manual send. The caller picks the tone: `Ok` is
+/// informational and a guard failure is a warning.
+pub(crate) fn manual_send_toast(result: Result<bool, DiscordSendGuardError>) -> String {
+    match result {
+        Ok(true) => tr!("photos.action.discord_queued"),
+        Ok(false) => tr!("photos.action.discord_waiting"),
+        Err(DiscordSendGuardError::Disabled) => tr!("photos.action.discord_disabled"),
+        Err(DiscordSendGuardError::MissingWebhook) => tr!("photos.action.discord_missing_webhook"),
+    }
 }
 
 /// Trims the destination label and falls back to `Discord` when blank, the
@@ -230,6 +239,61 @@ impl App {
         cx.notify();
     }
 
+    /// Queues one photo for a manual Discord send. The guard sends the user to
+    /// the integration screen when the feature or webhook is missing so the
+    /// toast is actionable instead of a dead end.
+    pub(crate) fn enqueue_photo_send(&mut self, photo_id: i64, cx: &mut Context<Self>) {
+        if let Err(error) = discord_send_guard(&self.settings, self.discord_url.is_some()) {
+            self.toast_warning(manual_send_toast(Err(error)), cx);
+            self.switch_screen(Screen::Integrations, cx);
+            return;
+        }
+        match self.db.photo_by_id(photo_id) {
+            Ok(Some(photo)) if photo.status != PhotoStatus::Deleting => {}
+            Ok(Some(_)) => {
+                self.toast_error(tr!("photos.action.discord_deleting"), cx);
+                cx.notify();
+                return;
+            }
+            Ok(None) => {
+                self.toast_error(tr!("photos.action.discord_error"), cx);
+                cx.notify();
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(%error, photo_id, "cannot load a photo for a Discord send");
+                self.toast_error(
+                    format!("{}: {error}", tr!("photos.action.discord_error")),
+                    cx,
+                );
+                cx.notify();
+                return;
+            }
+        }
+        match self.db.enqueue_send(
+            photo_id,
+            SendKind::Photo,
+            SendOrigin::Manual,
+            SendStatus::Pending,
+        ) {
+            Ok(Some(_)) => {
+                self.reload_send_history(cx);
+                self.send_wake_sends(cx);
+                self.toast_success(manual_send_toast(Ok(true)), cx);
+            }
+            // An active row for this photo already exists; the worker owns it.
+            Ok(None) => self.toast_info(manual_send_toast(Ok(false)), cx),
+            Err(error) => {
+                tracing::warn!(%error, photo_id, "cannot enqueue a Discord photo send");
+                self.toast_error(
+                    format!("{}: {error}", tr!("photos.action.discord_error")),
+                    cx,
+                );
+            }
+        }
+        cx.notify();
+    }
+
     /// Returns a failed row to the queue. The database rejects the retry when
     /// the photo already has an active send, which the warning toast covers.
     pub(crate) fn retry_send(&mut self, id: i64, cx: &mut Context<Self>) {
@@ -330,10 +394,32 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{
-        DiscordSendGuardError, discord_send_guard, normalized_destination, webhook_error_key,
+        DiscordSendGuardError, discord_send_guard, manual_send_toast, normalized_destination,
+        webhook_error_key,
     };
     use vrc_photon_core::discord::{WebhookUrlError, mask_webhook_url, validate_webhook_url};
     use vrc_photon_core::settings::AppSettings;
+    use vrc_photon_i18n::tr;
+
+    #[test]
+    fn manual_send_reports_queued_and_duplicate_states() {
+        assert_eq!(
+            manual_send_toast(Ok(true)),
+            tr!("photos.action.discord_queued")
+        );
+        assert_eq!(
+            manual_send_toast(Ok(false)),
+            tr!("photos.action.discord_waiting")
+        );
+        assert_eq!(
+            manual_send_toast(Err(DiscordSendGuardError::Disabled)),
+            tr!("photos.action.discord_disabled")
+        );
+        assert_eq!(
+            manual_send_toast(Err(DiscordSendGuardError::MissingWebhook)),
+            tr!("photos.action.discord_missing_webhook")
+        );
+    }
 
     #[test]
     fn webhook_mask_and_validation_feed_the_editor() {

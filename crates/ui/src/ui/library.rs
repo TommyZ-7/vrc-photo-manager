@@ -586,6 +586,15 @@ impl App {
                         this.open_quick_look(window, cx, ViewerOpenSource::Inspector);
                     })),
             )
+            .child(
+                Button::new("discord-send")
+                    .label(tr!("photos.action.discord_send"))
+                    .small()
+                    .w_full()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.enqueue_photo_send(id, cx);
+                    })),
+            )
             .child({
                 let count = self.selected_ids.len();
                 let label = if count > 1 {
@@ -746,6 +755,12 @@ impl App {
             cx,
             move |this, _, cx| this.open_manual_compression(vec![id], cx),
         );
+        let discord_button = Button::new("viewer-discord-send")
+            .label(tr!("photos.action.discord_send"))
+            .small()
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.enqueue_photo_send(id, cx);
+            }));
         let trash_button = self.focusable_text_button(
             "viewer-trash",
             tr!("photos.action.trash"),
@@ -962,6 +977,7 @@ impl App {
                     .items_center()
                     .child(folder_button)
                     .child(compress_button)
+                    .child(discord_button)
                     .child(trash_button),
             )
     }
