@@ -286,7 +286,7 @@ fn seed_demo(db: &Db, photo_dir: &Path, reference: NaiveDate) -> Result<(), Stri
 mod tests {
     use super::*;
     use chrono::NaiveDate;
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use vrc_photon_core::model::{PhotoFilter, PhotoSort};
     use vrc_photon_core::time;
 
@@ -346,6 +346,21 @@ mod tests {
         assert_eq!(years, vec![2026, 2025, 2024, 2023]);
 
         let fixture = demo_fixture::demo_fixture(reference);
+        let mut expected_months: BTreeMap<i32, usize> = BTreeMap::new();
+        for photo in &fixture {
+            let month = photo.captured_at.local[..7]
+                .replace('-', "")
+                .parse::<i32>()
+                .unwrap();
+            *expected_months.entry(month).or_default() += 1;
+        }
+        let actual_months: BTreeMap<i32, usize> =
+            entries.iter().fold(BTreeMap::new(), |mut months, entry| {
+                *months.entry(entry.captured_month).or_default() += 1;
+                months
+            });
+        assert_eq!(actual_months, expected_months);
+
         let june = fixture
             .iter()
             .filter(|photo| photo.captured_at.local.starts_with("2025-06"))

@@ -4,7 +4,7 @@
 //! files and database rows; keeping the distribution here lets tests pin the
 //! date without touching SQLite or the filesystem.
 
-use chrono::{Datelike, Months, NaiveDate};
+use chrono::{Datelike, Months, NaiveDate, NaiveDateTime};
 use vrc_photon_core::model::PhotoPlayer;
 use vrc_photon_core::time::{self, LocalStamp};
 
@@ -59,7 +59,7 @@ pub(crate) fn demo_fixture(reference: NaiveDate) -> Vec<DemoPhoto> {
         for index_in_month in 0..count {
             let linked = !global.is_multiple_of(7);
             let day = 1 + (index_in_month * days_in_month / count + months_ago) % days_in_month;
-            let hour = (8 + index_in_month * 3 + months_ago * 5) % 24;
+            let hour = (8 + index_in_month * 3 + months_ago * 5) % 23;
             let minute = (index_in_month * 13 + months_ago * 7) % 60;
             let date = start
                 .with_day(day as u32)
@@ -124,11 +124,20 @@ fn month_start(reference: NaiveDate, months_ago: usize) -> NaiveDate {
 
 /// Converts a local wall-clock time, moving forward over DST gaps.
 fn local_stamp(date: NaiveDate, hour: u32, minute: u32) -> LocalStamp {
+    local_stamp_with(date, hour, minute, time::from_naive)
+}
+
+fn local_stamp_with(
+    date: NaiveDate,
+    hour: u32,
+    minute: u32,
+    mut convert: impl FnMut(NaiveDateTime) -> Option<LocalStamp>,
+) -> LocalStamp {
     let mut naive = date
         .and_hms_opt(hour, minute, 0)
         .expect("demo time is valid");
-    for _ in 0..24 {
-        if let Some(stamp) = time::from_naive(naive) {
+    for _ in 0..=24 {
+        if let Some(stamp) = convert(naive) {
             return stamp;
         }
         naive += chrono::Duration::hours(1);
@@ -256,6 +265,42 @@ mod tests {
             assert!(!photo.players.is_empty());
             assert_eq!(photo.tags.len(), 2);
         }
+    }
+
+    #[test]
+    fn fixture_keeps_every_photo_inside_its_intended_month() {
+        let reference = reference();
+        let mut expected_months = Vec::new();
+        for months_ago in 0..DEMO_MONTHS {
+            let month = month_start(reference, months_ago);
+            let count = MONTH_COUNTS[(months_ago + (months_ago / 12) * 4) % MONTH_COUNTS.len()];
+            for _ in 0..count {
+                expected_months.push(month.format("%Y-%m").to_string());
+            }
+        }
+
+        let photos = demo_fixture(reference);
+        assert_eq!(photos.len(), expected_months.len());
+        for (photo, expected) in photos.iter().zip(expected_months) {
+            assert_eq!(&photo.captured_at.local[..7], expected);
+        }
+    }
+
+    #[test]
+    fn local_stamp_moves_forward_over_a_dst_gap() {
+        let date = NaiveDate::from_ymd_opt(2026, 3, 31).unwrap();
+        let mut calls = 0;
+        let stamp = local_stamp_with(date, 22, 15, |naive| {
+            calls += 1;
+            if calls == 1 {
+                None
+            } else {
+                time::from_naive(naive)
+            }
+        });
+
+        assert_eq!(calls, 2);
+        assert_eq!(&stamp.local[..16], "2026-03-31 23:15");
     }
 
     #[test]
