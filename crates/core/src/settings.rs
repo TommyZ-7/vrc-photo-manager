@@ -737,6 +737,25 @@ mod tests {
     }
 
     #[test]
+    fn blank_discord_destination_saves_as_discord() {
+        let db = Db::open_in_memory().unwrap();
+        let settings = AppSettings {
+            discord_destination: "   ".into(),
+            ..AppSettings::default()
+        };
+        settings.save(&db).unwrap();
+        let stored = db.get_setting("app_settings").unwrap().unwrap();
+        assert!(
+            stored.contains("\"discord_destination\": \"Discord\""),
+            "saved JSON kept a blank destination: {stored}"
+        );
+        assert_eq!(
+            AppSettings::load(&db).unwrap().discord_destination,
+            "Discord"
+        );
+    }
+
+    #[test]
     fn blank_discord_destination_loads_as_discord() {
         let db = Db::open_in_memory().unwrap();
         let mut value = serde_json::to_value(AppSettings::default()).unwrap();

@@ -7,8 +7,12 @@ use crate::model::{
     CompressionFormat, CompressionProfile, Derivative, Photo, PhotoStatus, SendSource,
 };
 
-/// Discord's upload limit on servers without boosts.
-pub const DISCORD_MAX_UPLOAD_BYTES: u64 = 25 * 1024 * 1024;
+/// Discord's current documented upload limit (20 MiB).
+///
+/// The older 25 MiB figure was an experimental allowance; the conservative
+/// pre-check keeps uploads inside the default limit instead of relying on the
+/// server to reject them.
+pub const DISCORD_MAX_UPLOAD_BYTES: u64 = 20 * 1024 * 1024;
 
 const EMBED_COLOR: u32 = 6_730_751;
 const EMBED_TITLE_MAX_CHARS: usize = 256;
@@ -58,10 +62,7 @@ pub fn validate_webhook_url(raw: &str) -> Result<url::Url, WebhookUrlError> {
     if !ALLOWED_WEBHOOK_HOSTS.contains(&host) {
         return Err(WebhookUrlError::HostNotAllowed);
     }
-    let (id, token) = webhook_path_parts(&parsed).ok_or(WebhookUrlError::InvalidPath)?;
-    if id.is_empty() || token.is_empty() {
-        return Err(WebhookUrlError::InvalidPath);
-    }
+    webhook_path_parts(&parsed).ok_or(WebhookUrlError::InvalidPath)?;
     Ok(parsed)
 }
 
@@ -80,13 +81,19 @@ pub fn mask_webhook_url(raw: &str) -> String {
     format!("https://{host}/api/webhooks/{id}…/••••")
 }
 
+/// The `<id>` and `<token>` of an exact `/api/webhooks/<id>/<token>` path.
+///
+/// Trailing segments are rejected: the app sends Discord payloads, so a Slack
+/// webhook (or any extended Discord path) must not pass the same validation.
 fn webhook_path_parts(url: &url::Url) -> Option<(&str, &str)> {
-    let mut segments = url.path_segments()?;
-    let first = segments.next()?;
-    let second = segments.next()?;
-    let id = segments.next()?;
-    let token = segments.next()?;
-    if first != "api" || second != "webhooks" {
+    let segments: Vec<&str> = url.path_segments()?.collect();
+    if segments.len() != 4 {
+        return None;
+    }
+    let [first, second, id, token] = segments.as_slice() else {
+        return None;
+    };
+    if *first != "api" || *second != "webhooks" || id.is_empty() || token.is_empty() {
         return None;
     }
     Some((id, token))
@@ -677,7 +684,53 @@ mod tests {
             validate_webhook_url("https://discord.com/api/webhooks/1/"),
             Err(WebhookUrlError::InvalidPath)
         );
+        assert_eq!(
+            validate_webhook_url("https://discord.com/api/webhooks/1/token/extra"),
+            Err(WebhookUrlError::InvalidPath)
+        );
+        assert_eq!(
+            validate_webhook_url("https://discord.com/api/webhooks/1/token/"),
+            Err(WebhookUrlError::InvalidPath)
+        );
+        assert_eq!(
+            validate_webhook_url("https://discord.com/api/webhooks/1/token/slack"),
+            Err(WebhookUrlError::InvalidPath)
+        );
+        assert!(validate_webhook_url("https://discord.com/api/webhooks/1/token?wait=true").is_ok());
         assert_eq!(mask_webhook_url("not a url"), "••••");
+    }
+
+    #[test]
+    fn exactly_twenty_mib_is_an_original_and_one_byte_more_falls_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let exactly = dir.path().join("exactly.png");
+        std::fs::File::create(&exactly)
+            .unwrap()
+            .set_len(DISCORD_MAX_UPLOAD_BYTES)
+            .unwrap();
+        let photo = sample_photo(1, &exactly, 1, PhotoStatus::Present, None, None);
+        assert!(matches!(
+            choose_send_source(&photo, true, None, &[]),
+            SendImageSource::File {
+                source: SendSource::Original,
+                ..
+            }
+        ));
+
+        let over = dir.path().join("over.png");
+        std::fs::File::create(&over)
+            .unwrap()
+            .set_len(DISCORD_MAX_UPLOAD_BYTES + 1)
+            .unwrap();
+        let profile = CompressionProfile {
+            id: "discord".into(),
+            ..CompressionProfile::default()
+        };
+        let photo = sample_photo(2, &over, 1, PhotoStatus::Present, None, None);
+        assert!(matches!(
+            choose_send_source(&photo, true, Some(&profile), &[]),
+            SendImageSource::Encode { profile_id, .. } if profile_id == "discord"
+        ));
     }
 
     #[test]

@@ -72,6 +72,19 @@ pub(crate) fn profile_name_update(
     Ok((name != current).then_some(name))
 }
 
+/// Whether a profile row should hold the Discord selection after a click.
+///
+/// A disabled profile cannot become the Discord profile, so clicking it is a
+/// no-op. Selecting any other profile also clears the previous selection
+/// because `profile.discord` is a single-choice flag.
+pub(crate) fn discord_profile_toggle(
+    profile: &CompressionProfile,
+    target_id: &str,
+    select: bool,
+) -> bool {
+    select && profile.id == target_id && profile.enabled
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ManualCompressionDialog {
     pub(crate) photo_ids: Vec<i64>,
@@ -109,7 +122,7 @@ impl App {
 
     /// Selects the profile used for Discord uploads. `profile.discord` is a
     /// single-choice flag, so only the requested profile keeps it enabled.
-    #[allow(dead_code)] // Consumed by the Discord profile picker (task 12).
+    /// Disabled profiles are not selectable.
     pub(crate) fn set_discord_profile(
         &mut self,
         profile_id: &str,
@@ -118,7 +131,7 @@ impl App {
     ) {
         let mut updates = Vec::new();
         for profile in &mut self.profiles {
-            let should_enable = enabled && profile.id == profile_id;
+            let should_enable = discord_profile_toggle(profile, profile_id, enabled);
             if profile.discord != should_enable {
                 profile.discord = should_enable;
                 updates.push(profile.clone());
@@ -769,9 +782,27 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_PROFILE_NAME_CHARS, ManualOutputTarget, ProfileNameError, manual_output_available,
-        normalize_profile_name, profile_name_update,
+        MAX_PROFILE_NAME_CHARS, ManualOutputTarget, ProfileNameError, discord_profile_toggle,
+        manual_output_available, normalize_profile_name, profile_name_update,
     };
+    use vrc_photon_core::model::CompressionProfile;
+
+    #[test]
+    fn disabled_discord_profiles_cannot_be_selected() {
+        let mut profile = CompressionProfile {
+            id: "disabled".into(),
+            enabled: false,
+            ..CompressionProfile::default()
+        };
+        assert!(!discord_profile_toggle(&profile, "disabled", true));
+        assert!(!discord_profile_toggle(&profile, "other", true));
+        assert!(!discord_profile_toggle(&profile, "disabled", false));
+
+        profile.enabled = true;
+        assert!(discord_profile_toggle(&profile, "disabled", true));
+        assert!(!discord_profile_toggle(&profile, "other", true));
+        assert!(!discord_profile_toggle(&profile, "disabled", false));
+    }
 
     #[test]
     fn clipboard_output_is_limited_to_one_photo_and_the_enabled_setting() {

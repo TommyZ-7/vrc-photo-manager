@@ -1065,6 +1065,21 @@ impl Daemon {
         }
         if !new_ids.is_empty() {
             self.link_unlinked()?;
+            let enqueued = {
+                let db = self.db.lock().unwrap();
+                match discord::enqueue_auto_sends(&db, &new_ids) {
+                    Ok(count) => count,
+                    Err(error) => {
+                        // Automatic sending is best effort: an outbox error
+                        // must not fail or roll back the photo scan.
+                        tracing::warn!(%error, "cannot enqueue automatic Discord sends");
+                        0
+                    }
+                }
+            };
+            if enqueued > 0 {
+                self.sends.notify();
+            }
         }
         Ok(())
     }
@@ -1269,6 +1284,23 @@ impl Daemon {
         self.report_scan_outcome(&report, full_scan)?;
         if report.modified > 0 {
             self.link_unlinked()?;
+        }
+        if !report.new_ids.is_empty() {
+            let enqueued = {
+                let db = self.db.lock().unwrap();
+                match discord::enqueue_auto_sends(&db, &report.new_ids) {
+                    Ok(count) => count,
+                    Err(error) => {
+                        // Automatic sending is best effort: an outbox error
+                        // must not fail or roll back the photo scan.
+                        tracing::warn!(%error, "cannot enqueue automatic Discord sends");
+                        0
+                    }
+                }
+            };
+            if enqueued > 0 {
+                self.sends.notify();
+            }
         }
         if let Some(tx) = &self.thumbnail_tx {
             for id in &report.new_ids {
@@ -3034,7 +3066,8 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::time::SystemTime;
-    use vrc_photon_core::model::DeletionStatus;
+    use vrc_photon_core::model::{DeletionStatus, SendOrigin, SendStatus};
+    use vrc_photon_core::settings::{DiscordAutoMode, save_discord_webhook};
 
     #[test]
     fn localized_error_builds_text_and_json_args() {
@@ -6922,6 +6955,145 @@ mod tests {
         }
         daemon.refresh_status().unwrap();
         assert_eq!(daemon.status.lock().unwrap().pending_sends, 1);
+    }
+
+    #[test]
+    fn auto_send_runs_after_linking_and_skips_old_photos() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let log_dir = dir.path().join("logs");
+        std::fs::write(
+            log_dir.join("output_log_2026-10-21_21-00-00.txt"),
+            concat!(
+                "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)\n",
+                "2026.10.21 21:23:13 Debug      -  [Behaviour] Joining or Creating Room: Test World\n",
+            ),
+        )
+        .unwrap();
+        write_photo(&original_path(&dir));
+        daemon.ingest_logs().unwrap();
+        daemon.scan_photos().unwrap();
+
+        let (captured, _) = {
+            let db = Db::open(dir.path().join("library.db")).unwrap();
+            let photo = db
+                .photo_by_path(&original_path(&dir).to_string_lossy())
+                .unwrap()
+                .unwrap();
+            (photo.captured_at_utc, photo.id)
+        };
+        save_daemon_settings(&daemon, |settings| {
+            settings.discord_enabled = true;
+            settings.discord_auto_mode = DiscordAutoMode::Immediate;
+            settings.discord_auto_since = Some(captured + 1);
+        });
+        {
+            let db = daemon.db.lock().unwrap();
+            save_discord_webhook(&db, "https://discord.com/api/webhooks/1/t").unwrap();
+        }
+
+        let second = dir
+            .path()
+            .join("photos/VRChat_2026-10-21_21-25-00.000_4x3.png");
+        write_photo(&second);
+        daemon.dirty_paths.push(second.clone());
+        daemon.index_dirty_paths().unwrap();
+
+        let db = Db::open(dir.path().join("library.db")).unwrap();
+        let history = db.send_history(10).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].entry.origin, SendOrigin::Auto);
+        assert_eq!(history[0].entry.status, SendStatus::Pending);
+        assert_eq!(
+            history[0].photo_name.as_deref(),
+            Some("VRChat_2026-10-21_21-25-00.000_4x3.png")
+        );
+        let second_photo = db
+            .photo_by_path(&second.to_string_lossy())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            db.photo_context(second_photo.id)
+                .unwrap()
+                .unwrap()
+                .world_name
+                .as_deref(),
+            Some("Test World")
+        );
+    }
+
+    #[test]
+    fn auto_send_runs_after_a_full_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        std::fs::write(
+            dir.path().join("logs/output_log_2026-10-21_21-00-00.txt"),
+            concat!(
+                "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)\n",
+                "2026.10.21 21:23:13 Debug      -  [Behaviour] Joining or Creating Room: Test World\n",
+            ),
+        )
+        .unwrap();
+        save_daemon_settings(&daemon, |settings| {
+            settings.discord_enabled = true;
+            settings.discord_auto_mode = DiscordAutoMode::Immediate;
+            settings.discord_auto_since = Some(0);
+        });
+        {
+            let db = daemon.db.lock().unwrap();
+            save_discord_webhook(&db, "https://discord.com/api/webhooks/1/t").unwrap();
+        }
+        write_photo(&original_path(&dir));
+        daemon.ingest_logs().unwrap();
+        // The first full scan of an empty library is still "initial": auto
+        // sends must not be skipped there, because `discord_auto_since`
+        // already filters out old photos.
+        daemon.scan_photos().unwrap();
+
+        let db = Db::open(dir.path().join("library.db")).unwrap();
+        let history = db.send_history(10).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].entry.origin, SendOrigin::Auto);
+        assert_eq!(history[0].entry.status, SendStatus::Pending);
+        assert_eq!(
+            history[0].photo_name.as_deref(),
+            Some("VRChat_2026-10-21_21-24-00.000_4x3.png")
+        );
+    }
+
+    #[test]
+    fn auto_send_enqueue_failure_does_not_fail_the_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        save_daemon_settings(&daemon, |settings| {
+            settings.discord_enabled = true;
+            settings.discord_auto_mode = DiscordAutoMode::Immediate;
+            settings.discord_auto_since = Some(0);
+        });
+        {
+            let db = daemon.db.lock().unwrap();
+            save_discord_webhook(&db, "https://discord.com/api/webhooks/1/t").unwrap();
+            db.connection()
+                .execute_batch(
+                    "CREATE TRIGGER fail_auto_send BEFORE INSERT ON send_outbox \
+                     BEGIN SELECT RAISE(ABORT, 'send outbox unavailable'); END;",
+                )
+                .unwrap();
+        }
+        write_photo(&original_path(&dir));
+        let report = daemon
+            .scan_photos()
+            .expect("an auto-send enqueue error must not fail the scan");
+        assert_eq!(report.indexed, 1);
+        assert!(
+            daemon
+                .db
+                .lock()
+                .unwrap()
+                .send_history(10)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
