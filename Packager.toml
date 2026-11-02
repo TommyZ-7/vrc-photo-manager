@@ -10,6 +10,7 @@ licenseFile = "LICENSE"
 resources = [
   "LICENSE",
   "packaging/licenses/LICENSE-LUCIDE",
+  "packaging/licenses/THIRD-PARTY-NOTICES.md",
 ]
 category = "Photography"
 outDir = "dist"

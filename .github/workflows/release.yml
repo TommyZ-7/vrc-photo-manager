@@ -164,7 +164,7 @@ jobs:
             exit 1
           fi
 
-          for notice in LICENSE LICENSE-LUCIDE; do
+          for notice in LICENSE LICENSE-LUCIDE THIRD-PARTY-NOTICES.md; do
             path="usr/lib/vrc-photon/$notice"
             dpkg-deb --contents "$deb" | grep "$path\$" >/dev/null \
               || { echo "missing $notice in deb"; exit 1; }
