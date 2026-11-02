@@ -795,7 +795,7 @@ git commit -m "feat(core): prefer log and XMP names and backfill photo contexts"
 
 ---
 
-### Task 5: レスポンス解析とバックオフの純粋関数
+### Task 5: ワールド名パーサの境界・分類テスト
 
 **Files:**
 - Modify: `crates/core/src/world_name.rs`
@@ -803,21 +803,13 @@ git commit -m "feat(core): prefer log and XMP names and backfill photo contexts"
 
 **Interfaces:**
 - Consumes: Task 2 の定数と型
-- Produces: Task 2 で定義した `parse_world_name_response` / `backoff_seconds` / `retry_after_seconds` の完成
+- Produces: なし（Task 2 の境界条件とエラー分類の検証）
 
-- [ ] **Step 1: 追加の失敗テストを書く**
+- [ ] **Step 1: 追加テストを書く**
+
+Task 2 の `rejects_invalid_world_names` は257文字を拒否するが、ちょうど256文字の受理、`id` なしの受理、エラー分類は検証していない。次を追加する。
 
 ```rust
-#[test]
-fn rejects_a_name_with_a_tab_or_carriage_return() {
-    for name in ["line\tbreak", "line\rbreak"] {
-        let body = serde_json::json!({"id": "wrld_test", "name": name});
-        assert!(
-            parse_world_name_response(body.to_string().as_bytes(), "wrld_test").is_err()
-        );
-    }
-}
-
 #[test]
 fn accepts_a_name_at_the_limit() {
     let name = "x".repeat(MAX_WORLD_NAME_CHARS);
@@ -827,18 +819,46 @@ fn accepts_a_name_at_the_limit() {
         Ok(name)
     );
 }
+
+#[test]
+fn accepts_a_name_without_an_id() {
+    assert_eq!(
+        parse_world_name_response(br#"{"name":"Test"}"#, "wrld_test"),
+        Ok("Test".to_string())
+    );
+}
+
+#[test]
+fn reports_the_specific_parse_error() {
+    assert_eq!(
+        parse_world_name_response(br#"{"id":"wrld_test","name":""}"#, "wrld_test"),
+        Err(WorldNameParseError::EmptyName)
+    );
+    assert_eq!(
+        parse_world_name_response(br#"{"id":"wrld_test"}"#, "wrld_test"),
+        Err(WorldNameParseError::MissingName)
+    );
+    assert_eq!(
+        parse_world_name_response(br#"{"id":"other","name":"Test"}"#, "wrld_test"),
+        Err(WorldNameParseError::WorldIdMismatch)
+    );
+    assert_eq!(
+        parse_world_name_response(br#"not json"#, "wrld_test"),
+        Err(WorldNameParseError::InvalidJson)
+    );
+}
 ```
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [ ] **Step 2: テストを実行する**
 
-Run: `cargo test -p vrc-photon-core world_name::tests::rejects_a_name_with_a_tab_or_carriage_return world_name::tests::accepts_a_name_at_the_limit`
-Expected: 制御文字テストが FAIL（実装がタブ/CRを許可している場合）
+Run: `cargo test -p vrc-photon-core world_name::tests::accepts_a_name_at_the_limit world_name::tests::accepts_a_name_without_an_id world_name::tests::reports_the_specific_parse_error`
+Expected: PASS。FAIL した場合は Task 2 のパーサを修正する（長さ比較は `>`、`id` なしは受理、各分岐は対応する `WorldNameParseError` を返す）。
 
-- [ ] **Step 3: 最小実装を追加**
+- [ ] **Step 3: パーサの境界条件を確認する**
 
-`parse_world_name_response` の検証に `char::is_control()` を追加する。`backoff_seconds` は `60 * 2^(attempts-1)` を `MAX_BACKOFF_SECONDS` で cap する。`retry_after_seconds` は整数秒を1〜3600に clamp し、失敗時は60を返す。
+`parse_world_name_response` が `name.chars().count() > MAX_WORLD_NAME_CHARS` で拒否し、`id` が存在する場合だけ一致を要求し、各エラー分岐が対応する variant を返すことを確認する。制御文字の拒否は Task 2 の `rejects_invalid_world_names` で検証済みなので、ここでは追加しない。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [ ] **Step 4: 全パーサテストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-core world_name::tests`
 Expected: PASS
@@ -847,7 +867,7 @@ Expected: PASS
 
 ```bash
 git add crates/core/src/world_name.rs
-git commit -m "test(core): cover world name parsing and backoff limits"
+git commit -m "test(core): cover world name parser boundaries and error variants"
 ```
 
 ---
