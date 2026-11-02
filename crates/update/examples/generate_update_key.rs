@@ -1,7 +1,7 @@
 //! Generates an unencrypted minisign key pair for release signing.
 //!
 //! Usage:
-//! `cargo run -p vrc-photo-update --example generate_update_key -- <secret-key-path>`
+//! `cargo run -p vrc-photon-update --example generate_update_key -- <secret-key-path>`
 //!
 //! The secret key is written with mode 0600. Only the public key line is
 //! printed, so it can be appended to `packaging/update/keys.txt`.

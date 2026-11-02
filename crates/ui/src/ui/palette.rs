@@ -46,13 +46,13 @@ pub(crate) struct AccentColor {
 
 impl MainColor {
     pub(crate) fn label(&self) -> String {
-        vrc_photo_i18n::tr(self.label_key)
+        vrc_photon_i18n::tr(self.label_key)
     }
 }
 
 impl AccentColor {
     pub(crate) fn label(&self) -> String {
-        vrc_photo_i18n::tr(self.label_key)
+        vrc_photon_i18n::tr(self.label_key)
     }
 }
 

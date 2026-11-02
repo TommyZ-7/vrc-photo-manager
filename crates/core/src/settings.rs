@@ -217,13 +217,13 @@ pub struct DetectedPaths {
 
 /// Detects the standard VRChat photo and output-log locations.
 ///
-/// Environment variables `VRC_PHOTO_DIR` and `VRC_LOG_DIR` take precedence,
+/// Environment variables `VRC_PHOTON_DIR` and `VRC_LOG_DIR` take precedence,
 /// which keeps tests and non-standard installs simple.
 pub fn detect_vrchat_paths() -> DetectedPaths {
     let mut photo_roots = Vec::new();
     let mut log_dir = None;
 
-    if let Some(path) = std::env::var_os("VRC_PHOTO_DIR") {
+    if let Some(path) = std::env::var_os("VRC_PHOTON_DIR") {
         photo_roots.push(PathBuf::from(path));
     }
     if let Some(path) = std::env::var_os("VRC_LOG_DIR") {

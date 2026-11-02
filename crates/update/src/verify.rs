@@ -43,7 +43,7 @@ pub fn embedded_public_keys() -> Vec<String> {
 /// Public keys used for this build. Debug builds may override the list for
 /// local feed testing; release builds always use the embedded keys.
 pub fn effective_public_keys() -> Vec<String> {
-    let override_value = std::env::var("VRC_PHOTO_UPDATE_PUBLIC_KEY").ok();
+    let override_value = std::env::var("VRC_PHOTON_UPDATE_PUBLIC_KEY").ok();
     merge_public_keys(
         embedded_public_keys(),
         override_value,

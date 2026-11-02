@@ -7,10 +7,10 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::component::notification::NotificationType;
 use gpui_kit::*;
-use vrc_photo_core::model::{LibraryStats, PhotoSort, QueueStatus};
-use vrc_photo_core::settings::AppSettings;
-use vrc_photo_i18n::{tr, tr_args};
-use vrc_photo_ipc::{
+use vrc_photon_core::model::{LibraryStats, PhotoSort, QueueStatus};
+use vrc_photon_core::settings::AppSettings;
+use vrc_photon_i18n::{tr, tr_args};
+use vrc_photon_ipc::{
     Endpoint, Event as IpcEvent, JobStatus, Request as IpcRequest, ScanPhase as IpcScanPhase,
 };
 
@@ -95,7 +95,7 @@ fn scan_refresh_action(
 
 impl App {
     pub(crate) fn start_ipc(&mut self, cx: &mut Context<Self>) {
-        let Some(data_dir) = vrc_photo_core::data_dir() else {
+        let Some(data_dir) = vrc_photon_core::data_dir() else {
             return;
         };
         let endpoint = match Endpoint::for_data_dir(&data_dir) {
@@ -686,7 +686,7 @@ impl App {
             tracing::warn!(%error, "cannot load app settings");
             AppSettings::default()
         });
-        settings.language = vrc_photo_i18n::set_locale(&settings.language);
+        settings.language = vrc_photon_i18n::set_locale(&settings.language);
         let language_changed = settings.language != previous_language;
         self.settings = settings;
         if self.settings.thumbnail_spec() != previous_thumbnail_spec {

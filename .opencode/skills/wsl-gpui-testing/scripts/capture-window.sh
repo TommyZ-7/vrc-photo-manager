@@ -10,7 +10,7 @@
 #
 # Defaults:
 #   output: /tmp/opencode/wslg-window.png
-#   window: Windows process msrdc, title matching "VRC Photo Manager*"
+#   window: Windows process msrdc, title matching "VRC PhotoN*"
 set -euo pipefail
 
 OUT="${1:-/tmp/opencode/wslg-window.png}"

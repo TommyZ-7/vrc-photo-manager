@@ -13,11 +13,11 @@ use std::time::Duration;
 use chrono::Utc;
 use gpui_kit::component::notification::NotificationType;
 use gpui_kit::*;
-use vrc_photo_core::db::Db;
-use vrc_photo_core::model::{
+use vrc_photon_core::db::Db;
+use vrc_photon_core::model::{
     CompressionJob, DaemonError, DeletionCounts, DeletionRequest, LibraryStats, QueueStatus,
 };
-use vrc_photo_i18n::tr_args;
+use vrc_photon_i18n::tr_args;
 
 use crate::app::App;
 use crate::app::daemon::daemon_liveness;
@@ -353,8 +353,8 @@ mod tests {
     use super::{
         DeletionSnapshot, apply_deletion_snapshot, collect_live_snapshot, deletion_update,
     };
-    use vrc_photo_core::db::Db;
-    use vrc_photo_core::model::{
+    use vrc_photon_core::db::Db;
+    use vrc_photon_core::model::{
         DeletionCounts, DeletionReason, DeletionRequest, DeletionStatus, NewPhoto,
     };
 
@@ -364,7 +364,7 @@ mod tests {
 
         let snapshot = DeletionSnapshot {
             requests: Vec::new(),
-            counts: vrc_photo_core::model::DeletionCounts {
+            counts: vrc_photon_core::model::DeletionCounts {
                 pending: 1,
                 blocked: 2,
                 running: 0,
@@ -376,7 +376,7 @@ mod tests {
 
         let snapshot = DeletionSnapshot {
             requests: Vec::new(),
-            counts: vrc_photo_core::model::DeletionCounts {
+            counts: vrc_photon_core::model::DeletionCounts {
                 pending: 1,
                 blocked: 2,
                 running: 0,

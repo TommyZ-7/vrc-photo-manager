@@ -29,7 +29,7 @@ Issue / PR を歓迎します。English is welcome.
 2. `git worktree` で作業ブランチを切る。
 
    ```bash
-   git worktree add ../vrc-photo-manager-<topic> -b <type>/<topic>
+   git worktree add ../vrc-photon-<topic> -b <type>/<topic>
    ```
 
 3. 変更を実装し、ローカル検証を直列で実行する。

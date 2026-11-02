@@ -10,9 +10,9 @@ use std::path::PathBuf;
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::*;
-use vrc_photo_core::compressor;
-use vrc_photo_core::model::{CompressionProfile, MAX_JOB_RETRIES, MAX_PROFILE_NAME_CHARS};
-use vrc_photo_i18n::{tr, tr_args};
+use vrc_photon_core::compressor;
+use vrc_photon_core::model::{CompressionProfile, MAX_JOB_RETRIES, MAX_PROFILE_NAME_CHARS};
+use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::App;
 use crate::ui::components::release_confirmation;

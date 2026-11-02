@@ -201,7 +201,7 @@ fn handshake(reader: &mut BufReader<Stream>) -> Result<HelloInfo, IpcError> {
             request: Request::Hello {
                 protocol_version: PROTOCOL_VERSION,
                 client: ClientInfo {
-                    name: "vrc-photo-manager".to_string(),
+                    name: "vrc-photon".to_string(),
                     version: APP_VERSION.to_string(),
                 },
             },

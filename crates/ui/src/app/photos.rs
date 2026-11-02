@@ -13,10 +13,10 @@ use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::component::*;
 use gpui_kit::*;
-use vrc_photo_core::model::{DeletionJobSummary, DeletionReason, Photo};
-use vrc_photo_core::{preview, thumbnail};
-use vrc_photo_i18n::{tr, tr_args};
-use vrc_photo_ipc::Request as IpcRequest;
+use vrc_photon_core::model::{DeletionJobSummary, DeletionReason, Photo};
+use vrc_photon_core::{preview, thumbnail};
+use vrc_photon_i18n::{tr, tr_args};
+use vrc_photon_ipc::Request as IpcRequest;
 
 use crate::app::cli::log_timing;
 use crate::app::demo::demo_thumb_path;
@@ -1007,7 +1007,7 @@ fn deletion_warning_lines(summary: &DeletionJobSummary) -> Vec<String> {
 
 fn job_status_line(
     label: impl Into<String>,
-    counts: vrc_photo_core::model::JobStatusCounts,
+    counts: vrc_photon_core::model::JobStatusCounts,
 ) -> String {
     let label: String = label.into();
     if counts.total() == 0 {
@@ -1066,7 +1066,7 @@ mod tests {
     use super::{
         deletion_warning_heading, deletion_warning_lines, normalize_note, with_tag, without_tag,
     };
-    use vrc_photo_core::model::{DeletionJobSummary, JobStatusCounts};
+    use vrc_photon_core::model::{DeletionJobSummary, JobStatusCounts};
 
     #[test]
     fn deletion_warning_heading_counts_only_photos_with_jobs() {

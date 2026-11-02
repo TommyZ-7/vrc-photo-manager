@@ -21,10 +21,10 @@ impl Default for LaunchOptions {
     }
 }
 
-/// Timing probes stay silent unless `VRC_PHOTO_TIMING` is set.
+/// Timing probes stay silent unless `VRC_PHOTON_TIMING` is set.
 pub(crate) fn timing_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("VRC_PHOTO_TIMING").is_some())
+    *ENABLED.get_or_init(|| std::env::var_os("VRC_PHOTON_TIMING").is_some())
 }
 
 pub(crate) fn log_timing(label: &str, start: Instant) {

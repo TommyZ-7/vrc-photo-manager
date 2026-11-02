@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use regex::Regex;
-use vrc_photo_i18n::{DEFAULT_LOCALE, has_key};
+use vrc_photon_i18n::{DEFAULT_LOCALE, has_key};
 
 #[test]
 fn every_tr_key_exists_in_the_default_catalog() {

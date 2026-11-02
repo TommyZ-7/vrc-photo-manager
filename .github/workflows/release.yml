@@ -100,6 +100,13 @@ jobs:
       - name: Build Linux packages
         run: cargo packager --release
 
+      - name: Fix PKGBUILD package name
+        run: |
+          pkg_name=$(sed -n 's/^name = "\(.*\)"/\1/p' Packager.toml | head -n1)
+          test -n "$pkg_name"
+          sed -i "s/^pkgname=.*/pkgname=${pkg_name}/" dist/PKGBUILD
+          grep "^pkgname=" dist/PKGBUILD
+
       - name: Read package version
         id: package-version
         run: |
@@ -126,7 +133,7 @@ jobs:
             }
             rm -f /dist/*-debug-*.pkg.tar.zst
             ls -l /dist/*.pkg.tar.zst || true
-            pkg=$(find /dist -maxdepth 1 -type f -name "vrc-photo-manager-[0-9]*.pkg.tar.zst" -print -quit)
+            pkg=$(find /dist -maxdepth 1 -type f -name "vrc-photon-[0-9]*.pkg.tar.zst" -print -quit)
             printf "pkg=[%s]\n" "$pkg"
             test -n "$pkg"
             metadata=$(LC_ALL=C pacman -Qip "$pkg") || { echo "pacman -Qip failed for $pkg"; exit 1; }
@@ -134,7 +141,7 @@ jobs:
             name=$(printf "%s\n" "$metadata" | sed -n "s/^Name[[:space:]]*: //p")
             version=$(printf "%s\n" "$metadata" | sed -n "s/^Version[[:space:]]*: //p")
             arch=$(printf "%s\n" "$metadata" | sed -n "s/^Architecture[[:space:]]*: //p")
-            test "$name" = "vrc-photo-manager"
+            test "$name" = "vrc-photon"
             test "$version" = "${PACKAGE_VERSION}-1"
             test "$arch" = "x86_64"
             rm -rf /dist/src /dist/pkg
@@ -158,7 +165,7 @@ jobs:
           fi
 
           for notice in LICENSE LICENSE-LUCIDE; do
-            path="usr/lib/vrc-photo-manager/$notice"
+            path="usr/lib/vrc-photon/$notice"
             dpkg-deb --contents "$deb" | grep "$path\$" >/dev/null \
               || { echo "missing $notice in deb"; exit 1; }
             test -f "squashfs-root/$path" \
@@ -167,7 +174,7 @@ jobs:
               || { echo "missing $notice in pacman package"; exit 1; }
           done
 
-          helper="usr/bin/vrc-photo-updater"
+          helper="usr/bin/vrc-photon-updater"
           dpkg-deb --contents "$deb" | grep "$helper\$" >/dev/null \
             || { echo "missing $helper in deb"; exit 1; }
           test -f "squashfs-root/$helper" \
@@ -179,7 +186,7 @@ jobs:
       - name: Verify systemd user unit
         run: |
           set -euo pipefail
-          unit="usr/lib/systemd/user/vrc-photo-daemon.service"
+          unit="usr/lib/systemd/user/vrc-photon-daemon.service"
           deb=$(ls dist/*.deb)
           pacman=$(ls dist/*.tar.gz)
           tmp=$(mktemp -d)
@@ -190,32 +197,32 @@ jobs:
             || { echo "missing $unit in deb"; exit 1; }
           test -f "$tmp/pacman/$unit" \
             || { echo "missing $unit in pacman package"; exit 1; }
-          grep -qx 'ExecStart=/usr/bin/vrc-photo-daemon' "$tmp/deb/$unit" \
+          grep -qx 'ExecStart=/usr/bin/vrc-photon-daemon' "$tmp/deb/$unit" \
             || { echo "unexpected ExecStart in deb unit"; exit 1; }
-          grep -qx 'ExecStart=/usr/bin/vrc-photo-daemon' "$tmp/pacman/$unit" \
+          grep -qx 'ExecStart=/usr/bin/vrc-photon-daemon' "$tmp/pacman/$unit" \
             || { echo "unexpected ExecStart in pacman unit"; exit 1; }
           echo "systemd user unit verified"
 
       - name: Verify polkit policy
         run: |
           set -euo pipefail
-          policy="usr/share/polkit-1/actions/com.tommyz.vrc-photo-manager.update.policy"
+          policy="usr/share/polkit-1/actions/com.tommyz.vrc-photon.update.policy"
           deb=$(ls dist/*.deb)
-          pkg=$(ls dist/vrc-photo-manager-[0-9]*.pkg.tar.zst)
+          pkg=$(ls dist/vrc-photon-[0-9]*.pkg.tar.zst)
           tmp=$(mktemp -d)
           mkdir -p "$tmp/deb"
           dpkg-deb --extract "$deb" "$tmp/deb"
           test -f "$tmp/deb/$policy" \
             || { echo "missing $policy in deb"; exit 1; }
           grep -q 'org.freedesktop.policykit.exec.path' "$tmp/deb/$policy"
-          grep -q 'org.freedesktop.policykit.exec.path.*/usr/bin/vrc-photo-updater' "$tmp/deb/$policy" \
+          grep -q 'org.freedesktop.policykit.exec.path.*/usr/bin/vrc-photon-updater' "$tmp/deb/$policy" \
             || { echo "unexpected pkexec path in $policy"; exit 1; }
           docker run --rm -v "$PWD/dist:/dist" archlinux:base-devel bash -c "
             set -euo pipefail
             package=/dist/$(basename "$pkg")
             pacman -Qlp \"\$package\" | grep -q '$policy$'
             bsdtar -xOf \"\$package\" '$policy' \
-              | grep -q 'org.freedesktop.policykit.exec.path.*/usr/bin/vrc-photo-updater'
+              | grep -q 'org.freedesktop.policykit.exec.path.*/usr/bin/vrc-photon-updater'
           "
           echo "polkit policy verified"
 
@@ -268,8 +275,8 @@ jobs:
           $sevenZip = Join-Path $env:ProgramFiles "7-Zip\7z.exe"
           if (-not (Test-Path $sevenZip)) { throw "7-Zip not found" }
           $listing = & $sevenZip l $installer.FullName
-          if (-not ($listing | Select-String -Quiet 'vrc-photo-updater.exe')) {
-            throw "vrc-photo-updater.exe is missing from $($installer.Name)"
+          if (-not ($listing | Select-String -Quiet 'vrc-photon-updater.exe')) {
+            throw "vrc-photon-updater.exe is missing from $($installer.Name)"
           }
           Write-Host "update helper found in $($installer.Name)"
 
@@ -306,7 +313,7 @@ jobs:
           merge-multiple: true
 
       - name: Build release tool (without the signing secret)
-        run: cargo build -p vrc-photo-release-tool --bin vrc-photo-update-manifest
+        run: cargo build -p vrc-photon-release-tool --bin vrc-photon-update-manifest
 
       - name: Sign artifacts and build the update manifest
         env:
@@ -323,7 +330,7 @@ jobs:
           esac
           VERSION="${TAG#v}"
           CARGO_VERSION=$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "vrc-photo-ui") | .version')
+            | jq -r '.packages[] | select(.name == "vrc-photon-ui") | .version')
           PACKAGER_VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Packager.toml | head -n1)
           if [ "$VERSION" != "$CARGO_VERSION" ] || [ "$VERSION" != "$PACKAGER_VERSION" ]; then
             echo "tag $TAG does not match Cargo ($CARGO_VERSION) and Packager ($PACKAGER_VERSION)"
@@ -348,16 +355,16 @@ jobs:
             PUB_ARGS+=(--public-key "$key")
           done
 
-          ./target/debug/vrc-photo-update-manifest sign --key "$KEY" --dist dist
-          ./target/debug/vrc-photo-update-manifest verify "${PUB_ARGS[@]}" --dist dist
-          ./target/debug/vrc-photo-update-manifest generate \
+          ./target/debug/vrc-photon-update-manifest sign --key "$KEY" --dist dist
+          ./target/debug/vrc-photon-update-manifest verify "${PUB_ARGS[@]}" --dist dist
+          ./target/debug/vrc-photon-update-manifest generate \
             --dist dist \
             --tag "$TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --notes-url "https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}" \
             --output dist/latest.json
-          ./target/debug/vrc-photo-update-manifest sign --key "$KEY" --file dist/latest.json
-          ./target/debug/vrc-photo-update-manifest verify "${PUB_ARGS[@]}" --file dist/latest.json
+          ./target/debug/vrc-photon-update-manifest sign --key "$KEY" --file dist/latest.json
+          ./target/debug/vrc-photon-update-manifest verify "${PUB_ARGS[@]}" --file dist/latest.json
           jq -e '.schema == 1 and (.platforms | length == 2) and (.system_packages | length == 2) and (.system_packages | has("pacman") and has("deb")) and (.system_packages.pacman.format == "pacman") and (.system_packages.deb.format == "deb")' dist/latest.json
 
       - name: Publish release (tags only)

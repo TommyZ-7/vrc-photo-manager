@@ -3,8 +3,8 @@
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::ButtonVariant;
 use gpui_kit::*;
-use vrc_photo_core::model::{DeletionReason, DeletionRequest, DeletionStatus};
-use vrc_photo_i18n::{tr, tr_args};
+use vrc_photon_core::model::{DeletionReason, DeletionRequest, DeletionStatus};
+use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::App;
 
@@ -158,7 +158,7 @@ mod tests {
         DeletionActions, deletion_actions, deletion_blocked_label, deletion_reason_label,
         deletion_status_label,
     };
-    use vrc_photo_core::model::{DeletionReason, DeletionRequest, DeletionStatus};
+    use vrc_photon_core::model::{DeletionReason, DeletionRequest, DeletionStatus};
 
     #[test]
     fn unknown_reason_is_visible_and_hides_unusable_actions() {

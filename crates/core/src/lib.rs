@@ -1,4 +1,4 @@
-//! Domain, storage, and ingestion logic for VRC Photo Manager.
+//! Domain, storage, and ingestion logic for VRC PhotoN.
 //!
 //! The core crate is intentionally free of UI and process concerns so that the
 //! daemon and the gpui application can share it.
@@ -24,14 +24,14 @@ pub mod time;
 pub use db::Db;
 pub use error::{CoreError, Result};
 
-pub const APP_NAME: &str = "VRC Photo Manager";
+pub const APP_NAME: &str = "VRC PhotoN";
 pub const DB_FILE_NAME: &str = "library.db";
 
 /// Returns the per-user data directory for the application.
 pub fn data_dir() -> Option<std::path::PathBuf> {
     dirs::data_local_dir()
         .or_else(dirs::data_dir)
-        .map(|dir| dir.join("vrc-photo-manager"))
+        .map(|dir| dir.join("vrc-photon"))
 }
 
 /// Returns the default SQLite path.

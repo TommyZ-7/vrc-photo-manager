@@ -8,8 +8,8 @@ use chrono::{DateTime, Local, Utc};
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
 use semver::Version;
-use vrc_photo_i18n::{tr, tr_args};
-use vrc_photo_update::{
+use vrc_photon_i18n::{tr, tr_args};
+use vrc_photon_update::{
     ApplyJob, ApplyKind, AvailableUpdate, FeedConfig, InstallKind, IoOperation, LastErrorCode,
     LastResult, LastStatus, NativeString, UpdateError, UpdatePaths, UreqClient, check, download,
     start_apply,
@@ -21,7 +21,7 @@ use crate::app::daemon::{open_path, restart_daemon_after_update, start_daemon};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vrc_photo_update::{InstallKind, LastResult, LastStatus, PackageFamily};
+    use vrc_photon_update::{InstallKind, LastResult, LastStatus, PackageFamily};
 
     fn appimage() -> InstallKind {
         InstallKind::AppImage {
@@ -125,7 +125,7 @@ mod tests {
             notes_url: None,
             asset: None,
             public_keys: Vec::new(),
-            signed_manifest: vrc_photo_update::SignedManifest {
+            signed_manifest: vrc_photon_update::SignedManifest {
                 bytes: Vec::new(),
                 signature: String::new(),
             },
@@ -141,7 +141,7 @@ mod tests {
             notes_url: None,
             asset: None,
             public_keys: Vec::new(),
-            signed_manifest: vrc_photo_update::SignedManifest {
+            signed_manifest: vrc_photon_update::SignedManifest {
                 bytes: Vec::new(),
                 signature: String::new(),
             },
@@ -302,7 +302,7 @@ mod tests {
 
     #[test]
     fn explains_update_io_failures_by_operation() {
-        use vrc_photo_update::IoOperation;
+        use vrc_photon_update::IoOperation;
 
         let cases = [
             (UpdateError::HelperMissing, "更新ヘルパーが見つかりません"),
@@ -384,7 +384,7 @@ mod tests {
                 family: PackageFamily::Pacman,
                 managed: true,
             }),
-            Some("sudo pacman -Syu vrc-photo-manager")
+            Some("sudo pacman -Syu vrc-photon")
         );
         assert_eq!(package_command(&appimage()), None);
     }
@@ -419,11 +419,11 @@ impl UpdateText {
     }
 
     fn message(&self) -> String {
-        self.message_in(&vrc_photo_i18n::current_locale())
+        self.message_in(&vrc_photon_i18n::current_locale())
     }
 
     fn message_in(&self, locale: &str) -> String {
-        vrc_photo_i18n::tr_args_in(locale, self.key, &self.args)
+        vrc_photon_i18n::tr_args_in(locale, self.key, &self.args)
     }
 }
 
@@ -519,18 +519,18 @@ pub(crate) struct UpdateNotice {
 
 impl UpdateNotice {
     pub(crate) fn message(&self) -> String {
-        self.message_in(&vrc_photo_i18n::current_locale())
+        self.message_in(&vrc_photon_i18n::current_locale())
     }
 
     pub(crate) fn message_in(&self, locale: &str) -> String {
         match self.kind {
-            UpdateNoticeKind::Success => vrc_photo_i18n::tr_args_in(
+            UpdateNoticeKind::Success => vrc_photon_i18n::tr_args_in(
                 locale,
                 "update.notice.success",
                 &[("version", self.version.clone())],
             ),
             UpdateNoticeKind::RolledBack => match &self.reason {
-                Some(reason) => vrc_photo_i18n::tr_args_in(
+                Some(reason) => vrc_photon_i18n::tr_args_in(
                     locale,
                     "update.notice.rolled_back",
                     &[
@@ -538,7 +538,7 @@ impl UpdateNotice {
                         ("reason", reason.clone()),
                     ],
                 ),
-                None => vrc_photo_i18n::tr_args_in(
+                None => vrc_photon_i18n::tr_args_in(
                     locale,
                     "update.notice.rolled_back_no_reason",
                     &[("version", self.version.clone())],
@@ -546,38 +546,38 @@ impl UpdateNotice {
             },
             UpdateNoticeKind::Failed => match self.code {
                 Some(LastErrorCode::AuthCancelled) => {
-                    vrc_photo_i18n::tr_in(locale, "update.notice.auth_cancelled")
+                    vrc_photon_i18n::tr_in(locale, "update.notice.auth_cancelled")
                 }
                 Some(LastErrorCode::AuthUnavailable) => {
-                    vrc_photo_i18n::tr_in(locale, "update.notice.auth_unavailable")
+                    vrc_photon_i18n::tr_in(locale, "update.notice.auth_unavailable")
                 }
                 Some(LastErrorCode::PackageManagerLocked) => {
-                    vrc_photo_i18n::tr_in(locale, "update.notice.package_locked")
+                    vrc_photon_i18n::tr_in(locale, "update.notice.package_locked")
                 }
                 Some(LastErrorCode::PackageManagerFailed) => {
-                    vrc_photo_i18n::tr_in(locale, "update.notice.package_failed")
+                    vrc_photon_i18n::tr_in(locale, "update.notice.package_failed")
                 }
                 Some(LastErrorCode::PackageVerificationFailed) => {
-                    vrc_photo_i18n::tr_in(locale, "update.error.package_verify")
+                    vrc_photon_i18n::tr_in(locale, "update.error.package_verify")
                 }
                 Some(LastErrorCode::PackageMetadataMismatch) => {
-                    vrc_photo_i18n::tr_in(locale, "update.notice.package_mismatch")
+                    vrc_photon_i18n::tr_in(locale, "update.notice.package_mismatch")
                 }
                 Some(LastErrorCode::Downgrade) => {
-                    vrc_photo_i18n::tr_in(locale, "update.notice.downgrade")
+                    vrc_photon_i18n::tr_in(locale, "update.notice.downgrade")
                 }
                 Some(LastErrorCode::HealthCheckFailed) => {
-                    vrc_photo_i18n::tr_in(locale, "update.notice.health_failed")
+                    vrc_photon_i18n::tr_in(locale, "update.notice.health_failed")
                 }
                 Some(LastErrorCode::InstallOutcomeUnknown)
                 | Some(LastErrorCode::HelperFailed)
                 | None => match &self.reason {
-                    Some(reason) => vrc_photo_i18n::tr_args_in(
+                    Some(reason) => vrc_photon_i18n::tr_args_in(
                         locale,
                         "update.notice.failed",
                         &[("reason", reason.clone())],
                     ),
-                    None => vrc_photo_i18n::tr_in(locale, "update.notice.failed_no_reason"),
+                    None => vrc_photon_i18n::tr_in(locale, "update.notice.failed_no_reason"),
                 },
             },
         }
@@ -621,9 +621,9 @@ impl UpdateState {
         let install = if demo {
             InstallKind::Development
         } else {
-            vrc_photo_update::install_kind()
+            vrc_photon_update::install_kind()
         };
-        let data_dir = vrc_photo_core::data_dir();
+        let data_dir = vrc_photon_core::data_dir();
         let last_result = if demo || !database_ok {
             None
         } else {
@@ -635,12 +635,12 @@ impl UpdateState {
             .as_ref()
             .is_some_and(|result| result.code == Some(LastErrorCode::AuthUnavailable));
         let system_apply_available = install.system_package_apply(
-            vrc_photo_update::pkexec_available(),
-            vrc_photo_update::system_helper_available(),
-            vrc_photo_update::system_policy_available(),
+            vrc_photon_update::pkexec_available(),
+            vrc_photon_update::system_helper_available(),
+            vrc_photon_update::system_policy_available(),
         ) && !auth_unavailable;
         let notice = last_result
-            .and_then(|result| result_notice(&result, vrc_photo_update::CURRENT_VERSION));
+            .and_then(|result| result_notice(&result, vrc_photon_update::CURRENT_VERSION));
         let (tx, rx) = async_channel::unbounded();
         Self {
             phase: UpdatePhase::Idle,
@@ -715,10 +715,10 @@ impl UpdateState {
             .ok_or_else(|| tr!("update.error.data_dir"))?;
         let paths = UpdatePaths::new(data_dir);
         paths.ensure().map_err(|error| error.to_string())?;
-        vrc_photo_update::helper::write_health_marker(
+        vrc_photon_update::helper::write_health_marker(
             &paths,
             token,
-            vrc_photo_update::CURRENT_VERSION,
+            vrc_photon_update::CURRENT_VERSION,
             self.db_path.as_deref(),
         )
         .map_err(|error| error.to_string())
@@ -835,7 +835,7 @@ impl App {
             .spawn(move || {
                 let client = UreqClient::new(cfg!(debug_assertions));
                 let feed = FeedConfig::from_env();
-                let Ok(current) = Version::parse(vrc_photo_update::CURRENT_VERSION) else {
+                let Ok(current) = Version::parse(vrc_photon_update::CURRENT_VERSION) else {
                     let _ = tx.send_blocking(UpdateMessage::Checked {
                         manual,
                         result: Err(UpdateText::key("update.error.version_parse")),
@@ -1013,7 +1013,7 @@ impl App {
             return;
         }
         if let Some(data_dir) = self.update.data_dir.as_deref()
-            && vrc_photo_update::helper::apply_in_progress(&UpdatePaths::new(data_dir))
+            && vrc_photon_update::helper::apply_in_progress(&UpdatePaths::new(data_dir))
         {
             self.toast_warning(tr!("update.error.in_progress"), cx);
             cx.notify();
@@ -1072,9 +1072,9 @@ impl App {
             _ => (None, None),
         };
         let job = ApplyJob {
-            schema: vrc_photo_update::APPLY_SCHEMA,
+            schema: vrc_photon_update::APPLY_SCHEMA,
             kind,
-            from_version: vrc_photo_update::CURRENT_VERSION.to_string(),
+            from_version: vrc_photon_update::CURRENT_VERSION.to_string(),
             to_version: update.version.to_string(),
             target,
             staged,
@@ -1111,7 +1111,7 @@ impl App {
                 && let Err(error) = cx
                     .background_executor()
                     .spawn(async move {
-                        ipc_bridge::request(endpoint, vrc_photo_ipc::Request::Shutdown)
+                        ipc_bridge::request(endpoint, vrc_photon_ipc::Request::Shutdown)
                     })
                     .await
             {
@@ -1270,7 +1270,7 @@ impl App {
             )
             .child(self.meta_row(
                 tr!("update.current_version"),
-                format!("v{}", vrc_photo_update::CURRENT_VERSION),
+                format!("v{}", vrc_photon_update::CURRENT_VERSION),
             ))
             .child(self.meta_row(
                 tr!("update.install_kind"),
@@ -1628,7 +1628,7 @@ fn appimage_writable(install: &InstallKind) -> bool {
     let Some(parent) = path.parent() else {
         return false;
     };
-    let probe = parent.join(format!(".vrc-photo-write-test-{}", std::process::id()));
+    let probe = parent.join(format!(".vrc-photon-write-test-{}", std::process::id()));
     match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1650,9 +1650,9 @@ fn install_label(install: &InstallKind) -> String {
         }
         InstallKind::WindowsOther => tr!("update.install.windows_manual"),
         InstallKind::SystemPackage { family, .. } => match family {
-            vrc_photo_update::PackageFamily::Deb => "deb".to_string(),
-            vrc_photo_update::PackageFamily::Pacman => "pacman".to_string(),
-            vrc_photo_update::PackageFamily::Unknown => tr!("update.install.linux_package"),
+            vrc_photon_update::PackageFamily::Deb => "deb".to_string(),
+            vrc_photon_update::PackageFamily::Pacman => "pacman".to_string(),
+            vrc_photon_update::PackageFamily::Unknown => tr!("update.install.linux_package"),
         },
         InstallKind::Development => tr!("update.install.development"),
     }

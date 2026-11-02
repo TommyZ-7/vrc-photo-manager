@@ -7940,7 +7940,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
-name = "vrc-photo-core"
+name = "vrc-photon-core"
 version = "0.9.2"
 dependencies = [
  "blake3",
@@ -7966,7 +7966,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "vrc-photo-daemon"
+name = "vrc-photon-daemon"
 version = "0.9.2"
 dependencies = [
  "anyhow",
@@ -7984,14 +7984,14 @@ dependencies = [
  "tracing-subscriber",
  "trash",
  "tray-icon",
- "vrc-photo-core",
- "vrc-photo-i18n",
- "vrc-photo-ipc",
+ "vrc-photon-core",
+ "vrc-photon-i18n",
+ "vrc-photon-ipc",
  "windows 0.62.2",
 ]
 
 [[package]]
-name = "vrc-photo-i18n"
+name = "vrc-photon-i18n"
 version = "0.9.2"
 dependencies = [
  "regex",
@@ -8000,7 +8000,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "vrc-photo-ipc"
+name = "vrc-photon-ipc"
 version = "0.9.2"
 dependencies = [
  "interprocess",
@@ -8012,7 +8012,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "vrc-photo-release-tool"
+name = "vrc-photon-release-tool"
 version = "0.9.2"
 dependencies = [
  "anyhow",
@@ -8026,11 +8026,11 @@ dependencies = [
  "sha2 0.11.1",
  "tempfile",
  "url",
- "vrc-photo-update",
+ "vrc-photon-update",
 ]
 
 [[package]]
-name = "vrc-photo-ui"
+name = "vrc-photon-ui"
 version = "0.9.2"
 dependencies = [
  "anyhow",
@@ -8047,14 +8047,14 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "trash",
- "vrc-photo-core",
- "vrc-photo-i18n",
- "vrc-photo-ipc",
- "vrc-photo-update",
+ "vrc-photon-core",
+ "vrc-photon-i18n",
+ "vrc-photon-ipc",
+ "vrc-photon-update",
 ]
 
 [[package]]
-name = "vrc-photo-update"
+name = "vrc-photon-update"
 version = "0.9.2"
 dependencies = [
  "base64 0.23.1",

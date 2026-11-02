@@ -77,7 +77,7 @@ pub fn run_helper(job_path: &Path) -> Result<()> {
 
 /// Whether the user-mode helper may run under this effective uid.
 ///
-/// The polkit policy lets `/usr/bin/vrc-photo-updater` run with arbitrary
+/// The polkit policy lets `/usr/bin/vrc-photon-updater` run with arbitrary
 /// arguments, so a root `--apply` would turn the job file into an arbitrary
 /// file replacement primitive.
 pub fn user_mode_allowed(euid: u32) -> bool {
@@ -596,7 +596,7 @@ pub(crate) struct TempPackage {
 impl TempPackage {
     fn create(dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(dir).map_err(|error| UpdateError::io(dir, error))?;
-        let path = dir.join(format!("vrc-photo-update-{}.pkg", uuid::Uuid::new_v4()));
+        let path = dir.join(format!("vrc-photon-update-{}.pkg", uuid::Uuid::new_v4()));
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -877,7 +877,7 @@ pub(crate) fn run_system_package_from_job(job: &ApplyJob, options: &HelperOption
         }
     };
     let metadata = read_package_metadata(family, temp.path(), options)?;
-    if metadata.name != "vrc-photo-manager" {
+    if metadata.name != "vrc-photon" {
         return Err(UpdateError::PackageMetadataMismatch(format!(
             "unexpected package name {}",
             metadata.name
@@ -1228,7 +1228,7 @@ fn apply_windows(paths: &UpdatePaths, job: &ApplyJob) -> Result<PathBuf> {
     let backup = paths.backup_dir(&job.from_version);
     std::fs::create_dir_all(&backup)
         .map_err(|error| UpdateError::io_at(IoOperation::Apply, &backup, error))?;
-    for name in ["vrc-photo-manager.exe", "vrc-photo-daemon.exe"] {
+    for name in ["vrc-photon.exe", "vrc-photon-daemon.exe"] {
         let source = install_dir.join(name);
         if source.is_file() {
             std::fs::copy(&source, backup.join(name))
@@ -1272,7 +1272,7 @@ fn apply_windows(paths: &UpdatePaths, job: &ApplyJob) -> Result<PathBuf> {
 
 #[cfg(windows)]
 fn restore_windows(backup: &Path, install_dir: &Path) -> Result<()> {
-    for name in ["vrc-photo-manager.exe", "vrc-photo-daemon.exe"] {
+    for name in ["vrc-photon.exe", "vrc-photon-daemon.exe"] {
         let source = backup.join(name);
         if source.is_file() {
             let target = install_dir.join(name);
@@ -1318,7 +1318,7 @@ fn launch_command(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     if let Some(token) = health_token {
-        command.env("VRC_PHOTO_HEALTH_TOKEN", token);
+        command.env("VRC_PHOTON_HEALTH_TOKEN", token);
     }
     command
 }
@@ -2003,7 +2003,7 @@ mod tests {
             vec![std::ffi::OsStr::new("--demo")]
         );
         assert!(command.get_envs().any(|(key, value)| {
-            key == std::ffi::OsStr::new("VRC_PHOTO_HEALTH_TOKEN")
+            key == std::ffi::OsStr::new("VRC_PHOTON_HEALTH_TOKEN")
                 && value == Some(std::ffi::OsStr::new("token"))
         }));
     }
@@ -2633,12 +2633,12 @@ mod tests {
             PackageFamily::Pacman => (
                 "pacman",
                 &b"fake pacman package"[..],
-                format!("vrc-photo-manager-{version}-1-x86_64.pkg.tar.zst"),
+                format!("vrc-photon-{version}-1-x86_64.pkg.tar.zst"),
             ),
             PackageFamily::Deb => (
                 "deb",
                 &b"fake deb package"[..],
-                format!("vrc-photo-manager_{version}_amd64.deb"),
+                format!("vrc-photon_{version}_amd64.deb"),
             ),
             PackageFamily::Unknown => unreachable!(),
         };
@@ -2686,7 +2686,7 @@ mod tests {
             kind: ApplyKind::SystemPackage { family },
             from_version: "0.3.0".to_string(),
             to_version: version.to_string(),
-            target: "/usr/bin/vrc-photo-manager".into(),
+            target: "/usr/bin/vrc-photon".into(),
             staged,
             signature: base64::engine::general_purpose::STANDARD.encode(asset_signature.as_bytes()),
             sha256: hex::encode(Sha256::digest(package)),
@@ -2933,7 +2933,7 @@ mod tests {
         let (job, mut options) = system_package_fixture(dir.path(), &next_version());
         options.pacman_path = Some(fake_pacman(
             dir.path(),
-            "Name            : vrc-photo-manager\nVersion         : 0.3.0-1",
+            "Name            : vrc-photon\nVersion         : 0.3.0-1",
             0,
             "",
         ));
@@ -2969,8 +2969,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let version = next_version();
         let (job, mut options) = system_package_fixture(dir.path(), &version);
-        let metadata =
-            format!("Name            : vrc-photo-manager\nVersion         : {version}-1");
+        let metadata = format!("Name            : vrc-photon\nVersion         : {version}-1");
         options.pacman_path = Some(fake_pacman(
             dir.path(),
             &metadata,
@@ -2989,8 +2988,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let version = next_version();
         let (job, mut options) = system_package_fixture(dir.path(), &version);
-        let metadata =
-            format!("Name            : vrc-photo-manager\nVersion         : {version}-1");
+        let metadata = format!("Name            : vrc-photon\nVersion         : {version}-1");
         options.pacman_path = Some(fake_pacman(
             dir.path(),
             &metadata,
@@ -3012,18 +3010,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let version = next_version();
         let (job, mut options) = system_package_fixture(dir.path(), &version);
-        let metadata =
-            format!("Name            : vrc-photo-manager\nVersion         : {version}-1");
+        let metadata = format!("Name            : vrc-photon\nVersion         : {version}-1");
         options.pacman_path = Some(fake_pacman(dir.path(), &metadata, 0, ""));
         run_system_package_from_job(&job, &options).unwrap();
         let metadata_args =
             std::fs::read_to_string(dir.path().join("pacman-metadata-args.log")).unwrap();
         assert!(metadata_args.contains("-Qip"));
-        assert!(metadata_args.contains("vrc-photo-update-"));
+        assert!(metadata_args.contains("vrc-photon-update-"));
         assert!(!metadata_args.contains("downloads"));
         let args = std::fs::read_to_string(dir.path().join("pacman-args.log")).unwrap();
         assert!(args.contains("-U --noconfirm"));
-        assert!(args.contains("vrc-photo-update-"));
+        assert!(args.contains("vrc-photon-update-"));
     }
 
     #[cfg(unix)]
@@ -3032,8 +3029,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let version = next_version();
         let (job, mut options) = system_package_fixture(dir.path(), &version);
-        let metadata =
-            format!("Name            : vrc-photo-manager\nVersion         : {version}-1");
+        let metadata = format!("Name            : vrc-photon\nVersion         : {version}-1");
         options.pacman_path = Some(fake_pacman(dir.path(), &metadata, 0, ""));
         let job_file = dir.path().join("job.json");
         std::fs::write(&job_file, serde_json::to_vec(&job).unwrap()).unwrap();
@@ -3041,11 +3037,11 @@ mod tests {
         let metadata_args =
             std::fs::read_to_string(dir.path().join("pacman-metadata-args.log")).unwrap();
         assert!(metadata_args.contains("-Qip"));
-        assert!(metadata_args.contains("vrc-photo-update-"));
+        assert!(metadata_args.contains("vrc-photon-update-"));
         assert!(!metadata_args.contains("downloads"));
         let args = std::fs::read_to_string(dir.path().join("pacman-args.log")).unwrap();
         assert!(args.contains("-U --noconfirm"));
-        assert!(args.contains("vrc-photo-update-"));
+        assert!(args.contains("vrc-photon-update-"));
     }
 
     #[cfg(unix)]
@@ -3055,17 +3051,17 @@ mod tests {
         let version = next_version();
         let (job, mut options) =
             system_package_fixture_for(PackageFamily::Deb, dir.path(), &version);
-        let metadata = format!("Package: vrc-photo-manager\nVersion: {version}");
+        let metadata = format!("Package: vrc-photon\nVersion: {version}");
         options.dpkg_deb_path = Some(fake_dpkg_deb(dir.path(), &metadata));
         options.dpkg_path = Some(fake_dpkg(dir.path(), 0, ""));
         run_system_package_from_job(&job, &options).unwrap();
         let metadata_args = std::fs::read_to_string(dir.path().join("dpkg-deb-args.log")).unwrap();
         assert!(metadata_args.contains("-f"));
-        assert!(metadata_args.contains("vrc-photo-update-"));
+        assert!(metadata_args.contains("vrc-photon-update-"));
         assert!(!metadata_args.contains("downloads"));
         let args = std::fs::read_to_string(dir.path().join("dpkg-args.log")).unwrap();
         assert!(args.contains("-i "));
-        assert!(args.contains("vrc-photo-update-"));
+        assert!(args.contains("vrc-photon-update-"));
     }
 
     #[cfg(unix)]
@@ -3075,7 +3071,7 @@ mod tests {
         let version = next_version();
         let (job, mut options) =
             system_package_fixture_for(PackageFamily::Deb, dir.path(), &version);
-        let metadata = format!("Package: vrc-photo-manager\nVersion: {version}-1");
+        let metadata = format!("Package: vrc-photon\nVersion: {version}-1");
         options.dpkg_deb_path = Some(fake_dpkg_deb(dir.path(), &metadata));
         options.dpkg_path = Some(fake_dpkg(
             dir.path(),
@@ -3095,7 +3091,7 @@ mod tests {
         let version = next_version();
         let (job, mut options) =
             system_package_fixture_for(PackageFamily::Deb, dir.path(), &version);
-        let metadata = format!("Package: vrc-photo-manager\nVersion: {version}");
+        let metadata = format!("Package: vrc-photon\nVersion: {version}");
         options.dpkg_deb_path = Some(fake_dpkg_deb(dir.path(), &metadata));
         options.dpkg_path = Some(fake_dpkg(
             dir.path(),
@@ -3124,7 +3120,7 @@ mod tests {
         write_script(
             &dpkg_deb,
             &format!(
-                "#!/bin/sh\nprintf '%s|%s' \"$LC_ALL\" \"$1\" > \"{}\"\nprintf 'Package: vrc-photo-manager\\nVersion: {version}\\n'\n",
+                "#!/bin/sh\nprintf '%s|%s' \"$LC_ALL\" \"$1\" > \"{}\"\nprintf 'Package: vrc-photon\\nVersion: {version}\\n'\n",
                 metadata_log.display()
             ),
         );
@@ -3236,7 +3232,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (mut job, options) = system_package_fixture(dir.path(), &next_version());
         let sentinel = dir.path().join("old-ran");
-        let target = dir.path().join("vrc-photo-manager");
+        let target = dir.path().join("vrc-photon");
         std::fs::write(
             &target,
             format!("#!/bin/sh\nprintf old > '{}'\n", sentinel.display()),
@@ -3273,7 +3269,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (mut job, mut options) = system_package_fixture(dir.path(), &next_version());
         let sentinel = dir.path().join("old-ran");
-        let target = dir.path().join("vrc-photo-manager");
+        let target = dir.path().join("vrc-photon");
         std::fs::write(
             &target,
             format!("#!/bin/sh\nprintf old > '{}'\n", sentinel.display()),
@@ -3345,7 +3341,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (mut job, _options) = system_package_fixture(dir.path(), &next_version());
         let sentinel = dir.path().join("relaunched");
-        let target = dir.path().join("vrc-photo-manager");
+        let target = dir.path().join("vrc-photon");
         std::fs::write(
             &target,
             format!("#!/bin/sh\nprintf ok > '{}'\n", sentinel.display()),

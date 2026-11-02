@@ -1,9 +1,9 @@
 use std::thread;
 use std::time::Duration;
 
-use vrc_photo_i18n::{tr, tr_args};
-use vrc_photo_ipc::client::{self, IpcError, Subscription};
-use vrc_photo_ipc::{Endpoint, Event, Request, Response, StatusSnapshot};
+use vrc_photon_i18n::{tr, tr_args};
+use vrc_photon_ipc::client::{self, IpcError, Subscription};
+use vrc_photon_ipc::{Endpoint, Event, Request, Response, StatusSnapshot};
 
 /// Messages sent from the IPC subscription thread to the GPUI task.
 #[derive(Clone, Debug, PartialEq)]
@@ -105,8 +105,8 @@ mod tests {
     use super::*;
     use std::io::BufReader;
     use std::time::Duration;
-    use vrc_photo_ipc::server::Listener;
-    use vrc_photo_ipc::{
+    use vrc_photon_ipc::server::Listener;
+    use vrc_photon_ipc::{
         Event, Request, RequestEnvelope, Response, ServerMessage, StatusSnapshot, framing,
     };
 
@@ -114,7 +114,7 @@ mod tests {
         ServerMessage::Response {
             id,
             response: Response::Hello {
-                protocol_version: vrc_photo_ipc::PROTOCOL_VERSION,
+                protocol_version: vrc_photon_ipc::PROTOCOL_VERSION,
                 daemon_version: "test".to_string(),
                 pid: 1,
                 status: StatusSnapshot::default(),
@@ -125,7 +125,7 @@ mod tests {
     #[test]
     fn bridge_delivers_connected_then_event() {
         let dir = tempfile::tempdir().unwrap();
-        let endpoint = vrc_photo_ipc::Endpoint::for_tests(dir.path());
+        let endpoint = vrc_photon_ipc::Endpoint::for_tests(dir.path());
         let listener = Listener::bind(endpoint.clone()).unwrap();
         let server = std::thread::spawn(move || {
             let stream = listener.accept().unwrap();
@@ -180,7 +180,7 @@ mod tests {
     #[test]
     fn protocol_mismatch_reports_the_update_message() {
         let dir = tempfile::tempdir().unwrap();
-        let endpoint = vrc_photo_ipc::Endpoint::for_tests(dir.path());
+        let endpoint = vrc_photon_ipc::Endpoint::for_tests(dir.path());
         let listener = Listener::bind(endpoint.clone()).unwrap();
         let server = std::thread::spawn(move || {
             let stream = listener.accept().unwrap();
@@ -191,7 +191,7 @@ mod tests {
                 &ServerMessage::Response {
                     id: hello.id,
                     response: Response::Hello {
-                        protocol_version: vrc_photo_ipc::PROTOCOL_VERSION + 1,
+                        protocol_version: vrc_photon_ipc::PROTOCOL_VERSION + 1,
                         daemon_version: "test".to_string(),
                         pid: 1,
                         status: StatusSnapshot::default(),
@@ -215,13 +215,13 @@ mod tests {
     #[test]
     fn request_round_trips_and_maps_daemon_errors() {
         let dir = tempfile::tempdir().unwrap();
-        let endpoint = vrc_photo_ipc::Endpoint::for_tests(dir.path());
+        let endpoint = vrc_photon_ipc::Endpoint::for_tests(dir.path());
         let listener = Listener::bind(endpoint.clone()).unwrap();
         let server = std::thread::spawn(move || {
             for response in [
                 Response::Ok,
                 Response::Error {
-                    code: vrc_photo_ipc::ErrorCode::InvalidRequest,
+                    code: vrc_photon_ipc::ErrorCode::InvalidRequest,
                     message: "nope".to_string(),
                 },
             ] {
@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn bridge_reports_disconnected_without_a_daemon() {
         let dir = tempfile::tempdir().unwrap();
-        let endpoint = vrc_photo_ipc::Endpoint::for_tests(dir.path());
+        let endpoint = vrc_photon_ipc::Endpoint::for_tests(dir.path());
         let (tx, rx) = async_channel::unbounded();
         start(endpoint, tx);
         match rx.recv_blocking().unwrap() {

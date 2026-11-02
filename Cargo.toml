@@ -14,7 +14,7 @@ members = [
 version = "0.9.2"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/TommyZ7/vrc-photo-manager"
+repository = "https://github.com/TommyZ7/vrc-photon"
 authors = ["TommyZ7"]
 
 [workspace.dependencies]

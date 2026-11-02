@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Launch the vrc-photo-manager UI in WSL.
+# Launch the vrc-photon UI in WSL.
 #
 # Usage:
 #   launch.sh [--dzn] [--release] [-- <app args>]
@@ -41,10 +41,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-BIN="${VRC_BIN:-$ROOT/target/$PROFILE/vrc-photo-manager}"
+BIN="${VRC_BIN:-$ROOT/target/$PROFILE/vrc-photon}"
 if [[ ! -x "$BIN" ]]; then
   echo "binary not found: $BIN" >&2
-  echo "build it first: CARGO_TARGET_DIR=$ROOT/target cargo build -p vrc-photo-ui" >&2
+  echo "build it first: CARGO_TARGET_DIR=$ROOT/target cargo build -p vrc-photon-ui" >&2
   exit 1
 fi
 
@@ -71,7 +71,7 @@ done
 
 echo "launching $BIN (dzn=$USE_DZN, profile=$PROFILE)" >&2
 if [[ "$has_demo" -eq 0 ]]; then
-  echo "note: non-demo launch starts vrc-photo-daemon from the binary directory" >&2
+  echo "note: non-demo launch starts vrc-photon-daemon from the binary directory" >&2
 fi
 
 exec "$BIN" "${ARGS[@]}"
