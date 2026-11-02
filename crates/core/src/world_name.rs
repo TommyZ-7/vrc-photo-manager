@@ -203,4 +203,42 @@ mod tests {
         let body = serde_json::json!({"id": "wrld_test", "name": long});
         assert!(parse_world_name_response(body.to_string().as_bytes(), "wrld_test").is_err());
     }
+
+    #[test]
+    fn accepts_a_name_at_the_limit() {
+        let name = "x".repeat(MAX_WORLD_NAME_CHARS);
+        let body = serde_json::json!({"id": "wrld_test", "name": name.clone()});
+        assert_eq!(
+            parse_world_name_response(body.to_string().as_bytes(), "wrld_test"),
+            Ok(name)
+        );
+    }
+
+    #[test]
+    fn accepts_a_name_without_an_id() {
+        assert_eq!(
+            parse_world_name_response(br#"{"name":"Test"}"#, "wrld_test"),
+            Ok("Test".to_string())
+        );
+    }
+
+    #[test]
+    fn reports_the_specific_parse_error() {
+        assert_eq!(
+            parse_world_name_response(br#"{"id":"wrld_test","name":""}"#, "wrld_test"),
+            Err(WorldNameParseError::EmptyName)
+        );
+        assert_eq!(
+            parse_world_name_response(br#"{"id":"wrld_test"}"#, "wrld_test"),
+            Err(WorldNameParseError::MissingName)
+        );
+        assert_eq!(
+            parse_world_name_response(br#"{"id":"other","name":"Test"}"#, "wrld_test"),
+            Err(WorldNameParseError::WorldIdMismatch)
+        );
+        assert_eq!(
+            parse_world_name_response(br#"not json"#, "wrld_test"),
+            Err(WorldNameParseError::InvalidJson)
+        );
+    }
 }
