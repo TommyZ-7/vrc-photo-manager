@@ -1,0 +1,22 @@
+# Third-Party Notices
+
+VRC PhotoN がバイナリに含むサードパーティ製クレートと、そのライセンス文を列挙する。
+このファイルは cargo-about で生成する。手で編集しないこと。
+再生成: `cargo about generate about.hbs -o packaging/licenses/THIRD-PARTY-NOTICES.md`
+
+## 概要
+
+| ライセンス | 名称 | クレート数 |
+|---|---|---:|
+{{#each overview}}| {{id}} | {{{name}}} | {{count}} |
+{{/each}}
+{{#each licenses}}
+{{#if first_of_kind}}
+## {{{name}}} ({{id}})
+{{/if}}
+### {{#each used_by}}{{{crate.name}}} {{{crate.version}}}{{#unless @last}}, {{/unless}}{{/each}}
+
+```
+{{{text}}}
+```
+{{/each}}
