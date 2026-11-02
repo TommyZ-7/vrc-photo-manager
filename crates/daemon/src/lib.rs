@@ -29,15 +29,13 @@ use vrc_photon_core::settings::{AppSettings, detect_vrchat_paths};
 use vrc_photon_core::thumbnail;
 use vrc_photon_ipc::{Endpoint, Event, JobStatus, Operation, ScanPhase as IpcScanPhase};
 
-// The daemon starts this worker thread in the next change; until then only the
-// tests in this module call it.
-#[allow(dead_code)]
 mod discord;
 mod discord_http;
 mod ipc_server;
 mod signals;
 mod tray;
 mod vrchat_process;
+use discord_http::UreqTransport;
 use ipc_server::{EventBus, IpcControl, IpcServer, status_snapshot};
 use signals::{JobSignal, WakeSignal};
 use tray::{Tray, TrayAction};
@@ -67,6 +65,7 @@ pub struct DaemonStatus {
     pub last_log: Option<String>,
     pub photo_count: i64,
     pub pending_jobs: i64,
+    pub pending_sends: i64,
     pub scanning: bool,
     pub scan_phase: Option<vrc_photon_ipc::ScanPhase>,
     pub scan_processed: usize,
@@ -208,6 +207,7 @@ pub struct Daemon {
     running: Arc<AtomicBool>,
     wake: Arc<WakeSignal>,
     jobs: Arc<JobSignal>,
+    sends: Arc<JobSignal>,
     events: EventBus,
     ipc_endpoint: Option<Endpoint>,
     ipc: Option<IpcServer>,
@@ -234,6 +234,7 @@ pub struct Daemon {
     thumbnail_tx: Option<mpsc::Sender<i64>>,
     thumbnail_handle: Option<JoinHandle<()>>,
     hash_handle: Option<JoinHandle<()>>,
+    send_handle: Option<JoinHandle<()>>,
     owns_deletion_executor: bool,
     deletion_handle: Option<JoinHandle<()>>,
     last_autostart_check: std::time::Instant,
@@ -367,6 +368,7 @@ impl Daemon {
             running: Arc::new(AtomicBool::new(true)),
             wake: Arc::new(WakeSignal::default()),
             jobs: Arc::new(JobSignal::default()),
+            sends: Arc::new(JobSignal::default()),
             events: EventBus::default(),
             ipc_endpoint,
             ipc: None,
@@ -386,6 +388,7 @@ impl Daemon {
             thumbnail_tx: None,
             thumbnail_handle: None,
             hash_handle: None,
+            send_handle: None,
             owns_deletion_executor,
             deletion_handle: None,
             last_autostart_check: std::time::Instant::now(),
@@ -918,6 +921,7 @@ impl Daemon {
             status: self.status.clone(),
             wake: self.wake.clone(),
             jobs: self.jobs.clone(),
+            sends: self.sends.clone(),
             events: self.events.clone(),
             thumbnail_dir: self.thumbnail_dir.clone(),
             thumbnail_cache_epoch: self.thumbnail_cache_epoch.clone(),
@@ -1620,12 +1624,14 @@ impl Daemon {
         };
         let photo_count = db.count_photos()?;
         let pending_jobs = db.count_jobs(QueueStatus::Pending)?;
+        let pending_sends = db.count_pending_sends()?;
         let mut status = self.status.lock().unwrap();
         status.watching = self.settings.log_dir.is_some();
         status.world_name = world_name;
         status.players = players;
         status.photo_count = photo_count;
         status.pending_jobs = pending_jobs;
+        status.pending_sends = pending_sends;
         status.last_log = self
             .log_tail
             .as_ref()
@@ -1922,6 +1928,19 @@ impl Daemon {
                 .expect("cannot spawn deletion worker");
             self.deletion_handle = Some(handle);
         }
+        if self.send_handle.is_none() {
+            let db = self.db.clone();
+            let running = self.running.clone();
+            let sends = self.sends.clone();
+            let events = self.events.clone();
+            let handle = thread::Builder::new()
+                .name("discord-send".to_string())
+                .spawn(move || {
+                    discord::worker_loop(db, running, sends, events, Arc::new(UreqTransport::new()))
+                })
+                .expect("cannot spawn Discord send worker");
+            self.send_handle = Some(handle);
+        }
         if !self.workers.is_empty() {
             return;
         }
@@ -1942,6 +1961,7 @@ impl Daemon {
     fn stop_workers(&mut self) {
         self.running.store(false, Ordering::Relaxed);
         self.jobs.notify();
+        self.sends.notify();
         self.thumbnail_tx = None;
         if let Some(handle) = self.thumbnail_handle.take()
             && handle.join().is_err()
@@ -1958,6 +1978,11 @@ impl Daemon {
         {
             tracing::error!("deletion worker panicked");
         }
+        if let Some(handle) = self.send_handle.take()
+            && handle.join().is_err()
+        {
+            tracing::error!("Discord send worker panicked");
+        }
         for (index, handle) in self.workers.drain(..).enumerate() {
             if handle.join().is_err() {
                 tracing::error!(worker = index, "compression worker panicked");
@@ -1969,6 +1994,7 @@ impl Daemon {
         self.ipc = None;
         self.running.store(false, Ordering::Relaxed);
         self.wake.notify();
+        self.sends.notify();
         if let Some(mut tail) = self.log_tail.take() {
             let db = self.db.lock().unwrap();
             let now = chrono::Utc::now().timestamp();
@@ -6871,6 +6897,31 @@ mod tests {
             supervisor_label(None, Some(std::ffi::OsStr::new("42")), 42),
             "app"
         );
+    }
+
+    #[test]
+    fn daemon_status_reports_pending_sends() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = manual_test_daemon(&dir);
+        daemon.scan_photos().unwrap();
+        let photo = {
+            let db = daemon.db.lock().unwrap();
+            db.list_photos(1, 0, vrc_photon_core::model::PhotoSort::Newest)
+                .unwrap()[0]
+                .id
+        };
+        {
+            let db = daemon.db.lock().unwrap();
+            db.enqueue_send(
+                photo,
+                vrc_photon_core::model::SendKind::Photo,
+                vrc_photon_core::model::SendOrigin::Manual,
+                vrc_photon_core::model::SendStatus::Pending,
+            )
+            .unwrap();
+        }
+        daemon.refresh_status().unwrap();
+        assert_eq!(daemon.status.lock().unwrap().pending_sends, 1);
     }
 
     #[test]

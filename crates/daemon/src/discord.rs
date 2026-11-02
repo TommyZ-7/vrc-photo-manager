@@ -26,7 +26,7 @@ use vrc_photon_core::settings::{AppSettings, load_discord_webhook};
 use vrc_photon_i18n::tr;
 use vrc_photon_ipc::Event;
 
-use crate::discord_http::{SendImage, SendOutcome, SendRequest, SendTransport, UreqTransport};
+use crate::discord_http::{SendImage, SendOutcome, SendRequest, SendTransport};
 use crate::ipc_server::EventBus;
 use crate::signals::JobSignal;
 
@@ -308,11 +308,6 @@ pub(crate) fn ipc_send_status(status: SendStatus) -> vrc_photon_ipc::SendStatus 
         SendStatus::Cancelled => vrc_photon_ipc::SendStatus::Cancelled,
         SendStatus::Unknown => vrc_photon_ipc::SendStatus::Unknown,
     }
-}
-
-/// The production transport used by the daemon's send worker thread.
-pub(crate) fn default_transport() -> Arc<dyn SendTransport> {
-    Arc::new(UreqTransport::new())
 }
 
 pub(crate) fn worker_loop(
