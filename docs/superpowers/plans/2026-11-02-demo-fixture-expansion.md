@@ -241,7 +241,15 @@ Implement `demo_fixture` with this algorithm:
 
 Add `fn local_stamp(date: NaiveDate, hour: u32, minute: u32) -> LocalStamp`:
 build the naive time, call `time::from_naive`, and on `None` add one hour and
-retry (at most 24 times) so DST gaps do not drop or panic the fixture.
+retry (at most 24 times) so DST gaps do not drop or panic the fixture. Split
+out `local_stamp_with(..., convert: impl FnMut(NaiveDateTime) -> Option<LocalStamp>)`
+so the retry branch can be tested with an injected converter; keep the hour
+formula modulo 23 so a one-hour shift stays inside the day.
+
+Also add `fixture_keeps_every_photo_inside_its_intended_month` (pair each
+photo with the expected `YYYY-MM` from `month_start`) and
+`local_stamp_moves_forward_over_a_dst_gap` (inject `None` once, then convert
+the next hour).
 
 - [x] **Step 4: Run the fixture tests**
 

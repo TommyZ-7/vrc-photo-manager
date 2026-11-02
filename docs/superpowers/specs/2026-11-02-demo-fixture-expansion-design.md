@@ -56,9 +56,10 @@ The DB schema and the production import path do not change.
 - Within a month, the day is spread evenly with
   `1 + (index * days_in_month / count + month_offset) % days_in_month`.
   Hours and minutes use deterministic modular arithmetic over 24h/60m.
-  Invalid local times (DST gaps) are moved forward by one hour. The current
-  month uses `reference.day()` as its day count so demo photos never land in
-  the future.
+  Invalid local times (DST gaps) are moved forward by one hour. Hours stay
+  below 23 so a one-hour shift cannot roll into the next day or month. The
+  current month uses `reference.day()` as its day count so demo photos never
+  land in the future.
 - Eight worlds and eight player names keep their current values. A linked
   photo's world starts at `(month_offset + index_in_month) % 8`; players
   start at `(month_offset * 2 + index_in_month) % 8` and number 3-7.
@@ -97,8 +98,9 @@ The DB schema and the production import path do not change.
 ## Tests
 
 - Pure fixture tests (new `demo_fixture` module): 300 photos, 36
-  contiguous months, 5-13 per month, day/time spread, deterministic
-  output, and exact favorite/compressed/unlinked counts.
+  contiguous months, 5-13 per month, day/time spread, intended-month
+  containment, DST-gap forward movement, deterministic output, and exact
+  favorite/compressed/unlinked counts.
 - DB integration test in `demo.rs`: seed into a temporary directory with
   a pinned reference date, then verify `count_photos`, 36 distinct
   `captured_month` values, year buckets, a single-month date-range count,
