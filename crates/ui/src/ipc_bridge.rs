@@ -141,6 +141,7 @@ mod tests {
                     response: Response::Subscribed {
                         status: StatusSnapshot {
                             photo_count: 5,
+                            pending_sends: 0,
                             ..StatusSnapshot::default()
                         },
                     },

@@ -213,6 +213,9 @@ impl App {
             IpcEvent::DaemonErrorChanged { .. } => {
                 self.reload_job_state(cx);
             }
+            IpcEvent::SendProgress { .. } => {
+                // TODO(#142, task 13): reload the send history here.
+            }
             IpcEvent::StatusChanged { status } => {
                 if crate::app::daemon::status_snapshot_is_newer(
                     status.version,

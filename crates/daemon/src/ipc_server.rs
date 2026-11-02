@@ -92,6 +92,7 @@ pub(crate) fn status_snapshot(status: &mut DaemonStatus) -> StatusSnapshot {
         scan_roots: status.scan_roots,
         photo_count: status.photo_count,
         pending_jobs: status.pending_jobs,
+        pending_sends: 0,
         version: status.version,
     }
 }
@@ -235,6 +236,17 @@ fn handle_connection(
             Request::WakeJobs => {
                 control.jobs.notify();
                 write_response(reader.get_mut(), id, Response::Ok)?;
+            }
+            Request::WakeSends => {
+                // TODO(#142, task 10): notify the send worker once it exists.
+                write_response(
+                    reader.get_mut(),
+                    id,
+                    Response::Error {
+                        code: ErrorCode::InvalidRequest,
+                        message: "wake_sends not wired".to_string(),
+                    },
+                )?;
             }
             Request::SetPaused { paused } => {
                 control.set_paused(paused);
