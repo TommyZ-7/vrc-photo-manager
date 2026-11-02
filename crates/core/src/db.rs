@@ -13,8 +13,8 @@ use crate::model::{
     DeletionBlockers, DeletionCounts, DeletionJobSummary, DeletionReason, DeletionRequest,
     DeletionStatus, Derivative, JobStatusCounts, LibraryRoot, LibraryStats, MAX_JOB_RETRIES,
     MAX_PROFILE_NAME_CHARS, NewPhoto, Photo, PhotoContext, PhotoFilter, PhotoIndexEntry,
-    PhotoPlayer, PhotoSort, PhotoStatus, PhotoTextFilter, QueueStatus, Session, SessionPlayer,
-    World,
+    PhotoPlayer, PhotoSort, PhotoStatus, PhotoTextFilter, QueueStatus, SendKind, SendOrigin,
+    SendOutboxEntry, SendSource, SendStatus, Session, SessionPlayer, World,
 };
 
 const SCHEMA_V1: &str = r#"
@@ -257,6 +257,40 @@ const SCHEMA_V9_JOB_PHOTO_PROFILE_INDEX: &str = "CREATE INDEX IF NOT EXISTS idx_
 const SCHEMA_V10_MESSAGE_KEY: &str = "ALTER TABLE daemon_errors ADD COLUMN message_key TEXT;";
 const SCHEMA_V10_MESSAGE_ARGS: &str = "ALTER TABLE daemon_errors ADD COLUMN message_args TEXT;";
 
+const SCHEMA_V11_SEND_OUTBOX: &str = r#"
+CREATE TABLE IF NOT EXISTS send_outbox (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    photo_id           INTEGER REFERENCES photos(id),
+    kind               TEXT NOT NULL,   -- photo | test
+    origin             TEXT NOT NULL,   -- manual | auto
+    status             TEXT NOT NULL,   -- waiting | pending | processing | sent | failed | cancelled
+    source             TEXT,            -- original | profile | derivative
+    profile_id         TEXT,
+    destination        TEXT,
+    attempts           INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at    INTEGER,
+    discord_message_id TEXT,
+    discord_channel_id TEXT,
+    discord_guild_id   TEXT,
+    error_code         TEXT,
+    error_detail       TEXT,
+    created_at         TEXT NOT NULL,
+    started_at         TEXT,
+    finished_at        TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_send_outbox_active_photo
+    ON send_outbox(photo_id)
+    WHERE photo_id IS NOT NULL
+      AND status IN ('waiting', 'pending', 'processing');
+
+CREATE INDEX IF NOT EXISTS idx_send_outbox_due
+    ON send_outbox(status, next_attempt_at, id);
+
+CREATE INDEX IF NOT EXISTS idx_send_outbox_photo
+    ON send_outbox(photo_id);
+"#;
+
 const PHOTO_SELECT: &str = "p.id, p.root_id, p.rel_path, p.abs_path, p.file_name, \
     p.captured_at_utc, p.captured_at_local, p.tz_offset_sec, p.width, p.height, \
     p.file_size, p.mtime, p.blake3, p.status, p.is_favorite, p.note, \
@@ -387,6 +421,9 @@ impl Db {
         }
         if version < 10 {
             self.migrate_v10()?;
+        }
+        if version < 11 {
+            self.migrate_v11()?;
         }
         Ok(())
     }
@@ -657,6 +694,27 @@ impl Db {
             params![now_string()],
         )?;
         tx.pragma_update(None, "user_version", 10)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Adds the durable Discord send outbox. The table and indexes use
+    /// `IF NOT EXISTS`, so the step is safe to retry after a crash between the
+    /// DDL and `user_version`.
+    fn migrate_v11(&self) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version >= 11 {
+            tx.commit()?;
+            return Ok(());
+        }
+
+        tx.execute_batch(SCHEMA_V11_SEND_OUTBOX)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (11, ?1)",
+            params![now_string()],
+        )?;
+        tx.pragma_update(None, "user_version", 11)?;
         tx.commit()?;
         Ok(())
     }
@@ -2668,6 +2726,130 @@ impl Db {
         Ok(count)
     }
 
+    // ---------- send outbox ----------
+
+    /// Columns read for every `send_outbox` row, in `row_to_send_outbox` order.
+    const SEND_COLUMNS: &str = "id, photo_id, kind, origin, status, source, profile_id, \
+        destination, attempts, next_attempt_at, discord_message_id, discord_channel_id, \
+        discord_guild_id, error_code, error_detail, created_at, started_at, finished_at";
+
+    /// Queues a photo send unless the photo is being deleted or another active
+    /// send already exists. The partial `idx_send_outbox_active_photo` index is
+    /// what dedupes active rows; `INSERT OR IGNORE` turns that conflict into a
+    /// quiet `None`.
+    pub fn enqueue_send(
+        &self,
+        photo_id: i64,
+        kind: SendKind,
+        origin: SendOrigin,
+        status: SendStatus,
+    ) -> Result<Option<i64>> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO send_outbox(photo_id, kind, origin, status, created_at) \
+             SELECT ?1, ?2, ?3, ?4, ?5 \
+             WHERE EXISTS (SELECT 1 FROM photos WHERE id = ?1 AND status <> 'deleting')",
+            params![
+                photo_id,
+                kind.as_str(),
+                origin.as_str(),
+                status.as_str(),
+                now_string()
+            ],
+        )?;
+        if self.conn.changes() == 0 {
+            return Ok(None);
+        }
+        Ok(Some(self.conn.last_insert_rowid()))
+    }
+
+    /// Queues a webhook test send. Test rows have no photo, so they are never
+    /// covered by the per-photo dedupe index.
+    pub fn enqueue_test_send(&self) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO send_outbox(photo_id, kind, origin, status, created_at) \
+             VALUES (NULL, 'test', 'manual', 'pending', ?1)",
+            params![now_string()],
+        )?;
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Atomically claims the oldest due pending send. `now` is epoch seconds;
+    /// `next_attempt_at` is compared against it and left untouched.
+    pub fn claim_next_send(&self, now: i64) -> Result<Option<SendOutboxEntry>> {
+        let sql = format!(
+            "UPDATE send_outbox SET status = 'processing', started_at = ?1 \
+             WHERE id = ( \
+                 SELECT id FROM send_outbox \
+                 WHERE status = 'pending' \
+                   AND (next_attempt_at IS NULL OR next_attempt_at <= ?2) \
+                 ORDER BY id LIMIT 1 \
+             ) \
+             RETURNING {}",
+            Self::SEND_COLUMNS
+        );
+        let entry = self
+            .conn
+            .query_row(&sql, params![now_string(), now], row_to_send_outbox)
+            .optional()?;
+        Ok(entry)
+    }
+
+    /// Delays the next claim of `id` until the given epoch second.
+    pub fn set_send_next_attempt(&self, id: i64, next_attempt_at: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE send_outbox SET next_attempt_at = ?1 WHERE id = ?2",
+            params![next_attempt_at, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn send_entry_by_id(&self, id: i64) -> Result<Option<SendOutboxEntry>> {
+        let sql = format!(
+            "SELECT {} FROM send_outbox WHERE id = ?1",
+            Self::SEND_COLUMNS
+        );
+        let entry = self
+            .conn
+            .query_row(&sql, params![id], row_to_send_outbox)
+            .optional()?;
+        Ok(entry)
+    }
+
+    /// Returns the active (`waiting` / `pending` / `processing`) row for a
+    /// photo, if any. The partial UNIQUE index guarantees at most one.
+    pub fn active_send_for_photo(&self, photo_id: i64) -> Result<Option<SendOutboxEntry>> {
+        let sql = format!(
+            "SELECT {} FROM send_outbox WHERE photo_id = ?1 \
+             AND status IN ('waiting', 'pending', 'processing') ORDER BY id LIMIT 1",
+            Self::SEND_COLUMNS
+        );
+        let entry = self
+            .conn
+            .query_row(&sql, params![photo_id], row_to_send_outbox)
+            .optional()?;
+        Ok(entry)
+    }
+
+    /// Counts work a user still expects to start: waiting and pending sends.
+    pub fn count_pending_sends(&self) -> Result<i64> {
+        let count = self.conn.query_row(
+            "SELECT COUNT(*) FROM send_outbox WHERE status IN ('waiting', 'pending')",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Counts only sends held in automatic `waiting` mode.
+    pub fn count_waiting_sends(&self) -> Result<i64> {
+        let count = self.conn.query_row(
+            "SELECT COUNT(*) FROM send_outbox WHERE status = 'waiting'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
     // ---------- daemon errors and commands ----------
 
     /// Records a daemon failure for `operation`, replacing any previous
@@ -3121,6 +3303,31 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<CompressionJob> {
     })
 }
 
+fn row_to_send_outbox(row: &Row<'_>) -> rusqlite::Result<SendOutboxEntry> {
+    Ok(SendOutboxEntry {
+        id: row.get(0)?,
+        photo_id: row.get(1)?,
+        kind: SendKind::parse(&row.get::<_, String>(2)?),
+        origin: SendOrigin::parse(&row.get::<_, String>(3)?),
+        status: SendStatus::parse(&row.get::<_, String>(4)?),
+        source: row
+            .get::<_, Option<String>>(5)?
+            .map(|value| SendSource::parse(&value)),
+        profile_id: row.get(6)?,
+        destination: row.get(7)?,
+        attempts: row.get(8)?,
+        next_attempt_at: row.get(9)?,
+        discord_message_id: row.get(10)?,
+        discord_channel_id: row.get(11)?,
+        discord_guild_id: row.get(12)?,
+        error_code: row.get(13)?,
+        error_detail: row.get(14)?,
+        created_at: row.get(15)?,
+        started_at: row.get(16)?,
+        finished_at: row.get(17)?,
+    })
+}
+
 fn row_to_deletion_request(row: &Row<'_>) -> rusqlite::Result<DeletionRequest> {
     Ok(DeletionRequest {
         id: row.get(0)?,
@@ -3306,7 +3513,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
     }
 
     #[test]
@@ -3352,7 +3559,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
         let author_columns: i64 = db
             .conn
             .query_row(
@@ -3404,7 +3611,7 @@ mod tests {
             }
             for handle in handles {
                 let opened = handle.join().unwrap();
-                assert_eq!(opened.unwrap().unwrap(), 10);
+                assert_eq!(opened.unwrap().unwrap(), 11);
             }
         }
     }
@@ -3416,7 +3623,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
         let has_output_dir: bool = db
             .conn
             .query_row(
@@ -3436,7 +3643,7 @@ mod tests {
             .connection()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
         let table: i64 = db
             .connection()
             .query_row(
@@ -4106,7 +4313,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
 
         let recorded: i64 = db
             .conn
@@ -4149,7 +4356,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
         let retry_column: i64 = db
             .conn
             .query_row(
@@ -4216,7 +4423,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
 
         let jobs = db.list_jobs(10).unwrap();
         assert_eq!(jobs.len(), 1);
@@ -4249,7 +4456,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
         assert_eq!(db.list_jobs(10).unwrap()[0].retry_count, 2);
 
         let tables: i64 = db
@@ -5283,6 +5490,185 @@ mod tests {
             .unwrap();
         assert!(has_key);
         assert!(has_args);
+    }
+
+    #[test]
+    fn migration_v11_adds_send_outbox() {
+        let db = Db::open_in_memory().unwrap();
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 11);
+        let exists: bool = db
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='send_outbox')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(exists);
+    }
+
+    #[test]
+    fn migration_v11_is_retryable() {
+        let db = Db::open_in_memory().unwrap();
+        db.conn.pragma_update(None, "user_version", 10).unwrap();
+        db.migrate_v11().unwrap();
+        db.migrate_v11().unwrap();
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 11);
+    }
+
+    #[test]
+    fn enqueue_send_dedupes_active_rows_and_allows_resend_after_terminal() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        let id = db
+            .enqueue_send(
+                photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(
+            db.enqueue_send(
+                photo,
+                SendKind::Photo,
+                SendOrigin::Auto,
+                SendStatus::Pending
+            )
+            .unwrap()
+            .is_none()
+        );
+        // Task 3 owns `cancel_send`; mark the row terminal directly so this
+        // test stays focused on the partial UNIQUE index.
+        db.conn
+            .execute(
+                "UPDATE send_outbox SET status = 'cancelled', finished_at = ?1 WHERE id = ?2",
+                params![now_string(), id],
+            )
+            .unwrap();
+        let again = db
+            .enqueue_send(
+                photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap();
+        assert!(again.is_some());
+    }
+
+    #[test]
+    fn enqueue_send_rejects_a_deleting_photo() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        db.request_deletion(&[photo], DeletionReason::Manual, false)
+            .unwrap();
+        assert!(
+            db.enqueue_send(
+                photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn claim_next_send_respects_status_and_next_attempt() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        let id = db
+            .enqueue_send(
+                photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        db.set_send_next_attempt(id, 200).unwrap();
+        assert!(db.claim_next_send(100).unwrap().is_none());
+        let claimed = db.claim_next_send(200).unwrap().unwrap();
+        assert_eq!(claimed.id, id);
+        assert_eq!(claimed.status, SendStatus::Processing);
+        assert!(db.claim_next_send(300).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_send_has_no_photo() {
+        let db = Db::open_in_memory().unwrap();
+        let id = db.enqueue_test_send().unwrap();
+        let entry = db.send_entry_by_id(id).unwrap().unwrap();
+        assert_eq!(entry.kind, SendKind::Test);
+        assert_eq!(entry.photo_id, None);
+    }
+
+    #[test]
+    fn send_counts_and_active_lookup_follow_statuses() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        let other = seed_other_photo(&db);
+        assert!(db.active_send_for_photo(photo).unwrap().is_none());
+
+        let waiting = db
+            .enqueue_send(
+                photo,
+                SendKind::Photo,
+                SendOrigin::Auto,
+                SendStatus::Waiting,
+            )
+            .unwrap()
+            .unwrap();
+        let pending = db
+            .enqueue_send(
+                other,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(db.count_waiting_sends().unwrap(), 1);
+        assert_eq!(db.count_pending_sends().unwrap(), 2);
+        assert_eq!(
+            db.active_send_for_photo(photo).unwrap().unwrap().id,
+            waiting
+        );
+
+        db.claim_next_send(100).unwrap();
+        assert_eq!(db.count_waiting_sends().unwrap(), 1);
+        assert_eq!(db.count_pending_sends().unwrap(), 1);
+        assert_eq!(
+            db.active_send_for_photo(other).unwrap().unwrap().id,
+            pending
+        );
+
+        db.conn
+            .execute(
+                "UPDATE send_outbox SET status = 'sent' WHERE id = ?1",
+                params![waiting],
+            )
+            .unwrap();
+        assert!(db.active_send_for_photo(photo).unwrap().is_none());
+    }
+
+    #[test]
+    fn send_status_parse_keeps_unknown_values_distinct() {
+        assert_eq!(SendStatus::parse("future_state"), SendStatus::Unknown);
+        assert_eq!(SendStatus::Unknown.as_str(), "unknown");
+        assert!(!SendStatus::Unknown.is_terminal());
     }
 
     #[test]
