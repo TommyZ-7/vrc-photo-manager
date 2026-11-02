@@ -344,17 +344,37 @@ impl App {
             self.toast_info(tr!("compression.clipboard_copying"), cx);
             cx.notify();
             cx.spawn(async move |this, cx| {
-                let bytes = cx
+                let result = cx
                     .background_executor()
-                    .spawn(async move { compressor::render_clipboard_png(&source, &profile) })
+                    .spawn(async move {
+                        let png = compressor::render_clipboard_png(&source, &profile)
+                            .map_err(|error| error.to_string())?;
+                        #[cfg(any(target_os = "linux", target_os = "windows"))]
+                        {
+                            crate::clipboard::write_png(&png)?;
+                            Ok::<Vec<u8>, String>(png)
+                        }
+                        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+                        {
+                            Ok::<Vec<u8>, String>(png)
+                        }
+                    })
                     .await;
                 this.update(cx, |this, cx| {
-                    match bytes {
-                        Ok(bytes) => {
-                            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_image(
-                                &gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, bytes),
-                            ));
-                            this.toast_success(tr!("compression.clipboard_copied"), cx);
+                    match result {
+                        Ok(png) => {
+                            #[cfg(any(target_os = "linux", target_os = "windows"))]
+                            {
+                                let _ = png;
+                                this.toast_success(tr!("compression.clipboard_copied"), cx);
+                            }
+                            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+                            {
+                                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_image(
+                                    &gpui_kit::Image::from_bytes(gpui_kit::ImageFormat::Png, png),
+                                ));
+                                this.toast_success(tr!("compression.clipboard_copied"), cx);
+                            }
                         }
                         Err(error) => {
                             this.toast_error(

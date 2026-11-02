@@ -13,6 +13,8 @@ use crate::ui::actions::{
 };
 
 mod app;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod clipboard;
 mod ipc_bridge;
 mod logging;
 mod state;

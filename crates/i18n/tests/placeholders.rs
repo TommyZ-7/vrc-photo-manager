@@ -10,6 +10,17 @@ const CALL_SITES: &[(&str, &[&str])] = &[
     ("components.compression_warning.replace", &["count"]),
     ("compression.add_error", &["error"]),
     ("compression.clipboard_error", &["error"]),
+    ("compression.clipboard_decode", &["error"]),
+    (
+        "compression.clipboard_tool_failed",
+        &["detail", "program", "status"],
+    ),
+    ("compression.clipboard_tool_missing", &["program"]),
+    ("compression.clipboard_tool_spawn", &["error", "program"]),
+    ("compression.clipboard_tool_tempfile", &["error"]),
+    ("compression.clipboard_tool_timeout", &["millis", "program"]),
+    ("compression.clipboard_tool_wait", &["error", "program"]),
+    ("compression.clipboard_windows_failed", &["error", "step"]),
     ("compression.enqueue.failed_note", &["count"]),
     (
         "compression.enqueue.success",
