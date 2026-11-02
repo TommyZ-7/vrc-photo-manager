@@ -21,7 +21,7 @@
 - Do not change focus order, keyboard shortcuts, hit-testing semantics, database schema, or settings keys.
 - Preserve the current card/detail rounded-corner pattern: every image layer that needs rounded clipping carries its own `rounded(...)`.
 - Verify with `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace` before the final commit.
-- Visual checks use `cargo run -p vrc-photo-ui -- --demo` (or the existing local demo launch command) on GNOME Wayland.
+- Visual checks use `cargo run -p vrc-photon-ui -- --demo` (or the existing local demo launch command) on GNOME Wayland.
 
 ## Review Focus
 
@@ -167,7 +167,7 @@ fn motion_durations_are_ordered() {
 
 - [ ] **Step 2: Run the tests and verify they fail**
 
-Run: `cargo test -p vrc-photo-ui nav_index_matches_sidebar_order`
+Run: `cargo test -p vrc-photon-ui nav_index_matches_sidebar_order`
 Expected: compile error because `nav_index`, the constants, and the other helpers do not exist.
 
 - [ ] **Step 3: Add the motion constants**
@@ -216,7 +216,7 @@ fn viewer_image_rect(viewport: Size<Pixels>, details_open: bool, aspect: f32) ->
 
 - [ ] **Step 5: Run the tests and verify they pass**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: all tests pass, including the eight new ones.
 
 - [ ] **Step 6: Commit**
@@ -341,7 +341,7 @@ In `nav_tooltip()`, replace the index `match` with `nav_index(screen)` and wrap 
 
 - [ ] **Step 7: Run the regression suite**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: all tests pass.
 
 - [ ] **Step 8: Visual check**
@@ -417,7 +417,7 @@ v_flex()
 
 - [ ] **Step 4: Run the regression suite**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: all tests pass.
 
 - [ ] **Step 5: Visual check**
@@ -509,7 +509,7 @@ preview_frame = preview_frame.child(
 
 - [ ] **Step 5: Run the regression suite**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: all tests pass. This task has no visible change yet.
 
 - [ ] **Step 6: Commit**
@@ -567,7 +567,7 @@ fn viewer_morph_current_bounds_follows_the_timeline() {
 }
 ```
 
-Run: `cargo test -p vrc-photo-ui viewer_morph_current_bounds_follows_the_timeline`
+Run: `cargo test -p vrc-photon-ui viewer_morph_current_bounds_follows_the_timeline`
 Expected: compile error because the struct and enum do not exist.
 
 - [ ] **Step 2: Define the source enum and morph struct**
@@ -737,7 +737,7 @@ In `render()`, append `.child(self.viewer_morph_overlay())` after the quick-look
 
 - [ ] **Step 8: Run the test and regression suite**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: the new bounds test and all existing tests pass.
 
 - [ ] **Step 9: Visual check**
@@ -776,7 +776,7 @@ fn closing_prefers_the_original_source() {
 }
 ```
 
-Run: `cargo test -p vrc-photo-ui closing_prefers_the_original_source`
+Run: `cargo test -p vrc-photon-ui closing_prefers_the_original_source`
 Expected: PASS.
 
 - [ ] **Step 2: Capture the closing start rectangle**
@@ -839,7 +839,7 @@ In `viewer_morph_overlay()`:
 
 - [ ] **Step 6: Run the regression suite**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: all tests pass.
 
 - [ ] **Step 7: Visual check**
@@ -911,7 +911,7 @@ fn viewer_box_state_hits_both_details_ends() {
 }
 ```
 
-Run: `cargo test -p vrc-photo-ui viewer_box_state_interpolates_mixed_aspects`
+Run: `cargo test -p vrc-photon-ui viewer_box_state_interpolates_mixed_aspects`
 Expected: compile error because `ViewerBoxState` does not exist.
 
 - [ ] **Step 2: Add the state fields and `ViewerBoxState`**
@@ -1085,7 +1085,7 @@ In `close_quick_look()`, when no opening morph is in flight, replace the raw `vi
 
 - [ ] **Step 10: Run the tests and regression suite**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: both new box-state tests and all existing tests pass.
 
 - [ ] **Step 11: Visual check**
@@ -1130,7 +1130,7 @@ In `selection_bar()`:
 
 - [ ] **Step 4: Run the regression suite**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: all tests pass.
 
 - [ ] **Step 5: Visual check**
@@ -1209,7 +1209,7 @@ The badge mounts only while selected, so each selection plays the entrance. Dese
 
 - [ ] **Step 4: Run the regression suite**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: all tests pass.
 
 - [ ] **Step 5: Visual check**
@@ -1291,7 +1291,7 @@ If no fixes were needed, this task has no commit; the branch is ready.
 
 ```bash
 git fetch origin
-git worktree add ../vrc-photo-manager-docs-motion -b docs/motion-transitions origin/main
+git worktree add ../vrc-photon-docs-motion -b docs/motion-transitions origin/main
 ```
 
 Do not edit `main` in place.

@@ -4,7 +4,7 @@
 
 **Goal:** Make `thumbnail_cache_mb` a real disk cap by deleting the least recently used `thumbnails/<id>.webp` files at daemon startup and after thumbnail generation.
 
-**Architecture:** `vrc-photo-core` owns size accounting, mtime-based eviction, and access-time refresh. The daemon thumbnail worker runs eviction on startup, after a batch of generated thumbnails, when its queue goes idle, and immediately when the live limit changes. The UI refreshes cache mtime on a hit and asks core to regenerate once if a file disappears between the cache check and decode.
+**Architecture:** `vrc-photon-core` owns size accounting, mtime-based eviction, and access-time refresh. The daemon thumbnail worker runs eviction on startup, after a batch of generated thumbnails, when its queue goes idle, and immediately when the live limit changes. The UI refreshes cache mtime on a hit and asks core to regenerate once if a file disappears between the cache check and decode.
 
 **Tech Stack:** Rust 2024, `std::fs`, `AtomicU64`, existing SQLite settings, `tempfile` in tests.
 
@@ -180,7 +180,7 @@ fn prune_thumbnails_removes_every_entry_when_limit_is_below_one_file() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-core thumbnail`
+Run: `cargo test -p vrc-photon-core thumbnail`
 Expected: compile error because `prune_thumbnails_in`, `thumbnail_cache_usage_in`, and the report types do not exist.
 
 - [ ] **Step 3: Implement the cache scan and prune API**
@@ -207,7 +207,7 @@ Scan rules:
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-core thumbnail`
+Run: `cargo test -p vrc-photon-core thumbnail`
 Expected: all existing thumbnail tests plus the six `prune_thumbnails_*` tests and the usage test pass.
 
 - [ ] **Step 5: Commit**
@@ -267,7 +267,7 @@ fn refresh_thumbnail_access_leaves_a_recent_mtime_alone() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-core thumbnail`
+Run: `cargo test -p vrc-photon-core thumbnail`
 Expected: compile error because `refresh_thumbnail_access` does not exist.
 
 - [ ] **Step 3: Implement `refresh_thumbnail_access`**
@@ -276,7 +276,7 @@ Open with `fs::OpenOptions::new().write(true).open(path)`, read `metadata.modifi
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-core thumbnail`
+Run: `cargo test -p vrc-photon-core thumbnail`
 Expected: the two `refresh_thumbnail_access*` tests and all earlier thumbnail tests pass.
 
 - [ ] **Step 5: Commit**
@@ -388,7 +388,7 @@ Add `SystemTime` to the daemon test module imports if it is not already imported
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-daemon thumbnail`
+Run: `cargo test -p vrc-photon-daemon thumbnail`
 Expected: both tests compile but fail in `wait_for` because the daemon never prunes the cache.
 
 - [ ] **Step 3: Implement the limit field and settings plumbing**
@@ -424,14 +424,14 @@ In `thumbnail_loop`:
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-daemon thumbnail`
+Run: `cargo test -p vrc-photon-daemon thumbnail`
 Expected: `startup_prunes_thumbnail_cache_to_limit` and `live_thumbnail_limit_change_prunes_cache` pass, along with existing thumbnail-related daemon tests.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add crates/daemon/src/lib.rs
-cargo test -p vrc-photo-daemon thumbnail
+cargo test -p vrc-photon-daemon thumbnail
 git commit -m "feat: prune thumbnail cache from the daemon worker"
 ```
 
@@ -503,7 +503,7 @@ fn decode_thumbnail_refreshes_cached_access_time() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-ui decode_thumbnail`
+Run: `cargo test -p vrc-photon-ui decode_thumbnail`
 Expected: compile error because `decode_thumbnail` takes three arguments.
 
 - [ ] **Step 3: Implement the core-backed decode path**
@@ -551,7 +551,7 @@ and render:
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-ui decode_thumbnail`
+Run: `cargo test -p vrc-photon-ui decode_thumbnail`
 Expected: the existing channels test plus both new decode tests pass.
 
 - [ ] **Step 6: Commit**

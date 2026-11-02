@@ -43,13 +43,13 @@ These are the inputs most likely to hurt a user even though the happy path works
 
 **Interfaces:**
 - Consumes: none.
-- Produces: working directory `../vrc-photo-manager-issue17` on branch `feat/issue-17-error-retry`.
+- Produces: working directory `../vrc-photon-issue17` on branch `feat/issue-17-error-retry`.
 
 - [ ] **Step 1: Confirm the main checkout is clean except for the known untracked files**
 
 Run:
 ```bash
-cd /home/tommyz7/work/vrc-photo-manager
+cd /home/tommyz7/work/vrc-photon
 git status --short --branch
 ```
 Expected: `main...origin/main` and only `opencode.json` / local `.opencode/` overrides / the new spec and plan are untracked or modified.
@@ -67,25 +67,25 @@ Expected: `Preparing worktree (new branch 'feat/issue-17-error-retry')`.
 
 Run:
 ```bash
-mkdir -p ../vrc-photo-manager-issue17/docs/superpowers/specs
-mkdir -p ../vrc-photo-manager-issue17/docs/superpowers/plans
+mkdir -p ../vrc-photon-issue17/docs/superpowers/specs
+mkdir -p ../vrc-photon-issue17/docs/superpowers/plans
 cp docs/superpowers/specs/2026-10-23-error-retry-design.md \
-  ../vrc-photo-manager-issue17/docs/superpowers/specs/
+  ../vrc-photon-issue17/docs/superpowers/specs/
 cp docs/superpowers/plans/2026-10-23-error-retry.md \
-  ../vrc-photo-manager-issue17/docs/superpowers/plans/
+  ../vrc-photon-issue17/docs/superpowers/plans/
 ```
 Expected: both files exist in the worktree.
 
 - [ ] **Step 4: Commit the design and plan**
 
 ```bash
-cd ../vrc-photo-manager-issue17
+cd ../vrc-photon-issue17
 git add docs/superpowers/specs/2026-10-23-error-retry-design.md \
         docs/superpowers/plans/2026-10-23-error-retry.md
 git commit -m "docs: add error retry design and plan (#17)"
 ```
 
-All later tasks run in `/home/tommyz7/work/vrc-photo-manager-issue17`.
+All later tasks run in `/home/tommyz7/work/vrc-photon-issue17`.
 
 ---
 
@@ -231,7 +231,7 @@ fn migration_adds_retry_count_and_daemon_tables() {
 
 Run:
 ```bash
-cargo test -p vrc-photo-core retry_job_resets_failed_job_and_enforces_cap -- --nocapture
+cargo test -p vrc-photon-core retry_job_resets_failed_job_and_enforces_cap -- --nocapture
 ```
 Expected: FAIL because `retry_job` and `retry_count` do not exist.
 
@@ -269,10 +269,10 @@ Update every `compression_jobs` select/returning list to include `retry_count` i
 
 Run:
 ```bash
-cargo test -p vrc-photo-core retry_job_resets_failed_job_and_enforces_cap
-cargo test -p vrc-photo-core retry_failed_jobs_returns_only_eligible_rows
-cargo test -p vrc-photo-core list_jobs_by_status_filters_and_limits
-cargo test -p vrc-photo-core migration_adds_retry_count_and_daemon_tables
+cargo test -p vrc-photon-core retry_job_resets_failed_job_and_enforces_cap
+cargo test -p vrc-photon-core retry_failed_jobs_returns_only_eligible_rows
+cargo test -p vrc-photon-core list_jobs_by_status_filters_and_limits
+cargo test -p vrc-photon-core migration_adds_retry_count_and_daemon_tables
 ```
 Expected: all PASS.
 
@@ -344,7 +344,7 @@ fn daemon_commands_deduplicate_and_drain_in_order() {
 
 Run:
 ```bash
-cargo test -p vrc-photo-core daemon_error_upsert_increments_attempts_and_clear_removes_it
+cargo test -p vrc-photon-core daemon_error_upsert_increments_attempts_and_clear_removes_it
 ```
 Expected: FAIL because the types and methods do not exist.
 
@@ -360,8 +360,8 @@ Implement the DB methods with the SQL from the spec. `take_daemon_commands` must
 
 Run:
 ```bash
-cargo test -p vrc-photo-core daemon_error_upsert_increments_attempts_and_clear_removes_it
-cargo test -p vrc-photo-core daemon_commands_deduplicate_and_drain_in_order
+cargo test -p vrc-photon-core daemon_error_upsert_increments_attempts_and_clear_removes_it
+cargo test -p vrc-photon-core daemon_commands_deduplicate_and_drain_in_order
 ```
 Expected: PASS.
 
@@ -439,7 +439,7 @@ fn move_reports_partial_move_and_keeps_the_target() {
 
 Run:
 ```bash
-cargo test -p vrc-photo-core missing_source_is_reported_without_aborting_the_batch
+cargo test -p vrc-photon-core missing_source_is_reported_without_aborting_the_batch
 ```
 Expected: FAIL because `ImportResult` has no `issues` field.
 
@@ -451,7 +451,7 @@ Handle each source independently. Missing source is a non-retryable `Failed` iss
 
 Run:
 ```bash
-cargo test -p vrc-photo-core importer
+cargo test -p vrc-photon-core importer
 ```
 Expected: all importer tests PASS, including the existing collision and non-image tests.
 
@@ -523,7 +523,7 @@ fn unreadable_directory_is_reported() {
 
 Run:
 ```bash
-cargo test -p vrc-photo-core corrupt_source_is_reported_but_other_photos_are_indexed
+cargo test -p vrc-photon-core corrupt_source_is_reported_but_other_photos_are_indexed
 ```
 Expected: FAIL because `ScanReport` has no `failures` and `scan_root_report` does not exist.
 
@@ -535,7 +535,7 @@ Add `ScanFailure`, add `failures` to `ScanReport`, and thread a `&mut Vec<ScanFa
 
 Run:
 ```bash
-cargo test -p vrc-photo-core scanner
+cargo test -p vrc-photon-core scanner
 ```
 Expected: all scanner tests PASS.
 
@@ -558,8 +558,8 @@ git commit -m "feat: collect photo scan failures (#17)"
 - Consumes: `crate::data_dir()`.
 - Produces:
   - `pub const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;`
-  - `pub const UI_LOG_FILE: &str = "vrc-photo-manager.log";`
-  - `pub const DAEMON_LOG_FILE: &str = "vrc-photo-daemon.log";`
+  - `pub const UI_LOG_FILE: &str = "vrc-photon.log";`
+  - `pub const DAEMON_LOG_FILE: &str = "vrc-photon-daemon.log";`
   - `pub fn logs_dir() -> Option<PathBuf>`
   - `pub fn prepare_log_file(process: &str) -> std::io::Result<Option<PathBuf>>`
   - `pub fn prepare_log_file_in(dir: &Path, process: &str, max_bytes: u64) -> std::io::Result<PathBuf>`
@@ -600,7 +600,7 @@ mod tests {
 
 Run:
 ```bash
-cargo test -p vrc-photo-core prepares_appends_and_rotates_log_file
+cargo test -p vrc-photon-core prepares_appends_and_rotates_log_file
 ```
 Expected: FAIL because the module/function does not exist.
 
@@ -612,7 +612,7 @@ Expected: FAIL because the module/function does not exist.
 
 Run:
 ```bash
-cargo test -p vrc-photo-core prepares_appends_and_rotates_log_file
+cargo test -p vrc-photon-core prepares_appends_and_rotates_log_file
 ```
 Expected: PASS.
 
@@ -769,7 +769,7 @@ fn scan_failure_does_not_mark_unseen_photos_missing() {
 
     let db = Db::open(&db_path).unwrap();
     let photo = db.photo_by_id(photo.id).unwrap().unwrap();
-    assert_eq!(photo.status, vrc_photo_core::model::PhotoStatus::Present);
+    assert_eq!(photo.status, vrc_photon_core::model::PhotoStatus::Present);
 }
 ```
 
@@ -777,7 +777,7 @@ fn scan_failure_does_not_mark_unseen_photos_missing() {
 
 Run:
 ```bash
-cargo test -p vrc-photo-daemon reads_only_complete_lines_with_offsets
+cargo test -p vrc-photon-daemon reads_only_complete_lines_with_offsets
 ```
 Expected: FAIL because `read_new_lines` returns `Vec<String>` without offsets.
 
@@ -822,7 +822,7 @@ Refactor `ingest_logs` into an inner pass plus a report wrapper:
 
 Run:
 ```bash
-cargo test -p vrc-photo-daemon
+cargo test -p vrc-photon-daemon
 ```
 Expected: all daemon tests PASS, including the existing end-to-end tests.
 
@@ -959,7 +959,7 @@ fn failed_job_can_be_retried_and_completed() {
         db.save_profile(&CompressionProfile {
             id: "p".to_string(),
             name: "retry".to_string(),
-            format: vrc_photo_core::model::CompressionFormat::Webp,
+            format: vrc_photon_core::model::CompressionFormat::Webp,
             suffix: "_retry".to_string(),
             ..CompressionProfile::default()
         })
@@ -992,7 +992,7 @@ fn failed_job_can_be_retried_and_completed() {
 
 Run:
 ```bash
-cargo test -p vrc-photo-daemon rescan_command_clears_missing_root_error_and_indexes_the_folder
+cargo test -p vrc-photon-daemon rescan_command_clears_missing_root_error_and_indexes_the_folder
 ```
 Expected: FAIL because `run_once` does not consume commands.
 
@@ -1013,7 +1013,7 @@ In `run`, replace the startup `setup_watchers()?` with a record-and-continue cal
 
 Run:
 ```bash
-cargo test -p vrc-photo-daemon
+cargo test -p vrc-photon-daemon
 ```
 Expected: all daemon tests PASS.
 
@@ -1037,15 +1037,15 @@ git commit -m "feat: handle daemon retry commands and rebuild watchers (#17)"
 - Modify: `Cargo.lock`
 
 **Interfaces:**
-- Consumes: `vrc_photo_core::logging::{prepare_log_file, UI_LOG_FILE, DAEMON_LOG_FILE}`.
+- Consumes: `vrc_photon_core::logging::{prepare_log_file, UI_LOG_FILE, DAEMON_LOG_FILE}`.
 - Produces: `logging::init(process, default_filter) -> Option<PathBuf>` in each binary.
 
 - [ ] **Step 1: Add dependencies and write the modules**
 
 Run:
 ```bash
-cargo add tracing@0.1 --package vrc-photo-ui
-cargo add tracing-subscriber@0.3 --features env-filter --package vrc-photo-ui
+cargo add tracing@0.1 --package vrc-photon-ui
+cargo add tracing-subscriber@0.3 --features env-filter --package vrc-photon-ui
 ```
 (or add the same workspace dependencies manually to `crates/ui/Cargo.toml`).
 
@@ -1056,7 +1056,7 @@ pub fn init(process: &str, default_filter: &str) -> Option<std::path::PathBuf> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| default_filter.into());
     let builder = tracing_subscriber::fmt().with_env_filter(filter);
-    match vrc_photo_core::logging::prepare_log_file(process)
+    match vrc_photon_core::logging::prepare_log_file(process)
         .ok()
         .flatten()
         .and_then(|path| {
@@ -1084,13 +1084,13 @@ pub fn init(process: &str, default_filter: &str) -> Option<std::path::PathBuf> {
 
 Add `mod logging;` to each binary root. In UI `main()`, before `parse_args`, call:
 ```rust
-if logging::init("vrc-photo-manager", "info,vrc_photo_manager=debug").is_none() {
+if logging::init("vrc-photon", "info,vrc_photonn=debug").is_none() {
     tracing::warn!("file logging is unavailable; using stderr only");
 }
 ```
 In daemon `main()`, replace the inline `tracing_subscriber::fmt()` block with:
 ```rust
-if logging::init("vrc-photo-daemon", "info,vrc_photo_daemon=debug").is_none() {
+if logging::init("vrc-photon-daemon", "info,vrc_photon_daemon=debug").is_none() {
     tracing::warn!("file logging is unavailable; using stderr only");
 }
 ```
@@ -1103,8 +1103,8 @@ Replace `eprintln!` at the library index/page error sites with `tracing::error!`
 
 Run:
 ```bash
-cargo test -p vrc-photo-core prepares_appends_and_rotates_log_file
-cargo build -p vrc-photo-ui -p vrc-photo-daemon
+cargo test -p vrc-photon-core prepares_appends_and_rotates_log_file
+cargo build -p vrc-photon-ui -p vrc-photon-daemon
 ```
 Expected: test PASS, both binaries build.
 
@@ -1172,13 +1172,13 @@ fn timestamp_formats_rfc3339_and_falls_back_to_raw() {
 
 Run:
 ```bash
-cargo test -p vrc-photo-ui alert_summaries_follow_priority_order
+cargo test -p vrc-photon-ui alert_summaries_follow_priority_order
 ```
 Expected: FAIL because the helpers do not exist.
 
 - [ ] **Step 3: Add state and helpers**
 
-Add `Debug` to `Screen`. Add `DaemonError` and `DaemonOperation` to the `vrc_photo_core::model` import. Add the four fields and initialize them in `App::new`. Add `reload_job_state()`:
+Add `Debug` to `Screen`. Add `DaemonError` and `DaemonOperation` to the `vrc_photon_core::model` import. Add the four fields and initialize them in `App::new`. Add `reload_job_state()`:
 
 ```rust
 fn reload_job_state(&mut self) {
@@ -1229,10 +1229,10 @@ v_flex()
 
 Run:
 ```bash
-cargo test -p vrc-photo-ui alert_summaries_follow_priority_order
-cargo test -p vrc-photo-ui daemon_operation_labels_cover_every_operation
-cargo test -p vrc-photo-ui timestamp_formats_rfc3339_and_falls_back_to_raw
-cargo build -p vrc-photo-ui
+cargo test -p vrc-photon-ui alert_summaries_follow_priority_order
+cargo test -p vrc-photon-ui daemon_operation_labels_cover_every_operation
+cargo test -p vrc-photon-ui timestamp_formats_rfc3339_and_falls_back_to_raw
+cargo build -p vrc-photon-ui
 ```
 Expected: tests PASS and the UI builds.
 
@@ -1260,7 +1260,7 @@ git commit -m "feat: add UI error state and global alerts (#17)"
 
 - [ ] **Step 1: Write the failing tests**
 
-Add `CompressionJob, QueueStatus` to the UI test module's `vrc_photo_core::model` import and add `job_retry_available, job_retry_label` to the `use super::{...}` list, then add:
+Add `CompressionJob, QueueStatus` to the UI test module's `vrc_photon_core::model` import and add `job_retry_available, job_retry_label` to the `use super::{...}` list, then add:
 
 ```rust
 fn test_job(status: QueueStatus, retry_count: i64) -> CompressionJob {
@@ -1294,7 +1294,7 @@ fn job_retry_availability_stops_at_the_cap() {
 
 Run:
 ```bash
-cargo test -p vrc-photo-ui job_retry_availability_stops_at_the_cap
+cargo test -p vrc-photon-ui job_retry_availability_stops_at_the_cap
 ```
 Expected: FAIL because the helpers do not exist.
 
@@ -1333,8 +1333,8 @@ Keep the existing 8-row total preview reasonable; the failed section is separate
 
 Run:
 ```bash
-cargo test -p vrc-photo-ui job_retry_availability_stops_at_the_cap
-cargo build -p vrc-photo-ui
+cargo test -p vrc-photon-ui job_retry_availability_stops_at_the_cap
+cargo build -p vrc-photon-ui
 ```
 Expected: PASS.
 
@@ -1362,7 +1362,7 @@ git commit -m "feat: show compression failures and retry them from the queue (#1
 
 - [ ] **Step 1: Write the failing tests**
 
-Add `use std::path::PathBuf;` and `use vrc_photo_core::importer::{ImportIssue, ImportIssueKind};` to the UI test module, add `import_issue_counts, retryable_sources` to the `use super::{...}` list, then add:
+Add `use std::path::PathBuf;` and `use vrc_photon_core::importer::{ImportIssue, ImportIssueKind};` to the UI test module, add `import_issue_counts, retryable_sources` to the `use super::{...}` list, then add:
 
 ```rust
 #[test]
@@ -1392,7 +1392,7 @@ fn import_issue_counts_separate_failures_and_partial_moves() {
 
 Run:
 ```bash
-cargo test -p vrc-photo-ui import_issue_counts_separate_failures_and_partial_moves
+cargo test -p vrc-photon-ui import_issue_counts_separate_failures_and_partial_moves
 ```
 Expected: FAIL because the helpers and types do not exist in the UI.
 
@@ -1441,8 +1441,8 @@ Extend `global_alerts` to pass `self.import_report.as_ref().map(|r| import_issue
 
 Run:
 ```bash
-cargo test -p vrc-photo-ui import_issue_counts_separate_failures_and_partial_moves
-cargo build -p vrc-photo-ui
+cargo test -p vrc-photon-ui import_issue_counts_separate_failures_and_partial_moves
+cargo build -p vrc-photon-ui
 ```
 Expected: PASS.
 
@@ -1471,7 +1471,7 @@ git commit -m "feat: report failed import files and retry them (#17)"
 
 - [ ] **Step 1: Implement the command action**
 
-Add `DaemonCommand` to the `vrc_photo_core::model` import, then add:
+Add `DaemonCommand` to the `vrc_photon_core::model` import, then add:
 ```rust
 fn request_daemon_command(&mut self, command: DaemonCommand, cx: &mut Context<Self>) {
     match self.db.request_daemon_command(command) {
@@ -1495,7 +1495,7 @@ In `monitor_screen`, after the stat cards (or before the session card), render a
 If the daemon is inactive, add a muted note: "デーモン停止中です。起動後に実行されます。"
 
 Add a "ログ" card (also used in Settings) showing:
-- `vrc_photo_core::logging::logs_dir()` path, or "ログフォルダを特定できません";
+- `vrc_photon_core::logging::logs_dir()` path, or "ログフォルダを特定できません";
 - `UI_LOG_FILE` and `DAEMON_LOG_FILE`;
 - a "ログフォルダを開く" button calling `open_logs_folder`.
 
@@ -1517,8 +1517,8 @@ Add `self.log_card(cx)` to the Settings screen below "起動と圧縮".
 
 Run:
 ```bash
-cargo test -p vrc-photo-ui
-cargo build -p vrc-photo-ui
+cargo test -p vrc-photon-ui
+cargo build -p vrc-photon-ui
 ```
 Expected: all UI tests PASS and the UI builds.
 
@@ -1679,13 +1679,13 @@ Expected: all three commands exit 0.
 
 - [ ] **Step 2: Seed the demo database for visual QA**
 
-Build the UI, create the demo data once, then insert one failed job and one daemon error with `sqlite3` against `/tmp/vrc-photo-manager-demo/library.db`:
+Build the UI, create the demo data once, then insert one failed job and one daemon error with `sqlite3` against `/tmp/vrc-photon-demo/library.db`:
 
 ```bash
-cargo build -p vrc-photo-ui
-cargo run -p vrc-photo-ui -- --demo --demo-reset
+cargo build -p vrc-photon-ui
+cargo run -p vrc-photon-ui -- --demo --demo-reset
 # In another shell, after the demo DB exists:
-sqlite3 /tmp/vrc-photo-manager-demo/library.db \
+sqlite3 /tmp/vrc-photon-demo/library.db \
   "INSERT INTO daemon_errors(operation,message,detail,occurred_at,attempts) \
    VALUES('scan','テスト用のスキャン失敗','/tmp/missing-folder','2026-10-23T10:00:00+00:00',2);"
 # Replace the ids with real rows from the demo DB:
@@ -1728,10 +1728,10 @@ Closes #14"
 Use the `ci-watch` skill for the branch. On green:
 ```bash
 gh pr merge <number> --merge
-cd /home/tommyz7/work/vrc-photo-manager
+cd /home/tommyz7/work/vrc-photon
 git checkout main
 git pull
-git worktree remove ../vrc-photo-manager-issue17
+git worktree remove ../vrc-photon-issue17
 git branch -d feat/issue-17-error-retry
 git push origin --delete feat/issue-17-error-retry
 ```

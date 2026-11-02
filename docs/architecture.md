@@ -9,7 +9,7 @@ VRChatの写真を、撮影時のワールド・同接プレイヤー・撮影�
 ```text
 ┌──────────────────────────────┐          ┌──────────────────────────────┐
 │ UIプロセス                    │          │ デーモンプロセス              │
-│ vrc-photo-manager             │          │ vrc-photo-daemon             │
+│ vrc-photon             │          │ vrc-photon-daemon             │
 │                              │          │                              │
 │ gpui-kit 0.8                 │          │ ログ監視 / 写真監視           │
 │ 一覧・詳細・圧縮・検索        │          │ 紐付け / 自動圧縮 / トレイ     │
@@ -34,8 +34,8 @@ UIとデーモンは同じSQLite（WAL）に加えて、ローカルIPC（Unix d
 
 | プロセス | バイナリ | 役割 |
 |---|---|---|
-| UI | `crates/ui` → `vrc-photo-manager` | 画面表示、検索、タグ・お気に入り・メモ編集、手動圧縮のキュー投入、取り込み |
-| デーモン | `crates/daemon` → `vrc-photo-daemon` | 写真・ログの監視、索引、文脈紐付け、サムネイル、自動圧縮、トレイ、自動起動、IPCサーバー |
+| UI | `crates/ui` → `vrc-photon` | 画面表示、検索、タグ・お気に入り・メモ編集、手動圧縮のキュー投入、取り込み |
+| デーモン | `crates/daemon` → `vrc-photon-daemon` | 写真・ログの監視、索引、文脈紐付け、サムネイル、自動圧縮、トレイ、自動起動、IPCサーバー |
 | 共通IPC | `crates/ipc` | プロトコル型、エンドポイント、改行区切りJSON、ローカルソケットの送受信 |
 | 共通コア | `crates/core` | DB、スキャン、ログ解析、XMP、圧縮、設定、サムネイル |
 
@@ -74,10 +74,10 @@ crates/
     src/download.rs       # ストリーミングDLと検証
     src/install.rs        # インストール形式、pkexec/ヘルパー/policyの判定、適用ジョブ
     src/helper.rs         # 置換・pkexec連携・健康確認・ロールバック
-    src/bin/vrc-photo-updater.rs # 適用ヘルパー（ユーザー / 特権モード）
+    src/bin/vrc-photon-updater.rs # 適用ヘルパー（ユーザー / 特権モード）
   release-tool/
     src/lib.rs            # latest.json生成、署名、検証
-    src/main.rs           # vrc-photo-update-manifest CLI（Release専用）
+    src/main.rs           # vrc-photon-update-manifest CLI（Release専用）
   ui/
     src/main.rs           # ブートストラップ、ウィンドウ、グローバルキーバインド
     src/app.rs            # App/Screen、new/render、アプリ全体の状態
@@ -232,14 +232,14 @@ crates/ui/src/
 3. 利用者がダウンロードを選ぶと、`<data_dir>/updates/downloads/<version>/` に
    `.part` で書きながらSHA-256とminisign署名を検証する。
 4. 利用者が適用を確定すると、UIはデーモンへ `shutdown` を送り、
-   `updates/bin/vrc-photo-updater` をコピーして `updates/job.json` を書く。
+   `updates/bin/vrc-photon-updater` をコピーして `updates/job.json` を書く。
    システムパッケージの job には署名対象の `latest.json` 生テキストと
    `.minisig`、現在の実行ファイルを `target` として入れる。
 5. ユーザー権限ヘルパーは適用ロックを取り、UI/デーモンの終了を待つ。
    - AppImage / Windows current-user NSIS は、旧版を退避して置換、または
      NSIS インストーラを `/S` で実行する。
    - `SystemPackage` は staging のSHA-256と署名を再確認し、
-     `pkexec --disable-internal-agent /usr/bin/vrc-photo-updater
+     `pkexec --disable-internal-agent /usr/bin/vrc-photon-updater
      --apply-system-package <job.json>` を実行する。`pkexec` がない場合は
      `AuthUnavailable` としてフォールバックする。
 6. 特権ヘルパーは effective uid 0 と `PKEXEC_UID` を要求し、次を行う。
@@ -248,10 +248,10 @@ crates/ui/src/
      確認する。
    - 署名済み manifest を埋め込み公開鍵で再検証し、`manifest.version` が
      job と一致し、ヘルパー自身のバージョンより新しいことを確認する。
-   - 検証済みファイルを `/var/tmp/vrc-photo-update-<uuid>.pkg` に root 所有・
+   - 検証済みファイルを `/var/tmp/vrc-photon-update-<uuid>.pkg` に root 所有・
      mode 0600 でコピーし、コピー先でSHA-256と署名を再検証する（TOCTOU 対策）。
    - `LC_ALL=C pacman -Qip` / `LC_ALL=C dpkg-deb -f` でパッケージ名
-     `vrc-photo-manager` とバージョンを確認する。
+     `vrc-photon` とバージョンを確認する。
    - 固定コマンド（`pacman -U --noconfirm` / `dpkg -i`）でインストールする。
      シェルは使わない。特権側はUIを起動しない。
 7. ユーザー権限ヘルパーは `pkexec` の終了コードを `LastErrorCode` に写像し、
@@ -264,7 +264,7 @@ crates/ui/src/
    システムパッケージは自動ロールバックせず、失敗を記録して手動復旧に委ねる。
 9. 健康確認後、UIはデーモンを起動する。`daemon_supervisor` が `systemd` なら
    `systemctl --user daemon-reload` と `systemctl --user restart
-   vrc-photo-daemon.service` を使い、失敗時はプロセス起動にフォールバックする。
+   vrc-photon-daemon.service` を使い、失敗時はプロセス起動にフォールバックする。
 10. 結果は `last-result.json` と `updater.log` に残る。UIは次回起動時に一度表示する。
 
 ### 4.8 削除キュー
@@ -304,16 +304,16 @@ crates/ui/src/
 
 ## 6. 起動・停止
 
-- パッケージ版のUIは、ハートビートが古い場合に同じディレクトリの `vrc-photo-daemon` を起動する。
-- 更新直後のUIは `VRC_PHOTO_HEALTH_TOKEN` を受け取り、健康マーカーを書くまで
+- パッケージ版のUIは、ハートビートが古い場合に同じディレクトリの `vrc-photon-daemon` を起動する。
+- 更新直後のUIは `VRC_PHOTON_HEALTH_TOKEN` を受け取り、健康マーカーを書くまで
   デーモンの自動起動を遅らせる。成功後に通常の起動処理でデーモンを起動する。
   デーモンが systemd ユーザーサービス管理なら `systemctl --user start` /
   `restart` を使い、unit 外のプロセスとして起動しない。
 - AppImageの自動起動は `$APPIMAGE --background` を登録する。UIの `--background` はデーモンを子プロセスとして起動し、終了まで待つ（マウント維持のため）。
-- deb/pacmanではデーモン実体（`/usr/bin/vrc-photo-daemon`）を自動起動に登録する。
-- deb/pacmanは任意の systemd ユーザーサービス `vrc-photo-daemon.service` を `/usr/lib/systemd/user/` に同梱する。unit は `graphical-session.target` に紐付き、インストール時には enable されない。
-- デーモンは `/proc/self/cgroup` が `vrc-photo-daemon.service` を含むか、`INVOCATION_ID` と `SYSTEMD_EXEC_PID` が自プロセスを指す場合に systemd 管理下と判定し、`app_settings.daemon_supervisor` に `systemd` / `app` を記録する。UIはハートビートが新しい間だけこの値を表示に使う。
-- デーモンは初期スキャンの前にIPCサーバーを起動する。Unixでは `$XDG_RUNTIME_DIR/vrc-photo-manager/daemon.sock`（未設定なら `<data_dir>/run/daemon.sock`）を使い、ディレクトリ `0700`、ソケット `0600` にする。Windowsはユーザー名の安定ハッシュを含む名前付きパイプを使う。
+- deb/pacmanではデーモン実体（`/usr/bin/vrc-photon-daemon`）を自動起動に登録する。
+- deb/pacmanは任意の systemd ユーザーサービス `vrc-photon-daemon.service` を `/usr/lib/systemd/user/` に同梱する。unit は `graphical-session.target` に紐付き、インストール時には enable されない。
+- デーモンは `/proc/self/cgroup` が `vrc-photon-daemon.service` を含むか、`INVOCATION_ID` と `SYSTEMD_EXEC_PID` が自プロセスを指す場合に systemd 管理下と判定し、`app_settings.daemon_supervisor` に `systemd` / `app` を記録する。UIはハートビートが新しい間だけこの値を表示に使う。
+- デーモンは初期スキャンの前にIPCサーバーを起動する。Unixでは `$XDG_RUNTIME_DIR/vrc-photon/daemon.sock`（未設定なら `<data_dir>/run/daemon.sock`）を使い、ディレクトリ `0700`、ソケット `0600` にする。Windowsはユーザー名の安定ハッシュを含む名前付きパイプを使う。
 - bind前に既存エンドポイントへ接続し、生存中ならunlinkしない。接続拒否ならstaleとして削除する。
 - 終了時、デーモンはIPCサーバーを止め、開いているログセッションを閉じ、ワーカーを停止する。
 

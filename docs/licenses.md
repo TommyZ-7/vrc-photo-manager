@@ -23,7 +23,7 @@
 
 `Packager.toml` の `resources` で `LICENSE` と `LICENSE-LUCIDE` を同梱する。
 
-- deb / AppImage / pacman: `/usr/lib/vrc-photo-manager/`
+- deb / AppImage / pacman: `/usr/lib/vrc-photon/`
 - Windows（NSIS）: 実行ファイルと同じディレクトリ
 
 `Release` ワークフローの `Verify third-party notices` ステップが、Linux の各成果物に両ファイルが含まれることを検査する。

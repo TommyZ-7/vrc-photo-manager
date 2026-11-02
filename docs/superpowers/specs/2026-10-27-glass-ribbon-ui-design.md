@@ -5,7 +5,7 @@
 - Mock: [docs/ui-glass-ribbon-mockup.html](../../ui-glass-ribbon-mockup.html)
 - Screenshots: [assets/glass-ribbon](assets/glass-ribbon/)
 - Target: `crates/ui`, `crates/core`（設定1項目）, `docs/ui.md`
-- 関連: [#27 UI刷新](https://github.com/TommyZ-7/vrc-photo-manager/issues/27) の後継差分。カスタムタイトルバー/リボン統合とUIファイル分割を追加する。
+- 関連: [#27 UI刷新](https://github.com/TommyZ-7/vrc-photon/issues/27) の後継差分。カスタムタイトルバー/リボン統合とUIファイル分割を追加する。
 
 ![Library 1280x820](assets/glass-ribbon/library-1280.jpg)
 
@@ -37,7 +37,7 @@
 - ウィンドウ**背景のみ**をダークなガラス面として扱う。環境光（アンビエント）は背景に置き、カードは不透明パネルとして写真の可読性を優先する。
 - 左はサイドバーカードのみ。右は「タイトルバー＋リボン」ヘッダーカードと、本コンテンツの内部カード。
 - 本コンテンツのページ見出し（タイトル・件数・フィルター行）を全画面で削除し、内部カードを上端から最大化する。
-- 最上部1行目に `VRC Photo Manager`、現在画面名、リボン折りたたみ、通知ベル、ウィンドウ操作を統合する。
+- 最上部1行目に `VRC PhotoN`、現在画面名、リボン折りたたみ、通知ベル、ウィンドウ操作を統合する。
 - リボンは **ホーム / 写真 / 圧縮** の3グループを常時表示し、高さ68px（高さ760px以下では62px）。
 - 設定固有のコマンド（背景のガラス強度・モーション・テーマ・ログ・更新・バージョン・ショートカット）はリボンから外し、設定画面へ寄せる。
 - 再読込・詳細パネル・取り込み・フォルダ・索引再構築など、画面ローカルだった操作をリボンへ移す。
@@ -222,7 +222,7 @@ OS window (Blurred/Transparent request)
 左から:
 
 1. アプリグリフ（22px）
-2. `VRC Photo Manager`（11px、muted）
+2. `VRC PhotoN`（11px、muted）
 3. 区切り
 4. 現在画面名（`Screen::title()`、11.5px、text）
 5. 右寄せ: リボン折りたたみ、通知ベル、ウィンドウ操作
@@ -432,7 +432,7 @@ crates/ui/src/
   - `photo_row_height(card_width)` と列数/年レール計算。
   - `ui_ribbon_collapsed` の serde default/roundtrip。
   - 詳細パネルコマンドがPhotos画面のみ表示されること（純粋な可視性helper）。
-- 分割PRの受け入れは「テスト数が減らない」「`cargo test -p vrc-photo-ui` が通る」「既存画面のスクリーンショットが変わらない」。
+- 分割PRの受け入れは「テスト数が減らない」「`cargo test -p vrc-photon-ui` が通る」「既存画面のスクリーンショットが変わらない」。
 
 ## 14. Behavior preservation checklist
 
@@ -458,9 +458,9 @@ cargo test --workspace
 
 ### 15.2 Visual QA (Linux)
 
-- `cargo run -p vrc-photo-ui -- --demo --window-size 1280x820`
-- `cargo run -p vrc-photo-ui -- --demo --window-size 1440x900`
-- `cargo run -p vrc-photo-ui -- --demo --window-size 1080x700`
+- `cargo run -p vrc-photon-ui -- --demo --window-size 1280x820`
+- `cargo run -p vrc-photon-ui -- --demo --window-size 1440x900`
+- `cargo run -p vrc-photon-ui -- --demo --window-size 1080x700`
 - 確認画面: Library, Search, Compression, Dashboard, Settings, Viewer, Import modal, Manual compression dialog。
 - 条件状態: 複数選択、取り込み結果、ライブラリエラー、圧縮失敗/待機、デーモン停止、サイドバー折りたたみ、リボン折りたたみ、詳細パネル非表示。
 - 横スクロール/カード欠け/文字切れがないこと。

@@ -100,7 +100,7 @@ fn removing_a_tag_drops_the_photo_from_tag_search() {
 
 - [ ] **Step 2: Run the tests**
 
-Run: `cargo test -p vrc-photo-core`
+Run: `cargo test -p vrc-photon-core`
 Expected: PASS. These pin behavior that already exists; if either new test fails, fix the DB contract before continuing.
 
 - [ ] **Step 3: Commit**
@@ -147,7 +147,7 @@ fn notes_normalize_empty_to_none_and_trim_text() {
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `cargo test -p vrc-photo-ui notes_normalize_empty_to_none_and_trim_text`
+Run: `cargo test -p vrc-photon-ui notes_normalize_empty_to_none_and_trim_text`
 Expected: FAIL with an unresolved import or missing function.
 
 - [ ] **Step 3: Implement `normalize_note`**
@@ -164,7 +164,7 @@ fn normalize_note(value: &str) -> Option<&str> {
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `cargo test -p vrc-photo-ui notes_normalize_empty_to_none_and_trim_text`
+Run: `cargo test -p vrc-photon-ui notes_normalize_empty_to_none_and_trim_text`
 Expected: PASS.
 
 - [ ] **Step 5: Add the textarea import, state, and focus handles**
@@ -352,7 +352,7 @@ In `impl Render for App`, change the `CloseQuickLook` handler from `this.close_q
 
 - [ ] **Step 11: Run the focused tests and clippy**
 
-Run: `cargo test -p vrc-photo-ui` then `cargo clippy -p vrc-photo-ui --all-targets -- -D warnings`
+Run: `cargo test -p vrc-photon-ui` then `cargo clippy -p vrc-photon-ui --all-targets -- -D warnings`
 Expected: PASS with no warnings.
 
 - [ ] **Step 12: Commit**
@@ -569,7 +569,7 @@ Keep the existing `when(tags.is_empty(), |this| this.child(pill("—".to_string(
 
 - [ ] **Step 7: Run the focused tests and clippy**
 
-Run: `cargo test -p vrc-photo-ui` then `cargo clippy -p vrc-photo-ui --all-targets -- -D warnings`
+Run: `cargo test -p vrc-photon-ui` then `cargo clippy -p vrc-photon-ui --all-targets -- -D warnings`
 Expected: PASS with no warnings.
 
 - [ ] **Step 8: Commit**
@@ -592,7 +592,7 @@ Expected: all commands exit 0; tests report 0 failures.
 
 - [ ] **Step 2: Verify note behavior in the demo app**
 
-Run: `cargo run -p vrc-photo-ui -- --demo`
+Run: `cargo run -p vrc-photon-ui -- --demo`
 
 In the viewer details panel:
 - Open a note, type text, click 保存; close and reopen the viewer; the text remains.

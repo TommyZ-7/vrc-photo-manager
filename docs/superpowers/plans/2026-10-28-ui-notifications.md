@@ -72,7 +72,7 @@ assert!(failure_transition(Some((5, 4)), (5, 4)).is_empty());
 
 - [ ] **Step 2: Run the test and verify it fails**
 
-Run: `cargo test -p vrc-photo-manager-ui failure_transition -j 1 -- --test-threads=1`
+Run: `cargo test -p vrc-photon-ui failure_transition -j 1 -- --test-threads=1`
 Expected: FAIL because `failure_transition` / `FailureNotice` do not exist.
 
 - [ ] **Step 3: Implement the notification module and state**
@@ -99,7 +99,7 @@ theme.notification.margins = Edges { top: px(16.), right: px(16.), bottom: px(16
 
 - [ ] **Step 4: Run the test and verify it passes**
 
-Run: `cargo test -p vrc-photo-manager-ui failure_transition -j 1 -- --test-threads=1`
+Run: `cargo test -p vrc-photon-ui failure_transition -j 1 -- --test-threads=1`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -151,7 +151,7 @@ assert!(notification_sections(false, false, 0, 0).is_empty());
 
 - [ ] **Step 2: Run the test and verify it fails**
 
-Run: `cargo test -p vrc-photo-manager-ui notification_sections -j 1 -- --test-threads=1`
+Run: `cargo test -p vrc-photon-ui notification_sections -j 1 -- --test-threads=1`
 Expected: FAIL because the enum/helper do not exist.
 
 - [ ] **Step 3: Implement the modal and bell**
@@ -172,7 +172,7 @@ Expected: FAIL because the enum/helper do not exist.
 
 - [ ] **Step 4: Run the test and verify it passes**
 
-Run: `cargo test -p vrc-photo-manager-ui notification_sections -j 1 -- --test-threads=1`
+Run: `cargo test -p vrc-photon-ui notification_sections -j 1 -- --test-threads=1`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -213,7 +213,7 @@ assert!(should_notify_library_error(Some("boom"), "different"));
 
 - [ ] **Step 2: Run the test and verify it fails**
 
-Run: `cargo test -p vrc-photo-manager-ui should_notify_library_error -j 1 -- --test-threads=1`
+Run: `cargo test -p vrc-photon-ui should_notify_library_error -j 1 -- --test-threads=1`
 Expected: FAIL because the helper does not exist.
 
 - [ ] **Step 3: Replace message writes and remove the old surfaces**
@@ -231,7 +231,7 @@ Expected: FAIL because the helper does not exist.
 
 - [ ] **Step 4: Run the test and verify it passes, then compile**
 
-Run: `cargo test -p vrc-photo-manager-ui should_notify_library_error -j 1 -- --test-threads=1`
+Run: `cargo test -p vrc-photon-ui should_notify_library_error -j 1 -- --test-threads=1`
 Run: `cargo check --workspace -j 1`
 Expected: PASS / no errors.
 
@@ -272,7 +272,7 @@ assert_eq!(rail_toggle_origin(true), (80.0, 32.0));
 
 - [ ] **Step 2: Run the test and verify it fails**
 
-Run: `cargo test -p vrc-photo-manager-ui nav_tooltip_origin rail_toggle_origin -j 1 -- --test-threads=1`
+Run: `cargo test -p vrc-photon-ui nav_tooltip_origin rail_toggle_origin -j 1 -- --test-threads=1`
 Expected: FAIL because the helpers do not exist.
 
 - [ ] **Step 3: Implement the layout changes**
@@ -286,8 +286,8 @@ Expected: FAIL because the helpers do not exist.
 
 - [ ] **Step 4: Run the tests and verify they pass**
 
-Run: `cargo test -p vrc-photo-manager-ui nav_tooltip_origin -j 1 -- --test-threads=1`
-Run: `cargo test -p vrc-photo-manager-ui rail_toggle_origin -j 1 -- --test-threads=1`
+Run: `cargo test -p vrc-photon-ui nav_tooltip_origin -j 1 -- --test-threads=1`
+Run: `cargo test -p vrc-photon-ui rail_toggle_origin -j 1 -- --test-threads=1`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -336,8 +336,8 @@ close(photo_row_height(300.0, true, true), 258.0);
 
 - [ ] **Step 2: Run the tests and verify they fail**
 
-Run: `cargo test -p vrc-photo-manager-ui viewer_nav_frame -j 1 -- --test-threads=1`
-Run: `cargo test -p vrc-photo-manager-ui photo_row_height -j 1 -- --test-threads=1`
+Run: `cargo test -p vrc-photon-ui viewer_nav_frame -j 1 -- --test-threads=1`
+Run: `cargo test -p vrc-photon-ui photo_row_height -j 1 -- --test-threads=1`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement the gap and animation**
@@ -350,8 +350,8 @@ Expected: FAIL.
 
 - [ ] **Step 4: Run the tests and verify they pass**
 
-Run: `cargo test -p vrc-photo-manager-ui viewer_nav_frame -j 1 -- --test-threads=1`
-Run: `cargo test -p vrc-photo-manager-ui photo_row_height -j 1 -- --test-threads=1`
+Run: `cargo test -p vrc-photon-ui viewer_nav_frame -j 1 -- --test-threads=1`
+Run: `cargo test -p vrc-photon-ui photo_row_height -j 1 -- --test-threads=1`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -385,13 +385,13 @@ Expected: all pass.
 
 - [ ] **Step 4: Build the UI once for the user's visual check**
 
-Run: `cargo build -p vrc-photo-manager-ui -j 1`
+Run: `cargo build -p vrc-photon-ui -j 1`
 Expected: success.
 
 - [ ] **Step 5: Hand off for visual verification**
 
 Report the exact commands the user can run:
 ```bash
-cargo run -p vrc-photo-manager-ui -j 1 -- --demo
+cargo run -p vrc-photon-ui -j 1 -- --demo
 ```
 Ask the user to check: bottom-right toasts, bell modal, sidebar tooltip, 14 px card gap, and viewer next/previous entrance.

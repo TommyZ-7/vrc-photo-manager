@@ -74,7 +74,7 @@ fn migration_adds_captured_id_index() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p vrc-photo-core migration_adds_captured_id_index`
+Run: `cargo test -p vrc-photon-core migration_adds_captured_id_index`
 Expected: FAIL because the index does not exist.
 
 - [ ] **Step 3: Add `SCHEMA_V3` and migration step**
@@ -91,7 +91,7 @@ Add `if version < 3 { ... }` to `Db::migrate`, inserting the migration row and s
 
 - [ ] **Step 4: Run the migration test to verify it passes**
 
-Run: `cargo test -p vrc-photo-core migration_adds_captured_id_index`
+Run: `cargo test -p vrc-photon-core migration_adds_captured_id_index`
 Expected: PASS.
 
 - [ ] **Step 5: Write the failing index/page tests**
@@ -223,7 +223,7 @@ fn database_path_is_exposed_for_read_only_workers() {
 
 - [ ] **Step 6: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-core photo_index`
+Run: `cargo test -p vrc-photon-core photo_index`
 Expected: FAIL because `PhotoIndexEntry`, `PhotoTextFilter`, and the methods do not exist.
 
 - [ ] **Step 7: Add the model types**
@@ -278,7 +278,7 @@ ORDER BY <photo_order>
 
 - [ ] **Step 9: Run the core tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-core`
+Run: `cargo test -p vrc-photon-core`
 Expected: PASS, including the existing filter tests.
 
 - [ ] **Step 10: Commit**
@@ -376,7 +376,7 @@ fn thumbnail_cache_does_not_retry_failed_or_pending_ids() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-ui thumbnail_cache`
+Run: `cargo test -p vrc-photon-ui thumbnail_cache`
 Expected: FAIL because the cache does not exist.
 
 - [ ] **Step 3: Implement `ThumbnailCache` and the decode helper**
@@ -392,7 +392,7 @@ Implementation notes:
 
 - [ ] **Step 4: Run the cache tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-ui thumbnail_cache`
+Run: `cargo test -p vrc-photon-ui thumbnail_cache`
 Expected: PASS.
 
 - [ ] **Step 5: Replace the eager thumbnail maps**
@@ -443,10 +443,10 @@ Call `request_thumbnail` from `photo_card` when `self.thumbnails.get(id)` is `No
 
 - [ ] **Step 7: Run the UI tests and clippy**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: PASS.
 
-Run: `cargo clippy -p vrc-photo-ui --all-targets -- -D warnings`
+Run: `cargo clippy -p vrc-photon-ui --all-targets -- -D warnings`
 Expected: PASS.
 
 - [ ] **Step 8: Commit**
@@ -594,7 +594,7 @@ fn search_available_width_drops_to_the_filter_panel_width() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-ui page_cache`
+Run: `cargo test -p vrc-photon-ui page_cache`
 Expected: FAIL because the types do not exist.
 
 - [ ] **Step 3: Implement the page cache and width helper**
@@ -607,7 +607,7 @@ Expected: FAIL because the types do not exist.
 
 - [ ] **Step 4: Run the pure tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-ui page_cache search_available_width`
+Run: `cargo test -p vrc-photon-ui page_cache search_available_width`
 Expected: PASS.
 
 - [ ] **Step 5: Replace `photos` with the library browser**
@@ -659,13 +659,13 @@ It must collect the ID slice from the chosen browser, drop the mutable borrow, c
 
 - [ ] **Step 8: Run the UI tests and clippy**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: PASS.
 
-Run: `cargo clippy -p vrc-photo-ui --all-targets -- -D warnings`
+Run: `cargo clippy -p vrc-photon-ui --all-targets -- -D warnings`
 Expected: PASS.
 
-Run: `cargo run -p vrc-photo-ui -- --demo --demo-reset` manually and verify the library scrolls with placeholders briefly and thumbnails appear.
+Run: `cargo run -p vrc-photon-ui -- --demo --demo-reset` manually and verify the library scrolls with placeholders briefly and thumbnails appear.
 
 - [ ] **Step 9: Commit**
 
@@ -684,7 +684,7 @@ git commit -m "feat: virtualize the photo library over an index snapshot"
 **Interfaces:**
 - Produces: `App.search_active: bool`, `App.searching: bool`, `App.search_request: u64`
 - Produces: `fn run_search(&mut self, cx: &mut Context<Self>)` using `Db::photo_index_text`
-- Produces: `fn apply_search_result(&mut self, generation: u64, result: vrc_photo_core::error::Result<Vec<PhotoIndexEntry>>, cx: &mut Context<Self>)`
+- Produces: `fn apply_search_result(&mut self, generation: u64, result: vrc_photon_core::error::Result<Vec<PhotoIndexEntry>>, cx: &mut Context<Self>)`
 - Produces: `fn clear_search(&mut self, cx: &mut Context<Self>)`
 - Consumes: `PhotoTextFilter`, `Db::path()`, `Db::open_read_only`, `PhotoIndex::new`, `search_view`, `photo_grid(true, window, cx)`.
 
@@ -735,10 +735,10 @@ cx.spawn(async move |this, cx| {
 
 - [ ] **Step 5: Run the UI tests and clippy**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: PASS.
 
-Run: `cargo clippy -p vrc-photo-ui --all-targets -- -D warnings`
+Run: `cargo clippy -p vrc-photon-ui --all-targets -- -D warnings`
 Expected: PASS.
 
 Run the app manually in `--demo` mode: run a search with more than 300 results (the demo fixture may need a larger seed) and confirm the count is exact and all cards are reachable.
@@ -865,7 +865,7 @@ fn rail_hides_labels_that_would_overlap() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-ui year_buckets rail_`
+Run: `cargo test -p vrc-photon-ui year_buckets rail_`
 Expected: FAIL because the helpers do not exist.
 
 - [ ] **Step 3: Implement the bucket and geometry helpers**
@@ -914,10 +914,10 @@ div()
 
 - [ ] **Step 6: Run the tests, clippy, and a manual rail check**
 
-Run: `cargo test -p vrc-photo-ui rail_`
+Run: `cargo test -p vrc-photon-ui rail_`
 Expected: PASS.
 
-Run: `cargo clippy -p vrc-photo-ui --all-targets -- -D warnings`
+Run: `cargo clippy -p vrc-photon-ui --all-targets -- -D warnings`
 Expected: PASS.
 
 Run the app with `--demo`, drag the rail from top to bottom, click a year label, and resize the window; the month pill must follow the top photo and the grid must not jump to the wrong year.
@@ -984,7 +984,7 @@ fn removing_a_photo_clears_pages_and_rebuilds_year_counts() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-ui anchor_photo_id removing_a_photo`
+Run: `cargo test -p vrc-photon-ui anchor_photo_id removing_a_photo`
 Expected: FAIL because the helpers do not exist.
 
 - [ ] **Step 3: Implement `PhotoBrowser::remove_photo` and anchor helpers**
@@ -1029,10 +1029,10 @@ Expected: FAIL because the helpers do not exist.
 
 - [ ] **Step 7: Run the tests, clippy, and manual checks**
 
-Run: `cargo test -p vrc-photo-ui`
+Run: `cargo test -p vrc-photon-ui`
 Expected: PASS.
 
-Run: `cargo clippy -p vrc-photo-ui --all-targets -- -D warnings`
+Run: `cargo clippy -p vrc-photon-ui --all-targets -- -D warnings`
 Expected: PASS.
 
 Manual checks: scroll down, import a photo, confirm the top photo stays; press Settings reload, confirm no jump; trash a search result, confirm it disappears immediately.
@@ -1054,7 +1054,7 @@ git commit -m "fix: preserve scroll across refresh and remove trashed search res
 - No production behavior changes.
 
 **Interfaces:**
-- Produces: `fn timing_enabled() -> bool` and `fn log_timing(label: &str, start: Instant)` in the UI (or inline `eprintln!` gated by `VRC_PHOTO_TIMING`).
+- Produces: `fn timing_enabled() -> bool` and `fn log_timing(label: &str, start: Instant)` in the UI (or inline `eprintln!` gated by `VRC_PHOTON_TIMING`).
 - Produces: `#[test] #[ignore = "100k timing benchmark"] fn photo_index_scales_to_100k()`.
 
 - [ ] **Step 1: Add the ignored 100k test**
@@ -1077,11 +1077,11 @@ assert_eq!(photos.len(), 256);
 
 Use generous assertions (`index_elapsed < 2s`, page query `< 200ms`) so the test documents the budget without becoming flaky on CI; record the actual numbers in the PR description. Run it manually:
 
-`cargo test -p vrc-photo-core photo_index_scales_to_100k -- --ignored --nocapture`
+`cargo test -p vrc-photon-core photo_index_scales_to_100k -- --ignored --nocapture`
 
 - [ ] **Step 2: Add lightweight UI timing**
 
-Use `std::time::Instant` and `eprintln!` only when `VRC_PHOTO_TIMING` is set. Instrument:
+Use `std::time::Instant` and `eprintln!` only when `VRC_PHOTON_TIMING` is set. Instrument:
 - library index build,
 - `load_pages` (page query time),
 - background thumbnail decode time.
@@ -1092,7 +1092,7 @@ Do not add a logging dependency.
 
 Generate a temporary DB outside the repo (for example `/tmp/opencode/vrc-100k.db`) with the same schema and 100k rows, using the ignored test's SQL or `sqlite3`. Run:
 
-`VRC_PHOTO_DB=/tmp/opencode/vrc-100k.db VRC_PHOTO_TIMING=1 cargo run -p vrc-photo-ui --release`
+`VRC_PHOTON_DB=/tmp/opencode/vrc-100k.db VRC_PHOTON_TIMING=1 cargo run -p vrc-photon-ui --release`
 
 Record: first frame, first page, scroll to the bottom, rail drag, and a 300+ result search.
 

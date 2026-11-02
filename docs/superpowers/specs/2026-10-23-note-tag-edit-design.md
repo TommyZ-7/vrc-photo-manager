@@ -1,7 +1,7 @@
 # Photo Note Editing and Tag Removal: Design
 
 - Date: 2026-10-23
-- Issue: [#10 feat: 写真詳細のメモ編集とタグ削除](https://github.com/TommyZ-7/vrc-photo-manager/issues/10)
+- Issue: [#10 feat: 写真詳細のメモ編集とタグ削除](https://github.com/TommyZ-7/vrc-photon/issues/10)
 - Status: Draft for review
 - Target: `crates/core/src/db.rs`, `crates/ui/src/main.rs`, docs
 

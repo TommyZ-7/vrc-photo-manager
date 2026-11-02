@@ -179,7 +179,7 @@ UI が生成したサムネイルのファイル数とバイト数を IPC でバ
     `crates/daemon/src/lib.rs`、`crates/ipc/src/protocol.rs`、
     `.github/workflows/ci.yml`）が変わった PR で true にする。
   - 既存の `ipc-windows` ジョブに、`thumbnails == 'true'` のときだけ
-    `cargo test -p vrc-photo-core thumbnail::tests` を実行するステップを足す。
+    `cargo test -p vrc-photon-core thumbnail::tests` を実行するステップを足す。
     新しい必須チェックは増やさない。
 
 ## テスト

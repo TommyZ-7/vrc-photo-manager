@@ -1,7 +1,7 @@
 # Compression Profile Management: Design
 
 - Date: 2026-10-23
-- Issue: [#11 feat: 圧縮プロファイル管理（並び替え・複製・削除確認）](https://github.com/TommyZ-7/vrc-photo-manager/issues/11)
+- Issue: [#11 feat: 圧縮プロファイル管理（並び替え・複製・削除確認）](https://github.com/TommyZ-7/vrc-photon/issues/11)
 - Status: Approved in session
 - Target: `crates/core/src/db.rs`, `crates/daemon/src/lib.rs`, `crates/ui/src/main.rs`, docs
 

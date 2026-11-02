@@ -1,6 +1,6 @@
 # UI仕様
 
-2026-10のガラス背景リボンUI（[#118](https://github.com/TommyZ-7/vrc-photo-manager/issues/118)）後の実装を記述する。写真を主役にした構成で、ナビゲーションと状態表示は画面の端に置く。
+2026-10のガラス背景リボンUI（[#118](https://github.com/TommyZ-7/vrc-photon/issues/118)）後の実装を記述する。写真を主役にした構成で、ナビゲーションと状態表示は画面の端に置く。
 
 ## 1. 技術
 
@@ -35,7 +35,7 @@ OSウィンドウ（背景ブラー要求）
 
 ### 2.1 タイトルバー
 
-左から、アプリグリフ（22px）、`VRC Photo Manager`（11px、muted）、区切り、現在画面名（11.5px）。右寄せにリボン折りたたみボタン、通知ベル、`TitleBar` 標準のウィンドウ操作を置く。
+左から、アプリグリフ（22px）、`VRC PhotoN`（11px、muted）、区切り、現在画面名（11.5px）。右寄せにリボン折りたたみボタン、通知ベル、`TitleBar` 標準のウィンドウ操作を置く。
 
 - 折りたたみ状態は `ui_ribbon_collapsed` として保存し、起動時に復元する。
 - 通知ベルは、注意が必要な状態（取り込み結果・ライブラリエラー・圧縮失敗・デーモンの処理エラー）があるときアンバーのドットを出す。クリックで通知モーダルを開く（§2.3.1）。
@@ -182,7 +182,7 @@ OSウィンドウ（背景ブラー要求）
 - デーモンカード: 最終同期、IPC接続状態とエラー、監視の一時停止状態、スキャン進捗（フォルダ番号・索引件数・バー）、「再スキャン」「監視を一時停止/再開」「デーモンを終了」を表示する。再スキャンはDBに積んでIPCで起こす。一時停止/再開と終了はIPC接続中のみ有効で、終了は2回押し確認。停止中は「停止中」バッジを表示し、一時停止/再開・終了ボタンを無効化する。
 - スキャン進捗イベントはwalking（検索中）とindexing（索引中）を区別し、フォルダが複数ある場合は「フォルダ n/N」を出す。
 - `daemon_errors` が空でないときは「処理エラー」カードを出す。操作（写真スキャン / ログ解析 / 写真の紐付け）のラベル、赤いメッセージ、折り返し表示のモノスペース詳細、検出回数、発生時刻（`MM/DD HH:MM`、解析できなければ生文字列）を並べる。「再試行」は操作に対応する `rescan` / `relog` / `relink` を `daemon_commands` に積み、IPC接続中なら `wake_commands` で即時実行する。デーモン停止中はコマンドがキューに残り、起動後に実行される旨を表示する。
-- 「ログ」カードにログフォルダ、`vrc-photo-manager.log` と `vrc-photo-daemon.log` の2ファイル名、「ログフォルダを開く」を出す。データディレクトリを特定できない場合は「ログフォルダを特定できません」「ファイルへのログ出力は利用できません」と表示する。データディレクトリは解決できるがログファイルを開けない場合、カードは保存先とファイル名を表示したまま、ログはstderrのみになる。
+- 「ログ」カードにログフォルダ、`vrc-photon.log` と `vrc-photon-daemon.log` の2ファイル名、「ログフォルダを開く」を出す。データディレクトリを特定できない場合は「ログフォルダを特定できません」「ファイルへのログ出力は利用できません」と表示する。データディレクトリは解決できるがログファイルを開けない場合、カードは保存先とファイル名を表示したまま、ログはstderrのみになる。
 - VRChat本体が出力ログを24時間で削除することをアンバーの注意書きで明示する。
 
 ### 2.9 設定
@@ -285,7 +285,7 @@ OSウィンドウ（背景ブラー要求）
 | `--background` | UIを開かず、デーモンのバックグラウンドスーパーバイザとして起動する |
 
 - デモは18枚の1280×800 PNG（縦グラデーション、太陽、シルエット）と256 pxのPNGサムネイルを生成する。1200 pxプレビューは選択時にデモ専用の `previews/` へ生成する。
-- 保存先はOSのテンポラリ領域 `vrc-photo-manager-demo/` 配下。DBは `library.db` で、再起動しても設定が残る。写真が空のときだけシードする。
+- 保存先はOSのテンポラリ領域 `vrc-photon-demo/` 配下。DBは `library.db` で、再起動しても設定が残る。写真が空のときだけシードする。
 - 実ライブラリのサムネイル／プレビューキャッシュには書き込まない。写真IDも実データと衝突しない。
 - デモ中はサイドバー下部に `DEMO DATA` を表示する。
 
@@ -302,7 +302,7 @@ OSウィンドウ（背景ブラー要求）
 - UIからデーモンを起動する処理は `spawn_daemon_process`。`--background` は `run_background_supervisor`。
 - `App` はDBを直接保持する。重い書き込みはデーモンに任せる。
 - 3秒更新で一覧全体を再読込しないこと（サムネイル再デコードが重い）。枚数比較でガードしている。
-- 見た目の基準はLinuxの1280×820 / 1440×900。Windows実機での確認は [#9](https://github.com/TommyZ-7/vrc-photo-manager/issues/9) で追跡する。
+- 見た目の基準はLinuxの1280×820 / 1440×900。Windows実機での確認は [#9](https://github.com/TommyZ-7/vrc-photon/issues/9) で追跡する。
 
 ## 9. 未実装・改善候補
 
@@ -320,7 +320,7 @@ OSウィンドウ（背景ブラー要求）
 - 実装計画: [2026-10-27-glass-ribbon-ui.md](superpowers/plans/2026-10-27-glass-ribbon-ui.md)
 - モック: [ui-glass-ribbon-mockup.html](ui-glass-ribbon-mockup.html)
 - 旧UI設計: [2026-10-22-ui-redesign-design.md](superpowers/specs/2026-10-22-ui-redesign-design.md)
-- Issue: [#118 ガラス背景リボンUI](https://github.com/TommyZ-7/vrc-photo-manager/issues/118)
-- Windows実機QA: [#9](https://github.com/TommyZ-7/vrc-photo-manager/issues/9)
+- Issue: [#118 ガラス背景リボンUI](https://github.com/TommyZ-7/vrc-photon/issues/118)
+- Windows実機QA: [#9](https://github.com/TommyZ-7/vrc-photon/issues/9)
 - 開発前の画面案: [ui-mockup.html](ui-mockup.html)（歴史的資料）
 - 現行の実装: `crates/ui/src/{main.rs,app,state,ui}`

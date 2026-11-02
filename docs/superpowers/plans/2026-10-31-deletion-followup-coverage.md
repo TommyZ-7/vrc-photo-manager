@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Workspace crates: `vrc-photo-core`, `vrc-photo-daemon`, `vrc-photo-ui`.
+- Workspace crates: `vrc-photon-core`, `vrc-photon-daemon`, `vrc-photon-ui`.
 - No new dependencies; no DB schema changes.
 - UI copy stays Japanese; the existing heading format is unchanged.
 - Code and docs land in separate PRs (`AGENTS.md` §4).
@@ -70,7 +70,7 @@ fn deletion_job_summary_counts_a_unknown_status_as_affected() {
 
 - [x] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p vrc-photo-core deletion_job_summary_counts_a_unknown_status_as_affected`
+Run: `cargo test -p vrc-photon-core deletion_job_summary_counts_a_unknown_status_as_affected`
 Expected: FAIL (`affected_photos` is 0 because the status list excludes `future_status`).
 
 - [x] **Step 3: Use the non-terminal predicate**
@@ -95,7 +95,7 @@ for #142.
 
 - [x] **Step 4: Run the test to verify it passes**
 
-Run: `cargo test -p vrc-photo-core deletion_job_summary`
+Run: `cargo test -p vrc-photon-core deletion_job_summary`
 Expected: PASS for both summary tests.
 
 - [x] **Step 5: Commit**
@@ -154,7 +154,7 @@ assert_eq!(
 
 - [x] **Step 2: Run the test**
 
-Run: `cargo test -p vrc-photo-daemon unknown_deletion_reason_is_blocked_without_deleting`
+Run: `cargo test -p vrc-photon-daemon unknown_deletion_reason_is_blocked_without_deleting`
 Expected: PASS. The guard already blocks before touching files; the new
 assertions lock the derivative behavior against future guard movement.
 
@@ -192,7 +192,7 @@ assert_eq!(
 
 - [x] **Step 2: Run the test**
 
-Run: `cargo test -p vrc-photo-core deletion_status_and_reason_round_trip`
+Run: `cargo test -p vrc-photon-core deletion_status_and_reason_round_trip`
 Expected: PASS. This is a coverage lock for existing behavior.
 
 - [x] **Step 3: Commit**
@@ -223,7 +223,7 @@ Change the test import to:
 use super::{
     DeletionSnapshot, apply_deletion_snapshot, collect_live_snapshot, deletion_update,
 };
-use vrc_photo_core::model::{
+use vrc_photon_core::model::{
     DeletionCounts, DeletionReason, DeletionRequest, DeletionStatus, NewPhoto,
 };
 ```
@@ -282,7 +282,7 @@ fn failed_deletion_snapshot_keeps_all_state_and_avoids_a_false_toast() {
 
 - [x] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p vrc-photo-ui failed_deletion_snapshot_keeps_all_state_and_avoids_a_false_toast`
+Run: `cargo test -p vrc-photon-ui failed_deletion_snapshot_keeps_all_state_and_avoids_a_false_toast`
 Expected: FAIL to compile (`apply_deletion_snapshot` is not defined).
 
 - [x] **Step 3: Add the apply helper**
@@ -341,7 +341,7 @@ if let Some(update) = apply_deletion_snapshot(
 
 - [x] **Step 5: Run the UI tests**
 
-Run: `cargo test -p vrc-photo-ui failed_deletion_snapshot_keeps_all_state_and_avoids_a_false_toast deletion_update_keeps_the_baseline`
+Run: `cargo test -p vrc-photon-ui failed_deletion_snapshot_keeps_all_state_and_avoids_a_false_toast deletion_update_keeps_the_baseline`
 Expected: PASS.
 
 - [x] **Step 6: Commit**

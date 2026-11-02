@@ -4,7 +4,7 @@
 
 **Goal:** Remove redundant full-image copies from the compression encoders and decode each photo once per compression batch, without losing AVIF alpha or changing replace-policy input semantics.
 
-**Architecture:** `vrc-photo-core` borrows `&DynamicImage` through resize and encode, using raw-buffer reinterpretation for AVIF RGBA and direct buffers for WebP/JPEG/JXL. The daemon claims all pending jobs for the oldest pending photo in one DB batch, decodes once, and processes profiles sequentially. `replace` input paths are frozen at batch start; forced deletion cancels the remaining claimed jobs between encodes.
+**Architecture:** `vrc-photon-core` borrows `&DynamicImage` through resize and encode, using raw-buffer reinterpretation for AVIF RGBA and direct buffers for WebP/JPEG/JXL. The daemon claims all pending jobs for the oldest pending photo in one DB batch, decodes once, and processes profiles sequentially. `replace` input paths are frozen at batch start; forced deletion cancels the remaining claimed jobs between encodes.
 
 **Tech Stack:** Rust 2024, `image` 0.25, `ravif` 0.13 (`rgb` + `bytemuck`), `webp` 0.3, `jpegxl-rs` 0.14, SQLite (`rusqlite`), `tempfile` in tests.
 
@@ -44,7 +44,7 @@ git worktree add ../${REPO}-compression-decode-sharing-feat -b feat/compression-
 ```
 
 - Open a separate session in that worktree and implement Tasks 1–4 there. Task 5 is a separate docs-only PR after the code merge.
-- Baseline local test command for the worktree: `cargo test -p vrc-photo-core && cargo test -p vrc-photo-daemon`.
+- Baseline local test command for the worktree: `cargo test -p vrc-photon-core && cargo test -p vrc-photon-daemon`.
 
 ---
 
@@ -84,7 +84,7 @@ fn compress_decoded_can_use_the_same_image_twice() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p vrc-photo-core compress_decoded_can_use_the_same_image_twice`
+Run: `cargo test -p vrc-photon-core compress_decoded_can_use_the_same_image_twice`
 
 Expected: compile error because `compress_decoded` takes `DynamicImage`, not `&DynamicImage`.
 
@@ -103,7 +103,7 @@ Do not change output paths, suffix sanitizing, or atomic writes.
 
 - [ ] **Step 4: Run the core compressor tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-core compressor`
+Run: `cargo test -p vrc-photon-core compressor`
 
 Expected: the new borrow test and all existing compressor tests pass.
 
@@ -189,7 +189,7 @@ Update the test imports to include `Rgb` and `RgbImage`.
 
 - [ ] **Step 6: Run the new encoder tests on the current implementation**
 
-Run: `cargo test -p vrc-photo-core avif_keeps_transparency jpeg_rgba_fast_path webp_rgb_fast_path jxl_rgb_fast_path avif_rgba_fast_path`
+Run: `cargo test -p vrc-photon-core avif_keeps_transparency jpeg_rgba_fast_path webp_rgb_fast_path jxl_rgb_fast_path avif_rgba_fast_path`
 
 Expected: all pass. These pin the output behavior before the copy-removal refactor.
 
@@ -226,7 +226,7 @@ In `crates/core/src/compressor.rs`:
 
 - [ ] **Step 9: Run the core compressor tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-core compressor`
+Run: `cargo test -p vrc-photon-core compressor`
 
 Expected: all compressor tests, including the five regression tests and the borrow test, pass.
 
@@ -315,7 +315,7 @@ fn photo_has_forced_deletion_tracks_the_force_flag() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-core next_pending_photo_jobs photo_has_forced_deletion`
+Run: `cargo test -p vrc-photon-core next_pending_photo_jobs photo_has_forced_deletion`
 
 Expected: compile errors because both methods do not exist.
 
@@ -364,11 +364,11 @@ pub fn photo_has_forced_deletion(&self, photo_id: i64) -> Result<bool> {
 
 - [ ] **Step 5: Run the DB tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-core next_pending_photo_jobs photo_has_forced_deletion`
+Run: `cargo test -p vrc-photon-core next_pending_photo_jobs photo_has_forced_deletion`
 
 Expected: both new tests pass. Then run the full core suite:
 
-Run: `cargo test -p vrc-photo-core`
+Run: `cargo test -p vrc-photon-core`
 
 Expected: all core tests pass, including the unchanged `next_pending_job` tests.
 
@@ -418,7 +418,7 @@ Add these helpers/tests in the daemon test module:
 fn save_batch_profile(
     db: &Db,
     id: &str,
-    format: vrc_photo_core::model::CompressionFormat,
+    format: vrc_photon_core::model::CompressionFormat,
     suffix: &str,
     resize: Option<(u32, u32)>,
 ) {
@@ -445,8 +445,8 @@ fn compress_pending_processes_every_profile_for_one_photo() {
         .photo_by_path(original_path(&dir).to_str().unwrap())
         .unwrap()
         .unwrap();
-    save_batch_profile(&db, "webp", vrc_photo_core::model::CompressionFormat::Webp, "_webp", None);
-    save_batch_profile(&db, "jpeg", vrc_photo_core::model::CompressionFormat::Jpeg, "_jpeg", None);
+    save_batch_profile(&db, "webp", vrc_photon_core::model::CompressionFormat::Webp, "_webp", None);
+    save_batch_profile(&db, "jpeg", vrc_photon_core::model::CompressionFormat::Jpeg, "_jpeg", None);
     db.enqueue_job(photo.id, "webp", "keep").unwrap();
     db.enqueue_job(photo.id, "jpeg", "keep").unwrap();
 
@@ -474,8 +474,8 @@ fn batch_keeps_the_original_source_after_a_replace_job() {
         .photo_by_path(original_path(&dir).to_str().unwrap())
         .unwrap()
         .unwrap();
-    save_batch_profile(&db, "small", vrc_photo_core::model::CompressionFormat::Webp, "_small", Some((8, 8)));
-    save_batch_profile(&db, "full", vrc_photo_core::model::CompressionFormat::Webp, "_full", None);
+    save_batch_profile(&db, "small", vrc_photon_core::model::CompressionFormat::Webp, "_small", Some((8, 8)));
+    save_batch_profile(&db, "full", vrc_photon_core::model::CompressionFormat::Webp, "_full", None);
     db.enqueue_job(photo.id, "small", "replace").unwrap();
     db.enqueue_job(photo.id, "full", "keep").unwrap();
 
@@ -501,8 +501,8 @@ fn batch_continues_after_one_profile_fails() {
         .photo_by_path(original_path(&dir).to_str().unwrap())
         .unwrap()
         .unwrap();
-    save_batch_profile(&db, "good", vrc_photo_core::model::CompressionFormat::Webp, "_good", None);
-    save_batch_profile(&db, "bad", vrc_photo_core::model::CompressionFormat::Webp, "_bad", None);
+    save_batch_profile(&db, "good", vrc_photon_core::model::CompressionFormat::Webp, "_good", None);
+    save_batch_profile(&db, "bad", vrc_photon_core::model::CompressionFormat::Webp, "_bad", None);
     db.enqueue_job(photo.id, "good", "keep").unwrap();
     db.enqueue_job_with_output_dir(photo.id, "bad", "keep", Some(blocked.to_str().unwrap()))
         .unwrap();
@@ -528,8 +528,8 @@ fn forced_deletion_cancels_the_rest_of_the_batch() {
         .photo_by_path(original_path(&dir).to_str().unwrap())
         .unwrap()
         .unwrap();
-    save_batch_profile(&db, "first", vrc_photo_core::model::CompressionFormat::Webp, "_first", None);
-    save_batch_profile(&db, "second", vrc_photo_core::model::CompressionFormat::Webp, "_second", None);
+    save_batch_profile(&db, "first", vrc_photon_core::model::CompressionFormat::Webp, "_first", None);
+    save_batch_profile(&db, "second", vrc_photon_core::model::CompressionFormat::Webp, "_second", None);
     db.enqueue_job(photo.id, "first", "keep").unwrap();
     db.enqueue_job(photo.id, "second", "keep").unwrap();
     let jobs = db.next_pending_photo_jobs().unwrap();
@@ -549,7 +549,7 @@ fn forced_deletion_cancels_the_rest_of_the_batch() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-daemon compress_pending_processes_every_profile batch_keeps_the_original_source batch_continues_after_one_profile forced_deletion_cancels_the_rest`
+Run: `cargo test -p vrc-photon-daemon compress_pending_processes_every_profile batch_keeps_the_original_source batch_continues_after_one_profile forced_deletion_cancels_the_rest`
 
 Expected: compile errors because `next_pending_photo_jobs` exists in core but `process_photo_batch` and `JobOutcome` do not, and `compress_pending` still starts workers.
 
@@ -567,7 +567,7 @@ In `crates/daemon/src/lib.rs`, add `use image::DynamicImage;` to the imports, th
   - `photo.abs_path` if `Path::new(&photo.abs_path).is_file()`
   - otherwise `photo.effective_path()`
 - Fill `photos.blake3` once when it is `None`, the source is `abs_path`, and `hashing::file_blake3` succeeds (same as the old `process_job`).
-- Decode once with `vrc_photo_core::image_decode::decode_image(&source_path)`. If it returns `None`, mark every job `failed` with `"cannot decode <path>"` and return outcomes.
+- Decode once with `vrc_photon_core::image_decode::decode_image(&source_path)`. If it returns `None`, mark every job `failed` with `"cannot decode <path>"` and return outcomes.
 - Loop over the jobs:
   - Before jobs 2..N (not before the first), call `db.photo_has_forced_deletion(photo.id)`. If true, mark every remaining job `cancelled` with `db.update_job(..., QueueStatus::Cancelled, 0.0, None, None)`, push `Cancelled` outcomes, and break.
   - Read the profile from `db.list_profiles()` by `job.profile_id`. Missing profile is a per-job failure.
@@ -610,17 +610,17 @@ fn process_job(db: &Arc<Mutex<Db>>, job: &CompressionJob) -> Result<()> {
 
 - [ ] **Step 7: Run the daemon tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-daemon compress_pending_processes_every_profile batch_keeps_the_original_source batch_continues_after_one_profile forced_deletion_cancels_the_rest`
+Run: `cargo test -p vrc-photon-daemon compress_pending_processes_every_profile batch_keeps_the_original_source batch_continues_after_one_profile forced_deletion_cancels_the_rest`
 
 Expected: all four pass. Then run the existing batch/replace tests:
 
-Run: `cargo test -p vrc-photo-daemon multi_profile_replace_is_worker_count_independent failed_job_blocks_deletion compression_workers_process_a_batch`
+Run: `cargo test -p vrc-photon-daemon multi_profile_replace_is_worker_count_independent failed_job_blocks_deletion compression_workers_process_a_batch`
 
 Expected: all pass.
 
 - [ ] **Step 8: Run the full daemon suite**
 
-Run: `cargo test -p vrc-photo-daemon`
+Run: `cargo test -p vrc-photon-daemon`
 
 Expected: all daemon tests pass.
 
@@ -670,7 +670,7 @@ In both the baseline `main` worktree and the feature worktree, create a temporar
 Build with:
 
 ```bash
-cargo build -p vrc-photo-core --release --example compression_peak
+cargo build -p vrc-photon-core --release --example compression_peak
 ```
 
 Generate the shared inputs outside the measured process:
@@ -711,8 +711,8 @@ fn measure_two_profile_compression() {
     let db = Db::open(dir.path().join("library.db")).unwrap();
     let photo = db.photo_by_path(photo_path.to_str().unwrap()).unwrap().unwrap();
     for (id, format, suffix) in [
-        ("webp", vrc_photo_core::model::CompressionFormat::Webp, "_webp"),
-        ("avif", vrc_photo_core::model::CompressionFormat::Avif, "_avif"),
+        ("webp", vrc_photon_core::model::CompressionFormat::Webp, "_webp"),
+        ("avif", vrc_photon_core::model::CompressionFormat::Avif, "_avif"),
     ] {
         db.save_profile(&CompressionProfile {
             id: id.to_string(),
@@ -738,8 +738,8 @@ fn measure_two_profile_compression() {
 Build once, then run three times on each branch:
 
 ```bash
-cargo test -p vrc-photo-daemon measure_two_profile_compression --release --no-run
-cargo test -p vrc-photo-daemon measure_two_profile_compression --release -- --ignored --nocapture
+cargo test -p vrc-photon-daemon measure_two_profile_compression --release --no-run
+cargo test -p vrc-photon-daemon measure_two_profile_compression --release -- --ignored --nocapture
 ```
 
 Record the median wall time. Also run the same command under `/usr/bin/time -v` and record user+sys. Use the same 4K input and machine for both branches. Delete the temporary test before committing.

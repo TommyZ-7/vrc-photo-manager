@@ -1,6 +1,6 @@
 # システムパッケージ（pacman / deb）のアプリ内更新 設計
 
-- Issue: [#144 feat(update): システムパッケージ（pacman / deb）でもアプリ内更新を可能にする](https://github.com/TommyZ-7/vrc-photo-manager/issues/144)
+- Issue: [#144 feat(update): システムパッケージ（pacman / deb）でもアプリ内更新を可能にする](https://github.com/TommyZ-7/vrc-photon/issues/144)
 - 日付: 2026-11-02
 - 状態: Approved
 - 対象: `crates/update`, `crates/ui`, `crates/release-tool`, `crates/i18n`,
@@ -13,7 +13,7 @@
 実際にはリリースの tar.gz を手動でダウンロードして再インストールしており、
 更新通知から先の導線が切れている。
 
-既存の「署名済み `latest.json` → 検証済みダウンロード → `vrc-photo-updater`
+既存の「署名済み `latest.json` → 検証済みダウンロード → `vrc-photon-updater`
 ヘルパー」のパイプラインはそのまま使い、足りない「root 権限が必要なインストール
 実行」だけを polkit 経由で追加する。
 
@@ -53,11 +53,11 @@
   `windows-x86_64`（NSIS）だけを持つ。`Manifest::parse_and_validate` は
   `platforms` の未知キーを `InvalidManifest` で拒否する。
 - `InstallKind::SystemPackage` は `automatic_apply()` が false。UI は
-  `sudo pacman -Syu vrc-photo-manager` などのコマンドを表示する。
-- `vrc-photo-updater` は UI が `<data_dir>/updates/bin/` にコピーして
+  `sudo pacman -Syu vrc-photon` などのコマンドを表示する。
+- `vrc-photon-updater` は UI が `<data_dir>/updates/bin/` にコピーして
   `--apply <job.json>` で起動する。ヘルパーは UI / デーモンの終了を待ち、
   AppImage の置換または NSIS の実行、health marker の確認、失敗時の復元を行う。
-- `vrc-photo-release-tool` は AppImage と NSIS だけを manifest 化する。
+- `vrc-photon-release-tool` は AppImage と NSIS だけを manifest 化する。
 - pacman 配布物は `cargo-packager` が `.tar.gz`（`usr/` ツリー）と `PKGBUILD`
   を生成する。この `.tar.gz` は `makepkg` の入力であり、`.PKGINFO` を含まない
   ため `pacman -U` ではインストールできない。実際に `pacman -U` できる
@@ -87,14 +87,14 @@
   },
   "system_packages": {
     "pacman": {
-      "url": "https://github.com/.../vrc-photo-manager-0.10.0-1-x86_64.pkg.tar.zst",
+      "url": "https://github.com/.../vrc-photon-0.10.0-1-x86_64.pkg.tar.zst",
       "format": "pacman",
       "size": 12345678,
       "sha256": "....",
       "signature": "base64..."
     },
     "deb": {
-      "url": "https://github.com/.../vrc-photo-manager_0.10.0_amd64.deb",
+      "url": "https://github.com/.../vrc-photon_0.10.0_amd64.deb",
       "format": "deb",
       "size": 12345678,
       "sha256": "....",
@@ -122,9 +122,9 @@ AppImage / NSIS の更新確認を続けられる。新しいクライアント�
 
 **A. ユーザー権限ヘルパー → `pkexec` → インストール専用モード（採用）**
 
-UI は既存どおりユーザー権限の `vrc-photo-updater --apply` を起動する。
+UI は既存どおりユーザー権限の `vrc-photon-updater --apply` を起動する。
 ユーザーヘルパーが UI / デーモンの終了を待ち、
-`pkexec --disable-internal-agent /usr/bin/vrc-photo-updater --apply-system-package`
+`pkexec --disable-internal-agent /usr/bin/vrc-photon-updater --apply-system-package`
 を実行する。特権側は検証とインストールだけを行い、UI の再起動や health 確認は
 ユーザーヘルパーが行う。特権面を最小にできる。
 
@@ -203,9 +203,9 @@ pacman は gzip + tar、deb は ar + control.tar.{gz,xz,zst} を扱う必要が�
 `.github/workflows/release.yml`:
 
 - `cargo packager` が生成した `dist/PKGBUILD` と
-  `vrc-photo-manager_<version>_x86_64.tar.gz` を使い、Arch Linux の
+  `vrc-photon_<version>_x86_64.tar.gz` を使い、Arch Linux の
   `base-devel` コンテナ内で `makepkg -f --nodeps` を実行して
-  `vrc-photo-manager-<version>-1-x86_64.pkg.tar.zst` を生成する。
+  `vrc-photon-<version>-1-x86_64.pkg.tar.zst` を生成する。
   `makepkg` は root で実行できないため、コンテナ内の非 root ユーザーで実行する。
 - `.tar.gz` と `PKGBUILD` は手動インストール / AUR 用に残す。
 - 既存の `sign --dist dist` が `.deb`、`.tar.gz`、`.pkg.tar.zst` も署名する。
@@ -213,7 +213,7 @@ pacman は gzip + tar、deb は ar + control.tar.{gz,xz,zst} を扱う必要が�
   `(.system_packages | length == 2)` を追加。
 - deb / pacman パッケージ内に polkit policy が入っていること、
   `.pkg.tar.zst` が `pacman -Qip` で
-  `vrc-photo-manager` / `<version>` を返すことを検証する。
+  `vrc-photon` / `<version>` を返すことを検証する。
 
 ### 6.2 更新確認とダウンロード
 
@@ -279,11 +279,11 @@ pub fn can_apply_automatically(
 
 - `pkexec_available()` は Linux で `PATH` と `/usr/bin`, `/bin`,
   `/usr/local/bin` から実行可能な `pkexec` を探す。非 Linux は false。
-- `system_helper_available()` は `/usr/bin/vrc-photo-updater` が通常ファイルで
+- `system_helper_available()` は `/usr/bin/vrc-photon-updater` が通常ファイルで
   あることを確認する。deb / pacman はこのパスに置く。`/usr/local/bin` など
   手動配置の `SystemPackage` はコマンド表示にフォールバックする。
 - `system_policy_available()` は
-  `/usr/share/polkit-1/actions/com.tommyz.vrc-photo-manager.update.policy`
+  `/usr/share/polkit-1/actions/com.tommyz.vrc-photon.update.policy`
   が通常ファイルであることを確認する。policy がない環境では、generic な
   `org.freedesktop.policykit.exec` にフォールバックせず、コマンド表示にする。
 - テスト用に `find_executable_in(paths, name)` のような純粋関数を用意する。
@@ -333,7 +333,7 @@ pub struct ApplyJob {
 3. 以下を実行する。
 
 ```text
-pkexec --disable-internal-agent /usr/bin/vrc-photo-updater \
+pkexec --disable-internal-agent /usr/bin/vrc-photon-updater \
   --apply-system-package <job.json>
 ```
 
@@ -367,15 +367,15 @@ pkexec --disable-internal-agent /usr/bin/vrc-photo-updater \
 
 ### 6.6 特権ヘルパー（`--apply-system-package`）
 
-`crates/update/src/bin/vrc-photo-updater.rs` にモードを追加する。
+`crates/update/src/bin/vrc-photon-updater.rs` にモードを追加する。
 
 ```text
-vrc-photo-updater --apply <job.json>                  # ユーザー権限
-vrc-photo-updater --apply-system-package <job.json>   # root + pkexec
+vrc-photon-updater --apply <job.json>                  # ユーザー権限
+vrc-photon-updater --apply-system-package <job.json>   # root + pkexec
 ```
 
 - `--apply` は effective uid が 0 のとき拒否する。polkit action は
-  `/usr/bin/vrc-photo-updater` を任意引数で実行できるため、ユーザーモードを
+  `/usr/bin/vrc-photon-updater` を任意引数で実行できるため、ユーザーモードを
   root で動かすと任意ファイル置換の特権昇格になる。このガードは必須。
 - `--apply-system-package` は effective uid 0 かつ `PKEXEC_UID` が設定されて
   いることを要求する。`PKEXEC_UID` がなければ拒否する。
@@ -402,7 +402,7 @@ vrc-photo-updater --apply-system-package <job.json>   # root + pkexec
    - `manifest.system_package_for(family)` が存在し、`format` / ファイル名 /
      `size` / `sha256` が staged と一致する。
 5. 検証済みファイルを root 所有の一時ファイルへコピーする。
-   - `/var/tmp/vrc-photo-update-<uuid>.pkg` を `create_new` + mode 0600 で作成。
+   - `/var/tmp/vrc-photon-update-<uuid>.pkg` を `create_new` + mode 0600 で作成。
    - コピーしながら SHA-256 を計算し、manifest の値と一致することを確認。
    - コピー先でも minisign 署名を検証する。
    - TOCTOU 対策として、以降のメタデータ確認とインストールはコピー先だけを使う。
@@ -410,7 +410,7 @@ vrc-photo-updater --apply-system-package <job.json>   # root + pkexec
 6. パッケージメタデータを確認する。
    - pacman: `LC_ALL=C /usr/bin/pacman -Qip <temp>` の `Name` / `Version`。
    - deb: `LC_ALL=C /usr/bin/dpkg-deb -f <temp>` の `Package` / `Version`。
-   - `Name` / `Package` が `vrc-photo-manager` と一致。
+   - `Name` / `Package` が `vrc-photon` と一致。
    - バージョンを正規化して manifest の version と一致。
      - pacman: epoch を除き、最後の `-pkgrel` を除いた `pkgver`。
      - deb: epoch を除き、`<manifest version>` または
@@ -467,7 +467,7 @@ vrc-photo-updater --apply-system-package <job.json>   # root + pkexec
 - `start_daemon(supervisor: Option<&str>)` を追加（通常起動用）。
   - `supervisor == Some("systemd")` なら
     `systemctl --user daemon-reload`（失敗はログのみ）→
-    `systemctl --user start vrc-photo-daemon.service` を実行。
+    `systemctl --user start vrc-photon-daemon.service` を実行。
   - 失敗したら既存の `spawn_daemon_process()` にフォールバック。
   - それ以外は `spawn_daemon_process()`。
 - `restart_daemon_after_update(supervisor: Option<&str>)` を追加。
@@ -487,7 +487,7 @@ vrc-photo-updater --apply-system-package <job.json>   # root + pkexec
 
 ### 6.9 polkit policy とパッケージ同梱
 
-新規 `packaging/polkit/com.tommyz.vrc-photo-manager.update.policy`:
+新規 `packaging/polkit/com.tommyz.vrc-photon.update.policy`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -496,28 +496,28 @@ vrc-photo-updater --apply-system-package <job.json>   # root + pkexec
  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 <policyconfig>
   <vendor>TommyZ7</vendor>
-  <vendor_url>https://github.com/TommyZ-7/vrc-photo-manager</vendor_url>
-  <action id="com.tommyz.vrc-photo-manager.update-package">
-    <description>Update VRC Photo Manager</description>
-    <message>Authentication is required to update VRC Photo Manager</message>
+  <vendor_url>https://github.com/TommyZ-7/vrc-photon</vendor_url>
+  <action id="com.tommyz.vrc-photon.update-package">
+    <description>Update VRC PhotoN</description>
+    <message>Authentication is required to update VRC PhotoN</message>
     <defaults>
       <allow_any>auth_admin</allow_any>
       <allow_inactive>auth_admin</allow_inactive>
       <allow_active>auth_admin</allow_active>
     </defaults>
     <annotations>
-      <annotation key="org.freedesktop.policykit.exec.path">/usr/bin/vrc-photo-updater</annotation>
+      <annotation key="org.freedesktop.policykit.exec.path">/usr/bin/vrc-photon-updater</annotation>
     </annotations>
   </action>
 </policyconfig>
 ```
 
 - `Packager.toml` の `[deb.files]` / `[pacman.files]` に
-  `usr/share/polkit-1/actions/com.tommyz.vrc-photo-manager.update.policy`
+  `usr/share/polkit-1/actions/com.tommyz.vrc-photon.update.policy`
   へのマッピングを追加する。
 - AppImage には同梱しない（AppImage は system package モードを使わない）。
 - release workflow で deb / pacman の両方に policy が入っていること、
-  `org.freedesktop.policykit.exec.path` が `/usr/bin/vrc-photo-updater` で
+  `org.freedesktop.policykit.exec.path` が `/usr/bin/vrc-photon-updater` で
   あることを検証する。
 
 ### 6.10 エラーと結果コード
@@ -585,7 +585,7 @@ UI の `update_error_message` / `result_notice` に新しい i18n キーを追�
 | symlink で staging 外へ誘導 | 最終パスと親ディレクトリの symlink / canonical path を検証 |
 | 検証後にファイルを差し替える（TOCTOU） | root 所有の一時ファイルへコピーし、コピー先でハッシュと署名を再検証してからインストール |
 | 古い署名済みパッケージへダウングレード | manifest.version > `CURRENT_VERSION` を必須化。パッケージメタデータも一致確認 |
-| 別名パッケージをインストール | パッケージ名 `vrc-photo-manager` を必須化 |
+| 別名パッケージをインストール | パッケージ名 `vrc-photon` を必須化 |
 | `pkexec` でユーザーモードを root 実行 | `--apply` は euid 0 を拒否。`--apply-system-package` は euid 0 + `PKEXEC_UID` 必須 |
 | 特権ヘルパーに任意コマンドを実行させる | 実行コマンドを pacman / dpkg の固定引数に限定。シェル不使用 |
 | pacman DB ロックを無視して強行 | 非ゼロ終了とロックパターンを検出し、変更なしで失敗 |
@@ -596,9 +596,9 @@ UI の `update_error_message` / `result_notice` に新しい i18n キーを追�
 - 署名鍵が漏洩した場合、特権側も署名済みパッケージを信頼する。鍵管理は
   既存 ADR-0012 の運用に従う。
 - パッケージのインストールスクリプトは root で実行される。現在の
-  vrc-photo-manager パッケージには install script を同梱していないが、
+  vrc-photon パッケージには install script を同梱していないが、
   将来追加する場合はレビュー必須とする。
-- `pkexec` の action は `/usr/bin/vrc-photo-updater` の任意引数を許可する。
+- `pkexec` の action は `/usr/bin/vrc-photon-updater` の任意引数を許可する。
   引数検証はヘルパー側で行う。
 - システムパッケージの health 失敗時は自動復旧できない。ログと手動再インストール
   手順を案内する。
@@ -653,7 +653,7 @@ UI の `update_error_message` / `result_notice` に新しい i18n キーを追�
   - `latest.json` の `system_packages` が 2 件
   - `.deb` / `.pkg.tar.zst` が署名される
   - `.pkg.tar.zst` が `pacman -Qip` で
-    `vrc-photo-manager` / `<version>` を返す
+    `vrc-photon` / `<version>` を返す
 
 ### 8.4 手動 QA
 
@@ -670,7 +670,7 @@ UI の `update_error_message` / `result_notice` に新しい i18n キーを追�
 4. 署名不正のパッケージをフィードに置き、通常側 / 特権側の両方で拒否されることを
    確認する。
 5. systemd ユーザーサービスでデーモンを動かし、更新後に
-   `systemctl --user is-active vrc-photo-daemon.service` が active で、
+   `systemctl --user is-active vrc-photon-daemon.service` が active で、
    新バージョンで動いていることを確認する。
 6. polkit エージェントのないセッション（または `pkexec` を隠した環境）で、
    コマンド表示にフォールバックすることを確認する。
@@ -699,7 +699,7 @@ UI の `update_error_message` / `result_notice` に新しい i18n キーを追�
 - pacman の更新用成果物は `.pkg.tar.zst` に変わる。`.tar.gz` + `PKGBUILD` は
   手動インストール / AUR 用として残す。リリースノートで両方の用途を案内する。
 - `system_packages` のない旧フィードではコマンド表示にフォールバックする。
-- `pkexec` / `/usr/bin/vrc-photo-updater` / polkit policy のいずれかが欠ける
+- `pkexec` / `/usr/bin/vrc-photon-updater` / polkit policy のいずれかが欠ける
   環境ではコマンド表示にフォールバックする。
 - 認証不能でフォールバックした場合、その UI セッションでは自動適用を隠す。
   次回起動時は再試行できる。

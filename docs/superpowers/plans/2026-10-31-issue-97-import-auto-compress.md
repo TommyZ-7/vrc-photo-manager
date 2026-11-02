@@ -6,7 +6,7 @@
 
 **Architecture:** 取り込みは引き続きデーモンの `ScanRoot` が索引する。起動時は保留中のコマンドを初回フルスキャンより先に処理し、初回スキャン判定を固定してバックログ設定を守る。自動圧縮専用の DB enqueue を冪等化し、`ScanFinished` に登録件数を載せて UI が取り込み結果へ反映する。
 
-**Tech Stack:** Rust stable (edition 2024), SQLite (rusqlite), gpui-kit, vrc-photo-core / daemon / ipc / ui
+**Tech Stack:** Rust stable (edition 2024), SQLite (rusqlite), gpui-kit, vrc-photon-core / daemon / ipc / ui
 
 **Spec:** `docs/superpowers/specs/2026-10-31-issue-97-import-auto-compress-design.md`
 
@@ -85,7 +85,7 @@ fn auto_job_enqueue_skips_an_existing_photo_profile_job() {
 
 - [x] **Step 2: テストが失敗することを確認する**
 
-Run: `cargo test -p vrc-photo-core auto_job_enqueue_skips_an_existing_photo_profile_job`
+Run: `cargo test -p vrc-photon-core auto_job_enqueue_skips_an_existing_photo_profile_job`
 
 Expected: FAIL（`enqueue_auto_job_for_existing_profile_with_status` が未定義）
 
@@ -104,7 +104,7 @@ AND NOT EXISTS (
 
 - [x] **Step 4: テストが通ることを確認する**
 
-Run: `cargo test -p vrc-photo-core auto_job_enqueue_skips_an_existing_photo_profile_job`
+Run: `cargo test -p vrc-photon-core auto_job_enqueue_skips_an_existing_photo_profile_job`
 
 Expected: PASS
 
@@ -291,9 +291,9 @@ fn enqueue_auto_jobs_skips_profiles_that_are_not_auto_enabled() {
 Run:
 
 ```bash
-cargo test -p vrc-photo-daemon startup_scan_enqueues_imported_photos_before_backlog
-cargo test -p vrc-photo-daemon scan_root_finished_event_reports_auto_enqueued_jobs
-cargo test -p vrc-photo-daemon enqueue_auto_jobs_skips_profiles_that_are_not_auto_enabled
+cargo test -p vrc-photon-daemon startup_scan_enqueues_imported_photos_before_backlog
+cargo test -p vrc-photon-daemon scan_root_finished_event_reports_auto_enqueued_jobs
+cargo test -p vrc-photon-daemon enqueue_auto_jobs_skips_profiles_that_are_not_auto_enabled
 ```
 
 Expected: FAIL（`startup_scan` が未定義、またはジョブ / `auto_enqueued` が0件）
@@ -347,16 +347,16 @@ tracing::info!(
 Run:
 
 ```bash
-cargo test -p vrc-photo-daemon startup_scan_enqueues_imported_photos_before_backlog
-cargo test -p vrc-photo-daemon scan_root_finished_event_reports_auto_enqueued_jobs
-cargo test -p vrc-photo-daemon enqueue_auto_jobs_skips_profiles_that_are_not_auto_enabled
+cargo test -p vrc-photon-daemon startup_scan_enqueues_imported_photos_before_backlog
+cargo test -p vrc-photon-daemon scan_root_finished_event_reports_auto_enqueued_jobs
+cargo test -p vrc-photon-daemon enqueue_auto_jobs_skips_profiles_that_are_not_auto_enabled
 ```
 
 Expected: PASS
 
 - [x] **Step 6: 既存の自動圧縮テストを確認する**
 
-Run: `cargo test -p vrc-photo-daemon auto_`
+Run: `cargo test -p vrc-photon-daemon auto_`
 
 Expected: PASS（`auto_jobs_use_replace_policy_and_waiting_status`, `auto_compress_holds_waiting_jobs_until_released`, `end_to_end_auto_compress` を含む）
 
@@ -399,7 +399,7 @@ fn auto_compress_badge_is_hidden_for_zero_and_shows_the_count() {
 
 - [x] **Step 2: テストが失敗することを確認する**
 
-Run: `cargo test -p vrc-photo-ui auto_compress_badge_is_hidden_for_zero_and_shows_the_count`
+Run: `cargo test -p vrc-photon-ui auto_compress_badge_is_hidden_for_zero_and_shows_the_count`
 
 Expected: FAIL（`auto_compress_badge_label` が未定義）
 
@@ -446,7 +446,7 @@ fn auto_compress_badge_label(count: usize) -> Option<String> {
 
 - [x] **Step 5: テストが通ることを確認する**
 
-Run: `cargo test -p vrc-photo-ui auto_compress_badge_is_hidden_for_zero_and_shows_the_count`
+Run: `cargo test -p vrc-photon-ui auto_compress_badge_is_hidden_for_zero_and_shows_the_count`
 
 Expected: PASS
 
@@ -513,7 +513,7 @@ gh pr edit --add-label bug
 - [x] **Step 1: 別 worktree / ブランチを main から作る**
 
 ```bash
-git worktree add ../vrc-photo-manager-97-docs -b docs/97-import-auto-compress
+git worktree add ../vrc-photon-97-docs -b docs/97-import-auto-compress
 ```
 
 - [x] **Step 2: 機能仕様を更新する**
