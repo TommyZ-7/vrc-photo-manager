@@ -108,6 +108,9 @@ pub struct AppSettings {
     pub discord_auto_since: Option<i64>,
     #[serde(default)]
     pub discord_consent_at: Option<i64>,
+    /// Whether the daemon resolves world names through the VRChat API.
+    #[serde(default)]
+    pub world_name_resolution_enabled: bool,
 }
 
 fn default_true() -> bool {
@@ -194,6 +197,7 @@ impl Default for AppSettings {
             discord_auto_mode: DiscordAutoMode::Off,
             discord_auto_since: None,
             discord_consent_at: None,
+            world_name_resolution_enabled: false,
         }
     }
 }
@@ -778,5 +782,38 @@ mod tests {
         assert!(!json.contains(url));
         clear_discord_webhook(&db).unwrap();
         assert_eq!(load_discord_webhook(&db).unwrap(), None);
+    }
+
+    #[test]
+    fn world_name_resolution_defaults_off_and_roundtrips() {
+        let db = Db::open_in_memory().unwrap();
+        assert!(!AppSettings::default().world_name_resolution_enabled);
+
+        let json = r#"{
+            "photo_roots": [],
+            "log_dir": null,
+            "managed_dir": null,
+            "language": "ja",
+            "autostart": true,
+            "tray": true,
+            "auto_compress": true,
+            "auto_compress_backlog": false,
+            "estimated_link": true,
+            "thumbnail_cache_mb": 2048,
+            "compression_workers": 1
+        }"#;
+        let old: AppSettings = serde_json::from_str(json).unwrap();
+        assert!(!old.world_name_resolution_enabled);
+
+        let settings = AppSettings {
+            world_name_resolution_enabled: true,
+            ..Default::default()
+        };
+        settings.save(&db).unwrap();
+        assert!(
+            AppSettings::load(&db)
+                .unwrap()
+                .world_name_resolution_enabled
+        );
     }
 }
