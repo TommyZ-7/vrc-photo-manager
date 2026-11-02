@@ -17,6 +17,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use vrc_photon_core::discord::mask_webhook_url;
 use vrc_photon_core::model::{SendErrorCode, SendHistoryEntry, SendKind, SendSource, SendStatus};
+use vrc_photon_core::settings::DiscordAutoMode;
 use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::App;
@@ -277,7 +278,8 @@ impl App {
                             }))
                             .into_any_element()
                     }),
-            );
+            )
+            .child(self.discord_auto_section(cx));
 
         glass_panel(&self.palette)
             .flex()
@@ -731,6 +733,73 @@ impl App {
                     toggle(this, *value, cx);
                 },
             )))
+            .into_any_element()
+    }
+
+    /// Off / Immediate / Waiting. The first switch away from Off opens the
+    /// consent dialog from `App::set_discord_auto_mode`; the note below the
+    /// rows repeats the privacy caveat next to the controls that cause it.
+    fn discord_auto_section(&self, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
+        let current = self.settings.discord_auto_mode;
+        let options = [
+            (
+                DiscordAutoMode::Off,
+                "discord-auto-off",
+                tr!("integrations.discord.auto.off"),
+                tr!("integrations.discord.auto.off_hint"),
+            ),
+            (
+                DiscordAutoMode::Immediate,
+                "discord-auto-immediate",
+                tr!("integrations.discord.auto.immediate"),
+                tr!("integrations.discord.auto.immediate_hint"),
+            ),
+            (
+                DiscordAutoMode::Waiting,
+                "discord-auto-waiting",
+                tr!("integrations.discord.auto.waiting"),
+                tr!("integrations.discord.auto.waiting_hint"),
+            ),
+        ];
+
+        v_flex()
+            .gap(px(6.))
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgb(p.text))
+                    .child(tr!("integrations.discord.auto.title")),
+            )
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(rgb(p.muted_2))
+                    .child(tr!("integrations.discord.auto.hint")),
+            )
+            .children(options.into_iter().map(|(mode, id, title, description)| {
+                manual_option_row(
+                    &p,
+                    SharedString::from(id),
+                    title,
+                    description,
+                    current == mode,
+                    true,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.set_discord_auto_mode(mode, window, cx);
+                }))
+                .into_any_element()
+            }))
+            .child(
+                div()
+                    .p(px(8.))
+                    .rounded(px(8.))
+                    .bg(rgb(p.amber_soft))
+                    .text_size(px(10.))
+                    .text_color(rgb(p.amber))
+                    .child(tr!("warning.private_instances")),
+            )
             .into_any_element()
     }
 }
