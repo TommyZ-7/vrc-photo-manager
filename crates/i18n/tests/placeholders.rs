@@ -111,6 +111,7 @@ const CALL_SITES: &[(&str, &[&str])] = &[
     ("import.summary.remaining", &["count"]),
     ("import.summary.renamed", &["count"]),
     ("import.summary.skipped", &["count"]),
+    ("integrations.discord.history.release_done", &["count"]),
     ("ipc.error.connect", &["error"]),
     ("ipc.error.protocol", &["client", "daemon"]),
     ("notifications.auto_compress_badge", &["count"]),

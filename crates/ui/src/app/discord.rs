@@ -59,6 +59,18 @@ pub(crate) fn manual_send_toast(result: Result<bool, DiscordSendGuardError>) -> 
     }
 }
 
+/// Toast text after releasing the waiting queue.
+///
+/// `0` means nothing was waiting, so the action is reported as a warning
+/// rather than a success with a count of zero.
+pub(crate) fn waiting_release_toast(count: usize) -> String {
+    if count == 0 {
+        tr!("integrations.discord.history.release_none")
+    } else {
+        tr_args!("integrations.discord.history.release_done", count = count)
+    }
+}
+
 /// Trims the destination label and falls back to `Discord` when blank, the
 /// same normalization `AppSettings` applies when it is loaded or saved.
 pub(crate) fn normalized_destination(raw: &str) -> String {
@@ -351,6 +363,25 @@ impl App {
         cx.notify();
     }
 
+    /// Promotes every waiting send (manual or automatic) so the daemon picks
+    /// them up. An empty queue is reported as a warning: the button is
+    /// disabled at zero, so only a stale count reaches this path.
+    pub(crate) fn release_waiting_sends(&mut self, cx: &mut Context<Self>) {
+        match self.db.release_waiting_sends() {
+            Ok(0) => self.toast_warning(waiting_release_toast(0), cx),
+            Ok(count) => {
+                self.reload_send_history(cx);
+                self.send_wake_sends(cx);
+                self.toast_success(waiting_release_toast(count), cx);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "cannot release waiting Discord sends");
+                self.toast_error(tr!("integrations.discord.history.release_error"), cx);
+            }
+        }
+        cx.notify();
+    }
+
     /// Queues one photo for a manual Discord send.
     ///
     /// Returns `true` when the integration guard rejected the send and the app
@@ -517,11 +548,23 @@ impl App {
 mod tests {
     use super::{
         DiscordSendGuardError, apply_discord_auto_mode, discord_send_guard, manual_send_toast,
-        needs_discord_consent, normalized_destination, webhook_error_key,
+        needs_discord_consent, normalized_destination, waiting_release_toast, webhook_error_key,
     };
     use vrc_photon_core::discord::{WebhookUrlError, mask_webhook_url, validate_webhook_url};
     use vrc_photon_core::settings::{AppSettings, DiscordAutoMode};
-    use vrc_photon_i18n::tr;
+    use vrc_photon_i18n::{tr, tr_args};
+
+    #[test]
+    fn waiting_release_result_messages() {
+        assert_eq!(
+            waiting_release_toast(0),
+            tr!("integrations.discord.history.release_none")
+        );
+        assert_eq!(
+            waiting_release_toast(3),
+            tr_args!("integrations.discord.history.release_done", count = 3)
+        );
+    }
 
     #[test]
     fn enabling_auto_requires_consent_only_the_first_time() {

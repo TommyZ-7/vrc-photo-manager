@@ -383,6 +383,16 @@ impl App {
                         ))
                     })
                     .child(
+                        Button::new("discord-history-release")
+                            .label(tr!("integrations.discord.history.release"))
+                            .small()
+                            .primary()
+                            .disabled(waiting == 0)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.release_waiting_sends(cx);
+                            })),
+                    )
+                    .child(
                         Button::new("discord-history-clear")
                             .label(tr!("integrations.discord.history.clear"))
                             .small()
@@ -392,6 +402,15 @@ impl App {
                             })),
                     ),
             )
+            .when(waiting > 0, |this| {
+                this.child(
+                    div()
+                        .px(px(4.))
+                        .text_size(px(10.))
+                        .text_color(rgb(p.muted_2))
+                        .child(tr!("integrations.discord.history.release_hint")),
+                )
+            })
             .child(if history.is_empty() {
                 div()
                     .px(px(4.))
@@ -791,15 +810,17 @@ impl App {
                 }))
                 .into_any_element()
             }))
-            .child(
-                div()
-                    .p(px(8.))
-                    .rounded(px(8.))
-                    .bg(rgb(p.amber_soft))
-                    .text_size(px(10.))
-                    .text_color(rgb(p.amber))
-                    .child(tr!("warning.private_instances")),
-            )
+            .when(current != DiscordAutoMode::Off, |this| {
+                this.child(
+                    div()
+                        .p(px(8.))
+                        .rounded(px(8.))
+                        .bg(rgb(p.amber_soft))
+                        .text_size(px(10.))
+                        .text_color(rgb(p.amber))
+                        .child(tr!("warning.private_instances")),
+                )
+            })
             .into_any_element()
     }
 }
