@@ -18,7 +18,7 @@ on tag pushes and uploads every file in `dist/` to the GitHub Release.
 
 `Packager.toml` bundles these files through `resources`:
 
-- `LICENSE` (application, MIT)
+- `LICENSE` (application, GPL-3.0-or-later)
 - `packaging/licenses/LICENSE-LUCIDE` (Lucide ISC; Feather-derived icons MIT)
 
 Linux packages place them in `/usr/lib/vrc-photon/`. The Windows

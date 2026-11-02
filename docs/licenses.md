@@ -7,7 +7,7 @@
 | アセット | ライセンス | リポジトリ内の通知 | 通知のパッケージ同梱 |
 |---|---|---|---|
 | Lucide アイコン（`gpui-kit-assets` 0.8.0 経由） | ISC（Feather 由来アイコンは MIT） | `packaging/licenses/LICENSE-LUCIDE` | あり（`LICENSE-LUCIDE`） |
-| アプリ本体 | MIT | `LICENSE` | あり（`LICENSE`） |
+| アプリ本体 | GPL-3.0-or-later | `LICENSE` | あり（`LICENSE`） |
 | Noto Sans JP | SIL Open Font License 1.1 | `crates/ui/assets/LICENSE-NotoSansJP.txt` | なし（リポジトリのみ） |
 
 ## Lucide
