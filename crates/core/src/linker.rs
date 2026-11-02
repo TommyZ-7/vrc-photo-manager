@@ -306,13 +306,17 @@ mod tests {
     fn estimated_link_does_not_promote_xmp_world_name() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        // The XMP world ID matches the session world on purpose: even then the
+        // estimated branch must not promote the XMP name. If the estimate were
+        // skipped, the XMP-only fallback would write this name to the world.
         write_png_with_xmp(
             &path,
-            r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:vrc="https://vrchat.com/xmp/1.0/" vrc:WorldDisplayName="XMP World" vrc:WorldId="wrld_xmp"/></rdf:RDF></x:xmpmeta>"#,
+            r#"<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description xmlns:vrc="https://vrchat.com/xmp/1.0/" vrc:WorldDisplayName="XMP World" vrc:WorldId="wrld_guessed"/></rdf:RDF></x:xmpmeta>"#,
         );
         let db = Db::open_in_memory().unwrap();
         let world = db.upsert_world("wrld_guessed", None, None).unwrap();
-        db.create_session("log.txt", 1_700_000_000, world, None)
+        let session = db
+            .create_session("log.txt", 1_700_000_000, world, None)
             .unwrap();
         // photo はセッション開始の3秒以内だが、セッションには含まれない時刻にする
         let photo_id = insert_photo_at(&db, 1_699_999_998, &path);
@@ -320,14 +324,11 @@ mod tests {
 
         assert!(link_photo(&db, &photo).unwrap());
         assert_eq!(db.world_by_id(world).unwrap().unwrap().name, None);
-        assert_eq!(
-            db.photo_context(photo_id)
-                .unwrap()
-                .unwrap()
-                .world_name
-                .as_deref(),
-            Some("XMP World")
-        );
+        let context = db.photo_context(photo_id).unwrap().unwrap();
+        assert_eq!(context.link_method, "log-estimated");
+        assert_eq!(context.world_id, Some(world));
+        assert_eq!(context.session_id, Some(session));
+        assert_eq!(context.world_name.as_deref(), Some("XMP World"));
     }
 
     fn ts_at(hms: &str) -> i64 {

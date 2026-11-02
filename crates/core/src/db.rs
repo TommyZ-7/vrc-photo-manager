@@ -1319,7 +1319,11 @@ impl Db {
         name: Option<&str>,
         source: Option<&str>,
     ) -> Result<i64> {
-        let tx = self.conn.unchecked_transaction()?;
+        // Read-then-write must take the write lock up front: with a deferred
+        // transaction another process could write between the SELECT and the
+        // UPDATE, turning our snapshot stale (SQLITE_BUSY_SNAPSHOT, which
+        // busy_timeout does not retry) or racing the insert on a new world.
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let now = now_string();
         let existing = tx
             .query_row(
