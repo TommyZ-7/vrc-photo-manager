@@ -40,8 +40,12 @@ pub(crate) fn discord_send_guard(
     Ok(())
 }
 
-/// Toast text for a manual send. The caller picks the tone: `Ok` is
-/// informational and a guard failure is a warning.
+/// Toast text for a manual send.
+///
+/// `Ok(true)` means the send was queued and is shown as a success toast;
+/// `Ok(false)` means an active send for the photo already exists and is shown
+/// as an info toast. A guard error maps to the warning shown before the user is
+/// sent to the Integrations screen.
 pub(crate) fn manual_send_toast(result: Result<bool, DiscordSendGuardError>) -> String {
     match result {
         Ok(true) => tr!("photos.action.discord_queued"),
@@ -239,26 +243,35 @@ impl App {
         cx.notify();
     }
 
-    /// Queues one photo for a manual Discord send. The guard sends the user to
-    /// the integration screen when the feature or webhook is missing so the
-    /// toast is actionable instead of a dead end.
-    pub(crate) fn enqueue_photo_send(&mut self, photo_id: i64, cx: &mut Context<Self>) {
+    /// Queues one photo for a manual Discord send.
+    ///
+    /// Returns `true` when the integration guard rejected the send and the app
+    /// navigated to the Integrations screen. A modal viewer uses that to close
+    /// itself and reveal the screen; every other outcome returns `false`.
+    pub(crate) fn enqueue_photo_send(&mut self, photo_id: i64, cx: &mut Context<Self>) -> bool {
         if let Err(error) = discord_send_guard(&self.settings, self.discord_url.is_some()) {
             self.toast_warning(manual_send_toast(Err(error)), cx);
             self.switch_screen(Screen::Integrations, cx);
-            return;
+            return true;
         }
         match self.db.photo_by_id(photo_id) {
-            Ok(Some(photo)) if photo.status != PhotoStatus::Deleting => {}
-            Ok(Some(_)) => {
-                self.toast_error(tr!("photos.action.discord_deleting"), cx);
+            // A missing photo has no source to read, so it shares the rejection
+            // path with a photo that is being deleted.
+            Ok(Some(photo))
+                if !matches!(photo.status, PhotoStatus::Deleting | PhotoStatus::Missing) => {}
+            Ok(Some(photo)) => {
+                let message = match photo.status {
+                    PhotoStatus::Deleting => tr!("photos.action.discord_deleting"),
+                    _ => tr!("photos.action.discord_error"),
+                };
+                self.toast_error(message, cx);
                 cx.notify();
-                return;
+                return false;
             }
             Ok(None) => {
                 self.toast_error(tr!("photos.action.discord_error"), cx);
                 cx.notify();
-                return;
+                return false;
             }
             Err(error) => {
                 tracing::warn!(%error, photo_id, "cannot load a photo for a Discord send");
@@ -267,7 +280,7 @@ impl App {
                     cx,
                 );
                 cx.notify();
-                return;
+                return false;
             }
         }
         match self.db.enqueue_send(
@@ -292,6 +305,7 @@ impl App {
             }
         }
         cx.notify();
+        false
     }
 
     /// Returns a failed row to the queue. The database rejects the retry when

@@ -758,8 +758,12 @@ impl App {
         let discord_button = Button::new("viewer-discord-send")
             .label(tr!("photos.action.discord_send"))
             .small()
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.enqueue_photo_send(id, cx);
+            .on_click(cx.listener(move |this, _, window, cx| {
+                // The shell (and Integrations) is hidden behind the viewer, so
+                // close it after a guard redirect or the navigation is invisible.
+                if this.enqueue_photo_send(id, cx) {
+                    this.close_quick_look(window, cx);
+                }
             }));
         let trash_button = self.focusable_text_button(
             "viewer-trash",
