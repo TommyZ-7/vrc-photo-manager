@@ -45,6 +45,7 @@ pub(crate) struct IpcControl {
     pub(crate) status: Arc<Mutex<DaemonStatus>>,
     pub(crate) wake: Arc<WakeSignal>,
     pub(crate) jobs: Arc<JobSignal>,
+    pub(crate) sends: Arc<JobSignal>,
     pub(crate) events: EventBus,
     pub(crate) thumbnail_dir: PathBuf,
     pub(crate) thumbnail_cache_epoch: Arc<AtomicU64>,
@@ -92,6 +93,7 @@ pub(crate) fn status_snapshot(status: &mut DaemonStatus) -> StatusSnapshot {
         scan_roots: status.scan_roots,
         photo_count: status.photo_count,
         pending_jobs: status.pending_jobs,
+        pending_sends: status.pending_sends,
         version: status.version,
     }
 }
@@ -234,6 +236,10 @@ fn handle_connection(
             }
             Request::WakeJobs => {
                 control.jobs.notify();
+                write_response(reader.get_mut(), id, Response::Ok)?;
+            }
+            Request::WakeSends => {
+                control.sends.notify();
                 write_response(reader.get_mut(), id, Response::Ok)?;
             }
             Request::SetPaused { paused } => {
@@ -397,6 +403,7 @@ mod tests {
             status: Arc::new(Mutex::new(DaemonStatus::default())),
             wake: Arc::new(WakeSignal::default()),
             jobs: Arc::new(JobSignal::default()),
+            sends: Arc::new(JobSignal::default()),
             events: EventBus::default(),
             thumbnail_dir: dir.path().join("thumbnails"),
             thumbnail_cache_epoch: Arc::new(AtomicU64::new(0)),
@@ -412,6 +419,18 @@ mod tests {
         let response = request(&endpoint, Request::WakeCommands, Duration::from_secs(1)).unwrap();
         assert!(matches!(response, Response::Ok));
         assert!(control.wake.is_pending());
+    }
+
+    #[test]
+    fn wake_sends_wakes_the_send_worker_without_touching_sqlite() {
+        let (_dir, endpoint, control) = test_control();
+        let _server = IpcServer::start(endpoint.clone(), control.clone()).unwrap();
+        let mut seen = 0;
+        let request = std::thread::spawn(move || {
+            request(&endpoint, Request::WakeSends, Duration::from_secs(1)).unwrap()
+        });
+        assert!(control.sends.wait(&mut seen, Duration::from_secs(1)));
+        assert!(matches!(request.join().unwrap(), Response::Ok));
     }
 
     #[test]

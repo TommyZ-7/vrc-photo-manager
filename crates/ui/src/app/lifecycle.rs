@@ -213,6 +213,11 @@ impl App {
             IpcEvent::DaemonErrorChanged { .. } => {
                 self.reload_job_state(cx);
             }
+            IpcEvent::SendProgress { .. } => {
+                // A send moved between waiting / pending / processing /
+                // terminal; the history page and the waiting badge follow it.
+                self.reload_send_history(cx);
+            }
             IpcEvent::StatusChanged { status } => {
                 if crate::app::daemon::status_snapshot_is_newer(
                     status.version,
@@ -678,9 +683,11 @@ impl App {
             .into_iter()
             .collect();
         self.reload_job_state(cx);
+        self.reload_send_history(cx);
         let previous_language = self.settings.language.clone();
         let previous_auto_compress = self.settings.auto_compress;
         let previous_clipboard_enabled = self.settings.clipboard_enabled;
+        let previous_discord_enabled = self.settings.discord_enabled;
         let previous_thumbnail_spec = self.settings.thumbnail_spec();
         let mut settings = AppSettings::load(&self.db).unwrap_or_else(|error| {
             tracing::warn!(%error, "cannot load app settings");
@@ -703,6 +710,14 @@ impl App {
         if self.settings.clipboard_enabled != previous_clipboard_enabled {
             self.integrations_clipboard_motion =
                 crate::state::motion::ToggleMotion::settled(if self.settings.clipboard_enabled {
+                    0.0
+                } else {
+                    1.0
+                });
+        }
+        if self.settings.discord_enabled != previous_discord_enabled {
+            self.integrations_discord_motion =
+                crate::state::motion::ToggleMotion::settled(if self.settings.discord_enabled {
                     0.0
                 } else {
                     1.0

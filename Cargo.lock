@@ -7771,7 +7771,9 @@ checksum = "cde93ff05758a36a851a398a772b0b79a82fbe3c186a46f2696baaeaf84c966b"
 dependencies = [
  "base64 0.23.1",
  "flate2",
+ "getrandom 0.4.3",
  "log",
+ "mime_guess",
  "percent-encoding",
  "rustls",
  "rustls-pki-types",
@@ -7961,6 +7963,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tracing",
+ "url",
  "uuid",
  "webp",
 ]
@@ -7984,6 +7987,7 @@ dependencies = [
  "tracing-subscriber",
  "trash",
  "tray-icon",
+ "ureq",
  "vrc-photon-core",
  "vrc-photon-i18n",
  "vrc-photon-ipc",

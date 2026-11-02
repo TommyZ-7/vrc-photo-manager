@@ -18,6 +18,8 @@ pub enum Request {
     Status,
     WakeCommands,
     WakeJobs,
+    /// Nudges the daemon's Discord send worker.
+    WakeSends,
     SetPaused {
         paused: bool,
     },
@@ -83,6 +85,10 @@ pub struct StatusSnapshot {
     pub scan_roots: usize,
     pub photo_count: i64,
     pub pending_jobs: i64,
+    /// Discord sends still queued or in flight. Defaults to 0 so a snapshot
+    /// from a daemon without the send worker still decodes.
+    #[serde(default)]
+    pub pending_sends: i64,
     /// Monotonic version stamped by the daemon when the snapshot is taken
     /// under its status lock. A snapshot published late therefore still
     /// carries the older version, and receivers drop it once a newer one
@@ -106,6 +112,21 @@ pub enum JobStatus {
     Completed,
     Failed,
     Cancelled,
+}
+
+/// Lifecycle of one Discord webhook send. Mirrors the core outbox status so
+/// the daemon can report every row without translation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SendStatus {
+    Waiting,
+    Pending,
+    Processing,
+    Sent,
+    Failed,
+    Cancelled,
+    /// A status written by a newer version. Never treated as terminal.
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,6 +181,14 @@ pub enum Event {
     },
     StatusChanged {
         status: StatusSnapshot,
+    },
+    /// One Discord send changed state. `error_code` is set when the daemon
+    /// reports a classified failure.
+    SendProgress {
+        outbox_id: i64,
+        photo_id: Option<i64>,
+        status: SendStatus,
+        error_code: Option<String>,
     },
 }
 
@@ -249,6 +278,51 @@ mod tests {
         };
         let json = serde_json::to_string(&value).unwrap();
         assert_eq!(serde_json::from_str::<ServerMessage>(&json).unwrap(), value);
+    }
+
+    #[test]
+    fn wake_sends_round_trips() {
+        let value = RequestEnvelope {
+            id: 10,
+            request: Request::WakeSends,
+        };
+        let json = serde_json::to_string(&value).unwrap();
+        assert!(json.contains("\"wake_sends\""));
+        assert_eq!(
+            serde_json::from_str::<RequestEnvelope>(&json).unwrap(),
+            value
+        );
+    }
+
+    #[test]
+    fn send_progress_round_trips_and_defaults_pending_sends() {
+        let event = Event::SendProgress {
+            outbox_id: 4,
+            photo_id: Some(9),
+            status: SendStatus::Processing,
+            error_code: None,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert_eq!(serde_json::from_str::<Event>(&json).unwrap(), event);
+        let snapshot: StatusSnapshot = serde_json::from_str(r#"{"paused":false,"watching":true,"scanning":false,"scan_phase":null,"scan_processed":0,"scan_total":null,"scan_indexed":0,"scan_root":0,"scan_roots":0,"photo_count":1,"pending_jobs":0}"#).unwrap();
+        assert_eq!(snapshot.pending_sends, 0);
+    }
+
+    #[test]
+    fn send_status_serializes_as_snake_case() {
+        let cases = [
+            (SendStatus::Waiting, "\"waiting\""),
+            (SendStatus::Pending, "\"pending\""),
+            (SendStatus::Processing, "\"processing\""),
+            (SendStatus::Sent, "\"sent\""),
+            (SendStatus::Failed, "\"failed\""),
+            (SendStatus::Cancelled, "\"cancelled\""),
+            (SendStatus::Unknown, "\"unknown\""),
+        ];
+        for (status, json) in cases {
+            assert_eq!(serde_json::to_string(&status).unwrap(), json);
+            assert_eq!(serde_json::from_str::<SendStatus>(json).unwrap(), status);
+        }
     }
 
     #[test]

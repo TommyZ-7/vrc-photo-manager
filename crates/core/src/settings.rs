@@ -18,6 +18,16 @@ pub enum CardSize {
     ExtraLarge,
 }
 
+/// How automatic Discord posting is scheduled after a photo is compressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscordAutoMode {
+    #[default]
+    Off,
+    Immediate,
+    Waiting,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     /// Photo roots to index. The first entry is the primary VRChat folder.
@@ -82,6 +92,22 @@ pub struct AppSettings {
     pub auto_update_check: bool,
     #[serde(default)]
     pub update_last_checked_at: Option<i64>,
+    /// Whether automatic Discord posting is enabled.
+    #[serde(default)]
+    pub discord_enabled: bool,
+    /// Destination label shown in the UI. Blank values normalize to `Discord`.
+    #[serde(default = "default_discord_destination")]
+    pub discord_destination: String,
+    #[serde(default)]
+    pub discord_include_players: bool,
+    #[serde(default = "default_true")]
+    pub discord_send_original: bool,
+    #[serde(default)]
+    pub discord_auto_mode: DiscordAutoMode,
+    #[serde(default)]
+    pub discord_auto_since: Option<i64>,
+    #[serde(default)]
+    pub discord_consent_at: Option<i64>,
 }
 
 fn default_true() -> bool {
@@ -110,6 +136,10 @@ fn default_ui_theme_main() -> String {
 
 fn default_ui_theme_accent() -> String {
     "sky".to_string()
+}
+
+fn default_discord_destination() -> String {
+    "Discord".to_string()
 }
 
 fn deserialize_card_size<'de, D>(deserializer: D) -> std::result::Result<CardSize, D::Error>
@@ -157,6 +187,13 @@ impl Default for AppSettings {
             ui_theme_accent: default_ui_theme_accent(),
             auto_update_check: true,
             update_last_checked_at: None,
+            discord_enabled: false,
+            discord_destination: default_discord_destination(),
+            discord_include_players: false,
+            discord_send_original: true,
+            discord_auto_mode: DiscordAutoMode::Off,
+            discord_auto_since: None,
+            discord_consent_at: None,
         }
     }
 }
@@ -164,7 +201,11 @@ impl Default for AppSettings {
 impl AppSettings {
     pub fn load(db: &Db) -> Result<Self> {
         match db.get_setting(SETTINGS_KEY)? {
-            Some(json) => Ok(serde_json::from_str(&json).unwrap_or_default()),
+            Some(json) => {
+                let mut settings: Self = serde_json::from_str(&json).unwrap_or_default();
+                settings.normalize_discord_destination();
+                Ok(settings)
+            }
             None => {
                 let mut settings = Self::default();
                 let detected = detect_vrchat_paths();
@@ -182,8 +223,20 @@ impl AppSettings {
     }
 
     pub fn save(&self, db: &Db) -> Result<()> {
-        let json = serde_json::to_string_pretty(self)?;
+        let mut settings = self.clone();
+        settings.normalize_discord_destination();
+        let json = serde_json::to_string_pretty(&settings)?;
         db.set_setting(SETTINGS_KEY, &json)
+    }
+
+    /// Keeps a blank destination from reaching the UI or a webhook payload.
+    fn normalize_discord_destination(&mut self) {
+        let trimmed = self.discord_destination.trim();
+        self.discord_destination = if trimmed.is_empty() {
+            default_discord_destination()
+        } else {
+            trimmed.to_string()
+        };
     }
 
     pub fn photo_roots(&self) -> Vec<PathBuf> {
@@ -313,6 +366,24 @@ pub fn existing_photo_roots(settings: &AppSettings) -> Vec<PathBuf> {
 
 pub fn is_under(path: &Path, root: &Path) -> bool {
     path.strip_prefix(root).is_ok()
+}
+
+/// Webhook URL lives in its own `app_settings` row so it never lands in the
+/// `app_settings` JSON blob or a settings export.
+pub const DISCORD_WEBHOOK_KEY: &str = "discord_webhook_url";
+
+pub fn load_discord_webhook(db: &Db) -> Result<Option<String>> {
+    Ok(db
+        .get_setting(DISCORD_WEBHOOK_KEY)?
+        .filter(|url| !url.trim().is_empty()))
+}
+
+pub fn save_discord_webhook(db: &Db, url: &str) -> Result<()> {
+    db.set_setting(DISCORD_WEBHOOK_KEY, url)
+}
+
+pub fn clear_discord_webhook(db: &Db) -> Result<()> {
+    db.delete_setting(DISCORD_WEBHOOK_KEY)
 }
 
 #[cfg(test)]
@@ -630,5 +701,63 @@ mod tests {
         // This test only checks the environment branch without mutating env.
         let detected = detect_vrchat_paths();
         assert!(detected.photo_roots.len() <= 1);
+    }
+
+    #[test]
+    fn discord_settings_default_to_off() {
+        let db = Db::open_in_memory().unwrap();
+        let settings = AppSettings::load(&db).unwrap();
+        assert!(!settings.discord_enabled);
+        assert_eq!(settings.discord_destination, "Discord");
+        assert!(!settings.discord_include_players);
+        assert!(settings.discord_send_original);
+        assert_eq!(settings.discord_auto_mode, DiscordAutoMode::Off);
+        assert_eq!(settings.discord_auto_since, None);
+        assert_eq!(settings.discord_consent_at, None);
+    }
+
+    #[test]
+    fn old_app_settings_json_keeps_discord_defaults() {
+        let mut value = serde_json::to_value(AppSettings::default()).unwrap();
+        for key in [
+            "discord_enabled",
+            "discord_destination",
+            "discord_include_players",
+            "discord_send_original",
+            "discord_auto_mode",
+            "discord_auto_since",
+            "discord_consent_at",
+        ] {
+            value.as_object_mut().unwrap().remove(key);
+        }
+        let settings: AppSettings = serde_json::from_value(value).unwrap();
+        assert!(!settings.discord_enabled);
+        assert_eq!(settings.discord_auto_mode, DiscordAutoMode::Off);
+        assert!(settings.discord_send_original);
+    }
+
+    #[test]
+    fn blank_discord_destination_loads_as_discord() {
+        let db = Db::open_in_memory().unwrap();
+        let mut value = serde_json::to_value(AppSettings::default()).unwrap();
+        value["discord_destination"] = serde_json::Value::String("   ".into());
+        db.set_setting("app_settings", &value.to_string()).unwrap();
+        assert_eq!(
+            AppSettings::load(&db).unwrap().discord_destination,
+            "Discord"
+        );
+    }
+
+    #[test]
+    fn discord_webhook_round_trips_outside_app_settings() {
+        let db = Db::open_in_memory().unwrap();
+        AppSettings::default().save(&db).unwrap();
+        let url = "https://discord.com/api/webhooks/123/token";
+        save_discord_webhook(&db, url).unwrap();
+        assert_eq!(load_discord_webhook(&db).unwrap().as_deref(), Some(url));
+        let json = db.get_setting("app_settings").unwrap().unwrap();
+        assert!(!json.contains(url));
+        clear_discord_webhook(&db).unwrap();
+        assert_eq!(load_discord_webhook(&db).unwrap(), None);
     }
 }

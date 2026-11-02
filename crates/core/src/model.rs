@@ -106,6 +106,10 @@ pub struct CompressionProfile {
     /// compresses with it immediately, without opening the manual modal.
     #[serde(default)]
     pub clipboard: bool,
+    /// At most one profile system-wide may use this flag. It is the profile
+    /// used when posting to Discord.
+    #[serde(default)]
+    pub discord: bool,
     pub format: CompressionFormat,
     pub quality: u8,
     pub lossless: bool,
@@ -129,6 +133,7 @@ impl Default for CompressionProfile {
             enabled: true,
             auto_enabled: true,
             clipboard: false,
+            discord: false,
             format: CompressionFormat::Webp,
             quality: 82,
             lossless: false,
@@ -163,6 +168,7 @@ impl CompressionProfile {
                 name: "discord用webp".to_string(),
                 auto_enabled: false,
                 clipboard: true,
+                discord: true,
                 format: CompressionFormat::Webp,
                 lossless: true,
                 resize_enabled: true,
@@ -227,6 +233,225 @@ impl QueueStatus {
     pub fn is_active(&self) -> bool {
         matches!(self, Self::Waiting | Self::Pending | Self::Processing)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendKind {
+    Photo,
+    Test,
+}
+
+impl SendKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Photo => "photo",
+            Self::Test => "test",
+        }
+    }
+
+    /// Unknown values are display-only and fall back to `Photo`.
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "test" => Self::Test,
+            _ => Self::Photo,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendOrigin {
+    Manual,
+    Auto,
+}
+
+impl SendOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Auto => "auto",
+        }
+    }
+
+    /// Unknown values are display-only and fall back to `Manual`.
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "auto" => Self::Auto,
+            _ => Self::Manual,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendStatus {
+    Waiting,
+    Pending,
+    Processing,
+    Sent,
+    Failed,
+    Cancelled,
+    /// A status written by a newer version. Never treated as terminal.
+    Unknown,
+}
+
+impl SendStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Waiting => "waiting",
+            Self::Pending => "pending",
+            Self::Processing => "processing",
+            Self::Sent => "sent",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "waiting" => Self::Waiting,
+            "pending" => Self::Pending,
+            "processing" => Self::Processing,
+            "sent" => Self::Sent,
+            "failed" => Self::Failed,
+            "cancelled" => Self::Cancelled,
+            _ => Self::Unknown,
+        }
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Sent | Self::Failed | Self::Cancelled)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendSource {
+    Original,
+    Profile,
+    Derivative,
+}
+
+impl SendSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Original => "original",
+            Self::Profile => "profile",
+            Self::Derivative => "derivative",
+        }
+    }
+
+    /// Unknown values are display-only and fall back to `Original`.
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "profile" => Self::Profile,
+            "derivative" => Self::Derivative,
+            _ => Self::Original,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendErrorCode {
+    Network,
+    RateLimited,
+    Http400,
+    Http401,
+    Http403,
+    Http404,
+    Http413,
+    Http5xx,
+    TooLarge,
+    PhotoMissing,
+    ProfileMissing,
+    EncodeFailed,
+    Interrupted,
+    WebhookInvalid,
+    Unknown,
+}
+
+impl SendErrorCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Network => "network",
+            Self::RateLimited => "rate_limited",
+            Self::Http400 => "http_400",
+            Self::Http401 => "http_401",
+            Self::Http403 => "http_403",
+            Self::Http404 => "http_404",
+            Self::Http413 => "http_413",
+            Self::Http5xx => "http_5xx",
+            Self::TooLarge => "too_large",
+            Self::PhotoMissing => "photo_missing",
+            Self::ProfileMissing => "profile_missing",
+            Self::EncodeFailed => "encode_failed",
+            Self::Interrupted => "interrupted",
+            Self::WebhookInvalid => "webhook_invalid",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "network" => Self::Network,
+            "rate_limited" => Self::RateLimited,
+            "http_400" => Self::Http400,
+            "http_401" => Self::Http401,
+            "http_403" => Self::Http403,
+            "http_404" => Self::Http404,
+            "http_413" => Self::Http413,
+            "http_5xx" => Self::Http5xx,
+            "too_large" => Self::TooLarge,
+            "photo_missing" => Self::PhotoMissing,
+            "profile_missing" => Self::ProfileMissing,
+            "encode_failed" => Self::EncodeFailed,
+            "interrupted" => Self::Interrupted,
+            "webhook_invalid" => Self::WebhookInvalid,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendOutboxEntry {
+    pub id: i64,
+    pub photo_id: Option<i64>,
+    pub kind: SendKind,
+    pub origin: SendOrigin,
+    pub status: SendStatus,
+    pub source: Option<SendSource>,
+    pub profile_id: Option<String>,
+    pub destination: Option<String>,
+    pub attempts: i64,
+    pub next_attempt_at: Option<i64>,
+    pub discord_message_id: Option<String>,
+    pub discord_channel_id: Option<String>,
+    pub discord_guild_id: Option<String>,
+    pub error_code: Option<String>,
+    pub error_detail: Option<String>,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+}
+
+/// The Discord identity produced by a successful send.
+///
+/// `source` stays optional because test sends have no image source, and
+/// `profile_id` is only set when a compression profile produced the upload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendCompletion {
+    pub source: Option<SendSource>,
+    pub profile_id: Option<String>,
+    pub destination: String,
+    pub message_id: Option<String>,
+    pub channel_id: Option<String>,
+    pub guild_id: Option<String>,
+}
+
+/// A send outbox row joined with the photo and world names shown in history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendHistoryEntry {
+    pub entry: SendOutboxEntry,
+    pub photo_name: Option<String>,
+    pub world_name: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -667,6 +892,15 @@ mod tests {
         assert!(!QueueStatus::Completed.is_active());
         assert!(!QueueStatus::Failed.is_active());
         assert!(!QueueStatus::Cancelled.is_active());
+    }
+
+    #[test]
+    fn send_error_code_roundtrips_rate_limited() {
+        assert_eq!(SendErrorCode::RateLimited.as_str(), "rate_limited");
+        assert_eq!(
+            SendErrorCode::parse("rate_limited"),
+            SendErrorCode::RateLimited
+        );
     }
 
     #[test]

@@ -5,6 +5,7 @@
 
 pub mod compressor;
 pub mod db;
+pub mod discord;
 pub mod error;
 pub mod hashing;
 pub mod image_decode;

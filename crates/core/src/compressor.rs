@@ -16,6 +16,18 @@ pub struct CompressionResult {
     pub compressed_size: u64,
 }
 
+/// An image encoded in memory for a Discord webhook attachment.
+///
+/// Unlike [`compress_image`], this never writes a derivative file or touches
+/// the database; the caller owns the encoded bytes.
+#[derive(Debug, Clone)]
+pub struct EncodedImage {
+    pub bytes: Vec<u8>,
+    pub format: CompressionFormat,
+    pub width: u32,
+    pub height: u32,
+}
+
 /// Compresses one source image according to a profile.
 ///
 /// The output is written to a temporary file and renamed only after a complete
@@ -31,12 +43,8 @@ pub fn compress_decoded(
     source: &Path,
     profile: &CompressionProfile,
 ) -> Result<CompressionResult> {
-    let image = resize_for_profile(image, profile);
-
-    let width = image.width();
-    let height = image.height();
     let output_path = determine_output_path(source, profile)?;
-    let bytes = encode(&image, profile)?;
+    let (bytes, width, height) = encode_image_bytes(image, profile)?;
     if bytes.is_empty() {
         return Err(CoreError::Invalid(
             "encoder produced an empty file".to_string(),
@@ -51,6 +59,40 @@ pub fn compress_decoded(
         height,
         compressed_size,
     })
+}
+
+/// Encodes one source image according to a profile without writing a file.
+///
+/// This shares the decode/resize/encode path of [`compress_image`] so a Discord
+/// attachment matches the configured compression profile byte for byte.
+pub fn encode_for_send(source: &Path, profile: &CompressionProfile) -> Result<EncodedImage> {
+    let image = crate::image_decode::decode_image(source)
+        .ok_or_else(|| CoreError::Invalid(format!("cannot decode {}", source.display())))?;
+    let (bytes, width, height) = encode_image_bytes(&image, profile)?;
+    if bytes.is_empty() {
+        return Err(CoreError::Invalid(
+            "encoder produced an empty payload".to_string(),
+        ));
+    }
+    Ok(EncodedImage {
+        bytes,
+        format: profile.format.clone(),
+        width,
+        height,
+    })
+}
+
+/// Applies the profile's resize and encoder, returning the bytes and the
+/// dimensions of the image that was actually encoded.
+fn encode_image_bytes(
+    image: &DynamicImage,
+    profile: &CompressionProfile,
+) -> Result<(Vec<u8>, u32, u32)> {
+    let image = resize_for_profile(image, profile);
+    let width = image.width();
+    let height = image.height();
+    let bytes = encode(&image, profile)?;
+    Ok((bytes, width, height))
 }
 
 fn resize_for_profile<'a>(
@@ -320,6 +362,48 @@ mod tests {
         assert!(first.output_path.is_file());
         assert!(second.output_path.is_file());
         assert_ne!(first.output_path, second.output_path);
+    }
+
+    #[test]
+    fn encode_for_send_returns_bytes_without_writing_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.png");
+        image::RgbaImage::from_pixel(32, 20, image::Rgba([10, 20, 30, 255]))
+            .save(&source)
+            .unwrap();
+        let profile = CompressionProfile {
+            format: CompressionFormat::Webp,
+            lossless: true,
+            resize_enabled: false,
+            ..CompressionProfile::default()
+        };
+        let encoded = encode_for_send(&source, &profile).unwrap();
+        assert_eq!(encoded.format, CompressionFormat::Webp);
+        assert_eq!((encoded.width, encoded.height), (32, 20));
+        assert!(!encoded.bytes.is_empty());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1); // source だけ
+    }
+
+    #[test]
+    fn encode_for_send_matches_the_file_compression_output() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("photo.png");
+        sample(&source);
+        let mut profile = profile(CompressionFormat::Webp);
+        profile.lossless = true;
+        profile.resize_enabled = true;
+        profile.width = 8;
+        profile.height = 8;
+
+        let encoded = encode_for_send(&source, &profile).unwrap();
+        let compressed = compress_image(&source, &profile).unwrap();
+
+        assert_eq!(
+            (encoded.width, encoded.height),
+            (compressed.width, compressed.height)
+        );
+        assert_eq!((encoded.width, encoded.height), (8, 5));
+        assert_eq!(encoded.bytes, fs::read(&compressed.output_path).unwrap());
     }
 
     #[test]
