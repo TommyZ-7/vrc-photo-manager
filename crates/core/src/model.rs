@@ -352,6 +352,7 @@ impl SendSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendErrorCode {
     Network,
+    RateLimited,
     Http400,
     Http401,
     Http403,
@@ -371,6 +372,7 @@ impl SendErrorCode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Network => "network",
+            Self::RateLimited => "rate_limited",
             Self::Http400 => "http_400",
             Self::Http401 => "http_401",
             Self::Http403 => "http_403",
@@ -390,6 +392,7 @@ impl SendErrorCode {
     pub fn parse(value: &str) -> Self {
         match value {
             "network" => Self::Network,
+            "rate_limited" => Self::RateLimited,
             "http_400" => Self::Http400,
             "http_401" => Self::Http401,
             "http_403" => Self::Http403,
@@ -889,6 +892,15 @@ mod tests {
         assert!(!QueueStatus::Completed.is_active());
         assert!(!QueueStatus::Failed.is_active());
         assert!(!QueueStatus::Cancelled.is_active());
+    }
+
+    #[test]
+    fn send_error_code_roundtrips_rate_limited() {
+        assert_eq!(SendErrorCode::RateLimited.as_str(), "rate_limited");
+        assert_eq!(
+            SendErrorCode::parse("rate_limited"),
+            SendErrorCode::RateLimited
+        );
     }
 
     #[test]

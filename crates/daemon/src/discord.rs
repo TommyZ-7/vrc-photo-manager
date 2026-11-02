@@ -47,159 +47,237 @@ pub(crate) enum ProcessOutcome {
     Failed,
 }
 
-/// Claims at most one due outbox row and processes it.
+/// Everything needed to perform one upload, collected under the DB lock.
+struct SendPlan {
+    entry: SendOutboxEntry,
+    webhook: String,
+    destination: String,
+    kind: SendPlanKind,
+}
+
+enum SendPlanKind {
+    Test,
+    Photo(Box<PhotoPlan>),
+    /// The row is already known to be unsendable; no lock is needed to fail it.
+    Failure(SendFailure),
+}
+
+struct PhotoPlan {
+    photo: Photo,
+    players: Vec<String>,
+    include_players: bool,
+    source: SendImageSource,
+    profile: Option<CompressionProfile>,
+}
+
+struct PreparedRequest {
+    request: SendRequest,
+    source: Option<SendSource>,
+    profile_id: Option<String>,
+}
+
+struct SendUpdate {
+    outcome: ProcessOutcome,
+    status: SendStatus,
+    error_code: Option<&'static str>,
+}
+
+/// Claims and processes at most one due outbox row.
 ///
-/// The integration settings are read before the claim so a disabled feature
-/// never takes work out of the queue, then re-read after the claim because the
-/// user can disable Discord while the row is between those two reads.
+/// The DB mutex is taken in two short phases. File reads, encoding, and the
+/// webhook upload all happen while it is released, so a slow upload cannot
+/// block the daemon or the UI.
 pub(crate) fn process_next_send(
-    db: &Db,
+    db: &Arc<Mutex<Db>>,
     transport: &dyn SendTransport,
     events: &EventBus,
     now: i64,
 ) -> Result<ProcessOutcome> {
-    let settings = AppSettings::load(db)?;
-    if ready_webhook(db, &settings)?.is_none() {
-        return Ok(ProcessOutcome::Idle);
-    }
-
-    let Some(entry) = db.claim_next_send(now)? else {
-        return Ok(ProcessOutcome::Idle);
+    let plan = {
+        let db = db.lock().unwrap();
+        plan_next_send(&db, now)?
     };
-
-    let settings = AppSettings::load(db)?;
-    let Some(webhook) = ready_webhook(db, &settings)? else {
-        db.release_send(entry.id)?;
+    let Some(SendPlan {
+        entry,
+        webhook,
+        destination,
+        kind,
+    }) = plan
+    else {
         return Ok(ProcessOutcome::Idle);
     };
 
     publish_send(events, &entry, SendStatus::Processing, None);
 
-    let prepared = match entry.kind {
-        SendKind::Test => PreparedSend {
-            payload_json: test_payload_json(&tr!("discord.test.message")),
-            image: None,
-            source: None,
-            profile_id: None,
-        },
-        SendKind::Photo => {
-            match prepare_photo_send(db, &settings, events, &entry, &settings.discord_destination)?
-            {
-                Some(prepared) => prepared,
-                None => return Ok(ProcessOutcome::Failed),
-            }
+    // No DB lock is held while this block reads files, encodes, or uploads.
+    let prepared = match prepare_request(kind, webhook) {
+        Ok(prepared) => prepared,
+        Err(failure) => {
+            let update = {
+                let db = db.lock().unwrap();
+                record_failure(&db, &entry, &destination, failure)?
+            };
+            publish_send(events, &entry, update.status, update.error_code);
+            return Ok(update.outcome);
         }
     };
-
-    tracing::debug!(
-        outbox_id = entry.id,
-        photo_id = ?entry.photo_id,
-        kind = entry.kind.as_str(),
-        "sending Discord webhook"
-    );
-
-    let PreparedSend {
-        payload_json,
-        image,
+    let PreparedRequest {
+        request,
         source,
         profile_id,
     } = prepared;
-    let request = SendRequest {
-        url: webhook,
-        payload_json,
-        image,
-    };
     let outcome = transport.send(&request);
-    match outcome {
-        SendOutcome::Sent {
-            message_id,
-            channel_id,
-            guild_id,
-        } => {
-            let completion = SendCompletion {
+
+    let update = {
+        let db = db.lock().unwrap();
+        record_outcome(&db, &entry, &destination, now, outcome, source, profile_id)?
+    };
+    publish_send(events, &entry, update.status, update.error_code);
+    Ok(update.outcome)
+}
+
+/// Phase one: validate the integration, claim a row, and snapshot all DB data.
+fn plan_next_send(db: &Db, now: i64) -> Result<Option<SendPlan>> {
+    let settings = AppSettings::load(db)?;
+    if ready_webhook(db, &settings)?.is_none() {
+        return Ok(None);
+    }
+
+    let Some(entry) = db.claim_next_send(now)? else {
+        return Ok(None);
+    };
+
+    // The integration can be disabled while the row waited in the queue.
+    let settings = AppSettings::load(db)?;
+    let Some(webhook) = ready_webhook(db, &settings)? else {
+        db.release_send(entry.id)?;
+        return Ok(None);
+    };
+
+    let destination = settings.discord_destination.clone();
+    let kind = match entry.kind {
+        SendKind::Test => SendPlanKind::Test,
+        SendKind::Photo => match build_photo_plan(db, &settings, entry.photo_id)? {
+            Some(plan) => SendPlanKind::Photo(Box::new(plan)),
+            None => SendPlanKind::Failure(SendFailure::new(
+                SendErrorCode::PhotoMissing,
+                None,
+                None,
+                None,
+            )),
+        },
+    };
+    Ok(Some(SendPlan {
+        entry,
+        webhook,
+        destination,
+        kind,
+    }))
+}
+
+fn build_photo_plan(
+    db: &Db,
+    settings: &AppSettings,
+    photo_id: Option<i64>,
+) -> Result<Option<PhotoPlan>> {
+    let Some(photo_id) = photo_id else {
+        return Ok(None);
+    };
+    let Some(photo) = db.photo_by_id(photo_id)? else {
+        return Ok(None);
+    };
+    let profile = db
+        .list_profiles()?
+        .into_iter()
+        .find(|profile| profile.discord && profile.enabled);
+    let derivatives = db.derivatives_for_photo(photo.id)?;
+    let source = choose_send_source(
+        &photo,
+        settings.discord_send_original,
+        profile.as_ref(),
+        &derivatives,
+    );
+    let players = if settings.discord_include_players {
+        db.photo_players(photo.id)?
+            .into_iter()
+            .map(|player| player.display_name)
+            .filter(|name| !name.trim().is_empty())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok(Some(PhotoPlan {
+        photo,
+        players,
+        include_players: settings.discord_include_players,
+        source,
+        profile,
+    }))
+}
+
+/// Phase two: materialise the image, build the embed, and prepare the POST.
+///
+/// This runs without the DB mutex. Every parse/IO/encode error is a normal
+/// send failure that phase three records.
+fn prepare_request(
+    kind: SendPlanKind,
+    webhook: String,
+) -> std::result::Result<PreparedRequest, SendFailure> {
+    match kind {
+        SendPlanKind::Failure(failure) => Err(failure),
+        SendPlanKind::Test => Ok(PreparedRequest {
+            request: SendRequest {
+                url: webhook,
+                payload_json: test_payload_json(&tr!("discord.test.message")),
+                image: None,
+            },
+            source: None,
+            profile_id: None,
+        }),
+        SendPlanKind::Photo(plan) => {
+            let PhotoPlan {
+                photo,
+                players,
+                include_players,
+                source,
+                profile,
+            } = *plan;
+            let (image, source, profile_id) = materialise_source(&photo, profile.as_ref(), source)?;
+            let captured_at = tr!("discord.embed.captured_at");
+            let players_label = tr!("discord.embed.players");
+            let unlinked = tr!("discord.embed.unlinked");
+            let footer_app = format!(
+                "{} {}",
+                vrc_photon_core::APP_NAME,
+                env!("CARGO_PKG_VERSION")
+            );
+            let labels = EmbedLabels {
+                captured_at: &captured_at,
+                players: &players_label,
+                unlinked: &unlinked,
+                footer_app: &footer_app,
+            };
+            let payload_json = photo_payload_json(
+                &EmbedPhoto {
+                    world_name: photo.world_name.as_deref(),
+                    captured_at_utc: photo.captured_at_utc,
+                    captured_at_local: &photo.captured_at_local,
+                    file_name: &photo.file_name,
+                    players: &players,
+                },
+                &labels,
+                include_players,
+                &image.filename,
+            );
+            Ok(PreparedRequest {
+                request: SendRequest {
+                    url: webhook,
+                    payload_json,
+                    image: Some(image),
+                },
                 source,
                 profile_id,
-                destination: settings.discord_destination.clone(),
-                message_id,
-                channel_id,
-                guild_id,
-            };
-            db.complete_send(entry.id, &completion)?;
-            if let Err(error) = db.prune_send_history(SEND_HISTORY_LIMIT) {
-                tracing::warn!(
-                    %error,
-                    outbox_id = entry.id,
-                    "cannot prune Discord send history"
-                );
-            }
-            publish_send(events, &entry, SendStatus::Sent, None);
-            tracing::info!(
-                outbox_id = entry.id,
-                photo_id = ?entry.photo_id,
-                status = "sent",
-                "Discord send completed"
-            );
-            Ok(ProcessOutcome::Sent)
-        }
-        SendOutcome::RateLimited { retry_after } => {
-            let next_attempt_at = now.saturating_add(retry_after.as_secs() as i64);
-            db.reschedule_send(
-                entry.id,
-                entry.attempts,
-                next_attempt_at,
-                SendErrorCode::Network,
-                Some("HTTP 429"),
-            )?;
-            publish_send(
-                events,
-                &entry,
-                SendStatus::Pending,
-                Some(SendErrorCode::Network.as_str()),
-            );
-            tracing::warn!(
-                outbox_id = entry.id,
-                photo_id = ?entry.photo_id,
-                status = "pending",
-                retry_after_secs = retry_after.as_secs(),
-                "Discord send rate limited"
-            );
-            Ok(ProcessOutcome::Rescheduled)
-        }
-        SendOutcome::Retryable { detail } => {
-            let attempts = entry.attempts.saturating_add(1);
-            let next_attempt_at = now.saturating_add(retry_delay_seconds(attempts));
-            let code = if detail.starts_with("HTTP ") {
-                SendErrorCode::Http5xx
-            } else {
-                SendErrorCode::Network
-            };
-            let detail = truncate_chars(&detail, MAX_ERROR_DETAIL_CHARS);
-            db.reschedule_send(entry.id, attempts, next_attempt_at, code, Some(&detail))?;
-            publish_send(events, &entry, SendStatus::Pending, Some(code.as_str()));
-            tracing::warn!(
-                outbox_id = entry.id,
-                photo_id = ?entry.photo_id,
-                status = "pending",
-                attempts,
-                error_code = code.as_str(),
-                "Discord send will be retried"
-            );
-            Ok(ProcessOutcome::Rescheduled)
-        }
-        SendOutcome::Failed { code, detail } => {
-            record_failure(
-                db,
-                events,
-                &entry,
-                SendFailure {
-                    code,
-                    detail,
-                    source,
-                    profile_id,
-                },
-                &settings.discord_destination,
-            )?;
-            Ok(ProcessOutcome::Failed)
+            })
         }
     }
 }
@@ -250,14 +328,11 @@ pub(crate) fn worker_loop(
     let mut seen_generation = 0;
     while running.load(Ordering::Relaxed) {
         let now = chrono::Utc::now().timestamp();
-        let outcome = {
-            let db = db.lock().unwrap();
-            match process_next_send(&db, transport.as_ref(), &events, now) {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    tracing::error!(%error, "Discord send step failed");
-                    ProcessOutcome::Idle
-                }
+        let outcome = match process_next_send(&db, transport.as_ref(), &events, now) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                tracing::error!(%error, "Discord send step failed");
+                ProcessOutcome::Idle
             }
         };
         match outcome {
@@ -286,13 +361,6 @@ fn ready_webhook(db: &Db, settings: &AppSettings) -> Result<Option<String>> {
     Ok(Some(url))
 }
 
-struct PreparedSend {
-    payload_json: String,
-    image: Option<SendImage>,
-    source: Option<SendSource>,
-    profile_id: Option<String>,
-}
-
 struct SendFailure {
     code: SendErrorCode,
     detail: Option<String>,
@@ -314,94 +382,6 @@ impl SendFailure {
             profile_id,
         }
     }
-}
-
-fn prepare_photo_send(
-    db: &Db,
-    settings: &AppSettings,
-    events: &EventBus,
-    entry: &SendOutboxEntry,
-    destination: &str,
-) -> Result<Option<PreparedSend>> {
-    let Some(photo_id) = entry.photo_id else {
-        record_failure(
-            db,
-            events,
-            entry,
-            SendFailure::new(SendErrorCode::PhotoMissing, None, None, None),
-            destination,
-        )?;
-        return Ok(None);
-    };
-    let Some(photo) = db.photo_by_id(photo_id)? else {
-        record_failure(
-            db,
-            events,
-            entry,
-            SendFailure::new(SendErrorCode::PhotoMissing, None, None, None),
-            destination,
-        )?;
-        return Ok(None);
-    };
-    let profile = db
-        .list_profiles()?
-        .into_iter()
-        .find(|profile| profile.discord && profile.enabled);
-    let derivatives = db.derivatives_for_photo(photo.id)?;
-    let source = choose_send_source(
-        &photo,
-        settings.discord_send_original,
-        profile.as_ref(),
-        &derivatives,
-    );
-    let (image, source, profile_id) = match materialise_source(&photo, profile.as_ref(), source) {
-        Ok(value) => value,
-        Err(failure) => {
-            record_failure(db, events, entry, failure, destination)?;
-            return Ok(None);
-        }
-    };
-    let players = if settings.discord_include_players {
-        db.photo_players(photo.id)?
-            .into_iter()
-            .map(|player| player.display_name)
-            .filter(|name| !name.trim().is_empty())
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let captured_at = tr!("discord.embed.captured_at");
-    let players_label = tr!("discord.embed.players");
-    let unlinked = tr!("discord.embed.unlinked");
-    let footer_app = format!(
-        "{} {}",
-        vrc_photon_core::APP_NAME,
-        env!("CARGO_PKG_VERSION")
-    );
-    let labels = EmbedLabels {
-        captured_at: &captured_at,
-        players: &players_label,
-        unlinked: &unlinked,
-        footer_app: &footer_app,
-    };
-    let payload_json = photo_payload_json(
-        &EmbedPhoto {
-            world_name: photo.world_name.as_deref(),
-            captured_at_utc: photo.captured_at_utc,
-            captured_at_local: &photo.captured_at_local,
-            file_name: &photo.file_name,
-            players: &players,
-        },
-        &labels,
-        settings.discord_include_players,
-        &image.filename,
-    );
-    Ok(Some(PreparedSend {
-        payload_json,
-        image: Some(image),
-        source,
-        profile_id,
-    }))
 }
 
 fn materialise_source(
@@ -528,13 +508,13 @@ fn materialise_source(
     }
 }
 
+/// Phase three for a row that could not be prepared: record the failure.
 fn record_failure(
     db: &Db,
-    events: &EventBus,
     entry: &SendOutboxEntry,
-    failure: SendFailure,
     destination: &str,
-) -> Result<()> {
+    failure: SendFailure,
+) -> Result<SendUpdate> {
     let detail = failure
         .detail
         .as_deref()
@@ -547,12 +527,6 @@ fn record_failure(
         failure.profile_id.as_deref(),
         Some(destination),
     )?;
-    publish_send(
-        events,
-        entry,
-        SendStatus::Failed,
-        Some(failure.code.as_str()),
-    );
     tracing::warn!(
         outbox_id = entry.id,
         photo_id = ?entry.photo_id,
@@ -560,7 +534,129 @@ fn record_failure(
         error_code = failure.code.as_str(),
         "Discord send failed"
     );
-    Ok(())
+    Ok(SendUpdate {
+        outcome: ProcessOutcome::Failed,
+        status: SendStatus::Failed,
+        error_code: Some(failure.code.as_str()),
+    })
+}
+
+/// Phase three for a completed upload: persist the outcome under the DB lock.
+fn record_outcome(
+    db: &Db,
+    entry: &SendOutboxEntry,
+    destination: &str,
+    now: i64,
+    outcome: SendOutcome,
+    source: Option<SendSource>,
+    profile_id: Option<String>,
+) -> Result<SendUpdate> {
+    match outcome {
+        SendOutcome::Sent {
+            message_id,
+            channel_id,
+            guild_id,
+        } => {
+            let completion = SendCompletion {
+                source,
+                profile_id,
+                destination: destination.to_string(),
+                message_id,
+                channel_id,
+                guild_id,
+            };
+            db.complete_send(entry.id, &completion)?;
+            if let Err(error) = db.prune_send_history(SEND_HISTORY_LIMIT) {
+                tracing::warn!(
+                    %error,
+                    outbox_id = entry.id,
+                    "cannot prune Discord send history"
+                );
+            }
+            tracing::info!(
+                outbox_id = entry.id,
+                photo_id = ?entry.photo_id,
+                status = "sent",
+                "Discord send completed"
+            );
+            Ok(SendUpdate {
+                outcome: ProcessOutcome::Sent,
+                status: SendStatus::Sent,
+                error_code: None,
+            })
+        }
+        SendOutcome::RateLimited { retry_after } => {
+            let next_attempt_at = now.saturating_add(retry_after.as_secs() as i64);
+            db.reschedule_send(
+                entry.id,
+                entry.attempts,
+                next_attempt_at,
+                SendErrorCode::RateLimited,
+                Some("HTTP 429"),
+            )?;
+            tracing::warn!(
+                outbox_id = entry.id,
+                photo_id = ?entry.photo_id,
+                status = "pending",
+                retry_after_secs = retry_after.as_secs(),
+                "Discord send rate limited"
+            );
+            Ok(SendUpdate {
+                outcome: ProcessOutcome::Rescheduled,
+                status: SendStatus::Pending,
+                error_code: Some(SendErrorCode::RateLimited.as_str()),
+            })
+        }
+        SendOutcome::Retryable { detail } => {
+            let attempts = entry.attempts.saturating_add(1);
+            let next_attempt_at = now.saturating_add(retry_delay_seconds(attempts));
+            let code = if detail.starts_with("HTTP ") {
+                SendErrorCode::Http5xx
+            } else {
+                SendErrorCode::Network
+            };
+            let detail = truncate_chars(&detail, MAX_ERROR_DETAIL_CHARS);
+            db.reschedule_send(entry.id, attempts, next_attempt_at, code, Some(&detail))?;
+            tracing::warn!(
+                outbox_id = entry.id,
+                photo_id = ?entry.photo_id,
+                status = "pending",
+                attempts,
+                error_code = code.as_str(),
+                "Discord send will be retried"
+            );
+            Ok(SendUpdate {
+                outcome: ProcessOutcome::Rescheduled,
+                status: SendStatus::Pending,
+                error_code: Some(code.as_str()),
+            })
+        }
+        SendOutcome::Failed { code, detail } => {
+            let detail = detail
+                .as_deref()
+                .map(|detail| truncate_chars(detail, MAX_ERROR_DETAIL_CHARS));
+            db.fail_send(
+                entry.id,
+                code,
+                detail.as_deref(),
+                source,
+                profile_id.as_deref(),
+                Some(destination),
+            )?;
+            tracing::warn!(
+                outbox_id = entry.id,
+                photo_id = ?entry.photo_id,
+                status = "failed",
+                error_code = code.as_str(),
+                "Discord send failed"
+            );
+            Ok(SendUpdate {
+                outcome: ProcessOutcome::Failed,
+                status: SendStatus::Failed,
+                error_code: Some(code.as_str()),
+            })
+        }
+    }
 }
 
 fn publish_send(
@@ -587,7 +683,8 @@ fn retry_delay_seconds(attempts: i64) -> i64 {
 mod tests {
     use std::collections::VecDeque;
     use std::path::Path;
-    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use vrc_photon_core::model::{
@@ -603,10 +700,18 @@ mod tests {
     struct FakeTransport {
         requests: Mutex<Vec<SendRequest>>,
         outcomes: Mutex<VecDeque<SendOutcome>>,
+        /// When set, `send` checks that the daemon DB lock is free.
+        db: Option<Arc<Mutex<Db>>>,
+        lock_was_free: AtomicBool,
     }
 
     impl SendTransport for FakeTransport {
         fn send(&self, request: &SendRequest) -> SendOutcome {
+            if let Some(db) = &self.db
+                && db.try_lock().is_ok()
+            {
+                self.lock_was_free.store(true, Ordering::SeqCst);
+            }
             self.requests.lock().unwrap().push(request.clone());
             self.outcomes
                 .lock()
@@ -617,6 +722,11 @@ mod tests {
                     detail: None,
                 })
         }
+    }
+
+    fn with_db<T>(db: &Arc<Mutex<Db>>, f: impl FnOnce(&Db) -> T) -> T {
+        let guard = db.lock().unwrap();
+        f(&guard)
     }
 
     fn seed_photo_file(db: &Db, photo_dir: &Path, name: &str) -> i64 {
@@ -645,43 +755,34 @@ mod tests {
         .unwrap()
     }
 
-    fn discord_db(dir: &tempfile::TempDir) -> (Db, i64) {
+    fn discord_db(dir: &tempfile::TempDir) -> (Arc<Mutex<Db>>, i64) {
         let db = Db::open(dir.path().join("library.db")).unwrap();
         let photo_dir = dir.path().join("photos");
         std::fs::create_dir_all(&photo_dir).unwrap();
         let photo = seed_photo_file(&db, &photo_dir, "VRChat_2026-11-02_21-34-56.000_16x10.png");
-        (db, photo)
+        (Arc::new(Mutex::new(db)), photo)
     }
 
-    #[test]
-    fn disabled_integration_sends_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let (db, photo) = discord_db(&dir);
-        let mut settings = AppSettings::load(&db).unwrap();
-        settings.discord_enabled = false;
-        settings.save(&db).unwrap();
-        save_discord_webhook(&db, "https://discord.com/api/webhooks/1/t").unwrap();
-        db.enqueue_send(
-            photo,
-            SendKind::Photo,
-            SendOrigin::Manual,
-            SendStatus::Pending,
-        )
-        .unwrap();
-        let transport = FakeTransport::default();
-        let events = EventBus::default();
-        assert!(matches!(
-            process_next_send(&db, &transport, &events, 100).unwrap(),
-            ProcessOutcome::Idle
-        ));
-        assert!(transport.requests.lock().unwrap().is_empty());
+    fn enable_discord(db: &Arc<Mutex<Db>>, url: &str) {
+        with_db(db, |db| {
+            let mut settings = AppSettings::load(db).unwrap();
+            settings.discord_enabled = true;
+            settings.save(db).unwrap();
+            save_discord_webhook(db, url).unwrap();
+        });
     }
 
-    fn enable_discord(db: &Db, url: &str) {
-        let mut settings = AppSettings::load(db).unwrap();
-        settings.discord_enabled = true;
-        settings.save(db).unwrap();
-        save_discord_webhook(db, url).unwrap();
+    fn enqueue_photo(db: &Arc<Mutex<Db>>, photo: i64) -> i64 {
+        with_db(db, |db| {
+            db.enqueue_send(
+                photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap()
+        })
     }
 
     fn sent_outcome() -> SendOutcome {
@@ -693,19 +794,37 @@ mod tests {
     }
 
     #[test]
-    fn success_stores_message_id_and_publishes_sent() {
+    fn disabled_integration_sends_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let (db, photo) = discord_db(&dir);
-        enable_discord(&db, "https://discord.com/api/webhooks/1/t");
-        let id = db
-            .enqueue_send(
+        with_db(&db, |db| {
+            let mut settings = AppSettings::load(db).unwrap();
+            settings.discord_enabled = false;
+            settings.save(db).unwrap();
+            save_discord_webhook(db, "https://discord.com/api/webhooks/1/t").unwrap();
+            db.enqueue_send(
                 photo,
                 SendKind::Photo,
                 SendOrigin::Manual,
                 SendStatus::Pending,
             )
-            .unwrap()
             .unwrap();
+        });
+        let transport = FakeTransport::default();
+        let events = EventBus::default();
+        assert!(matches!(
+            process_next_send(&db, &transport, &events, 100).unwrap(),
+            ProcessOutcome::Idle
+        ));
+        assert!(transport.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn success_stores_message_id_and_publishes_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, photo) = discord_db(&dir);
+        enable_discord(&db, "https://discord.com/api/webhooks/1/t");
+        let id = enqueue_photo(&db, photo);
         let transport = FakeTransport::default();
         transport.outcomes.lock().unwrap().push_back(sent_outcome());
         let events = EventBus::default();
@@ -714,7 +833,7 @@ mod tests {
             process_next_send(&db, &transport, &events, 100).unwrap(),
             ProcessOutcome::Sent
         ));
-        let entry = db.send_entry_by_id(id).unwrap().unwrap();
+        let entry = with_db(&db, |db| db.send_entry_by_id(id).unwrap().unwrap());
         assert_eq!(entry.status, SendStatus::Sent);
         assert_eq!(entry.discord_message_id.as_deref(), Some("42"));
         assert_eq!(entry.discord_channel_id.as_deref(), Some("7"));
@@ -737,11 +856,33 @@ mod tests {
     }
 
     #[test]
+    fn db_lock_is_released_during_upload() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, photo) = discord_db(&dir);
+        enable_discord(&db, "https://discord.com/api/webhooks/1/t");
+        enqueue_photo(&db, photo);
+        let transport = FakeTransport {
+            db: Some(db.clone()),
+            ..FakeTransport::default()
+        };
+        transport.outcomes.lock().unwrap().push_back(sent_outcome());
+        let events = EventBus::default();
+        assert!(matches!(
+            process_next_send(&db, &transport, &events, 100).unwrap(),
+            ProcessOutcome::Sent
+        ));
+        assert!(
+            transport.lock_was_free.load(Ordering::SeqCst),
+            "the DB mutex was held during the upload"
+        );
+    }
+
+    #[test]
     fn test_send_has_no_image() {
         let dir = tempfile::tempdir().unwrap();
         let (db, _photo) = discord_db(&dir);
         enable_discord(&db, "https://discord.com/api/webhooks/1/t");
-        let id = db.enqueue_test_send().unwrap();
+        let id = with_db(&db, |db| db.enqueue_test_send().unwrap());
         let transport = FakeTransport::default();
         transport.outcomes.lock().unwrap().push_back(sent_outcome());
         let events = EventBus::default();
@@ -750,7 +891,7 @@ mod tests {
             ProcessOutcome::Sent
         ));
         assert_eq!(
-            db.send_entry_by_id(id).unwrap().unwrap().kind,
+            with_db(&db, |db| db.send_entry_by_id(id).unwrap().unwrap().kind),
             SendKind::Test
         );
         let requests = transport.requests.lock().unwrap();
@@ -763,15 +904,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (db, photo) = discord_db(&dir);
         enable_discord(&db, "https://discord.com/api/webhooks/1/t");
-        let id = db
-            .enqueue_send(
-                photo,
-                SendKind::Photo,
-                SendOrigin::Manual,
-                SendStatus::Pending,
-            )
-            .unwrap()
-            .unwrap();
+        let id = enqueue_photo(&db, photo);
         let transport = FakeTransport::default();
         transport
             .outcomes
@@ -785,10 +918,11 @@ mod tests {
             process_next_send(&db, &transport, &events, 100).unwrap(),
             ProcessOutcome::Rescheduled
         ));
-        let entry = db.send_entry_by_id(id).unwrap().unwrap();
+        let entry = with_db(&db, |db| db.send_entry_by_id(id).unwrap().unwrap());
         assert_eq!(entry.status, SendStatus::Pending);
         assert_eq!(entry.attempts, 0);
         assert_eq!(entry.next_attempt_at, Some(102));
+        assert_eq!(entry.error_code.as_deref(), Some("rate_limited"));
         assert!(matches!(
             process_next_send(&db, &transport, &events, 101).unwrap(),
             ProcessOutcome::Idle
@@ -801,15 +935,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (db, photo) = discord_db(&dir);
         enable_discord(&db, "https://discord.com/api/webhooks/1/t");
-        let id = db
-            .enqueue_send(
-                photo,
-                SendKind::Photo,
-                SendOrigin::Manual,
-                SendStatus::Pending,
-            )
-            .unwrap()
-            .unwrap();
+        let id = enqueue_photo(&db, photo);
         let transport = FakeTransport::default();
         transport
             .outcomes
@@ -823,7 +949,7 @@ mod tests {
             process_next_send(&db, &transport, &events, 100).unwrap(),
             ProcessOutcome::Rescheduled
         ));
-        let entry = db.send_entry_by_id(id).unwrap().unwrap();
+        let entry = with_db(&db, |db| db.send_entry_by_id(id).unwrap().unwrap());
         assert_eq!(entry.status, SendStatus::Pending);
         assert_eq!(entry.attempts, 1);
         assert_eq!(entry.next_attempt_at, Some(102));
@@ -839,15 +965,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (db, photo) = discord_db(&dir);
         enable_discord(&db, "https://discord.com/api/webhooks/1/t");
-        let id = db
-            .enqueue_send(
-                photo,
-                SendKind::Photo,
-                SendOrigin::Manual,
-                SendStatus::Pending,
-            )
-            .unwrap()
-            .unwrap();
+        let id = enqueue_photo(&db, photo);
         let transport = FakeTransport::default();
         transport
             .outcomes
@@ -862,7 +980,7 @@ mod tests {
             process_next_send(&db, &transport, &events, 100).unwrap(),
             ProcessOutcome::Failed
         ));
-        let entry = db.send_entry_by_id(id).unwrap().unwrap();
+        let entry = with_db(&db, |db| db.send_entry_by_id(id).unwrap().unwrap());
         assert_eq!(entry.status, SendStatus::Failed);
         assert_eq!(entry.error_code.as_deref(), Some("http_401"));
         assert_eq!(entry.error_detail.as_deref(), Some("unauthorized"));
@@ -873,24 +991,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (db, photo) = discord_db(&dir);
         enable_discord(&db, "https://discord.com/api/webhooks/1/t");
-        let path = db.photo_by_id(photo).unwrap().unwrap().abs_path;
+        let path = with_db(&db, |db| db.photo_by_id(photo).unwrap().unwrap().abs_path);
         std::fs::remove_file(path).unwrap();
-        let id = db
-            .enqueue_send(
-                photo,
-                SendKind::Photo,
-                SendOrigin::Manual,
-                SendStatus::Pending,
-            )
-            .unwrap()
-            .unwrap();
+        let id = enqueue_photo(&db, photo);
         let transport = FakeTransport::default();
         let events = EventBus::default();
         assert!(matches!(
             process_next_send(&db, &transport, &events, 100).unwrap(),
             ProcessOutcome::Failed
         ));
-        let entry = db.send_entry_by_id(id).unwrap().unwrap();
+        let entry = with_db(&db, |db| db.send_entry_by_id(id).unwrap().unwrap());
         assert_eq!(entry.status, SendStatus::Failed);
         assert_eq!(entry.error_code.as_deref(), Some("photo_missing"));
         assert!(transport.requests.lock().unwrap().is_empty());
@@ -903,8 +1013,8 @@ mod tests {
         enable_discord(&db, "https://discord.com/api/webhooks/1/t");
         let display = dir.path().join("display.webp");
         std::fs::write(&display, b"WEBPDATA").unwrap();
-        let derivative = db
-            .add_derivative(
+        let derivative = with_db(&db, |db| {
+            db.add_derivative(
                 photo,
                 display.to_str().unwrap(),
                 "webp",
@@ -914,17 +1024,10 @@ mod tests {
                 "other",
                 "replace",
             )
-            .unwrap();
-        db.set_replaced(photo, derivative).unwrap();
-        let id = db
-            .enqueue_send(
-                photo,
-                SendKind::Photo,
-                SendOrigin::Manual,
-                SendStatus::Pending,
-            )
             .unwrap()
-            .unwrap();
+        });
+        with_db(&db, |db| db.set_replaced(photo, derivative).unwrap());
+        let id = enqueue_photo(&db, photo);
         let transport = FakeTransport::default();
         transport.outcomes.lock().unwrap().push_back(sent_outcome());
         let events = EventBus::default();
@@ -932,7 +1035,7 @@ mod tests {
             process_next_send(&db, &transport, &events, 100).unwrap(),
             ProcessOutcome::Sent
         ));
-        let entry = db.send_entry_by_id(id).unwrap().unwrap();
+        let entry = with_db(&db, |db| db.send_entry_by_id(id).unwrap().unwrap());
         assert_eq!(entry.source, Some(SendSource::Derivative));
         let requests = transport.requests.lock().unwrap();
         assert_eq!(requests[0].image.as_ref().unwrap().bytes, b"WEBPDATA");
@@ -942,18 +1045,10 @@ mod tests {
     fn recover_interrupted_sends_marks_processing_failed() {
         let dir = tempfile::tempdir().unwrap();
         let (db, photo) = discord_db(&dir);
-        let id = db
-            .enqueue_send(
-                photo,
-                SendKind::Photo,
-                SendOrigin::Manual,
-                SendStatus::Pending,
-            )
-            .unwrap()
-            .unwrap();
-        db.claim_next_send(100).unwrap();
-        assert_eq!(recover_interrupted_sends(&db).unwrap(), 1);
-        let entry = db.send_entry_by_id(id).unwrap().unwrap();
+        let id = enqueue_photo(&db, photo);
+        with_db(&db, |db| db.claim_next_send(100).unwrap());
+        assert_eq!(with_db(&db, |db| recover_interrupted_sends(db).unwrap()), 1);
+        let entry = with_db(&db, |db| db.send_entry_by_id(id).unwrap().unwrap());
         assert_eq!(entry.status, SendStatus::Failed);
         assert_eq!(entry.error_code.as_deref(), Some("interrupted"));
     }
@@ -962,31 +1057,34 @@ mod tests {
     fn missing_or_invalid_webhook_never_claims_a_send() {
         let dir = tempfile::tempdir().unwrap();
         let (db, photo) = discord_db(&dir);
-        let mut settings = AppSettings::load(&db).unwrap();
-        settings.discord_enabled = true;
-        settings.save(&db).unwrap();
-        let id = db
-            .enqueue_send(
+        let id = with_db(&db, |db| {
+            let mut settings = AppSettings::load(db).unwrap();
+            settings.discord_enabled = true;
+            settings.save(db).unwrap();
+            db.enqueue_send(
                 photo,
                 SendKind::Photo,
                 SendOrigin::Manual,
                 SendStatus::Pending,
             )
             .unwrap()
-            .unwrap();
+            .unwrap()
+        });
         let transport = FakeTransport::default();
         let events = EventBus::default();
         assert!(matches!(
             process_next_send(&db, &transport, &events, 100).unwrap(),
             ProcessOutcome::Idle
         ));
-        save_discord_webhook(&db, "http://discord.com/api/webhooks/1/t").unwrap();
+        with_db(&db, |db| {
+            save_discord_webhook(db, "http://discord.com/api/webhooks/1/t").unwrap()
+        });
         assert!(matches!(
             process_next_send(&db, &transport, &events, 101).unwrap(),
             ProcessOutcome::Idle
         ));
         assert!(transport.requests.lock().unwrap().is_empty());
-        let entry = db.send_entry_by_id(id).unwrap().unwrap();
+        let entry = with_db(&db, |db| db.send_entry_by_id(id).unwrap().unwrap());
         assert_eq!(entry.status, SendStatus::Pending);
         assert_eq!(entry.attempts, 0);
     }
