@@ -107,6 +107,31 @@ impl App {
         cx.notify();
     }
 
+    /// Selects the profile used for Discord uploads. `profile.discord` is a
+    /// single-choice flag, so only the requested profile keeps it enabled.
+    #[allow(dead_code)] // Consumed by the Discord profile picker (task 12).
+    pub(crate) fn set_discord_profile(
+        &mut self,
+        profile_id: &str,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let mut updates = Vec::new();
+        for profile in &mut self.profiles {
+            let should_enable = enabled && profile.id == profile_id;
+            if profile.discord != should_enable {
+                profile.discord = should_enable;
+                updates.push(profile.clone());
+            }
+        }
+        for profile in updates {
+            if let Err(error) = self.db.save_profile(&profile) {
+                tracing::warn!(%error, profile_id = %profile.id, "cannot save Discord profile flag");
+            }
+        }
+        cx.notify();
+    }
+
     /// Deduplicates ids and drops rows that no longer exist with chunked
     /// queries instead of one `photo_by_id` per selected photo.
     fn existing_photo_ids(&self, photo_ids: Vec<i64>) -> Vec<i64> {

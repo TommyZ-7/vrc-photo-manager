@@ -4,6 +4,7 @@ pub(crate) mod daemon;
 pub(crate) mod deletion;
 pub(crate) mod demo;
 pub(crate) mod demo_fixture;
+pub(crate) mod discord;
 pub(crate) mod import;
 pub(crate) mod lifecycle;
 pub(crate) mod live;
@@ -27,9 +28,9 @@ use gpui_kit::*;
 use vrc_photon_core::db::Db;
 use vrc_photon_core::model::{
     CompressionJob, CompressionProfile, DaemonError, DeletionCounts, DeletionRequest, Derivative,
-    LibraryStats, Photo, PhotoPlayer, PhotoTextFilter,
+    LibraryStats, Photo, PhotoPlayer, PhotoTextFilter, SendHistoryEntry,
 };
-use vrc_photon_core::settings::AppSettings;
+use vrc_photon_core::settings::{AppSettings, load_discord_webhook};
 use vrc_photon_core::thumbnail::ThumbnailCacheUsage;
 use vrc_photon_i18n::{tr, tr_args};
 use vrc_photon_ipc::Endpoint;
@@ -248,6 +249,21 @@ pub struct App {
     /// 0 = body expanded, 1 = collapsed to the card header.
     pub(crate) integrations_auto_motion: ToggleMotion,
     pub(crate) integrations_clipboard_motion: ToggleMotion,
+    pub(crate) integrations_discord_motion: ToggleMotion,
+    /// Stored webhook URL. It is never rendered in full: the card masks it via
+    /// `mask_webhook_url` and the editor starts empty.
+    pub(crate) discord_url: Option<String>,
+    pub(crate) discord_url_editing: bool,
+    pub(crate) discord_url_input: Entity<InputState>,
+    pub(crate) discord_destination_input: Entity<InputState>,
+    pub(crate) _discord_destination_subscription: Subscription,
+    /// Inline validation message for the webhook editor.
+    pub(crate) discord_url_error: Option<SharedString>,
+    pub(crate) send_history: Vec<SendHistoryEntry>,
+    /// Sends held in automatic `waiting` mode.
+    pub(crate) send_waiting_count: i64,
+    /// Outbox row of a test send waiting for a terminal state to toast.
+    pub(crate) pending_test_send: Option<i64>,
     pub(crate) thumbnail_quality_slider: Entity<SliderState>,
     pub(crate) _thumbnail_quality_subscription: Subscription,
     /// Last measured size of the thumbnail cache, refreshed when the settings
@@ -433,6 +449,14 @@ impl App {
             (&self.profile_name_input, "input.profile_name"),
             (&self.profile_suffix_input, "input.profile_suffix"),
             (&self.profile_output_input, "input.profile_output"),
+            (
+                &self.discord_url_input,
+                "integrations.discord.webhook.placeholder",
+            ),
+            (
+                &self.discord_destination_input,
+                "integrations.discord.destination.placeholder",
+            ),
         ];
         for (input, key) in inputs {
             input.update(cx, |state, cx| {
@@ -601,6 +625,33 @@ impl App {
                 }
             },
         );
+        let initial_discord_url = load_discord_webhook(&db).ok().flatten();
+        let discord_url_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(tr!("integrations.discord.webhook.placeholder"))
+        });
+        let discord_destination_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(tr!("integrations.discord.destination.placeholder"))
+                .default_value(initial_settings.discord_destination.clone())
+        });
+        // Enter and blur commit the label; typing alone stays in the input and
+        // is not persisted until one of those events arrives.
+        let discord_destination_subscription = cx.subscribe(
+            &discord_destination_input,
+            |this, _input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    this.save_discord_destination(cx);
+                }
+            },
+        );
+        let send_history = db.send_history(100).unwrap_or_else(|error| {
+            tracing::warn!(%error, "cannot load the Discord send history");
+            Vec::new()
+        });
+        let send_waiting_count = db.count_waiting_sends().unwrap_or_else(|error| {
+            tracing::warn!(%error, "cannot count waiting Discord sends");
+            0
+        });
         let photo_grid_focus = cx.focus_handle();
         let import_dialog_focus = cx.focus_handle();
         let quick_look_close_focus = cx.focus_handle();
@@ -805,6 +856,22 @@ impl App {
                     1.0
                 },
             ),
+            integrations_discord_motion: ToggleMotion::settled(
+                if initial_settings.discord_enabled {
+                    0.0
+                } else {
+                    1.0
+                },
+            ),
+            discord_url: initial_discord_url,
+            discord_url_editing: false,
+            discord_url_input,
+            discord_destination_input,
+            _discord_destination_subscription: discord_destination_subscription,
+            discord_url_error: None,
+            send_history,
+            send_waiting_count,
+            pending_test_send: None,
             thumbnail_quality_slider,
             _thumbnail_quality_subscription: thumbnail_quality_subscription,
             thumbnail_cache_usage: None,

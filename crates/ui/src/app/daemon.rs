@@ -253,6 +253,11 @@ impl App {
         self.wake_daemon(IpcRequest::WakeJobs, cx);
     }
 
+    #[allow(dead_code)] // Consumed by the Discord test/manual send actions (tasks 12–14).
+    pub(crate) fn send_wake_sends(&self, cx: &mut Context<Self>) {
+        self.wake_daemon(IpcRequest::WakeSends, cx);
+    }
+
     pub(crate) fn request_daemon_rescan(&mut self, cx: &mut Context<Self>) {
         match self.db.request_daemon_command(DaemonCommand::Rescan) {
             Ok(_) => {
