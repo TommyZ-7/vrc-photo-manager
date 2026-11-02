@@ -32,6 +32,7 @@ path = "vrc-photon-updater"
 generateDesktopEntry = true
 
 [deb]
+packageName = "vrc-photon"
 depends = [
   "libxkbcommon0",
   "libxkbcommon-x11-0",
