@@ -29,9 +29,10 @@ use vrc_photon_core::settings::{AppSettings, detect_vrchat_paths};
 use vrc_photon_core::thumbnail;
 use vrc_photon_ipc::{Endpoint, Event, JobStatus, Operation, ScanPhase as IpcScanPhase};
 
-// Wired into the send worker by the next change; until then only the tests in
-// this module use it.
+// The daemon starts this worker thread in the next change; until then only the
+// tests in this module call it.
 #[allow(dead_code)]
+mod discord;
 mod discord_http;
 mod ipc_server;
 mod signals;
