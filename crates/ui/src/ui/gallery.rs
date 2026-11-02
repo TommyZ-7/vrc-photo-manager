@@ -14,6 +14,8 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::popover::Popover;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -28,7 +30,7 @@ use crate::state::photo_browser::{
 use crate::state::thumbnail::ThumbnailCache;
 use crate::state::viewer::ViewerOpenSource;
 use crate::state::year_rail::format_captured_month;
-use crate::ui::components::{card_header, glass_panel};
+use crate::ui::components::{card_header, chip, glass_panel};
 use crate::ui::theme::*;
 use crate::ui::year_rail::{YearRail, YearRailLabels};
 
@@ -173,6 +175,53 @@ fn render_header(app: &App, shared: &Rc<GalleryShared>, window: &Window) -> AnyE
                 ),
         )
         .child(div().flex_1())
+        .child(filter_popover(&p))
+        .child(
+            div()
+                .flex_shrink_0()
+                .whitespace_nowrap()
+                .text_size(px(10.))
+                .text_color(rgb(p.muted_2))
+                .child(tr!("gallery.sort_newest")),
+        )
+        .into_any_element()
+}
+
+/// The header's filter chips: (label, active) pairs in display order.
+///
+/// The chips are appearance only, as the design spec sets out for the
+/// library header: nothing reads them to filter the grid. They live in a
+/// popover overlay, so opening or closing it cannot change the gallery's
+/// row heights or scroll position.
+fn filter_chips() -> [(String, bool); 4] {
+    [
+        (tr!("gallery.chip.world"), true),
+        (tr!("gallery.chip.player"), false),
+        (tr!("gallery.chip.date"), false),
+        (tr!("gallery.chip.tag"), false),
+    ]
+}
+
+/// Filter button for the gallery header, opening the chip popover below
+/// the button. The popover is anchored to the button's bottom-right so
+/// its surface stays inside the gallery card at narrow window widths.
+fn filter_popover(palette: &Palette) -> AnyElement {
+    let p = *palette;
+    Popover::new("gallery-filter-popover")
+        .anchor(Anchor::TopRight)
+        .trigger(
+            Button::new("gallery-filter")
+                .label(tr!("gallery.filter"))
+                .small()
+                .ghost(),
+        )
+        .content(move |_, _, _| {
+            let mut row = h_flex().gap(px(6.));
+            for (label, active) in filter_chips() {
+                row = row.child(chip(&p, &label, active));
+            }
+            row
+        })
         .into_any_element()
 }
 
@@ -768,4 +817,36 @@ fn grid_placeholder(palette: &Palette, image_height: f32, card_width: Option<f32
         None => placeholder.flex_1(),
     };
     placeholder.into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::filter_chips;
+    use vrc_photon_i18n::MISSING;
+
+    #[test]
+    fn filter_chips_match_the_design_set() {
+        let chips = filter_chips();
+        assert_eq!(chips.len(), 4);
+
+        // Exactly one chip is active: the world chip, first in the row.
+        let active: Vec<usize> = chips
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, active))| *active)
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(active, vec![0]);
+
+        // Every label resolves in the catalog (never the missing marker)
+        // and the four labels are distinct.
+        let mut labels: Vec<&str> = chips.iter().map(|(label, _)| label.as_str()).collect();
+        for label in &labels {
+            assert!(!label.is_empty());
+            assert_ne!(*label, MISSING);
+        }
+        labels.sort_unstable();
+        labels.dedup();
+        assert_eq!(labels.len(), 4);
+    }
 }
