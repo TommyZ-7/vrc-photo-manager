@@ -21,6 +21,7 @@ pub mod scanner;
 pub mod settings;
 pub mod thumbnail;
 pub mod time;
+pub mod world_name;
 
 pub use db::Db;
 pub use error::{CoreError, Result};

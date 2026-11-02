@@ -292,6 +292,21 @@ CREATE INDEX IF NOT EXISTS idx_send_outbox_photo
     ON send_outbox(photo_id);
 "#;
 
+const SCHEMA_V12_WORLD_NAME_LOOKUPS: &str = r#"
+CREATE TABLE IF NOT EXISTS world_name_lookups (
+    world_db_id INTEGER PRIMARY KEY REFERENCES worlds(id) ON DELETE CASCADE,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at INTEGER,
+    last_attempt_at INTEGER,
+    last_error TEXT,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_world_name_lookups_due
+    ON world_name_lookups(status, next_attempt_at);
+"#;
+
 const PHOTO_SELECT: &str = "p.id, p.root_id, p.rel_path, p.abs_path, p.file_name, \
     p.captured_at_utc, p.captured_at_local, p.tz_offset_sec, p.width, p.height, \
     p.file_size, p.mtime, p.blake3, p.status, p.is_favorite, p.note, \
@@ -425,6 +440,9 @@ impl Db {
         }
         if version < 11 {
             self.migrate_v11()?;
+        }
+        if version < 12 {
+            self.migrate_v12()?;
         }
         Ok(())
     }
@@ -716,6 +734,27 @@ impl Db {
             params![now_string()],
         )?;
         tx.pragma_update(None, "user_version", 11)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Adds the world name lookup queue. The table and index use
+    /// `IF NOT EXISTS`, so the step is safe to retry after a crash between the
+    /// DDL and `user_version`.
+    fn migrate_v12(&self) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version >= 12 {
+            tx.commit()?;
+            return Ok(());
+        }
+
+        tx.execute_batch(SCHEMA_V12_WORLD_NAME_LOOKUPS)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (12, ?1)",
+            params![now_string()],
+        )?;
+        tx.pragma_update(None, "user_version", 12)?;
         tx.commit()?;
         Ok(())
     }
@@ -3790,7 +3829,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
     }
 
     #[test]
@@ -3836,7 +3875,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
         let author_columns: i64 = db
             .conn
             .query_row(
@@ -3888,7 +3927,7 @@ mod tests {
             }
             for handle in handles {
                 let opened = handle.join().unwrap();
-                assert_eq!(opened.unwrap().unwrap(), 11);
+                assert_eq!(opened.unwrap().unwrap(), 12);
             }
         }
     }
@@ -3900,7 +3939,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
         let has_output_dir: bool = db
             .conn
             .query_row(
@@ -3920,7 +3959,7 @@ mod tests {
             .connection()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
         let table: i64 = db
             .connection()
             .query_row(
@@ -4886,7 +4925,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
 
         let recorded: i64 = db
             .conn
@@ -4929,7 +4968,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
         let retry_column: i64 = db
             .conn
             .query_row(
@@ -4996,7 +5035,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
 
         let jobs = db.list_jobs(10).unwrap();
         assert_eq!(jobs.len(), 1);
@@ -5029,7 +5068,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
         assert_eq!(db.list_jobs(10).unwrap()[0].retry_count, 2);
 
         let tables: i64 = db
@@ -6072,7 +6111,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
         let exists: bool = db
             .conn
             .query_row(
@@ -6095,6 +6134,47 @@ mod tests {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(version, 11);
+    }
+
+    #[test]
+    fn migration_v12_adds_world_name_lookups() {
+        let db = Db::open_in_memory().unwrap();
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 12);
+        let table: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='world_name_lookups'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(table, 1);
+        let index: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_world_name_lookups_due'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(index, 1);
+    }
+
+    #[test]
+    fn migration_v12_is_retryable() {
+        let db = Db::open_in_memory().unwrap();
+        db.conn.pragma_update(None, "user_version", 11).unwrap();
+        db.migrate_v12().unwrap();
+        db.migrate_v12().unwrap();
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 12);
     }
 
     #[test]
