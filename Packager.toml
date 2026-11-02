@@ -1,6 +1,6 @@
 name = "vrc-photon"
 productName = "VRC PhotoN"
-version = "0.9.2"
+version = "0.10.0"
 identifier = "com.tommyz.vrc-photon"
 description = "VRChat photo library with log-based world/player context and built-in compression."
 longDescription = "Index VRChat screenshots, link them to the world and players from VRChat output logs and XMP metadata, then search and compress them locally."
