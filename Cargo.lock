@@ -8051,6 +8051,7 @@ dependencies = [
  "vrc-photon-i18n",
  "vrc-photon-ipc",
  "vrc-photon-update",
+ "windows 0.62.2",
 ]
 
 [[package]]
