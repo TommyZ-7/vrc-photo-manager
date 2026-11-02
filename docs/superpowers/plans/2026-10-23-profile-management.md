@@ -139,7 +139,7 @@ Add `use crate::error::CoreError;` only if the test module does not already see 
 
 - [ ] **Step 3: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-core save_profile_assigns_and_preserves_sort_order reorder_profiles_persists_and_rolls_back_bad_lists`
+Run: `cargo test -p vrc-photon-core save_profile_assigns_and_preserves_sort_order reorder_profiles_persists_and_rolls_back_bad_lists`
 Expected: FAIL with a missing `reorder_profiles` method (and the order assertions fail for insert-at-zero).
 
 - [ ] **Step 4: Implement insert-at-end and reorder**
@@ -243,8 +243,8 @@ use crate::error::{CoreError, Result};
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-core save_profile_assigns_and_preserves_sort_order reorder_profiles_persists_and_rolls_back_bad_lists`
-Expected: PASS. Also run `cargo test -p vrc-photo-core ensure_default_profiles` and expect the existing seeding tests to pass.
+Run: `cargo test -p vrc-photon-core save_profile_assigns_and_preserves_sort_order reorder_profiles_persists_and_rolls_back_bad_lists`
+Expected: PASS. Also run `cargo test -p vrc-photon-core ensure_default_profiles` and expect the existing seeding tests to pass.
 
 - [ ] **Step 6: Commit**
 
@@ -335,7 +335,7 @@ fn duplicate_profile_normalizes_legacy_zero_order() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-core duplicate_profile`
+Run: `cargo test -p vrc-photon-core duplicate_profile`
 Expected: FAIL with a missing `duplicate_profile` method.
 
 - [ ] **Step 3: Implement `duplicate_profile`**
@@ -399,7 +399,7 @@ pub fn duplicate_profile(&self, id: &str) -> Result<CompressionProfile> {
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-core duplicate_profile`
+Run: `cargo test -p vrc-photon-core duplicate_profile`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -501,7 +501,7 @@ fn guarded_enqueue_skips_missing_profiles() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-core delete_profile_blocks_active_jobs_and_keeps_history guarded_enqueue_skips_missing_profiles`
+Run: `cargo test -p vrc-photon-core delete_profile_blocks_active_jobs_and_keeps_history guarded_enqueue_skips_missing_profiles`
 Expected: FAIL with missing `active_job_count_for_profile` / `enqueue_job_for_existing_profile` methods.
 
 - [ ] **Step 3: Implement the count, guarded delete, guarded enqueue, and rowid tie-break**
@@ -592,7 +592,7 @@ ORDER BY created_at, rowid LIMIT 1
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-core delete_profile_blocks_active_jobs_and_keeps_history guarded_enqueue_skips_missing_profiles queue_roundtrip`
+Run: `cargo test -p vrc-photon-core delete_profile_blocks_active_jobs_and_keeps_history guarded_enqueue_skips_missing_profiles queue_roundtrip`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -640,7 +640,7 @@ fn auto_jobs_follow_profile_sort_order() {
     let db = Db::open(dir.path().join("library.db")).unwrap();
     let root = db.add_root("/photos", "reference").unwrap();
     let photo_id = db
-        .upsert_photo(&vrc_photo_core::model::NewPhoto {
+        .upsert_photo(&vrc_photon_core::model::NewPhoto {
             root_id: root,
             rel_path: "a.png".to_string(),
             abs_path: "/photos/a.png".to_string(),
@@ -684,7 +684,7 @@ fn auto_jobs_follow_profile_sort_order() {
 
 - [ ] **Step 3: Run the daemon tests**
 
-Run: `cargo test -p vrc-photo-daemon auto_jobs_follow_profile_sort_order end_to_end_auto_compress`
+Run: `cargo test -p vrc-photon-daemon auto_jobs_follow_profile_sort_order end_to_end_auto_compress`
 Expected: PASS. If the sequence fails, confirm Task 3's `rowid` tie-break is present.
 
 - [ ] **Step 4: Commit**
@@ -732,7 +732,7 @@ fn profile_move_order_swaps_neighbors_and_stops_at_edges() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p vrc-photo-ui profile_move_order_swaps_neighbors_and_stops_at_edges`
+Run: `cargo test -p vrc-photon-ui profile_move_order_swaps_neighbors_and_stops_at_edges`
 Expected: FAIL with a missing `moved_profile_order` import.
 
 - [ ] **Step 3: Implement the helper and the move method**
@@ -846,10 +846,10 @@ Bind `let len = self.profiles.len();` before the `self.profiles.iter()` map so t
 
 - [ ] **Step 5: Run the tests and clippy**
 
-Run: `cargo test -p vrc-photo-ui profile_move_order_swaps_neighbors_and_stops_at_edges`
+Run: `cargo test -p vrc-photon-ui profile_move_order_swaps_neighbors_and_stops_at_edges`
 Expected: PASS.
 
-Run: `cargo clippy -p vrc-photo-ui --all-targets -- -D warnings`
+Run: `cargo clippy -p vrc-photon-ui --all-targets -- -D warnings`
 Expected: PASS.
 
 - [ ] **Step 6: Commit**
@@ -913,7 +913,7 @@ In `profile_editor`'s header, before the auto `Switch`:
 
 - [ ] **Step 3: Verify**
 
-Run: `cargo check -p vrc-photo-ui` and `cargo clippy -p vrc-photo-ui --all-targets -- -D warnings`.
+Run: `cargo check -p vrc-photon-ui` and `cargo clippy -p vrc-photon-ui --all-targets -- -D warnings`.
 Expected: PASS.
 
 - [ ] **Step 4: Commit**
@@ -1061,7 +1061,7 @@ Then in the header, after the duplicate button and before the auto `Switch`:
 
 - [ ] **Step 4: Verify**
 
-Run: `cargo check -p vrc-photo-ui` and `cargo clippy -p vrc-photo-ui --all-targets -- -D warnings`.
+Run: `cargo check -p vrc-photon-ui` and `cargo clippy -p vrc-photon-ui --all-targets -- -D warnings`.
 Expected: PASS, including the `cx.entity()` and `AlertDialog` callback types.
 
 - [ ] **Step 5: Commit**
@@ -1093,11 +1093,11 @@ Expected: all commands exit 0. Record the new test counts for the PR body.
 - [ ] **Step 2: Demo the reorder and restart persistence**
 
 ```bash
-cargo run -p vrc-photo-ui -- --demo --demo-reset
+cargo run -p vrc-photon-ui -- --demo --demo-reset
 ```
 
 - On 圧縮設定, move a profile down and another up; the selected profile follows its card.
-- Quit and relaunch `cargo run -p vrc-photo-ui -- --demo`.
+- Quit and relaunch `cargo run -p vrc-photon-ui -- --demo`.
 - Confirm the order is the same and the edge arrows are disabled at the top/bottom.
 
 - [ ] **Step 3: Demo duplication**

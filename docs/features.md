@@ -225,7 +225,7 @@
 - OSログイン時の自動起動を設定できる。
   - 通常: デーモン実体を登録。
   - AppImage: `$APPIMAGE --background` を登録。UIの `--background` がデーモンを子プロセスで起動して待機する。
-  - deb/pacman: 任意の systemd ユーザーサービス `vrc-photo-daemon.service` を同梱する。利用者が明示的に enable した場合のみサービスとして起動し、アプリ管理の自動起動もフォールバックとして残る。
+  - deb/pacman: 任意の systemd ユーザーサービス `vrc-photon-daemon.service` を同梱する。利用者が明示的に enable した場合のみサービスとして起動し、アプリ管理の自動起動もフォールバックとして残る。
 - デーモンは `single-instance` で二重起動を防ぐ。
 - Linuxでトレイが使えない環境ではヘッドレスで継続する。
 
@@ -271,7 +271,7 @@
 - 圧縮: ダッシュボードの共有キューに失敗ジョブ（最新100件）を表示する。各行に写真名、プロファイル名、失敗理由、`再試行 n/3` を出し、上限未満なら「再試行」を出す。「失敗をすべて再試行」は、読み込んだ最新100件に再試行可能な失敗が1件でもあると出し、実行時はDB上の再試行可能な全件（100件より古いものも含む）を対象にする。上限到達時は「再試行の上限（3回）に達しました」と表示する。
 - 取り込み: 写真画面の「取り込み結果」パネルに、取り込み数・スキップ数・失敗数・部分移動数を出す。失敗ファイルは元パスと理由を、部分移動は移動元・移動先・削除失敗の理由を、索引できなかったファイルはパスと理由を表示する。「失敗分を再試行」は再試行可能な失敗だけを同じ取り込み先・モードで再実行する。取り込みの再試行回数に上限はない。
 - デーモン: ダッシュボードの「処理エラー」カードに、操作（写真スキャン / ログ解析 / 写真の紐付け）ごとのメッセージ、詳細、検出回数、発生時刻を表示する。「再試行」は `daemon_commands` にコマンドを積み、IPC接続中なら `wake_commands` で即時実行する。デーモン停止中はキューに残り、起動後に実行される。処理が成功すると行は消える（ログ解析は、新しく処理できた行が1行以上あり、失敗もスキップもない場合）。
-- ログ: UIとデーモンは `<data_dir>/logs/` にログを書く。ファイル名は `vrc-photo-manager.log`（UI）と `vrc-photo-daemon.log`（デーモン）。起動時に10 MiB以上なら `vrc-photo-manager.log.1` のような `.1` ファイルへローテーションする。ダッシュボードと設定画面の「ログ」カードに保存先とファイル名を表示し、「ログフォルダを開く」でOSのファイラーを開く。
+- ログ: UIとデーモンは `<data_dir>/logs/` にログを書く。ファイル名は `vrc-photon.log`（UI）と `vrc-photon-daemon.log`（デーモン）。起動時に10 MiB以上なら `vrc-photon.log.1` のような `.1` ファイルへローテーションする。ダッシュボードと設定画面の「ログ」カードに保存先とファイル名を表示し、「ログフォルダを開く」でOSのファイラーを開く。
 
 ## 10. アプリのアップデート
 
@@ -287,14 +287,14 @@
   再起動して適用を表示する。適用は2回押しで確定する。
 - ダウンロードはマニフェストのサイズ上限（300 MiB）とSHA-256、minisign署名を
   検証する。検証に失敗したファイルは削除し、現行版を維持する。
-- AppImage と current-user の Windows NSIS は `vrc-photo-updater` ヘルパーが
+- AppImage と current-user の Windows NSIS は `vrc-photon-updater` ヘルパーが
   旧版を退避して置換し、新UIの健康マーカーを確認する。45秒以内に確認できない
   場合は旧版へ戻して再起動する。旧版は `<AppImage>.previous` または
   `<data_dir>/updates/backup/<version>/` に残る。
-- deb / pacman は、`pkexec`、`/usr/bin/vrc-photo-updater`、polkit policy の
+- deb / pacman は、`pkexec`、`/usr/bin/vrc-photon-updater`、polkit policy の
   3つが揃っている場合にアプリ内更新できる。UIは成果物をダウンロードし、
   ユーザー権限ヘルパーが `pkexec --disable-internal-agent` で
-  `/usr/bin/vrc-photo-updater --apply-system-package` を起動する。
+  `/usr/bin/vrc-photon-updater --apply-system-package` を起動する。
   - 特権側は staging の所有者・symlink・署名済み manifest・パッケージ名・
     バージョンを再検証し、`pacman -U --noconfirm` または `dpkg -i` の固定
     コマンドでインストールする。シェルは使わない。
@@ -305,8 +305,8 @@
     新UIを一度だけ起動して手動復旧を案内する。
   - `system_packages` がない旧フィード、`pkexec` がない、polkit エージェントが
     ない、policy がない環境では、パッケージマネージャのコマンド
-    （pacman: `sudo pacman -Syu vrc-photo-manager`、deb:
-    `sudo apt install --only-upgrade vrc-photo-manager`）を表示する。
+    （pacman: `sudo pacman -Syu vrc-photon`、deb:
+    `sudo apt install --only-upgrade vrc-photon`）を表示する。
     認証不能でフォールバックした場合、その UI セッションでは自動適用を隠す。
     次回起動時は再試行できる。
 - 開発ビルド、ポータブル、Windowsのper-machineインストールは自動適用の対象外。
@@ -318,7 +318,7 @@
   `<data_dir>/updates/updater.log`。
 - 更新後、デーモンが systemd ユーザーサービス管理なら
   `systemctl --user daemon-reload` と `systemctl --user restart
-  vrc-photo-daemon.service` で再起動する。失敗時は従来のプロセス起動に
+  vrc-photon-daemon.service` で再起動する。失敗時は従来のプロセス起動に
   フォールバックする。
 - 自動確認はUI起動中のみ。デーモンだけが動いている間は確認しない。
 

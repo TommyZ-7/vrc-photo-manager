@@ -314,7 +314,7 @@ fn indexing_fixture() -> ScanProgressView {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-ui running_job_count_clamps -- --nocapture`
+Run: `cargo test -p vrc-photon-ui running_job_count_clamps -- --nocapture`
 
 Expected: compile errors for the missing types and functions.
 
@@ -372,7 +372,7 @@ Implement the helpers after `scan_progress_ratio`:
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-ui running_job_count_clamps compression_card_status import_card_status scan_card_status attention_dots import_running_progress tone_colors`
+Run: `cargo test -p vrc-photon-ui running_job_count_clamps compression_card_status import_card_status scan_card_status attention_dots import_running_progress tone_colors`
 
 Expected: all new tests pass.
 
@@ -485,16 +485,16 @@ git commit -m "feat(ui): add sidebar progress card"
 
 - [ ] **Step 1: Build and launch the demo**
 
-Run: `cargo run -p vrc-photo-ui --bin vrc-photo-manager -- --demo`
+Run: `cargo run -p vrc-photon-ui --bin vrc-photon -- --demo`
 
 Use the visual QA skill available in the session to capture the window. If the environment is WSL, use `wsl-gpui-testing`; otherwise use `hyprland-visual-qa`.
 
 - [ ] **Step 2: Seed waiting jobs for the action check**
 
-Close the app, then insert three waiting jobs into the demo DB. The demo DB is `$TMPDIR/vrc-photo-manager-demo/library.db` (fall back to `/tmp/vrc-photo-manager-demo/library.db`):
+Close the app, then insert three waiting jobs into the demo DB. The demo DB is `$TMPDIR/vrc-photon-demo/library.db` (fall back to `/tmp/vrc-photon-demo/library.db`):
 
 ```bash
-sqlite3 /tmp/vrc-photo-manager-demo/library.db <<'SQL'
+sqlite3 /tmp/vrc-photon-demo/library.db <<'SQL'
 INSERT INTO compression_jobs(id, photo_id, profile_id, status, progress, policy, created_at)
 SELECT 'qa-wait-' || p.id, p.id,
        (SELECT id FROM compression_profiles LIMIT 1),

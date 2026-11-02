@@ -4,7 +4,7 @@
 
 **Goal:** Add a signed, UI-driven update path for the AppImage and Windows NSIS builds, with a previous-version rollback, a manual-update notice for deb/pacman, and an auto-check setting.
 
-**Architecture:** A new `vrc-photo-update` crate checks a signed `latest.json` on GitHub Releases, verifies minisign signatures, streams downloads to a staging directory, and hands the replace/restart work to a small `vrc-photo-updater` helper. The helper waits for the UI and daemon to exit, backs up the current install, applies the update, waits for a health marker written by the new UI, and restores the previous version if the new one does not start. The UI checks on startup and every 24 hours, shows progress in Settings, and never blocks on the network. No DB migration; two settings fields.
+**Architecture:** A new `vrc-photon-update` crate checks a signed `latest.json` on GitHub Releases, verifies minisign signatures, streams downloads to a staging directory, and hands the replace/restart work to a small `vrc-photon-updater` helper. The helper waits for the UI and daemon to exit, backs up the current install, applies the update, waits for a health marker written by the new UI, and restores the previous version if the new one does not start. The UI checks on startup and every 24 hours, shows progress in Settings, and never blocks on the network. No DB migration; two settings fields.
 
 **Tech Stack:** Rust stable (edition 2024), `ureq` 3.5 (rustls), `minisign-verify` 0.3, `semver`, `sha2`, `base64`, `serde`, `chrono`, gpui-kit 0.8, `async-channel`, GitHub Actions, minisign CLI.
 
@@ -22,7 +22,7 @@
 - Japanese UI copy, following the existing Settings card style.
 - Public keys live in `packaging/update/keys.txt`; the secret key exists only in the GitHub Actions secret `MINISIGN_SECRET_KEY` and a maintainer-held offline backup. Never print it.
 - Do not bump the app version or create a tag/release in this work. The first signed release is a separate user-authorized release step.
-- Worktree: `../vrc-photo-manager-auto-update`, branch `feat/auto-update`.
+- Worktree: `../vrc-photon-auto-update`, branch `feat/auto-update`.
 
 ## Review Focus
 
@@ -47,9 +47,9 @@
 - Test: inline `#[cfg(test)] mod tests` in `manifest.rs`
 
 **Interfaces:**
-- Produces: `vrc_photo_update::manifest::{Manifest, PlatformAsset, UpdateFormat, AvailableUpdate, MANIFEST_SCHEMA, MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES, MAX_ARTIFACT_BYTES}`
+- Produces: `vrc_photon_update::manifest::{Manifest, PlatformAsset, UpdateFormat, AvailableUpdate, MANIFEST_SCHEMA, MAX_MANIFEST_BYTES, MAX_SIGNATURE_BYTES, MAX_ARTIFACT_BYTES}`
 - Produces: `Manifest::parse_and_validate(bytes: &[u8], allow_http: bool) -> Result<(Manifest, semver::Version)>`
-- Produces: `vrc_photo_update::error::{UpdateError, Result}`, including
+- Produces: `vrc_photon_update::error::{UpdateError, Result}`, including
   `UpdateError::Integrity(String)` for size/hash mismatches
 
 - [ ] **Step 1: Write the ADR**
@@ -57,7 +57,7 @@
 Create `docs/adr/0012-auto-update.md` with:
 - Status `Accepted`, date `2026-10-24`.
 - Context: manual downloads, five install formats, no signatures, no network code, issue #24.
-- Decision: static signed `latest.json` on GitHub Releases; minisign over the manifest and artifacts; AppImage/Windows current-user self-update; deb/pacman notify-only; UI-driven 24-hour checks; `vrc-photo-updater` helper with backup/health/rollback; per-platform install detection.
+- Decision: static signed `latest.json` on GitHub Releases; minisign over the manifest and artifacts; AppImage/Windows current-user self-update; deb/pacman notify-only; UI-driven 24-hour checks; `vrc-photon-updater` helper with backup/health/rollback; per-platform install detection.
 - Consequences and limits from spec §10.
 - Alternatives: GitHub API, unsigned TLS-only, all-format self-update, daemon-side checks, `cargo-packager-updater`.
 - References: issue #24, this spec, `docs/release.md`.
@@ -76,9 +76,9 @@ ureq = { version = "3.5", default-features = false, features = ["rustls", "gzip"
 url = "2"
 ```
 
-`crates/update/Cargo.toml` declares `vrc-photo-update`, inherits the workspace
+`crates/update/Cargo.toml` declares `vrc-photon-update`, inherits the workspace
 version/edition/license/repository/authors, and has a library plus two binaries
-(`vrc-photo-updater`, `vrc-photo-update-manifest`) created in later tasks. Add
+(`vrc-photon-updater`, `vrc-photon-update-manifest`) created in later tasks. Add
 `tempfile` as a dev-dependency. Add `winreg = "0.56"` under
 `[target.'cfg(windows)'.dependencies]` now so later tasks do not touch the
 manifest again.
@@ -101,10 +101,10 @@ fn validates_a_complete_manifest() {
       "schema": 1,
       "version": "0.4.0",
       "pub_date": "2026-10-24T12:00:00Z",
-      "notes_url": "https://github.com/TommyZ-7/vrc-photo-manager/releases/tag/v0.4.0",
+      "notes_url": "https://github.com/TommyZ-7/vrc-photon/releases/tag/v0.4.0",
       "platforms": {
         "linux-x86_64": {
-          "url": "https://github.com/x/y/releases/download/v0.4.0/vrc-photo-manager_0.4.0_x86_64.AppImage",
+          "url": "https://github.com/x/y/releases/download/v0.4.0/vrc-photon_0.4.0_x86_64.AppImage",
           "format": "appimage",
           "size": 1024,
           "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -125,7 +125,7 @@ sha256 of 63 chars, `http://` URL with `allow_http=false`, loopback http with
 
 - [ ] **Step 4: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-update manifest`
+Run: `cargo test -p vrc-photon-update manifest`
 Expected: FAIL; `Manifest` is not defined.
 
 - [ ] **Step 5: Implement the manifest types and validation**
@@ -147,7 +147,7 @@ Use `UpdateError::InvalidManifest(String)` with a specific reason.
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-update manifest`
+Run: `cargo test -p vrc-photon-update manifest`
 Expected: PASS.
 
 - [ ] **Step 7: Commit**
@@ -190,7 +190,7 @@ Run:
 
 ```bash
 mkdir -p /tmp/opencode/vrcpm-update-key
-cargo run -p vrc-photo-update --example generate_update_key -- /tmp/opencode/vrcpm-update-key/minisign.key
+cargo run -p vrc-photon-update --example generate_update_key -- /tmp/opencode/vrcpm-update-key/minisign.key
 ```
 
 Append the printed `RW...` line to `packaging/update/keys.txt` under a
@@ -225,7 +225,7 @@ legacy case.
 
 - [ ] **Step 3: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-update verify`
+Run: `cargo test -p vrc-photon-update verify`
 Expected: FAIL; `verify_bytes` is not defined.
 
 - [ ] **Step 4: Implement verification**
@@ -240,12 +240,12 @@ Expected: FAIL; `verify_bytes` is not defined.
 - `embedded_public_keys` parses `include_str!("../../../packaging/update/keys.txt")`,
   ignoring blank lines and `#` comments.
 - `effective_public_keys` returns the debug-only
-  `VRC_PHOTO_UPDATE_PUBLIC_KEY` value when `cfg!(debug_assertions)` and the
+  `VRC_PHOTON_UPDATE_PUBLIC_KEY` value when `cfg!(debug_assertions)` and the
   variable is non-empty; otherwise the embedded list.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-update verify`
+Run: `cargo test -p vrc-photon-update verify`
 Expected: PASS.
 
 - [ ] **Step 6: Commit**
@@ -274,11 +274,11 @@ git commit -m "feat: verify update signatures with minisign"
 Table-driven tests:
 
 ```rust
-assert_eq!(classify_linux(Path::new("/usr/bin/vrc-photo-manager"), None,
+assert_eq!(classify_linux(Path::new("/usr/bin/vrc-photon"), None,
     "ID=ubuntu\nID_LIKE=debian\n"), InstallKind::SystemPackage { family: PackageFamily::Deb });
 assert!(matches!(classify_linux(Path::new("/home/me/Apps/VRC.AppImage"),
     Some(Path::new("/home/me/Apps/VRC.AppImage")), ""), InstallKind::AppImage { .. }));
-assert_eq!(classify_linux(Path::new("/home/me/project/target/debug/vrc-photo-manager"),
+assert_eq!(classify_linux(Path::new("/home/me/project/target/debug/vrc-photon"),
     None, ""), InstallKind::Development);
 assert_eq!(PackageFamily::from_os_release("ID=arch\n"), PackageFamily::Pacman);
 ```
@@ -286,10 +286,10 @@ assert_eq!(PackageFamily::from_os_release("ID=arch\n"), PackageFamily::Pacman);
 Windows classification with injected registry paths:
 
 ```rust
-let exe = Path::new(r"C:\Users\me\AppData\Local\VRC Photo Manager\vrc-photo-manager.exe");
-assert_eq!(classify_windows(exe, Some(Path::new(r"C:\Users\me\AppData\Local\VRC Photo Manager")), None),
+let exe = Path::new(r"C:\Users\me\AppData\Local\VRC PhotoN\vrc-photon.exe");
+assert_eq!(classify_windows(exe, Some(Path::new(r"C:\Users\me\AppData\Local\VRC PhotoN")), None),
     InstallKind::WindowsCurrentUser { install_dir: exe.parent().unwrap().into() });
-assert_eq!(classify_windows(exe, None, Some(Path::new(r"C:\Program Files\VRC Photo Manager"))),
+assert_eq!(classify_windows(exe, None, Some(Path::new(r"C:\Program Files\VRC PhotoN"))),
     InstallKind::WindowsPerMachine { .. });
 assert_eq!(classify_windows(exe, None, None), InstallKind::WindowsOther);
 ```
@@ -301,7 +301,7 @@ with mode 0700 on Unix.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-update install`
+Run: `cargo test -p vrc-photon-update install`
 Expected: FAIL; types are not defined.
 
 - [ ] **Step 3: Implement classification**
@@ -316,7 +316,7 @@ Expected: FAIL; types are not defined.
   current user, HKLM match → per machine, no match → other.
 - `install_kind()`: real `APPIMAGE`, `/etc/os-release`, current exe, and (on
   Windows) `winreg` reads of
-  `Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\VRC Photo Manager`
+  `Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\VRC PhotoN`
   under HKCU/HKLM. Any registry error → `WindowsOther`.
 - `automatic_apply`: true only for AppImage and WindowsCurrentUser.
 - `automatic_check`: true for AppImage, WindowsCurrentUser, and SystemPackage;
@@ -327,7 +327,7 @@ Expected: FAIL; types are not defined.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-update install`
+Run: `cargo test -p vrc-photon-update install`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -374,7 +374,7 @@ signs the bytes with a generated test key. Assert:
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-update check`
+Run: `cargo test -p vrc-photon-update check`
 Expected: FAIL; `check` is not defined.
 
 - [ ] **Step 3: Implement the client and check flow**
@@ -386,7 +386,7 @@ Expected: FAIL; `check` is not defined.
   maps 404 to `NotFound`, other statuses to `Network`.
 - `download` reads fixed 64 KiB chunks, enforces `max_bytes`, and invokes the
   callback; callback errors abort the read.
-- `FeedConfig::from_env` uses `VRC_PHOTO_UPDATE_FEED` or the production URL,
+- `FeedConfig::from_env` uses `VRC_PHOTON_UPDATE_FEED` or the production URL,
   `effective_public_keys()`, and `cfg!(debug_assertions)` for `allow_http`.
 - `check`: fetch manifest + signature, verify, parse/validate, compare semver,
   select `asset_for(kind)`, return `AvailableUpdate`.
@@ -401,7 +401,7 @@ within 2 seconds.
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-update check`
+Run: `cargo test -p vrc-photon-update check`
 Expected: PASS.
 
 - [ ] **Step 6: Commit**
@@ -440,7 +440,7 @@ With a fake client and a generated test key:
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-update download`
+Run: `cargo test -p vrc-photon-update download`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement the download**
@@ -457,7 +457,7 @@ Expected: FAIL.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-update download`
+Run: `cargo test -p vrc-photon-update download`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -489,7 +489,7 @@ git commit -m "feat: download and verify update artifacts"
 - `ApplyJob` round-trips through JSON with schema 1.
 - `validate` rejects a relative path, an empty health token, a token with `/`,
   a non-semver version, and schema 2.
-- `prepare_apply` copies a fake `vrc-photo-updater` from a temp “install dir”
+- `prepare_apply` copies a fake `vrc-photon-updater` from a temp “install dir”
   to `updates/bin/`, chmods it 0700, writes the job file atomically, and does
   not spawn anything.
 - `replace_appimage`: target `app.AppImage` with content `old`, staged `new`
@@ -504,7 +504,7 @@ git commit -m "feat: download and verify update artifacts"
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-update`
+Run: `cargo test -p vrc-photon-update`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement paths, job, and file engine**
@@ -513,7 +513,7 @@ Expected: FAIL.
   paths, schema, versions, token charset, and `kind`.
   `new_health_token()` returns `uuid::Uuid::new_v4().to_string()`.
 - `prepare_apply`: `UpdatePaths::ensure`, locate
-  `current_exe.parent()/vrc-photo-updater[.exe]`, copy to `paths.bin_dir()`,
+  `current_exe.parent()/vrc-photon-updater[.exe]`, copy to `paths.bin_dir()`,
   mode 0700, write `job.json` via a `.tmp` + rename, return the copied helper
   path.
 - `start_apply`: `prepare_apply`, then spawn with `--apply <job>`, stdin null,
@@ -529,7 +529,7 @@ Expected: FAIL.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-update`
+Run: `cargo test -p vrc-photon-update`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -544,7 +544,7 @@ git commit -m "feat: add update apply job and backup engine"
 ### Task 7: Helper binary, process wait, health check, rollback
 
 **Files:**
-- Create: `crates/update/src/bin/vrc-photo-updater.rs`
+- Create: `crates/update/src/bin/vrc-photon-updater.rs`
 - Modify: `crates/update/src/helper.rs`
 - Modify: `crates/update/src/lib.rs`
 - Test: inline tests in `helper.rs` plus a Unix integration test in the same module
@@ -559,7 +559,7 @@ git commit -m "feat: add update apply job and backup engine"
   `run_helper_with_options(job_path: &Path, options: HelperOptions) -> Result<()>`
 - Produces: `wait_for_process_exit(pid: u32, timeout: Duration) -> bool` and
   `wait_for_health(paths: &UpdatePaths, token: &str, expected: &str, child: &mut Child, timeout: Duration) -> Result<()>`
-- Produces: the `vrc-photo-updater --apply <job.json>` binary.
+- Produces: the `vrc-photon-updater --apply <job.json>` binary.
 
 - [ ] **Step 1: Write the failing process tests**
 
@@ -581,7 +581,7 @@ git commit -m "feat: add update apply job and backup engine"
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-update helper`
+Run: `cargo test -p vrc-photon-update helper`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement the helper**
@@ -596,9 +596,9 @@ Expected: FAIL.
 4. Re-verify the staged file signature and SHA-256 from the job.
 5. Apply:
    - AppImage: `replace_appimage`; launch the new target with
-     `VRC_PHOTO_HEALTH_TOKEN`.
-   - Windows (`cfg(windows)`): copy `vrc-photo-manager.exe` and
-     `vrc-photo-daemon.exe` to `backup_dir`, run the staged installer `/S` with
+     `VRC_PHOTON_HEALTH_TOKEN`.
+   - Windows (`cfg(windows)`): copy `vrc-photon.exe` and
+     `vrc-photon-daemon.exe` to `backup_dir`, run the staged installer `/S` with
      a 10-minute timeout, then launch the new target.
 6. Write the `success` result, wait for the health marker; on failure kill the
    child, restore the backup, write `rolled_back`, and launch the old target.
@@ -618,7 +618,7 @@ fn main() {
     let mut args = std::env::args_os().skip(1);
     match (args.next().as_deref(), args.next()) {
         (Some("--apply"), Some(path)) => {
-            if let Err(error) = vrc_photo_update::helper::run_helper(Path::new(&path)) {
+            if let Err(error) = vrc_photon_update::helper::run_helper(Path::new(&path)) {
                 // log already written by run_helper where possible
                 std::process::exit(1);
             }
@@ -630,7 +630,7 @@ fn main() {
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-update helper`
+Run: `cargo test -p vrc-photon-update helper`
 Expected: PASS (the Unix integration test may be skipped on non-Unix).
 
 - [ ] **Step 6: Commit**
@@ -663,7 +663,7 @@ git commit -m "feat: add update helper with health check and rollback"
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-ipc subscription`
+Run: `cargo test -p vrc-photon-ipc subscription`
 Expected: FAIL; the type/field is missing.
 
 - [ ] **Step 3: Implement the API change**
@@ -675,7 +675,7 @@ struct. Update the bridge to pass the PID. Do not change the wire protocol or
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-ipc`
+Run: `cargo test -p vrc-photon-ipc`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -693,7 +693,7 @@ git commit -m "feat: expose the daemon PID to the UI"
 - Create: `crates/ui/src/update_view.rs`
 - Modify: `crates/ui/src/main.rs`
 - Modify: `crates/core/src/settings.rs`
-- Modify: `crates/ui/Cargo.toml` (add `vrc-photo-update`)
+- Modify: `crates/ui/Cargo.toml` (add `vrc-photon-update`)
 - Test: inline tests in `settings.rs` and `update_view.rs`
 
 **Interfaces:**
@@ -728,7 +728,7 @@ fn old_settings_json_defaults_update_fields() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-core settings`
+Run: `cargo test -p vrc-photon-core settings`
 Expected: FAIL; fields are missing.
 
 - [ ] **Step 3: Add the settings fields and run the tests**
@@ -736,7 +736,7 @@ Expected: FAIL; fields are missing.
 Add `#[serde(default = "default_auto_update_check")] pub auto_update_check: bool`,
 `#[serde(default)] pub update_last_checked_at: Option<i64>`, and the default
 `true`. Update `Default`. Run:
-`cargo test -p vrc-photo-core settings` → PASS.
+`cargo test -p vrc-photon-core settings` → PASS.
 
 - [ ] **Step 4: Write the failing update-view helper tests**
 
@@ -752,7 +752,7 @@ In `update_view.rs`:
 
 - [ ] **Step 5: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-ui update_view`
+Run: `cargo test -p vrc-photon-ui update_view`
 Expected: FAIL.
 
 - [ ] **Step 6: Implement `UpdateState` and the background flow**
@@ -773,7 +773,7 @@ use super::*;
   `Ready`, `Applying`, `Error`) with the exact Japanese labels from the spec.
 - `UpdateState { phase, install, last_checked, armed, notice, manual_check, tx, rx, health_token, database_ok, data_dir }`.
 - `UpdateState::new(health_token, database_ok, demo)` calls `install_kind()` and
-  `vrc_photo_core::data_dir()`.
+  `vrc_photon_core::data_dir()`.
 - `take_last_result_notice()` uses `LastResult::take` and the helper above.
 - `start_channel(cx)` spawns a GPUI task reading `async_channel`.
 - `start_update_check(manual, cx)` spawns a `std::thread` with
@@ -798,7 +798,7 @@ use super::*;
   a user message. With `manual == true`, set `Error`.
 - `update_card(cx)`: the Settings card per spec §6.7, using `glass_panel`,
   `Button`, `Switch`, `badge`, `meta_row`, and the existing colors. Include
-  the current version (`vrc_photo_update::CURRENT_VERSION`), install label,
+  the current version (`vrc_photon_update::CURRENT_VERSION`), install label,
   auto-check switch, "今すぐ確認", progress bar, two-click apply, release-notes
   button via `open_path(Path::new(url))`, package-manager command for
   deb/pacman, and error/rollback text.
@@ -813,7 +813,7 @@ In `main.rs`:
 - Add `daemon_pid: Option<u32>` and `update: UpdateState`.
 - Change `open_database` to return `(db, demo, database_ok, message, demo_assets)`;
   `database_ok` is true only for the real `Db::open` success.
-- In `App::new`, read `VRC_PHOTO_HEALTH_TOKEN`, construct `UpdateState`, set the
+- In `App::new`, read `VRC_PHOTON_HEALTH_TOKEN`, construct `UpdateState`, set the
   last-result notice, and skip the initial daemon spawn when the token is
   present.
 - On the first frame (when a token is present), call
@@ -835,8 +835,8 @@ Run:
 
 ```bash
 cargo fmt --all
-cargo test -p vrc-photo-core -p vrc-photo-ui -p vrc-photo-update
-cargo check -p vrc-photo-ui
+cargo test -p vrc-photon-core -p vrc-photon-ui -p vrc-photon-update
+cargo check -p vrc-photon-ui
 ```
 
 Expected: PASS. Fix warnings before committing.
@@ -858,7 +858,7 @@ git commit -m "feat: add update settings and UI"
 > same tests. See the design §6.4/§6.8 and the execution ledger ruling.
 
 **Files:**
-- Create: `crates/update/src/bin/vrc-photo-update-manifest.rs`
+- Create: `crates/update/src/bin/vrc-photon-update-manifest.rs`
 - Modify: `crates/update/Cargo.toml` (`clap`, `chrono` dependencies; `[[bin]]`)
 - Modify: `Packager.toml`
 - Modify: `.github/workflows/release.yml`
@@ -868,13 +868,13 @@ git commit -m "feat: add update settings and UI"
 **Interfaces:**
 - Consumes: `Manifest`, `PlatformAsset`.
 - Produces: `build_manifest(dist: &Path, tag: &str, repo: &str, notes_url: &str) -> Result<Manifest>`
-- Produces: `vrc-photo-update-manifest generate --dist DIR --tag TAG --repo OWNER/REPO --notes-url URL --output PATH`
+- Produces: `vrc-photon-update-manifest generate --dist DIR --tag TAG --repo OWNER/REPO --notes-url URL --output PATH`
 
 - [ ] **Step 1: Write the failing generator tests**
 
 Create a temp dist with:
-- `vrc-photo-manager_0.4.0_x86_64.AppImage` + `.minisig`,
-- `vrc-photo-manager_0.4.0_x64-setup.exe` + `.minisig`.
+- `vrc-photon_0.4.0_x86_64.AppImage` + `.minisig`,
+- `vrc-photon_0.4.0_x64-setup.exe` + `.minisig`.
 
 Assert:
 - Two platform entries; `linux-x86_64` format `appimage`; `windows-x86_64`
@@ -886,7 +886,7 @@ Assert:
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-update --bin vrc-photo-update-manifest`
+Run: `cargo test -p vrc-photon-update --bin vrc-photon-update-manifest`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement the generator**
@@ -905,11 +905,11 @@ Use `clap` derive. `build_manifest`:
 - [ ] **Step 4: Package the helper**
 
 In `Packager.toml`:
-- `beforePackagingCommand = "cargo build --release -p vrc-photo-ui -p vrc-photo-daemon -p vrc-photo-update"`
-- Add `[[binaries]] path = "vrc-photo-updater"`.
+- `beforePackagingCommand = "cargo build --release -p vrc-photon-ui -p vrc-photon-daemon -p vrc-photon-update"`
+- Add `[[binaries]] path = "vrc-photon-updater"`.
 
-Verify locally that `cargo build --release -p vrc-photo-ui -p vrc-photo-daemon -p
-vrc-photo-update` puts `vrc-photo-updater` next to the UI in `target/release`.
+Verify locally that `cargo build --release -p vrc-photon-ui -p vrc-photon-daemon -p
+vrc-photon-update` puts `vrc-photon-updater` next to the UI in `target/release`.
 
 - [ ] **Step 5: Update the release workflow**
 
@@ -927,8 +927,8 @@ In the tag-only `publish` job:
 - Create/upload the release with `dist/*` as today.
 - Never publish if signing or verification fails.
 
-Add `cargo test -p vrc-photo-update` and
-`cargo clippy -p vrc-photo-update --all-targets -- -D warnings` to the existing
+Add `cargo test -p vrc-photon-update` and
+`cargo clippy -p vrc-photon-update --all-targets -- -D warnings` to the existing
 Windows CI job (keep the job id/name so branch protection stays intact).
 
 - [ ] **Step 6: Test the generator locally**
@@ -938,10 +938,10 @@ Run:
 ```bash
 mkdir -p /tmp/opencode/vrcpm-dist
 # create dummy versioned AppImage/NSIS files and .minisig files
-cargo run -p vrc-photo-update --bin vrc-photo-update-manifest -- generate \
+cargo run -p vrc-photon-update --bin vrc-photon-update-manifest -- generate \
   --dist /tmp/opencode/vrcpm-dist --tag v0.4.0 \
-  --repo TommyZ-7/vrc-photo-manager \
-  --notes-url https://github.com/TommyZ-7/vrc-photo-manager/releases/tag/v0.4.0 \
+  --repo TommyZ-7/vrc-photon \
+  --notes-url https://github.com/TommyZ-7/vrc-photon/releases/tag/v0.4.0 \
   --output /tmp/opencode/vrcpm-dist/latest.json
 jq . /tmp/opencode/vrcpm-dist/latest.json
 ```
@@ -988,8 +988,8 @@ In `docs/release.md` add:
   rollback, deb/pacman guidance, dev/per-machine limits).
 - `docs/ui.md`: add the Settings update card and nav badge; keep the existing
   §5 "自動更新" (3 s refresh) distinct by calling this "アプリのアップデート".
-- `docs/development.md`: new crate, helper, `VRC_PHOTO_UPDATE_FEED`,
-  `VRC_PHOTO_UPDATE_PUBLIC_KEY` (debug only), key/secret setup, and the new
+- `docs/development.md`: new crate, helper, `VRC_PHOTON_UPDATE_FEED`,
+  `VRC_PHOTON_UPDATE_PUBLIC_KEY` (debug only), key/secret setup, and the new
   verification commands.
 - `docs/architecture.md`: add the update flow (UI → feed → helper → restart).
 
@@ -1016,12 +1016,12 @@ Expected: all pass.
 - [ ] **Step 5: Manual QA on Linux**
 
 1. Build the release binaries and confirm the helper is next to the UI:
-   `cargo build --release -p vrc-photo-ui -p vrc-photo-daemon -p vrc-photo-update`
-   and `ls target/release/vrc-photo-*`.
+   `cargo build --release -p vrc-photon-ui -p vrc-photon-daemon -p vrc-photon-update`
+   and `ls target/release/vrc-photon-*`.
 2. Start the UI, open Settings, confirm the update card shows the version,
    install kind, auto-check switch, and "今すぐ確認".
 3. In a debug UI, set
-   `VRC_PHOTO_UPDATE_FEED=http://127.0.0.1:9/latest.json` and press
+   `VRC_PHOTON_UPDATE_FEED=http://127.0.0.1:9/latest.json` and press
    "今すぐ確認"; the UI must stay responsive and show an error.
 4. Serve a locally signed manifest with a test key and press "今すぐ確認";
    confirm "最新です" / "更新があります", the release-notes link, and that

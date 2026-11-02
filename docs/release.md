@@ -48,29 +48,29 @@ Release ワークフローが `makepkg` で追加生成する。
 
 | 形式 | 例 | 内容 |
 |---|---|---|
-| Debian | `vrc-photo-manager_0.1.0_amd64.deb` | `/usr/bin` にUI・デーモン・更新ヘルパー、desktop entry、アイコン、systemdユーザーunit、polkit policy |
-| AppImage | `vrc-photo-manager_0.1.0_x86_64.AppImage` | UI・デーモン・更新ヘルパーを同梱した単一ファイル（polkit policy は含まない） |
-| pacman（手動 / AUR 用） | `vrc-photo-manager_0.1.0_x86_64.tar.gz` + `PKGBUILD` | Arch Linux向け。更新ヘルパー、systemdユーザーunit、polkit policyを含む |
-| pacman（`pacman -U` 用） | `vrc-photo-manager-0.1.0-1-x86_64.pkg.tar.zst` | Releaseワークフローが `makepkg` で追加生成する実パッケージ。アプリ内更新はこれを使う |
-| NSIS | `vrc-photo-manager_0.1.0_x64-setup.exe` | Windowsインストーラ（UI・デーモン・更新ヘルパー） |
+| Debian | `vrc-photon_0.1.0_amd64.deb` | `/usr/bin` にUI・デーモン・更新ヘルパー、desktop entry、アイコン、systemdユーザーunit、polkit policy |
+| AppImage | `vrc-photon_0.1.0_x86_64.AppImage` | UI・デーモン・更新ヘルパーを同梱した単一ファイル（polkit policy は含まない） |
+| pacman（手動 / AUR 用） | `vrc-photon_0.1.0_x86_64.tar.gz` + `PKGBUILD` | Arch Linux向け。更新ヘルパー、systemdユーザーunit、polkit policyを含む |
+| pacman（`pacman -U` 用） | `vrc-photon-0.1.0-1-x86_64.pkg.tar.zst` | Releaseワークフローが `makepkg` で追加生成する実パッケージ。アプリ内更新はこれを使う |
+| NSIS | `vrc-photon_0.1.0_x64-setup.exe` | Windowsインストーラ（UI・デーモン・更新ヘルパー） |
 
 `Packager.toml` の設定:
 
-- `productName = "VRC Photo Manager"`
-- `identifier = "com.tommyz.vrc-photo-manager"`
+- `productName = "VRC PhotoN"`
+- `identifier = "com.tommyz.vrc-photon"`
 - `formats = ["deb", "appimage", "pacman"]`（Windowsジョブは `-f nsis` で上書き）
-- `beforePackagingCommand = "cargo build --release -p vrc-photo-ui -p vrc-photo-daemon -p vrc-photo-update"`
-- `[[binaries]]`: `vrc-photo-manager`（main）、`vrc-photo-daemon`、`vrc-photo-updater`
+- `beforePackagingCommand = "cargo build --release -p vrc-photon-ui -p vrc-photon-daemon -p vrc-photon-update"`
+- `[[binaries]]`: `vrc-photon`（main）、`vrc-photon-daemon`、`vrc-photon-updater`
 - `binariesDir = "target/release"` / `outDir = "dist"`
 - アイコン: `packaging/icons/icon.png`（512px）
 - `resources = ["LICENSE", "packaging/licenses/LICENSE-LUCIDE"]`
 - deb依存: `libxkbcommon0`, `libxkbcommon-x11-0`, `libwayland-client0`, `libvulkan1`, `libx11-6`, `libxcb1`, `libfontconfig1`, `libfreetype6`
 - pacman依存: `libxkbcommon`, `wayland`, `vulkan-icd-loader`, `libx11`, `libxcb`, `fontconfig`, `freetype2`
-- `[deb.files]` / `[pacman.files]`: `packaging/systemd/vrc-photo-daemon.service` を `usr/lib/systemd/user/vrc-photo-daemon.service` に配置
-- `[deb.files]` / `[pacman.files]`: `packaging/polkit/com.tommyz.vrc-photo-manager.update.policy` を `usr/share/polkit-1/actions/com.tommyz.vrc-photo-manager.update.policy` に配置
+- `[deb.files]` / `[pacman.files]`: `packaging/systemd/vrc-photon-daemon.service` を `usr/lib/systemd/user/vrc-photon-daemon.service` に配置
+- `[deb.files]` / `[pacman.files]`: `packaging/polkit/com.tommyz.vrc-photon.update.policy` を `usr/share/polkit-1/actions/com.tommyz.vrc-photon.update.policy` に配置
 
 `resources` のライセンス通知は、Linux（deb / AppImage / pacman）では
-`/usr/lib/vrc-photo-manager/`、Windows（NSIS）では実行ファイルと同じディレクトリに配置される。
+`/usr/lib/vrc-photon/`、Windows（NSIS）では実行ファイルと同じディレクトリに配置される。
 由来と更新手順は [licenses.md](licenses.md) を参照。
 
 ## 4. パッケージ起動時の挙動
@@ -79,18 +79,18 @@ Release ワークフローが `makepkg` で追加生成する。
 - UI起動時、ハートビートが古ければ同じディレクトリのデーモンを自動起動する。
 - デーモンは `single-instance` で二重起動を防ぐ。
 - 自動起動:
-  - deb/pacman: `/usr/bin/vrc-photo-daemon` を登録。
+  - deb/pacman: `/usr/bin/vrc-photon-daemon` を登録。
   - AppImage: `$APPIMAGE --background` を登録。UIの `--background` がデーモンを子プロセスで起動し、終了まで待ってAppImageのマウントを維持する。
-- deb/pacman は任意の systemd ユーザーサービス `vrc-photo-daemon.service` を同梱する。インストール時に enable はされない。アプリ管理の自動起動はフォールバックとして残る。
+- deb/pacman は任意の systemd ユーザーサービス `vrc-photon-daemon.service` を同梱する。インストール時に enable はされない。アプリ管理の自動起動はフォールバックとして残る。
 - LinuxのトレイはStatusNotifierItem（`ksni`）。トレイ非対応環境ではヘッドレスで動作する。
 
 ### systemdユーザーサービス（deb / pacman、任意）
 
-unit は `/usr/lib/systemd/user/vrc-photo-daemon.service` に配置される。
+unit は `/usr/lib/systemd/user/vrc-photon-daemon.service` に配置される。
 
 アプリ内更新でデーモンを再起動するとき、UIは `app_settings.daemon_supervisor` が
 `systemd` なら `systemctl --user daemon-reload` と
-`systemctl --user restart vrc-photo-daemon.service` を使う。失敗時は従来の
+`systemctl --user restart vrc-photon-daemon.service` を使う。失敗時は従来の
 プロセス起動にフォールバックする。これにより、更新後のデーモンが unit 外の
 プロセスにならない。
 
@@ -98,24 +98,24 @@ unit は `/usr/lib/systemd/user/vrc-photo-daemon.service` に配置される。
 
 ```bash
 systemctl --user daemon-reload
-systemctl --user enable --now vrc-photo-daemon.service
-systemctl --user is-active vrc-photo-daemon.service
-journalctl --user -u vrc-photo-daemon.service -f
+systemctl --user enable --now vrc-photon-daemon.service
+systemctl --user is-active vrc-photon-daemon.service
+journalctl --user -u vrc-photon-daemon.service -f
 ```
 
 - サービスは `graphical-session.target` に紐付く。GNOME / KDE など、この target を管理するデスクトップ環境でログイン時に起動する。
 - `graphical-session.target` を管理しないデスクトップ環境では、代わりに `default.target` へリンクする:
 
 ```bash
-systemctl --user add-wants default.target vrc-photo-daemon.service
+systemctl --user add-wants default.target vrc-photon-daemon.service
 ```
 
-- 既にデーモンが動いている状態で `enable --now` すると、サービスは単一インスタンス判定で終了して inactive になる。既存のデーモンを終了してから `systemctl --user restart vrc-photo-daemon.service` を実行する。ログイン後に `systemctl --user is-active` が `active` でない場合も同じ手順で復旧する。
+- 既にデーモンが動いている状態で `enable --now` すると、サービスは単一インスタンス判定で終了して inactive になる。既存のデーモンを終了してから `systemctl --user restart vrc-photon-daemon.service` を実行する。ログイン後に `systemctl --user is-active` が `active` でない場合も同じ手順で復旧する。
 - アンインストール前に無効化する:
 
 ```bash
-systemctl --user disable --now vrc-photo-daemon.service
-systemctl --user remove-wants default.target vrc-photo-daemon.service
+systemctl --user disable --now vrc-photon-daemon.service
+systemctl --user remove-wants default.target vrc-photon-daemon.service
 systemctl --user daemon-reload
 ```
 
@@ -145,17 +145,17 @@ ls -lh dist
 - `workflow_dispatch`
 - Ubuntuランナー: 依存を入れ、`cargo packager --release`
 - `Build pacman package`: `archlinux:base-devel` コンテナ内で非 root ユーザーが
-  `dist/PKGBUILD` と `dist/vrc-photo-manager_<version>_x86_64.tar.gz` から
+  `dist/PKGBUILD` と `dist/vrc-photon_<version>_x86_64.tar.gz` から
   `makepkg -f --nodeps` を実行し、`dist/*.pkg.tar.zst` を生成する。
-  `LC_ALL=C pacman -Qip` の出力から `Name: vrc-photo-manager`、
+  `LC_ALL=C pacman -Qip` の出力から `Name: vrc-photon`、
   `Version: <version>-1`、`Architecture: x86_64` を検証する
 - `Verify third-party notices`: deb / AppImage / pacman（`.tar.gz`）に
   `LICENSE` と `LICENSE-LUCIDE` が含まれることを検査する
 - `Verify systemd user unit`: deb / pacman に unit が入り、`ExecStart` が
-  `/usr/bin/vrc-photo-daemon` であることを検査する
+  `/usr/bin/vrc-photon-daemon` であることを検査する
 - `Verify polkit policy`: deb / pacman（`.pkg.tar.zst`）の両方に
-  `com.tommyz.vrc-photo-manager.update.policy` が入り、
-  `org.freedesktop.policykit.exec.path` が `/usr/bin/vrc-photo-updater` で
+  `com.tommyz.vrc-photon.update.policy` が入り、
+  `org.freedesktop.policykit.exec.path` が `/usr/bin/vrc-photon-updater` で
   あることを検査する
 - Windowsランナー: `cargo packager --release -f nsis`（NSISは自動取得）
 - 両ジョブの `dist/*` をworkflow artifactとして保存
@@ -163,9 +163,9 @@ ls -lh dist
 - `publish` ジョブはタグと `Cargo.toml` / `Packager.toml` のバージョン一致を確認し、
   `MINISIGN_SECRET_KEY` がなければ失敗する
 - プレリリースタグ（`-` を含むもの）は安定版フィードに混ざらないよう拒否する
-- `vrc-photo-release-tool` は秘密鍵を渡さないステップでビルドし、署名ステップでは
+- `vrc-photon-release-tool` は秘密鍵を渡さないステップでビルドし、署名ステップでは
   実行だけ行う
-- `vrc-photo-release-tool` で全artifactと `latest.json` を署名・検証し、
+- `vrc-photon-release-tool` で全artifactと `latest.json` を署名・検証し、
   `latest.json` を同じReleaseに添付する。`generate` は AppImage / NSIS に加えて
   `.pkg.tar.zst` と `.deb` が各1個あること、ファイル名にタグバージョンが
   含まれることを要求する
@@ -195,12 +195,12 @@ Required check名を変更した場合は、GitHubのbranch protectionも更新�
 - [ ] `docs/roadmap.md` の未解決事項を確認
 - [ ] 破壊的DB変更がない、またはマイグレーションがある
 - [ ] パッケージ生成物にUIとデーモンの両方が入っている
-- [ ] deb / pacman に `usr/lib/systemd/user/vrc-photo-daemon.service` が入っている
+- [ ] deb / pacman に `usr/lib/systemd/user/vrc-photon-daemon.service` が入っている
 - [ ] アイコンとdesktop entryが入っている
 - [ ] パッケージ生成物に `LICENSE` と `LICENSE-LUCIDE` が入っている
-- [ ] パッケージ生成物に `vrc-photo-updater` が入っている
-- [ ] deb / pacman に `usr/share/polkit-1/actions/com.tommyz.vrc-photo-manager.update.policy` が入り、`exec.path` が `/usr/bin/vrc-photo-updater` である
-- [ ] `dist/*.pkg.tar.zst` が存在し、`LC_ALL=C pacman -Qip` で `Name: vrc-photo-manager`、`Version: <version>-1`、`Architecture: x86_64` を返す
+- [ ] パッケージ生成物に `vrc-photon-updater` が入っている
+- [ ] deb / pacman に `usr/share/polkit-1/actions/com.tommyz.vrc-photon.update.policy` が入り、`exec.path` が `/usr/bin/vrc-photon-updater` である
+- [ ] `dist/*.pkg.tar.zst` が存在し、`LC_ALL=C pacman -Qip` で `Name: vrc-photon`、`Version: <version>-1`、`Architecture: x86_64` を返す
 - [ ] `latest.json` の `system_packages` が pacman / deb の2件で、両方に署名済みURL・サイズ・SHA-256・署名がある
 - [ ] `MINISIGN_SECRET_KEY` が登録されている
 - [ ] `latest.json` と `latest.json.minisig` がReleaseに添付されている
@@ -217,7 +217,7 @@ Required check名を変更した場合は、GitHubのbranch protectionも更新�
 
 ### 10.1 フィード
 
-- 更新確認は `https://github.com/TommyZ-7/vrc-photo-manager/releases/latest/download/latest.json`
+- 更新確認は `https://github.com/TommyZ-7/vrc-photon/releases/latest/download/latest.json`
   を取得する。GitHub API は使わない。
 - `latest.json` の隣に `latest.json.minisig` を置く。
 - `latest.json` の `platforms` は `linux-x86_64`（AppImage）と
@@ -246,7 +246,7 @@ Required check名を変更した場合は、GitHubのbranch protectionも更新�
 - 鍵の生成:
 
 ```bash
-cargo run -p vrc-photo-update --example generate_update_key -- /secure/path/minisign.key
+cargo run -p vrc-photon-update --example generate_update_key -- /secure/path/minisign.key
 ```
 
   出力された `RW...` 行を `packaging/update/keys.txt` に追記し、秘密鍵を
@@ -262,23 +262,23 @@ cargo run -p vrc-photo-update --example generate_update_key -- /secure/path/mini
 
 ### 10.3 ローカルでの署名・検証
 
-`vrc-photo-release-tool` はRelease専用で、アプリには同梱しない。
+`vrc-photon-release-tool` はRelease専用で、アプリには同梱しない。
 
 ```bash
-cargo run -p vrc-photo-release-tool --bin vrc-photo-update-manifest -- \
+cargo run -p vrc-photon-release-tool --bin vrc-photon-update-manifest -- \
   sign --key /secure/path/minisign.key --dist dist
 PUB_ARGS=()
 while read -r key; do PUB_ARGS+=(--public-key "$key"); done \
   < <(grep '^RW' packaging/update/keys.txt)
-cargo run -p vrc-photo-release-tool --bin vrc-photo-update-manifest -- \
+cargo run -p vrc-photon-release-tool --bin vrc-photon-update-manifest -- \
   verify "${PUB_ARGS[@]}" --dist dist
-cargo run -p vrc-photo-release-tool --bin vrc-photo-update-manifest -- \
-  generate --dist dist --tag v0.4.0 --repo TommyZ-7/vrc-photo-manager \
-  --notes-url https://github.com/TommyZ-7/vrc-photo-manager/releases/tag/v0.4.0 \
+cargo run -p vrc-photon-release-tool --bin vrc-photon-update-manifest -- \
+  generate --dist dist --tag v0.4.0 --repo TommyZ-7/vrc-photon \
+  --notes-url https://github.com/TommyZ-7/vrc-photon/releases/tag/v0.4.0 \
   --output dist/latest.json
-cargo run -p vrc-photo-release-tool --bin vrc-photo-update-manifest -- \
+cargo run -p vrc-photon-release-tool --bin vrc-photon-update-manifest -- \
   sign --key /secure/path/minisign.key --file dist/latest.json
-cargo run -p vrc-photo-release-tool --bin vrc-photo-update-manifest -- \
+cargo run -p vrc-photon-release-tool --bin vrc-photon-update-manifest -- \
   verify "${PUB_ARGS[@]}" --file dist/latest.json
 ```
 
@@ -303,7 +303,7 @@ docker run --rm -v "$PWD/dist:/dist" -w /dist archlinux:base-devel bash -c '
 '
 ```
 
-- `dist/PKGBUILD` と `dist/vrc-photo-manager_<version>_x86_64.tar.gz` は
+- `dist/PKGBUILD` と `dist/vrc-photon_<version>_x86_64.tar.gz` は
   `cargo packager` が生成する。`.tar.gz` は `makepkg` の入力であり、
   `pacman -U` では直接インストールできない。
 - 生成された `.pkg.tar.zst` も `sign --dist` の対象になる。
@@ -315,24 +315,24 @@ docker run --rm -v "$PWD/dist:/dist" -w /dist archlinux:base-devel bash -c '
 
 deb / pacman には次の polkit policy を同梱する。
 
-- ソース: `packaging/polkit/com.tommyz.vrc-photo-manager.update.policy`
-- 配置先: `/usr/share/polkit-1/actions/com.tommyz.vrc-photo-manager.update.policy`
-- action: `com.tommyz.vrc-photo-manager.update-package`
+- ソース: `packaging/polkit/com.tommyz.vrc-photon.update.policy`
+- 配置先: `/usr/share/polkit-1/actions/com.tommyz.vrc-photon.update.policy`
+- action: `com.tommyz.vrc-photon.update-package`
 - `allow_any` / `allow_inactive` / `allow_active`: `auth_admin`
-- `org.freedesktop.policykit.exec.path`: `/usr/bin/vrc-photo-updater`
+- `org.freedesktop.policykit.exec.path`: `/usr/bin/vrc-photon-updater`
 
 AppImage には同梱しない。policy がない環境、`pkexec` がない環境、
-`/usr/bin/vrc-photo-updater` がない環境では、アプリは自動適用を隠して
+`/usr/bin/vrc-photon-updater` がない環境では、アプリは自動適用を隠して
 パッケージマネージャのコマンドを表示する。
 
 アプリ内更新の流れ:
 
 1. UI が署名済み manifest の `system_packages` から pacman / deb の成果物を
    選び、`<data_dir>/updates/downloads/<version>/` にダウンロードする。
-2. UI は `updates/bin/vrc-photo-updater --apply <job.json>` を起動する。
+2. UI は `updates/bin/vrc-photon-updater --apply <job.json>` を起動する。
    job には署名対象の `latest.json` 生テキストと `.minisig` も入る。
 3. ユーザー権限ヘルパーが staging を再検証し、
-   `pkexec --disable-internal-agent /usr/bin/vrc-photo-updater --apply-system-package <job.json>`
+   `pkexec --disable-internal-agent /usr/bin/vrc-photon-updater --apply-system-package <job.json>`
    を実行する。
 4. 特権ヘルパーが staging の所有者・symlink・署名・バージョン・パッケージ
    メタデータを再検証し、固定コマンドでインストールする。
@@ -340,7 +340,7 @@ AppImage には同梱しない。policy がない環境、`pkexec` がない環�
    - deb: `LC_ALL=C DEBIAN_FRONTEND=noninteractive /usr/bin/dpkg -i <temp>`
 5. ユーザー権限ヘルパーが新 UI を起動し、健康マーカーを確認する。新 UI は
    `complete_update_startup` でデーモンを起動し、systemd 管理なら
-   `systemctl --user restart vrc-photo-daemon.service` を使う。
+   `systemctl --user restart vrc-photon-daemon.service` を使う。
 6. 結果は `<data_dir>/updates/last-result.json` と `updater.log` に残る。
 
 システムパッケージは自動ロールバックしない。認証キャンセル・DB ロック・
@@ -353,17 +353,17 @@ staged / log を残して `target` を一度だけ起動する。
 AppImage:
 
 ```bash
-ls -l "/path/to/VRC Photo Manager.AppImage.previous"
-cp "/path/to/VRC Photo Manager.AppImage.previous" "/path/to/VRC Photo Manager.AppImage"
-chmod +x "/path/to/VRC Photo Manager.AppImage"
+ls -l "/path/to/VRC PhotoN.AppImage.previous"
+cp "/path/to/VRC PhotoN.AppImage.previous" "/path/to/VRC PhotoN.AppImage"
+chmod +x "/path/to/VRC PhotoN.AppImage"
 ```
 
 Windows（current-user NSIS）:
 
 ```powershell
-$backup = "$env:LOCALAPPDATA\vrc-photo-manager\updates\backup\<version>"
-Copy-Item "$backup\vrc-photo-manager.exe" "$env:LOCALAPPDATA\VRC Photo Manager\vrc-photo-manager.exe" -Force
-Copy-Item "$backup\vrc-photo-daemon.exe" "$env:LOCALAPPDATA\VRC Photo Manager\vrc-photo-daemon.exe" -Force
+$backup = "$env:LOCALAPPDATA\vrc-photon\updates\backup\<version>"
+Copy-Item "$backup\vrc-photon.exe" "$env:LOCALAPPDATA\VRC PhotoN\vrc-photon.exe" -Force
+Copy-Item "$backup\vrc-photon-daemon.exe" "$env:LOCALAPPDATA\VRC PhotoN\vrc-photon-daemon.exe" -Force
 ```
 
 pacman / deb（システムパッケージ）:
@@ -373,10 +373,10 @@ pacman / deb（システムパッケージ）:
 
 ```bash
 # pacman: リリースページから .pkg.tar.zst を取得して再インストール
-sudo pacman -U /path/to/vrc-photo-manager-<version>-1-x86_64.pkg.tar.zst
+sudo pacman -U /path/to/vrc-photon-<version>-1-x86_64.pkg.tar.zst
 
 # deb: リリースページから .deb を取得して再インストール
-sudo dpkg -i /path/to/vrc-photo-manager_<version>_amd64.deb
+sudo dpkg -i /path/to/vrc-photon_<version>_amd64.deb
 sudo apt-get install -f
 ```
 

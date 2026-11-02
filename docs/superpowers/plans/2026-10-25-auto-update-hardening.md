@@ -6,9 +6,9 @@
 
 **Architecture:** Keep the existing check → download → helper → health-check pipeline. Harden each boundary in place: validate artifact signatures at manifest time, carry the check-time trust keys into download, tag I/O failures with their operation, fsync the AppImage directory, preserve restart arguments/working directory/database identity across the helper, and fix the update card's auto-check, label, and notice colors. Work in one branch with one commit per issue, ordered to minimize edits to the same files.
 
-**Tech Stack:** Rust stable (edition 2024), `minisign-verify` / `minisign` (dev), serde/serde_json, base64, gpui-kit 0.8, existing `vrc-photo-update` and `vrc-photo-ui` crates.
+**Tech Stack:** Rust stable (edition 2024), `minisign-verify` / `minisign` (dev), serde/serde_json, base64, gpui-kit 0.8, existing `vrc-photon-update` and `vrc-photon-ui` crates.
 
-**Spec:** GitHub issues [#69](https://github.com/TommyZ-7/vrc-photo-manager/issues/69), [#70](https://github.com/TommyZ-7/vrc-photo-manager/issues/70), [#71](https://github.com/TommyZ-7/vrc-photo-manager/issues/71), [#72](https://github.com/TommyZ-7/vrc-photo-manager/issues/72), [#73](https://github.com/TommyZ-7/vrc-photo-manager/issues/73), [#74](https://github.com/TommyZ-7/vrc-photo-manager/issues/74), plus the Decisions table below.
+**Spec:** GitHub issues [#69](https://github.com/TommyZ-7/vrc-photon/issues/69), [#70](https://github.com/TommyZ-7/vrc-photon/issues/70), [#71](https://github.com/TommyZ-7/vrc-photon/issues/71), [#72](https://github.com/TommyZ-7/vrc-photon/issues/72), [#73](https://github.com/TommyZ-7/vrc-photon/issues/73), [#74](https://github.com/TommyZ-7/vrc-photon/issues/74), plus the Decisions table below.
 
 ## Decisions
 
@@ -26,7 +26,7 @@
 
 ## Global Constraints
 
-- Code worktree: `../vrc-photo-manager-auto-update-fixes`, branch `fix/auto-update-review`, cut from updated `main`.
+- Code worktree: `../vrc-photon-auto-update-fixes`, branch `fix/auto-update-review`, cut from updated `main`.
 - Do not push to `main`; do not create tags, publish releases, or run the Release workflow.
 - One code PR for all six issues. Do not include `docs/**` changes in it.
 - Japanese UI copy, matching the existing Settings card style.
@@ -35,7 +35,7 @@
 - `HealthMarker.database` uses `#[serde(default)]` so an older marker without the field still parses.
 - Keep existing messages for `Network`, `Signature`, `Integrity`, `InvalidManifest`, `UnsupportedPlatform`, `Cancelled`, `NotFound`, and `InvalidJob`.
 - Pre-push verification: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`.
-- Targeted checks while working: `cargo test -p vrc-photo-update` and `cargo test -p vrc-photo-ui`, then clippy for those packages.
+- Targeted checks while working: `cargo test -p vrc-photon-update` and `cargo test -p vrc-photon-ui`, then clippy for those packages.
 - Every subagent runs on the parent session model; never pass a `model` argument.
 
 ## Review Focus
@@ -53,12 +53,12 @@
 ### Task 0: Create the isolated worktree
 
 **Files:**
-- Create: `../vrc-photo-manager-auto-update-fixes` (git worktree)
+- Create: `../vrc-photon-auto-update-fixes` (git worktree)
 - Copy: this plan into the worktree as an untracked file
 
 **Interfaces:**
 - Consumes: updated `main` with no open auto-update PR.
-- Produces: working directory `../vrc-photo-manager-auto-update-fixes` on branch `fix/auto-update-review`.
+- Produces: working directory `../vrc-photon-auto-update-fixes` on branch `fix/auto-update-review`.
 
 - [ ] **Step 1: Confirm `main` is current and the only local changes are known user files**
 
@@ -74,7 +74,7 @@ Expected: `0 0`; `opencode.json` may be modified and `.opencode/skills/gnome-way
 
 Run:
 ```bash
-git worktree add ../vrc-photo-manager-auto-update-fixes -b fix/auto-update-review main
+git worktree add ../vrc-photon-auto-update-fixes -b fix/auto-update-review main
 ```
 Expected: new worktree on branch `fix/auto-update-review` pointing at the same commit as `main`.
 
@@ -125,7 +125,7 @@ fn rejects_a_signature_that_is_not_minisign() {
 
 Run:
 ```bash
-cargo test -p vrc-photo-update --lib manifest::tests::rejects_a_signature
+cargo test -p vrc-photon-update --lib manifest::tests::rejects_a_signature
 ```
 Expected: both tests FAIL because `validate` only checks for an empty string.
 
@@ -164,8 +164,8 @@ minisign_verify::Signature::decode(&signature).map_err(|_| {
 
 Run:
 ```bash
-cargo test -p vrc-photo-update
-cargo clippy -p vrc-photo-update --all-targets -- -D warnings
+cargo test -p vrc-photon-update
+cargo clippy -p vrc-photon-update --all-targets -- -D warnings
 ```
 Expected: PASS, including `validates_a_complete_manifest`, the two new rejection tests, and the existing `rejects_empty_signature`.
 
@@ -204,7 +204,7 @@ fn custom_feed_keys_are_used_for_check_and_download() {
         .into_string();
     let platforms = serde_json::json!({
         "linux-x86_64": {
-            "url": "https://example.com/vrc-photo-manager_0.4.0_x86_64.AppImage",
+            "url": "https://example.com/vrc-photon_0.4.0_x86_64.AppImage",
             "format": "appimage",
             "size": body.len(),
             "sha256": hex::encode(sha2::Sha256::digest(body)),
@@ -260,7 +260,7 @@ Also assert in `finds_a_newer_release_and_selects_the_asset` that `update.public
 
 Run:
 ```bash
-cargo test -p vrc-photo-update --lib check::tests::custom_feed_keys
+cargo test -p vrc-photon-update --lib check::tests::custom_feed_keys
 ```
 Expected: FAIL to compile because `AvailableUpdate` has no `public_keys` field.
 
@@ -299,8 +299,8 @@ In `check.rs` tests:
 
 Run:
 ```bash
-cargo test -p vrc-photo-update
-cargo clippy -p vrc-photo-update --all-targets -- -D warnings
+cargo test -p vrc-photon-update
+cargo clippy -p vrc-photon-update --all-targets -- -D warnings
 ```
 Expected: PASS. The custom-key test proves `check` → `download` succeeds with a non-embedded key set and that a different key fails.
 
@@ -336,7 +336,7 @@ In `update_view.rs` tests, add:
 ```rust
 #[test]
 fn explains_update_io_failures_by_operation() {
-    use vrc_photo_update::IoOperation;
+    use vrc_photon_update::IoOperation;
     let cases = [
         (UpdateError::HelperMissing, "更新ヘルパーが見つかりません"),
         (
@@ -379,7 +379,7 @@ fn keeps_existing_update_error_messages() {
 
 Run:
 ```bash
-cargo test -p vrc-photo-ui --lib update_view::tests::explains_update_io_failures_by_operation
+cargo test -p vrc-photon-ui --lib update_view::tests::explains_update_io_failures_by_operation
 ```
 Expected: FAIL to compile because `IoOperation`, `HelperMissing`, and `io_at` do not exist.
 
@@ -475,15 +475,15 @@ UpdateError::Io { operation, .. } => match operation {
     }
 },
 ```
-Add `IoOperation` to the `vrc_photo_update::...` import in `update_view.rs`.
+Add `IoOperation` to the `vrc_photon_update::...` import in `update_view.rs`.
 
 - [ ] **Step 6: Run the tests**
 
 Run:
 ```bash
-cargo test -p vrc-photo-update
-cargo test -p vrc-photo-ui --lib update_view::tests
-cargo clippy -p vrc-photo-update -p vrc-photo-ui --all-targets -- -D warnings
+cargo test -p vrc-photon-update
+cargo test -p vrc-photon-ui --lib update_view::tests
+cargo clippy -p vrc-photon-update -p vrc-photon-ui --all-targets -- -D warnings
 ```
 Expected: PASS. All five I/O messages are distinct, and the existing network/signature/integrity messages are unchanged.
 
@@ -546,7 +546,7 @@ fn a_parent_directory_sync_failure_restores_the_previous_appimage() {
 
 Run:
 ```bash
-cargo test -p vrc-photo-update --lib helper::tests::a_parent_directory_sync_failure
+cargo test -p vrc-photon-update --lib helper::tests::a_parent_directory_sync_failure
 ```
 Expected: FAIL to compile because `replace_appimage_impl` does not exist.
 
@@ -579,8 +579,8 @@ sync_parent(parent)?;
 
 Run:
 ```bash
-cargo test -p vrc-photo-update --lib helper::tests
-cargo clippy -p vrc-photo-update --all-targets -- -D warnings
+cargo test -p vrc-photon-update --lib helper::tests
+cargo clippy -p vrc-photon-update --all-targets -- -D warnings
 ```
 Expected: PASS. `replaces_and_restores_an_appimage` still passes; the injected failure restores the old target and keeps `.previous`.
 
@@ -646,7 +646,7 @@ fn rejects_invalid_base64() {
 
 Run:
 ```bash
-cargo test -p vrc-photo-update --lib native
+cargo test -p vrc-photon-update --lib native
 ```
 Expected: FAIL to compile because the module and type do not exist.
 
@@ -710,7 +710,7 @@ fn launch_command(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     if let Some(token) = health_token {
-        command.env("VRC_PHOTO_HEALTH_TOKEN", token);
+        command.env("VRC_PHOTON_HEALTH_TOKEN", token);
     }
     command
 }
@@ -741,7 +741,7 @@ fn launch_uses_the_working_directory_and_native_arguments() {
         vec![std::ffi::OsStr::new("--demo")]
     );
     assert!(command.get_envs().any(|(key, value)| {
-        key == std::ffi::OsStr::new("VRC_PHOTO_HEALTH_TOKEN")
+        key == std::ffi::OsStr::new("VRC_PHOTON_HEALTH_TOKEN")
             && value == Some(std::ffi::OsStr::new("token"))
     }));
 }
@@ -874,11 +874,11 @@ restart_args,
 
 Run:
 ```bash
-cargo test -p vrc-photo-update
-cargo test -p vrc-photo-ui --lib update_view::tests
-cargo clippy -p vrc-photo-update -p vrc-photo-ui --all-targets -- -D warnings
+cargo test -p vrc-photon-update
+cargo test -p vrc-photon-ui --lib update_view::tests
+cargo clippy -p vrc-photon-update -p vrc-photon-ui --all-targets -- -D warnings
 ```
-Expected: PASS. The non-UTF-8 round-trip, working-directory launch, database-mismatch rollback, and job validation tests all pass. On Windows CI, `cargo test -p vrc-photo-update` must also pass.
+Expected: PASS. The non-UTF-8 round-trip, working-directory launch, database-mismatch rollback, and job validation tests all pass. On Windows CI, `cargo test -p vrc-photon-update` must also pass.
 
 - [ ] **Step 9: Commit**
 
@@ -942,7 +942,7 @@ fn auto_check_runs_while_an_update_is_available() {
 
 Run:
 ```bash
-cargo test -p vrc-photo-ui --lib update_view::tests
+cargo test -p vrc-photon-ui --lib update_view::tests
 ```
 Expected: FAIL to compile because `UpdateNotice` and `phase_allows_auto_check` do not exist.
 
@@ -1030,8 +1030,8 @@ if let Some(notice) = self.update.notice() {
 
 Run:
 ```bash
-cargo test -p vrc-photo-ui --lib update_view::tests
-cargo clippy -p vrc-photo-ui --all-targets -- -D warnings
+cargo test -p vrc-photon-ui --lib update_view::tests
+cargo clippy -p vrc-photon-ui --all-targets -- -D warnings
 ```
 Expected: PASS. The label has no duplicate prefix, rollback/failed notices use different colors, and `Available` is eligible for auto-check.
 

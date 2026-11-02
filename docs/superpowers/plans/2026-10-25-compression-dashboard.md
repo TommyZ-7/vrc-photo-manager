@@ -8,12 +8,12 @@
 
 **Tech Stack:** Rust stable (edition 2024), gpui-kit 0.8, SQLite via rusqlite, serde, chrono, existing core/daemon/UI crates.
 
-**Spec:** https://github.com/TommyZ-7/vrc-photo-manager/issues/80
+**Spec:** https://github.com/TommyZ-7/vrc-photon/issues/80
 
 ## Global Constraints
 
-- Code worktree: `../vrc-photo-manager-compression-dashboard`, branch `feat/compression-dashboard`, cut from updated `main`.
-- Documentation worktree: `../vrc-photo-manager-compression-dashboard-docs`, branch `docs/compression-dashboard`, created after the code PR merges. Do not mix code and product docs in the same PR (AGENTS §4). The plan file itself may stay untracked until the docs PR.
+- Code worktree: `../vrc-photon-compression-dashboard`, branch `feat/compression-dashboard`, cut from updated `main`.
+- Documentation worktree: `../vrc-photon-compression-dashboard-docs`, branch `docs/compression-dashboard`, created after the code PR merges. Do not mix code and product docs in the same PR (AGENTS §4). The plan file itself may stay untracked until the docs PR.
 - No DB schema migration. `compression_jobs.status` accepts the new `waiting` text value.
 - `compression_keep_original` defaults to `true`; `auto_compress_immediate` defaults to `true`. Existing settings JSON must load unchanged and preserve the old safe behavior.
 - `replace` still moves the original to the OS trash only after the compressed output exists and is non-empty. A failure before that point leaves the original untouched.
@@ -87,7 +87,7 @@ fn compression_policy_settings_roundtrip() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-core old_settings_default_to_keep_originals_and_immediate_auto_compress`
+Run: `cargo test -p vrc-photon-core old_settings_default_to_keep_originals_and_immediate_auto_compress`
 Expected: FAIL to compile because `compression_keep_original` and `auto_compress_immediate` do not exist.
 
 - [ ] **Step 3: Implement the settings fields**
@@ -105,7 +105,7 @@ Add `fn default_true() -> bool { true }` next to `default_auto_update_check`. Se
 
 - [ ] **Step 4: Run the settings tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-core settings`
+Run: `cargo test -p vrc-photon-core settings`
 Expected: PASS. The old JSON test proves upgraded installs keep the safe default.
 
 - [ ] **Step 5: Commit**
@@ -153,7 +153,7 @@ fn queue_status_roundtrips_waiting() {
 
 - [ ] **Step 2: Run the model test to verify it fails**
 
-Run: `cargo test -p vrc-photo-core queue_status_roundtrips_waiting`
+Run: `cargo test -p vrc-photon-core queue_status_roundtrips_waiting`
 Expected: FAIL to compile because `QueueStatus::Waiting` and `is_active` do not exist.
 
 - [ ] **Step 3: Implement the waiting status**
@@ -221,7 +221,7 @@ fn waiting_job_blocks_profile_deletion() {
 
 - [ ] **Step 5: Run the DB tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-core waiting_jobs_are_not_dequeued_until_released`
+Run: `cargo test -p vrc-photon-core waiting_jobs_are_not_dequeued_until_released`
 Expected: FAIL to compile because the status-aware enqueue methods, `release_waiting_jobs`, and `count_active_jobs` do not exist.
 
 - [ ] **Step 6: Implement the DB operations**
@@ -245,9 +245,9 @@ Return the changed row count.
 
 - [ ] **Step 7: Run the queue tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-core waiting_`
+Run: `cargo test -p vrc-photon-core waiting_`
 Expected: PASS, including the profile-deletion guard.
-Run: `cargo test -p vrc-photo-core queue`
+Run: `cargo test -p vrc-photon-core queue`
 Expected: PASS; the existing queue roundtrip and retry tests still pass.
 
 - [ ] **Step 8: Commit**
@@ -370,7 +370,7 @@ fn auto_replace_failure_leaves_the_original_in_place() {
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-daemon auto_jobs_use_replace_policy_and_waiting_status`
+Run: `cargo test -p vrc-photon-daemon auto_jobs_use_replace_policy_and_waiting_status`
 Expected: FAIL to compile because `enqueue_auto_jobs` still takes two arguments and hardcodes `pending`/`keep`.
 
 - [ ] **Step 3: Implement the daemon changes**
@@ -409,9 +409,9 @@ At both call sites, pass `self.settings.compression_keep_original` and `self.set
 
 - [ ] **Step 4: Run the daemon auto-compression tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-daemon auto_`
+Run: `cargo test -p vrc-photon-daemon auto_`
 Expected: PASS. The waiting job is not processed until released; the replace failure test proves the original survives.
-Run: `cargo test -p vrc-photo-daemon auto_jobs_follow_profile_sort_order`
+Run: `cargo test -p vrc-photon-daemon auto_jobs_follow_profile_sort_order`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -469,7 +469,7 @@ Add the helpers to the test module's `use super::{...}` import list.
 
 - [ ] **Step 2: Run the helper tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-ui compression_policy_`
+Run: `cargo test -p vrc-photon-ui compression_policy_`
 Expected: FAIL to compile because the helpers do not exist.
 
 - [ ] **Step 3: Implement the helpers and Settings UI**
@@ -508,7 +508,7 @@ Remove `compress_policy` from `App`, its initialization, the two policy buttons 
 
 - [ ] **Step 4: Run the UI helper tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-ui compression_policy_`
+Run: `cargo test -p vrc-photon-ui compression_policy_`
 Expected: PASS.
 
 - [ ] **Step 5: Verify the old in-memory policy is gone**
@@ -596,7 +596,7 @@ Add `CompressionFormat` and `CompressionProfile` to the test module imports.
 
 - [ ] **Step 2: Run the helper tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-ui lossless_`
+Run: `cargo test -p vrc-photon-ui lossless_`
 Expected: FAIL to compile because the helpers do not exist.
 
 - [ ] **Step 3: Implement the helpers**
@@ -659,9 +659,9 @@ fn apply_profile_format(profile: &mut CompressionProfile, format: CompressionFor
 
 - [ ] **Step 5: Run the profile helper tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-ui lossless_`
+Run: `cargo test -p vrc-photon-ui lossless_`
 Expected: PASS.
-Run: `cargo test -p vrc-photo-ui profile_summary_hides_quality_when_lossless`
+Run: `cargo test -p vrc-photon-ui profile_summary_hides_quality_when_lossless`
 Expected: PASS.
 
 - [ ] **Step 6: Commit**
@@ -721,7 +721,7 @@ Add `queue_status_badge` to the test module imports.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-ui dashboard_replaces_the_monitor_screen`
+Run: `cargo test -p vrc-photon-ui dashboard_replaces_the_monitor_screen`
 Expected: FAIL to compile because `Screen::Dashboard` and `queue_status_badge` do not exist.
 
 - [ ] **Step 3: Rename the screen**
@@ -803,11 +803,11 @@ fn release_waiting_jobs(&mut self, cx: &mut Context<Self>) {
 
 - [ ] **Step 6: Run the UI tests and build check**
 
-Run: `cargo test -p vrc-photo-ui dashboard_`
+Run: `cargo test -p vrc-photon-ui dashboard_`
 Expected: PASS.
-Run: `cargo test -p vrc-photo-ui queue_status_badges_`
+Run: `cargo test -p vrc-photon-ui queue_status_badges_`
 Expected: PASS.
-Run: `cargo check -p vrc-photo-ui`
+Run: `cargo check -p vrc-photon-ui`
 Expected: PASS; no remaining `Screen::Monitor` references.
 
 - [ ] **Step 7: Commit**

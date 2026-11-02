@@ -16,7 +16,7 @@
 - Library and Search share the same grid/card behavior.
 - Keep the Search tab's left filter panel; remove only its sort label.
 - No SQLite or image decoding in render/prepaint paths.
-- Use `cargo fmt --all -- --check`, `cargo clippy -p vrc-photo-ui --all-targets -- -D warnings`, and `cargo test -p vrc-photo-ui` before each commit.
+- Use `cargo fmt --all -- --check`, `cargo clippy -p vrc-photon-ui --all-targets -- -D warnings`, and `cargo test -p vrc-photon-ui` before each commit.
 
 ## Review Focus
 
@@ -43,7 +43,7 @@ Update the existing column tests to the uncapped expectations. At 1440 px with t
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-ui ui::theme::tests -v`
+Run: `cargo test -p vrc-photon-ui ui::theme::tests -v`
 Expected: the new/updated column assertions fail.
 
 - [ ] **Step 3: Implement the uncapped metrics**
@@ -52,7 +52,7 @@ In `theme.rs`, set `GRID_GAP = 14.0`; delete `library_column_cap`; in `grid_metr
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-ui ui::theme::tests -v`
+Run: `cargo test -p vrc-photon-ui ui::theme::tests -v`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -83,7 +83,7 @@ Compute `meta_line` and `has_info` before building `thumb`. When `!has_info`, se
 
 - [ ] **Step 3: Verify**
 
-Run `cargo build -p vrc-photo-ui`, launch with `--demo`, hide all card text, and capture. Expected: no image pixels outside the card's rounded silhouette at any aspect ratio.
+Run `cargo build -p vrc-photon-ui`, launch with `--demo`, hide all card text, and capture. Expected: no image pixels outside the card's rounded silhouette at any aspect ratio.
 
 - [ ] **Step 4: Commit**
 
@@ -110,7 +110,7 @@ In `theme.rs`, assert that `inspector_card_width(1280.0) == inspector_column_wid
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `cargo test -p vrc-photo-ui ui::theme::tests -v`
+Run: `cargo test -p vrc-photon-ui ui::theme::tests -v`
 Expected: FAIL because the card width is 16 px smaller.
 
 - [ ] **Step 3: Implement**
@@ -147,7 +147,7 @@ Add a test in `photo_browser.rs` for a helper that returns the first visible ent
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `cargo test -p vrc-photo-ui state::photo_browser::tests -v`
+Run: `cargo test -p vrc-photon-ui state::photo_browser::tests -v`
 Expected: FAIL because the helper does not exist.
 
 - [ ] **Step 3: Implement**
@@ -173,7 +173,7 @@ git commit -m "fix(ui): follow the visible month in the gallery header"
 - Modify: `crates/ui/src/ui/library.rs` (`gallery_header`, `gallery_filter_row`)
 - Modify: `crates/ui/src/ui/search.rs` (results header)
 - Modify: `crates/ui/src/app.rs` (remove `gallery_filters_open` if unused)
-- Test: `cargo test -p vrc-photo-ui`
+- Test: `cargo test -p vrc-photon-ui`
 
 **Interfaces:**
 - Produces: no filter button, filter row, or "並び: 新しい順" label in the library; the Search tab keeps `search_filter_panel` and loses only its sort label.
@@ -188,7 +188,7 @@ Delete the "並び: 新しい順" child from the search results header. Keep the
 
 - [ ] **Step 3: Verify**
 
-Run `cargo test -p vrc-photo-ui`. Launch `--demo` and confirm the library header is only month + count, the search left filter is intact, and the search header has no sort label.
+Run `cargo test -p vrc-photon-ui`. Launch `--demo` and confirm the library header is only month + count, the search left filter is intact, and the search header has no sort label.
 
 - [ ] **Step 4: Commit**
 
@@ -214,7 +214,7 @@ Add a test around `preferred_bounds` that passes a card and inspector bound with
 
 - [ ] **Step 2: Run it to verify it fails**
 
-Run: `cargo test -p vrc-photo-ui state::viewer::tests -v`
+Run: `cargo test -p vrc-photon-ui state::viewer::tests -v`
 Expected: the new expectation fails if `actual_source` still prefers the inspector.
 
 - [ ] **Step 3: Implement**
@@ -304,7 +304,7 @@ git commit -m "fix(ui): select cards on press with small pointer movement"
 
 **Files:**
 - Modify: `crates/ui/src/ui/search.rs` (only if the shared card/grid needs a search-specific flag)
-- Test: `cargo fmt --all -- --check`, `cargo clippy -p vrc-photo-ui --all-targets -- -D warnings`, `cargo test -p vrc-photo-ui`
+- Test: `cargo fmt --all -- --check`, `cargo clippy -p vrc-photon-ui --all-targets -- -D warnings`, `cargo test -p vrc-photon-ui`
 
 - [ ] **Step 1: Verify Search uses the shared fixes**
 
@@ -314,8 +314,8 @@ Open Search with a populated library. Confirm the uncapped columns, 14 px gap, i
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy -p vrc-photo-ui --all-targets -- -D warnings
-cargo test -p vrc-photo-ui
+cargo clippy -p vrc-photon-ui --all-targets -- -D warnings
+cargo test -p vrc-photon-ui
 ```
 
 Expected: all pass.

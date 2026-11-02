@@ -4,7 +4,7 @@
 
 **Goal:** deb / pacman 利用者が任意で systemd ユーザーサービスとしてデーモンを常駐できるようにする。
 
-**Architecture:** `vrc-photo-daemon.service` をパッケージの `/usr/lib/systemd/user/` に同梱し、`graphical-session.target` に紐付ける。既存の XDG 自動起動は残し、`single-instance` で重複を防ぐ。デーモンは `INVOCATION_ID` で systemd 管理下を判定して DB に記録し、UI は稼働状態と一緒に表示する。
+**Architecture:** `vrc-photon-daemon.service` をパッケージの `/usr/lib/systemd/user/` に同梱し、`graphical-session.target` に紐付ける。既存の XDG 自動起動は残し、`single-instance` で重複を防ぐ。デーモンは `INVOCATION_ID` で systemd 管理下を判定して DB に記録し、UI は稼働状態と一緒に表示する。
 
 **Tech Stack:** Rust (edition 2024), gpui-kit 0.8, SQLite, cargo-packager 0.11.8, systemd user units
 
@@ -14,8 +14,8 @@
 
 - systemd を必須にしない。既存の XDG 自動起動と AppImage の `$APPIMAGE --background` を残す。
 - インストール時にサービスを自動 enable しない。
-- unit の配置先は `usr/lib/systemd/user/vrc-photo-daemon.service`。
-- unit は `/usr/bin/vrc-photo-daemon` を実行し、トレイを無効化しない。
+- unit の配置先は `usr/lib/systemd/user/vrc-photon-daemon.service`。
+- unit は `/usr/bin/vrc-photon-daemon` を実行し、トレイを無効化しない。
 - 二重起動防止は既存の `single-instance` を変更しない。
 - supervisor 判定のために新しいランタイム依存クレートを追加しない。
 - ドキュメントは日本語で書く。
@@ -61,7 +61,7 @@ fn supervisor_label_detects_systemd() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p vrc-photo-daemon supervisor_label_detects_systemd`
+Run: `cargo test -p vrc-photon-daemon supervisor_label_detects_systemd`
 
 Expected: compile error `cannot find function supervisor_label in this scope`.
 
@@ -95,7 +95,7 @@ Call `self.record_supervisor();` as the first statement of `pub fn run(&mut self
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `cargo test -p vrc-photo-daemon supervisor_label_detects_systemd`
+Run: `cargo test -p vrc-photon-daemon supervisor_label_detects_systemd`
 
 Expected: `test result: ok. 1 passed`.
 
@@ -159,8 +159,8 @@ fn autostart_description_mentions_systemd_only_while_active() {
 Run:
 
 ```bash
-cargo test -p vrc-photo-ui daemon_sync_label
-cargo test -p vrc-photo-ui autostart_description
+cargo test -p vrc-photon-ui daemon_sync_label
+cargo test -p vrc-photon-ui autostart_description
 ```
 
 Expected: compile errors for the missing functions.
@@ -226,8 +226,8 @@ let sync = if self.demo_assets.is_some() {
 Run:
 
 ```bash
-cargo test -p vrc-photo-ui daemon_sync_label
-cargo test -p vrc-photo-ui autostart_description
+cargo test -p vrc-photon-ui daemon_sync_label
+cargo test -p vrc-photon-ui autostart_description
 ```
 
 Expected: both tests pass.
@@ -244,11 +244,11 @@ git commit -m "feat: show systemd supervisor in UI"
 ### Task 3: Package the systemd user unit
 
 **Files:**
-- Create: `packaging/systemd/vrc-photo-daemon.service`
+- Create: `packaging/systemd/vrc-photon-daemon.service`
 - Modify: `Packager.toml`
 
 **Interfaces:**
-- Produces: package path `usr/lib/systemd/user/vrc-photo-daemon.service` in deb and pacman.
+- Produces: package path `usr/lib/systemd/user/vrc-photon-daemon.service` in deb and pacman.
 
 - [ ] **Step 1: Write the failing packaging check**
 
@@ -259,8 +259,8 @@ python3 - <<'PY'
 import tomllib
 with open("Packager.toml", "rb") as f:
     config = tomllib.load(f)
-target = "usr/lib/systemd/user/vrc-photo-daemon.service"
-source = "packaging/systemd/vrc-photo-daemon.service"
+target = "usr/lib/systemd/user/vrc-photon-daemon.service"
+source = "packaging/systemd/vrc-photon-daemon.service"
 assert config.get("deb", {}).get("files", {}).get(source) == target
 assert config.get("pacman", {}).get("files", {}).get(source) == target
 print("Packager.toml ok")
@@ -271,18 +271,18 @@ Expected: `AssertionError` because the mappings do not exist yet.
 
 - [ ] **Step 2: Create the unit file**
 
-Create `packaging/systemd/vrc-photo-daemon.service` with exactly:
+Create `packaging/systemd/vrc-photon-daemon.service` with exactly:
 
 ```ini
 [Unit]
-Description=VRC Photo Manager background daemon
-Documentation=https://github.com/TommyZ-7/vrc-photo-manager/blob/main/docs/release.md
+Description=VRC PhotoN background daemon
+Documentation=https://github.com/TommyZ-7/vrc-photon/blob/main/docs/release.md
 PartOf=graphical-session.target
 After=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/vrc-photo-daemon
+ExecStart=/usr/bin/vrc-photon-daemon
 Restart=on-failure
 RestartSec=5s
 
@@ -296,14 +296,14 @@ Add after the `[deb]` block in `Packager.toml`:
 
 ```toml
 [deb.files]
-"packaging/systemd/vrc-photo-daemon.service" = "usr/lib/systemd/user/vrc-photo-daemon.service"
+"packaging/systemd/vrc-photon-daemon.service" = "usr/lib/systemd/user/vrc-photon-daemon.service"
 ```
 
 Add after the `[pacman]` block:
 
 ```toml
 [pacman.files]
-"packaging/systemd/vrc-photo-daemon.service" = "usr/lib/systemd/user/vrc-photo-daemon.service"
+"packaging/systemd/vrc-photon-daemon.service" = "usr/lib/systemd/user/vrc-photon-daemon.service"
 ```
 
 - [ ] **Step 4: Verify the TOML and unit syntax**
@@ -317,8 +317,8 @@ Run:
 ```bash
 mkdir -p /tmp/opencode
 sed 's#^ExecStart=.*#ExecStart=/bin/true#' \
-  packaging/systemd/vrc-photo-daemon.service > /tmp/opencode/vrc-photo-daemon.service
-systemd-analyze --user verify /tmp/opencode/vrc-photo-daemon.service
+  packaging/systemd/vrc-photon-daemon.service > /tmp/opencode/vrc-photon-daemon.service
+systemd-analyze --user verify /tmp/opencode/vrc-photon-daemon.service
 ```
 
 Expected: exit code 0 (warnings about the substitute binary are acceptable).
@@ -326,7 +326,7 @@ Expected: exit code 0 (warnings about the substitute binary are acceptable).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add Packager.toml packaging/systemd/vrc-photo-daemon.service
+git add Packager.toml packaging/systemd/vrc-photon-daemon.service
 git commit -m "feat: package systemd user unit"
 ```
 
@@ -360,7 +360,7 @@ Create `docs/adr/0010-systemd-user-service.md` with:
 - Status: `Accepted`, Date: `2026-10-24`
 - Context: deb/pacman はアプリ管理の XDG 自動起動のみで、再起動制御と journald がない。
 - Decision:
-  - `vrc-photo-daemon.service` を `/usr/lib/systemd/user/` に同梱する。
+  - `vrc-photon-daemon.service` を `/usr/lib/systemd/user/` に同梱する。
   - opt-in とし、インストール時に enable しない。
   - `graphical-session.target` に紐付ける。
   - 既存の XDG 自動起動を残し、`single-instance` で重複を防ぐ。
@@ -379,17 +379,17 @@ Add a row to the table in `docs/adr/README.md`:
 
 In `docs/release.md`:
 
-- Add `/usr/lib/systemd/user/vrc-photo-daemon.service` to the Debian/pacman contents table.
+- Add `/usr/lib/systemd/user/vrc-photon-daemon.service` to the Debian/pacman contents table.
 - Add `[deb.files]` / `[pacman.files]` to the `Packager.toml` settings list.
 - In section 4, state that deb/pacman ship the optional unit, that it is not enabled by install, and that the in-app autostart remains.
 - Add a subsection with these exact commands:
 
 ```bash
 systemctl --user daemon-reload
-systemctl --user enable --now vrc-photo-daemon.service
-systemctl --user status vrc-photo-daemon.service
-journalctl --user -u vrc-photo-daemon.service -f
-systemctl --user disable --now vrc-photo-daemon.service
+systemctl --user enable --now vrc-photon-daemon.service
+systemctl --user status vrc-photon-daemon.service
+journalctl --user -u vrc-photon-daemon.service -f
+systemctl --user disable --now vrc-photon-daemon.service
 ```
 
 - Explain that the package removes the unit, but the enable symlink lives in the user's home, so disable before uninstalling.
@@ -445,7 +445,7 @@ Expected: every file appears, and `docs/release.md` no longer lists systemd unde
 Run:
 
 ```bash
-grep -n "systemctl --user disable --now vrc-photo-daemon.service" docs/release.md docs/troubleshooting.md
+grep -n "systemctl --user disable --now vrc-photon-daemon.service" docs/release.md docs/troubleshooting.md
 ```
 
 Expected: the uninstall command appears in both files.
@@ -469,8 +469,8 @@ git commit -m "docs: document systemd user service"
 - Modify: `.github/workflows/release.yml`
 
 **Interfaces:**
-- Consumes: package path `usr/lib/systemd/user/vrc-photo-daemon.service`.
-- Produces: CI failure when the unit is missing or does not point at `/usr/bin/vrc-photo-daemon`.
+- Consumes: package path `usr/lib/systemd/user/vrc-photon-daemon.service`.
+- Produces: CI failure when the unit is missing or does not point at `/usr/bin/vrc-photon-daemon`.
 
 - [ ] **Step 1: Add the verification step**
 
@@ -480,7 +480,7 @@ After `Verify third-party notices`, add:
       - name: Verify systemd user unit
         run: |
           set -euo pipefail
-          unit="usr/lib/systemd/user/vrc-photo-daemon.service"
+          unit="usr/lib/systemd/user/vrc-photon-daemon.service"
           deb=$(ls dist/*.deb)
           pacman=$(ls dist/*.tar.gz)
           tmp=$(mktemp -d)
@@ -491,9 +491,9 @@ After `Verify third-party notices`, add:
             || { echo "missing $unit in deb"; exit 1; }
           test -f "$tmp/pacman/$unit" \
             || { echo "missing $unit in pacman package"; exit 1; }
-          grep -qx 'ExecStart=/usr/bin/vrc-photo-daemon' "$tmp/deb/$unit" \
+          grep -qx 'ExecStart=/usr/bin/vrc-photon-daemon' "$tmp/deb/$unit" \
             || { echo "unexpected ExecStart in deb unit"; exit 1; }
-          grep -qx 'ExecStart=/usr/bin/vrc-photo-daemon' "$tmp/pacman/$unit" \
+          grep -qx 'ExecStart=/usr/bin/vrc-photon-daemon' "$tmp/pacman/$unit" \
             || { echo "unexpected ExecStart in pacman unit"; exit 1; }
           echo "systemd user unit verified"
 ```
@@ -504,7 +504,7 @@ Run:
 
 ```bash
 grep -n "Verify systemd user unit" .github/workflows/release.yml
-grep -n "ExecStart=/usr/bin/vrc-photo-daemon" .github/workflows/release.yml
+grep -n "ExecStart=/usr/bin/vrc-photon-daemon" .github/workflows/release.yml
 git diff --check
 ```
 
@@ -523,7 +523,7 @@ git commit -m "ci: verify systemd unit in packages"
 
 **Files:**
 - No source changes expected.
-- Temporary test unit: `~/.config/systemd/user/vrc-photo-daemon-test.service` (removed after the test).
+- Temporary test unit: `~/.config/systemd/user/vrc-photon-daemon-test.service` (removed after the test).
 
 **Interfaces:**
 - Consumes: all previous tasks.
@@ -542,9 +542,9 @@ Expected: all commands exit 0. If a test fails, fix it before continuing.
 
 - [ ] **Step 2: Build the debug daemon for the integration test**
 
-Run: `cargo build -p vrc-photo-daemon`
+Run: `cargo build -p vrc-photon-daemon`
 
-Expected: `target/debug/vrc-photo-daemon` exists.
+Expected: `target/debug/vrc-photon-daemon` exists.
 
 - [ ] **Step 3: Run the daemon under a temporary systemd user unit**
 
@@ -553,23 +553,23 @@ Run:
 ```bash
 set -euo pipefail
 work=/tmp/opencode/systemd-supervisor-test
-unit="$HOME/.config/systemd/user/vrc-photo-daemon-test.service"
+unit="$HOME/.config/systemd/user/vrc-photon-daemon-test.service"
 rm -rf "$work"
 mkdir -p "$work" "$(dirname "$unit")"
 cat > "$unit" <<EOF
 [Unit]
-Description=VRC Photo Manager supervisor test
+Description=VRC PhotoN supervisor test
 
 [Service]
 Type=simple
 Environment=XDG_DATA_HOME=$work
-ExecStart=$PWD/target/debug/vrc-photo-daemon --no-tray --db $work/library.db
+ExecStart=$PWD/target/debug/vrc-photon-daemon --no-tray --db $work/library.db
 
 [Install]
 WantedBy=default.target
 EOF
 systemctl --user daemon-reload
-systemctl --user start vrc-photo-daemon-test.service
+systemctl --user start vrc-photon-daemon-test.service
 for _ in $(seq 1 20); do
   if [ -f "$work/library.db" ] && \
      [ "$(sqlite3 "$work/library.db" "select value from app_settings where key='daemon_supervisor';" 2>/dev/null)" = "systemd" ]; then
@@ -577,7 +577,7 @@ for _ in $(seq 1 20); do
   fi
   sleep 0.5
 done
-systemctl --user stop vrc-photo-daemon-test.service
+systemctl --user stop vrc-photon-daemon-test.service
 test "$(sqlite3 "$work/library.db" "select value from app_settings where key='daemon_supervisor';")" = "systemd"
 echo "supervisor integration test passed"
 ```
@@ -590,15 +590,15 @@ Run the same daemon manually, then try the temporary unit again while it is runn
 
 ```bash
 XDG_DATA_HOME=/tmp/opencode/systemd-supervisor-test \
-  target/debug/vrc-photo-daemon --no-tray --db /tmp/opencode/systemd-supervisor-test/library.db &
+  target/debug/vrc-photon-daemon --no-tray --db /tmp/opencode/systemd-supervisor-test/library.db &
 manual_pid=$!
 sleep 1
-systemctl --user start vrc-photo-daemon-test.service
-systemctl --user is-active vrc-photo-daemon-test.service || true
+systemctl --user start vrc-photon-daemon-test.service
+systemctl --user is-active vrc-photon-daemon-test.service || true
 kill "$manual_pid"
 wait "$manual_pid" 2>/dev/null || true
-systemctl --user stop vrc-photo-daemon-test.service || true
-rm -f "$HOME/.config/systemd/user/vrc-photo-daemon-test.service"
+systemctl --user stop vrc-photon-daemon-test.service || true
+rm -f "$HOME/.config/systemd/user/vrc-photon-daemon-test.service"
 systemctl --user daemon-reload
 ```
 
@@ -621,7 +621,7 @@ Expected: the worktree is clean and the branch contains the design, plan, code, 
 git push -u origin feat/systemd-user-service
 gh pr create --title "feat: add opt-in systemd user service" --body "$(cat <<'EOF'
 ## Summary
-- add an opt-in `vrc-photo-daemon.service` for deb/pacman
+- add an opt-in `vrc-photon-daemon.service` for deb/pacman
 - record whether the daemon runs under systemd and show it in the UI
 - document enable, journalctl, uninstall, and overlap with app-managed autostart
 

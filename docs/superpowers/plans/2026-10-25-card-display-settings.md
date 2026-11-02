@@ -105,7 +105,7 @@ In the existing `settings_deserialize_without_ui_fields` test, also assert the f
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-core settings::`
+Run: `cargo test -p vrc-photon-core settings::`
 
 Expected: compile errors for the missing fields/variants, or assertion failures for the default values.
 
@@ -154,7 +154,7 @@ where
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `cargo test -p vrc-photo-core settings::`
+Run: `cargo test -p vrc-photon-core settings::`
 
 Expected: all settings tests pass, including the existing round-trip and old-JSON tests.
 
@@ -276,7 +276,7 @@ Existing tests that call `first_visible_photo`, `anchor_photo_id`, `rail_scroll_
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `cargo test -p vrc-photo-ui tests::default_card_metrics_match_the_current_grid tests::card_size_presets_scale_the_grid`
+Run: `cargo test -p vrc-photon-ui tests::default_card_metrics_match_the_current_grid tests::card_size_presets_scale_the_grid`
 
 Expected: compile errors for the missing `CardMetrics`, `card_metrics`, and the new parameters.
 
@@ -343,7 +343,7 @@ Make these concrete changes:
 
 - [ ] **Step 5: Run the UI tests**
 
-Run: `cargo test -p vrc-photo-ui tests::`
+Run: `cargo test -p vrc-photon-ui tests::`
 
 Expected: all UI unit tests pass, and the new metric tests report the default 196 px row.
 
@@ -394,7 +394,7 @@ fn card_meta_line_joins_only_visible_parts() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p vrc-photo-ui tests::card_meta_line_joins_only_visible_parts`
+Run: `cargo test -p vrc-photon-ui tests::card_meta_line_joins_only_visible_parts`
 
 Expected: compile error for the missing `card_meta_line`.
 
@@ -424,7 +424,7 @@ In `photo_card`:
 
 - [ ] **Step 4: Run the tests**
 
-Run: `cargo test -p vrc-photo-ui tests::`
+Run: `cargo test -p vrc-photon-ui tests::`
 
 Expected: all UI tests pass, including the four metadata-line combinations.
 
@@ -475,7 +475,7 @@ fn card_size_options_cover_every_preset_in_order() {
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p vrc-photo-ui tests::card_size_options_cover_every_preset_in_order`
+Run: `cargo test -p vrc-photon-ui tests::card_size_options_cover_every_preset_in_order`
 
 Expected: compile error for the missing functions.
 
@@ -580,7 +580,7 @@ Clear `pending_layout_anchor_search` when a new search begins or the view is cle
 
 - [ ] **Step 5: Run the UI tests and a workspace check**
 
-Run: `cargo test -p vrc-photo-ui tests::`
+Run: `cargo test -p vrc-photon-ui tests::`
 
 Expected: all UI tests pass.
 
@@ -616,7 +616,7 @@ Expected: no formatting differences, no clippy warnings, and every test passes.
 
 - [ ] **Step 2: Verify the settings screen and both grids in demo mode**
 
-Run: `cargo run -p vrc-photo-ui --bin vrc-photo-manager -- --demo`
+Run: `cargo run -p vrc-photon-ui --bin vrc-photon -- --demo`
 
 Check all of the following:
 

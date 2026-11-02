@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust stable (edition 2024), SQLite/rusqlite, gpui-kit 0.8, `trash` 5.
 
-**Spec:** GitHub issue [#143](https://github.com/TommyZ-7/vrc-photo-manager/issues/143) plus the approved decisions below.
+**Spec:** GitHub issue [#143](https://github.com/TommyZ-7/vrc-photon/issues/143) plus the approved decisions below.
 
 ## Approved Decisions
 
@@ -71,13 +71,13 @@ Run:
 REPO=$(basename "$(git rev-parse --show-toplevel)")
 git worktree add ../${REPO}-deferred-deletion -b feat/deferred-deletion origin/main
 ```
-Expected: a new worktree at `../vrc-photo-manager-deferred-deletion`.
+Expected: a new worktree at `../vrc-photon-deferred-deletion`.
 
 Copy this plan into the new worktree if it exists only in the original checkout. Do not commit it with either code PR; it travels with the docs PR in Task 14:
 
 ```bash
-cp /home/tommyz7/work/vrc-photo-manager/docs/superpowers/plans/2026-10-29-deferred-deletion.md \
-   ../vrc-photo-manager-deferred-deletion/docs/superpowers/plans/
+cp /home/tommyz7/work/vrc-photon/docs/superpowers/plans/2026-10-29-deferred-deletion.md \
+   ../vrc-photon-deferred-deletion/docs/superpowers/plans/
 ```
 
 - [ ] **Step 3: Move the session**
@@ -157,7 +157,7 @@ fn deletion_status_and_reason_round_trip() {
 
 Run:
 ```bash
-cargo test -p vrc-photo-core migration_v7_adds_deletion_requests
+cargo test -p vrc-photon-core migration_v7_adds_deletion_requests
 ```
 Expected: compile errors for the new types, or the migration assertion fails with version 6.
 
@@ -199,7 +199,7 @@ Use `PhotoStatus`-style enum parsing for the status. `DeletionReason::parse` ret
 
 Run:
 ```bash
-cargo test -p vrc-photo-core
+cargo test -p vrc-photon-core
 ```
 Expected: PASS, including the updated migration-version assertions.
 
@@ -338,7 +338,7 @@ This keeps Task 3 independent of the Task 4 API.
 
 Run:
 ```bash
-cargo test -p vrc-photo-core deleting_photo_is_hidden
+cargo test -p vrc-photon-core deleting_photo_is_hidden
 ```
 Expected: compile error for `PhotoStatus::Deleting` / `request_deletion`.
 
@@ -381,7 +381,7 @@ It still returns `changed == 1`; the derivative is recorded, but the photo stays
 
 Run:
 ```bash
-cargo test -p vrc-photo-core
+cargo test -p vrc-photon-core
 ```
 Expected: PASS.
 
@@ -481,7 +481,7 @@ fn deletion_job_summary_counts_each_status() {
 
 Run:
 ```bash
-cargo test -p vrc-photo-core
+cargo test -p vrc-photon-core
 ```
 Expected: compile errors for missing methods.
 
@@ -527,7 +527,7 @@ Apply the same two predicates to `enqueue_job_for_existing_profile_with_options`
 
 Run:
 ```bash
-cargo test -p vrc-photo-core
+cargo test -p vrc-photon-core
 ```
 Expected: PASS.
 
@@ -690,7 +690,7 @@ fn resume_blocked_deletion_waits_for_all_jobs() {
 
 Run:
 ```bash
-cargo test -p vrc-photo-core
+cargo test -p vrc-photon-core
 ```
 Expected: compile errors for missing methods.
 
@@ -768,7 +768,7 @@ Return the changed count. This is what makes a successful retry resume deletion 
 
 Run:
 ```bash
-cargo test -p vrc-photo-core manual_request_is_rejected
+cargo test -p vrc-photon-core manual_request_is_rejected
 ```
 Expected: PASS.
 
@@ -911,7 +911,7 @@ fn manual_test_daemon(dir: &tempfile::TempDir) -> Daemon {
 
 Run:
 ```bash
-cargo test -p vrc-photo-daemon
+cargo test -p vrc-photon-daemon
 ```
 Expected: compile error for `process_deletions` / `DeletionReason`, or assertions show the original was trashed immediately.
 
@@ -1032,7 +1032,7 @@ This is the automatic-resume hook for a failed-job block.
 
 Run:
 ```bash
-cargo test -p vrc-photo-daemon
+cargo test -p vrc-photon-daemon
 ```
 Expected: PASS.
 
@@ -1050,7 +1050,7 @@ git commit -m "feat(daemon): execute queued deletions after dependent jobs"
 - Test: `crates/daemon/src/lib.rs` (`mod tests`)
 
 **Interfaces:**
-- Consumes: Task 6 executor and `process_job`; `vrc_photo_core::image_decode::decode_image` for WebP decoding.
+- Consumes: Task 6 executor and `process_job`; `vrc_photon_core::image_decode::decode_image` for WebP decoding.
 - Produces: regression coverage for the issue's central acceptance criteria.
 
 Use `decode_image` from core instead of `image::open` for the WebP derivatives; core already enables the `webp` feature.
@@ -1077,7 +1077,7 @@ fn add_replace_profiles(db: &Db) {
         id: "lossy".to_string(),
         name: "lossy".to_string(),
         auto_enabled: true,
-        format: vrc_photo_core::model::CompressionFormat::Webp,
+        format: vrc_photon_core::model::CompressionFormat::Webp,
         quality: 10,
         lossless: false,
         resize_enabled: false,
@@ -1089,7 +1089,7 @@ fn add_replace_profiles(db: &Db) {
         id: "lossless".to_string(),
         name: "lossless".to_string(),
         auto_enabled: true,
-        format: vrc_photo_core::model::CompressionFormat::Webp,
+        format: vrc_photon_core::model::CompressionFormat::Webp,
         lossless: true,
         resize_enabled: false,
         output_dir: Some("lossless".to_string()),
@@ -1121,7 +1121,7 @@ fn multi_profile_replace_is_worker_count_independent() {
         });
         let original = original_path(&dir);
         write_gradient_photo(&original);
-        let expected = vrc_photo_core::image_decode::decode_image(&original)
+        let expected = vrc_photon_core::image_decode::decode_image(&original)
             .unwrap()
             .to_rgba8();
         daemon.run_once().unwrap();
@@ -1148,7 +1148,7 @@ fn multi_profile_replace_is_worker_count_independent() {
         assert_eq!(completed, 1, "workers={workers}");
 
         let lossless = derivatives.iter().find(|d| d.profile_id == "lossless").unwrap();
-        let actual = vrc_photo_core::image_decode::decode_image(Path::new(&lossless.path))
+        let actual = vrc_photon_core::image_decode::decode_image(Path::new(&lossless.path))
             .unwrap()
             .to_rgba8();
         assert_eq!(actual, expected, "workers={workers}: second job read a derivative");
@@ -1162,7 +1162,7 @@ fn multi_profile_replace_is_worker_count_independent() {
 
 Temporarily keep the old `effective_path()` input selection (or revert just that line) and run:
 ```bash
-cargo test -p vrc-photo-daemon multi_profile_replace_is_worker_count_independent -- --nocapture
+cargo test -p vrc-photon-daemon multi_profile_replace_is_worker_count_independent -- --nocapture
 ```
 Expected: the lossless derivative pixels differ from the original, proving the second job read the lossy derivative.
 
@@ -1170,7 +1170,7 @@ Expected: the lossless derivative pixels differ from the original, proving the s
 
 If Step 2 required a temporary revert, restore the Task 6 implementation and rerun:
 ```bash
-cargo test -p vrc-photo-daemon multi_profile_replace_is_worker_count_independent -- --nocapture
+cargo test -p vrc-photon-daemon multi_profile_replace_is_worker_count_independent -- --nocapture
 ```
 Expected: PASS for workers 1 and 4.
 
@@ -1227,7 +1227,7 @@ fn failed_job_blocks_deletion_until_retry_succeeds() {
 
 Run:
 ```bash
-cargo test -p vrc-photo-daemon
+cargo test -p vrc-photon-daemon
 ```
 Expected: PASS, including both new tests.
 
@@ -1245,8 +1245,8 @@ git commit -m "test(daemon): cover multi-profile replace and deletion resume"
 - [ ] **Step 1: Run the focused suites**
 
 ```bash
-cargo test -p vrc-photo-core
-cargo test -p vrc-photo-daemon
+cargo test -p vrc-photon-core
+cargo test -p vrc-photon-daemon
 ```
 
 - [ ] **Step 2: Run the full local gate**
@@ -1334,7 +1334,7 @@ fn deletion_warning_lines_are_empty_without_jobs() {
 
 Run:
 ```bash
-cargo test -p vrc-photo-ui deletion_warning_lines
+cargo test -p vrc-photon-ui deletion_warning_lines
 ```
 Expected: compile error for the missing helper.
 
@@ -1419,7 +1419,7 @@ Remove `TrashOutcome::Promoted` handling from the queue path; it is only used by
 - [ ] **Step 6: Run the helper tests**
 
 ```bash
-cargo test -p vrc-photo-ui deletion_warning_lines
+cargo test -p vrc-photon-ui deletion_warning_lines
 ```
 Expected: PASS.
 
@@ -1479,7 +1479,7 @@ fn blocked_deletion_transition_notifies_only_on_increase() {
 
 Run:
 ```bash
-cargo test -p vrc-photo-ui deletion
+cargo test -p vrc-photon-ui deletion
 ```
 Expected: compile errors for missing fields/functions.
 
@@ -1511,7 +1511,7 @@ Seed the baseline on the first successful snapshot, exactly like `failure_baseli
 - [ ] **Step 4: Run the tests**
 
 ```bash
-cargo test -p vrc-photo-ui deletion
+cargo test -p vrc-photon-ui deletion
 ```
 Expected: PASS.
 
@@ -1582,7 +1582,7 @@ fn sample_request(status: DeletionStatus) -> DeletionRequest {
 - [ ] **Step 2: Run the tests to verify they fail**
 
 ```bash
-cargo test -p vrc-photo-ui
+cargo test -p vrc-photon-ui
 ```
 Expected: compile error for the missing module/functions.
 
@@ -1629,8 +1629,8 @@ In `dashboard_screen`'s right column, after `daemon_card` and before the daemon 
 - [ ] **Step 5: Run the tests and compile the UI**
 
 ```bash
-cargo test -p vrc-photo-ui
-cargo clippy -p vrc-photo-ui --all-targets -- -D warnings
+cargo test -p vrc-photon-ui
+cargo clippy -p vrc-photon-ui --all-targets -- -D warnings
 ```
 Expected: PASS.
 
@@ -1648,7 +1648,7 @@ git commit -m "feat(ui): show pending deletions on the dashboard"
 - [ ] **Step 1: Run the focused UI suite**
 
 ```bash
-cargo test -p vrc-photo-ui
+cargo test -p vrc-photon-ui
 ```
 
 - [ ] **Step 2: Run the full local gate**
@@ -1660,13 +1660,13 @@ Expected: all green.
 
 - [ ] **Step 3: Visual QA with the GNOME Wayland skill**
 
-Use the `gnome-wayland-visual-qa` skill. Seed the demo database at `/tmp/vrc-photo-manager-demo/library.db`:
+Use the `gnome-wayland-visual-qa` skill. Seed the demo database at `/tmp/vrc-photon-demo/library.db`:
 
 ```bash
-rm -rf /tmp/vrc-photo-manager-demo
-cargo run -p vrc-photo-ui -- --demo --demo-reset
+rm -rf /tmp/vrc-photon-demo
+cargo run -p vrc-photon-ui -- --demo --demo-reset
 # after the first launch creates the DB, stop the app
-sqlite3 /tmp/vrc-photo-manager-demo/library.db <<'SQL'
+sqlite3 /tmp/vrc-photon-demo/library.db <<'SQL'
 INSERT INTO deletion_requests(photo_id, reason, status, force, blocked_reason, requested_at)
 VALUES ((SELECT id FROM photos LIMIT 1), 'manual', 'blocked', 0, 'job_failed', datetime('now'));
 UPDATE photos SET status = 'deleting'
@@ -1679,7 +1679,7 @@ FROM photos WHERE status = 'present' LIMIT 1;
 UPDATE app_settings SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
 WHERE key = 'library_revision';
 SQL
-cargo run -p vrc-photo-ui -- --demo --window-size 1440x900
+cargo run -p vrc-photon-ui -- --demo --window-size 1440x900
 ```
 
 Capture the dashboard and verify:
@@ -1690,7 +1690,7 @@ Capture the dashboard and verify:
 - The warning modal appears when trashing a demo photo with an injected incomplete job; its lines wrap instead of overflowing.
 - Cancelling the warning writes no request; confirming hides the photo and shows the pending toast.
 
-Clean up with `rm -rf /tmp/vrc-photo-manager-demo` after the check.
+Clean up with `rm -rf /tmp/vrc-photon-demo` after the check.
 
 - [ ] **Step 4: Open PR2 and monitor CI**
 
@@ -1749,9 +1749,9 @@ git checkout main
 git pull
 REPO=$(basename "$(git rev-parse --show-toplevel)")
 git worktree add ../${REPO}-deferred-deletion-docs -b docs/deferred-deletion origin/main
-cp /home/tommyz7/work/vrc-photo-manager/docs/superpowers/plans/2026-10-29-deferred-deletion.md \
-   ../vrc-photo-manager-deferred-deletion-docs/docs/superpowers/plans/
-cd ../vrc-photo-manager-deferred-deletion-docs
+cp /home/tommyz7/work/vrc-photon/docs/superpowers/plans/2026-10-29-deferred-deletion.md \
+   ../vrc-photon-deferred-deletion-docs/docs/superpowers/plans/
+cd ../vrc-photon-deferred-deletion-docs
 git add docs/features.md docs/data-model.md docs/architecture.md docs/adr/0015-deferred-deletion-queue.md docs/superpowers/plans/2026-10-29-deferred-deletion.md
 git commit -m "docs: describe the deferred deletion queue"
 git push -u origin docs/deferred-deletion

@@ -29,7 +29,7 @@ Issue #18 では、即時コマンド（再スキャン、監視の一時停止/
 ### 2. トランスポート
 
 - `interprocess` 2.4 のローカルソケットを使う。
-  - Unix: `${XDG_RUNTIME_DIR}/vrc-photo-manager/daemon.sock`。未設定なら `<data_dir>/run/daemon.sock`。パスが長すぎる場合は `/tmp/vrc-photo-manager-<user>/daemon.sock`。
+  - Unix: `${XDG_RUNTIME_DIR}/vrc-photon/daemon.sock`。未設定なら `<data_dir>/run/daemon.sock`。パスが長すぎる場合は `/tmp/vrc-photon-<user>/daemon.sock`。
   - Windows: ユーザー名の安定ハッシュを含む名前付きパイプ（非ASCII名や記号違いの衝突を避ける）。
 - Unixではディレクトリを `0700`、ソケットを `0600` にする。
 - bind前に既存エンドポイントへ接続を試す。接続できれば生存中のデーモンとみなし、unlinkしない。接続拒否ならstaleとして削除してbindする。
@@ -66,7 +66,7 @@ Issue #18 では、即時コマンド（再スキャン、監視の一時停止/
 
 ## References
 
-- [Issue #18](https://github.com/TommyZ-7/vrc-photo-manager/issues/18)
+- [Issue #18](https://github.com/TommyZ-7/vrc-photon/issues/18)
 - [ADR-0002](0002-sqlite-shared-state.md)（SQLite共有。本ADRで補完）
 - [設計書](../superpowers/specs/2026-10-24-daemon-ipc-design.md)
 - [実装計画](../superpowers/plans/2026-10-24-daemon-ipc.md)

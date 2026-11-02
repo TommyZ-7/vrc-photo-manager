@@ -16,7 +16,7 @@
   コマンド表示までしか行わず、pacman / deb 利用者はリリースのアーカイブを
   手動で取得して再インストールする必要があった。
 - 既存の「署名済み `latest.json` → 検証済みダウンロード →
-  `vrc-photo-updater` ヘルパー」のパイプラインはそのまま使える。足りないのは
+  `vrc-photon-updater` ヘルパー」のパイプラインはそのまま使える。足りないのは
   root 権限が必要なインストール実行だけだった。
 - `latest.json` の `platforms` は未知キーを `InvalidManifest` として拒否する。
   既存クライアントの更新確認を壊さずに pacman / deb の成果物を追加する必要が
@@ -48,8 +48,8 @@
     "windows-x86_64": { "format": "nsis", "url": "...", "size": 12345678, "sha256": "...", "signature": "..." }
   },
   "system_packages": {
-    "pacman": { "format": "pacman", "url": "https://.../vrc-photo-manager-0.10.0-1-x86_64.pkg.tar.zst", "size": 12345678, "sha256": "...", "signature": "..." },
-    "deb": { "format": "deb", "url": "https://.../vrc-photo-manager_0.10.0_amd64.deb", "size": 12345678, "sha256": "...", "signature": "..." }
+    "pacman": { "format": "pacman", "url": "https://.../vrc-photon-0.10.0-1-x86_64.pkg.tar.zst", "size": 12345678, "sha256": "...", "signature": "..." },
+    "deb": { "format": "deb", "url": "https://.../vrc-photon_0.10.0_amd64.deb", "size": 12345678, "sha256": "...", "signature": "..." }
   }
 }
 ```
@@ -72,28 +72,28 @@
 - `cargo packager` の `.tar.gz` と `PKGBUILD` を入力に、Release ワークフローで
   `archlinux:base-devel` コンテナの非 root ユーザーが
   `makepkg -f --nodeps` を実行し、
-  `vrc-photo-manager-<version>-1-x86_64.pkg.tar.zst` を生成する。
+  `vrc-photon-<version>-1-x86_64.pkg.tar.zst` を生成する。
   `makepkg` は root で実行できないため、コンテナ内に `builder` ユーザーを作る。
 - `.tar.gz` と `PKGBUILD` は手動インストール / AUR 用に残す。
-- `vrc-photo-release-tool` は `dist` 内の一意な `*.pkg.tar.zst` と `*.deb` を
+- `vrc-photon-release-tool` は `dist` 内の一意な `*.pkg.tar.zst` と `*.deb` を
   manifest 化する。どちらか欠ける、重複する、ファイル名にタグバージョンが
   含まれない場合はエラーにする。
 - 既存の `sign --dist` が `.deb`、`.tar.gz`、`.pkg.tar.zst` も署名する。
 - Release ワークフローで次を検証する。
   - `latest.json` の `system_packages` が 2 件であること。
   - deb / pacman の両方に polkit policy が入り、`exec.path` が
-    `/usr/bin/vrc-photo-updater` であること。
-  - `.pkg.tar.zst` が `LC_ALL=C pacman -Qip` で `Name: vrc-photo-manager`、
+    `/usr/bin/vrc-photon-updater` であること。
+  - `.pkg.tar.zst` が `LC_ALL=C pacman -Qip` で `Name: vrc-photon`、
     `Version: <version>-1`、`Architecture: x86_64` を返すこと。
 
 ### 3. 特権実行の構成
 
-UI は既存どおりユーザー権限の `vrc-photo-updater --apply <job.json>` を起動する。
+UI は既存どおりユーザー権限の `vrc-photon-updater --apply <job.json>` を起動する。
 ユーザーヘルパーが UI / デーモンの終了を待ち、システムパッケージのときだけ
 次を実行する。
 
 ```text
-pkexec --disable-internal-agent /usr/bin/vrc-photo-updater \
+pkexec --disable-internal-agent /usr/bin/vrc-photon-updater \
   --apply-system-package <job.json>
 ```
 
@@ -106,7 +106,7 @@ pkexec --disable-internal-agent /usr/bin/vrc-photo-updater \
   `PKEXEC_UID` への降格と root での健康確認が必要になり特権面が増える。
   いずれも採用しない。
 - `--apply` は effective uid が 0 のとき拒否する。polkit action は
-  `/usr/bin/vrc-photo-updater` を任意引数で実行できるため、ユーザーモードを
+  `/usr/bin/vrc-photon-updater` を任意引数で実行できるため、ユーザーモードを
   root で動かすと任意ファイル置換の特権昇格になる。
 - `--apply-system-package` は effective uid 0 かつ `PKEXEC_UID` が設定されて
   いることを要求する。
@@ -125,11 +125,11 @@ pkexec --disable-internal-agent /usr/bin/vrc-photo-updater \
    `manifest.version > CURRENT_VERSION` であること（ダウングレード拒否）。
 5. `manifest.system_package_for(family)` の `format` / ファイル名 / `size` /
    `sha256` が staged と一致すること。
-6. 検証済みファイルを `/var/tmp/vrc-photo-update-<uuid>.pkg` に root 所有・
+6. 検証済みファイルを `/var/tmp/vrc-photon-update-<uuid>.pkg` に root 所有・
    mode 0600 でコピーし、コピー先で SHA-256 と minisign 署名を再検証すること。
    以降のメタデータ確認とインストールはコピー先だけを使う（TOCTOU 対策）。
 7. `LC_ALL=C pacman -Qip` または `LC_ALL=C dpkg-deb -f` でパッケージ名
-   `vrc-photo-manager` と正規化したバージョンを確認すること。
+   `vrc-photon` と正規化したバージョンを確認すること。
 
 インストールコマンドは固定し、シェルを経由しない。
 
@@ -168,24 +168,24 @@ LC_ALL=C DEBIAN_FRONTEND=noninteractive /usr/bin/dpkg -i <temp>
 
 ### 6. UI のフォールバック
 
-- 自動適用は `pkexec`、`/usr/bin/vrc-photo-updater`、polkit policy の3つが
+- 自動適用は `pkexec`、`/usr/bin/vrc-photon-updater`、polkit policy の3つが
   揃っている場合だけ有効にする。
 - `system_packages` がない旧フィード、上記のいずれかが欠ける環境、直前の
   適用が `AuthUnavailable` だった UI セッションでは、ダウンロード / 適用
   ボタンを出さず、パッケージマネージャのコマンドと理由を表示する。
 - `AuthUnavailable` の非表示はその UI セッションだけ。`last-result.json` は
   起動時に一度消費されるため、次回起動時は再試行できる。
-- 表示するコマンドは pacman が `sudo pacman -Syu vrc-photo-manager`、
-  deb が `sudo apt install --only-upgrade vrc-photo-manager`。
+- 表示するコマンドは pacman が `sudo pacman -Syu vrc-photon`、
+  deb が `sudo apt install --only-upgrade vrc-photon`。
 
 ### 7. polkit policy
 
-`packaging/polkit/com.tommyz.vrc-photo-manager.update.policy` を deb / pacman
+`packaging/polkit/com.tommyz.vrc-photon.update.policy` を deb / pacman
 の両方に同梱し、`/usr/share/polkit-1/actions/` に配置する。
 
-- action id: `com.tommyz.vrc-photo-manager.update-package`
+- action id: `com.tommyz.vrc-photon.update-package`
 - `allow_any` / `allow_inactive` / `allow_active`: `auth_admin`
-- `org.freedesktop.policykit.exec.path`: `/usr/bin/vrc-photo-updater`
+- `org.freedesktop.policykit.exec.path`: `/usr/bin/vrc-photon-updater`
 
 AppImage には同梱しない（AppImage はシステムパッケージモードを使わない）。
 policy がない環境では generic な `org.freedesktop.policykit.exec` に
@@ -198,8 +198,8 @@ policy がない環境では generic な `org.freedesktop.policykit.exec` に
   `systemctl --user start` / `restart` が必要。
 - `daemon_supervisor` が `systemd` の場合、通常起動は
   `systemctl --user daemon-reload` → `systemctl --user start
-  vrc-photo-daemon.service`、更新後は `daemon-reload` →
-  `systemctl --user restart vrc-photo-daemon.service` を使う。
+  vrc-photon-daemon.service`、更新後は `daemon-reload` →
+  `systemctl --user restart vrc-photon-daemon.service` を使う。
 - `systemctl` が失敗した場合は従来のプロセス起動にフォールバックする。
 - 健康マーカーを書くまでデーモンは自動起動しない。健康確認後に
   supervisor に応じた方法でデーモンを起動する。
@@ -218,9 +218,9 @@ policy がない環境では generic な `org.freedesktop.policykit.exec` に
 - 特権側も署名済み manifest と埋め込み公開鍵を信頼の根にする。署名鍵の管理は
   ADR-0012 の運用に従う。
 - パッケージのインストールスクリプトは root で実行される。現在の
-  vrc-photo-manager パッケージには install script を同梱していないが、将来
+  vrc-photon パッケージには install script を同梱していないが、将来
   追加する場合はレビューを必須とする。
-- `pkexec` の action は `/usr/bin/vrc-photo-updater` の任意引数を許可するため、
+- `pkexec` の action は `/usr/bin/vrc-photon-updater` の任意引数を許可するため、
   引数検証はヘルパー側で行う。
 - polkit policy がない、`pkexec` がない、ヘルパーが `/usr/bin` にない環境では
   従来のコマンド表示にフォールバックする。
@@ -252,7 +252,7 @@ policy がない環境では generic な `org.freedesktop.policykit.exec` に
 
 ## References
 
-- [Issue #144](https://github.com/TommyZ-7/vrc-photo-manager/issues/144)
+- [Issue #144](https://github.com/TommyZ-7/vrc-photon/issues/144)
 - [設計書](../superpowers/specs/2026-11-02-system-package-update-design.md)
 - [実装計画](../superpowers/plans/2026-11-02-system-package-update.md)
 - [ADR-0012: 自動アップデートは署名付きマニフェストと専用ヘルパーで行う](0012-auto-update.md)

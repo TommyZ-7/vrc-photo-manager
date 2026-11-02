@@ -1,7 +1,7 @@
 # 100k Photo Library: Infinite Scroll and Google Photos-style Year Rail
 
 - Date: 2026-10-23
-- Issue: [#8 feat: 一覧・検索の10万枚対応（キーセットページング）](https://github.com/TommyZ-7/vrc-photo-manager/issues/8)
+- Issue: [#8 feat: 一覧・検索の10万枚対応（キーセットページング）](https://github.com/TommyZ-7/vrc-photon/issues/8)
 - Status: Draft for review
 - Target: `crates/core/src/db.rs`, `crates/core/src/model.rs`, `crates/ui/src/main.rs`, docs
 - Supersedes: [ADR-0007](../adr/0007-photo-load-cap.md)
@@ -580,7 +580,7 @@ Budgets (development machine, 100k photos, release build):
 
 Instrumentation:
 
-- `VRC_PHOTO_TIMING` env-gated timing probes for index build, page load,
+- `VRC_PHOTON_TIMING` env-gated timing probes for index build, page load,
   thumbnail decode, background search, and first frame. The probes are silent
   when the variable is unset and add no logging dependency.
 - A `#[test] #[ignore]` in `crates/core/src/db.rs` seeds 100k photos in a

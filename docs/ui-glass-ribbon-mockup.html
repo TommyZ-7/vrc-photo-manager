@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>VRC Photo Manager — Glass Backdrop Ribbon UI Mock</title>
+<title>VRC PhotoN — Glass Backdrop Ribbon UI Mock</title>
 <style>
   /* ==========================================================================
      Tokens
@@ -2789,7 +2789,7 @@
       <div class="titlebar">
         <div class="tb-left">
           <span class="app-glyph"><svg class="icon"><use href="#i-aperture"/></svg></span>
-          <span class="tb-app">VRC Photo Manager</span>
+          <span class="tb-app">VRC PhotoN</span>
           <span class="tb-sep"></span>
           <span class="tb-crumb" id="titlebarCrumb">ライブラリ</span>
           <div class="ribbon-tablist" role="tablist" aria-label="リボン">
@@ -3581,12 +3581,12 @@
             <section class="settings-card card-sub" data-settings-panel="logs">
               <div class="settings-card-head">
                 <span class="settings-icon"><svg class="icon"><use href="#i-file"/></svg></span>
-                <div><h3>ログ</h3><p>vrc-photo-manager.log / vrc-photo-daemon.log</p></div>
+                <div><h3>ログ</h3><p>vrc-photon.log / vrc-photon-daemon.log</p></div>
                 <button class="badge" data-action="open-logs">ログフォルダを開く</button>
               </div>
               <div class="settings-list">
-                <div class="setting-row"><div><label>UI ログ</label><p>~/.local/share/vrc-photo-manager/logs</p></div><span class="value">vrc-photo-manager.log</span></div>
-                <div class="setting-row"><div><label>デーモンログ</label><p>~/.local/share/vrc-photo-manager/logs</p></div><span class="value">vrc-photo-daemon.log</span></div>
+                <div class="setting-row"><div><label>UI ログ</label><p>~/.local/share/vrc-photon/logs</p></div><span class="value">vrc-photon.log</span></div>
+                <div class="setting-row"><div><label>デーモンログ</label><p>~/.local/share/vrc-photon/logs</p></div><span class="value">vrc-photon-daemon.log</span></div>
                 <div class="setting-row"><div><label>VRChat ログ保持</label><p>VRChat 本体は 24 時間で削除します</p></div><span class="badge amber">注意</span></div>
               </div>
             </section>
@@ -3594,11 +3594,11 @@
             <section class="settings-card card-sub" data-settings-panel="about">
               <div class="settings-card-head">
                 <span class="settings-icon"><svg class="icon"><use href="#i-shield"/></svg></span>
-                <div><h3>VRC Photo Manager</h3><p>ローカルファースト · 写真とログは外部送信しません</p></div>
+                <div><h3>VRC PhotoN</h3><p>ローカルファースト · 写真とログは外部送信しません</p></div>
                 <span class="badge">v0.8.0-dev</span>
               </div>
               <div class="settings-list">
-                <div class="setting-row"><div><label>データベース</label><p>~/.local/share/vrc-photo-manager/library.db</p></div><span class="value">38.6 GB</span></div>
+                <div class="setting-row"><div><label>データベース</label><p>~/.local/share/vrc-photon/library.db</p></div><span class="value">38.6 GB</span></div>
                 <div class="setting-row"><div><label>サムネイルキャッシュ</label><p>256px WebP · LRU 192</p></div><span class="value">1.2 GB</span></div>
                 <div class="setting-row"><div><label>ショートカット</label><p>サイドバー / 詳細 / 検索</p></div><span class="value">Ctrl+B · I · K</span></div>
                 <div class="setting-row"><div><label>アップデート</label><p>署名付き GitHub Releases を確認</p></div><button class="btn" data-action="check-update"><svg class="icon"><use href="#i-download"/></svg>確認</button></div>
@@ -4090,7 +4090,7 @@
       "view-log": () => showToast("ログビューアは次のイテレーションで追加します"),
       "check-update": () => showToast("最新バージョンです（モック）"),
       "shortcuts": () => showToast("Ctrl+B / Ctrl+I / Ctrl+K / Esc が使えます"),
-      "about": () => showToast("VRC Photo Manager v0.8.0-dev · MIT"),
+      "about": () => showToast("VRC PhotoN v0.8.0-dev · MIT"),
       "reduce-motion": () => showToast("モーション設定を切り替えました（モック）"),
       "theme": () => showToast("テーマ切り替えは次のイテレーションで追加します"),
       "import-result": () => showToast("直近の取り込み結果: 完了 22 · スキップ 2"),

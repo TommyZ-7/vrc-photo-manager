@@ -129,7 +129,7 @@ UI helper tests:
 
 Verification:
 
-- `VRC_PHOTO_TIMING=1` on a debug build: the click handler stays under 1 ms;
+- `VRC_PHOTON_TIMING=1` on a debug build: the click handler stays under 1 ms;
   a cache-miss decode is logged in the background; a repeat click uses the
   cache. The existing timing probes remain env-gated.
 - Manual demo run: click cards, navigate the viewer with arrows, open a
