@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
-use vrc_photo_i18n::{tr, tr_args};
+use vrc_photon_i18n::{tr, tr_args};
 
 use crate::DaemonStatus;
 
@@ -39,7 +39,7 @@ impl Tray {
 
         let icon = TrayIconBuilder::new()
             .with_menu(Box::new(menu))
-            .with_tooltip("VRC Photo Manager")
+            .with_tooltip("VRC PhotoN")
             .with_icon(build_icon()?)
             .build()
             .context("cannot create tray icon")?;
@@ -91,9 +91,7 @@ impl Tray {
         if text != self.last_text {
             self.status
                 .set_text(tr_args!("tray.status.prefix", status = text.clone()));
-            let _ = self
-                .icon
-                .set_tooltip(Some(format!("VRC Photo Manager — {text}")));
+            let _ = self.icon.set_tooltip(Some(format!("VRC PhotoN — {text}")));
             self.last_text = text;
         }
         self.pause.set_checked(status.paused);
@@ -106,9 +104,9 @@ pub fn open_ui() {
         return;
     };
     let name = if cfg!(target_os = "windows") {
-        "vrc-photo-manager.exe"
+        "vrc-photon.exe"
     } else {
-        "vrc-photo-manager"
+        "vrc-photon"
     };
     let candidate = current
         .parent()

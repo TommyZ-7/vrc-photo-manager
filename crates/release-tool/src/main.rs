@@ -2,13 +2,13 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use vrc_photo_release_tool::{
+use vrc_photon_release_tool::{
     build_manifest, collect_files, load_secret_key, sign_file, verify_file,
 };
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "vrc-photo-update-manifest",
+    name = "vrc-photon-update-manifest",
     about = "Sign release artifacts and build the update manifest"
 )]
 struct Cli {

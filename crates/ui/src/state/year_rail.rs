@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use gpui_kit::{Bounds, Pixels, Point, TextRun, font, point, px, rgb, size};
-use vrc_photo_core::model::PhotoIndexEntry;
+use vrc_photon_core::model::PhotoIndexEntry;
 
 pub(crate) const RAIL_TOP_PAD: f32 = 24.0;
 pub(crate) const RAIL_TRACK_INSET: f32 = 6.0;
@@ -89,16 +89,16 @@ pub(crate) fn rail_row_at(y: f32, total: usize, height: f32) -> usize {
 
 /// Formats a local `YYYYMM` capture month for the rail pill.
 pub(crate) fn format_captured_month(month: i32) -> String {
-    format_captured_month_in(&vrc_photo_i18n::current_locale(), month)
+    format_captured_month_in(&vrc_photon_i18n::current_locale(), month)
 }
 
 pub(crate) fn format_captured_month_in(locale: &str, month: i32) -> String {
     if month <= 0 {
-        return vrc_photo_i18n::tr_in(locale, "date.unknown");
+        return vrc_photon_i18n::tr_in(locale, "date.unknown");
     }
     let month_number = month % 100;
-    let month_name = vrc_photo_i18n::tr_in(locale, &format!("date.month_name.{month_number}"));
-    vrc_photo_i18n::tr_args_in(
+    let month_name = vrc_photon_i18n::tr_in(locale, &format!("date.month_name.{month_number}"));
+    vrc_photon_i18n::tr_args_in(
         locale,
         "date.captured_month",
         &[

@@ -10,7 +10,7 @@ use crate::verify::{effective_public_keys, verify_bytes};
 
 /// The default feed on the latest GitHub Release.
 pub const DEFAULT_FEED_URL: &str =
-    "https://github.com/TommyZ-7/vrc-photo-manager/releases/latest/download/latest.json";
+    "https://github.com/TommyZ-7/vrc-photon/releases/latest/download/latest.json";
 
 /// Where and how to check for updates.
 #[derive(Debug, Clone)]
@@ -24,7 +24,7 @@ impl FeedConfig {
     /// Reads the feed override and the keys for this build.
     pub fn from_env() -> Self {
         Self {
-            manifest_url: std::env::var("VRC_PHOTO_UPDATE_FEED")
+            manifest_url: std::env::var("VRC_PHOTON_UPDATE_FEED")
                 .unwrap_or_else(|_| DEFAULT_FEED_URL.to_string()),
             public_keys: effective_public_keys(),
             allow_http: cfg!(debug_assertions),
@@ -241,7 +241,7 @@ mod tests {
     fn linux_platform() -> serde_json::Value {
         serde_json::json!({
             "linux-x86_64": {
-                "url": "https://example.com/vrc-photo-manager_0.4.0_x86_64.AppImage",
+                "url": "https://example.com/vrc-photon_0.4.0_x86_64.AppImage",
                 "format": "appimage",
                 "size": 1024,
                 "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -253,7 +253,7 @@ mod tests {
     fn system_platforms() -> serde_json::Value {
         serde_json::json!({
             "linux-x86_64": {
-                "url": "https://example.com/vrc-photo-manager_0.4.0_x86_64.AppImage",
+                "url": "https://example.com/vrc-photon_0.4.0_x86_64.AppImage",
                 "format": "appimage",
                 "size": 1024,
                 "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -261,14 +261,14 @@ mod tests {
             },
             "system_packages": {
                 "pacman": {
-                    "url": "https://example.com/vrc-photo-manager-0.4.0-1-x86_64.pkg.tar.zst",
+                    "url": "https://example.com/vrc-photon-0.4.0-1-x86_64.pkg.tar.zst",
                     "format": "pacman",
                     "size": 1024,
                     "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
                     "signature": crate::verify::test_signature()
                 },
                 "deb": {
-                    "url": "https://example.com/vrc-photo-manager_0.4.0_amd64.deb",
+                    "url": "https://example.com/vrc-photon_0.4.0_amd64.deb",
                     "format": "deb",
                     "size": 1024,
                     "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
@@ -320,7 +320,7 @@ mod tests {
             .into_string();
         let platforms = serde_json::json!({
             "linux-x86_64": {
-                "url": "https://example.com/vrc-photo-manager_0.4.0_x86_64.AppImage",
+                "url": "https://example.com/vrc-photon_0.4.0_x86_64.AppImage",
                 "format": "appimage",
                 "size": body.len(),
                 "sha256": hex::encode(sha2::Sha256::digest(body)),
@@ -595,7 +595,7 @@ mod tests {
             "0.4.0",
             serde_json::json!({
                 "windows-x86_64": {
-                    "url": "https://example.com/vrc-photo-manager_0.4.0_x64-setup.exe",
+                    "url": "https://example.com/vrc-photon_0.4.0_x64-setup.exe",
                     "format": "nsis",
                     "size": 1024,
                     "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",

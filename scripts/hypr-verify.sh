@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Hyprland visual-verification helper for vrc-photo-manager.
+# Hyprland visual-verification helper for vrc-photon.
 #
 # The app window is launched on a dedicated workspace (default 9) without
 # switching to it, moved to a chosen monitor (default DP-3), and captured with
@@ -7,7 +7,7 @@
 # window on a monitor.
 #
 # Requirements: Hyprland (Lua config era, 0.56+), grim 1.5+ with -T support,
-# jq, and a built vrc-photo-manager binary.
+# jq, and a built vrc-photon binary.
 #
 # Usage:
 #   scripts/hypr-verify.sh start [--release] [--monitor DP-3] [--workspace 9] \
@@ -33,14 +33,14 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/vrc-photo-manager"
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/vrc-photon"
 STATE_FILE="$STATE_DIR/hypr-verify.json"
 
 PROFILE="${VRC_PROFILE:-debug}"
 BIN_OVERRIDE="${VRC_BIN:-}"
 WORKSPACE="${VRC_VERIFY_WORKSPACE:-9}"
 MONITOR="${VRC_VERIFY_MONITOR:-DP-3}"
-TITLE="${VRC_VERIFY_TITLE:-VRC Photo Manager}"
+TITLE="${VRC_VERIFY_TITLE:-VRC PhotoN}"
 
 RESTORE_ACTIVE=0
 RESTORE_ADDR=""
@@ -210,8 +210,8 @@ cmd_start() {
 
     local win_size
     win_size=$(window_size_from_args "${app_args[@]}")
-    local bin="${BIN_OVERRIDE:-$ROOT/target/$profile/vrc-photo-manager}"
-    [[ -x "$bin" ]] || die "binary not found: $bin (build with: cargo build -p vrc-photo-ui)"
+    local bin="${BIN_OVERRIDE:-$ROOT/target/$profile/vrc-photon}"
+    [[ -x "$bin" ]] || die "binary not found: $bin (build with: cargo build -p vrc-photon-ui)"
 
     local existing
     existing=$(find_window)

@@ -95,7 +95,7 @@ cat <<EOF
 
 Patch applied. Build and launch:
   cd "$WORKTREE"
-  CARGO_TARGET_DIR="$MAIN_ROOT/target" cargo build -p vrc-photo-ui
+  CARGO_TARGET_DIR="$MAIN_ROOT/target" cargo build -p vrc-photon-ui
   "$SKILL_DIR/scripts/launch.sh" --dzn --demo
 
 Do not commit vendor/ or the Cargo.toml/Cargo.lock patch.

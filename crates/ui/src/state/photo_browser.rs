@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::{ScrollStrategy, UniformListScrollHandle};
-use vrc_photo_core::model::{Photo, PhotoIndexEntry};
+use vrc_photon_core::model::{Photo, PhotoIndexEntry};
 
 use crate::state::year_rail::{YearBucket, build_year_buckets};
 use crate::ui::year_rail::YearRailLabels;
@@ -372,7 +372,7 @@ pub(crate) fn sync_search_mirror(search: &mut PhotoBrowser, library: &PhotoBrows
 /// visible library. Returns the user-facing error in that case.
 pub(crate) fn apply_library_index(
     browser: &mut PhotoBrowser,
-    result: vrc_photo_core::error::Result<Vec<PhotoIndexEntry>>,
+    result: vrc_photon_core::error::Result<Vec<PhotoIndexEntry>>,
 ) -> Option<&'static str> {
     match result {
         Ok(entries) => {
@@ -431,8 +431,8 @@ mod tests {
     use crate::ui::theme::library_grid_metrics;
     use crate::ui::year_rail::YearRailLabels;
     use gpui_kit::{ScrollStrategy, UniformListScrollHandle, point, px};
-    use vrc_photo_core::error::CoreError;
-    use vrc_photo_core::settings::CardSize;
+    use vrc_photon_core::error::CoreError;
+    use vrc_photon_core::settings::CardSize;
 
     /// Arbitrary non-196 row height so these tests prove the maths reads the
     /// supplied layout instead of a fixed constant.

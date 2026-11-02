@@ -1,6 +1,6 @@
 //! Fixtures shared by the `state` module tests.
 
-use vrc_photo_core::model::{Photo, PhotoIndexEntry, PhotoStatus};
+use vrc_photon_core::model::{Photo, PhotoIndexEntry, PhotoStatus};
 
 pub(crate) fn test_photo(id: i64) -> Photo {
     Photo {

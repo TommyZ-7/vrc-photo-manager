@@ -8,8 +8,8 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use vrc_photo_core::importer::{ImportIssue, ImportIssueKind, ImportMode, ImportProgress};
-use vrc_photo_i18n::{tr, tr_args};
+use vrc_photon_core::importer::{ImportIssue, ImportIssueKind, ImportMode, ImportProgress};
+use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::App;
 use crate::app::import::{ImportDialogOrigin, ImportDialogPhase, ImportReportView};
@@ -514,7 +514,7 @@ mod tests {
     use super::{import_progress_label, import_progress_ratio, retryable_sources};
     use crate::app::import::import_issue_counts;
     use std::path::PathBuf;
-    use vrc_photo_core::importer::{ImportIssue, ImportIssueKind, ImportProgress};
+    use vrc_photon_core::importer::{ImportIssue, ImportIssueKind, ImportProgress};
 
     #[test]
     fn import_issue_counts_separate_failures_and_partial_moves() {

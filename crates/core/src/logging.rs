@@ -13,10 +13,10 @@ use crate::data_dir;
 pub const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
 
 /// File name of the UI application log.
-pub const UI_LOG_FILE: &str = "vrc-photo-manager.log";
+pub const UI_LOG_FILE: &str = "vrc-photon.log";
 
 /// File name of the daemon log.
-pub const DAEMON_LOG_FILE: &str = "vrc-photo-daemon.log";
+pub const DAEMON_LOG_FILE: &str = "vrc-photon-daemon.log";
 
 /// Returns the per-user log directory, or `None` when no data directory is
 /// available.

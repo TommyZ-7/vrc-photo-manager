@@ -13,14 +13,14 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::component::notification::NotificationType;
 use gpui_kit::*;
-use vrc_photo_core::importer::{
+use vrc_photon_core::importer::{
     self, ImportIssue, ImportIssueKind, ImportMode, ImportProgress, ImportRename, ImportResult,
 };
-use vrc_photo_core::linker;
-use vrc_photo_core::scanner;
-use vrc_photo_core::scanner::ScanFailure;
-use vrc_photo_core::settings::AppSettings;
-use vrc_photo_i18n::{tr, tr_args};
+use vrc_photon_core::linker;
+use vrc_photon_core::scanner;
+use vrc_photon_core::scanner::ScanFailure;
+use vrc_photon_core::settings::AppSettings;
+use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::App;
 use crate::ui::import::retryable_sources;
@@ -648,9 +648,9 @@ fn append_scan_error(report: &mut ImportReportView, message: impl Into<String>) 
 
 /// Queues a scan of only the directory the import wrote to.
 pub(crate) fn request_import_scan(
-    db: &vrc_photo_core::Db,
+    db: &vrc_photon_core::Db,
     dest: &Path,
-) -> vrc_photo_core::Result<bool> {
+) -> vrc_photon_core::Result<bool> {
     db.request_daemon_scan_root(&dest.to_string_lossy())
 }
 
@@ -788,11 +788,11 @@ mod tests {
     use std::cell::Cell;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
-    use vrc_photo_core::importer::{
+    use vrc_photon_core::importer::{
         ImportIssue, ImportIssueKind, ImportMode, ImportRename, ImportResult,
     };
-    use vrc_photo_core::scanner::ScanFailure;
-    use vrc_photo_core::settings::AppSettings;
+    use vrc_photon_core::scanner::ScanFailure;
+    use vrc_photon_core::settings::AppSettings;
 
     #[test]
     fn import_dialog_errors_render_in_the_current_language() {
@@ -803,12 +803,12 @@ mod tests {
 
     #[test]
     fn import_scan_request_targets_the_destination_root() {
-        let db = vrc_photo_core::Db::open_in_memory().unwrap();
+        let db = vrc_photon_core::Db::open_in_memory().unwrap();
         let dest = Path::new("/photos/imported");
         assert!(request_import_scan(&db, dest).unwrap());
         assert_eq!(
             db.take_daemon_commands().unwrap(),
-            vec![vrc_photo_core::model::DaemonCommand::ScanRoot {
+            vec![vrc_photon_core::model::DaemonCommand::ScanRoot {
                 path: "/photos/imported".to_string(),
             }]
         );

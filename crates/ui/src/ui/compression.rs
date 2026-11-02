@@ -12,11 +12,11 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use vrc_photo_core::model::{
+use vrc_photon_core::model::{
     CompressionFormat, CompressionJob, CompressionProfile, MAX_JOB_RETRIES, MAX_PROFILE_NAME_CHARS,
     QueueStatus, ResizeMode,
 };
-use vrc_photo_i18n::{tr, tr_args};
+use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::App;
 use crate::ui::components::{card_header, glass_panel};
@@ -1178,7 +1178,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{job_error_label, job_retry_available, job_retry_label, queue_status_badge};
-    use vrc_photo_core::model::{CompressionJob, QueueStatus};
+    use vrc_photon_core::model::{CompressionJob, QueueStatus};
 
     fn test_job(status: QueueStatus, retry_count: i64) -> CompressionJob {
         CompressionJob {

@@ -68,7 +68,7 @@ fn filter_from(env_value: Option<&str>, default_filter: &str) -> EnvFilter {
 
 /// Opens the process log file in the default log directory.
 fn open_file_writer(process: &str) -> Result<(PathBuf, File), String> {
-    let dir = vrc_photo_core::logging::logs_dir()
+    let dir = vrc_photon_core::logging::logs_dir()
         .ok_or_else(|| "no data directory for the log file".to_string())?;
     open_file_writer_in(&dir, process)
 }
@@ -76,10 +76,10 @@ fn open_file_writer(process: &str) -> Result<(PathBuf, File), String> {
 /// Prepares and opens the log file under `dir`, naming the failing step
 /// when preparation fails so the caller can log the reason.
 fn open_file_writer_in(dir: &Path, process: &str) -> Result<(PathBuf, File), String> {
-    let path = vrc_photo_core::logging::prepare_log_file_in(
+    let path = vrc_photon_core::logging::prepare_log_file_in(
         dir,
         process,
-        vrc_photo_core::logging::MAX_LOG_BYTES,
+        vrc_photon_core::logging::MAX_LOG_BYTES,
     )
     .map_err(|error| format!("cannot prepare log file in {}: {error}", dir.display()))?;
     let file = std::fs::OpenOptions::new()
@@ -100,8 +100,8 @@ mod tests {
     fn rust_log_wins_when_parsable_and_default_applies_otherwise() {
         assert_eq!(filter_from(Some("debug"), "info").to_string(), "debug");
         assert_eq!(
-            filter_from(Some("vrc_photo_manager=trace"), "info").to_string(),
-            "vrc_photo_manager=trace"
+            filter_from(Some("vrc_photonn=trace"), "info").to_string(),
+            "vrc_photonn=trace"
         );
         assert_eq!(filter_from(Some("!!!"), "info").to_string(), "info");
         assert_eq!(filter_from(None, "info").to_string(), "info");

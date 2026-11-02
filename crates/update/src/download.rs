@@ -201,7 +201,7 @@ mod tests {
 
     fn asset(keys: &Keys, body: &[u8], signed: &[u8], size: Option<u64>) -> PlatformAsset {
         PlatformAsset {
-            url: "https://example.com/vrc-photo-manager_0.4.0_x86_64.AppImage".to_string(),
+            url: "https://example.com/vrc-photon_0.4.0_x86_64.AppImage".to_string(),
             format: UpdateFormat::AppImage,
             size: size.unwrap_or(body.len() as u64),
             sha256: sha256(body),
@@ -229,7 +229,7 @@ mod tests {
         let body = b"new appimage bytes";
         let update = available(asset(&keys, body, body, None), &keys);
         let dir = tempfile::tempdir().unwrap();
-        let dest = dir.path().join("vrc-photo-manager.AppImage");
+        let dest = dir.path().join("vrc-photon.AppImage");
         let mut last_progress = 0;
         let path = download(
             &FakeClient {
@@ -262,7 +262,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir
             .path()
-            .join("updates/downloads/0.4.0/vrc-photo-manager.AppImage");
+            .join("updates/downloads/0.4.0/vrc-photon.AppImage");
         download(
             &FakeClient {
                 body: body.to_vec(),
@@ -292,7 +292,7 @@ mod tests {
         let tampered = b"tampered contents";
         let update = available(asset(&keys, tampered, signed, None), &keys);
         let dir = tempfile::tempdir().unwrap();
-        let dest = dir.path().join("vrc-photo-manager.AppImage");
+        let dest = dir.path().join("vrc-photon.AppImage");
         let error = download(
             &FakeClient {
                 body: tampered.to_vec(),
@@ -305,7 +305,7 @@ mod tests {
         .unwrap_err();
         assert!(matches!(error, UpdateError::Signature));
         assert!(!dest.exists());
-        assert!(!dir.path().join("vrc-photo-manager.AppImage.part").exists());
+        assert!(!dir.path().join("vrc-photon.AppImage.part").exists());
     }
 
     #[test]

@@ -1,6 +1,6 @@
 param(
     [string]$OutFile = "$env:TEMP\wslg-window.png",
-    [string]$TitleLike = "VRC Photo Manager*",
+    [string]$TitleLike = "VRC PhotoN*",
     [string]$ProcessName = "msrdc",
     [switch]$FullScreen
 )
@@ -52,7 +52,7 @@ if ($FullScreen) {
     $handle = if ($process -and $process.MainWindowHandle -ne 0) {
         $process.MainWindowHandle
     } else {
-        [Win32Capture]::FindWindow($null, "VRC Photo Manager (Ubuntu)")
+        [Win32Capture]::FindWindow($null, "VRC PhotoN (Ubuntu)")
     }
 
     if ($handle -eq [IntPtr]::Zero) {

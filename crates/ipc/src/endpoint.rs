@@ -34,7 +34,7 @@ impl Endpoint {
     pub fn for_data_dir(data_dir: &Path) -> io::Result<Self> {
         let path = match std::env::var_os("XDG_RUNTIME_DIR") {
             Some(runtime) if !runtime.is_empty() => PathBuf::from(runtime)
-                .join("vrc-photo-manager")
+                .join("vrc-photon")
                 .join("daemon.sock"),
             _ => data_dir.join("run").join("daemon.sock"),
         };
@@ -55,7 +55,7 @@ impl Endpoint {
     #[cfg(windows)]
     pub fn for_data_dir(_data_dir: &Path) -> io::Result<Self> {
         Ok(Self {
-            inner: EndpointInner::Namespaced(current_user_namespaced("vrc-photo-manager-daemon")),
+            inner: EndpointInner::Namespaced(current_user_namespaced("vrc-photon-daemon")),
             fallback: false,
         })
     }
@@ -82,7 +82,7 @@ impl Endpoint {
         let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
         Self {
             inner: EndpointInner::Namespaced(format!(
-                "vrc-photo-manager-test-{}-{counter}",
+                "vrc-photon-test-{}-{counter}",
                 std::process::id()
             )),
             fallback: false,
@@ -154,10 +154,10 @@ fn current_uid() -> Option<u32> {
 #[cfg(unix)]
 fn fallback_dir() -> PathBuf {
     let name = match current_uid() {
-        Some(uid) => format!("vrc-photo-manager-{uid}"),
+        Some(uid) => format!("vrc-photon-{uid}"),
         None => {
             let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
-            format!("vrc-photo-manager-{user}")
+            format!("vrc-photon-{user}")
         }
     };
     std::env::temp_dir().join(name)
@@ -269,8 +269,8 @@ mod tests {
         let dir = fallback_dir();
         let name = dir.file_name().unwrap().to_string_lossy().to_string();
         match current_uid() {
-            Some(uid) => assert_eq!(name, format!("vrc-photo-manager-{uid}")),
-            None => assert!(name.starts_with("vrc-photo-manager-")),
+            Some(uid) => assert_eq!(name, format!("vrc-photon-{uid}")),
+            None => assert!(name.starts_with("vrc-photon-")),
         }
         assert_eq!(dir.parent(), Some(std::env::temp_dir().as_path()));
     }

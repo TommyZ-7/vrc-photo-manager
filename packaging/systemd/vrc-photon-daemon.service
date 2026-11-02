@@ -1,12 +1,12 @@
 [Unit]
-Description=VRC Photo Manager background daemon
-Documentation=https://github.com/TommyZ-7/vrc-photo-manager/blob/main/docs/release.md
+Description=VRC PhotoN background daemon
+Documentation=https://github.com/TommyZ-7/vrc-photon/blob/main/docs/release.md
 PartOf=graphical-session.target
 After=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/vrc-photo-daemon
+ExecStart=/usr/bin/vrc-photon-daemon
 Restart=on-failure
 RestartSec=5s
 

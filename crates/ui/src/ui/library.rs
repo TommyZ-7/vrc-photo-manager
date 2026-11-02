@@ -13,9 +13,9 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use vrc_photo_core::db::Db;
-use vrc_photo_core::model::Photo;
-use vrc_photo_i18n::{tr, tr_args};
+use vrc_photon_core::db::Db;
+use vrc_photon_core::model::Photo;
+use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::App;
 use crate::app::cli::log_timing;
@@ -229,7 +229,7 @@ impl App {
         search: bool,
         generation: u64,
         requests: Vec<(usize, usize, usize)>,
-        error: vrc_photo_core::error::CoreError,
+        error: vrc_photon_core::error::CoreError,
         cx: &mut Context<Self>,
     ) {
         tracing::error!(%error, "photos_by_ids failed");

@@ -1,5 +1,5 @@
 [package]
-name = "vrc-photo-ui"
+name = "vrc-photon-ui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ repository.workspace = true
 authors.workspace = true
 
 [[bin]]
-name = "vrc-photo-manager"
+name = "vrc-photon"
 path = "src/main.rs"
 
 [dependencies]
@@ -24,10 +24,10 @@ smallvec = "1"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 trash = "5"
-vrc-photo-core = { path = "../core" }
-vrc-photo-i18n = { path = "../i18n" }
-vrc-photo-ipc = { path = "../ipc" }
-vrc-photo-update = { path = "../update" }
+vrc-photon-core = { path = "../core" }
+vrc-photon-i18n = { path = "../i18n" }
+vrc-photon-ipc = { path = "../ipc" }
+vrc-photon-update = { path = "../update" }
 
 [dev-dependencies]
 tempfile = "3"

@@ -11,7 +11,7 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use vrc_photo_i18n::{tr, tr_args};
+use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::App;
 use crate::ui::components::{card_header, glass_panel};

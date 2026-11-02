@@ -14,11 +14,11 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::prelude::StatefulInteractiveElement as _;
 use gpui_kit::*;
-use vrc_photo_core::model::DaemonCommand;
-use vrc_photo_core::settings::CardSize;
-use vrc_photo_core::thumbnail;
-use vrc_photo_i18n::{tr, tr_args};
-use vrc_photo_ipc::Response;
+use vrc_photon_core::model::DaemonCommand;
+use vrc_photon_core::settings::CardSize;
+use vrc_photon_core::thumbnail;
+use vrc_photon_i18n::{tr, tr_args};
+use vrc_photon_ipc::Response;
 
 use crate::app::App;
 use crate::app::daemon::autostart_description;
@@ -63,8 +63,8 @@ impl App {
         } else {
             format!("{} MB", self.settings.thumbnail_cache_mb)
         };
-        let active_language = vrc_photo_i18n::normalize(&self.settings.language);
-        let language_name = vrc_photo_i18n::locales()
+        let active_language = vrc_photon_i18n::normalize(&self.settings.language);
+        let language_name = vrc_photon_i18n::locales()
             .into_iter()
             .find(|locale| locale.code == active_language)
             .map(|locale| locale.name)
@@ -569,7 +569,7 @@ impl App {
 
     fn language_card(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.palette;
-        let active = vrc_photo_i18n::normalize(&self.settings.language);
+        let active = vrc_photon_i18n::normalize(&self.settings.language);
         glass_panel(&self.palette)
             .flex()
             .flex_col()
@@ -590,7 +590,7 @@ impl App {
                     .child(tr!("settings.language.hint")),
             )
             .child(h_flex().flex_wrap().gap(px(4.)).children(
-                vrc_photo_i18n::locales().into_iter().map(|locale| {
+                vrc_photon_i18n::locales().into_iter().map(|locale| {
                     let selected = locale.code == active;
                     let code = locale.code.clone();
                     div()
@@ -904,7 +904,7 @@ impl App {
                 .background_executor()
                 .spawn(async move {
                     let result =
-                        ipc_bridge::request(endpoint, vrc_photo_ipc::Request::ClearThumbnailCache);
+                        ipc_bridge::request(endpoint, vrc_photon_ipc::Request::ClearThumbnailCache);
                     let usage = thumbnail::thumbnail_cache_usage().ok();
                     (result, usage)
                 })

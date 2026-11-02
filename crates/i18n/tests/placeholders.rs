@@ -1,4 +1,4 @@
-use vrc_photo_i18n::{MISSING, keys, tr_in};
+use vrc_photon_i18n::{MISSING, keys, tr_in};
 
 /// Every `tr_args!` call site and the placeholder names it passes.
 ///

@@ -9,7 +9,7 @@ body:
         バグ報告ありがとうございます。English is welcome.
 
         VRChat のユーザーID・表示名・ワールド名・ローカルパス・生ログには個人情報が含まれます。貼る前に必ず除去してください。
-        脆弱性や個人情報の漏えいは、公開 Issue ではなく [SECURITY.md](https://github.com/TommyZ-7/vrc-photo-manager/blob/main/SECURITY.md) の非公開レポートへお願いします。
+        脆弱性や個人情報の漏えいは、公開 Issue ではなく [SECURITY.md](https://github.com/TommyZ-7/vrc-photon/blob/main/SECURITY.md) の非公開レポートへお願いします。
 
   - type: textarea
     id: summary
