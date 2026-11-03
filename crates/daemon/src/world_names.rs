@@ -4,8 +4,6 @@
 //! interval is persisted in `app_settings` so a restart cannot send a request
 //! sooner than the previous process would have.
 
-#![allow(dead_code)] // The Task 8 daemon wiring is the first production consumer.
-
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

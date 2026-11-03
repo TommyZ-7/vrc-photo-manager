@@ -5,8 +5,6 @@
 //! attached, redirects are never followed, and response bodies are capped so a
 //! misbehaving server cannot grow memory without bound.
 
-#![allow(dead_code)] // The Task 7 world name worker is the first consumer.
-
 use std::time::Duration;
 
 use ureq::typestate::AgentScope;
@@ -59,11 +57,6 @@ impl UreqWorldNameTransport {
             agent: production_agent(),
             base_url: BASE_URL.to_string(),
         }
-    }
-
-    #[cfg(test)]
-    fn for_loopback() -> Self {
-        Self::for_loopback_with_base(BASE_URL.to_string())
     }
 
     #[cfg(test)]

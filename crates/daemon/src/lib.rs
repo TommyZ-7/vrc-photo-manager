@@ -41,6 +41,7 @@ use discord_http::UreqTransport;
 use ipc_server::{EventBus, IpcControl, IpcServer, status_snapshot};
 use signals::{JobSignal, WakeSignal};
 use tray::{Tray, TrayAction};
+use world_name_http::UreqWorldNameTransport;
 
 const PARSER_VERSION: &str = "1";
 /// Number of skipped-line sentences kept in one log error detail.
@@ -210,6 +211,10 @@ pub struct Daemon {
     wake: Arc<WakeSignal>,
     jobs: Arc<JobSignal>,
     sends: Arc<JobSignal>,
+    /// Wakes the world name worker when lookups are queued.
+    world_names: Arc<JobSignal>,
+    /// Live copy of `settings.world_name_resolution_enabled` for the worker.
+    world_name_resolution_enabled: Arc<AtomicBool>,
     events: EventBus,
     ipc_endpoint: Option<Endpoint>,
     ipc: Option<IpcServer>,
@@ -237,6 +242,7 @@ pub struct Daemon {
     thumbnail_handle: Option<JoinHandle<()>>,
     hash_handle: Option<JoinHandle<()>>,
     send_handle: Option<JoinHandle<()>>,
+    world_name_handle: Option<JoinHandle<()>>,
     owns_deletion_executor: bool,
     deletion_handle: Option<JoinHandle<()>>,
     last_autostart_check: std::time::Instant,
@@ -318,6 +324,8 @@ impl Daemon {
         }
         settings.save(&db).context("cannot save settings")?;
         let tray_enabled = settings.tray;
+        let world_name_resolution_enabled =
+            Arc::new(AtomicBool::new(settings.world_name_resolution_enabled));
         let thumbnail_dir = vrc_photon_core::thumbnail::thumbnails_dir()
             .unwrap_or_else(|| PathBuf::from("thumbnails"));
         let thumbnail_cache_limit = Arc::new(AtomicU64::new(thumbnail_cache_limit_bytes(
@@ -371,6 +379,8 @@ impl Daemon {
             wake: Arc::new(WakeSignal::default()),
             jobs: Arc::new(JobSignal::default()),
             sends: Arc::new(JobSignal::default()),
+            world_names: Arc::new(JobSignal::default()),
+            world_name_resolution_enabled,
             events: EventBus::default(),
             ipc_endpoint,
             ipc: None,
@@ -391,6 +401,7 @@ impl Daemon {
             thumbnail_handle: None,
             hash_handle: None,
             send_handle: None,
+            world_name_handle: None,
             owns_deletion_executor,
             deletion_handle: None,
             last_autostart_check: std::time::Instant::now(),
@@ -1603,6 +1614,10 @@ impl Daemon {
             Ok(linked) => {
                 if linked > 0 {
                     tracing::info!(linked, "linked photos to log context");
+                    if self.world_name_resolution_enabled.load(Ordering::Relaxed) {
+                        self.enqueue_world_name_backfill();
+                        self.world_names.notify();
+                    }
                 }
                 self.clear_daemon_error(DaemonOperation::Link)
             }
@@ -1775,6 +1790,30 @@ impl Daemon {
             pack_thumbnail_spec(settings.thumbnail_spec()),
             Ordering::Relaxed,
         );
+        let world_name_enabled = settings.world_name_resolution_enabled;
+        let was_enabled = self
+            .world_name_resolution_enabled
+            .swap(world_name_enabled, Ordering::Relaxed);
+        self.settings.world_name_resolution_enabled = world_name_enabled;
+        if world_name_enabled && !was_enabled {
+            self.enqueue_world_name_backfill();
+            self.world_names.notify();
+        } else if !world_name_enabled && was_enabled {
+            self.world_names.notify();
+        }
+    }
+
+    /// Fills photo contexts from stored world names, then queues every world
+    /// that still has no name. Lookup failures stay out of `daemon_errors`:
+    /// the feature is best-effort and must not surface as a user-facing fault.
+    fn enqueue_world_name_backfill(&self) {
+        let db = self.db.lock().unwrap();
+        if let Err(error) = db.backfill_photo_context_world_names() {
+            tracing::warn!(%error, "cannot backfill photo context world names");
+        }
+        if let Err(error) = db.enqueue_missing_world_name_lookups() {
+            tracing::warn!(%error, "cannot enqueue missing world name lookups");
+        }
     }
 
     fn apply_autostart(&self, enabled: bool) {
@@ -1975,6 +2014,21 @@ impl Daemon {
                 .expect("cannot spawn Discord send worker");
             self.send_handle = Some(handle);
         }
+        if self.world_name_handle.is_none() {
+            if self.world_name_resolution_enabled.load(Ordering::Relaxed) {
+                self.enqueue_world_name_backfill();
+            }
+            let db = self.db.clone();
+            let running = self.running.clone();
+            let enabled = self.world_name_resolution_enabled.clone();
+            let wake = self.world_names.clone();
+            let transport = Arc::new(UreqWorldNameTransport::new());
+            let handle = thread::Builder::new()
+                .name("world-name".to_string())
+                .spawn(move || world_names::worker_loop(db, running, enabled, wake, transport))
+                .expect("cannot spawn world name worker");
+            self.world_name_handle = Some(handle);
+        }
         if !self.workers.is_empty() {
             return;
         }
@@ -1996,6 +2050,7 @@ impl Daemon {
         self.running.store(false, Ordering::Relaxed);
         self.jobs.notify();
         self.sends.notify();
+        self.world_names.notify();
         self.thumbnail_tx = None;
         if let Some(handle) = self.thumbnail_handle.take()
             && handle.join().is_err()
@@ -2017,6 +2072,11 @@ impl Daemon {
         {
             tracing::error!("Discord send worker panicked");
         }
+        if let Some(handle) = self.world_name_handle.take()
+            && handle.join().is_err()
+        {
+            tracing::error!("world name worker panicked");
+        }
         for (index, handle) in self.workers.drain(..).enumerate() {
             if handle.join().is_err() {
                 tracing::error!(worker = index, "compression worker panicked");
@@ -2029,6 +2089,7 @@ impl Daemon {
         self.running.store(false, Ordering::Relaxed);
         self.wake.notify();
         self.sends.notify();
+        self.world_names.notify();
         if let Some(mut tail) = self.log_tail.take() {
             let db = self.db.lock().unwrap();
             let now = chrono::Utc::now().timestamp();
@@ -3068,7 +3129,7 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::time::SystemTime;
-    use vrc_photon_core::model::{DeletionStatus, SendOrigin, SendStatus};
+    use vrc_photon_core::model::{DeletionStatus, NewPhoto, PhotoContext, SendOrigin, SendStatus};
     use vrc_photon_core::settings::{DiscordAutoMode, save_discord_webhook};
 
     #[test]
@@ -7112,5 +7173,108 @@ mod tests {
             "0::/user.slice/user-1000.slice/user@1000.service/app.slice/foo-vrc-photon-daemon.service\n",
             "vrc-photon-daemon.service"
         ));
+    }
+
+    fn insert_unresolved_world_photo(db: &Db) -> (i64, i64) {
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo = db
+            .upsert_photo(&NewPhoto {
+                root_id: root,
+                rel_path: "a.png".to_string(),
+                abs_path: "/photos/a.png".to_string(),
+                file_name: "a.png".to_string(),
+                captured_at_utc: 100,
+                captured_at_local: "2026-10-21 21:14:03".to_string(),
+                tz_offset_sec: 0,
+                width: 1,
+                height: 1,
+                file_size: 1,
+                mtime: 100,
+                blake3: None,
+            })
+            .unwrap();
+        let world = db.upsert_world("wrld_test", None, None).unwrap();
+        db.set_photo_context(&PhotoContext {
+            photo_id: photo,
+            session_id: None,
+            world_id: Some(world),
+            world_name: None,
+            instance_id: None,
+            link_method: "log".to_string(),
+            confidence: 0.9,
+            author: None,
+            linked_at: "2026-11-03T00:00:00+00:00".to_string(),
+        })
+        .unwrap();
+        (world, photo)
+    }
+
+    #[test]
+    fn start_workers_spawns_and_stops_the_world_name_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("library.db");
+        let mut daemon = Daemon::open(&db_path, Some(dir.path().to_path_buf()), None).unwrap();
+        daemon.settings.world_name_resolution_enabled = false;
+        daemon.start_workers();
+        assert!(daemon.world_name_handle.is_some());
+        daemon.stop_workers();
+        assert!(daemon.world_name_handle.is_none());
+    }
+
+    #[test]
+    fn enabling_world_name_resolution_enqueues_backfill() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("library.db");
+        let mut daemon = Daemon::open(&db_path, Some(dir.path().to_path_buf()), None).unwrap();
+        let (world, photo) = {
+            let db = daemon.db.lock().unwrap();
+            insert_unresolved_world_photo(&db)
+        };
+        daemon.settings.world_name_resolution_enabled = false;
+        AppSettings {
+            world_name_resolution_enabled: false,
+            ..daemon.settings.clone()
+        }
+        .save(&daemon.db.lock().unwrap())
+        .unwrap();
+
+        AppSettings {
+            world_name_resolution_enabled: true,
+            ..daemon.settings.clone()
+        }
+        .save(&daemon.db.lock().unwrap())
+        .unwrap();
+        daemon.refresh_compression_settings();
+
+        assert!(daemon.world_name_resolution_enabled.load(Ordering::Relaxed));
+        assert!(
+            daemon
+                .db
+                .lock()
+                .unwrap()
+                .world_name_lookup(world)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            daemon
+                .db
+                .lock()
+                .unwrap()
+                .photo_context(photo)
+                .unwrap()
+                .unwrap()
+                .world_name,
+            None
+        );
+    }
+
+    #[test]
+    fn run_once_does_not_start_the_world_name_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("library.db");
+        let mut daemon = Daemon::open(&db_path, Some(dir.path().to_path_buf()), None).unwrap();
+        daemon.run_once().unwrap();
+        assert!(daemon.world_name_handle.is_none());
     }
 }
