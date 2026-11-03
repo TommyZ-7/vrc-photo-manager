@@ -27,7 +27,7 @@ VRChat API の未認証 `GET /api/1/worlds/{worldId}` を使えば、ワール�
 - デーモンの専用ワーカーが、DB のキューから1件ずつ解決する。UI やログ取り込みを
   ブロックしない。
 - API 呼び出しはグローバルに60秒間隔。同じワールドはキャッシュ済みなら再取得しない。
-- 429 は `Retry-After` に従う。5xx・タイムアウト・ネットワーク失敗は指数バックオフ。
+- 429 は `Retry-After` に従うが、60秒を下回らない。5xx・タイムアウト・ネットワーク失敗は指数バックオフ。
   404 は24時間後に再試行。その他の4xxと不正レスポンスは terminal。
 - 成功時は `worlds.name` と `name_source = 'vrchat-api'` を保存し、同じワールドに
   紐づく `photo_context.world_name` の NULL をバックフィルする。
@@ -332,7 +332,7 @@ pub(crate) trait WorldNameTransport: Send + Sync {
   - `200..=299`: JSON の `name` を検証して `Found`。
   - `404`: `NotFound`。
   - `429`: `Retry-After` を秒として解釈し、1〜3600秒に clamp して `RateLimited`。
-    ヘッダーがない、または解釈できない場合は60秒。
+    ワーカーはさらに60秒を下限にする。ヘッダーがない、または解釈できない場合は60秒。
   - `500..=599`: `Retryable { code: "http_5xx" }`。
   - `300..=399`: `Invalid { code: "redirect" }`（リダイレクトは追わない）。
   - その他の4xx: `Invalid { code: "http_4xx" }`。
@@ -364,13 +364,13 @@ pub(crate) trait WorldNameTransport: Send + Sync {
      再起動後に60秒以内の送信をしないため。
   5. DB ロックを解放してから `transport.fetch(world_id)` を呼ぶ。
   6. 結果を DB に記録する。成功時は `library_revision` が進む。
-  7. 429 の場合は `next_request_at = now + Retry-After` に延長して保存する。
+  7. 429 の場合は `next_request_at = now + max(60, Retry-After)` に延長して保存する。
 - 起動時は `world_name_next_request_at` を読み、その時刻まで待つ。
   デーモン再起動直後に前回のリクエストから60秒以内の送信をしない。
   値がない、または過去なら即時開始する。
 - `next_request_at`:
   - 成功: `now + 60s`（送信前の予約を維持）
-  - 429: `now + Retry-After`（1〜3600秒）
+  - 429: `now + max(60, Retry-After)`（1〜3600秒。60秒を下回らない）
   - 5xx / ネットワーク: `now + max(60s, backoff(attempts))`
   - 404: `now + 60s`（グローバル間隔。行の次回は24時間後）
   - terminal: `now + 60s`（次のワールドへ進む）
@@ -378,6 +378,7 @@ pub(crate) trait WorldNameTransport: Send + Sync {
   例: 60, 120, 240, 480, 960, 1920, 3840, 7680, 21600。
 - 429 は `attempts` を増やさない（サーバー都合の待機であり、失敗回数ではない）。
   429 の `Retry-After` も `world_name_next_request_at` に保存し、再起動後も待つ。
+  60秒未満の値は60秒として扱う。
 - 404 は `attempts` を増やし、`status='not_found'`, `next_attempt_at=now+24h`,
   `last_error='not_found'` にする。`next_due_world_name_lookup` は
   `not_found` も対象にするため、24時間後に再試行される。
@@ -567,7 +568,7 @@ pub struct Photo {
 - フェイクトランスポートで:
   - 成功時にDBが更新され、次のリクエストが60秒後になる。
   - 404 / 429 / 5xx / network の分類と次回時刻。
-  - 429 の `Retry-After` がグローバル間隔に反映される。
+  - 429 の `Retry-After` がグローバル間隔に反映される（60秒未満は60秒）。
   - terminal 行が再取得されない。
   - 無効時に `fetch` が1回も呼ばれない。
   - 有効化時に `backfill_photo_context_world_names` と
@@ -642,7 +643,8 @@ pub struct Photo {
   設定カードに「解決には時間がかかる」と明記する。
 - **404 が多い（非公開ワールド）**: 24時間後に再試行し、短間隔で叩かない。
 - **デーモン再起動直後の連続リクエスト**: `world_name_next_request_at` を
-  `app_settings` に保存し、再起動後も前回から60秒（429時は `Retry-After`）待つ。
+  `app_settings` に保存し、再起動後も前回から60秒（429時は `Retry-After`、
+  60秒未満なら60秒）待つ。
 - **ワールドID表示が長い**: 既存の `.truncate()` でカード内に収める。
   詳細画面では全文を表示する。
 - **DB マイグレーション**: v12 は `CREATE TABLE IF NOT EXISTS` と

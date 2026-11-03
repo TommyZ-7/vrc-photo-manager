@@ -18,7 +18,7 @@
 - User-Agent は `vrc-photon/<version> (https://github.com/TommyZ7/vrc-photon)`。
 - 送信するのは検証済みのワールドID、User-Agent、標準HTTPヘッダーだけ。
 - グローバルなAPI呼び出し間隔は60秒。`world_name_next_request_at` を `app_settings` に保存し、再起動後も維持する。
-- 429 は `Retry-After`（1〜3600秒）に従い、`attempts` を増やさない。
+- 429 は `Retry-After`（1〜3600秒）に従い、60秒を下回らない（実効 `max(60, Retry-After)`）。`attempts` を増やさない。
 - 5xx / ネットワーク / タイムアウトは `60 * 2^(attempts-1)` 秒（最大6時間）の指数バックオフ。
 - 404 は `not_found` として24時間後に再試行。その他の4xx・3xx・不正レスポンスは terminal。
 - API 名は `worlds.name` が NULL のときだけ保存し、`name_source='vrchat-api'` を付ける。ログ/XMP/手動エイリアスを API 名で上書きしない。
@@ -37,7 +37,8 @@
 3. **無効時・デーモン停止時**: 機能OFF、または UI だけが動いている状態で、API リクエストが1件も発生しないこと。
 4. **既存 v11 データ**: `worlds.name` はあるが `photo_context.world_name` が NULL の写真が、API を呼ばずに表示名を得ること。
 5. **推定リンク**: `log-estimated` の XMP 名が、推定先のワールドを誤って改名しないこと。
-6. **再起動直後**: 前回のリクエストから60秒以内（429時は `Retry-After` 以内）に送信しないこと。
+6. **再起動直後**: 前回のリクエストから60秒以内（429時は `Retry-After` 以内、
+   60秒未満なら60秒）に送信しないこと。
 
 ---
 
@@ -1106,6 +1107,12 @@ fn failure_outcomes_schedule_the_expected_next_request() {
 }
 
 #[test]
+fn short_retry_after_keeps_the_global_interval() {
+    // `Retry-After: 30` でも lookup 行の next_attempt_at と
+    // step.next_request_at が 60 秒後になること。
+}
+
+#[test]
 fn no_due_lookup_returns_none_without_a_request() {
     let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
     let transport = FakeTransport::default();
@@ -1198,11 +1205,11 @@ Expected: コンパイルエラー（モジュール未定義）
 
 - `process_next_world_name` は DB から due を1件取得し、ロックを解放して `fetch` し、結果を `record_world_name_resolved(world_db_id, name, now)` / `record_world_name_failure(world_db_id, failure, now)` に渡す。
 - 成功: `next_request_at = now + 60`。
-- 429: `next_request_at = now + retry_after`。
+- 429: `next_request_at = now + max(60, retry_after)`。`Retry-After` が60秒未満でもグローバル間隔を短縮しない。
 - 5xx / network: `next_request_at = now + max(60, backoff_seconds(attempts))`。
 - 404: `next_request_at = now + 60`、行は24時間後。
 - invalid: `next_request_at = now + 60`、行は terminal。
-- `worker_loop` は `initial_next_request_at` を読み、送信前に `now + 60` を予約して `set_world_name_next_request_at` に保存する。429 の後は `Retry-After` で延長する。無効時は `wait(5s)`。
+- `worker_loop` は `initial_next_request_at` を読み、送信前に `now + 60` を予約して `set_world_name_next_request_at` に保存する。429 の後は `max(60, Retry-After)` で延長する。無効時は `wait(5s)`。
 - DB の記録に失敗した場合は行を terminal にせず、60秒待って次のループで再試行する。
 - ログは `world_db_id` と固定コードだけ。
 
