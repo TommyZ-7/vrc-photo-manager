@@ -26,6 +26,7 @@ use crate::state::preview::{
     preview_cache_dir, preview_key, should_apply_preview, should_request_preview,
 };
 use crate::state::thumbnail::{decode_thumbnail, make_render_image, rgba_to_bgra};
+use crate::ui::components::photo_scene_key;
 
 /// Delay before a partial thumbnail notice batch is reported. Keeps a quiet
 /// gallery's generated files visible to the daemon without one request each.
@@ -587,15 +588,10 @@ impl App {
     }
 
     pub(crate) fn color_for(&self, photo: &Photo) -> u32 {
-        self.thumbnails.borrow().color(photo.id).unwrap_or_else(|| {
-            self.palette.scene_color(
-                photo
-                    .world_name
-                    .as_deref()
-                    .or(photo.world_id.as_deref())
-                    .unwrap_or(""),
-            )
-        })
+        self.thumbnails
+            .borrow()
+            .color(photo.id)
+            .unwrap_or_else(|| self.palette.scene_color(photo_scene_key(photo)))
     }
 
     pub(crate) fn selected_color(&self) -> u32 {

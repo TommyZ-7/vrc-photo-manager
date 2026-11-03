@@ -491,7 +491,7 @@ impl App {
             );
 
         let mut badges = h_flex().flex_wrap().gap(px(5.));
-        if photo.world_name.is_some() {
+        if photo.world_name.is_some() || photo.world_id.is_some() {
             badges = badges.child(self.badge(tr!("photos.badge.context"), p.accent, p.accent_soft));
         }
         if photo.is_favorite {

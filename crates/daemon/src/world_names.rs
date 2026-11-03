@@ -102,6 +102,8 @@ fn record_outcome(
                     MIN_RETRY_AFTER_SECONDS as u64,
                     MAX_RETRY_AFTER_SECONDS as u64,
                 ) as i64;
+                // A short Retry-After must not shorten the global interval.
+                let retry_after = retry_after.max(REQUEST_INTERVAL_SECONDS);
                 db.record_world_name_failure(
                     world_db_id,
                     WorldNameFailure::RateLimited { retry_after },
@@ -213,23 +215,23 @@ pub fn worker_loop(
 
         // Check before reserving: an empty queue must not push the next
         // request out by a full interval.
-        let due = {
+        let due_world_db_id = {
             let db = db.lock().unwrap();
             match db.next_due_world_name_lookup(now) {
-                Ok(lookup) => lookup.is_some(),
+                Ok(lookup) => lookup.map(|lookup| lookup.world_db_id),
                 Err(_) => {
                     tracing::warn!(
                         code = "queue_read_failed",
                         "world name worker cannot read the lookup queue"
                     );
-                    false
+                    None
                 }
             }
         };
-        if !due {
+        let Some(due_world_db_id) = due_world_db_id else {
             wake.wait(&mut seen_generation, IDLE_INTERVAL);
             continue;
-        }
+        };
 
         // Reserve before fetching. A crash right after sending still leaves
         // the next process waiting the full interval.
@@ -273,6 +275,7 @@ pub fn worker_loop(
                 // The result was not recorded. Leave the row non-terminal;
                 // the reserved interval spaces out the retry.
                 tracing::warn!(
+                    world_db_id = due_world_db_id,
                     code = "record_failed",
                     "world name worker cannot record the lookup result"
                 );
@@ -286,6 +289,8 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
+
+    use vrc_photon_core::world_name::WorldNameLookupStatus;
 
     use super::*;
 
@@ -388,6 +393,40 @@ mod tests {
     }
 
     #[test]
+    fn short_retry_after_keeps_the_global_interval() {
+        let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+        let world = {
+            let db = db.lock().unwrap();
+            db.upsert_world("wrld_test", None, None).unwrap()
+        };
+        db.lock().unwrap().enqueue_world_name_lookup(world).unwrap();
+        let transport = FakeTransport {
+            outcomes: Mutex::new(VecDeque::from([WorldNameOutcome::RateLimited {
+                retry_after: Duration::from_secs(30),
+            }])),
+            ..Default::default()
+        };
+
+        let step = process_next_world_name(&db, &transport, 1_000)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            step.outcome,
+            WorldNameStepOutcome::RateLimited { retry_after: 60 }
+        );
+        assert_eq!(step.next_request_at, 1_060);
+        let lookup = db
+            .lock()
+            .unwrap()
+            .world_name_lookup(world)
+            .unwrap()
+            .unwrap();
+        assert_eq!(lookup.status, WorldNameLookupStatus::Retry);
+        assert_eq!(lookup.attempts, 0);
+        assert_eq!(lookup.next_attempt_at, Some(1_060));
+    }
+
+    #[test]
     fn no_due_lookup_returns_none_without_a_request() {
         let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
         let transport = FakeTransport::default();
@@ -408,12 +447,22 @@ mod tests {
     }
 
     #[test]
-    fn disabled_worker_never_fetches() {
+    fn disabled_worker_does_not_fetch_a_due_lookup_until_enabled() {
         let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+        let world = {
+            let db = db.lock().unwrap();
+            db.upsert_world("wrld_test", None, None).unwrap()
+        };
+        db.lock().unwrap().enqueue_world_name_lookup(world).unwrap();
         let running = Arc::new(AtomicBool::new(true));
         let enabled = Arc::new(AtomicBool::new(false));
         let wake = Arc::new(JobSignal::default());
-        let transport = Arc::new(FakeTransport::default());
+        let transport = Arc::new(FakeTransport {
+            outcomes: Mutex::new(VecDeque::from([WorldNameOutcome::Found(
+                "API World".to_string(),
+            )])),
+            ..Default::default()
+        });
         let handle = {
             let db = db.clone();
             let running = running.clone();
@@ -422,11 +471,23 @@ mod tests {
             let transport = transport.clone();
             std::thread::spawn(move || worker_loop(db, running, enabled, wake, transport))
         };
-        std::thread::sleep(Duration::from_millis(50));
-        assert!(transport.calls.lock().unwrap().is_empty());
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            transport.calls.lock().unwrap().is_empty(),
+            "the OFF gate must suppress a queued lookup"
+        );
+
+        enabled.store(true, Ordering::Relaxed);
+        wake.notify();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while transport.calls.lock().unwrap().is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         running.store(false, Ordering::Relaxed);
         wake.notify();
         handle.join().unwrap();
+
+        assert_eq!(transport.calls.lock().unwrap().len(), 1);
     }
 
     #[test]
@@ -470,5 +531,81 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(next >= chrono::Utc::now().timestamp() + 55);
+    }
+
+    #[test]
+    fn worker_waits_for_the_persisted_next_request_at() {
+        let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+        let world = {
+            let db = db.lock().unwrap();
+            db.upsert_world("wrld_test", None, None).unwrap()
+        };
+        db.lock().unwrap().enqueue_world_name_lookup(world).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        db.lock()
+            .unwrap()
+            .set_world_name_next_request_at(now + REQUEST_INTERVAL_SECONDS)
+            .unwrap();
+        let running = Arc::new(AtomicBool::new(true));
+        let enabled = Arc::new(AtomicBool::new(true));
+        let wake = Arc::new(JobSignal::default());
+        let transport = Arc::new(FakeTransport::default());
+        let handle = {
+            let db = db.clone();
+            let running = running.clone();
+            let enabled = enabled.clone();
+            let wake = wake.clone();
+            let transport = transport.clone();
+            std::thread::spawn(move || worker_loop(db, running, enabled, wake, transport))
+        };
+        std::thread::sleep(Duration::from_millis(250));
+        assert!(
+            transport.calls.lock().unwrap().is_empty(),
+            "a restart must wait out the persisted request interval"
+        );
+        running.store(false, Ordering::Relaxed);
+        wake.notify();
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn worker_never_fetches_a_terminal_lookup() {
+        let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+        let world = {
+            let db = db.lock().unwrap();
+            db.upsert_world("wrld_test", None, None).unwrap()
+        };
+        {
+            let db = db.lock().unwrap();
+            db.enqueue_world_name_lookup(world).unwrap();
+            db.record_world_name_failure(
+                world,
+                WorldNameFailure::Invalid {
+                    code: "invalid_response",
+                },
+                1_000,
+            )
+            .unwrap();
+        }
+        let running = Arc::new(AtomicBool::new(true));
+        let enabled = Arc::new(AtomicBool::new(true));
+        let wake = Arc::new(JobSignal::default());
+        let transport = Arc::new(FakeTransport::default());
+        let handle = {
+            let db = db.clone();
+            let running = running.clone();
+            let enabled = enabled.clone();
+            let wake = wake.clone();
+            let transport = transport.clone();
+            std::thread::spawn(move || worker_loop(db, running, enabled, wake, transport))
+        };
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            transport.calls.lock().unwrap().is_empty(),
+            "terminal lookups must never be fetched again"
+        );
+        running.store(false, Ordering::Relaxed);
+        wake.notify();
+        handle.join().unwrap();
     }
 }

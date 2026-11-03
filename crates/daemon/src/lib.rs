@@ -615,7 +615,15 @@ impl Daemon {
             pack_thumbnail_spec(settings.thumbnail_spec()),
             Ordering::Relaxed,
         );
+        let world_name_enabled = settings.world_name_resolution_enabled;
         self.settings = settings;
+        let was_world_name_enabled = self
+            .world_name_resolution_enabled
+            .swap(world_name_enabled, Ordering::Relaxed);
+        if world_name_enabled && !was_world_name_enabled {
+            self.enqueue_world_name_backfill();
+            self.world_names.notify();
+        }
         if language_changed {
             vrc_photon_i18n::set_locale(&self.settings.language);
             if let Some(tray) = self.tray.as_mut() {
@@ -1761,7 +1769,9 @@ impl Daemon {
     /// Applies the compression switches and thumbnail cache limit without
     /// touching paths or restarting watchers. The UI saves these immediately;
     /// a running daemon must not keep enqueuing with the previous policy or
-    /// prune with a stale cache limit.
+    /// prune with a stale cache limit. This also mirrors
+    /// `world_name_resolution_enabled` into the worker flag and runs the
+    /// backfill when the switch turns on.
     fn refresh_compression_settings(&mut self) {
         let loaded = {
             let db = self.db.lock().unwrap();
@@ -7219,6 +7229,69 @@ mod tests {
         assert!(daemon.world_name_handle.is_some());
         daemon.stop_workers();
         assert!(daemon.world_name_handle.is_none());
+    }
+
+    #[test]
+    fn reload_settings_syncs_the_world_name_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("library.db");
+        let mut daemon = Daemon::open(&db_path, Some(dir.path().to_path_buf()), None).unwrap();
+        daemon
+            .world_name_resolution_enabled
+            .store(false, Ordering::Relaxed);
+        AppSettings {
+            world_name_resolution_enabled: true,
+            ..daemon.settings.clone()
+        }
+        .save(&daemon.db.lock().unwrap())
+        .unwrap();
+
+        daemon.reload_settings().unwrap();
+
+        assert!(daemon.world_name_resolution_enabled.load(Ordering::Relaxed));
+        assert!(daemon.settings.world_name_resolution_enabled);
+    }
+
+    #[test]
+    fn start_workers_backfills_when_world_name_resolution_is_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("library.db");
+        let mut daemon = Daemon::open(&db_path, Some(dir.path().to_path_buf()), None).unwrap();
+        let (world, _photo) = {
+            let db = daemon.db.lock().unwrap();
+            insert_unresolved_world_photo(&db)
+        };
+        AppSettings {
+            world_name_resolution_enabled: true,
+            ..daemon.settings.clone()
+        }
+        .save(&daemon.db.lock().unwrap())
+        .unwrap();
+        daemon.settings.world_name_resolution_enabled = true;
+        daemon
+            .world_name_resolution_enabled
+            .store(true, Ordering::Relaxed);
+        // Keep the worker away from the real network while the test runs.
+        daemon
+            .db
+            .lock()
+            .unwrap()
+            .set_world_name_next_request_at(chrono::Utc::now().timestamp() + 3_600)
+            .unwrap();
+
+        daemon.start_workers();
+
+        assert!(
+            daemon
+                .db
+                .lock()
+                .unwrap()
+                .world_name_lookup(world)
+                .unwrap()
+                .is_some(),
+            "an enabled startup must enqueue unresolved worlds"
+        );
+        daemon.stop_workers();
     }
 
     #[test]

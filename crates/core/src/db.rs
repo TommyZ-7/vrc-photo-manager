@@ -18,8 +18,8 @@ use crate::model::{
     Session, SessionPlayer, World,
 };
 use crate::world_name::{
-    NOT_FOUND_RETRY_SECONDS, WorldNameFailure, WorldNameLookup, WorldNameLookupCounts,
-    WorldNameLookupStatus, backoff_seconds,
+    NOT_FOUND_RETRY_SECONDS, REQUEST_INTERVAL_SECONDS, WorldNameFailure, WorldNameLookup,
+    WorldNameLookupCounts, WorldNameLookupStatus, backoff_seconds,
 };
 
 const SCHEMA_V1: &str = r#"
@@ -1509,7 +1509,7 @@ impl Db {
     pub fn mark_world_name_lookup_satisfied(&self, world_db_id: i64) -> Result<()> {
         self.conn.execute(
             "UPDATE world_name_lookups SET status = 'resolved', next_attempt_at = NULL, \
-                updated_at = ?1 \
+                last_error = NULL, updated_at = ?1 \
              WHERE world_db_id = ?2 AND status IN ('pending', 'retry', 'not_found')",
             params![now_string(), world_db_id],
         )?;
@@ -1519,7 +1519,7 @@ impl Db {
     pub fn mark_world_name_lookup_resolved(&self, world_db_id: i64, now: i64) -> Result<()> {
         self.conn.execute(
             "UPDATE world_name_lookups SET status = 'resolved', next_attempt_at = NULL, \
-                last_attempt_at = ?1, updated_at = ?2 \
+                last_error = NULL, last_attempt_at = ?1, updated_at = ?2 \
              WHERE world_db_id = ?3 AND status IN ('pending', 'retry', 'not_found')",
             params![now, now_string(), world_db_id],
         )?;
@@ -1538,14 +1538,18 @@ impl Db {
     }
 
     /// Records the outcome of a failed attempt and schedules the next try
-    /// according to the shared retry policy. 429s do not count as attempts.
+    /// according to the shared retry policy. 429s do not count as attempts
+    /// and never schedule sooner than the global request interval.
     pub fn record_world_name_failure(
         &self,
         world_db_id: i64,
         failure: WorldNameFailure,
         now: i64,
     ) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        // Read-then-write must take the write lock up front, like
+        // `upsert_world`: a deferred transaction can hit SQLITE_BUSY_SNAPSHOT
+        // when the UI writes between our SELECT and UPDATE.
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let attempts = tx
             .query_row(
                 "SELECT attempts FROM world_name_lookups WHERE world_db_id = ?1 \
@@ -1562,7 +1566,7 @@ impl Db {
             WorldNameFailure::RateLimited { retry_after } => (
                 WorldNameLookupStatus::Retry,
                 attempts,
-                Some(now + retry_after),
+                Some(now + retry_after.max(REQUEST_INTERVAL_SECONDS)),
                 "http_429",
             ),
             WorldNameFailure::Retryable { code } => {
@@ -6636,6 +6640,63 @@ mod tests {
         let row = db.world_name_lookup(world).unwrap().unwrap();
         assert_eq!(row.status, WorldNameLookupStatus::Failed);
         assert_eq!(row.next_attempt_at, None);
+    }
+
+    #[test]
+    fn short_retry_after_never_schedules_sooner_than_the_global_interval() {
+        let db = Db::open_in_memory().unwrap();
+        let world = db.upsert_world("wrld_test", None, None).unwrap();
+        db.enqueue_world_name_lookup(world).unwrap();
+
+        db.record_world_name_failure(
+            world,
+            WorldNameFailure::RateLimited { retry_after: 30 },
+            1_000,
+        )
+        .unwrap();
+        let row = db.world_name_lookup(world).unwrap().unwrap();
+        assert_eq!(row.status, WorldNameLookupStatus::Retry);
+        assert_eq!(row.attempts, 0);
+        assert_eq!(row.next_attempt_at, Some(1_060));
+    }
+
+    #[test]
+    fn satisfied_and_resolved_lookups_clear_the_last_error() {
+        let db = Db::open_in_memory().unwrap();
+        let satisfied = db.upsert_world("wrld_satisfied", None, None).unwrap();
+        let resolved = db.upsert_world("wrld_resolved", None, None).unwrap();
+        db.enqueue_world_name_lookup(satisfied).unwrap();
+        db.enqueue_world_name_lookup(resolved).unwrap();
+        db.record_world_name_failure(
+            satisfied,
+            WorldNameFailure::Retryable { code: "http_5xx" },
+            1_000,
+        )
+        .unwrap();
+        db.record_world_name_failure(
+            resolved,
+            WorldNameFailure::Retryable { code: "network" },
+            1_000,
+        )
+        .unwrap();
+
+        db.mark_world_name_lookup_satisfied(satisfied).unwrap();
+        db.mark_world_name_lookup_resolved(resolved, 1_060).unwrap();
+
+        for world in [satisfied, resolved] {
+            let row = db.world_name_lookup(world).unwrap().unwrap();
+            assert_eq!(row.status, WorldNameLookupStatus::Resolved);
+            assert_eq!(row.next_attempt_at, None);
+            let last_error: Option<String> = db
+                .conn
+                .query_row(
+                    "SELECT last_error FROM world_name_lookups WHERE world_db_id = ?1",
+                    params![world],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(last_error, None);
+        }
     }
 
     #[test]
