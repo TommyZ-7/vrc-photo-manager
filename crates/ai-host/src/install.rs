@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufReader, Read, Seek, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -22,6 +22,13 @@ use crate::verify::verify_manifest_bytes;
 pub const MANIFEST_FILE: &str = "manifest.json";
 /// Name of the detached signature entry at the ZIP root.
 pub const SIGNATURE_FILE: &str = "manifest.minisig";
+
+const EOCD_SIGNATURE: u32 = 0x0605_4b50;
+const ZIP64_EOCD_SIGNATURE: u32 = 0x0606_4b50;
+const ZIP64_EOCD_LOCATOR_SIGNATURE: u32 = 0x0706_4b50;
+const EOCD_MIN_BYTES: u64 = 22;
+const ZIP64_EOCD_LOCATOR_BYTES: u64 = 20;
+const ZIP64_EOCD_MIN_BYTES: u64 = 56;
 
 /// Limits applied while reading a plugin ZIP.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,7 +98,8 @@ pub fn install_from_zip_with_limits(
         )));
     }
 
-    let file = File::open(zip_path)?;
+    let mut file = File::open(zip_path)?;
+    check_zip_entry_count(&mut file, zip_size, limits.max_entries)?;
     let mut archive = ZipArchive::new(BufReader::new(file))?;
     if archive.has_duplicate_names() {
         return Err(AiHostError::DuplicateEntry(
@@ -219,6 +227,12 @@ pub fn install_from_zip_with_limits(
     }
 
     let root = plugins_root(data_dir);
+    reject_install_directory_collisions(
+        &root,
+        &manifest.plugin_id,
+        &manifest.variant,
+        &manifest.plugin_version,
+    )?;
     fs::create_dir_all(&root)?;
     let staging = Builder::new().prefix(".staging-").tempdir_in(&root)?;
 
@@ -269,6 +283,147 @@ struct ZipEntryInfo {
     index: usize,
     size: u64,
     unix_mode: Option<u32>,
+}
+
+/// Reads the EOCD (and ZIP64 EOCD when present) and rejects an excessive
+/// declared entry count before `ZipArchive::new` allocates from the central
+/// directory metadata.
+fn check_zip_entry_count(file: &mut File, file_len: u64, max_entries: usize) -> Result<()> {
+    let tail_len = file_len.min(EOCD_MIN_BYTES + u64::from(u16::MAX));
+    if tail_len < EOCD_MIN_BYTES {
+        return Err(invalid_zip("file is too small to be a ZIP archive"));
+    }
+    let mut tail = vec![0u8; tail_len as usize];
+    file.seek(SeekFrom::Start(file_len - tail_len))?;
+    file.read_exact(&mut tail)?;
+
+    let signature = EOCD_SIGNATURE.to_le_bytes();
+    let mut declared_entries = 0u64;
+    let mut found = false;
+
+    for position in 0..=tail.len() - EOCD_MIN_BYTES as usize {
+        if tail[position..position + 4] != signature {
+            continue;
+        }
+        let comment_length = usize::from(read_u16(&tail, position + 20));
+        if position + EOCD_MIN_BYTES as usize + comment_length != tail.len() {
+            continue;
+        }
+        found = true;
+        declared_entries = declared_entries
+            .max(u64::from(read_u16(&tail, position + 8)))
+            .max(u64::from(read_u16(&tail, position + 10)));
+
+        if let Some(locator_position) = position.checked_sub(ZIP64_EOCD_LOCATOR_BYTES as usize)
+            && tail[locator_position..locator_position + 4]
+                == ZIP64_EOCD_LOCATOR_SIGNATURE.to_le_bytes()
+        {
+            let zip64_offset = read_u64(&tail, locator_position + 8);
+            let (on_disk, total) = read_zip64_entry_count(file, file_len, zip64_offset)?;
+            declared_entries = declared_entries.max(on_disk).max(total);
+        }
+    }
+
+    if !found {
+        return Err(invalid_zip("ZIP end-of-central-directory record not found"));
+    }
+    if declared_entries > max_entries as u64 {
+        return Err(AiHostError::LimitExceeded(format!(
+            "ZIP declares {declared_entries} entries (limit {max_entries})"
+        )));
+    }
+    Ok(())
+}
+
+fn read_zip64_entry_count(file: &mut File, file_len: u64, offset: u64) -> Result<(u64, u64)> {
+    let header_end = offset
+        .checked_add(ZIP64_EOCD_MIN_BYTES)
+        .ok_or_else(|| invalid_zip("ZIP64 EOCD offset overflows"))?;
+    if header_end > file_len {
+        return Err(invalid_zip("ZIP64 EOCD record is outside the file"));
+    }
+
+    file.seek(SeekFrom::Start(offset))?;
+    let mut header = [0u8; ZIP64_EOCD_MIN_BYTES as usize];
+    file.read_exact(&mut header)?;
+    if read_u32(&header, 0) != ZIP64_EOCD_SIGNATURE {
+        return Err(invalid_zip("ZIP64 EOCD signature not found"));
+    }
+
+    let record_size = read_u64(&header, 4);
+    let record_end = offset
+        .checked_add(12)
+        .and_then(|value| value.checked_add(record_size))
+        .ok_or_else(|| invalid_zip("ZIP64 EOCD size overflows"))?;
+    if record_size < 44 || record_end > file_len {
+        return Err(invalid_zip("invalid ZIP64 EOCD record size"));
+    }
+
+    Ok((read_u64(&header, 24), read_u64(&header, 32)))
+}
+
+fn read_u16(bytes: &[u8], offset: usize) -> u16 {
+    u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
+}
+
+fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(
+        bytes[offset..offset + 4]
+            .try_into()
+            .expect("a four-byte field"),
+    )
+}
+
+fn read_u64(bytes: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(
+        bytes[offset..offset + 8]
+            .try_into()
+            .expect("an eight-byte field"),
+    )
+}
+
+fn invalid_zip(message: &'static str) -> AiHostError {
+    AiHostError::Zip(zip::result::ZipError::InvalidArchive(
+        std::borrow::Cow::Borrowed(message),
+    ))
+}
+
+/// Rejects a new install directory whose name differs only by case from an
+/// existing sibling. This keeps Linux behaviour consistent with Windows,
+/// where both names would resolve to the same directory.
+fn reject_install_directory_collisions(
+    root: &Path,
+    plugin_id: &str,
+    variant: &str,
+    version: &str,
+) -> Result<()> {
+    reject_case_collision(root, plugin_id)?;
+    let plugin_path = root.join(plugin_id);
+    reject_case_collision(&plugin_path, variant)?;
+    let variant_path = plugin_path.join(variant);
+    reject_case_collision(&variant_path, version)?;
+    Ok(())
+}
+
+fn reject_case_collision(parent: &Path, name: &str) -> Result<()> {
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let existing = entry.file_name();
+        let Some(existing) = existing.to_str() else {
+            continue;
+        };
+        if existing != name && existing.eq_ignore_ascii_case(name) {
+            return Err(AiHostError::UnsafePath(format!(
+                "install directory {name:?} collides case-insensitively with existing {existing:?}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn validate_zip_path(original: &str, path: &str) -> Result<()> {
@@ -478,6 +633,18 @@ mod tests {
         patched
     }
 
+    fn patch_eocd_entry_count(bytes: &[u8], entries: u16) -> Vec<u8> {
+        let signature = [0x50, 0x4b, 0x05, 0x06];
+        let position = bytes
+            .windows(signature.len())
+            .rposition(|window| window == signature)
+            .expect("ZIP contains an EOCD record");
+        let mut patched = bytes.to_vec();
+        patched[position + 8..position + 10].copy_from_slice(&entries.to_le_bytes());
+        patched[position + 10..position + 12].copy_from_slice(&entries.to_le_bytes());
+        patched
+    }
+
     #[test]
     fn install_accepts_a_valid_plugin() {
         let data_dir = tempdir().unwrap();
@@ -537,6 +704,122 @@ mod tests {
         assert_eq!(limits.max_uncompressed_bytes, 512 * 1024 * 1024);
         assert_eq!(limits.max_manifest_bytes, 1024 * 1024);
         assert_eq!(limits.max_zip_bytes, 512 * 1024 * 1024);
+    }
+
+    #[test]
+    fn install_rejects_an_excessive_eocd_entry_count_before_opening_the_archive() {
+        let data_dir = tempdir().unwrap();
+        let package = TestPackage::new();
+        let bytes = patch_eocd_entry_count(&package.zip_bytes().unwrap(), u16::MAX);
+        let zip = write_temp_zip(&bytes).unwrap();
+
+        let error = install_from_zip(
+            zip.path(),
+            data_dir.path(),
+            &[package.public_key()],
+            "0.10.1",
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, AiHostError::LimitExceeded(_)));
+        assert!(
+            fs::read_dir(data_dir.path()).unwrap().next().is_none(),
+            "the data directory must not be touched before the entry-count check"
+        );
+    }
+
+    #[test]
+    fn zip64_eocd_entry_count_is_checked_before_opening_the_archive() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("zip64.zip");
+        let mut bytes = Vec::new();
+
+        // ZIP64 EOCD record at offset 0.
+        bytes.extend_from_slice(&0x0606_4b50u32.to_le_bytes());
+        bytes.extend_from_slice(&44u64.to_le_bytes());
+        bytes.extend_from_slice(&45u16.to_le_bytes());
+        bytes.extend_from_slice(&45u16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&1_000_000u64.to_le_bytes());
+        bytes.extend_from_slice(&1_000_000u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+
+        // ZIP64 EOCD locator at offset 56.
+        bytes.extend_from_slice(&0x0706_4b50u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+
+        // ZIP32 EOCD with sentinel counts at offset 76.
+        bytes.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&u16::MAX.to_le_bytes());
+        bytes.extend_from_slice(&u16::MAX.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+
+        fs::write(&path, &bytes).unwrap();
+        let mut file = File::open(&path).unwrap();
+        let error = check_zip_entry_count(&mut file, bytes.len() as u64, 512).unwrap_err();
+
+        assert!(matches!(error, AiHostError::LimitExceeded(_)));
+    }
+
+    #[test]
+    fn install_rejects_case_insensitive_plugin_id_collisions() {
+        let data_dir = tempdir().unwrap();
+        let first = TestPackage::new();
+        install(&first, data_dir.path()).unwrap();
+
+        let mut second = TestPackage::new();
+        second.manifest_mut().plugin_id = "VRC-Photon-AutoTag".to_string();
+        let error = install(&second, data_dir.path()).unwrap_err();
+
+        assert!(matches!(error, AiHostError::UnsafePath(_)));
+        assert!(
+            !plugin_dir(
+                data_dir.path(),
+                "VRC-Photon-AutoTag",
+                TEST_VARIANT,
+                crate::test_support::TEST_PLUGIN_VERSION
+            )
+            .exists()
+        );
+        assert!(staging_entries(data_dir.path()).is_empty());
+    }
+
+    #[test]
+    fn install_rejects_case_insensitive_variant_collisions() {
+        let data_dir = tempdir().unwrap();
+        let first = TestPackage::new();
+        install(&first, data_dir.path()).unwrap();
+
+        let mut second = TestPackage::new();
+        second.manifest_mut().backend = "VULKAN".to_string();
+        second.manifest_mut().variant = "linux-VULKAN".to_string();
+        let error = install(&second, data_dir.path()).unwrap_err();
+
+        assert!(matches!(error, AiHostError::UnsafePath(_)));
+        assert!(staging_entries(data_dir.path()).is_empty());
+    }
+
+    #[test]
+    fn install_rejects_case_insensitive_version_collisions() {
+        let data_dir = tempdir().unwrap();
+        let mut first = TestPackage::new();
+        first.manifest_mut().plugin_version = "1.0.0-rc1".to_string();
+        install(&first, data_dir.path()).unwrap();
+
+        let mut second = TestPackage::new();
+        second.manifest_mut().plugin_version = "1.0.0-RC1".to_string();
+        let error = install(&second, data_dir.path()).unwrap_err();
+
+        assert!(matches!(error, AiHostError::UnsafePath(_)));
+        assert!(staging_entries(data_dir.path()).is_empty());
     }
 
     #[test]

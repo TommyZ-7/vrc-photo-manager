@@ -218,17 +218,17 @@ pub fn model_file_role(file: &ManifestModelFile) -> Result<ModelFileRole> {
     }
 }
 
-/// Rejects absolute paths, `..`, Windows drive/UNC paths, and empty components.
+/// Rejects absolute paths, `..`, Windows aliases/device names, and empty
+/// components. Every component is validated with the same cross-platform
+/// rules so a package cannot rely on Windows normalization to reach a
+/// different directory.
 pub(crate) fn validate_relative_path(field: &str, path: &str) -> Result<()> {
     let unsafe_path = || AiHostError::UnsafePath(format!("{field}: {path}"));
-    if path.is_empty() || path.contains('\0') || path.contains('\\') || path.contains(':') {
-        return Err(unsafe_path());
-    }
-    if path.starts_with('/') {
+    if path.is_empty() {
         return Err(unsafe_path());
     }
     for component in path.split('/') {
-        if component.is_empty() || component == "." || component == ".." {
+        if !is_safe_component(component) {
             return Err(unsafe_path());
         }
     }
@@ -236,11 +236,41 @@ pub(crate) fn validate_relative_path(field: &str, path: &str) -> Result<()> {
 }
 
 fn validate_path_component(field: &str, value: &str) -> Result<()> {
-    validate_relative_path(field, value)?;
-    if value.contains('/') {
+    if value.contains('/') || !is_safe_component(value) {
         return Err(AiHostError::UnsafePath(format!("{field}: {value}")));
     }
     Ok(())
+}
+
+/// One cross-platform path component. Rejects separators/stream characters,
+/// control characters, Windows trailing-dot/space normalization, and reserved
+/// device names (including names followed by an extension).
+fn is_safe_component(component: &str) -> bool {
+    if component.is_empty() || component == "." || component == ".." {
+        return false;
+    }
+    if component.ends_with('.') || component.ends_with(' ') {
+        return false;
+    }
+    if component.chars().any(|character| {
+        character.is_control()
+            || matches!(character, '\\' | ':' | '<' | '>' | '"' | '|' | '?' | '*')
+    }) {
+        return false;
+    }
+    let stem = component.split('.').next().unwrap_or(component);
+    !is_windows_reserved_name(stem)
+}
+
+fn is_windows_reserved_name(stem: &str) -> bool {
+    const RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", "COM1", "COM2", "COM3", "COM4", "COM5",
+        "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7",
+        "LPT8", "LPT9",
+    ];
+    RESERVED
+        .iter()
+        .any(|reserved| stem.eq_ignore_ascii_case(reserved))
 }
 
 fn validate_sha256(field: &str, value: &str) -> Result<()> {
@@ -394,6 +424,52 @@ mod tests {
             validate_manifest(&manifest, "0.10.1", "linux"),
             Err(AiHostError::UnsafePath(_))
         ));
+    }
+
+    #[test]
+    fn validate_rejects_windows_path_aliases() {
+        for value in [
+            ".. ", "foo.", "foo ", "CON", "con", "CON.txt", "NUL", "COM1", "LPT9", "CONOUT$",
+            "a<b", "a>b", "a\"b", "a|b", "a?b", "a*b", "a\tb",
+        ] {
+            let mut manifest = sample_manifest();
+            manifest.plugin_id = value.to_string();
+            assert!(
+                matches!(
+                    validate_manifest(&manifest, "0.10.1", "linux"),
+                    Err(AiHostError::UnsafePath(_))
+                ),
+                "plugin_id {value:?} should be rejected"
+            );
+        }
+
+        let mut manifest = sample_manifest();
+        manifest.model.revision = "foo.".to_string();
+        assert!(matches!(
+            validate_manifest(&manifest, "0.10.1", "linux"),
+            Err(AiHostError::UnsafePath(_))
+        ));
+
+        let mut manifest = sample_manifest();
+        manifest.files[0].path = "libs/CON/child".to_string();
+        assert!(matches!(
+            validate_manifest(&manifest, "0.10.1", "linux"),
+            Err(AiHostError::UnsafePath(_))
+        ));
+
+        let mut manifest = sample_manifest();
+        manifest.files[0].path = "libs/foo./child".to_string();
+        assert!(matches!(
+            validate_manifest(&manifest, "0.10.1", "linux"),
+            Err(AiHostError::UnsafePath(_))
+        ));
+
+        // Case variants remain valid identifiers; install-time collision
+        // checks decide whether an existing directory already uses the name.
+        let mut manifest = sample_manifest();
+        manifest.backend = "VULKAN".to_string();
+        manifest.variant = "linux-VULKAN".to_string();
+        validate_manifest(&manifest, "0.10.1", "linux").unwrap();
     }
 
     #[test]
