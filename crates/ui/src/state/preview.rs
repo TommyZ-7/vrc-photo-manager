@@ -172,6 +172,7 @@ mod tests {
             display_width: None,
             display_height: None,
             world_name: None,
+            world_id: None,
             instance_id: None,
             link_method: None,
             confidence: None,

@@ -315,11 +315,12 @@ const PHOTO_SELECT: &str = "p.id, p.root_id, p.rel_path, p.abs_path, p.file_name
     p.captured_at_utc, p.captured_at_local, p.tz_offset_sec, p.width, p.height, \
     p.file_size, p.mtime, p.blake3, p.status, p.is_favorite, p.note, \
     p.display_derivative_id, d.path, d.format, d.file_size, d.width, d.height, \
-    c.world_name, c.instance_id, c.link_method, c.confidence, c.author";
+    c.world_name, c.instance_id, c.link_method, c.confidence, c.author, pw.world_id";
 
 const PHOTO_FROM: &str = " FROM photos p \
     LEFT JOIN derivatives d ON d.id = p.display_derivative_id \
-    LEFT JOIN photo_context c ON c.photo_id = p.id ";
+    LEFT JOIN photo_context c ON c.photo_id = p.id \
+    LEFT JOIN worlds pw ON pw.id = c.world_id ";
 
 /// Statuses that belong in the library. `missing` rows stay in the database
 /// so tags and context survive a restore, but they are not displayed.
@@ -3870,6 +3871,7 @@ fn row_to_photo(row: &Row<'_>) -> rusqlite::Result<Photo> {
         link_method: row.get(24)?,
         confidence: row.get(25)?,
         author: row.get(26)?,
+        world_id: row.get(27)?,
     })
 }
 
@@ -8275,5 +8277,30 @@ mod tests {
 
         assert_eq!(db.duplicate_photo_ids().unwrap(), vec![first_id, copy_id]);
         assert_eq!(db.count_photos().unwrap(), 3);
+    }
+
+    #[test]
+    fn photo_query_includes_the_vrchat_world_id() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo = db.upsert_photo(&sample_photo(root, "a.png", 100)).unwrap();
+        let world = db
+            .upsert_world("wrld_test", Some("Test World"), Some("log"))
+            .unwrap();
+        db.set_photo_context(&PhotoContext {
+            photo_id: photo,
+            session_id: None,
+            world_id: Some(world),
+            world_name: Some("Test World".to_string()),
+            instance_id: None,
+            link_method: "log".to_string(),
+            confidence: 0.9,
+            author: None,
+            linked_at: "2026-11-03T00:00:00+00:00".to_string(),
+        })
+        .unwrap();
+
+        let stored = db.photo_by_id(photo).unwrap().unwrap();
+        assert_eq!(stored.world_id.as_deref(), Some("wrld_test"));
     }
 }

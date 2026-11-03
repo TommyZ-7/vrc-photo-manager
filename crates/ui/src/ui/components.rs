@@ -8,6 +8,7 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use vrc_photon_core::model::Photo;
 use vrc_photon_core::settings::AppSettings;
 use vrc_photon_i18n::{tr, tr_args};
 
@@ -179,6 +180,24 @@ pub(crate) fn compression_policy_warning(
 
 pub(crate) fn release_confirmation(keep_original: bool, count: i64) -> Option<String> {
     (!keep_original).then(|| tr_args!("components.compression_warning.replace", count = count))
+}
+
+/// Label for a photo's world: the resolved name, then the VRChat world ID,
+/// then the shared "unlinked" fallback.
+pub(crate) fn photo_world_label(photo: &Photo) -> String {
+    let name = photo
+        .world_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let id = photo
+        .world_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    name.or(id)
+        .map(str::to_string)
+        .unwrap_or_else(|| tr!("photos.unlinked"))
 }
 
 impl App {
@@ -518,7 +537,22 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{compression_policy_warning, release_confirmation};
+    use super::{compression_policy_warning, photo_world_label, release_confirmation};
+    use vrc_photon_i18n::tr;
+
+    #[test]
+    fn photo_world_label_prefers_name_then_id_then_unlinked() {
+        let mut photo = crate::state::test_support::test_photo(1);
+        photo.world_name = Some("Test World".to_string());
+        photo.world_id = Some("wrld_test".to_string());
+        assert_eq!(photo_world_label(&photo), "Test World");
+
+        photo.world_name = None;
+        assert_eq!(photo_world_label(&photo), "wrld_test");
+
+        photo.world_id = None;
+        assert_eq!(photo_world_label(&photo), tr!("photos.unlinked"));
+    }
 
     #[test]
     fn compression_policy_warning_is_limited_to_automatic_compression() {

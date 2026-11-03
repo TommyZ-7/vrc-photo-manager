@@ -588,8 +588,13 @@ impl App {
 
     pub(crate) fn color_for(&self, photo: &Photo) -> u32 {
         self.thumbnails.borrow().color(photo.id).unwrap_or_else(|| {
-            self.palette
-                .scene_color(photo.world_name.as_deref().unwrap_or(""))
+            self.palette.scene_color(
+                photo
+                    .world_name
+                    .as_deref()
+                    .or(photo.world_id.as_deref())
+                    .unwrap_or(""),
+            )
         })
     }
 

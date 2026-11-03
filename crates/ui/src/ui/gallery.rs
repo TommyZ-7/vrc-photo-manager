@@ -28,7 +28,7 @@ use crate::state::photo_browser::{
 use crate::state::thumbnail::ThumbnailCache;
 use crate::state::viewer::ViewerOpenSource;
 use crate::state::year_rail::format_captured_month;
-use crate::ui::components::{card_header, glass_panel};
+use crate::ui::components::{card_header, glass_panel, photo_world_label};
 use crate::ui::theme::*;
 use crate::ui::year_rail::{YearRail, YearRailLabels};
 
@@ -506,10 +506,7 @@ fn render_card(
     let show_world = app.settings.ui_card_show_world;
     let show_date = app.settings.ui_card_show_date;
     let show_size = app.settings.ui_card_show_size;
-    let world = photo
-        .world_name
-        .clone()
-        .unwrap_or_else(|| tr!("gallery.unlinked"));
+    let world = photo_world_label(photo);
     let thumbnail = shared.thumbnails.borrow_mut().get(id);
     if thumbnail.is_none() {
         missing_thumbnails.push(photo.clone());

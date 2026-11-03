@@ -23,7 +23,7 @@ use crate::app::daemon::open_path;
 use crate::state::photo_browser::{PAGE_SIZE, PhotoIndex};
 use crate::state::preview::preview_placeholder_label;
 use crate::state::viewer::ViewerOpenSource;
-use crate::ui::components::{ButtonState, ButtonTone, glass_panel};
+use crate::ui::components::{ButtonState, ButtonTone, glass_panel, photo_world_label};
 use crate::ui::theme::*;
 
 impl App {
@@ -315,10 +315,7 @@ impl App {
         let current_preview = self.preview.clone();
         let thumbnail = self.thumbnails.borrow_mut().get(id);
         let compressed = self.compressed_ids.contains(&id);
-        let world = photo
-            .world_name
-            .clone()
-            .unwrap_or_else(|| tr!("photos.unlinked"));
+        let world = photo_world_label(photo);
         let players = self
             .selected_players
             .iter()
@@ -640,10 +637,7 @@ impl App {
     ) -> impl IntoElement {
         let p = self.palette;
         let id = photo.id;
-        let world = photo
-            .world_name
-            .clone()
-            .unwrap_or_else(|| tr!("photos.unlinked"));
+        let world = photo_world_label(photo);
         let players = self
             .selected_players
             .iter()
