@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/ai-host",
     "crates/ai-protocol",
     "crates/core",
     "crates/daemon",
