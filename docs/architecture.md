@@ -21,7 +21,7 @@ VRChatの写真を、撮影時のワールド・同接プレイヤー・撮影�
         ┌────────────────────────────────────────────────────────┐
         │ SQLite (WAL)                                           │
         │ photos / photo_context / sessions / jobs / settings …  │
-        │ send_outbox / daemon_errors / daemon_commands          │
+        │ send_outbox / world_name_lookups / daemon_errors / …   │
         └────────────────────────────────────────────────────────┘
                ▲                                          ▲
                │                                          │
@@ -35,9 +35,9 @@ UIとデーモンは同じSQLite（WAL）に加えて、ローカルIPC（Unix d
 | プロセス | バイナリ | 役割 |
 |---|---|---|
 | UI | `crates/ui` → `vrc-photon` | 画面表示、検索、タグ・お気に入り・メモ編集、手動圧縮のキュー投入、取り込み、Discord 設定と送信 enqueue |
-| デーモン | `crates/daemon` → `vrc-photon-daemon` | 写真・ログの監視、索引、文脈紐付け、サムネイル、自動圧縮、Discord 送信、トレイ、自動起動、IPCサーバー |
+| デーモン | `crates/daemon` → `vrc-photon-daemon` | 写真・ログの監視、索引、文脈紐付け、サムネイル、自動圧縮、Discord 送信、任意の VRChat API ワールド名解決、トレイ、自動起動、IPCサーバー |
 | 共通IPC | `crates/ipc` | プロトコル型、エンドポイント、改行区切りJSON、ローカルソケットの送受信 |
-| 共通コア | `crates/core` | DB、スキャン、ログ解析、XMP、圧縮、Discord の URL 検証・payload・送信元選択、設定、サムネイル |
+| 共通コア | `crates/core` | DB、スキャン、ログ解析、XMP、圧縮、Discord の URL 検証・payload・送信元選択、ワールド名解決の状態とレスポンス解析、設定、サムネイル |
 
 UIとデーモンは同じSQLite（WAL）を共有し、状態とジョブをやり取りする。これに加えて、即時コマンドのwake-upとイベント配信のためにローカルIPCを使う（ADR-0011）。UIはデーモンのハートビート（`app_settings.daemon_heartbeat`）とIPC購読のどちらかが生きていれば稼働中と判定する。デーモンの処理エラーは `daemon_errors`、UIからの再実行要求は `daemon_commands` に置く。IPCは `daemon_commands` / `compression_jobs` / `send_outbox` を置き換えず、デーモンを起こすだけ。デーモン停止中も要求はDBに残り、起動後に処理される。
 
@@ -64,6 +64,7 @@ crates/
     src/photo_filename.rs # VRChatファイル名の時刻解析
     src/log_parser.rs     # output_log の解析とセッション状態
     src/linker.rs         # 写真とログ/XMPの紐付け
+    src/world_name.rs     # ワールド名解決の状態・再試行スケジュール・レスポンス解析
     src/metadata.rs       # PNG XMPの読み取り
     src/compressor.rs     # JPEG / WebP / AVIF / JXL
     src/discord.rs        # Webhook URL検証、送信元選択、embed payload
@@ -74,6 +75,8 @@ crates/
     src/lib.rs            # 監視ループ、ジョブワーカー、トレイ制御
     src/discord.rs        # Discord 送信ワーカー、outbox、自動 enqueue
     src/discord_http.rs   # multipart POST、429/4xx/5xx の分類
+    src/world_names.rs    # ワールド名解決ワーカー、60秒間隔の予約
+    src/world_name_http.rs # VRChat worlds API の HTTP とステータス分類
     src/main.rs           # CLI、単一インスタンス
     src/tray.rs           # Windows tray-icon / Linux ksni
   update/
@@ -326,6 +329,29 @@ crates/ui/src/
     `processing` は完了まで残し、削除エグゼキュータはアクティブな送信がなくなる
     まで待つ。`failed` は削除をブロックしない。
 
+### 4.10 ワールド名解決（オプトイン）
+
+1. 設定 `world_name_resolution_enabled`（既定 false）がONのときだけ動く。
+   スキーマ v12 で追加した `world_name_lookups` をキューとして使う。
+2. デーモンは起動時・有効化時・リンク完了時に
+   `backfill_photo_context_world_names` → `enqueue_missing_world_name_lookups`
+   の順で実行し、名前のないワールドだけを `pending` で積む。既存の
+   `resolved` / `retry` / `not_found` / `failed` 行は変更しない。
+3. `world-name` ワーカーは `pending` / `retry` / `not_found` の due 行を1件取り、
+   送信前に `world_name_next_request_at = now + 60s` を `app_settings` に保存する。
+   デーモン再起動後も、この時刻まで次のリクエストを送らない。
+4. DBロックを解放してから
+   `GET https://api.vrchat.cloud/api/1/worlds/{worldId}` を呼ぶ。HTTP中は
+   DBロックを持たない。送るのはワールドIDと標準的なHTTPヘッダーだけ。
+5. 成功時は `worlds.name` が NULL のときだけ `name_source='vrchat-api'` で保存し、
+   同じワールドに紐づく `photo_context.world_name` の NULL をバックフィルして
+   `library_revision` を進める。ログ/XMP名がある場合は上書きしない。
+6. 429 は `Retry-After`（60秒未満は60秒）、5xx／ネットワークは指数バックオフ
+   （60秒〜6時間）、404 は24時間後、3xx（リダイレクト）／その他の4xx／
+   不正レスポンスは terminal。
+7. 失敗してもワールドID表示のままで、他の機能には影響しない。定期的な
+   ポーリングはしない。`--once` ではワーカーを起動せず、ネットワークも使わない。
+
 ## 5. 並行性
 
 | 実行単位 | 役割 | 共有状態 |
@@ -342,6 +368,7 @@ crates/ui/src/
 | 圧縮ワーカー | 1〜4スレッド。ジョブを原子的に取得 | `Arc<Mutex<Db>>` |
 | 削除エグゼキュータ | 1スレッド。依存ジョブの完了後に要求を実行 | `Arc<Mutex<Db>>`、`JobSignal` |
 | Discord送信ワーカー | 1スレッド（`discord-send`）。outboxを原子的に取得し、HTTP中はDBロックを持たない | `Arc<Mutex<Db>>`、`JobSignal`、`EventBus` |
+| ワールド名解決ワーカー | 1スレッド（`world-name`）。`world_name_lookups` を1件ずつ処理し、HTTP中はDBロックを持たない | `Arc<Mutex<Db>>`、`JobSignal`、`AtomicBool` |
 | サムネイルワーカー | 1スレッド。キューを順次処理 | `Arc<Mutex<Db>>` |
 | トレイ | Windowsメッセージポンプ / Linux StatusNotifierItem | `DaemonStatus` |
 
@@ -349,6 +376,7 @@ crates/ui/src/
 - 圧縮のエンコード中はDBロックを持たない（写真・プロファイルを読んでから解放し、完了後に再ロック）。
 - 削除のファイル移動中もDBロックを持たない。対象パスを読んで解放し、移動後に再ロックしてDBを更新する。
 - Discordのファイル読み込み・エンコード・アップロード中もDBロックを持たない。結果の記録時だけ再ロックする。
+- ワールド名解決のHTTP中もDBロックを持たない。送信前に次回リクエスト時刻を予約し、結果の記録時だけ再ロックする。
 - ジョブ取得は `UPDATE ... WHERE status='pending' RETURNING` で二重取得を防ぐ。
 - デーモンは `single-instance` で二重起動を防ぐ。
 

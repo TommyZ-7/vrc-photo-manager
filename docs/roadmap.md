@@ -10,6 +10,7 @@
 - LinuxのCI/Releaseは成功。deb / AppImage / pacmanの生成を確認済み。
 - Windows実機、AppImage実起動、deb/pacmanインストール後起動は未検証。
 - 一覧・検索は全件の仮想グリッド＋年レールで表示する。100k合成DB（`photo_context` 5万行を含む）で索引61.5 ms、ページ0.72 ms、warm初回フレーム179–187 ms、cold-ish 226–235 ms（空DB 158–163 ms）を計測済み。真のOS cold起動（ページキャッシュ破棄後）は未測定。
+- VRChat API の未認証ワールド名解決（既定OFF、60秒間隔、ローカルキャッシュ）を実装済み（ADR-0018）。認証付き VRChat API 連携とクラウド同期は未実装。
 
 ## 2. 優先度
 
@@ -40,7 +41,7 @@
 | Windows実機検証 | NSISインストーラは配布済み。自動起動、アンインストール、コード署名、IPC名前付きパイプのACLを確認 |
 | Windows署名 | Authenticode（SmartScreen警告の低減） |
 | 重複検出 | blake3による同一画像判定 |
-| ワールド名解決 | 任意のVRChat API連携（認証が必要） |
+| ワールド名解決 | 認証なしの解決は実装済み（既定OFF、60秒間隔、ローカルキャッシュ）。認証付き VRChat API 連携・クラウド同期は将来 |
 | エクスポート | タグ・文脈のJSON/CSV出力 |
 
 ### 自動アップデートの残作業

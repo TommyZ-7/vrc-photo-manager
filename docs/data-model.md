@@ -27,7 +27,7 @@ PRAGMA busy_timeout = 5000;
 ```
 
 - `user_version` でスキーマバージョンを管理する。
-- 現在のバージョンは **11**。
+- 現在のバージョンは **12**。
 - マイグレーションは `Db::migrate` で起動時に自動実行する。
 
 ## 3. テーブル
@@ -97,10 +97,51 @@ idx_photos_move_match(status, file_size, captured_at_utc)
 |---|---|---|
 | id | INTEGER PK | |
 | world_id | TEXT UNIQUE | `wrld_...` |
-| name | TEXT | 表示名。ログ/XMPから取得 |
-| name_source | TEXT | `log` / `xmp` など |
+| name | TEXT | 表示名。ログ/XMP、または任意の VRChat API 解決から取得 |
+| name_source | TEXT | `log` / `xmp` / `vrchat-api` など |
 | alias | TEXT | 手動エイリアス用（現状UI未接続） |
 | first_seen / last_seen | TEXT | |
+
+`name` が NULL のときだけ API 名を `name_source='vrchat-api'` で保存する。
+ログ/XMP名が既にある場合は上書きしない。逆に API 名が先に入った場合は、
+後から届いたログ/XMP名で上書きできる。表示は常に `alias` → `name` の順。
+
+### `world_name_lookups`
+
+VRChat API によるワールド名解決の耐久キュー。デーモンの `world-name`
+ワーカーだけが処理する。1ワールドにつき最大1行。
+
+| 列 | 型 | 説明 |
+|---|---|---|
+| world_db_id | INTEGER PK/FK | `worlds.id`。`ON DELETE CASCADE` |
+| status | TEXT | `pending` / `retry` / `resolved` / `not_found` / `failed` |
+| attempts | INTEGER | 再試行可能な失敗の回数。429 では増やさない |
+| next_attempt_at | INTEGER | 次回試行時刻（epoch秒）。`NULL` は即時または terminal |
+| last_attempt_at | INTEGER | 最後に試行した時刻（epoch秒） |
+| last_error | TEXT | `network` / `http_429` / `http_5xx` / `not_found` / `invalid_response` / `http_4xx` などの固定コード。レスポンス本文は保存しない |
+| updated_at | TEXT | RFC3339 |
+
+`status` の意味:
+
+| status | 意味 | 再試行 |
+|---|---|---|
+| `pending` | 未試行。`next_attempt_at` は NULL | 即時 |
+| `retry` | 一時失敗（429 / 5xx / ネットワーク） | `next_attempt_at` 以降 |
+| `resolved` | 名前を保存済み、またはログ/XMP名で解決済み | なし |
+| `not_found` | 404 | 24時間後 |
+| `failed` | 3xx（リダイレクト）/ その他の4xx / 不正レスポンス | なし（terminal） |
+
+インデックス:
+
+```sql
+idx_world_name_lookups_due(status, next_attempt_at)
+```
+
+- `pending` / `retry` / `not_found` かつ `next_attempt_at` が到来した行を、
+  `COALESCE(next_attempt_at, 0), world_db_id` 順で1件取得する。
+- 名前を保存したとき、同じワールドに紐づく `photo_context.world_name` の
+  `NULL` を埋め、更新があれば `library_revision` を進める。
+- ログ/XMP名が先に保存された行は `resolved` になり、API を呼ばない。
 
 ### `sessions`
 
@@ -139,7 +180,7 @@ VRChatの1滞在。
 | photo_id | INTEGER PK/FK | `photos.id` |
 | session_id | INTEGER FK | 紐付いたセッション。XMPのみならNULL |
 | world_id | INTEGER FK | |
-| world_name | TEXT | ログ/XMPの表示名 |
+| world_name | TEXT | ログ/XMP/API の表示名。リンク時点で NULL なら、名前が解決したときにバックフィルされる |
 | instance_id | TEXT | |
 | link_method | TEXT | `log` / `log+xmp` / `xmp` / `demo` |
 | confidence | REAL | 1.0（log+xmp）、0.9（log）、0.4（xmp） |
@@ -394,6 +435,7 @@ UIからデーモンへの再実行要求。FIFOの小さなキュー。
 | `daemon_heartbeat` | デーモンの最終ハートビート（epoch秒） |
 | `daemon_supervisor` | 稼働中のデーモンの起動元。`systemd` または `app` |
 | `library_revision` | 一覧変更の単調増加カウンタ。UIのページキャッシュ無効化に使う |
+| `world_name_next_request_at` | ワールド名解決の次回リクエスト時刻（epoch秒）。再起動後も60秒間隔と 429 の待機を維持する |
 
 `daemon_supervisor` はデーモン起動時に上書きされる。判定は `/proc/self/cgroup` の unit 名、または `INVOCATION_ID` と `SYSTEMD_EXEC_PID` が自プロセスを指すことを使う。UIはハートビートが新しい場合だけ値を表示し、停止中は「デーモン停止」を優先する。
 
@@ -412,10 +454,15 @@ photo_roots, log_dir, managed_dir, language,
 autostart, tray, auto_compress, auto_compress_backlog,
 auto_compress_immediate, auto_compress_keep_original,
 estimated_link, thumbnail_cache_mb, compression_workers,
+world_name_resolution_enabled,
 discord_enabled, discord_destination, discord_include_players,
 discord_send_original, discord_auto_mode, discord_auto_since,
 discord_consent_at
 ```
+
+ワールド名解決の既定値:
+
+- `world_name_resolution_enabled = false`
 
 Discord 関連の既定値:
 
@@ -446,6 +493,7 @@ Discord 関連の既定値:
 15. `send_outbox` は1写真につき `waiting` / `pending` / `processing` のいずれか1件だけ。`sent` / `failed` / `cancelled` の後は再送できる。テスト送信は `photo_id=NULL` でこの制約を受けない。
 16. `send_outbox.processing` はデーモン再起動時に `failed(interrupted)` へ移し、自動再送しない。送信結果が不明なメッセージを二重投稿しないため。
 17. アクティブな送信がある写真は削除を開始しない。削除要求は `waiting` / `pending` / `failed` をキャンセルし、`processing` は完了まで残す。`failed` は削除をブロックしない。
+18. `world_name_lookups` は1ワールドにつき1行。`resolved` / `failed` は再取得しない。`not_found` は24時間後にだけ再試行する。API 名は `worlds.name` が NULL のときだけ保存し、ログ/XMP/手動エイリアスを上書きしない。
 
 ## 5. タイムゾーンと時刻
 
@@ -471,11 +519,13 @@ Discord 関連の既定値:
 | 9 | `idx_jobs_photo_profile` 追加（自動圧縮の重複判定用） |
 | 10 | `daemon_errors.message_key` / `message_args` 追加（翻訳キーと引数） |
 | 11 | `send_outbox` と active / due / photo インデックス追加（Discord 送信 outbox） |
+| 12 | `world_name_lookups` と due インデックス追加（VRChat API ワールド名解決） |
 
 V4以降は `IMMEDIATE` トランザクションで適用する。UIとデーモンが同時に起動しても、書き込みロックで直列化し、`user_version` と列・テーブルの存在を再確認してから進めるため、中断後の再実行でも安全。
 
-v11 の `send_outbox` は `CREATE TABLE IF NOT EXISTS` とインデックス追加だけで、
-既存データを変更しない。ロールバック時はテーブルを残しても既存機能は動く。
+v11 の `send_outbox` と v12 の `world_name_lookups` は
+`CREATE TABLE IF NOT EXISTS` とインデックス追加だけで、既存データを変更しない。
+ロールバック時はテーブルを残しても既存機能は動く。
 
 追加手順:
 
