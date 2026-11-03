@@ -1,0 +1,18 @@
+[package]
+name = "vrc-photon-ai-mock-sidecar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+# Test-only binary. It is not listed in `Packager.toml` or the release
+# workflows, so it never ships with `vrc-photon` or `vrc-photon-daemon`.
+[[bin]]
+name = "mock-sidecar"
+path = "src/main.rs"
+
+[dependencies]
+vrc-photon-ai-protocol = { path = "../ai-protocol" }
+serde_json.workspace = true

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/ai-host",
+    "crates/ai-mock-sidecar",
     "crates/ai-protocol",
     "crates/core",
     "crates/daemon",

@@ -8070,6 +8070,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "vrc-photon-ai-mock-sidecar"
+version = "0.10.1"
+dependencies = [
+ "serde_json",
+ "vrc-photon-ai-protocol",
+]
+
+[[package]]
 name = "vrc-photon-ai-protocol"
 version = "0.10.1"
 dependencies = [
