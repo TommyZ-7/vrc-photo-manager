@@ -51,7 +51,7 @@
 **Interfaces:**
 - Produces: `AppSettings.world_name_resolution_enabled: bool`（既定 `false`）
 
-- [ ] **Step 1: 失敗するテストを書く**
+- [x] **Step 1: 失敗するテストを書く**
 
 `mod tests` に追加する。
 
@@ -86,21 +86,21 @@ fn world_name_resolution_defaults_off_and_roundtrips() {
 }
 ```
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-core settings::tests::world_name_resolution_defaults_off_and_roundtrips`
 Expected: コンパイルエラー（`world_name_resolution_enabled` が未定義）
 
-- [ ] **Step 3: 最小実装を追加**
+- [x] **Step 3: 最小実装を追加**
 
 `AppSettings` に `#[serde(default)] pub world_name_resolution_enabled: bool` を追加し、`Default` で `false` にする。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-core settings::tests::world_name_resolution_defaults_off_and_roundtrips`
 Expected: PASS
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/core/src/settings.rs
@@ -133,7 +133,7 @@ git commit -m "feat(core): add the world name resolution setting"
   - `WorldNameParseError::{InvalidJson, MissingName, EmptyName, TooLong, ControlChars, WorldIdMismatch}`
   - `Db::migrate_v12()`
 
-- [ ] **Step 1: 失敗するテストを書く**
+- [x] **Step 1: 失敗するテストを書く**
 
 `world_name.rs` の `mod tests`:
 
@@ -244,12 +244,12 @@ fn migration_v12_is_retryable() {
 
 既存の `assert_eq!(version, 11)` をすべて `12` に更新する（`rg -n "assert_eq!\\(version, 11\\)" crates/core/src/db.rs`）。
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-core world_name::tests migration_v12`
 Expected: コンパイルエラー（`world_name` モジュール、`migrate_v12` が未定義）
 
-- [ ] **Step 3: 最小実装を追加**
+- [x] **Step 3: 最小実装を追加**
 
 `SCHEMA_V12`:
 
@@ -272,12 +272,12 @@ CREATE INDEX IF NOT EXISTS idx_world_name_lookups_due
 
 `parse_world_name_response` は `serde_json::Value` で `id` と `name` を読み、`name.trim()`、空、256文字超、制御文字、`id` 不一致を検証する。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-core world_name::tests migration_v12`
 Expected: PASS
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/core/src/world_name.rs crates/core/src/lib.rs crates/core/src/db.rs
@@ -306,7 +306,7 @@ git commit -m "feat(core): add world name lookup schema and types"
   - `Db::set_world_name_next_request_at(timestamp: i64) -> Result<()>`
   - `Db::world_name_lookup_counts() -> Result<WorldNameLookupCounts>`
 
-- [ ] **Step 1: 失敗するテストを書く**
+- [x] **Step 1: 失敗するテストを書く**
 
 `db.rs` の `mod tests` に追加する。既存の `sample_photo` / `photo_at` / `set_photo_context` を使う。
 
@@ -473,12 +473,12 @@ fn next_request_at_and_counts_roundtrip() {
 }
 ```
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-core db::tests::enqueue_missing_world_name_lookups_queues_only_unresolved_referenced_worlds`
 Expected: コンパイルエラー（メソッド未定義）
 
-- [ ] **Step 3: 最小実装を追加**
+- [x] **Step 3: 最小実装を追加**
 
 - `enqueue_missing_world_name_lookups` は `INSERT INTO world_name_lookups ... SELECT ... WHERE alias IS NULL AND name IS NULL AND EXISTS (SELECT 1 FROM photo_context c WHERE c.world_id = w.id AND c.world_name IS NULL) AND NOT EXISTS (...)`。
 - `next_due_world_name_lookup` は `status IN ('pending','retry','not_found')` かつ `next_attempt_at IS NULL OR next_attempt_at <= ?` を `COALESCE(next_attempt_at, 0), world_db_id` 順で1件。
@@ -487,12 +487,12 @@ Expected: コンパイルエラー（メソッド未定義）
 - `world_name_next_request_at` / `set_world_name_next_request_at` は `app_settings` の `world_name_next_request_at` キーを使う。
 - `world_name_lookup_counts` は `pending` に `pending` / `retry` / `not_found` をまとめる。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-core db::tests::enqueue_missing_world_name_lookups_queues_only_unresolved_referenced_worlds db::tests::next_due_world_name_lookup_respects_schedule_and_not_found db::tests::failures_schedule_the_expected_backoff db::tests::next_request_at_and_counts_roundtrip`
 Expected: PASS
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/core/src/db.rs
@@ -517,7 +517,7 @@ git commit -m "feat(core): queue and retry world name lookups"
   - `upsert_world` の優先順位とコンテキストバックフィル
   - `link_photo_with` の確定リンクXMP名反映
 
-- [ ] **Step 1: 失敗するテストを書く**
+- [x] **Step 1: 失敗するテストを書く**
 
 `db.rs` の `mod tests`:
 
@@ -763,12 +763,12 @@ fn insert_photo_at(db: &Db, ts: i64, path: &Path) -> i64 {
 
 既存の `insert_photo` は `insert_photo_at(db, ts, Path::new("/photos/a.png"))` を呼ぶ形にしてもよい。
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-core db::tests::backfill_photo_context_world_names_fills_nulls_with_alias_then_name db::tests::record_world_name_resolved_fills_only_nulls_and_keeps_log_names db::tests::api_result_after_log_name_fills_null_contexts_with_the_log_name db::tests::log_name_overwrites_api_name_and_updates_contexts linker::tests::confirmed_link_promotes_xmp_world_name_to_worlds linker::tests::estimated_link_does_not_promote_xmp_world_name`
 Expected: コンパイルエラー（メソッド未定義）
 
-- [ ] **Step 3: 最小実装を追加**
+- [x] **Step 3: 最小実装を追加**
 
 - `backfill_photo_context_world_names` は `photo_context.world_name IS NULL` の行を `COALESCE(worlds.alias, worlds.name)` で埋め、更新件数が1以上なら `library_revision` を進める。
 - `record_world_name_resolved` は `world_by_id` で文字列IDを取得し、`upsert_world(&world.world_id, Some(name), Some("vrchat-api"))` を呼び、`mark_world_name_lookup_resolved(world_db_id, now)` を呼ぶ。
@@ -782,12 +782,12 @@ Expected: コンパイルエラー（メソッド未定義）
   - コンテキスト更新件数が1以上なら `library_revision` を進める
 - `link_photo_with` の確定リンク分岐で、XMP の `world_name` があり、`xmp.world_id` が `None` またはセッションの `world.world_id` と一致する場合、`worlds.name` が NULL または `name_source='vrchat-api'` なら `upsert_world(..., Some(xmp_name), Some("xmp"))` を呼ぶ。推定リンク分岐では呼ばない。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-core db::tests::backfill_photo_context_world_names_fills_nulls_with_alias_then_name db::tests::record_world_name_resolved_fills_only_nulls_and_keeps_log_names db::tests::api_result_after_log_name_fills_null_contexts_with_the_log_name db::tests::log_name_overwrites_api_name_and_updates_contexts linker::tests::confirmed_link_promotes_xmp_world_name_to_worlds linker::tests::estimated_link_does_not_promote_xmp_world_name`
 Expected: PASS
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/core/src/db.rs crates/core/src/linker.rs
@@ -806,7 +806,7 @@ git commit -m "feat(core): prefer log and XMP names and backfill photo contexts"
 - Consumes: Task 2 の定数と型
 - Produces: なし（Task 2 の境界条件とエラー分類の検証）
 
-- [ ] **Step 1: 追加テストを書く**
+- [x] **Step 1: 追加テストを書く**
 
 Task 2 の `rejects_invalid_world_names` は257文字を拒否するが、ちょうど256文字の受理、`id` なしの受理、エラー分類は検証していない。次を追加する。
 
@@ -850,21 +850,21 @@ fn reports_the_specific_parse_error() {
 }
 ```
 
-- [ ] **Step 2: テストを実行する**
+- [x] **Step 2: テストを実行する**
 
 Run: `cargo test -p vrc-photon-core world_name::tests::accepts_a_name_at_the_limit world_name::tests::accepts_a_name_without_an_id world_name::tests::reports_the_specific_parse_error`
 Expected: PASS。FAIL した場合は Task 2 のパーサを修正する（長さ比較は `>`、`id` なしは受理、各分岐は対応する `WorldNameParseError` を返す）。
 
-- [ ] **Step 3: パーサの境界条件を確認する**
+- [x] **Step 3: パーサの境界条件を確認する**
 
 `parse_world_name_response` が `name.chars().count() > MAX_WORLD_NAME_CHARS` で拒否し、`id` が存在する場合だけ一致を要求し、各エラー分岐が対応する variant を返すことを確認する。制御文字の拒否は Task 2 の `rejects_invalid_world_names` で検証済みなので、ここでは追加しない。
 
-- [ ] **Step 4: 全パーサテストが通ることを確認**
+- [x] **Step 4: 全パーサテストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-core world_name::tests`
 Expected: PASS
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/core/src/world_name.rs
@@ -889,7 +889,7 @@ git commit -m "test(core): cover world name parser boundaries and error variants
   - `#[cfg(test)] UreqWorldNameTransport::for_loopback()`
   - `classify_response(status: u16, retry_after_header: Option<&str>, body: &[u8], expected_world_id: &str) -> WorldNameOutcome`
 
-- [ ] **Step 1: 失敗するテストを書く**
+- [x] **Step 1: 失敗するテストを書く**
 
 ```rust
 #[test]
@@ -970,12 +970,12 @@ fn rejects_oversized_response_bodies() {
 
 `loopback_server_once` と `for_loopback_with_base` はテスト専用ヘルパー。既存の `discord_http.rs` の loopback テストを参考にする。本番の `UreqWorldNameTransport::new()` は固定URLを使い、テスト用だけ base URL を差し替える。
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-daemon world_name_http::tests`
 Expected: コンパイルエラー（モジュール未定義）
 
-- [ ] **Step 3: 最小実装を追加**
+- [x] **Step 3: 最小実装を追加**
 
 - `UreqWorldNameTransport` は `ureq::Agent` を構築する:
   - `https_only(true)`
@@ -989,12 +989,12 @@ Expected: コンパイルエラー（モジュール未定義）
 - `classify_response` は 2xx / 404 / 429 / 5xx / その他で分岐し、2xx は `parse_world_name_response` に渡す。パース失敗は `Invalid { code: "invalid_response" }`。
 - ネットワークエラーは `Retryable { code: "network" }`。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-daemon world_name_http::tests`
 Expected: PASS
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/daemon/src/world_name_http.rs crates/daemon/src/lib.rs
@@ -1019,7 +1019,7 @@ git commit -m "feat(daemon): add the VRChat world name HTTP transport"
   - `worker_loop(db: Arc<Mutex<Db>>, running: Arc<AtomicBool>, enabled: Arc<AtomicBool>, wake: Arc<JobSignal>, transport: Arc<dyn WorldNameTransport>)`
   - `initial_next_request_at(db: &Db) -> anyhow::Result<i64>`
 
-- [ ] **Step 1: 失敗するテストを書く**
+- [x] **Step 1: 失敗するテストを書く**
 
 ```rust
 #[derive(Default)]
@@ -1196,12 +1196,12 @@ fn worker_loop_reserves_the_next_request_before_fetching() {
 
 テストモジュールに `use std::collections::VecDeque; use std::sync::Mutex; use std::time::{Duration, Instant};` を追加する。
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-daemon world_names::tests`
 Expected: コンパイルエラー（モジュール未定義）
 
-- [ ] **Step 3: 最小実装を追加**
+- [x] **Step 3: 最小実装を追加**
 
 - `process_next_world_name` は DB から due を1件取得し、ロックを解放して `fetch` し、結果を `record_world_name_resolved(world_db_id, name, now)` / `record_world_name_failure(world_db_id, failure, now)` に渡す。
 - 成功: `next_request_at = now + 60`。
@@ -1213,12 +1213,12 @@ Expected: コンパイルエラー（モジュール未定義）
 - DB の記録に失敗した場合は行を terminal にせず、60秒待って次のループで再試行する。
 - ログは `world_db_id` と固定コードだけ。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-daemon world_names::tests`
 Expected: PASS
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/daemon/src/world_names.rs crates/daemon/src/lib.rs
@@ -1241,7 +1241,7 @@ git commit -m "feat(daemon): process world name lookups in a worker"
   - `Daemon.world_name_handle: Option<JoinHandle<()>>`
   - `Daemon::enqueue_world_name_backfill(&self)`
 
-- [ ] **Step 1: 失敗するテストを書く**
+- [x] **Step 1: 失敗するテストを書く**
 
 ```rust
 fn insert_unresolved_world_photo(db: &Db) -> (i64, i64) {
@@ -1341,12 +1341,12 @@ fn run_once_does_not_start_the_world_name_worker() {
 
 daemon のテストモジュールに `use vrc_photon_core::model::{NewPhoto, PhotoContext};` を追加する。
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-daemon start_workers_spawns_and_stops_the_world_name_worker enabling_world_name_resolution_enqueues_backfill run_once_does_not_start_the_world_name_worker`
 Expected: コンパイルエラー（フィールド/メソッド未定義）
 
-- [ ] **Step 3: 最小実装を追加**
+- [x] **Step 3: 最小実装を追加**
 
 - `Daemon` に `world_names: Arc<JobSignal>`、`world_name_resolution_enabled: Arc<AtomicBool>`、`world_name_handle: Option<JoinHandle<()>>` を追加し、`open_inner` で初期化する。
 - `start_workers` で、設定がONなら `enqueue_world_name_backfill()` を実行してから `world-name` スレッドを spawn する。無効でもスレッドは spawn し、5秒待機させる。`world_name_handle.is_none()` のときだけ spawn する。
@@ -1355,12 +1355,12 @@ Expected: コンパイルエラー（フィールド/メソッド未定義）
 - `link_unlinked` で `linked > 0` かつ機能ONなら `enqueue_world_name_backfill()` と `world_names.notify()`。
 - `enqueue_world_name_backfill` は DB ロックを取り、`backfill_photo_context_world_names()` → `enqueue_missing_world_name_lookups()` を実行する。エラーは `tracing::warn!` に留める。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-daemon start_workers_spawns_and_stops_the_world_name_worker enabling_world_name_resolution_enqueues_backfill run_once_does_not_start_the_world_name_worker`
 Expected: PASS
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/daemon/src/lib.rs
@@ -1390,7 +1390,7 @@ git commit -m "feat(daemon): wire world name resolution into the daemon"
   - `Photo.world_id: Option<String>`（VRChat の `wrld_...`。DB の FK ではない）
   - `pub(crate) fn photo_world_label(photo: &Photo) -> String`
 
-- [ ] **Step 1: 失敗するテストを書く**
+- [x] **Step 1: 失敗するテストを書く**
 
 `crates/core/src/db.rs` の `mod tests`:
 
@@ -1437,12 +1437,12 @@ fn photo_world_label_prefers_name_then_id_then_unlinked() {
 }
 ```
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-core db::tests::photo_query_includes_the_vrchat_world_id`
 Expected: コンパイルエラー（`Photo.world_id` が未定義）
 
-- [ ] **Step 3: 最小実装を追加**
+- [x] **Step 3: 最小実装を追加**
 
 - `Photo` に `pub world_id: Option<String>` を追加する。
 - `PHOTO_SELECT` の末尾に `pw.world_id` を追加し、`PHOTO_FROM` に `LEFT JOIN worlds pw ON pw.id = c.world_id` を追加する。`row_to_photo` のインデックス27に `world_id` を追加する。
@@ -1456,14 +1456,14 @@ Expected: コンパイルエラー（`Photo.world_id` が未定義）
 - `app/photos.rs` のシーン色フォールバックを `photo.world_name.as_deref().or(photo.world_id.as_deref()).unwrap_or("")` にする。
 - `app/live.rs` と `app/daemon.rs` の現在ワールド表示を `world.alias.or(world.name).or(Some(world.world_id))` にする。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-core db::tests::photo_query_includes_the_vrchat_world_id && cargo test -p vrc-photon-ui photo_world_label_prefers_name_then_id_then_unlinked`
 Expected: PASS
 
 追加で `cargo test -p vrc-photon-ui` と `cargo test -p vrc-photon-core` を実行し、`Photo` リテラルの追加漏れがないことを確認する。
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/core/src/model.rs crates/core/src/db.rs crates/core/src/discord.rs crates/ui/src
@@ -1484,7 +1484,7 @@ git commit -m "feat(ui): show the world ID when no name is available"
 - Consumes: `AppSettings.world_name_resolution_enabled`、`App::setting_switch`
 - Produces: 設定画面の「ワールド名解決」カード
 
-- [ ] **Step 1: 失敗するテストを書く**
+- [x] **Step 1: 失敗するテストを書く**
 
 `crates/i18n/tests/catalog.rs` の `english_catalog_is_complete` が自動で新キーを検出する。先に `ja.yml` だけにキーを追加し、`en.yml` を空のままにして失敗させる。
 
@@ -1497,12 +1497,12 @@ settings.world_name.hint: "名前がないワールドIDを検索し、結果を
 settings.world_name.privacy: "有効にすると、ワールドIDのみを api.vrchat.cloud へ送信します。認証情報は使いません。既定はOFFです。"
 ```
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-i18n english_catalog_is_complete`
 Expected: FAIL（`en` に `settings.world_name.*` がない）
 
-- [ ] **Step 3: 最小実装を追加**
+- [x] **Step 3: 最小実装を追加**
 
 `en.yml` に追加する。
 
@@ -1547,12 +1547,12 @@ settings.world_name.privacy: "When enabled, only the world ID is sent to api.vrc
 )
 ```
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-i18n && cargo test -p vrc-photon-ui`
 Expected: PASS
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/ui/src/ui/settings.rs crates/i18n/locales/ja.yml crates/i18n/locales/en.yml
@@ -1561,7 +1561,9 @@ git commit -m "feat(ui): add the world name resolution setting card"
 
 ---
 
-### Task 11: ドキュメントと ADR
+### Task 11: ドキュメントと ADR（別 PR に延期）
+
+**Status:** Deferred to `docs/25-world-name-resolution` per AGENTS. This code branch does not include user-facing docs/ADR changes.
 
 **Files:**
 - Modify: `docs/security-privacy.md`
@@ -1629,22 +1631,24 @@ git commit -m "docs: document VRChat world name resolution"
 **Interfaces:**
 - Consumes: Task 1〜11 のすべて
 
-- [ ] **Step 1: フォーマットを確認**
+- [x] **Step 1: フォーマットを確認**
 
 Run: `cargo fmt --all -- --check`
 Expected: 無出力
 
-- [ ] **Step 2: Clippy を確認**
+- [x] **Step 2: Clippy を確認**
 
 Run: `cargo clippy --workspace --all-targets -- -D warnings`
 Expected: 警告なし
 
-- [ ] **Step 3: ワークスペースのテストを実行**
+- [x] **Step 3: ワークスペースのテストを実行**
 
 Run: `cargo test --workspace`
 Expected: すべて PASS
 
 - [ ] **Step 4: 手動確認**
+
+**Status:** 自動検証（fmt/clippy/workspace tests）は完了。VRChat API/UI の手動確認は merge 前に実施する。
 
 以下を確認する。
 
@@ -1657,7 +1661,7 @@ Expected: すべて PASS
 - `worlds.name_source` が `vrchat-api` になり、ログ/XMP名を上書きしていない。
 - 推定リンクの XMP 名が `worlds.name` を変更していない。
 
-- [ ] **Step 5: 差分を確認**
+- [x] **Step 5: 差分を確認**
 
 Run: `git diff --check && git status --short`
 Expected: 意図したファイルだけが変更されている。`opencode.json` や `.opencode/` など、この作業と無関係な既存の変更をコミットしない。
