@@ -4,7 +4,7 @@
 //! files and database rows; keeping the distribution here lets tests pin the
 //! date without touching SQLite or the filesystem.
 
-use chrono::{Datelike, Months, NaiveDate, NaiveDateTime};
+use chrono::{Datelike, Months, NaiveDate, NaiveDateTime, Timelike};
 use vrc_photon_core::model::PhotoPlayer;
 use vrc_photon_core::time::{self, LocalStamp};
 
@@ -38,7 +38,12 @@ pub(crate) struct DemoPhoto {
     pub(crate) compressed: bool,
 }
 
-pub(crate) fn demo_fixture(reference: NaiveDate) -> Vec<DemoPhoto> {
+/// Fixture as of a specific moment. Photos in the current month never carry
+/// a timestamp after `now`: days are limited to the elapsed days, and a
+/// photo that lands on `now`'s own day has its time of day scaled into the
+/// part of the day that has already elapsed.
+pub(crate) fn demo_fixture_at(now: NaiveDateTime) -> Vec<DemoPhoto> {
+    let reference = now.date();
     let mut photos = Vec::with_capacity(300);
     let mut global = 0usize;
 
@@ -59,11 +64,23 @@ pub(crate) fn demo_fixture(reference: NaiveDate) -> Vec<DemoPhoto> {
         for index_in_month in 0..count {
             let linked = !global.is_multiple_of(7);
             let day = 1 + (index_in_month * days_in_month / count + months_ago) % days_in_month;
-            let hour = (8 + index_in_month * 3 + months_ago * 5) % 23;
-            let minute = (index_in_month * 13 + months_ago * 7) % 60;
+            let mut hour = (8 + index_in_month * 3 + months_ago * 5) % 23;
+            let mut minute = (index_in_month * 13 + months_ago * 7) % 60;
             let date = start
                 .with_day(day as u32)
                 .expect("demo day is inside its month");
+            if months_ago == 0 && date == reference {
+                // The reference day is still in progress: scale a later
+                // time of day into the elapsed part of the day so no
+                // photo is stamped in the future.
+                let minutes = hour * 60 + minute;
+                let elapsed = (now.hour() * 60 + now.minute()) as usize;
+                if minutes > elapsed {
+                    let scaled = minutes * (elapsed + 1) / (24 * 60);
+                    hour = scaled / 60;
+                    minute = scaled % 60;
+                }
+            }
             let captured_at = local_stamp(date, hour as u32, minute as u32);
 
             let world = linked.then_some((months_ago + index_in_month) % DEMO_WORLDS.len());
@@ -159,19 +176,25 @@ mod tests {
         photo.captured_at.local[..7].to_string()
     }
 
-    fn signature(
-        photo: &DemoPhoto,
-    ) -> (
+    /// Everything the determinism check compares, including the full
+    /// `LocalStamp` (local text, UTC instant, and offset).
+    type Signature = (
         String,
+        i64,
+        i32,
         usize,
         Option<usize>,
         bool,
         bool,
         Vec<String>,
         Vec<String>,
-    ) {
+    );
+
+    fn signature(photo: &DemoPhoto) -> Signature {
         (
             photo.captured_at.local.clone(),
+            photo.captured_at.utc,
+            photo.captured_at.offset_sec,
             photo.palette,
             photo.world,
             photo.favorite,
@@ -187,7 +210,7 @@ mod tests {
 
     #[test]
     fn fixture_spans_36_months_and_300_photos() {
-        let photos = demo_fixture(reference());
+        let photos = demo_fixture_at(reference().and_hms_opt(23, 59, 0).unwrap());
         assert_eq!(photos.len(), 300);
 
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -219,11 +242,56 @@ mod tests {
     }
 
     #[test]
+    fn fixture_month_counts_follow_the_exact_cycle() {
+        let reference = reference();
+        let photos = demo_fixture_at(reference.and_hms_opt(23, 59, 0).unwrap());
+
+        let mut expected: BTreeMap<String, usize> = BTreeMap::new();
+        for months_ago in 0..DEMO_MONTHS {
+            let month = month_start(reference, months_ago);
+            let count = MONTH_COUNTS[(months_ago + (months_ago / 12) * 4) % MONTH_COUNTS.len()];
+            *expected
+                .entry(month.format("%Y-%m").to_string())
+                .or_default() += count;
+        }
+
+        let mut actual: BTreeMap<String, usize> = BTreeMap::new();
+        for photo in &photos {
+            *actual.entry(month_key(photo)).or_default() += 1;
+        }
+        assert_eq!(actual, expected);
+        // One full year of the cycle sums to exactly 100 photos.
+        assert_eq!(MONTH_COUNTS.iter().sum::<usize>(), 100);
+    }
+
+    #[test]
+    fn fixture_on_the_first_keeps_the_current_month_on_day_one() {
+        let now = NaiveDate::from_ymd_opt(2026, 11, 1)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap();
+        let photos = demo_fixture_at(now);
+
+        let current: Vec<&DemoPhoto> = photos
+            .iter()
+            .filter(|photo| photo.captured_at.local.starts_with("2026-11"))
+            .collect();
+        assert_eq!(current.len(), MONTH_COUNTS[0]);
+        for photo in current {
+            assert!(
+                photo.captured_at.local.starts_with("2026-11-01"),
+                "{} is not on day one",
+                photo.captured_at.local
+            );
+        }
+    }
+
+    #[test]
     fn fixture_spreads_days_and_times_within_each_month() {
         let mut days_by_month: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut times_by_month: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
 
-        for photo in demo_fixture(reference()) {
+        for photo in demo_fixture_at(reference().and_hms_opt(23, 59, 0).unwrap()) {
             let month = month_key(&photo);
             days_by_month
                 .entry(month.clone())
@@ -247,7 +315,7 @@ mod tests {
 
     #[test]
     fn fixture_keeps_metadata_ratios_and_context() {
-        let photos = demo_fixture(reference());
+        let photos = demo_fixture_at(reference().and_hms_opt(23, 59, 0).unwrap());
         assert_eq!(photos.iter().filter(|photo| photo.favorite).count(), 75);
         assert_eq!(photos.iter().filter(|photo| photo.compressed).count(), 100);
 
@@ -262,7 +330,17 @@ mod tests {
         }
 
         for photo in photos.iter().filter(|photo| photo.world.is_some()) {
-            assert!(!photo.players.is_empty());
+            assert!(
+                (3..=7).contains(&photo.players.len()),
+                "linked photo has {} players",
+                photo.players.len()
+            );
+            let unique: BTreeSet<&str> = photo
+                .players
+                .iter()
+                .map(|player| player.user_id.as_str())
+                .collect();
+            assert_eq!(unique.len(), photo.players.len());
             assert_eq!(photo.tags.len(), 2);
         }
     }
@@ -279,7 +357,7 @@ mod tests {
             }
         }
 
-        let photos = demo_fixture(reference);
+        let photos = demo_fixture_at(reference.and_hms_opt(23, 59, 0).unwrap());
         assert_eq!(photos.len(), expected_months.len());
         for (photo, expected) in photos.iter().zip(expected_months) {
             assert_eq!(&photo.captured_at.local[..7], expected);
@@ -304,9 +382,39 @@ mod tests {
     }
 
     #[test]
+    fn fixture_at_never_stamps_today_after_now() {
+        let now = NaiveDate::from_ymd_opt(2026, 11, 2)
+            .unwrap()
+            .and_hms_opt(9, 30, 0)
+            .unwrap();
+        let photos = demo_fixture_at(now);
+        assert_eq!(photos.len(), 300);
+        let now_text = "2026-11-02 09:30";
+        for photo in &photos {
+            assert!(
+                photo.captured_at.local[..16] <= *now_text,
+                "{} is after {now_text}",
+                photo.captured_at.local
+            );
+        }
+        // Photos on the reference day itself exist and stay on that day.
+        let today: Vec<&DemoPhoto> = photos
+            .iter()
+            .filter(|photo| photo.captured_at.local.starts_with("2026-11-02"))
+            .collect();
+        assert!(!today.is_empty());
+    }
+
+    #[test]
     fn fixture_is_deterministic() {
-        let first: Vec<_> = demo_fixture(reference()).iter().map(signature).collect();
-        let second: Vec<_> = demo_fixture(reference()).iter().map(signature).collect();
+        let first: Vec<_> = demo_fixture_at(reference().and_hms_opt(23, 59, 0).unwrap())
+            .iter()
+            .map(signature)
+            .collect();
+        let second: Vec<_> = demo_fixture_at(reference().and_hms_opt(23, 59, 0).unwrap())
+            .iter()
+            .map(signature)
+            .collect();
         assert_eq!(first, second);
     }
 }

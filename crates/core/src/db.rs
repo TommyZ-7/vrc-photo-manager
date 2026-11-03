@@ -1320,13 +1320,31 @@ impl Db {
         name: Option<&str>,
         source: Option<&str>,
     ) -> Result<i64> {
-        // Read-then-write must take the write lock up front: with a deferred
+        // Standalone calls take the write lock up front: with a deferred
         // transaction another process could write between the SELECT and the
         // UPDATE, turning our snapshot stale (SQLITE_BUSY_SNAPSHOT, which
         // busy_timeout does not retry) or racing the insert on a new world.
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        // Calls already inside a caller-owned transaction (for example the
+        // demo seed) must join it instead of nesting a second transaction.
+        if self.conn.is_autocommit() {
+            let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+            let id = self.upsert_world_inner(&tx, world_id, name, source)?;
+            tx.commit()?;
+            Ok(id)
+        } else {
+            self.upsert_world_inner(&self.conn, world_id, name, source)
+        }
+    }
+
+    fn upsert_world_inner(
+        &self,
+        conn: &Connection,
+        world_id: &str,
+        name: Option<&str>,
+        source: Option<&str>,
+    ) -> Result<i64> {
         let now = now_string();
-        let existing = tx
+        let existing = conn
             .query_row(
                 "SELECT id, name, name_source, alias FROM worlds WHERE world_id = ?1",
                 params![world_id],
@@ -1342,14 +1360,14 @@ impl Db {
             .optional()?;
 
         let Some((id, old_name, old_source, alias)) = existing else {
-            let id = tx.query_row(
-                "INSERT INTO worlds(world_id, name, name_source, first_seen, last_seen) \
+            return conn
+                .query_row(
+                    "INSERT INTO worlds(world_id, name, name_source, first_seen, last_seen) \
                  VALUES (?1, ?2, ?3, ?4, ?4) RETURNING id",
-                params![world_id, name, source, now],
-                |row| row.get(0),
-            )?;
-            tx.commit()?;
-            return Ok(id);
+                    params![world_id, name, source, now],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into);
         };
 
         // A missing name is always filled. An API name may be replaced by a
@@ -1366,7 +1384,7 @@ impl Db {
         } else {
             old_source.clone()
         };
-        tx.execute(
+        conn.execute(
             "UPDATE worlds SET name = ?1, name_source = ?2, last_seen = ?3 WHERE id = ?4",
             params![stored_name, stored_source, now, id],
         )?;
@@ -1375,12 +1393,12 @@ impl Db {
         // that already show that API name must follow the new name too.
         let effective_name = alias.as_deref().or(stored_name.as_deref());
         let updated = match effective_name {
-            Some(effective_name) if replaces_api_name => tx.execute(
+            Some(effective_name) if replaces_api_name => conn.execute(
                 "UPDATE photo_context SET world_name = ?1 \
                  WHERE world_id = ?2 AND (world_name IS NULL OR world_name = ?3)",
                 params![effective_name, id, old_name],
             )?,
-            Some(effective_name) => tx.execute(
+            Some(effective_name) => conn.execute(
                 "UPDATE photo_context SET world_name = ?1 \
                  WHERE world_id = ?2 AND world_name IS NULL",
                 params![effective_name, id],
@@ -1394,7 +1412,6 @@ impl Db {
         if updated > 0 {
             self.bump_library_revision()?;
         }
-        tx.commit()?;
         Ok(id)
     }
 
@@ -1822,23 +1839,37 @@ impl Db {
     }
 
     pub fn set_photo_players(&self, photo_id: i64, players: &[PhotoPlayer]) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "DELETE FROM photo_players WHERE photo_id = ?1",
-            params![photo_id],
-        )?;
-        for player in players {
-            if player.user_id.trim().is_empty() {
-                continue;
-            }
-            tx.execute(
-                "INSERT OR REPLACE INTO photo_players(photo_id, user_id, display_name) \
-                 VALUES (?1, ?2, ?3)",
-                params![photo_id, player.user_id, player.display_name],
+        // A savepoint instead of a transaction, so the method also works
+        // inside a caller's transaction (e.g. `in_transaction`).
+        self.conn.execute_batch("SAVEPOINT set_photo_players")?;
+        let result = (|| {
+            self.conn.execute(
+                "DELETE FROM photo_players WHERE photo_id = ?1",
+                params![photo_id],
             )?;
+            for player in players {
+                if player.user_id.trim().is_empty() {
+                    continue;
+                }
+                self.conn.execute(
+                    "INSERT OR REPLACE INTO photo_players(photo_id, user_id, display_name) \
+                     VALUES (?1, ?2, ?3)",
+                    params![photo_id, player.user_id, player.display_name],
+                )?;
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("RELEASE set_photo_players")?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = self.conn.execute_batch("ROLLBACK TO set_photo_players");
+                let _ = self.conn.execute_batch("RELEASE set_photo_players");
+                Err(error)
+            }
         }
-        tx.commit()?;
-        Ok(())
     }
 
     pub fn photo_players(&self, photo_id: i64) -> Result<Vec<PhotoPlayer>> {
@@ -1871,32 +1902,46 @@ impl Db {
     }
 
     pub fn set_photo_tags(&self, photo_id: i64, tags: &[String]) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
-        tx.execute(
-            "DELETE FROM photo_tags WHERE photo_id = ?1",
-            params![photo_id],
-        )?;
-        for name in tags {
-            let name = name.trim();
-            if name.is_empty() {
-                continue;
+        // A savepoint instead of a transaction, so the method also works
+        // inside a caller's transaction (e.g. `in_transaction`).
+        self.conn.execute_batch("SAVEPOINT set_photo_tags")?;
+        let result = (|| {
+            self.conn.execute(
+                "DELETE FROM photo_tags WHERE photo_id = ?1",
+                params![photo_id],
+            )?;
+            for name in tags {
+                let name = name.trim();
+                if name.is_empty() {
+                    continue;
+                }
+                self.conn.execute(
+                    "INSERT INTO tags(name) VALUES (?1) ON CONFLICT(name) DO NOTHING",
+                    params![name],
+                )?;
+                let tag_id: i64 = self.conn.query_row(
+                    "SELECT id FROM tags WHERE name = ?1",
+                    params![name],
+                    |row| row.get(0),
+                )?;
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO photo_tags(photo_id, tag_id) VALUES (?1, ?2)",
+                    params![photo_id, tag_id],
+                )?;
             }
-            tx.execute(
-                "INSERT INTO tags(name) VALUES (?1) ON CONFLICT(name) DO NOTHING",
-                params![name],
-            )?;
-            let tag_id: i64 = tx.query_row(
-                "SELECT id FROM tags WHERE name = ?1",
-                params![name],
-                |row| row.get(0),
-            )?;
-            tx.execute(
-                "INSERT OR IGNORE INTO photo_tags(photo_id, tag_id) VALUES (?1, ?2)",
-                params![photo_id, tag_id],
-            )?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.conn.execute_batch("RELEASE set_photo_tags")?;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = self.conn.execute_batch("ROLLBACK TO set_photo_tags");
+                let _ = self.conn.execute_batch("RELEASE set_photo_tags");
+                Err(error)
+            }
         }
-        tx.commit()?;
-        Ok(())
     }
 
     pub fn photo_tags(&self, photo_id: i64) -> Result<Vec<String>> {
@@ -3702,6 +3747,16 @@ impl Db {
         Ok(())
     }
 
+    /// Runs `f` as a single transaction: commits when `f` succeeds and
+    /// rolls back when it fails, so bulk writers never leave a
+    /// half-written library behind.
+    pub fn in_transaction<T>(&self, f: impl FnOnce(&Db) -> Result<T>) -> Result<T> {
+        let tx = self.conn.unchecked_transaction()?;
+        let value = f(self)?;
+        tx.commit()?;
+        Ok(value)
+    }
+
     pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
         self.conn.execute(
             "INSERT INTO app_settings(key, value) VALUES (?1, ?2) \
@@ -4621,6 +4676,112 @@ mod tests {
         assert_eq!(
             summary.affected_photos, 2,
             "a photo with both kinds of work counts once, and a failed send alone counts"
+        );
+    }
+
+    #[test]
+    fn deletion_summary_counts_a_processing_send_as_affected() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        db.enqueue_send(
+            photo,
+            SendKind::Photo,
+            SendOrigin::Manual,
+            SendStatus::Pending,
+        )
+        .unwrap();
+        let claimed = db.claim_next_send(100).unwrap().unwrap();
+        assert_eq!(claimed.status, SendStatus::Processing);
+
+        let summary = db.deletion_job_summary(&[photo]).unwrap();
+        assert_eq!(summary.send.processing, 1);
+        assert_eq!(summary.send.total(), 1);
+        assert_eq!(
+            summary.affected_photos, 1,
+            "a photo with a claimed send is affected"
+        );
+        assert!(summary.needs_warning());
+    }
+
+    #[test]
+    fn deletion_summary_excludes_photos_with_only_terminal_sends() {
+        let db = Db::open_in_memory().unwrap();
+        let sent_photo = seed_photo(&db);
+        let cancelled_photo = seed_other_photo(&db);
+
+        let sent = db
+            .enqueue_send(
+                sent_photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        db.claim_next_send(100).unwrap();
+        db.complete_send(
+            sent,
+            &SendCompletion {
+                source: None,
+                profile_id: None,
+                destination: "D".into(),
+                message_id: None,
+                channel_id: None,
+                guild_id: None,
+            },
+        )
+        .unwrap();
+
+        let cancelled = db
+            .enqueue_send(
+                cancelled_photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(db.cancel_send(cancelled).unwrap());
+
+        let summary = db
+            .deletion_job_summary(&[sent_photo, cancelled_photo])
+            .unwrap();
+        assert_eq!(summary.send.total(), 0);
+        assert_eq!(
+            summary.affected_photos, 0,
+            "sent and cancelled sends are terminal and leave the photo unaffected"
+        );
+        assert!(!summary.needs_warning());
+    }
+
+    #[test]
+    fn deletion_summary_counts_an_unknown_send_status_as_affected() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        let send = db
+            .enqueue_send(
+                photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        db.connection()
+            .execute(
+                "UPDATE send_outbox SET status = 'future_status' WHERE id = ?1",
+                params![send],
+            )
+            .unwrap();
+
+        let summary = db.deletion_job_summary(&[photo]).unwrap();
+        assert_eq!(
+            summary.send.pending, 1,
+            "unknown send statuses parse as pending in the body"
+        );
+        assert_eq!(
+            summary.affected_photos, 1,
+            "a status written by a newer version is never terminal"
         );
     }
 
@@ -6732,6 +6893,23 @@ mod tests {
         assert_eq!(counts.pending, 2);
         assert_eq!(counts.resolved, 1);
         assert_eq!(counts.failed, 1);
+    }
+
+    #[test]
+    fn upsert_world_joins_an_existing_transaction() {
+        let db = Db::open_in_memory().unwrap();
+        db.in_transaction(|db| {
+            let world = db.upsert_world("wrld_tx", Some("Tx World"), Some("log"))?;
+            assert_eq!(
+                db.world_by_id(world)?.unwrap().name.as_deref(),
+                Some("Tx World")
+            );
+            Ok(())
+        })
+        .unwrap();
+
+        let world = db.world_by_world_id("wrld_tx").unwrap().unwrap();
+        assert_eq!(world.name.as_deref(), Some("Tx World"));
     }
 
     #[test]

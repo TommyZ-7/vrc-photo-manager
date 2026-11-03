@@ -243,8 +243,7 @@ impl App {
 
     fn inspector_column(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let motion = self.inspector_motion;
-        let inset = window.client_inset().map(f32::from).unwrap_or(0.0);
-        let content_width = window_content_extent(f32::from(window.viewport_size().width), inset);
+        let content_width = f32::from(content_viewport(window).width);
         let column_width = inspector_column_width(content_width);
         // Keep the body mounted for the whole collapse so it can be clipped by
         // the shrinking column, and from the first expanded frame so the
@@ -271,10 +270,9 @@ impl App {
 
     fn inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let p = self.palette;
-        let viewport = window.viewport_size();
-        let client_inset = window.client_inset().map(f32::from).unwrap_or(0.0);
-        let content_width = window_content_extent(f32::from(viewport.width), client_inset);
-        let content_height = window_content_extent(f32::from(viewport.height), client_inset);
+        let content = content_viewport(window);
+        let content_width = f32::from(content.width);
+        let content_height = f32::from(content.height);
         let column_width = inspector_column_width(content_width);
         let card_width = inspector_card_width(content_width);
         let preview_height = inspector_preview_height(content_height);

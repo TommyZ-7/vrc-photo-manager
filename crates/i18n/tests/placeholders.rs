@@ -84,6 +84,7 @@ const CALL_SITES: &[(&str, &[&str])] = &[
     ("demo.db_error", &["error"]),
     ("demo.prepare_error", &["error"]),
     ("demo.remove_error", &["error", "path"]),
+    ("demo.unexpected_contents", &["entry", "path"]),
     ("dialog.compress_count", &["count"]),
     ("dialog.target_count", &["count"]),
     ("gallery.month_count", &["count", "total"]),

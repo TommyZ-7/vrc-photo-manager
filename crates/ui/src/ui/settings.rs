@@ -31,8 +31,8 @@ use crate::ui::palette::{
 };
 use crate::ui::theme::*;
 
-#[derive(Clone, Copy)]
-enum ThemeAxis {
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ThemeAxis {
     Main,
     Accent,
 }
@@ -705,12 +705,30 @@ impl App {
                 })
                 .collect(),
         };
+        // GPUI tooltips only appear on hover, so while a swatch in this
+        // axis holds keyboard focus its color name is repeated in the
+        // heading, in the accent color, next to the selected color name.
+        let focused_label = self
+            .theme_focused
+            .filter(|(focused_axis, _)| *focused_axis == axis)
+            .and_then(|(_, index)| items.get(index))
+            .map(|item| item.1.clone())
+            .filter(|label| *label != selected_label);
         let mut rows = v_flex().gap(px(8.));
-        for chunk in items.chunks(6) {
+        for (chunk_index, chunk) in items.chunks(6).enumerate() {
             let mut row = h_flex().items_center().gap(px(8.));
-            for item in chunk {
+            for (offset, item) in chunk.iter().enumerate() {
                 let (id, label, swatch, selected) = item;
-                row = row.child(self.theme_swatch(axis, id, label.clone(), *swatch, *selected, cx));
+                let index = chunk_index * 6 + offset;
+                row = row.child(self.theme_swatch(
+                    axis,
+                    index,
+                    id,
+                    label.clone(),
+                    *swatch,
+                    *selected,
+                    cx,
+                ));
             }
             rows = rows.child(row);
         }
@@ -732,14 +750,24 @@ impl App {
                             .text_size(px(10.))
                             .text_color(rgb(p.muted))
                             .child(format!("· {selected_label}")),
-                    ),
+                    )
+                    .when_some(focused_label, |this, label| {
+                        this.child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(p.accent))
+                                .child(format!("· {label}")),
+                        )
+                    }),
             )
             .child(rows)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn theme_swatch(
         &self,
         axis: ThemeAxis,
+        index: usize,
         id: &'static str,
         label: String,
         swatch: u32,
@@ -747,6 +775,12 @@ impl App {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let p = self.palette;
+        let focus = match axis {
+            ThemeAxis::Main => self.theme_main_focus[index].clone(),
+            ThemeAxis::Accent => self.theme_accent_focus[index].clone(),
+        };
+        let click_focus = focus.clone();
+        let key_focus = focus;
         div()
             .id(SharedString::from(format!("theme-{}-{id}", axis.key())))
             .size(px(30.))
@@ -762,11 +796,35 @@ impl App {
                 rgba(0x00000000)
             })
             .cursor_pointer()
+            .track_focus(&click_focus)
+            .tab_stop(true)
             .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
             .hover(move |this| this.bg(rgb(p.panel_inner)))
-            .on_click(cx.listener(move |this, _, _, cx| match axis {
-                ThemeAxis::Main => this.set_main_theme(id, cx),
-                ThemeAxis::Accent => this.set_accent_theme(id, cx),
+            .focus(move |this| this.border_color(rgb(p.accent)).bg(rgb(p.panel_inner)))
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                // Keyboard activation is handled on key down; ignore the
+                // click GPUI synthesizes on key up so the theme is not
+                // applied twice.
+                if matches!(event, ClickEvent::Keyboard(_)) {
+                    return;
+                }
+                window.focus(&click_focus, cx);
+                match axis {
+                    ThemeAxis::Main => this.set_main_theme(id, cx),
+                    ThemeAxis::Accent => this.set_accent_theme(id, cx),
+                }
+            }))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                let key = event.keystroke.key.as_str();
+                if !event.is_held && (key == "enter" || key == "space") {
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    window.focus(&key_focus, cx);
+                    match axis {
+                        ThemeAxis::Main => this.set_main_theme(id, cx),
+                        ThemeAxis::Accent => this.set_accent_theme(id, cx),
+                    }
+                }
             }))
             .child(
                 div()

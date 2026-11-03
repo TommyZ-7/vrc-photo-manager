@@ -5,6 +5,10 @@
 //! three command pages from design §10.2. Both stay opaque on top of the
 //! window's glass backdrop.
 
+use std::rc::Rc;
+
+use gpui_kit::Edges;
+
 use gpui_kit::assets::IconName;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::*;
@@ -68,8 +72,9 @@ pub(crate) const RIBBON_LABELS_MIN_WIDTH: f32 = 1004.0;
 ///
 /// X11 client-side decorations report the outer window through
 /// `viewport_size`, so the responsive thresholds must see the same inner size
-/// the gallery and inspector use. `client_inset` is 0 on Wayland and on X11
-/// without CSD.
+/// the gallery and inspector use. `insets` is the window's real per-edge
+/// decoration inset: a tiled or maximized edge contributes 0 even though the
+/// platform still reports a scalar `client_inset` for window sizing.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ChromeLayout {
     pub(crate) content_width: f32,
@@ -81,11 +86,12 @@ pub(crate) struct ChromeLayout {
 pub(crate) fn chrome_layout(
     viewport_width: f32,
     viewport_height: f32,
-    client_inset: f32,
+    insets: Edges<Pixels>,
     sidebar_collapsed: bool,
 ) -> ChromeLayout {
-    let content_width = window_content_extent(viewport_width, client_inset);
-    let content_height = window_content_extent(viewport_height, client_inset);
+    let content = content_size(size(px(viewport_width), px(viewport_height)), insets);
+    let content_width = f32::from(content.width);
+    let content_height = f32::from(content.height);
     let header_width =
         (content_width - WORKSPACE_PAD * 2.0 - sidebar_width(sidebar_collapsed) - WORKSPACE_GAP)
             .max(0.0);
@@ -248,7 +254,12 @@ impl App {
             .child(div().flex_1().min_w_0())
             .child(drag_exempt(
                 "titlebar-ribbon-collapse-drag",
-                collapse_button(collapsed, &self.palette, cx),
+                collapse_button(
+                    collapsed,
+                    &self.palette,
+                    self.ribbon_collapse_focus.clone(),
+                    cx,
+                ),
             ))
             .child(drag_exempt(
                 "titlebar-notifications-drag",
@@ -283,6 +294,7 @@ impl App {
     }
 
     fn ribbon_home(&mut self, metrics: RibbonMetrics, cx: &mut Context<Self>) -> AnyElement {
+        let focusable = !self.ribbon_collapsed;
         let import_group = ribbon_group(
             &self.palette,
             vec![
@@ -293,6 +305,8 @@ impl App {
                     IconName::Copy,
                     RibbonLook::Normal,
                     metrics,
+                    self.ribbon_import_copy_focus.clone(),
+                    focusable,
                     cx,
                     |this, window, cx| this.open_import_dialog(ImportMode::Copy, window, cx),
                 ),
@@ -303,6 +317,8 @@ impl App {
                     IconName::Replace,
                     RibbonLook::Normal,
                     metrics,
+                    self.ribbon_import_move_focus.clone(),
+                    focusable,
                     cx,
                     |this, window, cx| this.open_import_dialog(ImportMode::Move, window, cx),
                 ),
@@ -319,6 +335,8 @@ impl App {
             IconName::RefreshCw,
             RibbonLook::Normal,
             metrics,
+            self.ribbon_reload_focus.clone(),
+            focusable,
             cx,
             |this, _, cx| {
                 if matches!(this.screen, Screen::Photos | Screen::Search) {
@@ -346,6 +364,8 @@ impl App {
             IconName::PanelRight,
             inspector_button_look(self.screen, self.inspector_collapsed),
             metrics,
+            self.ribbon_inspector_focus.clone(),
+            focusable,
             cx,
             |this, _, cx| this.toggle_inspector(cx),
         ));
@@ -369,44 +389,79 @@ impl App {
     fn card_size_selector(&mut self, metrics: RibbonMetrics, cx: &mut Context<Self>) -> AnyElement {
         let p = self.palette;
         let current = self.settings.ui_card_size;
+        let focusable = !self.ribbon_collapsed;
         let mut row = h_flex().gap(px(2.)).items_center();
-        for size in [
+        for (index, size) in [
             CardSize::Small,
             CardSize::Medium,
             CardSize::Large,
             CardSize::ExtraLarge,
-        ] {
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let active = size == current;
-            row = row.child(
-                div()
-                    .id(SharedString::from(format!("ribbon-card-size-{size:?}")))
-                    .h(px(metrics.small_height.max(20.)))
-                    .px(px(6.))
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(5.))
-                    .border_1()
-                    .border_color(if active {
-                        rgba(with_alpha(p.accent, 0x29))
-                    } else {
-                        rgba(0x00000000)
+            let mut chip = div()
+                .id(SharedString::from(format!("ribbon-card-size-{size:?}")))
+                .h(px(metrics.small_height.max(20.)))
+                .px(px(6.))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(5.))
+                .border_1()
+                .border_color(if active {
+                    rgba(with_alpha(p.accent, 0x29))
+                } else {
+                    rgba(0x00000000)
+                })
+                .when(active, |this| this.bg(rgba(with_alpha(p.accent, 0x17))))
+                .text_size(px(9.))
+                .text_color(rgb(if active { p.text } else { p.muted }))
+                .whitespace_nowrap()
+                .cursor_pointer()
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+            if focusable {
+                // Same keyboard contract as the ribbon's large buttons:
+                // activation on key down, synthesized keyboard clicks ignored.
+                let focus = self.card_size_focus[index].clone();
+                let click_focus = focus.clone();
+                let key_focus = focus;
+                chip = chip
+                    .track_focus(&click_focus)
+                    .tab_stop(true)
+                    .focus(|this| {
+                        this.border_color(rgb(p.accent))
+                            .bg(rgba(with_alpha(p.accent, 0x17)))
                     })
-                    .when(active, |this| this.bg(rgba(with_alpha(p.accent, 0x17))))
-                    .text_size(px(9.))
-                    .text_color(rgb(if active { p.text } else { p.muted }))
-                    .whitespace_nowrap()
-                    .cursor_pointer()
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, _, cx| this.set_card_size(size, cx)))
-                    .child(card_size_label(size)),
-            );
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        if matches!(event, ClickEvent::Keyboard(_)) {
+                            return;
+                        }
+                        window.focus(&click_focus, cx);
+                        this.set_card_size(size, cx);
+                    }))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                        let key = event.keystroke.key.as_str();
+                        if !event.is_held && (key == "enter" || key == "space") {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            window.focus(&key_focus, cx);
+                            this.set_card_size(size, cx);
+                        }
+                    }));
+            } else {
+                chip =
+                    chip.on_click(cx.listener(move |this, _, _, cx| this.set_card_size(size, cx)));
+            }
+            row = row.child(chip.child(card_size_label(size)));
         }
         row.into_any_element()
     }
 
     fn ribbon_photo(&mut self, metrics: RibbonMetrics, cx: &mut Context<Self>) -> AnyElement {
+        let focusable = !self.ribbon_collapsed;
         let has_selection = self.selected_photo.is_some();
         let select_group = ribbon_group(
             &self.palette,
@@ -422,6 +477,8 @@ impl App {
                         RibbonLook::Normal
                     },
                     metrics,
+                    self.ribbon_select_all_focus.clone(),
+                    focusable,
                     cx,
                     |this, _, cx| this.select_all_photos(cx),
                 ),
@@ -436,6 +493,8 @@ impl App {
                         RibbonLook::Normal
                     },
                     metrics,
+                    self.ribbon_clear_selection_focus.clone(),
+                    focusable,
                     cx,
                     |this, _, cx| this.clear_selection(cx),
                 ),
@@ -459,6 +518,8 @@ impl App {
                         RibbonLook::Normal
                     },
                     metrics,
+                    self.ribbon_trash_focus.clone(),
+                    focusable,
                     cx,
                     |this, window, cx| this.trash_selected(window, cx),
                 ),
@@ -469,6 +530,8 @@ impl App {
                     IconName::Minimize,
                     selection_look(self.has_action_selection()),
                     metrics,
+                    self.ribbon_manual_compress_focus.clone(),
+                    focusable,
                     cx,
                     |this, _, cx| {
                         let ids = this.selected_action_ids();
@@ -490,6 +553,7 @@ impl App {
     }
 
     fn ribbon_compression(&mut self, metrics: RibbonMetrics, cx: &mut Context<Self>) -> AnyElement {
+        let focusable = !self.ribbon_collapsed;
         let has_selection = self.has_action_selection();
         let waiting = self.waiting_job_count;
         let run_group = ribbon_group(
@@ -502,6 +566,8 @@ impl App {
                     IconName::FolderOpen,
                     selection_look(has_selection),
                     metrics,
+                    self.ribbon_compress_folder_focus.clone(),
+                    focusable,
                     cx,
                     |this, _, cx| this.compress_selection_to_folder(cx),
                 ),
@@ -512,6 +578,8 @@ impl App {
                     IconName::FolderOpen,
                     selection_look(has_selection),
                     metrics,
+                    self.ribbon_compress_profile_focus.clone(),
+                    focusable,
                     cx,
                     |this, _, cx| this.compress_selection_to_profile_folder(cx),
                 ),
@@ -526,6 +594,8 @@ impl App {
                         RibbonLook::Disabled
                     },
                     metrics,
+                    self.ribbon_compress_clipboard_focus.clone(),
+                    focusable,
                     cx,
                     |this, _, cx| this.compress_selection_to_clipboard(cx),
                 ),
@@ -540,6 +610,8 @@ impl App {
                         RibbonLook::Disabled
                     },
                     metrics,
+                    self.ribbon_release_waiting_focus.clone(),
+                    focusable,
                     cx,
                     |this, window, cx| this.request_release_waiting_jobs(window, cx),
                 ),
@@ -578,13 +650,20 @@ pub(crate) fn drag_exempt(id: &'static str, child: AnyElement) -> AnyElement {
         .into_any_element()
 }
 
-fn collapse_button(collapsed: bool, palette: &Palette, cx: &mut Context<App>) -> AnyElement {
+fn collapse_button(
+    collapsed: bool,
+    palette: &Palette,
+    focus: FocusHandle,
+    cx: &mut Context<App>,
+) -> AnyElement {
     let p = palette;
     let icon = if collapsed {
         IconName::ChevronDown
     } else {
         IconName::ChevronUp
     };
+    let click_focus = focus.clone();
+    let key_focus = focus;
     div()
         .id("ribbon-collapse")
         .flex_shrink_0()
@@ -593,17 +672,41 @@ fn collapse_button(collapsed: bool, palette: &Palette, cx: &mut Context<App>) ->
         .items_center()
         .justify_center()
         .rounded(px(6.))
+        .border_1()
+        .border_color(rgba(0x00000000))
         .text_color(rgb(p.muted_2))
         .cursor_pointer()
+        .track_focus(&click_focus)
+        .tab_stop(true)
         .hover(|this| {
             this.bg(rgba(with_alpha(p.text, 0x0a)))
                 .text_color(rgb(p.text))
         })
+        .focus(|this| {
+            this.border_color(rgb(p.accent))
+                .bg(rgba(with_alpha(p.text, 0x0a)))
+                .text_color(rgb(p.text))
+        })
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .on_double_click(|_, _, cx| cx.stop_propagation())
-        .on_click(cx.listener(|this, _, _, cx| {
+        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+            // Keyboard activation is handled on key down; ignore the click
+            // GPUI synthesizes on key up so the ribbon does not toggle twice.
+            if matches!(event, ClickEvent::Keyboard(_)) {
+                return;
+            }
+            window.focus(&click_focus, cx);
             this.toggle_ribbon_collapsed(cx);
             cx.stop_propagation();
+        }))
+        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+            let key = event.keystroke.key.as_str();
+            if !event.is_held && (key == "enter" || key == "space") {
+                window.prevent_default();
+                cx.stop_propagation();
+                window.focus(&key_focus, cx);
+                this.toggle_ribbon_collapsed(cx);
+            }
         }))
         .child(chrome_icon(icon).with_size(px(14.)))
         .into_any_element()
@@ -653,6 +756,9 @@ fn ribbon_group(
         .into_any_element()
 }
 
+/// A ribbon command callback, shared between the click and key handlers.
+type RibbonActivate = Rc<dyn Fn(&mut App, &mut Window, &mut Context<App>)>;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RibbonLook {
     Normal,
@@ -696,6 +802,8 @@ fn large_button(
     icon: IconName,
     look: RibbonLook,
     metrics: RibbonMetrics,
+    focus: FocusHandle,
+    focusable: bool,
     cx: &mut Context<App>,
     on_click: impl Fn(&mut App, &mut Window, &mut Context<App>) + 'static,
 ) -> AnyElement {
@@ -756,16 +864,46 @@ fn large_button(
     }
 
     if enabled {
-        button = button
-            .cursor_pointer()
-            .hover(|this| {
-                this.border_color(rgba(p.highlight))
-                    .bg(rgba(p.highlight))
-                    .text_color(rgb(p.text))
-            })
-            .on_click(
-                cx.listener(move |this, _: &ClickEvent, window, cx| on_click(this, window, cx)),
+        let activate: RibbonActivate = Rc::new(on_click);
+        button = button.cursor_pointer().hover(|this| {
+            this.border_color(rgba(p.highlight))
+                .bg(rgba(p.highlight))
+                .text_color(rgb(p.text))
+        });
+        if focusable {
+            // Same keyboard contract as `focusable_text_button`: GPUI
+            // synthesizes a click on key-up for focused elements, so
+            // activation happens on key-down and the click handler ignores
+            // `ClickEvent::Keyboard` to avoid firing the command twice.
+            let click_activate = activate.clone();
+            let key_activate = activate;
+            let click_focus = focus.clone();
+            let key_focus = focus;
+            button = button
+                .track_focus(&click_focus)
+                .tab_stop(true)
+                .focus(|this| this.border_color(rgb(p.accent)).bg(rgb(p.accent_soft)))
+                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                    if matches!(event, ClickEvent::Keyboard(_)) {
+                        return;
+                    }
+                    window.focus(&click_focus, cx);
+                    click_activate(this, window, cx);
+                }))
+                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                    let key = event.keystroke.key.as_str();
+                    if !event.is_held && (key == "enter" || key == "space") {
+                        window.prevent_default();
+                        cx.stop_propagation();
+                        window.focus(&key_focus, cx);
+                        key_activate(this, window, cx);
+                    }
+                }));
+        } else {
+            button = button.on_click(
+                cx.listener(move |this, _: &ClickEvent, window, cx| activate(this, window, cx)),
             );
+        }
     } else {
         button = button.opacity(0.42);
     }
@@ -775,8 +913,8 @@ fn large_button(
 #[cfg(test)]
 mod tests {
     use super::{
-        CHROME_ICONS, RibbonLook, chrome_layout, inspector_button_look, is_bundled, ribbon_height,
-        ribbon_metrics,
+        CHROME_ICONS, Edges, RibbonLook, chrome_layout, inspector_button_look, is_bundled, px,
+        ribbon_height, ribbon_metrics,
     };
     use crate::app::Screen;
 
@@ -836,24 +974,24 @@ mod tests {
     #[test]
     fn ribbon_uses_icons_below_1280() {
         assert!(
-            chrome_layout(1279.0, 820.0, 0.0, false)
+            chrome_layout(1279.0, 820.0, Edges::default(), false)
                 .ribbon_metrics
                 .compact
         );
         assert!(
-            !chrome_layout(1280.0, 820.0, 0.0, false)
+            !chrome_layout(1280.0, 820.0, Edges::default(), false)
                 .ribbon_metrics
                 .compact
         );
         // Collapsed sidebar: 1080 - 28 - 78 - 14 = 960 (compact), while
         // 1280 - 28 - 78 - 14 = 1160 leaves room for labels.
         assert!(
-            chrome_layout(1080.0, 700.0, 0.0, true)
+            chrome_layout(1080.0, 700.0, Edges::default(), true)
                 .ribbon_metrics
                 .compact
         );
         assert!(
-            !chrome_layout(1280.0, 820.0, 0.0, true)
+            !chrome_layout(1280.0, 820.0, Edges::default(), true)
                 .ribbon_metrics
                 .compact
         );
@@ -863,7 +1001,7 @@ mod tests {
     fn chrome_layout_uses_the_content_extent() {
         // The requested 1080x700 is the content size; X11 reports the outer
         // 1120x740 window, and the 20 px CSD inset on each edge is removed.
-        let minimum = chrome_layout(1120.0, 740.0, 20.0, false);
+        let minimum = chrome_layout(1120.0, 740.0, Edges::all(px(20.0)), false);
         assert_eq!(minimum.content_width, 1080.0);
         assert_eq!(minimum.content_height, 700.0);
         assert_eq!(minimum.ribbon_height, 62.0);
@@ -872,19 +1010,47 @@ mod tests {
         assert_eq!(minimum.ribbon_metrics, expected_metrics);
 
         // 1280x820 content keeps the regular ribbon.
-        let regular = chrome_layout(1320.0, 860.0, 20.0, false);
+        let regular = chrome_layout(1320.0, 860.0, Edges::all(px(20.0)), false);
         assert_eq!(regular.content_width, 1280.0);
         assert_eq!(regular.content_height, 820.0);
         assert_eq!(regular.ribbon_height, 68.0);
 
-        let large = chrome_layout(1480.0, 940.0, 20.0, false);
+        let large = chrome_layout(1480.0, 940.0, Edges::all(px(20.0)), false);
         assert_eq!(large.content_width, 1440.0);
         assert_eq!(large.ribbon_height, 68.0);
     }
 
     #[test]
     fn chrome_layout_thresholds_sit_on_the_content_edge() {
-        assert_eq!(chrome_layout(1200.0, 760.0, 0.0, false).ribbon_height, 62.0);
-        assert_eq!(chrome_layout(1200.0, 761.0, 0.0, false).ribbon_height, 68.0);
+        assert_eq!(
+            chrome_layout(1200.0, 760.0, Edges::default(), false).ribbon_height,
+            62.0
+        );
+        assert_eq!(
+            chrome_layout(1200.0, 761.0, Edges::default(), false).ribbon_height,
+            68.0
+        );
+    }
+
+    #[test]
+    fn chrome_layout_keeps_tiled_edges_at_full_extent() {
+        // Maximized: the compositor zeroes every edge padding, so the
+        // content extent is the full outer size even though the platform
+        // still reports a scalar client inset for sizing.
+        let maximized = chrome_layout(1920.0, 1080.0, Edges::default(), false);
+        assert_eq!(maximized.content_width, 1920.0);
+        assert_eq!(maximized.content_height, 1080.0);
+
+        // Tiled against the left and top screen edges: those edges lose
+        // their inset, the remaining edges keep the 20 px CSD inset.
+        let tiled = Edges {
+            top: px(0.0),
+            bottom: px(20.0),
+            left: px(0.0),
+            right: px(20.0),
+        };
+        let layout = chrome_layout(960.0, 1060.0, tiled, false);
+        assert_eq!(layout.content_width, 940.0);
+        assert_eq!(layout.content_height, 1040.0);
     }
 }

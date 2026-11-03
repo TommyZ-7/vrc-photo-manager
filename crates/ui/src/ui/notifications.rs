@@ -257,6 +257,7 @@ impl App {
             .flex_shrink_0()
             .child(
                 Button::new("titlebar-notifications")
+                    .track_focus(&self.notification_bell_focus)
                     .ghost()
                     .icon(IconName::Bell)
                     .tooltip(tr!("notifications.title"))
