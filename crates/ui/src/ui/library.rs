@@ -23,7 +23,7 @@ use crate::app::daemon::open_path;
 use crate::state::photo_browser::{PAGE_SIZE, PhotoIndex};
 use crate::state::preview::preview_placeholder_label;
 use crate::state::viewer::ViewerOpenSource;
-use crate::ui::components::{ButtonState, ButtonTone, glass_panel};
+use crate::ui::components::{ButtonState, ButtonTone, glass_panel, photo_world_label};
 use crate::ui::theme::*;
 
 impl App {
@@ -313,10 +313,7 @@ impl App {
         let current_preview = self.preview.clone();
         let thumbnail = self.thumbnails.borrow_mut().get(id);
         let compressed = self.compressed_ids.contains(&id);
-        let world = photo
-            .world_name
-            .clone()
-            .unwrap_or_else(|| tr!("photos.unlinked"));
+        let world = photo_world_label(photo);
         let players = self
             .selected_players
             .iter()
@@ -492,7 +489,7 @@ impl App {
             );
 
         let mut badges = h_flex().flex_wrap().gap(px(5.));
-        if photo.world_name.is_some() {
+        if photo.world_name.is_some() || photo.world_id.is_some() {
             badges = badges.child(self.badge(tr!("photos.badge.context"), p.accent, p.accent_soft));
         }
         if photo.is_favorite {
@@ -638,10 +635,7 @@ impl App {
     ) -> impl IntoElement {
         let p = self.palette;
         let id = photo.id;
-        let world = photo
-            .world_name
-            .clone()
-            .unwrap_or_else(|| tr!("photos.unlinked"));
+        let world = photo_world_label(photo);
         let players = self
             .selected_players
             .iter()

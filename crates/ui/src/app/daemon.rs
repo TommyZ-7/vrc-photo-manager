@@ -344,7 +344,7 @@ impl App {
         self.monitor_players.clear();
         if let Ok(Some(session)) = self.db.session_at(now) {
             if let Ok(Some(world)) = self.db.world_by_id(session.world_id) {
-                self.monitor_world = world.alias.or(world.name);
+                self.monitor_world = world.alias.or(world.name).or(Some(world.world_id));
             }
             self.monitor_instance = session.instance_id;
             if let Ok(players) = self.db.players_at(session.id, now) {

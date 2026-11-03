@@ -505,6 +505,9 @@ pub struct Photo {
     pub display_width: Option<u32>,
     pub display_height: Option<u32>,
     pub world_name: Option<String>,
+    /// VRChat world ID (`wrld_...`) of the linked world. This is the external
+    /// ID, not the `worlds.id` foreign key.
+    pub world_id: Option<String>,
     pub instance_id: Option<String>,
     pub link_method: Option<String>,
     pub confidence: Option<f64>,

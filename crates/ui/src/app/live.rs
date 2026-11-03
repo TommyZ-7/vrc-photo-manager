@@ -329,7 +329,10 @@ fn collect_monitor(db: &Db) -> MonitorSnapshot {
     let mut players = Vec::new();
     if let Ok(Some(session)) = db.session_at(now) {
         if let Ok(Some(world_row)) = db.world_by_id(session.world_id) {
-            world = world_row.alias.or(world_row.name);
+            world = world_row
+                .alias
+                .or(world_row.name)
+                .or(Some(world_row.world_id));
         }
         instance = session.instance_id;
         if let Ok(players_at) = db.players_at(session.id, now) {

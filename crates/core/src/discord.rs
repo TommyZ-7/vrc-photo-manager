@@ -456,6 +456,7 @@ mod tests {
             display_width: display_path.map(|_| 16),
             display_height: display_path.map(|_| 10),
             world_name: None,
+            world_id: None,
             instance_id: None,
             link_method: None,
             confidence: None,
