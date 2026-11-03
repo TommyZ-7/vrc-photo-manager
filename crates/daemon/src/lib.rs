@@ -35,6 +35,7 @@ mod ipc_server;
 mod signals;
 mod tray;
 mod vrchat_process;
+mod world_name_http;
 use discord_http::UreqTransport;
 use ipc_server::{EventBus, IpcControl, IpcServer, status_snapshot};
 use signals::{JobSignal, WakeSignal};
