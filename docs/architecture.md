@@ -333,7 +333,7 @@ crates/ui/src/
 
 1. 設定 `world_name_resolution_enabled`（既定 false）がONのときだけ動く。
    スキーマ v12 で追加した `world_name_lookups` をキューとして使う。
-2. デーモンは起動時・有効化時・リンク完了時に
+2. デーモンは機能がONのとき、起動時・有効化時・リンク完了時に
    `backfill_photo_context_world_names` → `enqueue_missing_world_name_lookups`
    の順で実行し、名前のないワールドだけを `pending` で積む。既存の
    `resolved` / `retry` / `not_found` / `failed` 行は変更しない。
@@ -346,9 +346,9 @@ crates/ui/src/
 5. 成功時は `worlds.name` が NULL のときだけ `name_source='vrchat-api'` で保存し、
    同じワールドに紐づく `photo_context.world_name` の NULL をバックフィルして
    `library_revision` を進める。ログ/XMP名がある場合は上書きしない。
-6. 429 は `Retry-After`（60秒未満は60秒）、5xx／ネットワークは指数バックオフ
-   （60秒〜6時間）、404 は24時間後、3xx（リダイレクト）／その他の4xx／
-   不正レスポンスは terminal。
+6. 429 は `Retry-After` を1〜3600秒に clamp し、60秒未満は60秒。5xx／ネットワークは
+   指数バックオフ（60秒〜6時間）、404 は24時間後、3xx（リダイレクト）／
+   その他の4xx／不正レスポンスは terminal。
 7. 失敗してもワールドID表示のままで、他の機能には影響しない。定期的な
    ポーリングはしない。`--once` ではワーカーを起動せず、ネットワークも使わない。
 

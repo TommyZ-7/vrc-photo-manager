@@ -115,7 +115,7 @@ VRChat API によるワールド名解決の耐久キュー。デーモンの `w
 |---|---|---|
 | world_db_id | INTEGER PK/FK | `worlds.id`。`ON DELETE CASCADE` |
 | status | TEXT | `pending` / `retry` / `resolved` / `not_found` / `failed` |
-| attempts | INTEGER | 再試行可能な失敗の回数。429 では増やさない |
+| attempts | INTEGER | 失敗の回数（429 では増やさない） |
 | next_attempt_at | INTEGER | 次回試行時刻（epoch秒）。`NULL` は即時または terminal |
 | last_attempt_at | INTEGER | 最後に試行した時刻（epoch秒） |
 | last_error | TEXT | `network` / `http_429` / `http_5xx` / `not_found` / `invalid_response` / `http_4xx` などの固定コード。レスポンス本文は保存しない |
@@ -129,7 +129,7 @@ VRChat API によるワールド名解決の耐久キュー。デーモンの `w
 | `retry` | 一時失敗（429 / 5xx / ネットワーク） | `next_attempt_at` 以降 |
 | `resolved` | 名前を保存済み、またはログ/XMP名で解決済み | なし |
 | `not_found` | 404 | 24時間後 |
-| `failed` | 3xx（リダイレクト）/ その他の4xx / 不正レスポンス | なし（terminal） |
+| `failed` | 3xx（リダイレクト）、その他の4xx、`invalid_world_id` / `response_too_large` / 不正レスポンスなど | なし（terminal） |
 
 インデックス:
 
