@@ -232,6 +232,35 @@ impl App {
                                     .text_size(px(13.))
                                     .font_semibold()
                                     .text_color(rgb(p.text))
+                                    .child(tr!("settings.world_name.title")),
+                            )
+                            .child(self.setting_switch(
+                                tr!("settings.world_name.enabled"),
+                                tr!("settings.world_name.hint"),
+                                self.settings.world_name_resolution_enabled,
+                                false,
+                                cx,
+                                |settings, value| settings.world_name_resolution_enabled = value,
+                            ))
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(p.muted_2))
+                                    .child(tr!("settings.world_name.privacy")),
+                            ),
+                    )
+                    .child(
+                        glass_panel(&self.palette)
+                            .flex()
+                            .flex_col()
+                            .p(px(14.))
+                            .gap(px(12.))
+                            .rounded(px(17.))
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .font_semibold()
+                                    .text_color(rgb(p.text))
                                     .child(tr!("settings.display.title")),
                             )
                             .child(self.setting_switch(
