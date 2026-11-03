@@ -29,6 +29,10 @@ const ZIP64_EOCD_LOCATOR_SIGNATURE: u32 = 0x0706_4b50;
 const EOCD_MIN_BYTES: u64 = 22;
 const ZIP64_EOCD_LOCATOR_BYTES: u64 = 20;
 const ZIP64_EOCD_MIN_BYTES: u64 = 56;
+/// `zip` only searches the tail of the file for the EOCD, and trailing bytes
+/// after the EOCD comment are allowed. A generous 128 KiB window covers its
+/// search window plus the largest possible comment.
+const EOCD_SEARCH_BYTES: u64 = 128 * 1024;
 
 /// Limits applied while reading a plugin ZIP.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,8 +292,14 @@ struct ZipEntryInfo {
 /// Reads the EOCD (and ZIP64 EOCD when present) and rejects an excessive
 /// declared entry count before `ZipArchive::new` allocates from the central
 /// directory metadata.
+///
+/// Backwards EOCD scanners may accept a candidate whose comment ends before
+/// EOF and then fall back to an earlier candidate when the last one does not
+/// describe a readable central directory. To cover that, every plausible
+/// EOCD candidate in the tail is considered and the maximum declared count
+/// wins.
 fn check_zip_entry_count(file: &mut File, file_len: u64, max_entries: usize) -> Result<()> {
-    let tail_len = file_len.min(EOCD_MIN_BYTES + u64::from(u16::MAX));
+    let tail_len = file_len.min(EOCD_SEARCH_BYTES);
     if tail_len < EOCD_MIN_BYTES {
         return Err(invalid_zip("file is too small to be a ZIP archive"));
     }
@@ -305,23 +315,36 @@ fn check_zip_entry_count(file: &mut File, file_len: u64, max_entries: usize) -> 
         if tail[position..position + 4] != signature {
             continue;
         }
+        // `zip` accepts trailing bytes after the comment, so do not require
+        // the record to end exactly at EOF.
         let comment_length = usize::from(read_u16(&tail, position + 20));
-        if position + EOCD_MIN_BYTES as usize + comment_length != tail.len() {
+        if position + EOCD_MIN_BYTES as usize + comment_length > tail.len() {
             continue;
         }
         found = true;
-        declared_entries = declared_entries
-            .max(u64::from(read_u16(&tail, position + 8)))
-            .max(u64::from(read_u16(&tail, position + 10)));
 
-        if let Some(locator_position) = position.checked_sub(ZIP64_EOCD_LOCATOR_BYTES as usize)
-            && tail[locator_position..locator_position + 4]
-                == ZIP64_EOCD_LOCATOR_SIGNATURE.to_le_bytes()
-        {
-            let zip64_offset = read_u64(&tail, locator_position + 8);
-            let (on_disk, total) = read_zip64_entry_count(file, file_len, zip64_offset)?;
-            declared_entries = declared_entries.max(on_disk).max(total);
-        }
+        let entries_on_disk = u64::from(read_u16(&tail, position + 8));
+        let total_entries = u64::from(read_u16(&tail, position + 10));
+        let directory_size = u64::from(read_u32(&tail, position + 12));
+        let directory_offset = u64::from(read_u32(&tail, position + 16));
+        // `zip` only consults the ZIP64 locator when a ZIP32 field uses its
+        // sentinel value. Mirror that so a valid ZIP64 archive is not
+        // rejected for its sentinel, while the values actually used for the
+        // allocation are always checked.
+        let may_be_zip64 = entries_on_disk == u64::from(u16::MAX)
+            || total_entries == u64::from(u16::MAX)
+            || directory_size == u64::from(u32::MAX)
+            || directory_offset == u64::from(u32::MAX);
+
+        let (candidate_on_disk, candidate_total) = if may_be_zip64 {
+            match zip64_locator_counts(file, file_len, file_len - tail_len, &tail, position)? {
+                Some(counts) => counts,
+                None => (entries_on_disk, total_entries),
+            }
+        } else {
+            (entries_on_disk, total_entries)
+        };
+        declared_entries = declared_entries.max(candidate_on_disk).max(candidate_total);
     }
 
     if !found {
@@ -335,7 +358,44 @@ fn check_zip_entry_count(file: &mut File, file_len: u64, max_entries: usize) -> 
     Ok(())
 }
 
-fn read_zip64_entry_count(file: &mut File, file_len: u64, offset: u64) -> Result<(u64, u64)> {
+fn zip64_locator_counts(
+    file: &mut File,
+    file_len: u64,
+    tail_start: u64,
+    tail: &[u8],
+    eocd_position: usize,
+) -> Result<Option<(u64, u64)>> {
+    let Some(locator_position) = eocd_position.checked_sub(ZIP64_EOCD_LOCATOR_BYTES as usize)
+    else {
+        return Ok(None);
+    };
+    if tail[locator_position..locator_position + 4] != ZIP64_EOCD_LOCATOR_SIGNATURE.to_le_bytes() {
+        return Ok(None);
+    }
+    if read_u32(tail, locator_position + 16) > 1 {
+        return Err(invalid_zip("multi-disk ZIP64 archives are not supported"));
+    }
+
+    let locator_disk_with_central_directory = read_u32(tail, locator_position + 4);
+    let zip64_offset = read_u64(tail, locator_position + 8);
+    let locator_file_offset = tail_start + locator_position as u64;
+    let counts = read_zip64_entry_count(
+        file,
+        file_len,
+        zip64_offset,
+        locator_file_offset,
+        locator_disk_with_central_directory,
+    )?;
+    Ok(Some(counts))
+}
+
+fn read_zip64_entry_count(
+    file: &mut File,
+    file_len: u64,
+    offset: u64,
+    locator_offset: u64,
+    locator_disk_with_central_directory: u32,
+) -> Result<(u64, u64)> {
     let header_end = offset
         .checked_add(ZIP64_EOCD_MIN_BYTES)
         .ok_or_else(|| invalid_zip("ZIP64 EOCD offset overflows"))?;
@@ -351,15 +411,41 @@ fn read_zip64_entry_count(file: &mut File, file_len: u64, offset: u64) -> Result
     }
 
     let record_size = read_u64(&header, 4);
-    let record_end = offset
-        .checked_add(12)
-        .and_then(|value| value.checked_add(record_size))
-        .ok_or_else(|| invalid_zip("ZIP64 EOCD size overflows"))?;
-    if record_size < 44 || record_end > file_len {
-        return Err(invalid_zip("invalid ZIP64 EOCD record size"));
+    let expected_length = locator_offset
+        .checked_sub(offset)
+        .ok_or_else(|| invalid_zip("ZIP64 EOCD offset is after its locator"))?;
+    if record_size < 44
+        || record_size
+            .checked_add(12)
+            .is_none_or(|length| length != expected_length)
+    {
+        return Err(invalid_zip("invalid ZIP64 EOCD record length"));
     }
 
-    Ok((read_u64(&header, 24), read_u64(&header, 32)))
+    let entries_on_disk = read_u64(&header, 24);
+    let total_entries = read_u64(&header, 32);
+    if read_u32(&header, 16) != 0 || entries_on_disk != total_entries {
+        return Err(invalid_zip("multi-disk ZIP64 archives are not supported"));
+    }
+    if read_u32(&header, 20) != locator_disk_with_central_directory {
+        return Err(invalid_zip("ZIP64 EOCD disagrees with its locator"));
+    }
+
+    // `zip` rejects an EOCD64 that starts before the minimum possible end of
+    // the central directory. Mirror this so its later cache-based search can
+    // never fall through to a different EOCD64 record.
+    let central_directory_offset = read_u64(&header, 48);
+    let minimum_offset = total_entries
+        .checked_mul(46)
+        .and_then(|value| value.checked_add(central_directory_offset))
+        .ok_or_else(|| invalid_zip("ZIP64 EOCD offset overflows"))?;
+    if offset < minimum_offset {
+        return Err(invalid_zip(
+            "ZIP64 EOCD is positioned before its central directory",
+        ));
+    }
+
+    Ok((entries_on_disk, total_entries))
 }
 
 fn read_u16(bytes: &[u8], offset: usize) -> u16 {
@@ -645,6 +731,67 @@ mod tests {
         patched
     }
 
+    fn insert_decoy_eocd(bytes: &[u8], entries: u16) -> Vec<u8> {
+        let signature = [0x50, 0x4b, 0x05, 0x06];
+        let position = bytes
+            .windows(signature.len())
+            .rposition(|window| window == signature)
+            .expect("ZIP contains an EOCD record");
+        let mut decoy = Vec::with_capacity(22);
+        decoy.extend_from_slice(&signature);
+        decoy.extend_from_slice(&0u16.to_le_bytes());
+        decoy.extend_from_slice(&0u16.to_le_bytes());
+        decoy.extend_from_slice(&entries.to_le_bytes());
+        decoy.extend_from_slice(&entries.to_le_bytes());
+        decoy.extend_from_slice(&0u32.to_le_bytes());
+        decoy.extend_from_slice(&0u32.to_le_bytes());
+        decoy.extend_from_slice(&0u16.to_le_bytes());
+
+        let mut patched = bytes[..position].to_vec();
+        // Keep the decoy's preceding 20 bytes non-locator-shaped so the test
+        // exercises the plain ZIP32 candidate path.
+        patched.extend_from_slice(&[0u8; 20]);
+        patched.extend_from_slice(&decoy);
+        patched.extend_from_slice(&bytes[position..]);
+        patched
+    }
+
+    fn zip64_eocd_fixture(entries: u64) -> Vec<u8> {
+        // Keep the EOCD64 after the minimum possible central-directory end,
+        // matching `zip`'s consistency check.
+        let padding = (entries * 46 + 8).max(512) as usize;
+        let mut bytes = vec![0u8; padding];
+
+        // ZIP64 EOCD record at `padding`.
+        bytes.extend_from_slice(&0x0606_4b50u32.to_le_bytes());
+        bytes.extend_from_slice(&44u64.to_le_bytes());
+        bytes.extend_from_slice(&45u16.to_le_bytes());
+        bytes.extend_from_slice(&45u16.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&entries.to_le_bytes());
+        bytes.extend_from_slice(&entries.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+
+        // ZIP64 EOCD locator immediately after it.
+        bytes.extend_from_slice(&0x0706_4b50u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&(padding as u64).to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+
+        // ZIP32 EOCD with sentinel counts immediately after the locator.
+        bytes.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes.extend_from_slice(&u16::MAX.to_le_bytes());
+        bytes.extend_from_slice(&u16::MAX.to_le_bytes());
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        bytes.extend_from_slice(&0u16.to_le_bytes());
+        bytes
+    }
+
     #[test]
     fn install_accepts_a_valid_plugin() {
         let data_dir = tempdir().unwrap();
@@ -729,44 +876,73 @@ mod tests {
     }
 
     #[test]
+    fn install_rejects_an_earlier_excessive_eocd_behind_an_eof_decoy() {
+        let data_dir = tempdir().unwrap();
+        let package = TestPackage::new();
+        let bytes = insert_decoy_eocd(&package.zip_bytes().unwrap(), u16::MAX);
+        let zip = write_temp_zip(&bytes).unwrap();
+
+        // The real EOCD at EOF is valid and `zip` would use it; only the
+        // precheck sees the earlier candidate claiming 65535 entries.
+        let archive = ZipArchive::new(BufReader::new(File::open(zip.path()).unwrap())).unwrap();
+        assert_eq!(archive.len(), 5);
+
+        let error = install_from_zip(
+            zip.path(),
+            data_dir.path(),
+            &[package.public_key()],
+            "0.10.1",
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, AiHostError::LimitExceeded(_)));
+        assert!(
+            fs::read_dir(data_dir.path()).unwrap().next().is_none(),
+            "the data directory must not be touched before the entry-count check"
+        );
+    }
+
+    #[test]
+    fn install_accepts_trailing_bytes_after_the_eocd() {
+        let data_dir = tempdir().unwrap();
+        let package = TestPackage::new();
+        let mut bytes = package.zip_bytes().unwrap();
+        bytes.extend_from_slice(b"trailing bytes accepted by zip");
+        let zip = write_temp_zip(&bytes).unwrap();
+
+        let installed = install_from_zip(
+            zip.path(),
+            data_dir.path(),
+            &[package.public_key()],
+            "0.10.1",
+        )
+        .unwrap();
+
+        assert!(installed.path.join(TEST_ENTRYPOINT).is_file());
+    }
+
+    #[test]
     fn zip64_eocd_entry_count_is_checked_before_opening_the_archive() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("zip64.zip");
-        let mut bytes = Vec::new();
-
-        // ZIP64 EOCD record at offset 0.
-        bytes.extend_from_slice(&0x0606_4b50u32.to_le_bytes());
-        bytes.extend_from_slice(&44u64.to_le_bytes());
-        bytes.extend_from_slice(&45u16.to_le_bytes());
-        bytes.extend_from_slice(&45u16.to_le_bytes());
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        bytes.extend_from_slice(&1_000_000u64.to_le_bytes());
-        bytes.extend_from_slice(&1_000_000u64.to_le_bytes());
-        bytes.extend_from_slice(&0u64.to_le_bytes());
-        bytes.extend_from_slice(&0u64.to_le_bytes());
-
-        // ZIP64 EOCD locator at offset 56.
-        bytes.extend_from_slice(&0x0706_4b50u32.to_le_bytes());
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        bytes.extend_from_slice(&0u64.to_le_bytes());
-        bytes.extend_from_slice(&1u32.to_le_bytes());
-
-        // ZIP32 EOCD with sentinel counts at offset 76.
-        bytes.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
-        bytes.extend_from_slice(&0u16.to_le_bytes());
-        bytes.extend_from_slice(&0u16.to_le_bytes());
-        bytes.extend_from_slice(&u16::MAX.to_le_bytes());
-        bytes.extend_from_slice(&u16::MAX.to_le_bytes());
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        bytes.extend_from_slice(&0u16.to_le_bytes());
-
+        let bytes = zip64_eocd_fixture(513);
         fs::write(&path, &bytes).unwrap();
+
         let mut file = File::open(&path).unwrap();
         let error = check_zip_entry_count(&mut file, bytes.len() as u64, 512).unwrap_err();
 
         assert!(matches!(error, AiHostError::LimitExceeded(_)));
+    }
+
+    #[test]
+    fn zip64_sentinel_counts_use_the_zip64_values() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("zip64.zip");
+        let bytes = zip64_eocd_fixture(5);
+        fs::write(&path, &bytes).unwrap();
+
+        let mut file = File::open(&path).unwrap();
+        check_zip_entry_count(&mut file, bytes.len() as u64, 512).unwrap();
     }
 
     #[test]
