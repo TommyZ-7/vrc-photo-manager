@@ -38,3 +38,4 @@
 | [0016](0016-system-package-update.md) | pacman / deb も polkit 経由でアプリ内更新する | Accepted |
 | [0017](0017-discord-webhook.md) | Discord 連携は単一 Webhook と耐久 outbox で行う | Accepted |
 | [0018](0018-vrchat-world-name-resolution.md) | VRChat API のワールド名解決は未認証・既定OFFの専用ワーカーで行う | Accepted |
+| [0019](0019-ai-tagging-plugin.md) | AI 自動タグ付けは署名済み sidecar プラグインとして分離する | Accepted |
