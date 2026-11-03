@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/ai-protocol",
     "crates/core",
     "crates/daemon",
     "crates/i18n",
@@ -49,3 +50,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ureq = { version = "3.5", default-features = false, features = ["rustls", "gzip", "multipart"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
