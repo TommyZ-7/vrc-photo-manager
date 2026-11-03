@@ -22,7 +22,7 @@
 |---|---|---|
 | [0001](0001-gpui-kit.md) | UIにgpui-kit 0.8を採用する | Accepted |
 | [0002](0002-sqlite-shared-state.md) | UIとデーモンはSQLiteを共有する | Accepted（ADR-0011で補完） |
-| [0003](0003-log-and-xmp.md) | 文脈取得はログ監視＋XMP補完とする | Accepted |
+| [0003](0003-log-and-xmp.md) | 文脈取得はログ監視＋XMP補完とする | Accepted（ワールド名解決の認証前提はADR-0018で更新） |
 | [0004](0004-compression-policy.md) | 自動圧縮は元画像保持、手動置換はゴミ箱 | Superseded by ADR-0013 |
 | [0005](0005-reference-library.md) | 参照ライブラリ＋任意取り込み | Accepted |
 | [0006](0006-linux-packaging.md) | Linux配布はdeb/AppImage/pacman | Accepted |
@@ -37,3 +37,4 @@
 | [0015](0015-deferred-deletion-queue.md) | 削除は依存ジョブのドレイン後に実行する | Accepted |
 | [0016](0016-system-package-update.md) | pacman / deb も polkit 経由でアプリ内更新する | Accepted |
 | [0017](0017-discord-webhook.md) | Discord 連携は単一 Webhook と耐久 outbox で行う | Accepted |
+| [0018](0018-vrchat-world-name-resolution.md) | VRChat API のワールド名解決は未認証・既定OFFの専用ワーカーで行う | Accepted |

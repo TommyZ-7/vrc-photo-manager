@@ -34,6 +34,7 @@ cargo test --workspace
 | `photo_filename.rs` | VRChatファイル名、無効名、拡張子 |
 | `log_parser.rs` | イベント解析、セッション、入退室 |
 | `linker.rs` | ログ紐付け、XMPのみの紐付け |
+| `world_name.rs` | ステータス、指数バックオフ、`Retry-After` の clamp、レスポンスの `name` 検証（空・長すぎ・制御文字・ID不一致） |
 | `metadata.rs` | XMP属性、PNG iTXtからの読み取り |
 | `compressor.rs` | WebP/JPEG/AVIF/JXL、リサイズ、出力名衝突回避、AVIF透過、16bitフォールバック、高速経路と変換経路の一致、同一画像の再利用 |
 | `thumbnail.rs` | サムネイル生成、キャッシュ、存在しない元ファイル |
@@ -98,6 +99,8 @@ cargo test --workspace
 - 有効かつ自動ONのプロファイルが無いときは自動圧縮 enqueue をしないこと。
 - 無変更の再スキャンで `library_revision` が上がらないこと。
 - `run_once` が処理前にコマンドを消化する。
+- ワールド名解決ワーカーが成功時に `worlds.name` と `photo_context` を更新し、次のリクエストを60秒後にすること。
+- 無効時はワールド名解決ワーカーが `fetch` を呼ばず、再起動後は保存済みの次回リクエスト時刻まで待つこと。terminal 行を再取得しないこと。
 - IPCサーバーのhello/status、`wake_commands` がDBを触らずにwakeすること、`set_paused` の状態変更とイベント、`shutdown` のrunning/wake。
 - `scan_photos` のScanStarted / ScanProgress / ScanFinished、`set_paused` のStatusChanged、`daemon_errors` 変更イベントの重複抑止。
 - `Daemon::start_ipc` がstatusを返すこと。
@@ -170,6 +173,16 @@ GPUIのウィンドウは開かず、表示に使う純粋関数だけを検証�
 - [ ] ログがない写真にXMPの撮影者/ワールドが付く
 - [ ] プライベートワールドでID表示になる
 - [ ] 24時間より前のログがない場合、未紐付けのままになる
+
+### ワールド名解決
+
+- [ ] 名前のないワールドの写真がある状態で設定の「ワールド名解決」をONにすると、60秒間隔で名前が付く（件数が多いと時間がかかる）
+- [ ] OFFのままでは API リクエストが発生しない（プロキシ／パケットキャプチャで確認）
+- [ ] 存在しないワールドIDは `wrld_...` 表示のまま
+- [ ] デーモンを再起動しても、解決済みワールドを再取得せず、保存済みの次回リクエスト時刻まで待つ
+- [ ] 429 の後は `Retry-After`（1〜3600秒に clamp、最低60秒）以上待つ
+- [ ] DB とログに VRChat API 用の認証情報（Cookie・トークン・`Authorization`）がない（Discord Webhook URL は DB に保存される）
+- [ ] `--once` ではネットワークリクエストが発生しない
 
 ### 圧縮
 
@@ -312,6 +325,7 @@ GPUIのウィンドウは開かず、表示に使う純粋関数だけを検証�
 - GitHub Releaseの署名付き `latest.json` を本番フィードから取得する確認
 - rfdのファイルダイアログ（xdg-portal環境）
 - エラー表示・再試行・ログカードの実画面確認（デモDBに失敗ジョブと `daemon_errors` を入れて行う。UIの自動テストは純粋ヘルパーのみ）
+- VRChat API ワールド名解決の実 API / UI 手動確認（有効化・無効化、60秒間隔、429、再起動後の待機）。自動テストはフェイクトランスポートで代替している
 
 ## 5. CI
 

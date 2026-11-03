@@ -1561,9 +1561,9 @@ git commit -m "feat(ui): add the world name resolution setting card"
 
 ---
 
-### Task 11: ドキュメントと ADR（別 PR に延期）
+### Task 11: ドキュメントと ADR
 
-**Status:** Deferred to `docs/25-world-name-resolution` per AGENTS. This code branch does not include user-facing docs/ADR changes.
+**Status:** Completed in `docs/25-world-name-resolution`. User-facing docs and the ADR are in this docs PR.
 
 **Files:**
 - Modify: `docs/security-privacy.md`
@@ -1580,16 +1580,16 @@ git commit -m "feat(ui): add the world name resolution setting card"
 - Consumes: 実装済みの設定名、テーブル名、ワーカー名、API制約
 - Produces: 利用者・保守者向けのドキュメント
 
-**Note:** `AGENTS.md` の「コードと docs を同じ PR に混ぜない」に従う場合、
-このタスクはコードPRと別の `docs/25-world-name-resolution` ブランチで実施する。
-その場合も Issue #25 の受け入れ条件は docs のマージまで完了としない。
+**Note:** `AGENTS.md` の「コードと docs を同じ PR に混ぜない」に従い、
+このタスクはコードPRと別の `docs/25-world-name-resolution` ブランチで実施した。
+Issue #25 の受け入れ条件は docs のマージまで完了としない。
 
-- [ ] **Step 1: ドキュメントの不足を確認**
+- [x] **Step 1: ドキュメントの不足を確認**
 
 Run: `rg -n "world_name_resolution|world_name_lookups|vrchat-api|ワールド名解決" docs`
 Expected: 設計メモ以外にヒットしない
 
-- [ ] **Step 2: ドキュメントを更新**
+- [x] **Step 2: ドキュメントを更新**
 
 - `docs/security-privacy.md`:
   - ネットワーク節の現行通信一覧に「VRChat API ワールド名解決」を追加。
@@ -1604,17 +1604,17 @@ Expected: 設計メモ以外にヒットしない
 - `docs/adr/0018-vrchat-world-name-resolution.md`: 設計メモの「検討した方式」「設計」を要約し、Context / Decision / Consequences / Alternatives を書く。
 - `docs/adr/README.md`: ADR-0018 の行を追加。
 
-- [ ] **Step 3: ドキュメントの整合性を確認**
+- [x] **Step 3: ドキュメントの整合性を確認**
 
 Run: `rg -n "world_name_lookups|world_name_resolution_enabled|vrchat-api|ワールド名解決" docs`
 Expected: 設計メモ、ADR、security-privacy、data-model、architecture、features、testing、roadmap にヒットする
 
-- [ ] **Step 4: 空白とリンクを確認**
+- [x] **Step 4: 空白とリンクを確認**
 
 Run: `git diff --check && ! rg -n "TODO|TBD" docs/adr/0018-vrchat-world-name-resolution.md`
 Expected: `git diff --check` が無出力、TODO/TBD がない
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add docs
@@ -1648,7 +1648,7 @@ Expected: すべて PASS
 
 - [ ] **Step 4: 手動確認**
 
-**Status:** 自動検証（fmt/clippy/workspace tests）は完了。VRChat API/UI の手動確認は merge 前に実施する。
+**Status:** 自動検証（fmt/clippy/workspace tests）は完了。VRChat API/UI の手動確認はメンテナが merge 前に実施する（未実施のためチェックは付けない）。
 
 以下を確認する。
 
