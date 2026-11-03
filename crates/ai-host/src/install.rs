@@ -32,6 +32,8 @@ pub struct InstallLimits {
     pub max_uncompressed_bytes: u64,
     /// Maximum size of `manifest.json` (and `manifest.minisig`).
     pub max_manifest_bytes: u64,
+    /// Maximum size of the ZIP file on disk before it is opened.
+    pub max_zip_bytes: u64,
 }
 
 impl Default for InstallLimits {
@@ -40,6 +42,7 @@ impl Default for InstallLimits {
             max_entries: 512,
             max_uncompressed_bytes: 512 * 1024 * 1024,
             max_manifest_bytes: 1024 * 1024,
+            max_zip_bytes: 512 * 1024 * 1024,
         }
     }
 }
@@ -80,6 +83,14 @@ pub fn install_from_zip_with_limits(
     host_version: &str,
     limits: InstallLimits,
 ) -> Result<InstalledPlugin> {
+    let zip_size = fs::metadata(zip_path)?.len();
+    if zip_size > limits.max_zip_bytes {
+        return Err(AiHostError::LimitExceeded(format!(
+            "ZIP is {zip_size} bytes (limit {})",
+            limits.max_zip_bytes
+        )));
+    }
+
     let file = File::open(zip_path)?;
     let mut archive = ZipArchive::new(BufReader::new(file))?;
     if archive.has_duplicate_names() {
@@ -233,8 +244,7 @@ pub fn install_from_zip_with_limits(
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
     }
-    remove_existing(&target)?;
-    fs::rename(staging.path(), &target)?;
+    replace_installation(staging.path(), &target, &root)?;
 
     tracing::debug!(
         plugin_id = %manifest.plugin_id,
@@ -367,13 +377,40 @@ fn set_file_mode(path: &Path, zip_mode: Option<u32>, is_entrypoint: bool) -> Res
     Ok(())
 }
 
-fn remove_existing(target: &Path) -> Result<()> {
-    match fs::symlink_metadata(target) {
-        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(target)?,
-        Ok(_) => fs::remove_file(target)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+fn replace_installation(staging: &Path, target: &Path, backup_root: &Path) -> Result<()> {
+    let target_exists = match fs::symlink_metadata(target) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
         Err(error) => return Err(error.into()),
+    };
+
+    let backup = if target_exists {
+        let directory = Builder::new().prefix(".backup-").tempdir_in(backup_root)?;
+        let path = directory.path().join("previous");
+        fs::rename(target, &path)?;
+        Some((directory, path))
+    } else {
+        None
+    };
+
+    if let Err(error) = fs::rename(staging, target) {
+        if let Some((backup_directory, backup_path)) = backup {
+            match fs::rename(&backup_path, target) {
+                Ok(()) => drop(backup_directory),
+                Err(restore_error) => {
+                    let kept = backup_directory.keep();
+                    tracing::error!(
+                        backup = %kept.display(),
+                        error = %restore_error,
+                        "failed to restore the previous AI plugin installation"
+                    );
+                }
+            }
+        }
+        return Err(error.into());
     }
+
+    drop(backup);
     Ok(())
 }
 
@@ -394,7 +431,7 @@ mod tests {
         install_from_zip(zip.path(), data_dir, &[package.public_key()], "0.10.1")
     }
 
-    fn staging_entries(data_dir: &Path) -> Vec<PathBuf> {
+    fn prefixed_entries(data_dir: &Path, prefix: &str) -> Vec<PathBuf> {
         let Ok(entries) = fs::read_dir(plugins_root(data_dir)) else {
             return Vec::new();
         };
@@ -403,9 +440,17 @@ mod tests {
             .map(|entry| entry.path())
             .filter(|path| {
                 path.file_name()
-                    .is_some_and(|name| name.to_string_lossy().starts_with(".staging-"))
+                    .is_some_and(|name| name.to_string_lossy().starts_with(prefix))
             })
             .collect()
+    }
+
+    fn staging_entries(data_dir: &Path) -> Vec<PathBuf> {
+        prefixed_entries(data_dir, ".staging-")
+    }
+
+    fn backup_entries(data_dir: &Path) -> Vec<PathBuf> {
+        prefixed_entries(data_dir, ".backup-")
     }
 
     fn replace_entry_data(package: &mut TestPackage, path: &str, data: &[u8]) {
@@ -482,6 +527,43 @@ mod tests {
         install(&package, data_dir.path()).unwrap();
         assert!(!installed.path.join("stale.txt").exists());
         assert!(staging_entries(data_dir.path()).is_empty());
+        assert!(backup_entries(data_dir.path()).is_empty());
+    }
+
+    #[test]
+    fn default_install_limits_match_the_design() {
+        let limits = InstallLimits::default();
+        assert_eq!(limits.max_entries, 512);
+        assert_eq!(limits.max_uncompressed_bytes, 512 * 1024 * 1024);
+        assert_eq!(limits.max_manifest_bytes, 1024 * 1024);
+        assert_eq!(limits.max_zip_bytes, 512 * 1024 * 1024);
+    }
+
+    #[test]
+    fn install_rejects_a_zip_larger_than_the_limit_without_writing() {
+        let data_dir = tempdir().unwrap();
+        let package = TestPackage::new();
+        let zip = package.temp_zip().unwrap();
+        let zip_size = fs::metadata(zip.path()).unwrap().len();
+        assert!(zip_size > 0);
+
+        let error = install_from_zip_with_limits(
+            zip.path(),
+            data_dir.path(),
+            &[package.public_key()],
+            "0.10.1",
+            InstallLimits {
+                max_zip_bytes: zip_size - 1,
+                ..InstallLimits::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, AiHostError::LimitExceeded(_)));
+        assert!(
+            fs::read_dir(data_dir.path()).unwrap().next().is_none(),
+            "the data directory must not be touched before the ZIP size check"
+        );
     }
 
     #[test]
@@ -562,6 +644,7 @@ mod tests {
             .exists()
         );
         assert!(staging_entries(data_dir.path()).is_empty());
+        assert!(backup_entries(data_dir.path()).is_empty());
     }
 
     #[test]
@@ -779,6 +862,55 @@ mod tests {
     }
 
     #[test]
+    fn replace_installation_swaps_in_staging_and_removes_the_backup() {
+        let workspace = tempdir().unwrap();
+        let plugins = plugins_root(workspace.path());
+        fs::create_dir_all(&plugins).unwrap();
+        let target = plugin_dir(
+            workspace.path(),
+            TEST_PLUGIN_ID,
+            TEST_VARIANT,
+            crate::test_support::TEST_PLUGIN_VERSION,
+        );
+        fs::create_dir_all(target.join("libs")).unwrap();
+        fs::write(target.join("old.txt"), b"old").unwrap();
+
+        let staging = Builder::new()
+            .prefix(".staging-")
+            .tempdir_in(&plugins)
+            .unwrap();
+        fs::write(staging.path().join("new.txt"), b"new").unwrap();
+
+        replace_installation(staging.path(), &target, &plugins).unwrap();
+
+        assert_eq!(fs::read(target.join("new.txt")).unwrap(), b"new");
+        assert!(!target.join("old.txt").exists());
+        assert!(prefixed_entries(workspace.path(), ".backup-").is_empty());
+    }
+
+    #[test]
+    fn replace_installation_restores_the_previous_version_when_the_rename_fails() {
+        let workspace = tempdir().unwrap();
+        let plugins = plugins_root(workspace.path());
+        fs::create_dir_all(&plugins).unwrap();
+        let target = plugin_dir(
+            workspace.path(),
+            TEST_PLUGIN_ID,
+            TEST_VARIANT,
+            crate::test_support::TEST_PLUGIN_VERSION,
+        );
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("old.txt"), b"old").unwrap();
+        let missing_staging = plugins.join(".staging-missing");
+
+        let error = replace_installation(&missing_staging, &target, &plugins).unwrap_err();
+
+        assert!(matches!(error, AiHostError::Io(_)));
+        assert_eq!(fs::read(target.join("old.txt")).unwrap(), b"old");
+        assert!(prefixed_entries(workspace.path(), ".backup-").is_empty());
+    }
+
+    #[test]
     fn install_is_atomic_on_failure() {
         let data_dir = tempdir().unwrap();
         let mut package = TestPackage::new();
@@ -795,6 +927,7 @@ mod tests {
             original
         );
         assert!(staging_entries(data_dir.path()).is_empty());
+        assert!(backup_entries(data_dir.path()).is_empty());
     }
 
     #[test]
@@ -814,5 +947,6 @@ mod tests {
             .exists()
         );
         assert!(staging_entries(data_dir.path()).is_empty());
+        assert!(backup_entries(data_dir.path()).is_empty());
     }
 }
