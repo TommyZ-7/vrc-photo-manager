@@ -10,5 +10,5 @@ pub use client::{IpcError, SubscriptionInfo};
 pub use endpoint::Endpoint;
 pub use protocol::*;
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");

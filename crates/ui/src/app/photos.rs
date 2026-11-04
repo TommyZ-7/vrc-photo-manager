@@ -1178,6 +1178,7 @@ mod tests {
                 failed: 1,
             },
             send: JobStatusCounts::default(),
+            tagging: JobStatusCounts::default(),
             affected_photos: 1,
         };
         let lines = deletion_warning_lines(&summary);
@@ -1210,6 +1211,7 @@ mod tests {
                 processing: 0,
                 failed: 1,
             },
+            tagging: JobStatusCounts::default(),
             affected_photos: 3,
         };
         let lines = deletion_warning_lines(&summary);

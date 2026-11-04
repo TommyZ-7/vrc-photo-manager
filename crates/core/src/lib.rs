@@ -3,6 +3,7 @@
 //! The core crate is intentionally free of UI and process concerns so that the
 //! daemon and the gpui application can share it.
 
+pub mod ai;
 pub mod compressor;
 pub mod db;
 pub mod discord;
@@ -19,6 +20,7 @@ pub mod photo_filename;
 pub mod preview;
 pub mod scanner;
 pub mod settings;
+pub mod tagging_image;
 pub mod thumbnail;
 pub mod time;
 pub mod world_name;

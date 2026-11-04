@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+pub use vrc_photon_ai_protocol::{ModelState, PluginInstallStatus, TaggingJobStatus, TaggingStage};
+
 /// Client identity sent during the handshake.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClientInfo {
@@ -32,6 +34,42 @@ pub enum Request {
     ClearThumbnailCache,
     Shutdown,
     Subscribe,
+    /// Nudges the daemon's tagging worker.
+    WakeTagging,
+    InstallPlugin {
+        zip_path: String,
+    },
+    UninstallPlugin {
+        plugin_id: String,
+        variant: Option<String>,
+        version: Option<String>,
+        delete_ai_tags: bool,
+    },
+    ProbePlugin {
+        plugin_id: String,
+    },
+    SetActiveVariant {
+        plugin_id: String,
+        variant: String,
+        version: Option<String>,
+    },
+    StartModelDownload {
+        plugin_id: String,
+    },
+    CancelModelDownload {
+        plugin_id: String,
+    },
+    ImportModelFiles {
+        plugin_id: String,
+        paths: Vec<String>,
+    },
+    DeleteModel {
+        plugin_id: String,
+    },
+    /// Cancels a waiting or running tagging job.
+    CancelTagging {
+        job_id: String,
+    },
 }
 
 /// Responses returned by the daemon.
@@ -69,6 +107,14 @@ pub enum Response {
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     InvalidRequest,
+    /// Unknown plugin, job, or install.
+    NotFound,
+    /// Another operation for the same plugin is already running.
+    Busy,
+    /// The active install, model, or probe is not ready.
+    NotReady,
+    /// The model license has not been accepted.
+    ConsentRequired,
 }
 
 /// Live daemon state shared with the UI.
@@ -95,6 +141,14 @@ pub struct StatusSnapshot {
     /// has been applied. Zero means the sender does not version snapshots.
     #[serde(default)]
     pub version: u64,
+    /// Tagging jobs that are waiting, pending, or processing. Defaults to 0
+    /// so a snapshot from a daemon without tagging still decodes.
+    #[serde(default)]
+    pub pending_tagging_jobs: i64,
+    /// True when an active install, a ready model, and a saved probe are all
+    /// present. Defaults to false for daemons without tagging.
+    #[serde(default)]
+    pub tagging_ready: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -189,6 +243,33 @@ pub enum Event {
         photo_id: Option<i64>,
         status: SendStatus,
         error_code: Option<String>,
+    },
+    /// One tagging job changed state.
+    TaggingProgress {
+        job_id: String,
+        photo_id: i64,
+        status: TaggingJobStatus,
+        progress: f64,
+        stage: Option<TaggingStage>,
+        error: Option<String>,
+    },
+    PluginInstallProgress {
+        plugin_id: String,
+        variant: String,
+        version: Option<String>,
+        status: PluginInstallStatus,
+        error: Option<String>,
+    },
+    /// The plugin's model state, probe, or active variant changed.
+    PluginStateChanged {
+        plugin_id: String,
+    },
+    ModelDownloadProgress {
+        plugin_id: String,
+        status: ModelState,
+        bytes: u64,
+        total: Option<u64>,
+        error: Option<String>,
     },
 }
 
@@ -343,5 +424,160 @@ mod tests {
                 target: None,
             }
         );
+    }
+
+    #[test]
+    fn ai_requests_and_events_round_trip() {
+        let requests = [
+            ("wake_tagging", Request::WakeTagging),
+            (
+                "install_plugin",
+                Request::InstallPlugin {
+                    zip_path: "/tmp/plugin.zip".into(),
+                },
+            ),
+            (
+                "uninstall_plugin",
+                Request::UninstallPlugin {
+                    plugin_id: "vrc-photon-autotag".into(),
+                    variant: Some("linux-vulkan".into()),
+                    version: Some("1.0.0".into()),
+                    delete_ai_tags: true,
+                },
+            ),
+            (
+                "probe_plugin",
+                Request::ProbePlugin {
+                    plugin_id: "vrc-photon-autotag".into(),
+                },
+            ),
+            (
+                "set_active_variant",
+                Request::SetActiveVariant {
+                    plugin_id: "vrc-photon-autotag".into(),
+                    variant: "linux-vulkan".into(),
+                    version: Some("1.0.0".into()),
+                },
+            ),
+            (
+                "start_model_download",
+                Request::StartModelDownload {
+                    plugin_id: "vrc-photon-autotag".into(),
+                },
+            ),
+            (
+                "cancel_model_download",
+                Request::CancelModelDownload {
+                    plugin_id: "vrc-photon-autotag".into(),
+                },
+            ),
+            (
+                "import_model_files",
+                Request::ImportModelFiles {
+                    plugin_id: "vrc-photon-autotag".into(),
+                    paths: vec!["/tmp/model.gguf".into()],
+                },
+            ),
+            (
+                "delete_model",
+                Request::DeleteModel {
+                    plugin_id: "vrc-photon-autotag".into(),
+                },
+            ),
+            (
+                "cancel_tagging",
+                Request::CancelTagging {
+                    job_id: "job-1".into(),
+                },
+            ),
+        ];
+        for (tag, request) in requests {
+            let value = RequestEnvelope { id: 1, request };
+            let json = serde_json::to_string(&value).unwrap();
+            assert!(
+                json.contains(&format!("\"type\":\"{tag}\"")),
+                "request wire tag {tag} missing: {json}"
+            );
+            assert_eq!(
+                serde_json::from_str::<RequestEnvelope>(&json).unwrap(),
+                value
+            );
+        }
+
+        let events = [
+            (
+                "tagging_progress",
+                Event::TaggingProgress {
+                    job_id: "job-1".into(),
+                    photo_id: 1,
+                    status: TaggingJobStatus::Processing,
+                    progress: 0.5,
+                    stage: Some(TaggingStage::PlaceClass),
+                    error: None,
+                },
+            ),
+            (
+                "plugin_install_progress",
+                Event::PluginInstallProgress {
+                    plugin_id: "vrc-photon-autotag".into(),
+                    variant: "linux-vulkan".into(),
+                    version: Some("1.0.0".into()),
+                    status: PluginInstallStatus::Installed,
+                    error: None,
+                },
+            ),
+            (
+                "plugin_state_changed",
+                Event::PluginStateChanged {
+                    plugin_id: "vrc-photon-autotag".into(),
+                },
+            ),
+            (
+                "model_download_progress",
+                Event::ModelDownloadProgress {
+                    plugin_id: "vrc-photon-autotag".into(),
+                    status: ModelState::Downloading,
+                    bytes: 512,
+                    total: Some(2048),
+                    error: None,
+                },
+            ),
+        ];
+        for (tag, event) in events {
+            let value = ServerMessage::Event {
+                event: event.clone(),
+            };
+            let json = serde_json::to_string(&value).unwrap();
+            assert!(
+                json.contains(&format!("\"type\":\"{tag}\"")),
+                "event wire tag {tag} missing: {json}"
+            );
+            assert_eq!(serde_json::from_str::<ServerMessage>(&json).unwrap(), value);
+        }
+
+        for (code, tag) in [
+            (ErrorCode::NotReady, "not_ready"),
+            (ErrorCode::ConsentRequired, "consent_required"),
+        ] {
+            assert_eq!(serde_json::to_string(&code).unwrap(), format!("\"{tag}\""));
+            let value = ServerMessage::Response {
+                id: 2,
+                response: Response::Error {
+                    code,
+                    message: "try again".into(),
+                },
+            };
+            let json = serde_json::to_string(&value).unwrap();
+            assert!(json.contains(tag), "error wire tag {tag} missing: {json}");
+            assert_eq!(serde_json::from_str::<ServerMessage>(&json).unwrap(), value);
+        }
+    }
+
+    #[test]
+    fn status_snapshot_without_ai_fields_decodes() {
+        let json = r#"{"paused":false,"watching":true,"scanning":false,"scan_phase":null,"scan_processed":0,"scan_total":null,"scan_indexed":0,"scan_root":0,"scan_roots":0,"photo_count":0,"pending_jobs":0}"#;
+        let snapshot: StatusSnapshot = serde_json::from_str(json).unwrap();
+        assert_eq!(snapshot.pending_tagging_jobs, 0);
+        assert!(!snapshot.tagging_ready);
     }
 }
