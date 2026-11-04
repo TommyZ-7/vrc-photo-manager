@@ -145,10 +145,19 @@ impl AiUiState {
             TaggingJobStatus::Completed | TaggingJobStatus::Failed | TaggingJobStatus::Cancelled
         );
         let index = self.active_jobs.iter().position(|job| job.id == job_id);
-        if let Some(previous) = index.map(|index| self.active_jobs[index].status) {
-            adjust_job_count(&mut self.job_counts, previous, -1);
-        }
-        if !terminal {
+        let previous = index.map(|index| self.active_jobs[index].status);
+        if let Some(previous) = previous {
+            if previous != status {
+                adjust_job_count(&mut self.job_counts, previous, -1);
+                if status == TaggingJobStatus::Failed {
+                    // A job that reached a terminal failure still counts as a
+                    // failure; only cancelled/completed leave the totals.
+                    adjust_job_count(&mut self.job_counts, TaggingJobStatus::Failed, 1);
+                } else if !terminal {
+                    adjust_job_count(&mut self.job_counts, status, 1);
+                }
+            }
+        } else if !terminal {
             adjust_job_count(&mut self.job_counts, status, 1);
         }
 
@@ -509,6 +518,27 @@ pub(crate) fn ai_response_outcome(response: &IpcResponse) -> AiResponseOutcome {
     }
 }
 
+/// Whether an install event belongs to the AI plugin. Async install failures
+/// are published before the ZIP yields a plugin id, so the daemon reports them
+/// with an empty id; the UI installs only the AI plugin, so those failures
+/// belong to this flow. Events for other plugin ids stay ignored.
+pub(crate) fn install_event_applies_to_ai(plugin_id: &str, status: PluginInstallStatus) -> bool {
+    plugin_id == AI_PLUGIN_ID || (status == PluginInstallStatus::Failed && plugin_id.is_empty())
+}
+
+/// Applies an install event that belongs to the AI plugin.
+pub(crate) fn apply_install_event(
+    ai: &mut AiUiState,
+    plugin_id: &str,
+    status: PluginInstallStatus,
+    error: Option<&str>,
+) -> Option<String> {
+    if !install_event_applies_to_ai(plugin_id, status) {
+        return None;
+    }
+    ai.apply_install_progress(status, error)
+}
+
 impl App {
     pub(crate) fn refresh_ai_state(&mut self, cx: &mut Context<Self>) {
         let snapshot = collect_ai_snapshot(&self.db);
@@ -645,8 +675,10 @@ impl App {
     }
 
     pub(crate) fn accept_ai_model_license(&mut self, cx: &mut Context<Self>) {
+        let previous = self.settings.ai_model_license_consent_at;
         self.settings.ai_model_license_consent_at = Some(chrono::Utc::now().timestamp());
         if let Err(error) = self.settings.save(&self.db) {
+            self.settings.ai_model_license_consent_at = previous;
             self.toast_error(tr_args!("settings.save_failed", error = error), cx);
             cx.notify();
             return;
@@ -740,6 +772,7 @@ impl App {
         if let Err(error) = self.settings.save(&self.db) {
             self.settings = previous;
             tracing::warn!(%error, "cannot save AI tagging settings");
+            self.toast_error(tr_args!("settings.save_failed", error = error), cx);
             cx.notify();
             return;
         }
@@ -869,11 +902,13 @@ impl App {
                 error,
                 ..
             } => {
-                if plugin_id != AI_PLUGIN_ID {
+                if !install_event_applies_to_ai(&plugin_id, status) {
                     return false;
                 }
-                if let Some(error) = self.ai.apply_install_progress(status, error.as_deref()) {
-                    self.toast_error(self.ai_error_label(&error), cx);
+                if let Some(error) =
+                    apply_install_event(&mut self.ai, &plugin_id, status, error.as_deref())
+                {
+                    self.toast_error(tr_args!("settings.ai.install_failed", error = error), cx);
                 }
                 self.refresh_ai_state(cx);
                 true
@@ -899,7 +934,7 @@ impl App {
                     self.ai
                         .apply_model_download(status, bytes, total, error.as_deref())
                 {
-                    self.toast_error(self.ai_error_label(&error), cx);
+                    self.toast_error(tr_args!("settings.ai.model_failed", error = error), cx);
                 }
                 self.refresh_ai_state(cx);
                 true
@@ -954,9 +989,9 @@ impl App {
 mod tests {
     use super::{
         AI_PLUGIN_ID, AiResponseOutcome, AiUiState, ai_error_label_in, ai_error_text_in,
-        ai_job_summary_label, ai_response_outcome, ai_tag_view, backend_options,
-        collect_ai_snapshot, model_progress_ratio, needs_license_consent, people_label,
-        place_label,
+        ai_job_summary_label, ai_response_outcome, ai_tag_view, apply_install_event,
+        backend_options, collect_ai_snapshot, install_event_applies_to_ai, model_progress_ratio,
+        needs_license_consent, people_label, place_label,
     };
     use vrc_photon_ai_protocol::{
         BackendInfo, ModelState, PluginInstallStatus, Probe, TaggingJobStatus,
@@ -1077,8 +1112,13 @@ mod tests {
 
     #[test]
     fn handle_tagging_progress_updates_counts() {
-        let mut ai = AiUiState::default();
-        ai.job_counts.waiting = 1;
+        let mut ai = AiUiState {
+            job_counts: JobStatusCounts {
+                waiting: 1,
+                ..JobStatusCounts::default()
+            },
+            ..AiUiState::default()
+        };
         ai.active_jobs
             .push(sample_job("j1", TaggingJobStatus::Waiting));
 
@@ -1108,6 +1148,85 @@ mod tests {
         );
         assert_eq!(ai.job_counts.processing, 0);
         assert!(ai.active_jobs.is_empty());
+    }
+
+    #[test]
+    fn processing_to_failed_increments_failed_count() {
+        let mut ai = AiUiState {
+            job_counts: JobStatusCounts {
+                processing: 1,
+                ..JobStatusCounts::default()
+            },
+            ..AiUiState::default()
+        };
+        ai.active_jobs
+            .push(sample_job("j1", TaggingJobStatus::Processing));
+
+        ai.apply_tagging_progress(
+            "j1",
+            7,
+            TaggingJobStatus::Failed,
+            0.5,
+            Some(vrc_photon_ai_protocol::TaggingStage::Presence),
+            Some("sidecar_exited"),
+        );
+
+        assert_eq!(ai.job_counts.processing, 0);
+        assert_eq!(ai.job_counts.failed, 1);
+        assert!(ai.active_jobs.is_empty());
+        assert_eq!(ai.last_error.as_deref(), Some("sidecar_exited"));
+    }
+
+    #[test]
+    fn empty_plugin_id_install_failure_clears_busy_and_reports() {
+        assert!(install_event_applies_to_ai("", PluginInstallStatus::Failed));
+        assert!(!install_event_applies_to_ai(
+            "",
+            PluginInstallStatus::Running
+        ));
+        assert!(!install_event_applies_to_ai(
+            "another-plugin",
+            PluginInstallStatus::Failed
+        ));
+
+        let mut ai = AiUiState {
+            install_busy: true,
+            ..AiUiState::default()
+        };
+        // A failure before the ZIP yields a plugin id arrives with an empty
+        // id; it must still clear the busy flag and report the error.
+        let toast = apply_install_event(
+            &mut ai,
+            "",
+            PluginInstallStatus::Failed,
+            Some("signature verification failed"),
+        );
+        assert_eq!(toast.as_deref(), Some("signature verification failed"));
+        assert!(!ai.install_busy);
+        assert_eq!(
+            ai.last_error.as_deref(),
+            Some("signature verification failed")
+        );
+
+        let mut ai = AiUiState {
+            install_busy: true,
+            ..AiUiState::default()
+        };
+        assert!(
+            apply_install_event(&mut ai, "", PluginInstallStatus::Running, None).is_none(),
+            "a running event without an id is not attributable to the AI plugin"
+        );
+        assert!(
+            apply_install_event(
+                &mut ai,
+                "another-plugin",
+                PluginInstallStatus::Failed,
+                Some("other failure")
+            )
+            .is_none(),
+            "another plugin's failure must not clear the AI install state"
+        );
+        assert!(ai.install_busy);
     }
 
     #[test]
@@ -1173,6 +1292,18 @@ mod tests {
         assert_eq!(
             ai_error_label_in("ja", "consent_required"),
             "モデルライセンスへの同意が必要です"
+        );
+        assert_eq!(
+            ai_error_label_in("ja", "interrupted"),
+            "処理が中断されました"
+        );
+        assert_eq!(
+            ai_error_label_in("ja", "protocol_error"),
+            "推論プラグインとの通信が不正です"
+        );
+        assert_eq!(
+            ai_error_label_in("ja", "model_load_failed"),
+            "モデルを読み込めませんでした"
         );
         assert_eq!(ai_error_label_in("ja", "unknown_code"), "unknown_code");
         assert_eq!(
