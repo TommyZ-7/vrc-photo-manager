@@ -4,6 +4,7 @@
 //! The switch, card-size, and field widgets come from `ui::components`; screen
 //! dispatch lives in `ui::shell`.
 
+use gpui_kit::base::FocusTrapElement as _;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::Input;
@@ -26,9 +27,10 @@ use vrc_photon_ipc::Response;
 
 use crate::app::App;
 use crate::app::ai::{
-    AiManifestView, AiPluginAction, AiPluginCardState, AiPluginCardView, ModelDownloadView,
-    ai_error_text_in, ai_manifest_view, installation_row_id, is_active_installation,
-    model_progress_ratio, variant_backend_label,
+    AI_PLUGIN_ID, AiErrorInfo, AiErrorKind, AiManifestView, AiPluginAction, AiPluginCardState,
+    AiPluginCardView, ModelDownloadView, UninstallTarget, ai_error_detail_in, ai_error_summary_in,
+    ai_manifest_view, installation_row_id, is_active_installation, model_progress_ratio,
+    variant_backend_label,
 };
 use crate::app::daemon::{autostart_description, open_path};
 use crate::ipc_bridge;
@@ -1134,8 +1136,13 @@ impl App {
                     .text_color(rgb(p.muted))
                     .child(tr!("settings.ai.not_installed.body")),
             );
-            if let Some(error) = self.ai.last_error.clone() {
-                card = card.child(self.ai_install_error_box(&error));
+            if let Some(error) = self
+                .ai
+                .error_of(AiErrorKind::Install)
+                .or_else(|| self.ai.error_of(AiErrorKind::Model))
+                .cloned()
+            {
+                card = card.child(self.ai_operation_error_box(&error));
             }
             return card
                 .child(self.ai_primary_action_button(view.primary_action, false, cx))
@@ -1228,15 +1235,21 @@ impl App {
                     )),
             );
         } else if state == AiPluginCardState::Error {
-            let code = self
+            let error = self
                 .ai
-                .state
-                .as_ref()
-                .and_then(|state| state.model_error.clone())
-                .or_else(|| self.ai.last_error.clone())
-                .unwrap_or_else(|| "model_download_failed".to_string());
-            let error = ai_error_text_in(&vrc_photon_i18n::current_locale(), &code, &code);
-            card = card.child(self.ai_error_box(&error)).child(
+                .error_of(AiErrorKind::Model)
+                .cloned()
+                .or_else(|| {
+                    self.ai
+                        .state
+                        .as_ref()
+                        .and_then(|state| state.model_error.clone())
+                        .map(|code| AiErrorInfo::new(AiErrorKind::Model, code, None))
+                })
+                .unwrap_or_else(|| {
+                    AiErrorInfo::new(AiErrorKind::Model, "model_download_failed", None)
+                });
+            card = card.child(self.ai_error_box(&error, cx)).child(
                 h_flex()
                     .flex_wrap()
                     .items_center()
@@ -1299,6 +1312,14 @@ impl App {
                             false,
                             false,
                             cx,
+                        ))
+                        .child(self.ai_action_button(
+                            "ai-missing-uninstall",
+                            AiPluginAction::Uninstall,
+                            tr!("settings.ai.uninstall"),
+                            false,
+                            true,
+                            cx,
                         )),
                 )
                 .child(
@@ -1307,6 +1328,16 @@ impl App {
                         .text_color(rgb(p.muted_2))
                         .child(tr!("settings.ai.download_note")),
                 );
+        }
+
+        if state != AiPluginCardState::Error
+            && let Some(error) = self
+                .ai
+                .error_of(AiErrorKind::Install)
+                .or_else(|| self.ai.error_of(AiErrorKind::Model))
+                .cloned()
+        {
+            card = card.child(self.ai_operation_error_box(&error));
         }
 
         card
@@ -1345,6 +1376,8 @@ impl App {
                         let switch_variant = install.variant.clone();
                         let version = install.version.clone();
                         let row_id = installation_row_id(&install);
+                        let remove_id = format!("{row_id}-remove");
+                        let remove_target = UninstallTarget::for_install(&install);
                         h_flex()
                             .items_center()
                             .gap(px(8.))
@@ -1376,16 +1409,34 @@ impl App {
                                 self.badge(tr!("settings.ai.variant.active"), p.green, p.green_soft)
                                     .into_any_element()
                             } else {
-                                Button::new(SharedString::from(row_id))
-                                    .label(tr!("settings.ai.variant.switch"))
-                                    .small()
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.set_ai_active_variant(
-                                            &switch_variant,
-                                            Some(&version),
-                                            cx,
-                                        );
-                                    }))
+                                h_flex()
+                                    .items_center()
+                                    .gap(px(4.))
+                                    .child(
+                                        Button::new(SharedString::from(row_id))
+                                            .label(tr!("settings.ai.variant.switch"))
+                                            .small()
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.set_ai_active_variant(
+                                                    &switch_variant,
+                                                    Some(&version),
+                                                    cx,
+                                                );
+                                            })),
+                                    )
+                                    .child(
+                                        Button::new(SharedString::from(remove_id))
+                                            .label(tr!("settings.ai.variant.remove"))
+                                            .small()
+                                            .danger()
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.open_ai_uninstall_modal(
+                                                    remove_target.clone(),
+                                                    window,
+                                                    cx,
+                                                );
+                                            })),
+                                    )
                                     .into_any_element()
                             })
                     })),
@@ -1514,21 +1565,54 @@ impl App {
             )
     }
 
-    fn ai_error_box(&self, text: &str) -> impl IntoElement {
+    fn ai_error_box(&self, error: &AiErrorInfo, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.palette;
-        div()
+        let language = vrc_photon_i18n::current_locale();
+        let summary = ai_error_summary_in(&language, error);
+        let detail = ai_error_detail_in(&language, error);
+        let code = error.code.clone();
+        v_flex()
+            .gap(px(3.))
             .p(px(10.))
             .rounded(px(8.))
             .bg(rgb(p.red_soft))
             .border_1()
             .border_color(rgb(p.red_border))
-            .text_size(px(10.))
-            .text_color(rgb(p.red))
-            .child(text.to_string())
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .font_medium()
+                    .text_color(rgb(p.red))
+                    .child(summary),
+            )
+            .when_some(detail, |this, detail| {
+                this.child(
+                    div()
+                        .text_size(px(9.))
+                        .text_color(rgb(p.muted))
+                        .child(detail),
+                )
+            })
+            .child(
+                div()
+                    .text_size(px(9.))
+                    .text_color(rgb(p.muted_2))
+                    .child(tr_args!("settings.ai.error_code", code = code)),
+            )
+            .child(
+                Button::new("ai-error-open-logs")
+                    .label(tr!("settings.ai.open_logs"))
+                    .small()
+                    .ghost()
+                    .on_click(cx.listener(|this, _, _, cx| this.open_logs_folder(cx))),
+            )
     }
 
-    fn ai_install_error_box(&self, detail: &str) -> impl IntoElement {
+    fn ai_operation_error_box(&self, error: &AiErrorInfo) -> impl IntoElement {
         let p = self.palette;
+        let language = vrc_photon_i18n::current_locale();
+        let summary = ai_error_summary_in(&language, error);
+        let detail = ai_error_detail_in(&language, error);
         v_flex()
             .gap(px(2.))
             .p(px(10.))
@@ -1541,14 +1625,16 @@ impl App {
                     .text_size(px(10.))
                     .font_medium()
                     .text_color(rgb(p.red))
-                    .child(tr!("settings.ai.install_error")),
+                    .child(summary),
             )
-            .child(
-                div()
-                    .text_size(px(9.))
-                    .text_color(rgb(p.muted))
-                    .child(detail.to_string()),
-            )
+            .when_some(detail, |this, detail| {
+                this.child(
+                    div()
+                        .text_size(px(9.))
+                        .text_color(rgb(p.muted))
+                        .child(detail),
+                )
+            })
     }
 
     fn ai_warning_box(&self, text: &str) -> impl IntoElement {
@@ -1607,16 +1693,14 @@ impl App {
             button = button.danger();
         }
         button
-            .on_click(cx.listener(move |this, _, _, cx| match action {
+            .on_click(cx.listener(move |this, _, window, cx| match action {
                 AiPluginAction::InstallZip => this.install_ai_plugin(cx),
-                AiPluginAction::DownloadModel => this.request_ai_model_download(cx),
+                AiPluginAction::DownloadModel => this.request_ai_model_download(window, cx),
                 AiPluginAction::ImportModel => this.import_ai_model_files(cx),
                 AiPluginAction::Recheck => this.probe_ai_plugin(cx),
                 AiPluginAction::DeleteModel => this.delete_ai_model(cx),
                 AiPluginAction::Uninstall => {
-                    this.ai.uninstall_modal_open = true;
-                    this.ai.uninstall_delete_tags = false;
-                    cx.notify();
+                    this.open_ai_uninstall_modal(UninstallTarget::plugin_wide(), window, cx)
                 }
                 AiPluginAction::None => {}
             }))
@@ -1641,7 +1725,20 @@ impl App {
             )
     }
 
-    pub(crate) fn ai_license_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn ai_license_overlay(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if self.ai_modal_focus_pending {
+            self.ai_modal_focus_pending = false;
+            let focus = self.ai_license_focus.clone();
+            cx.defer_in(window, move |this, window, cx| {
+                if this.ai.license_modal_open {
+                    window.focus(&focus, cx);
+                }
+            });
+        }
         let p = self.palette;
         let manifest = self
             .ai
@@ -1654,10 +1751,9 @@ impl App {
             .clone()
             .unwrap_or_else(|| tr!("settings.ai.license.unknown"));
         let license_url = manifest.license_url.clone();
-        let license_fallback = manifest
+        let license_file = manifest
             .license_file
             .clone()
-            .or_else(|| license_url.clone())
             .unwrap_or_else(|| "—".to_string());
         let install_line = self
             .ai
@@ -1676,22 +1772,40 @@ impl App {
             .w(px(520.))
             .gap(px(14.))
             .p(px(20.))
+            .track_focus(&self.ai_license_focus)
+            .focus_trap("ai-license", &self.ai_license_focus)
             .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
             .child(
-                v_flex()
-                    .gap(px(2.))
+                h_flex()
+                    .items_center()
+                    .gap(px(10.))
                     .child(
-                        div()
-                            .text_size(px(16.))
-                            .font_semibold()
-                            .text_color(rgb(p.text))
-                            .child(tr!("settings.ai.license.title")),
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .text_size(px(16.))
+                                    .font_semibold()
+                                    .text_color(rgb(p.text))
+                                    .child(tr!("settings.ai.license.title")),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(p.muted_2))
+                                    .child(install_line),
+                            ),
                     )
                     .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(p.muted_2))
-                            .child(install_line),
+                        Button::new("ai-license-close")
+                            .icon(Icon::new(IconName::Close))
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.close_ai_license_modal(window, cx)
+                            })),
                     ),
             )
             .child(
@@ -1712,7 +1826,7 @@ impl App {
                     ))
                     .child(self.ai_license_row(
                         tr!("settings.ai.license.metadata.bundled"),
-                        license_fallback,
+                        license_file,
                     ))
                     .when_some(license_url.clone(), |this, url| {
                         this.child(self.ai_license_row(
@@ -1759,8 +1873,8 @@ impl App {
                             .label(tr!("common.cancel"))
                             .small()
                             .ghost()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.close_ai_license_modal(cx)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.close_ai_license_modal(window, cx)
                             })),
                     )
                     .child(
@@ -1768,8 +1882,8 @@ impl App {
                             .label(tr!("settings.ai.license.agree_download"))
                             .small()
                             .primary()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.accept_ai_model_license(cx)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.accept_ai_model_license(window, cx)
                             })),
                     ),
             );
@@ -1788,28 +1902,67 @@ impl App {
             .justify_center()
             .p(px(DIALOG_VIEWPORT_MARGIN))
             .bg(rgba(p.scrim))
-            .on_click(cx.listener(|this, _, _, cx| this.close_ai_license_modal(cx)))
+            .key_context("ai_license_modal")
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    this.close_ai_license_modal(window, cx);
+                }
+            }))
+            .on_click(cx.listener(|this, _, window, cx| this.close_ai_license_modal(window, cx)))
             .child(panel)
             .into_any_element()
     }
 
-    pub(crate) fn ai_uninstall_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn ai_uninstall_overlay(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if self.ai_modal_focus_pending {
+            self.ai_modal_focus_pending = false;
+            let focus = self.ai_uninstall_focus.clone();
+            cx.defer_in(window, move |this, window, cx| {
+                if this.ai.uninstall_modal_open {
+                    window.focus(&focus, cx);
+                }
+            });
+        }
         let p = self.palette;
-        let install = self.ai.active.clone();
+        let target = self
+            .ai
+            .uninstall_target
+            .clone()
+            .unwrap_or_else(UninstallTarget::plugin_wide);
+        let variant_only = !target.is_plugin_wide();
+        let install = if variant_only {
+            self.ai
+                .installations
+                .iter()
+                .find(|install| {
+                    Some(&install.variant) == target.variant.as_ref()
+                        && Some(&install.version) == target.version.as_ref()
+                })
+                .cloned()
+        } else {
+            self.ai.active.clone()
+        };
         let manifest = install
             .as_ref()
             .map(|install| ai_manifest_view(&install.manifest_json))
             .unwrap_or_default();
-        let size_label = self
-            .ai
-            .state
-            .as_ref()
-            .and_then(|state| state.model_bytes_total)
-            .and_then(|bytes| u64::try_from(bytes).ok())
-            .filter(|bytes| *bytes > 0)
-            .or(manifest.model_size)
-            .map(format_bytes)
-            .unwrap_or_else(|| "—".to_string());
+        let size_label = if variant_only {
+            manifest.model_size
+        } else {
+            self.ai
+                .state
+                .as_ref()
+                .and_then(|state| state.model_bytes_total)
+                .and_then(|bytes| u64::try_from(bytes).ok())
+                .filter(|bytes| *bytes > 0)
+                .or(manifest.model_size)
+        }
+        .map(format_bytes)
+        .unwrap_or_else(|| "—".to_string());
         let install_line = install
             .as_ref()
             .map(|install| {
@@ -1818,30 +1971,55 @@ impl App {
                     install.plugin_id, install.variant, install.version
                 )
             })
-            .unwrap_or_default();
-        let delete_tags = self.ai.uninstall_delete_tags;
+            .unwrap_or_else(|| {
+                format!(
+                    "{} · {} · v{}",
+                    AI_PLUGIN_ID,
+                    target.variant.as_deref().unwrap_or("—"),
+                    target.version.as_deref().unwrap_or("—")
+                )
+            });
+        let delete_tags = self.ai.uninstall_delete_tags && !variant_only;
 
         let panel = dialog_panel(&self.palette)
             .id("ai-uninstall-panel")
             .w(px(520.))
             .gap(px(14.))
             .p(px(20.))
+            .track_focus(&self.ai_uninstall_focus)
+            .focus_trap("ai-uninstall", &self.ai_uninstall_focus)
             .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
             .child(
-                v_flex()
-                    .gap(px(2.))
+                h_flex()
+                    .items_center()
+                    .gap(px(10.))
                     .child(
-                        div()
-                            .text_size(px(16.))
-                            .font_semibold()
-                            .text_color(rgb(p.text))
-                            .child(tr!("settings.ai.uninstall.title")),
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .text_size(px(16.))
+                                    .font_semibold()
+                                    .text_color(rgb(p.text))
+                                    .child(tr!("settings.ai.uninstall.title")),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(p.muted_2))
+                                    .child(install_line),
+                            ),
                     )
                     .child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(rgb(p.muted_2))
-                            .child(install_line),
+                        Button::new("ai-uninstall-close")
+                            .icon(Icon::new(IconName::Close))
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.close_ai_uninstall_modal(window, cx)
+                            })),
                     ),
             )
             .child(
@@ -1851,33 +2029,43 @@ impl App {
                     .child(tr!("settings.ai.uninstall.body")),
             )
             .child(self.meta_row(tr!("settings.ai.model_size"), size_label))
-            .child(
-                v_flex()
-                    .gap(px(2.))
-                    .child(
-                        Checkbox::new("ai-uninstall-delete-tags")
-                            .checked(delete_tags)
-                            .label(tr!("settings.ai.uninstall.delete_tags"))
-                            .on_click(cx.listener(|this, checked, _, cx| {
-                                this.ai.uninstall_delete_tags = *checked;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(9.))
-                            .text_color(rgb(p.muted_2))
-                            .child(tr!("settings.ai.uninstall.delete_tags_hint")),
-                    )
-                    .when(!delete_tags, |this| {
-                        this.child(
-                            div()
-                                .text_size(px(10.))
-                                .text_color(rgb(p.muted_2))
-                                .child(tr!("settings.ai.uninstall.keep_note")),
+            .when(variant_only, |this| {
+                this.child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(rgb(p.muted_2))
+                        .child(tr!("settings.ai.uninstall.variant_note")),
+                )
+            })
+            .when(!variant_only, |this| {
+                this.child(
+                    v_flex()
+                        .gap(px(2.))
+                        .child(
+                            Checkbox::new("ai-uninstall-delete-tags")
+                                .checked(delete_tags)
+                                .label(tr!("settings.ai.uninstall.delete_tags"))
+                                .on_click(cx.listener(|this, checked, _, cx| {
+                                    this.ai.uninstall_delete_tags = *checked;
+                                    cx.notify();
+                                })),
                         )
-                    }),
-            )
+                        .child(
+                            div()
+                                .text_size(px(9.))
+                                .text_color(rgb(p.muted_2))
+                                .child(tr!("settings.ai.uninstall.delete_tags_hint")),
+                        )
+                        .when(!delete_tags, |this| {
+                            this.child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(p.muted_2))
+                                    .child(tr!("settings.ai.uninstall.keep_note")),
+                            )
+                        }),
+                )
+            })
             .child(
                 h_flex()
                     .items_center()
@@ -1894,9 +2082,8 @@ impl App {
                             .label(tr!("common.cancel"))
                             .small()
                             .ghost()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.ai.uninstall_modal_open = false;
-                                cx.notify();
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.close_ai_uninstall_modal(window, cx)
                             })),
                     )
                     .child(
@@ -1904,10 +2091,15 @@ impl App {
                             .label(tr!("settings.ai.uninstall.confirm"))
                             .small()
                             .danger()
-                            .on_click(cx.listener(|this, _, _, cx| {
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                let target = this
+                                    .ai
+                                    .uninstall_target
+                                    .clone()
+                                    .unwrap_or_else(UninstallTarget::plugin_wide);
                                 let delete_tags = this.ai.uninstall_delete_tags;
-                                this.ai.uninstall_modal_open = false;
-                                this.uninstall_ai_plugin(delete_tags, cx);
+                                this.close_ai_uninstall_modal(window, cx);
+                                this.uninstall_ai_plugin(&target, delete_tags, cx);
                             })),
                     ),
             );
@@ -1926,10 +2118,13 @@ impl App {
             .justify_center()
             .p(px(DIALOG_VIEWPORT_MARGIN))
             .bg(rgba(p.scrim))
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.ai.uninstall_modal_open = false;
-                cx.notify();
+            .key_context("ai_uninstall_modal")
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" {
+                    this.close_ai_uninstall_modal(window, cx);
+                }
             }))
+            .on_click(cx.listener(|this, _, window, cx| this.close_ai_uninstall_modal(window, cx)))
             .child(panel)
             .into_any_element()
     }

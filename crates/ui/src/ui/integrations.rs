@@ -10,12 +10,13 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use vrc_photon_ai_protocol::{TaggingJobStatus, TaggingStage};
-use vrc_photon_i18n::tr;
+use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::App;
 use crate::app::Screen;
 use crate::app::ai::{
-    backend_options, backend_selection_is_disabled_when_not_ready, download_progress_bar_ratio,
+    AiErrorKind, active_job_photo_label, ai_error_summary_in, backend_options,
+    backend_selection_is_disabled_when_not_ready, download_progress_bar_ratio,
     variant_backend_label,
 };
 use crate::state::motion::ToggleMotion;
@@ -295,6 +296,9 @@ impl App {
         let auto = self.settings.ai_tagging_auto;
         let backlog = self.settings.ai_tagging_backlog;
         let counts = self.ai.job_counts;
+        let language = vrc_photon_i18n::current_locale();
+        let job_names = self.ai.active_job_names.clone();
+        let job_error = self.ai.error_of(AiErrorKind::Job).cloned();
         let active_jobs: Vec<_> = self
             .ai
             .active_jobs
@@ -342,6 +346,18 @@ impl App {
                             p.red,
                         )),
                 )
+                .when_some(job_error, |this, error| {
+                    this.child(
+                        div()
+                            .px(px(10.))
+                            .text_size(px(10.))
+                            .text_color(rgb(p.red))
+                            .child(tr_args!(
+                                "integrations.ai.jobs.latest_failure",
+                                error = ai_error_summary_in(&language, &error)
+                            )),
+                    )
+                })
                 .child(if active_jobs.is_empty() {
                     v_flex()
                         .gap(px(2.))
@@ -368,6 +384,11 @@ impl App {
                         .gap(px(6.))
                         .children(active_jobs.into_iter().map(|job| {
                             let job_id = job.id.clone();
+                            let photo_label = active_job_photo_label(
+                                job_names.get(&job.photo_id).map(String::as_str),
+                                job.photo_id,
+                                &language,
+                            );
                             let ratio = download_progress_bar_ratio(job.progress);
                             let percent = (ratio * 100.0).round() as u32;
                             v_flex()
@@ -387,11 +408,7 @@ impl App {
                                                 .font_medium()
                                                 .text_color(rgb(p.text))
                                                 .truncate()
-                                                .child(format!(
-                                                    "{} #{}",
-                                                    tr!("integrations.ai.jobs.photo"),
-                                                    job.photo_id
-                                                )),
+                                                .child(photo_label),
                                         )
                                         .child(
                                             div()

@@ -1,4 +1,3 @@
-#[allow(dead_code)] // Actions and state are consumed by the AI cards/inspector (tasks 18–20).
 pub(crate) mod ai;
 pub(crate) mod cli;
 pub(crate) mod compression;
@@ -266,6 +265,13 @@ pub struct App {
     /// per-panel, so the inspector and Quick Look cannot light up each other's
     /// chips.
     pub(crate) ai_tag_focused: Option<FocusHandle>,
+    /// Focus traps for the AI license and uninstall dialogs.
+    pub(crate) ai_license_focus: FocusHandle,
+    pub(crate) ai_uninstall_focus: FocusHandle,
+    /// Focus restored after the AI dialog closes.
+    pub(crate) ai_modal_return_focus: Option<FocusHandle>,
+    /// The next render should move focus into the open AI dialog.
+    pub(crate) ai_modal_focus_pending: bool,
     /// 0 = body expanded, 1 = collapsed to the card header.
     pub(crate) integrations_auto_motion: ToggleMotion,
     /// 0 = runtime details expanded, 1 = collapsed while AI is disabled.
@@ -740,6 +746,8 @@ impl App {
         let quick_look_note_cancel_focus = cx.focus_handle();
         let notification_close_focus = cx.focus_handle();
         let notification_modal_focus = cx.focus_handle();
+        let ai_license_focus = cx.focus_handle();
+        let ai_uninstall_focus = cx.focus_handle();
         let ribbon_collapse_focus = cx.focus_handle();
         let notification_bell_focus = cx.focus_handle();
         let ribbon_import_copy_focus = cx.focus_handle();
@@ -966,6 +974,10 @@ impl App {
             ai_refresh_scheduled: false,
             ai_selected_refresh_pending: false,
             ai_tag_focused: None,
+            ai_license_focus,
+            ai_uninstall_focus,
+            ai_modal_return_focus: None,
+            ai_modal_focus_pending: false,
             integrations_auto_motion: ToggleMotion::settled(if initial_settings.auto_compress {
                 0.0
             } else {
@@ -1257,10 +1269,10 @@ impl Render for App {
                 root = root.child(self.import_modal_overlay(window, cx));
             }
             if self.ai.license_modal_open {
-                root = root.child(self.ai_license_overlay(cx));
+                root = root.child(self.ai_license_overlay(window, cx));
             }
             if self.ai.uninstall_modal_open {
-                root = root.child(self.ai_uninstall_overlay(cx));
+                root = root.child(self.ai_uninstall_overlay(window, cx));
             }
         } else {
             root = root.child(self.quick_look(window, cx));

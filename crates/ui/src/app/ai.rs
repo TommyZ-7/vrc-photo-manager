@@ -6,6 +6,7 @@
 //! updates. Rendering lives in `ui::settings`, `ui::integrations`, and
 //! `ui::library`.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use gpui_kit::*;
@@ -30,6 +31,82 @@ pub(crate) const AI_PLUGIN_ID: &str = "vrc-photon-autotag";
 /// Delay before an event burst triggers a state or inspector refresh.
 const AI_REFRESH_DEBOUNCE: Duration = Duration::from_millis(250);
 
+/// Which operation produced a transient AI error. Keeping the origin lets the
+/// settings card show install/model failures and the runtime card show tagging
+/// failures without relabelling one as the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AiErrorKind {
+    Install,
+    Model,
+    Job,
+}
+
+impl AiErrorKind {
+    fn index(self) -> usize {
+        match self {
+            Self::Install => 0,
+            Self::Model => 1,
+            Self::Job => 2,
+        }
+    }
+}
+
+/// The latest AI operation failure: a stable code plus the daemon's raw detail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AiErrorInfo {
+    pub(crate) kind: AiErrorKind,
+    pub(crate) code: String,
+    pub(crate) detail: Option<String>,
+}
+
+impl AiErrorInfo {
+    pub(crate) fn new(kind: AiErrorKind, code: impl Into<String>, detail: Option<String>) -> Self {
+        Self {
+            kind,
+            code: code.into(),
+            detail,
+        }
+    }
+}
+
+/// A plugin uninstall target. `None`/`None` removes the whole plugin (the
+/// existing behaviour); a variant/version pair removes just that package.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct UninstallTarget {
+    pub(crate) variant: Option<String>,
+    pub(crate) version: Option<String>,
+}
+
+impl UninstallTarget {
+    pub(crate) fn plugin_wide() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn for_install(install: &PluginInstallation) -> Self {
+        Self {
+            variant: Some(install.variant.clone()),
+            version: Some(install.version.clone()),
+        }
+    }
+
+    pub(crate) fn is_plugin_wide(&self) -> bool {
+        self.variant.is_none() && self.version.is_none()
+    }
+}
+
+/// Maps a modal target to the IPC fields. A variant-only removal never deletes
+/// the plugin-wide AI tags, even if the modal checkbox was somehow checked.
+pub(crate) fn uninstall_request_args(
+    target: &UninstallTarget,
+    delete_ai_tags: bool,
+) -> (Option<String>, Option<String>, bool) {
+    if target.is_plugin_wide() {
+        (None, None, delete_ai_tags)
+    } else {
+        (target.variant.clone(), target.version.clone(), false)
+    }
+}
+
 /// Everything the AI tagging cards render. Populated from the database and
 /// kept current by daemon events.
 #[derive(Default)]
@@ -40,12 +117,19 @@ pub(crate) struct AiUiState {
     pub(crate) probe: Option<Probe>,
     pub(crate) download: Option<ModelDownloadView>,
     pub(crate) install_busy: bool,
+    /// A Recheck or variant switch is waiting for the next state event.
+    pub(crate) probe_pending: bool,
     pub(crate) job_counts: JobStatusCounts,
     pub(crate) active_jobs: Vec<TaggingJob>,
+    /// File names for the displayed jobs, keyed by photo id.
+    pub(crate) active_job_names: HashMap<i64, String>,
     pub(crate) license_modal_open: bool,
     pub(crate) uninstall_modal_open: bool,
+    pub(crate) uninstall_target: Option<UninstallTarget>,
     pub(crate) uninstall_delete_tags: bool,
-    pub(crate) last_error: Option<String>,
+    /// Latest failure per origin, so an install warning and a tagging failure
+    /// can stay visible at the same time.
+    errors: [Option<AiErrorInfo>; 3],
 }
 
 /// Progress of the model download, kept separately from the persisted state
@@ -81,6 +165,7 @@ pub(crate) struct AiSnapshot {
     pub(crate) probe: Option<Probe>,
     pub(crate) job_counts: JobStatusCounts,
     pub(crate) active_jobs: Vec<TaggingJob>,
+    pub(crate) active_job_names: HashMap<i64, String>,
 }
 
 /// The subset the three-second live poller collects on its background thread.
@@ -88,6 +173,7 @@ pub(crate) struct AiSnapshot {
 pub(crate) struct AiLiveSnapshot {
     pub(crate) job_counts: JobStatusCounts,
     pub(crate) active_jobs: Vec<TaggingJob>,
+    pub(crate) active_job_names: HashMap<i64, String>,
     pub(crate) state: Option<PluginState>,
     pub(crate) probe: Option<Probe>,
 }
@@ -111,6 +197,7 @@ impl AiUiState {
         self.download = self.state.as_ref().and_then(ModelDownloadView::from_state);
         self.job_counts = snapshot.job_counts;
         self.active_jobs = snapshot.active_jobs;
+        self.active_job_names = snapshot.active_job_names;
     }
 
     /// Applies the three-second poller snapshot. Returns whether anything the
@@ -118,16 +205,58 @@ impl AiUiState {
     pub(crate) fn apply_live_snapshot(&mut self, snapshot: AiLiveSnapshot) -> bool {
         let changed = self.job_counts != snapshot.job_counts
             || self.active_jobs != snapshot.active_jobs
+            || self.active_job_names != snapshot.active_job_names
             || self.state != snapshot.state
             || self.probe != snapshot.probe;
         if changed {
             self.job_counts = snapshot.job_counts;
             self.active_jobs = snapshot.active_jobs;
+            self.active_job_names = snapshot.active_job_names;
             self.state = snapshot.state;
             self.probe = snapshot.probe;
             self.download = self.state.as_ref().and_then(ModelDownloadView::from_state);
         }
         changed
+    }
+
+    /// Drops transient connection-scoped state after the IPC link closes: a
+    /// disconnected daemon cannot finish an install, a probe, or a download,
+    /// and leaving those flags set would wedge the cards.
+    pub(crate) fn reset_connection(&mut self) {
+        self.install_busy = false;
+        self.probe_pending = false;
+        self.download = None;
+    }
+
+    /// Stores a new error unless it is an exact repeat of the visible one.
+    /// Returns true when the error is new and should be reported.
+    fn set_error(&mut self, error: AiErrorInfo) -> bool {
+        let slot = &mut self.errors[error.kind.index()];
+        if slot.as_ref() == Some(&error) {
+            return false;
+        }
+        *slot = Some(error);
+        true
+    }
+
+    fn clear_error(&mut self, kind: AiErrorKind) {
+        self.errors[kind.index()] = None;
+    }
+
+    pub(crate) fn error_of(&self, kind: AiErrorKind) -> Option<&AiErrorInfo> {
+        self.errors[kind.index()].as_ref()
+    }
+
+    /// Marks a Recheck/variant switch as awaiting its state event.
+    pub(crate) fn begin_probe(&mut self) {
+        self.probe_pending = true;
+    }
+
+    /// Resolves a pending probe after a state refresh. Returns true when the
+    /// plugin still has no probe, which is the daemon's failure signal.
+    pub(crate) fn finish_probe(&mut self) -> bool {
+        let was_pending = std::mem::take(&mut self.probe_pending);
+        was_pending && self.probe.is_none()
     }
 
     /// Applies one `TaggingProgress` event before the debounced database
@@ -200,8 +329,24 @@ impl AiUiState {
         if status == TaggingJobStatus::Failed
             && let Some(error) = error
         {
-            self.last_error = Some(error.to_string());
+            self.set_error(AiErrorInfo::new(AiErrorKind::Job, error, None));
+        } else if status == TaggingJobStatus::Completed {
+            // A successful tag clears the previous job failure. Install/model
+            // failures are owned by their own flows and stay put.
+            self.clear_error(AiErrorKind::Job);
         }
+
+        // The card shows the first three rows, so a newly pending row must not
+        // push a processing job out of view.
+        self.active_jobs.sort_by_key(|job| match job.status {
+            TaggingJobStatus::Processing => 0,
+            TaggingJobStatus::Pending => 1,
+            TaggingJobStatus::Waiting => 2,
+            TaggingJobStatus::Failed
+            | TaggingJobStatus::Completed
+            | TaggingJobStatus::Cancelled => 3,
+        });
+        self.active_jobs.truncate(20);
     }
 
     /// Applies an install event. Returns the failure message when it warrants
@@ -214,22 +359,22 @@ impl AiUiState {
         match status {
             PluginInstallStatus::Running => {
                 self.install_busy = true;
-                self.last_error = None;
+                self.clear_error(AiErrorKind::Install);
                 None
             }
             PluginInstallStatus::Installed => {
                 self.install_busy = false;
-                self.last_error = None;
+                self.clear_error(AiErrorKind::Install);
                 None
             }
             PluginInstallStatus::Failed => {
                 self.install_busy = false;
                 let error = error.unwrap_or("install_failed").to_string();
-                if self.last_error.as_deref() == Some(error.as_str()) {
-                    None
-                } else {
-                    self.last_error = Some(error.clone());
+                let info = AiErrorInfo::new(AiErrorKind::Install, error.clone(), None);
+                if self.set_error(info) {
                     Some(error)
+                } else {
+                    None
                 }
             }
         }
@@ -246,7 +391,7 @@ impl AiUiState {
     ) -> Option<String> {
         match status {
             ModelState::Downloading | ModelState::Verifying => {
-                self.last_error = None;
+                self.clear_error(AiErrorKind::Model);
                 self.download = Some(ModelDownloadView {
                     bytes,
                     total,
@@ -262,7 +407,7 @@ impl AiUiState {
             }
             ModelState::Ready => {
                 self.download = None;
-                self.last_error = None;
+                self.clear_error(AiErrorKind::Model);
                 self.update_model_state(status, bytes, total, None);
                 None
             }
@@ -270,11 +415,11 @@ impl AiUiState {
                 self.download = None;
                 let error = error.unwrap_or("model_download_failed").to_string();
                 self.update_model_state(status, bytes, total, Some(&error));
-                if self.last_error.as_deref() == Some(error.as_str()) {
-                    None
-                } else {
-                    self.last_error = Some(error.clone());
+                let info = AiErrorInfo::new(AiErrorKind::Model, error.clone(), None);
+                if self.set_error(info) {
                     Some(error)
+                } else {
+                    None
                 }
             }
         }
@@ -493,11 +638,33 @@ fn probe_from_state(state: &PluginState) -> Option<Probe> {
     }
 }
 
+fn active_job_names(db: &Db, jobs: &[TaggingJob]) -> HashMap<i64, String> {
+    let mut names = HashMap::new();
+    for photo_id in jobs.iter().map(|job| job.photo_id) {
+        if names.contains_key(&photo_id) {
+            continue;
+        }
+        match db.photo_by_id(photo_id) {
+            Ok(Some(photo)) => {
+                names.insert(photo_id, photo.file_name);
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(%error, photo_id, "cannot load a job photo name"),
+        }
+    }
+    names
+}
+
 pub(crate) fn collect_ai_snapshot(db: &Db) -> AiSnapshot {
     let state = db.plugin_state(AI_PLUGIN_ID).unwrap_or_else(|error| {
         tracing::warn!(%error, "cannot load AI plugin state");
         None
     });
+    let active_jobs = db.active_tagging_jobs_for_ui(20).unwrap_or_else(|error| {
+        tracing::warn!(%error, "cannot load active AI tagging jobs");
+        Vec::new()
+    });
+    let active_job_names = active_job_names(db, &active_jobs);
     AiSnapshot {
         installations: db
             .list_plugin_installations(AI_PLUGIN_ID)
@@ -517,10 +684,8 @@ pub(crate) fn collect_ai_snapshot(db: &Db) -> AiSnapshot {
             tracing::warn!(%error, "cannot count AI tagging jobs");
             JobStatusCounts::default()
         }),
-        active_jobs: db.active_tagging_jobs(20).unwrap_or_else(|error| {
-            tracing::warn!(%error, "cannot load active AI tagging jobs");
-            Vec::new()
-        }),
+        active_jobs,
+        active_job_names,
     }
 }
 
@@ -529,11 +694,14 @@ pub(crate) fn collect_ai_live_snapshot(db: &Db) -> AiLiveSnapshot {
         tracing::warn!(%error, "cannot load AI plugin state");
         None
     });
+    let active_jobs = db.active_tagging_jobs_for_ui(20).unwrap_or_default();
+    let active_job_names = active_job_names(db, &active_jobs);
     AiLiveSnapshot {
         probe: state.as_ref().and_then(probe_from_state),
         state,
         job_counts: db.tagging_job_counts(AI_PLUGIN_ID).unwrap_or_default(),
-        active_jobs: db.active_tagging_jobs(20).unwrap_or_default(),
+        active_jobs,
+        active_job_names,
     }
 }
 
@@ -585,6 +753,23 @@ pub(crate) fn download_progress_bar_ratio(progress: f64) -> f32 {
     progress.clamp(0.0, 1.0) as f32
 }
 
+/// File name for a runtime job row, with the translated photo id as a
+/// fallback when the row disappears from the catalog between snapshots.
+pub(crate) fn active_job_photo_label(
+    file_name: Option<&str>,
+    photo_id: i64,
+    language: &str,
+) -> String {
+    match file_name.map(str::trim).filter(|name| !name.is_empty()) {
+        Some(name) => name.to_string(),
+        None => format!(
+            "{} #{}",
+            vrc_photon_i18n::tr_in(language, "integrations.ai.jobs.photo"),
+            photo_id
+        ),
+    }
+}
+
 /// Backend chips are selectable only once the plugin is ready and AI tagging
 /// is enabled, matching the mockup's "有効化後に選択" state.
 pub(crate) fn backend_selection_is_disabled_when_not_ready(ready: bool, enabled: bool) -> bool {
@@ -621,7 +806,9 @@ pub(crate) fn people_label_in(language: &str, min: Option<u32>, max: Option<u32>
     }
 }
 
-/// Human-readable people count for the active locale.
+/// Human-readable people count for the active locale. Kept for the label
+/// tests; the inspector always passes an explicit language.
+#[cfg(test)]
 pub(crate) fn people_label(min: Option<u32>, max: Option<u32>) -> String {
     people_label_in(&vrc_photon_i18n::current_locale(), min, max)
 }
@@ -690,16 +877,6 @@ pub(crate) fn ai_empty_state_labels(has_ai: bool) -> (String, String) {
     }
 }
 
-/// Compact queue summary for the runtime card.
-pub(crate) fn ai_job_summary_label(counts: JobStatusCounts) -> String {
-    format!(
-        "待機 {} / 実行中 {} / 失敗 {}",
-        counts.waiting,
-        counts.pending + counts.processing,
-        counts.failed
-    )
-}
-
 /// The presentation of one AI tag chip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AiTagView {
@@ -711,6 +888,8 @@ pub(crate) struct AiTagView {
 
 /// Chooses the catalog name for the active language and formats the
 /// probability tooltip. AI tags are read-only history, hence the badge.
+/// Test-only the UI always calls `ai_tag_view_with_context`.
+#[cfg(test)]
 pub(crate) fn ai_tag_view(tag: &PhotoAiTagView, language: &str) -> AiTagView {
     ai_tag_view_with_context(tag, language, None, None)
 }
@@ -753,7 +932,8 @@ pub(crate) fn ai_tag_view_with_context(
     }
 }
 
-/// Formats every stored tag for the active language.
+/// Formats every stored tag for the active language. Test-only helper.
+#[cfg(test)]
 pub(crate) fn ai_tag_views(tags: &[PhotoAiTagView], language: &str) -> Vec<AiTagView> {
     tags.iter().map(|tag| ai_tag_view(tag, language)).collect()
 }
@@ -841,14 +1021,58 @@ pub(crate) fn ai_error_label_in(language: &str, code: &str) -> String {
     }
 }
 
-/// Prefer the translated label; when the code is unknown, show the daemon's
-/// own message rather than the opaque code.
-pub(crate) fn ai_error_text_in(language: &str, code: &str, message: &str) -> String {
-    let label = ai_error_label_in(language, code);
-    if label == code {
-        message.to_string()
-    } else {
-        label
+/// Generic translated summary for an AI failure. The specific code label and
+/// the daemon's raw detail are shown as secondary lines so a raw English
+/// message never becomes the headline.
+pub(crate) fn ai_error_summary_in(language: &str, error: &AiErrorInfo) -> String {
+    let key = match error.kind {
+        AiErrorKind::Install => "settings.ai.install_failed",
+        AiErrorKind::Model => "settings.ai.model_failed",
+        AiErrorKind::Job => "integrations.ai.jobs.failure_generic",
+    };
+    vrc_photon_i18n::tr_in(language, key)
+}
+
+/// Translated code label plus the daemon's raw detail, when they add anything
+/// beyond the code itself.
+pub(crate) fn ai_error_detail_in(language: &str, error: &AiErrorInfo) -> Option<String> {
+    let label = ai_error_label_in(language, &error.code);
+    let known = label != error.code;
+    let detail = error
+        .detail
+        .as_deref()
+        .map(str::trim)
+        .filter(|detail| !detail.is_empty() && *detail != error.code);
+    match (known, detail) {
+        (true, Some(detail)) if detail != label => Some(format!("{label}: {detail}")),
+        (true, _) => Some(label),
+        (false, Some(detail)) => Some(detail.to_string()),
+        (false, None) => (!error.code.is_empty()).then(|| error.code.clone()),
+    }
+}
+
+/// One toast line: translated summary, then the best available detail.
+pub(crate) fn ai_error_toast_in(language: &str, error: &AiErrorInfo) -> String {
+    let summary = ai_error_summary_in(language, error);
+    match ai_error_detail_in(language, error) {
+        Some(detail) => format!("{summary}: {detail}"),
+        None => summary,
+    }
+}
+
+fn request_error_kind(request: &IpcRequest) -> AiErrorKind {
+    match request {
+        IpcRequest::InstallPlugin { .. } | IpcRequest::UninstallPlugin { .. } => {
+            AiErrorKind::Install
+        }
+        IpcRequest::StartModelDownload { .. }
+        | IpcRequest::CancelModelDownload { .. }
+        | IpcRequest::ImportModelFiles { .. }
+        | IpcRequest::DeleteModel { .. } => AiErrorKind::Model,
+        IpcRequest::ProbePlugin { .. } | IpcRequest::SetActiveVariant { .. } => {
+            AiErrorKind::Install
+        }
+        _ => AiErrorKind::Job,
     }
 }
 
@@ -897,6 +1121,18 @@ pub(crate) fn apply_install_event(
     error: Option<&str>,
 ) -> Option<String> {
     if !install_event_applies_to_ai(plugin_id, status) {
+        // The UI only starts AI installs, but a daemon-side event for another
+        // plugin must not leave the card on "Installing…" forever. A terminal
+        // event ends whatever install flow is active; its error still belongs
+        // to the other plugin and is not reported as an AI failure.
+        if ai.install_busy
+            && matches!(
+                status,
+                PluginInstallStatus::Installed | PluginInstallStatus::Failed
+            )
+        {
+            ai.install_busy = false;
+        }
         return None;
     }
     ai.apply_install_progress(status, error)
@@ -917,9 +1153,24 @@ impl App {
         cx: &mut Context<Self>,
     ) {
         let clears_install_busy = matches!(request, IpcRequest::InstallPlugin { .. });
+        let clears_probe_pending = matches!(
+            request,
+            IpcRequest::ProbePlugin { .. } | IpcRequest::SetActiveVariant { .. }
+        );
+        let error_kind = request_error_kind(&request);
+        let refresh_selected = matches!(
+            request,
+            IpcRequest::UninstallPlugin {
+                delete_ai_tags: true,
+                ..
+            }
+        );
         if !self.ipc_connected {
             if clears_install_busy {
                 self.ai.install_busy = false;
+            }
+            if clears_probe_pending {
+                self.ai.probe_pending = false;
             }
             self.toast_error(tr!("daemon.ipc.disconnected"), cx);
             cx.notify();
@@ -928,6 +1179,9 @@ impl App {
         let Some(endpoint) = self.ipc_endpoint.clone() else {
             if clears_install_busy {
                 self.ai.install_busy = false;
+            }
+            if clears_probe_pending {
+                self.ai.probe_pending = false;
             }
             self.toast_error(tr!("daemon.ipc.resolve_error"), cx);
             cx.notify();
@@ -945,21 +1199,28 @@ impl App {
                             if let Some(message) = success {
                                 this.toast_success(message, cx);
                             }
+                            if refresh_selected {
+                                // Deleting AI data removes the inspector's
+                                // result too; reload it so stale tags cannot
+                                // survive the uninstall.
+                                this.refresh_selected_ai(cx);
+                            }
                         }
                         AiResponseOutcome::Error { code, message } => {
                             if clears_install_busy {
                                 this.ai.install_busy = false;
                             }
-                            this.ai.last_error = Some(message.clone());
+                            if clears_probe_pending {
+                                this.ai.probe_pending = false;
+                            }
+                            let info = AiErrorInfo::new(error_kind, code, Some(message.clone()));
+                            this.ai.set_error(info.clone());
                             if code == "consent_required" {
                                 this.ai.license_modal_open = true;
+                                this.ai_modal_focus_pending = true;
                             }
                             this.toast_error(
-                                ai_error_text_in(
-                                    &vrc_photon_i18n::current_locale(),
-                                    code,
-                                    &message,
-                                ),
+                                ai_error_toast_in(&vrc_photon_i18n::current_locale(), &info),
                                 cx,
                             );
                         }
@@ -968,7 +1229,16 @@ impl App {
                         if clears_install_busy {
                             this.ai.install_busy = false;
                         }
-                        this.toast_error(ipc_bridge::error_message(&error), cx);
+                        if clears_probe_pending {
+                            this.ai.probe_pending = false;
+                        }
+                        let detail = ipc_bridge::error_message(&error);
+                        let info = AiErrorInfo::new(error_kind, "internal", Some(detail));
+                        this.ai.set_error(info.clone());
+                        this.toast_error(
+                            ai_error_toast_in(&vrc_photon_i18n::current_locale(), &info),
+                            cx,
+                        );
                     }
                 }
                 this.refresh_ai_state(cx);
@@ -986,7 +1256,7 @@ impl App {
             return;
         };
         self.ai.install_busy = true;
-        self.ai.last_error = None;
+        self.ai.clear_error(AiErrorKind::Install);
         self.send_ai_request(
             IpcRequest::InstallPlugin {
                 zip_path: path.to_string_lossy().into_owned(),
@@ -1006,7 +1276,7 @@ impl App {
         if paths.is_empty() {
             return;
         }
-        self.ai.last_error = None;
+        self.ai.clear_error(AiErrorKind::Model);
         let paths = paths
             .into_iter()
             .map(|path| path.to_string_lossy().into_owned())
@@ -1023,21 +1293,34 @@ impl App {
 
     /// Starts a model download. The first request opens the license modal;
     /// the persisted consent makes later downloads start immediately.
-    pub(crate) fn request_ai_model_download(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn request_ai_model_download(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.ai.active.is_none() {
             self.toast_warning(tr!("integrations.ai.not_ready"), cx);
             cx.notify();
             return;
         }
         if needs_license_consent(self.settings.ai_model_license_consent_at) {
-            self.ai.license_modal_open = true;
-            cx.notify();
+            self.open_ai_license_modal(window, cx);
             return;
         }
         self.start_ai_model_download(cx);
     }
 
-    pub(crate) fn accept_ai_model_license(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn open_ai_license_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.ai.license_modal_open {
+            return;
+        }
+        self.ai_modal_return_focus = window.focused(cx);
+        self.ai.license_modal_open = true;
+        self.ai_modal_focus_pending = true;
+        cx.notify();
+    }
+
+    pub(crate) fn accept_ai_model_license(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let previous = self.settings.ai_model_license_consent_at;
         self.settings.ai_model_license_consent_at = Some(chrono::Utc::now().timestamp());
         if let Err(error) = self.settings.save(&self.db) {
@@ -1046,12 +1329,54 @@ impl App {
             cx.notify();
             return;
         }
-        self.ai.license_modal_open = false;
+        self.close_ai_license_modal(window, cx);
         self.start_ai_model_download(cx);
     }
 
-    pub(crate) fn close_ai_license_modal(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn close_ai_license_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.ai.license_modal_open {
+            return;
+        }
         self.ai.license_modal_open = false;
+        self.ai_modal_focus_pending = false;
+        self.restore_ai_modal_focus(window, cx);
+        cx.notify();
+    }
+
+    fn restore_ai_modal_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let focus = self
+            .ai_modal_return_focus
+            .take()
+            .unwrap_or_else(|| self.photo_grid_focus.clone());
+        window.focus(&focus, cx);
+    }
+
+    pub(crate) fn open_ai_uninstall_modal(
+        &mut self,
+        target: UninstallTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.ai.uninstall_modal_open {
+            return;
+        }
+        self.ai_modal_return_focus = window.focused(cx);
+        self.ai.uninstall_target = Some(target);
+        self.ai.uninstall_delete_tags = false;
+        self.ai.uninstall_modal_open = true;
+        self.ai_modal_focus_pending = true;
+        cx.notify();
+    }
+
+    pub(crate) fn close_ai_uninstall_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.ai.uninstall_modal_open {
+            return;
+        }
+        self.ai.uninstall_modal_open = false;
+        self.ai.uninstall_target = None;
+        self.ai.uninstall_delete_tags = false;
+        self.ai_modal_focus_pending = false;
+        self.restore_ai_modal_focus(window, cx);
         cx.notify();
     }
 
@@ -1076,6 +1401,7 @@ impl App {
     }
 
     pub(crate) fn probe_ai_plugin(&mut self, cx: &mut Context<Self>) {
+        self.ai.begin_probe();
         self.send_ai_request(
             IpcRequest::ProbePlugin {
                 plugin_id: AI_PLUGIN_ID.to_string(),
@@ -1091,6 +1417,7 @@ impl App {
         version: Option<&str>,
         cx: &mut Context<Self>,
     ) {
+        self.ai.begin_probe();
         self.send_ai_request(
             IpcRequest::SetActiveVariant {
                 plugin_id: AI_PLUGIN_ID.to_string(),
@@ -1112,12 +1439,18 @@ impl App {
         );
     }
 
-    pub(crate) fn uninstall_ai_plugin(&mut self, delete_ai_tags: bool, cx: &mut Context<Self>) {
+    pub(crate) fn uninstall_ai_plugin(
+        &mut self,
+        target: &UninstallTarget,
+        delete_ai_tags: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let (variant, version, delete_ai_tags) = uninstall_request_args(target, delete_ai_tags);
         self.send_ai_request(
             IpcRequest::UninstallPlugin {
                 plugin_id: AI_PLUGIN_ID.to_string(),
-                variant: None,
-                version: None,
+                variant,
+                version,
                 delete_ai_tags,
             },
             None,
@@ -1272,22 +1605,34 @@ impl App {
                 error,
                 ..
             } => {
-                if !install_event_applies_to_ai(&plugin_id, status) {
-                    return false;
-                }
-                if let Some(error) =
+                let applies = install_event_applies_to_ai(&plugin_id, status);
+                let was_busy = self.ai.install_busy;
+                if let Some(code) =
                     apply_install_event(&mut self.ai, &plugin_id, status, error.as_deref())
                 {
-                    self.toast_error(tr_args!("settings.ai.install_failed", error = error), cx);
+                    let info = AiErrorInfo::new(AiErrorKind::Install, code, None);
+                    self.toast_error(
+                        ai_error_toast_in(&vrc_photon_i18n::current_locale(), &info),
+                        cx,
+                    );
                 }
-                self.refresh_ai_state(cx);
-                true
+                if applies || was_busy {
+                    self.refresh_ai_state(cx);
+                }
+                applies || was_busy
             }
             IpcEvent::PluginStateChanged { plugin_id } => {
                 if plugin_id != AI_PLUGIN_ID {
                     return false;
                 }
                 self.refresh_ai_state(cx);
+                if self.ai.finish_probe() {
+                    let info = AiErrorInfo::new(AiErrorKind::Install, "plugin_probe_failed", None);
+                    self.toast_error(
+                        ai_error_toast_in(&vrc_photon_i18n::current_locale(), &info),
+                        cx,
+                    );
+                }
                 true
             }
             IpcEvent::ModelDownloadProgress {
@@ -1300,11 +1645,15 @@ impl App {
                 if plugin_id != AI_PLUGIN_ID {
                     return false;
                 }
-                if let Some(error) =
+                if let Some(code) =
                     self.ai
                         .apply_model_download(status, bytes, total, error.as_deref())
                 {
-                    self.toast_error(tr_args!("settings.ai.model_failed", error = error), cx);
+                    let info = AiErrorInfo::new(AiErrorKind::Model, code, None);
+                    self.toast_error(
+                        ai_error_toast_in(&vrc_photon_i18n::current_locale(), &info),
+                        cx,
+                    );
                 }
                 self.refresh_ai_state(cx);
                 true
@@ -1353,28 +1702,22 @@ impl App {
         self.selected_ai_tags = tags;
         self.ai_tag_focused = None;
     }
-
-    pub(crate) fn ai_ready(&self) -> bool {
-        self.ai.ready()
-    }
-
-    pub(crate) fn ai_error_label(&self, code: &str) -> String {
-        ai_error_label_in(&vrc_photon_i18n::current_locale(), code)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AI_PLUGIN_ID, AiPluginAction, AiPluginCardState, AiPluginCardView, AiResponseOutcome,
-        AiUiState, ManualRetagOutcome, ModelDownloadView, ai_empty_state_labels, ai_error_label_in,
-        ai_error_text_in, ai_job_summary_label, ai_manifest_view, ai_plugin_card_state,
-        ai_response_outcome, ai_tag_view, ai_tag_view_with_context, ai_tag_views,
-        apply_install_event, backend_options, backend_selection_is_disabled_when_not_ready,
-        collect_ai_snapshot, download_progress_bar_ratio, enqueue_manual_retag, format_tagged_at,
+        AI_PLUGIN_ID, AiErrorInfo, AiErrorKind, AiPluginAction, AiPluginCardState,
+        AiPluginCardView, AiResponseOutcome, AiUiState, ManualRetagOutcome, ModelDownloadView,
+        UninstallTarget, active_job_photo_label, ai_empty_state_labels, ai_error_detail_in,
+        ai_error_label_in, ai_error_summary_in, ai_error_toast_in, ai_manifest_view,
+        ai_plugin_card_state, ai_response_outcome, ai_tag_view, ai_tag_view_with_context,
+        ai_tag_views, apply_install_event, backend_options,
+        backend_selection_is_disabled_when_not_ready, collect_ai_snapshot,
+        download_progress_bar_ratio, enqueue_manual_retag, format_tagged_at,
         install_event_applies_to_ai, installation_row_id, is_active_installation, load_photo_ai,
         model_progress_ratio, needs_license_consent, people_label, people_label_in, place_label,
-        place_label_with_confidence, variant_backend_label,
+        place_label_with_confidence, uninstall_request_args, variant_backend_label,
     };
     use vrc_photon_ai_protocol::{
         BackendInfo, Catalog, ModelState, PluginInstallStatus, Probe, TagDefinition,
@@ -1762,7 +2105,8 @@ mod tests {
         assert_eq!(ai.job_counts.processing, 0);
         assert_eq!(ai.job_counts.failed, 1);
         assert!(ai.active_jobs.is_empty());
-        assert_eq!(ai.last_error.as_deref(), Some("sidecar_exited"));
+        let error = ai.error_of(AiErrorKind::Job).expect("job error");
+        assert_eq!(error.code, "sidecar_exited");
     }
 
     #[test]
@@ -1791,10 +2135,8 @@ mod tests {
         );
         assert_eq!(toast.as_deref(), Some("signature verification failed"));
         assert!(!ai.install_busy);
-        assert_eq!(
-            ai.last_error.as_deref(),
-            Some("signature verification failed")
-        );
+        let error = ai.error_of(AiErrorKind::Install).expect("install error");
+        assert_eq!(error.code, "signature verification failed");
 
         let mut ai = AiUiState {
             install_busy: true,
@@ -1804,17 +2146,90 @@ mod tests {
             apply_install_event(&mut ai, "", PluginInstallStatus::Running, None).is_none(),
             "a running event without an id is not attributable to the AI plugin"
         );
+        assert!(ai.install_busy);
+        // A daemon that accepts other plugin ids may publish their terminal
+        // event while the AI install flow is still marked busy. The event is
+        // not an AI failure, but it must not wedge the card forever.
         assert!(
             apply_install_event(
                 &mut ai,
                 "another-plugin",
-                PluginInstallStatus::Failed,
-                Some("other failure")
+                PluginInstallStatus::Installed,
+                None
             )
-            .is_none(),
-            "another plugin's failure must not clear the AI install state"
+            .is_none()
         );
-        assert!(ai.install_busy);
+        assert!(!ai.install_busy);
+        assert!(
+            [AiErrorKind::Install, AiErrorKind::Model, AiErrorKind::Job]
+                .into_iter()
+                .all(|kind| ai.error_of(kind).is_none())
+        );
+    }
+
+    #[test]
+    fn disconnect_resets_transient_ai_connection_state() {
+        let mut ai = AiUiState {
+            install_busy: true,
+            probe_pending: true,
+            download: Some(ModelDownloadView {
+                bytes: 1,
+                total: Some(2),
+                state: ModelState::Downloading,
+            }),
+            ..AiUiState::default()
+        };
+        ai.reset_connection();
+        assert!(!ai.install_busy);
+        assert!(!ai.probe_pending);
+        assert!(ai.download.is_none());
+    }
+
+    #[test]
+    fn pending_probe_reports_a_missing_probe_once() {
+        let mut ai = AiUiState::default();
+        ai.begin_probe();
+        assert!(ai.finish_probe(), "a missing probe is a failure");
+        assert!(!ai.finish_probe(), "the pending flag was consumed");
+
+        let mut ai = ready_state();
+        ai.probe = None;
+        ai.begin_probe();
+        assert!(ai.finish_probe());
+
+        let mut ai = ready_state();
+        ai.begin_probe();
+        assert!(!ai.finish_probe(), "a stored probe is a success");
+    }
+
+    #[test]
+    fn variant_uninstall_maps_to_variant_fields_and_keeps_tags() {
+        let install = sample_install();
+        let target = UninstallTarget::for_install(&install);
+        assert_eq!(
+            uninstall_request_args(&target, true),
+            (
+                Some("linux-vulkan".to_string()),
+                Some("1.0.0".to_string()),
+                false
+            )
+        );
+
+        let plugin_wide = UninstallTarget::plugin_wide();
+        assert_eq!(
+            uninstall_request_args(&plugin_wide, true),
+            (None, None, true)
+        );
+    }
+
+    #[test]
+    fn runtime_job_rows_prefer_file_names_with_an_id_fallback() {
+        assert_eq!(
+            active_job_photo_label(Some("screenshot.png"), 7, "ja"),
+            "screenshot.png"
+        );
+        assert_eq!(active_job_photo_label(Some("  "), 7, "ja"), "写真 #7");
+        assert_eq!(active_job_photo_label(None, 7, "en"), "Photo #7");
     }
 
     #[test]
@@ -1864,6 +2279,32 @@ mod tests {
     }
 
     #[test]
+    fn install_and_job_errors_keep_separate_origins() {
+        let mut ai = AiUiState::default();
+        ai.apply_install_progress(PluginInstallStatus::Failed, Some("install_failed"));
+        ai.apply_tagging_progress(
+            "j1",
+            7,
+            TaggingJobStatus::Failed,
+            0.5,
+            None,
+            Some("sidecar_exited"),
+        );
+
+        assert_eq!(
+            ai.error_of(AiErrorKind::Install)
+                .map(|error| error.code.as_str()),
+            Some("install_failed")
+        );
+        assert_eq!(
+            ai.error_of(AiErrorKind::Job)
+                .map(|error| error.code.as_str()),
+            Some("sidecar_exited")
+        );
+        assert!(ai.error_of(AiErrorKind::Model).is_none());
+    }
+
+    #[test]
     fn license_required_only_once() {
         assert!(needs_license_consent(None));
         let consent = Some(1_700_000_000);
@@ -1894,13 +2335,33 @@ mod tests {
             "モデルを読み込めませんでした"
         );
         assert_eq!(ai_error_label_in("ja", "unknown_code"), "unknown_code");
+
+        let busy = AiErrorInfo::new(AiErrorKind::Install, "busy", Some("raw detail".into()));
         assert_eq!(
-            ai_error_text_in("ja", "busy", "raw detail"),
-            "別のAIタグ付け操作が実行中です"
+            ai_error_summary_in("ja", &busy),
+            "プラグインを導入できませんでした"
         );
         assert_eq!(
-            ai_error_text_in("ja", "unknown_code", "raw detail"),
-            "raw detail"
+            ai_error_detail_in("ja", &busy).as_deref(),
+            Some("別のAIタグ付け操作が実行中です: raw detail")
+        );
+        assert_eq!(
+            ai_error_toast_in("ja", &busy),
+            "プラグインを導入できませんでした: 別のAIタグ付け操作が実行中です: raw detail"
+        );
+
+        let unknown = AiErrorInfo::new(
+            AiErrorKind::Model,
+            "unknown_code",
+            Some("raw detail".into()),
+        );
+        assert_eq!(
+            ai_error_summary_in("ja", &unknown),
+            "モデルの準備に失敗しました"
+        );
+        assert_eq!(
+            ai_error_detail_in("ja", &unknown).as_deref(),
+            Some("raw detail")
         );
     }
 
@@ -1974,19 +2435,6 @@ mod tests {
         assert!(backend_selection_is_disabled_when_not_ready(false, true));
         assert!(backend_selection_is_disabled_when_not_ready(true, false));
         assert!(!backend_selection_is_disabled_when_not_ready(true, true));
-    }
-
-    #[test]
-    fn ai_job_summary_label_lists_each_state() {
-        assert_eq!(
-            ai_job_summary_label(JobStatusCounts {
-                waiting: 1,
-                pending: 2,
-                processing: 3,
-                failed: 4,
-            }),
-            "待機 1 / 実行中 5 / 失敗 4"
-        );
     }
 
     #[test]
@@ -2132,6 +2580,22 @@ mod tests {
         assert_eq!(not_ready, ManualRetagOutcome::NotReady);
         assert!(!not_ready.wakes());
         assert!(db.tagging_jobs_for_photo(photo).unwrap().is_empty());
+    }
+
+    #[test]
+    fn snapshot_maps_active_job_photo_names() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        db.enqueue_tagging_jobs(&[photo], AI_PLUGIN_ID, TaggingJobStatus::Pending)
+            .unwrap();
+
+        let snapshot = collect_ai_snapshot(&db);
+
+        assert_eq!(snapshot.active_jobs.len(), 1);
+        assert_eq!(
+            snapshot.active_job_names.get(&photo).map(String::as_str),
+            Some("a.png")
+        );
     }
 
     #[test]

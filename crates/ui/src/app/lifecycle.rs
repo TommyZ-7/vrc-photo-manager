@@ -133,6 +133,10 @@ impl App {
                 self.last_status_version = status.version;
                 self.refresh_monitor();
                 self.apply_daemon_status(status);
+                // A restarted daemon may have finished an install/probe while
+                // the link was down. Reload the cards and the inspector.
+                self.refresh_ai_state(cx);
+                self.refresh_selected_ai(cx);
                 // A batch held while disconnected can now be reported.
                 self.flush_thumbnail_notice(cx);
             }
@@ -147,6 +151,10 @@ impl App {
                 self.daemon_shutdown_armed = false;
                 self.scan_progress = None;
                 self.import_scan_target = None;
+                // No daemon event can finish an in-flight install, probe, or
+                // download while the link is down. Drop the transient state so
+                // the cards cannot stay on "Installing…".
+                self.ai.reset_connection();
                 if was_connected {
                     self.refresh_monitor();
                 }
