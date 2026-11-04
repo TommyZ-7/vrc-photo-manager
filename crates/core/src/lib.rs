@@ -20,6 +20,7 @@ pub mod photo_filename;
 pub mod preview;
 pub mod scanner;
 pub mod settings;
+pub mod tagging_image;
 pub mod thumbnail;
 pub mod time;
 pub mod world_name;
