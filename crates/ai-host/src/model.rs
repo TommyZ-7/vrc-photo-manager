@@ -105,32 +105,36 @@ pub fn download_model(
     }
     fs::create_dir_all(&directory)?;
 
-    let mut downloaded = 0u64;
-    for file in [model, mmproj] {
-        let destination = directory.join(&file.path);
-        let part = part_path(&destination);
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)?;
-        }
+    let model_destination = directory.join(&model.path);
+    let mmproj_destination = directory.join(&mmproj.path);
+    let model_part = part_path(&model_destination);
+    let mmproj_part = part_path(&mmproj_destination);
 
-        let result = download_one(
-            file,
-            &part,
-            client,
-            &mut downloaded,
-            total,
-            progress,
-            cancel,
-        );
-        if let Err(error) = result {
-            let _ = fs::remove_file(&part);
-            return Err(error);
+    // Stage and verify both files before committing either one. A failure in
+    // the second file must not leave the first file at its final name.
+    let mut downloaded = 0u64;
+    let staged = (|| -> Result<()> {
+        for (file, destination, part) in [
+            (model, &model_destination, &model_part),
+            (mmproj, &mmproj_destination, &mmproj_part),
+        ] {
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            download_one(file, part, client, &mut downloaded, total, progress, cancel)?;
         }
-        if let Err(error) = commit_part(&part, &destination) {
-            let _ = fs::remove_file(&part);
-            return Err(error);
-        }
+        Ok(())
+    })();
+    if let Err(error) = staged {
+        let _ = fs::remove_file(&model_part);
+        let _ = fs::remove_file(&mmproj_part);
+        return Err(error);
     }
+
+    commit_verified([
+        (&model_part, &model_destination),
+        (&mmproj_part, &mmproj_destination),
+    ])?;
 
     Ok(model_paths(&directory, model, mmproj))
 }
@@ -178,10 +182,45 @@ pub fn import_model_files(
     }
 
     fs::create_dir_all(&directory)?;
+    let model_destination = directory.join(&model.path);
+    let mmproj_destination = directory.join(&mmproj.path);
+    let model_part = part_path(&model_destination);
+    let mmproj_part = part_path(&mmproj_destination);
+
+    // Stage and verify both files before committing either one. A failure in
+    // the second file must not leave the first file at its final name.
     let mut imported = 0u64;
-    for (file, source) in [(model, model_source), (mmproj, mmproj_source)] {
-        import_one(file, source, &directory, &mut imported, total, progress)?;
+    let staged = (|| -> Result<()> {
+        stage_import(
+            model,
+            model_source,
+            &model_destination,
+            &model_part,
+            &mut imported,
+            total,
+            progress,
+        )?;
+        stage_import(
+            mmproj,
+            mmproj_source,
+            &mmproj_destination,
+            &mmproj_part,
+            &mut imported,
+            total,
+            progress,
+        )?;
+        Ok(())
+    })();
+    if let Err(error) = staged {
+        let _ = fs::remove_file(&model_part);
+        let _ = fs::remove_file(&mmproj_part);
+        return Err(error);
     }
+
+    commit_verified([
+        (&model_part, &model_destination),
+        (&mmproj_part, &mmproj_destination),
+    ])?;
 
     Ok(model_paths(&directory, model, mmproj))
 }
@@ -340,31 +379,30 @@ fn download_one(
     Ok(())
 }
 
-fn import_one(
+fn stage_import(
     file: &ManifestModelFile,
     source: &Path,
-    directory: &Path,
+    destination: &Path,
+    part: &Path,
     imported: &mut u64,
     total: u64,
     progress: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<()> {
-    let destination = directory.join(&file.path);
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent)?;
     }
-    let part = part_path(&destination);
-    remove_file_if_exists(&part)?;
+    remove_file_if_exists(part)?;
 
     // A hard link avoids copying multi-gigabyte files when the selection and
     // the data directory live on the same file system. The linked file is
-    // still hashed before it is renamed into place.
-    let hard_linked = fs::hard_link(source, &part).is_ok();
+    // still hashed before any file is committed.
+    let hard_linked = fs::hard_link(source, part).is_ok();
     let verified = if hard_linked {
-        let mut input = File::open(&part)?;
+        let mut input = File::open(part)?;
         import_stream(&mut input, None, file, imported, total, progress)
     } else {
         let mut input = File::open(source)?;
-        let mut output = create_part(&part)?;
+        let mut output = create_part(part)?;
         let result = import_stream(
             &mut input,
             Some(&mut output),
@@ -382,11 +420,7 @@ fn import_one(
     };
 
     if let Err(error) = verified {
-        let _ = fs::remove_file(&part);
-        return Err(error);
-    }
-    if let Err(error) = commit_part(&part, &destination) {
-        let _ = fs::remove_file(&part);
+        let _ = fs::remove_file(part);
         return Err(error);
     }
     Ok(())
@@ -483,6 +517,31 @@ fn create_part(path: &Path) -> Result<File> {
         .write(true)
         .create_new(true)
         .open(path)?)
+}
+
+/// Commits verified part files into their final names.
+///
+/// A commit failure removes the parts that were not renamed and any finals
+/// created by this call. Finals that already existed before the call are left
+/// untouched.
+fn commit_verified(pairs: [(&Path, &Path); 2]) -> Result<()> {
+    let mut created: Vec<&Path> = Vec::new();
+    for (index, &(part, destination)) in pairs.iter().enumerate() {
+        let existed = fs::symlink_metadata(destination).is_ok();
+        if let Err(error) = commit_part(part, destination) {
+            for &(remaining, _) in &pairs[index..] {
+                let _ = fs::remove_file(remaining);
+            }
+            for path in created {
+                let _ = fs::remove_file(path);
+            }
+            return Err(error);
+        }
+        if !existed {
+            created.push(destination);
+        }
+    }
+    Ok(())
 }
 
 /// Renames a verified part file into place. On Windows an existing file must
@@ -642,8 +701,9 @@ mod tests {
     fn download_verifies_size_and_sha256_before_rename() {
         let manifest = sample_manifest();
         let data_dir = tempdir().unwrap();
-        // Same size as declared, different content.
-        let client = FakeClient::new(&manifest, b"xxxxx", MMPROJ_BYTES);
+        // The model is good; the mmproj has the declared size but wrong
+        // content. Neither final may be committed until both are verified.
+        let client = FakeClient::new(&manifest, MODEL_BYTES, b"xxxxxx");
 
         let error = download_model(
             &manifest,
@@ -657,7 +717,9 @@ mod tests {
         assert!(matches!(error, AiHostError::Integrity(_)));
         let directory = model_directory(&manifest, data_dir.path());
         assert!(!directory.join(MODEL_PATH).exists());
+        assert!(!directory.join(MMPROJ_PATH).exists());
         assert!(!directory.join(format!("{MODEL_PATH}.part")).exists());
+        assert!(!directory.join(format!("{MMPROJ_PATH}.part")).exists());
     }
 
     #[test]
@@ -784,7 +846,9 @@ mod tests {
 
         assert!(matches!(error, AiHostError::Integrity(_)));
         let directory = model_directory(&manifest, data_dir.path());
+        assert!(!directory.join(MODEL_PATH).exists());
         assert!(!directory.join(MMPROJ_PATH).exists());
+        assert!(!directory.join(format!("{MODEL_PATH}.part")).exists());
         assert!(!directory.join(format!("{MMPROJ_PATH}.part")).exists());
     }
 
