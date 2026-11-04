@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use vrc_photon_ai_host::{
     AiHostError, ModelCheck, ModelHttpClient, PluginManifest, ProbeExpectations, SidecarClient,
-    SidecarConfig, SidecarPaths, check_model, delete_model_revision,
+    SidecarConfig, SidecarPaths, check_model, delete_model_revision, discard_installation_backup,
     download_model as download_plugin_model, import_model_files as import_model_files_from_disk,
     install_from_zip_keeping_backup as install_plugin_zip_keeping_backup, parse_manifest,
     plugins_root, restore_installation_backup,
@@ -769,6 +769,20 @@ impl PluginServiceInner {
                 %error,
                 plugin_id = %install.plugin_id,
                 "AI plugin install did not activate"
+            );
+        }
+
+        // The new package is committed and nothing can roll back to the
+        // retained copy anymore. Remove it so successful reinstalls do not
+        // leave a full duplicate package under the plugin root.
+        if result.is_ok()
+            && let Some(backup) = backup.as_deref()
+            && let Err(error) = discard_installation_backup(backup)
+        {
+            tracing::warn!(
+                %error,
+                plugin_id = %install.plugin_id,
+                "cannot remove the retained AI plugin backup"
             );
         }
 
@@ -1550,6 +1564,7 @@ mod tests {
     };
     use vrc_photon_ai_host::{
         AiHostError, ManifestFile, ModelCheck, ModelHttpClient, check_model, model_dir, plugin_dir,
+        plugins_root,
     };
     use vrc_photon_ai_protocol::{Catalog, ModelState, Probe};
     use vrc_photon_core::db::Db;
@@ -1947,6 +1962,46 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn successful_same_version_reinstall_removes_the_retained_backup() {
+        let ctx = TestContext::new();
+        ctx.install_default();
+        let install_path = PathBuf::from(
+            &ctx.db()
+                .active_plugin_installation(PLUGIN)
+                .unwrap()
+                .unwrap()
+                .path,
+        );
+
+        ctx.service.install_from_zip(&ctx.zip).unwrap();
+        ctx.wait_for_install();
+
+        let root = plugins_root(&ctx.data_dir);
+        let backups: Vec<_> = fs::read_dir(&root)
+            .expect("read the plugin root")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(".backup-"))
+            })
+            .collect();
+        assert!(
+            backups.is_empty(),
+            "a successful reinstall must not retain its backup: {backups:?}"
+        );
+        assert!(install_path.join(TEST_ENTRYPOINT).is_file());
+        assert_eq!(
+            ctx.db()
+                .active_plugin_installation(PLUGIN)
+                .unwrap()
+                .unwrap()
+                .path,
+            install_path.to_string_lossy().into_owned()
+        );
     }
 
     #[test]

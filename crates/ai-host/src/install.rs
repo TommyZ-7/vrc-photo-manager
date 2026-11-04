@@ -131,6 +131,33 @@ pub fn restore_installation_backup(target: &Path, backup: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Deletes the retained previous package after the new one is committed.
+///
+/// Only a path inside a `.backup-*` directory is accepted, so a caller cannot
+/// accidentally remove the live installation directory.
+pub fn discard_installation_backup(backup: &Path) -> Result<()> {
+    let parent = backup.parent().ok_or_else(|| {
+        AiHostError::Integrity(format!(
+            "backup path {} has no parent directory",
+            backup.display()
+        ))
+    })?;
+    if !parent
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with(".backup-"))
+    {
+        return Err(AiHostError::Integrity(format!(
+            "refusing to remove non-backup directory {}",
+            parent.display()
+        )));
+    }
+    match fs::remove_dir_all(parent) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Installs a signed plugin ZIP with explicit limits.
 pub fn install_from_zip_with_limits(
     zip_path: &Path,
@@ -1641,6 +1668,32 @@ mod tests {
         .unwrap();
 
         assert!(backup.is_none());
+        assert!(backup_entries(data_dir.path()).is_empty());
+    }
+
+    #[test]
+    fn install_keeping_backup_can_be_discarded_after_commit() {
+        let data_dir = tempdir().unwrap();
+        let package = TestPackage::new();
+        let installed = install(&package, data_dir.path()).unwrap();
+        fs::write(installed.path.join("stale.txt"), b"stale").unwrap();
+
+        let zip = package.temp_zip().unwrap();
+        let (reinstalled, backup) = crate::install_from_zip_keeping_backup(
+            zip.path(),
+            data_dir.path(),
+            &[package.public_key()],
+            "0.10.1",
+        )
+        .unwrap();
+        let backup = backup.expect("replacing a package must retain its files");
+        let backup_directory = backup.parent().unwrap().to_path_buf();
+
+        crate::discard_installation_backup(&backup).unwrap();
+
+        assert!(!backup_directory.exists());
+        assert!(reinstalled.path.join(TEST_ENTRYPOINT).is_file());
+        assert!(!reinstalled.path.join("stale.txt").exists());
         assert!(backup_entries(data_dir.path()).is_empty());
     }
 }
