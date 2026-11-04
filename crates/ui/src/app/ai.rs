@@ -296,6 +296,47 @@ impl AiUiState {
     }
 }
 
+/// The card state derived from the plugin installation, model, and probe.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum AiPluginCardState {
+    #[default]
+    NotInstalled,
+    Installing,
+    ModelMissing,
+    Downloading,
+    Verifying,
+    Ready,
+    NeedsProbe,
+    Error,
+}
+
+/// Pure state machine for the settings plugin card. A ready model without a
+/// stored probe is not ready for tagging, so it gets its own state instead of
+/// claiming success.
+pub(crate) fn ai_plugin_card_state(ai: &AiUiState) -> AiPluginCardState {
+    if ai.install_busy {
+        return AiPluginCardState::Installing;
+    }
+    if ai.active.is_none() {
+        return AiPluginCardState::NotInstalled;
+    }
+    if let Some(download) = &ai.download {
+        return if download.state == ModelState::Verifying {
+            AiPluginCardState::Verifying
+        } else {
+            AiPluginCardState::Downloading
+        };
+    }
+    match ai.state.as_ref().map(|state| state.model_state) {
+        Some(ModelState::Downloading) => AiPluginCardState::Downloading,
+        Some(ModelState::Verifying) => AiPluginCardState::Verifying,
+        Some(ModelState::Ready) if ai.ready() => AiPluginCardState::Ready,
+        Some(ModelState::Ready) => AiPluginCardState::NeedsProbe,
+        Some(ModelState::Error) => AiPluginCardState::Error,
+        Some(ModelState::Missing) | None => AiPluginCardState::ModelMissing,
+    }
+}
+
 /// The primary action a plugin card offers for the current state.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum AiPluginAction {
@@ -309,33 +350,43 @@ pub(crate) enum AiPluginAction {
     None,
 }
 
-/// Pure presentation model for the settings plugin card. Keeping the primary
-/// action here makes the state machine testable without a window.
+/// Pure presentation model for the settings plugin card. Keeping the state and
+/// primary action here makes the state machine testable without a window.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct AiPluginCardView {
+    pub(crate) state: AiPluginCardState,
     pub(crate) primary_action: AiPluginAction,
 }
 
 impl From<&AiUiState> for AiPluginCardView {
     fn from(ai: &AiUiState) -> Self {
-        let model_state = ai.state.as_ref().map(|state| state.model_state);
-        let primary_action = if ai.install_busy {
-            AiPluginAction::None
-        } else if ai.active.is_none() {
-            AiPluginAction::InstallZip
-        } else if ai.download.is_some() {
-            AiPluginAction::None
-        } else {
-            match model_state {
-                None | Some(ModelState::Missing) | Some(ModelState::Error) => {
-                    AiPluginAction::DownloadModel
-                }
-                Some(ModelState::Ready) => AiPluginAction::Recheck,
-                Some(ModelState::Downloading | ModelState::Verifying) => AiPluginAction::None,
+        let state = ai_plugin_card_state(ai);
+        let primary_action = match state {
+            AiPluginCardState::Installing => AiPluginAction::None,
+            AiPluginCardState::NotInstalled => AiPluginAction::InstallZip,
+            AiPluginCardState::ModelMissing | AiPluginCardState::Error => {
+                AiPluginAction::DownloadModel
             }
+            AiPluginCardState::Downloading | AiPluginCardState::Verifying => AiPluginAction::None,
+            AiPluginCardState::Ready | AiPluginCardState::NeedsProbe => AiPluginAction::Recheck,
         };
-        Self { primary_action }
+        Self {
+            state,
+            primary_action,
+        }
     }
+}
+
+/// Whether an installation row is the active package. The version is part of
+/// the row identity, so two versions of one variant cannot both look active.
+pub(crate) fn is_active_installation(install: &PluginInstallation) -> bool {
+    install.active
+}
+
+/// Stable element id for a variant row. Includes the version because a variant
+/// can have several installed versions at once.
+pub(crate) fn installation_row_id(install: &PluginInstallation) -> String {
+    format!("ai-variant-{}-{}", install.variant, install.version)
 }
 
 /// License and model metadata read from an installed package manifest.
@@ -1114,11 +1165,12 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{
-        AI_PLUGIN_ID, AiPluginAction, AiPluginCardView, AiResponseOutcome, AiUiState,
-        ModelDownloadView, ai_error_label_in, ai_error_text_in, ai_job_summary_label,
-        ai_manifest_view, ai_response_outcome, ai_tag_view, apply_install_event, backend_options,
-        collect_ai_snapshot, install_event_applies_to_ai, model_progress_ratio,
-        needs_license_consent, people_label, place_label, variant_backend_label,
+        AI_PLUGIN_ID, AiPluginAction, AiPluginCardState, AiPluginCardView, AiResponseOutcome,
+        AiUiState, ModelDownloadView, ai_error_label_in, ai_error_text_in, ai_job_summary_label,
+        ai_manifest_view, ai_plugin_card_state, ai_response_outcome, ai_tag_view,
+        apply_install_event, backend_options, collect_ai_snapshot, install_event_applies_to_ai,
+        installation_row_id, is_active_installation, model_progress_ratio, needs_license_consent,
+        people_label, place_label, variant_backend_label,
     };
     use vrc_photon_ai_protocol::{
         BackendInfo, ModelState, PluginInstallStatus, Probe, TaggingJobStatus,
@@ -1223,13 +1275,49 @@ mod tests {
     #[test]
     fn plugin_card_state_selects_the_right_primary_action() {
         let view = AiPluginCardView::from(&AiUiState::default());
+        assert_eq!(view.state, AiPluginCardState::NotInstalled);
         assert_eq!(view.primary_action, AiPluginAction::InstallZip);
 
         let view = AiPluginCardView::from(&installed_missing_model());
+        assert_eq!(view.state, AiPluginCardState::ModelMissing);
         assert_eq!(view.primary_action, AiPluginAction::DownloadModel);
 
         let view = AiPluginCardView::from(&ready_state());
+        assert_eq!(view.state, AiPluginCardState::Ready);
         assert_eq!(view.primary_action, AiPluginAction::Recheck);
+    }
+
+    #[test]
+    fn plugin_card_requires_a_probe_before_reporting_ready() {
+        let mut ai = ready_state();
+        ai.probe = None;
+
+        assert_eq!(ai_plugin_card_state(&ai), AiPluginCardState::NeedsProbe);
+        let view = AiPluginCardView::from(&ai);
+        assert_eq!(view.state, AiPluginCardState::NeedsProbe);
+        assert_eq!(view.primary_action, AiPluginAction::Recheck);
+    }
+
+    #[test]
+    fn only_one_version_of_a_variant_is_marked_active() {
+        let mut older = sample_install();
+        older.version = "1.0.0".to_string();
+        older.active = true;
+        let mut newer = sample_install();
+        newer.version = "2.0.0".to_string();
+        newer.active = false;
+        let installations = [older, newer];
+
+        let active: Vec<_> = installations
+            .iter()
+            .filter(|install| is_active_installation(install))
+            .collect();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].version, "1.0.0");
+        assert_ne!(
+            installation_row_id(&installations[0]),
+            installation_row_id(&installations[1])
+        );
     }
 
     #[test]

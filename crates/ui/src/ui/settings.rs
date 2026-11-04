@@ -1,5 +1,5 @@
-//! Settings screen: library paths, display options, startup, and compress
-//! policies.
+//! Settings screen: library paths, display options, startup, AI plugin
+//! management, and compress policies.
 //!
 //! The switch, card-size, and field widgets come from `ui::components`; screen
 //! dispatch lives in `ui::shell`.
@@ -26,8 +26,9 @@ use vrc_photon_ipc::Response;
 
 use crate::app::App;
 use crate::app::ai::{
-    AiManifestView, AiPluginAction, AiPluginCardView, ModelDownloadView, ai_error_text_in,
-    ai_manifest_view, model_progress_ratio, variant_backend_label,
+    AiManifestView, AiPluginAction, AiPluginCardState, AiPluginCardView, ModelDownloadView,
+    ai_error_text_in, ai_manifest_view, installation_row_id, is_active_installation,
+    model_progress_ratio, variant_backend_label,
 };
 use crate::app::daemon::{autostart_description, open_path};
 use crate::ipc_bridge;
@@ -1052,38 +1053,37 @@ impl App {
     fn ai_plugin_card(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.palette;
         let view = AiPluginCardView::from(&self.ai);
-        let model_state = self.ai.state.as_ref().map(|state| state.model_state);
+        let state = view.state;
         let has_active = self.ai.active.is_some();
-        let (status, status_fg, status_bg) = if self.ai.install_busy {
-            (
+        let (status, status_fg, status_bg) = match state {
+            AiPluginCardState::Installing => (
                 tr!("settings.ai.status.installing"),
                 p.accent,
                 p.accent_soft,
-            )
-        } else if !has_active {
-            (
+            ),
+            AiPluginCardState::NotInstalled => (
                 tr!("settings.ai.status.not_installed"),
                 p.accent,
                 p.accent_soft,
-            )
-        } else if matches!(model_state, Some(ModelState::Downloading)) {
-            (
+            ),
+            AiPluginCardState::Downloading => (
                 tr!("settings.ai.status.downloading"),
                 p.accent,
                 p.accent_soft,
-            )
-        } else if matches!(model_state, Some(ModelState::Verifying)) {
-            (tr!("settings.ai.status.verifying"), p.accent, p.accent_soft)
-        } else if matches!(model_state, Some(ModelState::Ready)) {
-            (tr!("settings.ai.status.ready"), p.green, p.green_soft)
-        } else if matches!(model_state, Some(ModelState::Error)) {
-            (tr!("settings.ai.status.error"), p.red, p.red_soft)
-        } else {
-            (
+            ),
+            AiPluginCardState::Verifying => {
+                (tr!("settings.ai.status.verifying"), p.accent, p.accent_soft)
+            }
+            AiPluginCardState::Ready => (tr!("settings.ai.status.ready"), p.green, p.green_soft),
+            AiPluginCardState::NeedsProbe => {
+                (tr!("settings.ai.status.needs_probe"), p.amber, p.amber_soft)
+            }
+            AiPluginCardState::Error => (tr!("settings.ai.status.error"), p.red, p.red_soft),
+            AiPluginCardState::ModelMissing => (
                 tr!("settings.ai.status.model_missing"),
                 p.amber,
                 p.amber_soft,
-            )
+            ),
         };
 
         let mut card = glass_panel(&self.palette)
@@ -1135,7 +1135,7 @@ impl App {
                     .child(tr!("settings.ai.not_installed.body")),
             );
             if let Some(error) = self.ai.last_error.clone() {
-                card = card.child(self.ai_error_box(&error));
+                card = card.child(self.ai_install_error_box(&error));
             }
             return card
                 .child(self.ai_primary_action_button(view.primary_action, false, cx))
@@ -1165,12 +1165,22 @@ impl App {
             .map(format_bytes)
             .unwrap_or_else(|| tr!("settings.ai.not_downloaded"));
 
-        card = card
-            .child(self.ai_install_meta(&install, &size_label))
-            .child(self.ai_variant_list(cx));
+        card = card.child(self.ai_install_meta(&install, &size_label));
+        if !matches!(
+            state,
+            AiPluginCardState::Downloading | AiPluginCardState::Verifying
+        ) {
+            card = card.child(self.ai_variant_list(cx));
+        }
 
-        if let Some(download) = self.ai.download.clone() {
-            card = card.child(self.ai_download_box(&download)).child(
+        if matches!(
+            state,
+            AiPluginCardState::Downloading | AiPluginCardState::Verifying
+        ) {
+            if let Some(download) = self.ai.download.clone() {
+                card = card.child(self.ai_download_box(&download));
+            }
+            card = card.child(
                 h_flex().flex_wrap().items_center().gap(px(8.)).child(
                     Button::new("ai-cancel-download")
                         .label(tr!("settings.ai.cancel"))
@@ -1178,41 +1188,46 @@ impl App {
                         .on_click(cx.listener(|this, _, _, cx| this.cancel_ai_model_download(cx))),
                 ),
             );
-        } else if matches!(model_state, Some(ModelState::Ready)) {
-            card = card
-                .child(self.ai_model_path_box(&install, &manifest, &size_label))
-                .child(
-                    h_flex()
-                        .flex_wrap()
-                        .items_center()
-                        .gap(px(8.))
-                        .child(self.ai_primary_action_button(view.primary_action, false, cx))
-                        .child(self.ai_action_button(
-                            "ai-import-zip",
-                            AiPluginAction::InstallZip,
-                            tr!("settings.ai.install"),
-                            false,
-                            false,
-                            cx,
-                        ))
-                        .child(self.ai_action_button(
-                            "ai-delete-model",
-                            AiPluginAction::DeleteModel,
-                            tr!("settings.ai.delete_model"),
-                            false,
-                            false,
-                            cx,
-                        ))
-                        .child(self.ai_action_button(
-                            "ai-uninstall",
-                            AiPluginAction::Uninstall,
-                            tr!("settings.ai.uninstall"),
-                            false,
-                            true,
-                            cx,
-                        )),
-                );
-        } else if matches!(model_state, Some(ModelState::Error)) {
+        } else if matches!(
+            state,
+            AiPluginCardState::Ready | AiPluginCardState::NeedsProbe
+        ) {
+            card = card.child(self.ai_model_path_box(&install, &manifest, &size_label));
+            if state == AiPluginCardState::NeedsProbe {
+                card = card.child(self.ai_warning_box(&tr!("settings.ai.needs_probe")));
+            }
+            card = card.child(
+                h_flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(self.ai_primary_action_button(view.primary_action, false, cx))
+                    .child(self.ai_action_button(
+                        "ai-import-zip",
+                        AiPluginAction::InstallZip,
+                        tr!("settings.ai.install"),
+                        false,
+                        false,
+                        cx,
+                    ))
+                    .child(self.ai_action_button(
+                        "ai-delete-model",
+                        AiPluginAction::DeleteModel,
+                        tr!("settings.ai.delete_model"),
+                        false,
+                        false,
+                        cx,
+                    ))
+                    .child(self.ai_action_button(
+                        "ai-uninstall",
+                        AiPluginAction::Uninstall,
+                        tr!("settings.ai.uninstall"),
+                        false,
+                        true,
+                        cx,
+                    )),
+            );
+        } else if state == AiPluginCardState::Error {
             let code = self
                 .ai
                 .state
@@ -1312,11 +1327,6 @@ impl App {
     fn ai_variant_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.palette;
         let installations = self.ai.installations.clone();
-        let active_variant = self
-            .ai
-            .active
-            .as_ref()
-            .map(|install| install.variant.clone());
         v_flex()
             .gap(px(6.))
             .child(
@@ -1330,10 +1340,11 @@ impl App {
                 v_flex()
                     .gap(px(4.))
                     .children(installations.into_iter().map(|install| {
-                        let active = active_variant.as_deref() == Some(install.variant.as_str());
+                        let active = is_active_installation(&install);
                         let display_variant = install.variant.clone();
                         let switch_variant = install.variant.clone();
                         let version = install.version.clone();
+                        let row_id = installation_row_id(&install);
                         h_flex()
                             .items_center()
                             .gap(px(8.))
@@ -1365,15 +1376,17 @@ impl App {
                                 self.badge(tr!("settings.ai.variant.active"), p.green, p.green_soft)
                                     .into_any_element()
                             } else {
-                                Button::new(SharedString::from(format!(
-                                    "ai-variant-{switch_variant}"
-                                )))
-                                .label(tr!("settings.ai.variant.switch"))
-                                .small()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.set_ai_active_variant(&switch_variant, Some(&version), cx);
-                                }))
-                                .into_any_element()
+                                Button::new(SharedString::from(row_id))
+                                    .label(tr!("settings.ai.variant.switch"))
+                                    .small()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.set_ai_active_variant(
+                                            &switch_variant,
+                                            Some(&version),
+                                            cx,
+                                        );
+                                    }))
+                                    .into_any_element()
                             })
                     })),
             )
@@ -1412,7 +1425,10 @@ impl App {
                             .text_color(rgb(p.muted_2))
                             .child(format!(
                                 "{} · {size_label}",
-                                manifest.revision.clone().unwrap_or_else(|| "—".to_string())
+                                manifest
+                                    .revision
+                                    .clone()
+                                    .unwrap_or_else(|| tr!("settings.ai.unknown"))
                             )),
                     ),
             )
@@ -1426,17 +1442,14 @@ impl App {
         size_label: &str,
     ) -> impl IntoElement {
         let p = self.palette;
-        let revision = manifest.revision.clone().unwrap_or_else(|| "—".to_string());
-        let path = vrc_photon_core::data_dir()
-            .map(|dir| {
-                dir.join("plugins")
-                    .join(&install.plugin_id)
-                    .join("models")
-                    .join(&revision)
-                    .display()
-                    .to_string()
-            })
-            .unwrap_or(revision);
+        let models_dir = vrc_photon_core::data_dir()
+            .map(|dir| dir.join("plugins").join(&install.plugin_id).join("models"));
+        let path = match (models_dir, manifest.revision.clone()) {
+            (Some(dir), Some(revision)) => dir.join(revision).display().to_string(),
+            (Some(dir), None) => dir.display().to_string(),
+            (None, Some(revision)) => revision,
+            (None, None) => tr!("settings.ai.unknown"),
+        };
         v_flex()
             .gap(px(4.))
             .child(
@@ -1511,6 +1524,43 @@ impl App {
             .border_color(rgb(p.red_border))
             .text_size(px(10.))
             .text_color(rgb(p.red))
+            .child(text.to_string())
+    }
+
+    fn ai_install_error_box(&self, detail: &str) -> impl IntoElement {
+        let p = self.palette;
+        v_flex()
+            .gap(px(2.))
+            .p(px(10.))
+            .rounded(px(8.))
+            .bg(rgb(p.red_soft))
+            .border_1()
+            .border_color(rgb(p.red_border))
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .font_medium()
+                    .text_color(rgb(p.red))
+                    .child(tr!("settings.ai.install_error")),
+            )
+            .child(
+                div()
+                    .text_size(px(9.))
+                    .text_color(rgb(p.muted))
+                    .child(detail.to_string()),
+            )
+    }
+
+    fn ai_warning_box(&self, text: &str) -> impl IntoElement {
+        let p = self.palette;
+        div()
+            .p(px(10.))
+            .rounded(px(8.))
+            .bg(rgb(p.amber_soft))
+            .border_1()
+            .border_color(rgb(p.amber))
+            .text_size(px(10.))
+            .text_color(rgb(p.amber))
             .child(text.to_string())
     }
 
@@ -1604,9 +1654,10 @@ impl App {
             .clone()
             .unwrap_or_else(|| tr!("settings.ai.license.unknown"));
         let license_url = manifest.license_url.clone();
-        let license_file = manifest
+        let license_fallback = manifest
             .license_file
             .clone()
+            .or_else(|| license_url.clone())
             .unwrap_or_else(|| "—".to_string());
         let install_line = self
             .ai
@@ -1661,8 +1712,14 @@ impl App {
                     ))
                     .child(self.ai_license_row(
                         tr!("settings.ai.license.metadata.bundled"),
-                        license_file,
+                        license_fallback,
                     ))
+                    .when_some(license_url.clone(), |this, url| {
+                        this.child(self.ai_license_row(
+                            tr!("settings.ai.license.metadata.url"),
+                            url,
+                        ))
+                    })
                     .child(
                         div()
                             .text_size(px(10.))

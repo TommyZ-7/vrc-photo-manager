@@ -1347,7 +1347,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_guard_covers_the_viewer_and_both_modals() {
+    fn overlay_guard_covers_the_viewer_and_all_modals() {
         assert!(!any_overlay_open(false, false, false, false, false));
         assert!(any_overlay_open(true, false, false, false, false));
         assert!(any_overlay_open(false, true, false, false, false));
