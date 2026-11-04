@@ -4608,6 +4608,25 @@ impl Db {
         Ok(changed)
     }
 
+    /// Cancels every unfinished tagging job whose photo has a pending forced
+    /// deletion. `pending_deletion_requests` hides those requests while their
+    /// jobs are active, so the executor runs this before collecting work. One
+    /// statement keeps the per-tick cost bounded even when the deletion backlog
+    /// is large.
+    pub fn cancel_tagging_for_forced_deletions(&self) -> Result<usize> {
+        let changed = self.conn.execute(
+            "UPDATE tagging_jobs SET status = 'cancelled', progress = 0, stage = NULL, \
+                finished_at = ?1 \
+             WHERE status IN ('waiting', 'pending', 'processing') \
+               AND photo_id IN ( \
+                   SELECT photo_id FROM deletion_requests \
+                   WHERE force = 1 AND status = 'pending' \
+               )",
+            params![now_string()],
+        )?;
+        Ok(changed)
+    }
+
     /// Cancels every unfinished job for one plugin. Returns the number of
     /// cancelled rows.
     pub fn cancel_tagging_jobs_for_plugin(&self, plugin_id: &str) -> Result<usize> {
@@ -9014,6 +9033,31 @@ mod tests {
         assert_eq!(
             db.tagging_job(&job.id).unwrap().unwrap().status,
             TaggingJobStatus::Completed
+        );
+    }
+
+    #[test]
+    fn cancel_tagging_for_forced_deletions_only_touches_forced_pending_requests() {
+        let db = Db::open_in_memory().unwrap();
+        let forced = seed_photo(&db);
+        let plain = seed_other_photo(&db);
+        db.enqueue_tagging_jobs(&[forced], AI_PLUGIN, TaggingJobStatus::Pending)
+            .unwrap();
+        db.enqueue_tagging_jobs(&[plain], AI_PLUGIN, TaggingJobStatus::Pending)
+            .unwrap();
+        db.request_deletion(&[forced], DeletionReason::Manual, true)
+            .unwrap();
+        db.request_deletion(&[plain], DeletionReason::Manual, false)
+            .unwrap();
+
+        assert_eq!(db.cancel_tagging_for_forced_deletions().unwrap(), 1);
+        assert_eq!(
+            db.tagging_jobs_for_photo(forced).unwrap()[0].status,
+            TaggingJobStatus::Cancelled
+        );
+        assert_eq!(
+            db.tagging_jobs_for_photo(plain).unwrap()[0].status,
+            TaggingJobStatus::Pending
         );
     }
 

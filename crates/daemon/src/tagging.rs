@@ -82,6 +82,14 @@ impl TaggingControl {
         }
     }
 
+    /// Cancels every registered job token. Called when the daemon stops so an
+    /// in-flight sidecar request is interrupted instead of delaying shutdown.
+    pub(crate) fn cancel_all(&self) {
+        for token in lock_unpoisoned(&self.tokens).values() {
+            token.cancel();
+        }
+    }
+
     /// The wake signal shared with the tagging worker.
     pub(crate) fn signal(&self) -> &Arc<JobSignal> {
         &self.signal
@@ -158,14 +166,26 @@ impl TaggingWorker {
     /// Claims and processes one pending job. Returns `false` when the queue is
     /// empty (and performs the idle sidecar check).
     pub(crate) fn process_once(&self) -> Result<bool> {
+        if self.is_stopping() {
+            return Ok(false);
+        }
         let job = self.db().next_pending_tagging_job()?;
         let Some(job) = job else {
             self.maybe_stop_idle_sidecar()?;
             return Ok(false);
         };
+        if self.is_stopping() {
+            // Leave the claimed row `processing`; the next owner startup
+            // resumes it instead of losing the retry.
+            return Ok(false);
+        }
         self.process_job(job)?;
         *lock_unpoisoned(&self.last_activity) = Instant::now();
         Ok(true)
+    }
+
+    fn is_stopping(&self) -> bool {
+        !self.running.load(Ordering::Relaxed)
     }
 
     fn db(&self) -> MutexGuard<'_, Db> {
@@ -182,7 +202,17 @@ impl TaggingWorker {
         self.publish_processing(&job, 0.05, None);
 
         loop {
-            match self.run_pipeline(&job, &cancel) {
+            if self.is_stopping() {
+                break;
+            }
+            let result = self.run_pipeline(&job, &cancel);
+            if self.is_stopping() {
+                // Do not write a terminal status while stopping. The job stays
+                // `processing` and `resume_interrupted_tagging_jobs` recovers
+                // it on the next owner startup.
+                break;
+            }
+            match result {
                 Ok(Completion::Completed) => break,
                 Ok(Completion::Cancelled) => {
                     self.finish_cancelled(&job)?;
@@ -228,9 +258,13 @@ impl TaggingWorker {
                     }
                     let delay = self.config.retry_delays[job.retry_count as usize];
                     job.retry_count += 1;
-                    if self.wait_for_retry(delay, &job, &cancel) {
-                        self.finish_cancelled(&job)?;
-                        break;
+                    match self.wait_for_retry(delay, &job, &cancel) {
+                        RetryWait::Cancelled => {
+                            self.finish_cancelled(&job)?;
+                            break;
+                        }
+                        RetryWait::Stopping => break,
+                        RetryWait::Elapsed => {}
                     }
                     self.publish_processing(&job, 0.05, None);
                 }
@@ -256,6 +290,9 @@ impl TaggingWorker {
         job: &TaggingJob,
         cancel: &CancelToken,
     ) -> std::result::Result<Completion, JobFailure> {
+        if self.is_stopping() {
+            return Ok(Completion::Cancelled);
+        }
         if self.is_cancelled(job, cancel) {
             return Ok(Completion::Cancelled);
         }
@@ -444,17 +481,32 @@ impl TaggingWorker {
         }
     }
 
-    /// Sleeps through the retry backoff while polling for cancellation. The
-    /// job stays `processing` for the whole delay.
-    fn wait_for_retry(&self, delay: Duration, job: &TaggingJob, cancel: &CancelToken) -> bool {
+    /// Sleeps through the retry backoff while polling for cancellation or a
+    /// daemon stop. The job stays `processing` for the whole delay.
+    fn wait_for_retry(&self, delay: Duration, job: &TaggingJob, cancel: &CancelToken) -> RetryWait {
         let deadline = Instant::now() + delay;
         loop {
+            if self.is_stopping() {
+                return RetryWait::Stopping;
+            }
             if self.is_cancelled(job, cancel) {
-                return true;
+                return RetryWait::Cancelled;
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return false;
+                return RetryWait::Elapsed;
+            }
+            thread::sleep(remaining.min(Duration::from_millis(25)));
+        }
+    }
+
+    /// Waits for `duration`, but returns immediately once shutdown starts.
+    fn sleep_until_stopped(&self, duration: Duration) {
+        let deadline = Instant::now() + duration;
+        while !self.is_stopping() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return;
             }
             thread::sleep(remaining.min(Duration::from_millis(25)));
         }
@@ -483,7 +535,7 @@ impl TaggingWorker {
                 Some(TaggingErrorCode::PluginNotReady.as_str()),
             );
         }
-        thread::sleep(NOT_READY_DELAY);
+        self.sleep_until_stopped(NOT_READY_DELAY);
         Ok(())
     }
 
@@ -590,7 +642,7 @@ pub(crate) fn start_tagging_worker(worker: TaggingWorker) -> JoinHandle<()> {
         .name("tagging".to_string())
         .spawn(move || {
             let mut seen = 0;
-            while worker.running.load(Ordering::Relaxed) {
+            while !worker.is_stopping() {
                 match worker.process_once() {
                     Ok(true) => {}
                     Ok(false) => {
@@ -604,6 +656,12 @@ pub(crate) fn start_tagging_worker(worker: TaggingWorker) -> JoinHandle<()> {
             }
         })
         .expect("cannot spawn tagging worker")
+}
+
+enum RetryWait {
+    Elapsed,
+    Cancelled,
+    Stopping,
 }
 
 enum Completion {
@@ -767,6 +825,23 @@ mod tests {
         assert!(control.cancel("job-1"));
         assert!(token.is_cancelled());
 
+        control.unregister("job-1");
+        assert!(!control.cancel("job-1"));
+    }
+
+    #[test]
+    fn cancel_all_cancels_every_registered_token() {
+        let signal = Arc::new(JobSignal::default());
+        let control = TaggingControl::new(signal);
+        let first = control.register("job-1");
+        let second = control.register("job-2");
+        assert!(!first.is_cancelled());
+        assert!(!second.is_cancelled());
+
+        control.cancel_all();
+
+        assert!(first.is_cancelled());
+        assert!(second.is_cancelled());
         control.unregister("job-1");
         assert!(!control.cancel("job-1"));
     }
@@ -951,6 +1026,7 @@ mod tests {
         plugin: PluginService,
         events: EventBus,
         control: Arc<TaggingControl>,
+        running: Arc<AtomicBool>,
         worker: Arc<TaggingWorker>,
         ai_data_dir: PathBuf,
         photos_dir: PathBuf,
@@ -1020,7 +1096,7 @@ mod tests {
                 ai_data_dir.clone(),
                 service.clone(),
                 events.clone(),
-                running,
+                running.clone(),
                 signal,
                 control.clone(),
                 config,
@@ -1032,6 +1108,7 @@ mod tests {
                 plugin: service,
                 events,
                 control,
+                running,
                 worker,
                 ai_data_dir,
                 photos_dir,
@@ -1341,6 +1418,43 @@ mod tests {
 
         let job = ctx.db().tagging_job(&job_id).unwrap().unwrap();
         assert_eq!(job.status, TaggingJobStatus::Cancelled);
+        assert_eq!(job.retry_count, 1);
+        assert!(ctx.db().photo_ai(ctx.photo_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn stopping_during_retry_backoff_leaves_the_job_processing() {
+        let mut config = test_config();
+        config.retry_delays = [Duration::from_secs(5), Duration::from_secs(5)];
+        let ctx = TaggingTestContext::with_scenario(
+            "busy",
+            presence_response(true, 0.99),
+            PeopleResponse::default(),
+            "other",
+            None,
+            true,
+            config,
+        );
+        let job_id = ctx.enqueue_one();
+        let worker = ctx.worker.clone();
+        let handle = thread::spawn(move || worker.process_once());
+
+        wait_until("the first retry backoff", || {
+            ctx.db().tagging_job(&job_id).unwrap().unwrap().retry_count == 1
+        });
+
+        let stopped_at = Instant::now();
+        ctx.running
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        ctx.control.cancel_all();
+        assert!(handle.join().unwrap().unwrap());
+        assert!(
+            stopped_at.elapsed() < Duration::from_secs(1),
+            "the worker waited for the 5 s retry backoff despite stopping"
+        );
+
+        let job = ctx.db().tagging_job(&job_id).unwrap().unwrap();
+        assert_eq!(job.status, TaggingJobStatus::Processing);
         assert_eq!(job.retry_count, 1);
         assert!(ctx.db().photo_ai(ctx.photo_id).unwrap().is_none());
     }

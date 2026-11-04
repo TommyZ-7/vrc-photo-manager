@@ -19,7 +19,7 @@ use vrc_photon_core::linker;
 use vrc_photon_core::log_parser::LogIngestor;
 use vrc_photon_core::model::{
     CompressionJob, CompressionProfile, DaemonCommand, DaemonOperation, DeletionReason,
-    DeletionRequest, DeletionStatus, Derivative, Photo, PhotoStatus, QueueStatus,
+    DeletionRequest, Derivative, Photo, PhotoStatus, QueueStatus,
 };
 use vrc_photon_core::photo_filename::is_source_photo;
 use vrc_photon_core::scanner::{
@@ -2219,6 +2219,9 @@ impl Daemon {
 
     fn stop_workers(&mut self) {
         self.running.store(false, Ordering::Relaxed);
+        // Interrupt an in-flight sidecar request before joining the tagging
+        // worker; otherwise shutdown waits for the whole inference.
+        self.tagging_control.cancel_all();
         self.jobs.notify();
         self.sends.notify();
         self.world_names.notify();
@@ -2813,32 +2816,16 @@ fn deletion_loop(db: Arc<Mutex<Db>>, running: Arc<AtomicBool>, jobs: Arc<JobSign
 /// A forced request may be recorded directly with `force = 1` instead of
 /// through `force_deletion`, which cancels tagging jobs itself. Requests with
 /// active tagging jobs are hidden from `pending_deletion_requests`, so cancel
-/// those jobs first; the late sidecar result is rejected by the cancelled job
-/// state. `claim_deletion` then only waits for runs that were not forced.
+/// those jobs first in one bulk statement; the late sidecar result is rejected
+/// by the cancelled job state. `claim_deletion` then only waits for runs that
+/// were not forced.
 fn cancel_tagging_for_forced_deletions(db: &Arc<Mutex<Db>>) -> Result<()> {
-    let active = {
+    let cancelled = {
         let db = db.lock().unwrap();
-        db.active_deletion_requests(i64::MAX)?
+        db.cancel_tagging_for_forced_deletions()?
     };
-    for request in active {
-        if !request.force
-            || request.status != DeletionStatus::Pending
-            || request.reason == DeletionReason::Unknown
-        {
-            continue;
-        }
-        let cancelled = {
-            let db = db.lock().unwrap();
-            db.cancel_tagging_jobs_for_photo(request.photo_id)?
-        };
-        if cancelled > 0 {
-            tracing::info!(
-                request = request.id,
-                photo_id = request.photo_id,
-                cancelled,
-                "cancelled tagging jobs for forced deletion"
-            );
-        }
+    if cancelled > 0 {
+        tracing::info!(cancelled, "cancelled tagging jobs for forced deletions");
     }
     Ok(())
 }
@@ -5043,6 +5030,84 @@ mod tests {
             DeletionStatus::Completed
         );
         assert!(!path.exists(), "the forced deletion must remove the file");
+    }
+
+    #[test]
+    fn forced_deletion_batch_cancels_all_tagging_in_one_pass() {
+        let mut ctx = DaemonAiTest::new();
+        let (photos, requests) = {
+            let db = ctx.db.lock().unwrap();
+            let root = db
+                .add_root(ctx.photo_dir.to_str().unwrap(), "reference")
+                .unwrap();
+            let mut photos = Vec::new();
+            let mut requests = Vec::new();
+            for index in 0..150i64 {
+                let name = format!("bulk{index:03}.png");
+                let abs_path = ctx.photo_dir.join(&name);
+                let photo_id = db
+                    .upsert_photo(&NewPhoto {
+                        root_id: root,
+                        rel_path: name.clone(),
+                        abs_path: abs_path.to_string_lossy().into_owned(),
+                        file_name: name,
+                        captured_at_utc: 1_700_000_000 + index,
+                        captured_at_local: "2026-10-21 21:24:00".to_string(),
+                        tz_offset_sec: 9 * 3600,
+                        width: 16,
+                        height: 10,
+                        file_size: 10,
+                        mtime: 1_700_000_000 + index,
+                        blake3: None,
+                    })
+                    .unwrap();
+                db.enqueue_tagging_jobs(&[photo_id], PLUGIN, TaggingJobStatus::Pending)
+                    .unwrap();
+                let request = db
+                    .request_deletion(&[photo_id], DeletionReason::Manual, true)
+                    .unwrap()[0];
+                photos.push(photo_id);
+                requests.push(request);
+            }
+            (photos, requests)
+        };
+        assert_eq!(ctx.tagging_counts().unfinished(), 150);
+
+        ctx.daemon.process_deletions().unwrap();
+
+        // One bulk statement cancels every job, even though the executor only
+        // claims 100 requests per pass.
+        assert_eq!(ctx.tagging_counts().unfinished(), 0);
+        {
+            let db = ctx.db.lock().unwrap();
+            let completed = requests
+                .iter()
+                .filter(|request| {
+                    db.deletion_request_by_id(**request)
+                        .unwrap()
+                        .unwrap()
+                        .status
+                        == DeletionStatus::Completed
+                })
+                .count();
+            assert_eq!(completed, 100);
+            for photo_id in &photos {
+                let jobs = db.tagging_jobs_for_photo(*photo_id).unwrap();
+                assert!(
+                    jobs.iter()
+                        .all(|job| job.status == TaggingJobStatus::Cancelled)
+                );
+            }
+        }
+
+        ctx.daemon.process_deletions().unwrap();
+        let db = ctx.db.lock().unwrap();
+        for request in requests {
+            assert_eq!(
+                db.deletion_request_by_id(request).unwrap().unwrap().status,
+                DeletionStatus::Completed
+            );
+        }
     }
 
     #[test]
