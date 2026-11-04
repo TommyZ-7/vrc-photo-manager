@@ -44,6 +44,12 @@ impl JobSignal {
         self.condvar.notify_all();
     }
 
+    /// Test-only view of the notification counter.
+    #[cfg(test)]
+    pub fn generation(&self) -> u64 {
+        *self.generation.lock().unwrap()
+    }
+
     /// Returns `true` when the generation changed. Each worker keeps its own
     /// `seen` value, so one notification wakes every worker.
     pub fn wait(&self, seen: &mut u64, timeout: Duration) -> bool {

@@ -426,6 +426,8 @@ CREATE INDEX IF NOT EXISTS idx_tagging_jobs_claim
     ON tagging_jobs(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_tagging_jobs_photo
     ON tagging_jobs(photo_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_tagging_jobs_plugin_status
+    ON tagging_jobs(plugin_id, status);
 CREATE INDEX IF NOT EXISTS idx_tagging_jobs_active_list
     ON tagging_jobs(created_at DESC, id DESC)
     WHERE status IN ('waiting', 'pending', 'processing');
@@ -4551,6 +4553,21 @@ impl Db {
         Ok(())
     }
 
+    /// Consumes one automatic retry while the job stays claimed (`processing`).
+    ///
+    /// The worker backs off without releasing the job, so a cancel during the
+    /// delay still sees a processing row and a daemon restart leaves enough
+    /// state for `resume_interrupted_tagging_jobs` to continue the same job.
+    pub fn bump_tagging_retry(&self, job_id: &str) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE tagging_jobs SET retry_count = retry_count + 1, progress = 0, \
+                stage = NULL, error = NULL \
+             WHERE id = ?1 AND status = 'processing' AND retry_count < ?2",
+            params![job_id, MAX_TAGGING_RETRIES],
+        )?;
+        Ok(changed == 1)
+    }
+
     /// Returns a failed job to the queue while it still has retries left and
     /// no newer job for the same photo/plugin is active.
     pub fn retry_tagging_job(&self, job_id: &str) -> Result<bool> {
@@ -4589,6 +4606,25 @@ impl Db {
                 finished_at = ?1 \
              WHERE photo_id = ?2 AND status IN ('waiting', 'pending', 'processing')",
             params![now_string(), photo_id],
+        )?;
+        Ok(changed)
+    }
+
+    /// Cancels every unfinished tagging job whose photo has a pending forced
+    /// deletion. `pending_deletion_requests` hides those requests while their
+    /// jobs are active, so the executor runs this before collecting work. One
+    /// statement keeps the per-tick cost bounded even when the deletion backlog
+    /// is large.
+    pub fn cancel_tagging_for_forced_deletions(&self) -> Result<usize> {
+        let changed = self.conn.execute(
+            "UPDATE tagging_jobs SET status = 'cancelled', progress = 0, stage = NULL, \
+                finished_at = ?1 \
+             WHERE status IN ('waiting', 'pending', 'processing') \
+               AND photo_id IN ( \
+                   SELECT photo_id FROM deletion_requests \
+                   WHERE force = 1 AND status = 'pending' \
+               )",
+            params![now_string()],
         )?;
         Ok(changed)
     }
@@ -7988,6 +8024,7 @@ mod tests {
             "idx_tagging_jobs_status",
             "idx_tagging_jobs_claim",
             "idx_tagging_jobs_photo",
+            "idx_tagging_jobs_plugin_status",
             "idx_tagging_jobs_active_list",
             "idx_tagging_jobs_active",
         ] {
@@ -8792,6 +8829,18 @@ mod tests {
                 .any(|line| line.contains("idx_tagging_jobs_active_list")),
             "active query did not use idx_tagging_jobs_active_list: {active:?}"
         );
+
+        let counts = query_plan(
+            &db,
+            "SELECT status, COUNT(*) FROM tagging_jobs WHERE plugin_id = 'vrc-photon-autotag' \
+             GROUP BY status",
+        );
+        assert!(
+            counts
+                .iter()
+                .any(|line| line.contains("idx_tagging_jobs_plugin_status")),
+            "status counts did not use idx_tagging_jobs_plugin_status: {counts:?}"
+        );
     }
 
     #[test]
@@ -8999,6 +9048,31 @@ mod tests {
         assert_eq!(
             db.tagging_job(&job.id).unwrap().unwrap().status,
             TaggingJobStatus::Completed
+        );
+    }
+
+    #[test]
+    fn cancel_tagging_for_forced_deletions_only_touches_forced_pending_requests() {
+        let db = Db::open_in_memory().unwrap();
+        let forced = seed_photo(&db);
+        let plain = seed_other_photo(&db);
+        db.enqueue_tagging_jobs(&[forced], AI_PLUGIN, TaggingJobStatus::Pending)
+            .unwrap();
+        db.enqueue_tagging_jobs(&[plain], AI_PLUGIN, TaggingJobStatus::Pending)
+            .unwrap();
+        db.request_deletion(&[forced], DeletionReason::Manual, true)
+            .unwrap();
+        db.request_deletion(&[plain], DeletionReason::Manual, false)
+            .unwrap();
+
+        assert_eq!(db.cancel_tagging_for_forced_deletions().unwrap(), 1);
+        assert_eq!(
+            db.tagging_jobs_for_photo(forced).unwrap()[0].status,
+            TaggingJobStatus::Cancelled
+        );
+        assert_eq!(
+            db.tagging_jobs_for_photo(plain).unwrap()[0].status,
+            TaggingJobStatus::Pending
         );
     }
 

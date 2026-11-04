@@ -10,6 +10,12 @@
 //!   `wrong_backend`, `wrong_op`, or `wrong_branch`.
 //! - `MOCK_SIDECAR_DELAY_MS`: overrides the response delay of `slow` and
 //!   `no_cancel`, so timeout and cancel tests can run in milliseconds.
+//! - `MOCK_SIDECAR_PRESENT` / `MOCK_SIDECAR_PRESENCE_P`: override the presence
+//!   verdict and probability in `normal` mode.
+//! - `MOCK_SIDECAR_PEOPLE_COUNT` / `MOCK_SIDECAR_PEOPLE_INTERVAL`: override the
+//!   people count and `[p10, p90]` interval (`"2,4"` syntax for the interval).
+//! - `MOCK_SIDECAR_PLACE_BRANCH`: override the `place_class` branch
+//!   (`indoor`, `outdoor`, or `other`).
 //! - `MOCK_SIDECAR_CATALOG`: fallback path to a `Catalog` JSON file when
 //!   `--catalog` is absent. A real sidecar always receives `--catalog`, so
 //!   the flag takes precedence. When neither is usable, the built-in two-tag
@@ -220,6 +226,59 @@ fn configured_delay() -> Option<Duration> {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .map(Duration::from_millis)
+}
+
+fn env_bool(name: &str) -> Option<bool> {
+    std::env::var(name).ok().map(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+fn env_f32(name: &str) -> Option<f32> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+}
+
+fn env_u32(name: &str) -> Option<u32> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+}
+
+fn presence_override() -> (bool, f32) {
+    (
+        env_bool("MOCK_SIDECAR_PRESENT").unwrap_or(false),
+        env_f32("MOCK_SIDECAR_PRESENCE_P").unwrap_or(0.1),
+    )
+}
+
+fn people_override() -> (u32, [u32; 2]) {
+    let count = env_u32("MOCK_SIDECAR_PEOPLE_COUNT").unwrap_or(0);
+    let interval = std::env::var("MOCK_SIDECAR_PEOPLE_INTERVAL")
+        .ok()
+        .and_then(|value| {
+            let (low, high) = value.split_once(',')?;
+            Some([low.trim().parse().ok()?, high.trim().parse().ok()?])
+        })
+        .unwrap_or([count, count]);
+    (count, interval)
+}
+
+fn place_branch_override() -> PlaceBranch {
+    match std::env::var("MOCK_SIDECAR_PLACE_BRANCH")
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "indoor" => PlaceBranch::Indoor,
+        "outdoor" => PlaceBranch::Outdoor,
+        _ => PlaceBranch::Other,
+    }
 }
 
 fn load_catalog(explicit: Option<&Path>) -> Catalog {
@@ -541,22 +600,38 @@ fn response_result(
 
 fn mock_result(op: Op, branch: Option<TagBranch>, catalog: &Catalog) -> SidecarResult {
     match op {
-        Op::Presence => SidecarResult::Presence {
-            present: false,
-            p_yes: 0.1,
-        },
-        Op::PeopleCount => SidecarResult::PeopleCount {
-            count: 0,
-            interval: [0, 0],
-        },
-        Op::PlaceClass => SidecarResult::PlaceClass {
-            branch: PlaceBranch::Other,
-            probabilities: PlaceProbabilities {
-                indoor: 0.3,
-                outdoor: 0.3,
-                other: 0.4,
-            },
-        },
+        Op::Presence => {
+            let (present, p_yes) = presence_override();
+            SidecarResult::Presence { present, p_yes }
+        }
+        Op::PeopleCount => {
+            let (count, interval) = people_override();
+            SidecarResult::PeopleCount { count, interval }
+        }
+        Op::PlaceClass => {
+            let branch = place_branch_override();
+            let probabilities = match branch {
+                PlaceBranch::Indoor => PlaceProbabilities {
+                    indoor: 0.9,
+                    outdoor: 0.05,
+                    other: 0.05,
+                },
+                PlaceBranch::Outdoor => PlaceProbabilities {
+                    indoor: 0.05,
+                    outdoor: 0.9,
+                    other: 0.05,
+                },
+                PlaceBranch::Other => PlaceProbabilities {
+                    indoor: 0.3,
+                    outdoor: 0.3,
+                    other: 0.4,
+                },
+            };
+            SidecarResult::PlaceClass {
+                branch,
+                probabilities,
+            }
+        }
         Op::PlaceTags => {
             let branch = branch.unwrap_or(TagBranch::Outdoor);
             let definitions = match branch {

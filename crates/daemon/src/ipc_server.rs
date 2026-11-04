@@ -1,5 +1,5 @@
 use std::io::{self, BufReader, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -9,6 +9,7 @@ use std::time::Duration;
 use interprocess::TryClone as _;
 #[cfg(unix)]
 use interprocess::local_socket::traits::Stream as _;
+use vrc_photon_core::db::Db;
 use vrc_photon_ipc::framing;
 use vrc_photon_ipc::server::Listener;
 use vrc_photon_ipc::{
@@ -17,7 +18,9 @@ use vrc_photon_ipc::{
 };
 
 use crate::DaemonStatus;
+use crate::plugin::{AI_PLUGIN_ID, PluginError, PluginService};
 use crate::signals::{JobSignal, WakeSignal};
+use crate::tagging::TaggingControl;
 
 /// Fan-out for daemon events. Dead subscribers are pruned on publish.
 #[derive(Clone, Default)]
@@ -50,6 +53,10 @@ pub(crate) struct IpcControl {
     pub(crate) thumbnail_dir: PathBuf,
     pub(crate) thumbnail_cache_epoch: Arc<AtomicU64>,
     pub(crate) thumbnail_external_bytes: Arc<AtomicU64>,
+    pub(crate) plugin: PluginService,
+    pub(crate) tagging: Arc<JobSignal>,
+    pub(crate) tagging_control: Arc<TaggingControl>,
+    pub(crate) db: Arc<Mutex<Db>>,
 }
 
 impl IpcControl {
@@ -95,9 +102,24 @@ pub(crate) fn status_snapshot(status: &mut DaemonStatus) -> StatusSnapshot {
         pending_jobs: status.pending_jobs,
         pending_sends: status.pending_sends,
         version: status.version,
-        pending_tagging_jobs: 0,
-        tagging_ready: false,
+        pending_tagging_jobs: status.pending_tagging_jobs,
+        tagging_ready: status.tagging_ready,
     }
+}
+
+/// Reads the AI tagging status fields without holding the status lock.
+pub(crate) fn tagging_status(db: &Arc<Mutex<Db>>, plugin: &PluginService) -> (i64, bool) {
+    let pending_tagging_jobs = {
+        let db = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        match db.tagging_job_counts(AI_PLUGIN_ID) {
+            Ok(counts) => counts.unfinished(),
+            Err(error) => {
+                tracing::warn!(%error, "cannot read tagging job counts");
+                0
+            }
+        }
+    };
+    (pending_tagging_jobs, plugin.is_ready(AI_PLUGIN_ID))
 }
 
 /// The listening IPC server. Dropping it stops the accept thread and removes
@@ -305,27 +327,115 @@ fn handle_connection(
                 stream_events(&mut reader, &control, events)?;
                 return Ok(());
             }
-            // Plugin and AI tagging requests are not wired yet.
-            Request::WakeTagging
-            | Request::InstallPlugin { .. }
-            | Request::UninstallPlugin { .. }
-            | Request::ProbePlugin { .. }
-            | Request::SetActiveVariant { .. }
-            | Request::StartModelDownload { .. }
-            | Request::CancelModelDownload { .. }
-            | Request::ImportModelFiles { .. }
-            | Request::DeleteModel { .. }
-            | Request::CancelTagging { .. } => {
-                write_response(
-                    reader.get_mut(),
-                    id,
-                    Response::Error {
-                        code: ErrorCode::NotReady,
-                        message: "AI tagging is not wired yet".to_string(),
+            Request::WakeTagging => {
+                control.tagging.notify();
+                write_response(reader.get_mut(), id, Response::Ok)?;
+            }
+            Request::InstallPlugin { zip_path } => {
+                let response = plugin_ack(control.plugin.install_from_zip(Path::new(&zip_path)));
+                write_response(reader.get_mut(), id, response)?;
+            }
+            Request::UninstallPlugin {
+                plugin_id,
+                variant,
+                version,
+                delete_ai_tags,
+            } => {
+                let response = plugin_ack(control.plugin.uninstall_async(
+                    &plugin_id,
+                    variant.as_deref(),
+                    version.as_deref(),
+                    delete_ai_tags,
+                ));
+                write_response(reader.get_mut(), id, response)?;
+            }
+            Request::ProbePlugin { plugin_id } => {
+                let response = plugin_ack(control.plugin.probe_async(&plugin_id));
+                write_response(reader.get_mut(), id, response)?;
+            }
+            Request::SetActiveVariant {
+                plugin_id,
+                variant,
+                version,
+            } => {
+                let response = plugin_ack(control.plugin.set_active_variant_async(
+                    &plugin_id,
+                    &variant,
+                    version.as_deref(),
+                ));
+                write_response(reader.get_mut(), id, response)?;
+            }
+            Request::StartModelDownload { plugin_id } => {
+                let response = plugin_ack(control.plugin.start_model_download(&plugin_id));
+                write_response(reader.get_mut(), id, response)?;
+            }
+            Request::CancelModelDownload { plugin_id } => {
+                let response = match control.plugin.cancel_model_download(&plugin_id) {
+                    Ok(_) => Response::Ok,
+                    Err(error) => plugin_error_response(error),
+                };
+                write_response(reader.get_mut(), id, response)?;
+            }
+            Request::ImportModelFiles { plugin_id, paths } => {
+                let paths: Vec<PathBuf> = paths.into_iter().map(PathBuf::from).collect();
+                let response = plugin_ack(control.plugin.import_model_files(&plugin_id, &paths));
+                write_response(reader.get_mut(), id, response)?;
+            }
+            Request::DeleteModel { plugin_id } => {
+                let response = plugin_ack(control.plugin.delete_model_async(&plugin_id));
+                write_response(reader.get_mut(), id, response)?;
+            }
+            Request::CancelTagging { job_id } => {
+                let cancelled = {
+                    let db = control
+                        .db
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    db.cancel_tagging_job(&job_id)
+                };
+                let response = match cancelled {
+                    Ok(_) => {
+                        control.tagging_control.cancel(&job_id);
+                        Response::Ok
+                    }
+                    Err(error) => Response::Error {
+                        code: ErrorCode::InvalidRequest,
+                        message: error.to_string(),
                     },
-                )?;
+                };
+                write_response(reader.get_mut(), id, response)?;
             }
         }
+    }
+}
+
+fn plugin_ack(result: crate::plugin::Result<()>) -> Response {
+    match result {
+        Ok(()) => Response::Ok,
+        Err(error) => plugin_error_response(error),
+    }
+}
+
+/// Maps an immediate plugin failure onto the protocol error codes. Only
+/// validation failures reach IPC here; worker failures are published as
+/// events instead.
+fn plugin_error_response(error: PluginError) -> Response {
+    let code = if error.is_consent_required() {
+        ErrorCode::ConsentRequired
+    } else {
+        match &error {
+            PluginError::NotFound(_) => ErrorCode::NotFound,
+            PluginError::Busy(_) => ErrorCode::Busy,
+            PluginError::NotReady(_) => ErrorCode::NotReady,
+            PluginError::Host(_)
+            | PluginError::Core(_)
+            | PluginError::Json(_)
+            | PluginError::Io(_) => ErrorCode::InvalidRequest,
+        }
+    };
+    Response::Error {
+        code,
+        message: error.to_string(),
     }
 }
 
@@ -411,27 +521,211 @@ fn write_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert_cmd::cargo::cargo_bin;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+    use vrc_photon_ai_host::ManifestFile;
+    use vrc_photon_ai_host::UreqModelClient;
+    use vrc_photon_ai_host::test_support::{
+        TEST_ENTRYPOINT, TestPackage, sample_manifest, sha256_hex,
+    };
+    use vrc_photon_ai_protocol::{ModelState, Probe, TaggingJobStatus};
+    use vrc_photon_core::ai::PluginInstallation;
+    use vrc_photon_core::db::Db;
+    use vrc_photon_core::model::NewPhoto;
     use vrc_photon_ipc::client::{Subscription, request};
-    use vrc_photon_ipc::{Endpoint, Event, Request, Response};
+    use vrc_photon_ipc::{Endpoint, Event, PluginInstallStatus, Request, Response};
+
+    use crate::plugin::{AI_PLUGIN_ID, PluginService};
+    use crate::tagging::TaggingControl;
+
+    fn mock_sidecar() -> std::path::PathBuf {
+        static MOCK: OnceLock<std::path::PathBuf> = OnceLock::new();
+        MOCK.get_or_init(|| {
+            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+            let status = std::process::Command::new(cargo)
+                .args(["build", "--package", "vrc-photon-ai-mock-sidecar"])
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .status()
+                .expect("build the mock sidecar");
+            assert!(status.success(), "cargo build failed for the mock sidecar");
+            cargo_bin("mock-sidecar")
+        })
+        .clone()
+    }
+
+    /// Replaces the inert test entrypoint with the mock sidecar so the install
+    /// probe succeeds the same way it does in the daemon's other tests.
+    fn use_mock_sidecar(package: &mut TestPackage) {
+        let entrypoint = std::fs::read(mock_sidecar()).expect("read the mock sidecar binary");
+        let entry = package
+            .entries_mut()
+            .iter_mut()
+            .find(|entry| entry.path == TEST_ENTRYPOINT)
+            .expect("the test package has an entrypoint");
+        entry.data = entrypoint;
+        entry.unix_mode = Some(0o755);
+        let catalog = package
+            .entries_mut()
+            .iter_mut()
+            .find(|entry| entry.path == "catalog.json")
+            .expect("the test package has a catalog");
+        catalog.data = br#"{"version":"2026-11-03.1","outdoor":[],"indoor":[]}"#.to_vec();
+        let files = package
+            .entries()
+            .iter()
+            .map(|entry| ManifestFile {
+                path: entry.path.clone(),
+                size: entry.data.len() as u64,
+                sha256: sha256_hex(&entry.data),
+            })
+            .collect();
+        package.manifest_mut().files = files;
+    }
 
     fn test_control() -> (tempfile::TempDir, Endpoint, IpcControl) {
+        test_control_with_keys(Vec::new())
+    }
+
+    fn test_control_with_keys(keys: Vec<String>) -> (tempfile::TempDir, Endpoint, IpcControl) {
         let dir = tempfile::tempdir().unwrap();
         let endpoint = Endpoint::for_tests(dir.path());
+        let db = Arc::new(Mutex::new(Db::open(dir.path().join("library.db")).unwrap()));
+        let events = EventBus::default();
+        let tagging = Arc::new(JobSignal::default());
+        let plugin = PluginService::new(
+            db.clone(),
+            dir.path().join("ai"),
+            events.clone(),
+            keys,
+            Arc::new(UreqModelClient::new()),
+        );
         let control = IpcControl {
             running: Arc::new(AtomicBool::new(true)),
             status: Arc::new(Mutex::new(DaemonStatus::default())),
             wake: Arc::new(WakeSignal::default()),
             jobs: Arc::new(JobSignal::default()),
             sends: Arc::new(JobSignal::default()),
-            events: EventBus::default(),
+            events,
             thumbnail_dir: dir.path().join("thumbnails"),
             thumbnail_cache_epoch: Arc::new(AtomicU64::new(0)),
             thumbnail_external_bytes: Arc::new(AtomicU64::new(0)),
+            plugin,
+            tagging: tagging.clone(),
+            tagging_control: Arc::new(TaggingControl::new(tagging)),
+            db,
         };
         (dir, endpoint, control)
+    }
+
+    fn install_plugin_row(control: &IpcControl) {
+        let manifest = sample_manifest();
+        let install = PluginInstallation {
+            plugin_id: AI_PLUGIN_ID.to_string(),
+            variant: manifest.variant.clone(),
+            version: manifest.plugin_version.clone(),
+            protocol_version: manifest.protocol_version,
+            path: "/nonexistent/plugin".to_string(),
+            manifest_json: serde_json::to_string(&manifest).unwrap(),
+            catalog_version: Some(manifest.catalog_version.clone()),
+            active: true,
+            installed_at: "2026-11-04T00:00:00Z".to_string(),
+            updated_at: "2026-11-04T00:00:00Z".to_string(),
+        };
+        control
+            .db
+            .lock()
+            .unwrap()
+            .upsert_plugin_installation(&install)
+            .unwrap();
+    }
+
+    fn mark_plugin_ready(control: &IpcControl) {
+        install_plugin_row(control);
+        let manifest = sample_manifest();
+        let probe = Probe {
+            protocol_version: vrc_photon_ai_protocol::PROTOCOL_VERSION,
+            sidecar_version: "1.0.0".to_string(),
+            plugin_id: AI_PLUGIN_ID.to_string(),
+            variant: manifest.variant.clone(),
+            catalog_version: manifest.catalog_version.clone(),
+            backends: Vec::new(),
+        };
+        let db = control.db.lock().unwrap();
+        db.set_plugin_model_state(
+            AI_PLUGIN_ID,
+            ModelState::Ready,
+            Some(&manifest.model.revision),
+            11,
+            Some(11),
+            None,
+        )
+        .unwrap();
+        db.set_plugin_probe_json(AI_PLUGIN_ID, Some(&serde_json::to_string(&probe).unwrap()))
+            .unwrap();
+    }
+
+    /// Sends one request without the public client's error flattening, so
+    /// tests can assert the protocol error code.
+    fn request_raw(endpoint: &Endpoint, request: Request) -> Response {
+        let stream = vrc_photon_ipc::client::connect(endpoint, Duration::from_secs(1)).unwrap();
+        let mut reader = BufReader::new(stream);
+        framing::write_message(
+            reader.get_mut(),
+            &RequestEnvelope {
+                id: 1,
+                request: Request::Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                    client: vrc_photon_ipc::ClientInfo {
+                        name: "test".to_string(),
+                        version: "0".to_string(),
+                    },
+                },
+            },
+        )
+        .unwrap();
+        match framing::read_message(&mut reader).unwrap() {
+            Some(ServerMessage::Response {
+                id: 1,
+                response: Response::Hello { .. },
+            }) => {}
+            other => panic!("unexpected hello response: {other:?}"),
+        }
+        framing::write_message(reader.get_mut(), &RequestEnvelope { id: 2, request }).unwrap();
+        match framing::read_message(&mut reader).unwrap() {
+            Some(ServerMessage::Response { id: 2, response }) => response,
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+
+    fn add_tagging_job(control: &IpcControl, name: &str, status: TaggingJobStatus) -> String {
+        let db = control.db.lock().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo_id = db
+            .upsert_photo(&NewPhoto {
+                root_id: root,
+                rel_path: format!("{name}.png"),
+                abs_path: format!("/photos/{name}.png"),
+                file_name: format!("{name}.png"),
+                captured_at_utc: 1_700_000_000,
+                captured_at_local: "2026-10-21 21:14:03".to_string(),
+                tz_offset_sec: 9 * 3600,
+                width: 16,
+                height: 10,
+                file_size: 10,
+                mtime: 1_700_000_000,
+                blake3: None,
+            })
+            .unwrap();
+        db.enqueue_tagging_jobs(&[photo_id], AI_PLUGIN_ID, status)
+            .unwrap();
+        db.active_tagging_jobs(10)
+            .unwrap()
+            .into_iter()
+            .find(|job| job.photo_id == photo_id)
+            .unwrap()
+            .id
     }
 
     #[test]
@@ -602,6 +896,213 @@ mod tests {
         let response = request(&endpoint, Request::Status, Duration::from_secs(1)).unwrap();
         match response {
             Response::Status { status } => assert_eq!(status.photo_count, 7),
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wake_tagging_notifies_the_worker() {
+        let (_dir, endpoint, control) = test_control();
+        let _server = IpcServer::start(endpoint.clone(), control.clone()).unwrap();
+        let before = control.tagging.generation();
+        let response = request(&endpoint, Request::WakeTagging, Duration::from_secs(1)).unwrap();
+        assert!(matches!(response, Response::Ok));
+        assert!(control.tagging.generation() > before);
+    }
+
+    #[test]
+    fn unknown_plugin_returns_not_found() {
+        let (_dir, endpoint, control) = test_control();
+        let _server = IpcServer::start(endpoint.clone(), control.clone()).unwrap();
+        let response = request_raw(
+            &endpoint,
+            Request::ProbePlugin {
+                plugin_id: "missing-plugin".to_string(),
+            },
+        );
+        assert!(
+            matches!(
+                response,
+                Response::Error {
+                    code: ErrorCode::NotFound,
+                    ..
+                }
+            ),
+            "{response:?}"
+        );
+    }
+
+    #[test]
+    fn uninstall_plugin_returns_ok_and_removes_rows_in_the_background() {
+        let (_dir, endpoint, control) = test_control();
+        install_plugin_row(&control);
+        let _server = IpcServer::start(endpoint.clone(), control.clone()).unwrap();
+
+        let response = request(
+            &endpoint,
+            Request::UninstallPlugin {
+                plugin_id: AI_PLUGIN_ID.to_string(),
+                variant: None,
+                version: None,
+                delete_ai_tags: false,
+            },
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(matches!(response, Response::Ok));
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let removed = control
+                .db
+                .lock()
+                .unwrap()
+                .active_plugin_installation(AI_PLUGIN_ID)
+                .unwrap()
+                .is_none();
+            if removed {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the uninstall worker did not remove the installation"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn model_download_requires_license_consent() {
+        let (_dir, endpoint, control) = test_control();
+        install_plugin_row(&control);
+        let _server = IpcServer::start(endpoint.clone(), control.clone()).unwrap();
+        let response = request_raw(
+            &endpoint,
+            Request::StartModelDownload {
+                plugin_id: AI_PLUGIN_ID.to_string(),
+            },
+        );
+        assert!(
+            matches!(
+                response,
+                Response::Error {
+                    code: ErrorCode::ConsentRequired,
+                    ..
+                }
+            ),
+            "{response:?}"
+        );
+    }
+
+    #[test]
+    fn install_plugin_returns_ok_and_emits_installed_progress() {
+        let mut package = TestPackage::new();
+        use_mock_sidecar(&mut package);
+        let manifest = package.manifest().clone();
+        let (_dir, endpoint, control) = test_control_with_keys(vec![package.public_key()]);
+        let _server = IpcServer::start(endpoint.clone(), control.clone()).unwrap();
+        let zip = package.temp_zip().unwrap();
+        let events = control.events.subscribe();
+        let response = request(
+            &endpoint,
+            Request::InstallPlugin {
+                zip_path: zip.path().to_string_lossy().into_owned(),
+            },
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(matches!(response, Response::Ok));
+
+        // Wait for the terminal event too, so the install worker cannot
+        // outlive the temporary directory.
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match events.recv_timeout(remaining) {
+                Ok(Event::PluginInstallProgress {
+                    status: PluginInstallStatus::Installed,
+                    ..
+                }) => break,
+                Ok(Event::PluginInstallProgress {
+                    status: PluginInstallStatus::Failed,
+                    error,
+                    ..
+                }) => panic!("plugin install failed: {error:?}"),
+                Ok(_) => {}
+                Err(error) => panic!("no install progress was published: {error}"),
+            }
+        }
+
+        let db = control.db.lock().unwrap();
+        let installs = db.list_plugin_installations(AI_PLUGIN_ID).unwrap();
+        assert_eq!(installs.len(), 1);
+        assert!(installs[0].active);
+        assert_eq!(installs[0].variant, manifest.variant);
+        assert_eq!(installs[0].version, manifest.plugin_version);
+        assert!(
+            db.active_plugin_installation(AI_PLUGIN_ID)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn cancel_tagging_cancels_db_and_token() {
+        let (_dir, endpoint, control) = test_control();
+        let job_id = add_tagging_job(&control, "cancel", TaggingJobStatus::Pending);
+        let claimed = control
+            .db
+            .lock()
+            .unwrap()
+            .next_pending_tagging_job()
+            .unwrap()
+            .expect("claim the pending job");
+        assert_eq!(claimed.id, job_id);
+        let token = control.tagging_control.register(&job_id);
+        let _server = IpcServer::start(endpoint.clone(), control.clone()).unwrap();
+
+        let response = request(
+            &endpoint,
+            Request::CancelTagging {
+                job_id: job_id.clone(),
+            },
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(matches!(response, Response::Ok));
+        assert!(token.is_cancelled());
+        let job = control
+            .db
+            .lock()
+            .unwrap()
+            .tagging_job(&job_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.status, TaggingJobStatus::Cancelled);
+    }
+
+    #[test]
+    fn status_includes_ai_counts() {
+        let (_dir, endpoint, control) = test_control();
+        mark_plugin_ready(&control);
+        add_tagging_job(&control, "waiting", TaggingJobStatus::Waiting);
+        add_tagging_job(&control, "pending", TaggingJobStatus::Pending);
+        // The daemon refreshes these cached fields; snapshots do not query the
+        // database on the IPC hot path.
+        let (pending_tagging_jobs, tagging_ready) = tagging_status(&control.db, &control.plugin);
+        {
+            let mut status = control.status.lock().unwrap();
+            status.pending_tagging_jobs = pending_tagging_jobs;
+            status.tagging_ready = tagging_ready;
+        }
+        let _server = IpcServer::start(endpoint.clone(), control.clone()).unwrap();
+
+        let response = request(&endpoint, Request::Status, Duration::from_secs(1)).unwrap();
+        match response {
+            Response::Status { status } => {
+                assert_eq!(status.pending_tagging_jobs, 2);
+                assert!(status.tagging_ready);
+            }
             other => panic!("unexpected response: {other:?}"),
         }
     }
