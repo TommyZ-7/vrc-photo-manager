@@ -193,11 +193,71 @@ impl PluginService {
             .uninstall(plugin_id, variant, version, delete_ai_tags)
     }
 
+    /// Accepts an uninstall, then removes files and rows on a worker thread.
+    ///
+    /// Stopping the sidecar can take seconds, so IPC must not wait for it.
+    /// The target is validated and the lifecycle key is reserved before this
+    /// returns; the worker owns the key until it finishes.
+    pub(crate) fn uninstall_async(
+        &self,
+        plugin_id: &str,
+        variant: Option<&str>,
+        version: Option<&str>,
+        delete_ai_tags: bool,
+    ) -> Result<()> {
+        let guard = self.inner.begin_lifecycle(plugin_id)?;
+        self.inner.uninstall_targets(plugin_id, variant, version)?;
+        let inner = self.inner.clone();
+        let plugin_id = plugin_id.to_string();
+        let variant = variant.map(str::to_string);
+        let version = version.map(str::to_string);
+        thread::Builder::new()
+            .name("plugin-uninstall".to_string())
+            .spawn(move || {
+                let _guard = guard;
+                if let Err(error) = inner.uninstall(
+                    &plugin_id,
+                    variant.as_deref(),
+                    version.as_deref(),
+                    delete_ai_tags,
+                ) {
+                    tracing::warn!(%error, plugin_id = %plugin_id, "AI plugin uninstall failed");
+                }
+            })
+            .map_err(PluginError::Io)?;
+        Ok(())
+    }
+
     /// Runs `--probe` for the active installation.
     pub(crate) fn probe(&self, plugin_id: &str) -> Result<()> {
         let _guard = self.inner.begin_lifecycle(plugin_id)?;
         let install = self.inner.active_install(plugin_id)?;
         self.inner.probe_install(&install)
+    }
+
+    /// Accepts a probe, then spawns and waits for the sidecar on a worker.
+    pub(crate) fn probe_async(&self, plugin_id: &str) -> Result<()> {
+        let guard = self.inner.begin_lifecycle(plugin_id)?;
+        let install = self.inner.active_install(plugin_id)?;
+        let inner = self.inner.clone();
+        thread::Builder::new()
+            .name("plugin-probe".to_string())
+            .spawn(move || {
+                let _guard = guard;
+                if let Err(error) = inner.probe_install(&install) {
+                    tracing::warn!(
+                        %error,
+                        plugin_id = %install.plugin_id,
+                        "AI plugin probe failed"
+                    );
+                    // The probe cache stays empty; tell clients to re-read it.
+                    inner.events.publish(Event::PluginStateChanged {
+                        plugin_id: install.plugin_id.clone(),
+                    });
+                }
+            })
+            .map_err(PluginError::Io)?;
+        Ok(())
     }
 
     pub(crate) fn set_active_variant(
@@ -208,6 +268,59 @@ impl PluginService {
     ) -> Result<()> {
         let _guard = self.inner.begin_lifecycle(plugin_id)?;
         self.inner.set_active_variant(plugin_id, variant, version)
+    }
+
+    /// Switches the active installation synchronously, then stops the old
+    /// sidecar and probes the new variant on a worker thread.
+    ///
+    /// The row change and the cleared probe cache are visible as soon as this
+    /// returns `Ok`, so the UI can render the switch before the sidecar work
+    /// finishes.
+    pub(crate) fn set_active_variant_async(
+        &self,
+        plugin_id: &str,
+        variant: &str,
+        version: Option<&str>,
+    ) -> Result<()> {
+        let guard = self.inner.begin_lifecycle(plugin_id)?;
+        let activated = self
+            .inner
+            .db()
+            .set_active_plugin_installation(plugin_id, variant, version)?;
+        if !activated {
+            return Err(PluginError::NotFound(format!(
+                "{plugin_id} variant={variant} version={version:?}"
+            )));
+        }
+        self.inner.db().set_plugin_probe_json(plugin_id, None)?;
+        self.inner.events.publish(Event::PluginStateChanged {
+            plugin_id: plugin_id.to_string(),
+        });
+
+        let inner = self.inner.clone();
+        let plugin_id = plugin_id.to_string();
+        thread::Builder::new()
+            .name("plugin-variant".to_string())
+            .spawn(move || {
+                let _guard = guard;
+                inner.stop_sidecar();
+                let result = (|| -> Result<()> {
+                    let install = inner.active_install(&plugin_id)?;
+                    inner.probe_install(&install)
+                })();
+                if let Err(error) = result {
+                    tracing::warn!(
+                        %error,
+                        plugin_id = %plugin_id,
+                        "AI plugin probe after variant switch failed"
+                    );
+                    inner.events.publish(Event::PluginStateChanged {
+                        plugin_id: plugin_id.clone(),
+                    });
+                }
+            })
+            .map_err(PluginError::Io)?;
+        Ok(())
     }
 
     /// Starts a model download after checking the licence consent.
@@ -286,6 +399,25 @@ impl PluginService {
         let _guard = self.inner.begin_lifecycle(plugin_id)?;
         let revision = self.inner.stored_model_revision(plugin_id)?;
         self.inner.remove_model_revision(plugin_id, &revision)
+    }
+
+    /// Accepts a model deletion, then stops the sidecar and removes the files
+    /// on a worker thread. The stored revision is validated before returning.
+    pub(crate) fn delete_model_async(&self, plugin_id: &str) -> Result<()> {
+        let guard = self.inner.begin_lifecycle(plugin_id)?;
+        let revision = self.inner.stored_model_revision(plugin_id)?;
+        let inner = self.inner.clone();
+        let plugin_id = plugin_id.to_string();
+        thread::Builder::new()
+            .name("plugin-model-delete".to_string())
+            .spawn(move || {
+                let _guard = guard;
+                if let Err(error) = inner.remove_model_revision(&plugin_id, &revision) {
+                    tracing::warn!(%error, plugin_id = %plugin_id, "AI model delete failed");
+                }
+            })
+            .map_err(PluginError::Io)?;
+        Ok(())
     }
 
     /// Shuts the sidecar down and waits up to its shutdown timeout.
@@ -504,6 +636,39 @@ impl PluginServiceInner {
         result.map(|()| install)
     }
 
+    /// Resolves the installations an uninstall request targets and whether it
+    /// removes the active one. Shared by the synchronous and accepted (async)
+    /// paths so both reject unknown targets before doing any work.
+    fn uninstall_targets(
+        &self,
+        plugin_id: &str,
+        variant: Option<&str>,
+        version: Option<&str>,
+    ) -> Result<(Vec<PluginInstallation>, bool)> {
+        let db = self.db();
+        let targets: Vec<_> = db
+            .list_plugin_installations(plugin_id)?
+            .into_iter()
+            .filter(|install| {
+                variant.is_none_or(|variant| install.variant == variant)
+                    && version.is_none_or(|version| install.version == version)
+            })
+            .collect();
+        if targets.is_empty() {
+            return Err(PluginError::NotFound(format!(
+                "{plugin_id} variant={variant:?} version={version:?}"
+            )));
+        }
+        let removes_active = db
+            .active_plugin_installation(plugin_id)?
+            .is_some_and(|active| {
+                targets.iter().any(|target| {
+                    target.variant == active.variant && target.version == active.version
+                })
+            });
+        Ok((targets, removes_active))
+    }
+
     fn uninstall(
         &self,
         plugin_id: &str,
@@ -511,30 +676,7 @@ impl PluginServiceInner {
         version: Option<&str>,
         delete_ai_tags: bool,
     ) -> Result<()> {
-        let (targets, removes_active) = {
-            let db = self.db();
-            let targets: Vec<_> = db
-                .list_plugin_installations(plugin_id)?
-                .into_iter()
-                .filter(|install| {
-                    variant.is_none_or(|variant| install.variant == variant)
-                        && version.is_none_or(|version| install.version == version)
-                })
-                .collect();
-            if targets.is_empty() {
-                return Err(PluginError::NotFound(format!(
-                    "{plugin_id} variant={variant:?} version={version:?}"
-                )));
-            }
-            let removes_active = db
-                .active_plugin_installation(plugin_id)?
-                .is_some_and(|active| {
-                    targets.iter().any(|target| {
-                        target.variant == active.variant && target.version == active.version
-                    })
-                });
-            (targets, removes_active)
-        };
+        let (targets, removes_active) = self.uninstall_targets(plugin_id, variant, version)?;
 
         if removes_active {
             self.stop_sidecar();
@@ -1937,6 +2079,132 @@ mod tests {
         assert!(cancelled, "a running download must be cancellable");
         ctx.wait_for_model_state(ModelState::Missing);
         assert!(!ctx.service.cancel_model_download(PLUGIN).unwrap());
+    }
+
+    #[test]
+    fn async_probe_runs_in_the_background() {
+        let ctx = TestContext::new();
+        ctx.install_default();
+        ctx.make_model_ready();
+        ctx.db().set_plugin_probe_json(PLUGIN, None).unwrap();
+        assert!(!ctx.service.is_ready(PLUGIN));
+
+        ctx.service.probe_async(PLUGIN).unwrap();
+
+        ctx.wait_for("the background probe", || ctx.service.is_ready(PLUGIN));
+    }
+
+    #[test]
+    fn async_probe_returns_busy_while_the_worker_holds_the_key() {
+        let ctx = TestContext::new();
+        ctx.install_default();
+        let install = ctx
+            .db()
+            .active_plugin_installation(PLUGIN)
+            .unwrap()
+            .unwrap();
+        let executable = Path::new(&install.path).join(TEST_ENTRYPOINT);
+        fs::write(&executable, b"#!/bin/sh\nsleep 2\nexit 1\n").unwrap();
+
+        ctx.service.probe_async(PLUGIN).unwrap();
+        let error = ctx.service.probe_async(PLUGIN).unwrap_err();
+        assert!(matches!(error, PluginError::Busy(_)), "{error:?}");
+        ctx.wait_for("the background probe", || {
+            !ctx.service.operation_active(PLUGIN)
+        });
+    }
+
+    #[test]
+    fn async_variant_switch_updates_the_row_before_the_sidecar_work() {
+        let ctx = TestContext::new();
+        ctx.install_default();
+        let vulkan = ctx.package("linux-vulkan", "vulkan", &[]);
+        let zip = ctx.write_zip("vulkan-async.zip", &vulkan);
+        ctx.service.install_from_zip(&zip).unwrap();
+        ctx.wait_for_install();
+        ctx.wait_for_installation_count(2);
+        ctx.service
+            .set_active_variant(PLUGIN, "linux-cpu", None)
+            .unwrap();
+        ctx.make_model_ready();
+        ctx.service.probe(PLUGIN).unwrap();
+        assert!(ctx.service.is_ready(PLUGIN));
+
+        let events = ctx.events.subscribe();
+        ctx.service
+            .set_active_variant_async(PLUGIN, "linux-vulkan", None)
+            .unwrap();
+
+        let active = ctx
+            .db()
+            .active_plugin_installation(PLUGIN)
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.variant, "linux-vulkan");
+        ctx.wait_for("the background variant probe", || {
+            ctx.service.is_ready(PLUGIN)
+        });
+        assert_eq!(
+            ctx.service.sidecar().unwrap().hello().variant,
+            "linux-vulkan"
+        );
+        ctx.collect_events(&events, |events| {
+            events.iter().any(|event| {
+                matches!(event, Event::PluginStateChanged { plugin_id } if plugin_id == PLUGIN)
+            })
+        });
+    }
+
+    #[test]
+    fn async_delete_model_removes_files_in_the_background() {
+        let ctx = TestContext::new();
+        let error = ctx.service.delete_model_async(PLUGIN).unwrap_err();
+        assert!(matches!(error, PluginError::NotFound(_)), "{error:?}");
+
+        ctx.install_default();
+        ctx.make_model_ready();
+        let directory = model_dir(&ctx.data_dir, PLUGIN, &sample_manifest().model.revision);
+        assert!(directory.exists());
+
+        ctx.service.delete_model_async(PLUGIN).unwrap();
+
+        ctx.wait_for("the background model delete", || {
+            !directory.exists()
+                && ctx.db().plugin_state(PLUGIN).unwrap().unwrap().model_state
+                    == ModelState::Missing
+        });
+        assert!(!ctx.service.is_ready(PLUGIN));
+    }
+
+    #[test]
+    fn async_uninstall_rejects_unknown_and_removes_in_the_background() {
+        let ctx = TestContext::new();
+        let error = ctx
+            .service
+            .uninstall_async(PLUGIN, None, None, true)
+            .unwrap_err();
+        assert!(matches!(error, PluginError::NotFound(_)), "{error:?}");
+
+        ctx.install_default();
+        let install_path = PathBuf::from(
+            &ctx.db()
+                .active_plugin_installation(PLUGIN)
+                .unwrap()
+                .unwrap()
+                .path,
+        );
+
+        ctx.service
+            .uninstall_async(PLUGIN, None, None, true)
+            .unwrap();
+
+        ctx.wait_for("the background uninstall", || {
+            ctx.db()
+                .active_plugin_installation(PLUGIN)
+                .unwrap()
+                .is_none()
+                && !install_path.exists()
+        });
     }
 
     #[test]

@@ -353,7 +353,7 @@ fn handle_connection(
                 version,
                 delete_ai_tags,
             } => {
-                let response = plugin_ack(control.plugin.uninstall(
+                let response = plugin_ack(control.plugin.uninstall_async(
                     &plugin_id,
                     variant.as_deref(),
                     version.as_deref(),
@@ -362,7 +362,7 @@ fn handle_connection(
                 write_response(reader.get_mut(), id, response)?;
             }
             Request::ProbePlugin { plugin_id } => {
-                let response = plugin_ack(control.plugin.probe(&plugin_id));
+                let response = plugin_ack(control.plugin.probe_async(&plugin_id));
                 write_response(reader.get_mut(), id, response)?;
             }
             Request::SetActiveVariant {
@@ -370,7 +370,7 @@ fn handle_connection(
                 variant,
                 version,
             } => {
-                let response = plugin_ack(control.plugin.set_active_variant(
+                let response = plugin_ack(control.plugin.set_active_variant_async(
                     &plugin_id,
                     &variant,
                     version.as_deref(),
@@ -394,7 +394,7 @@ fn handle_connection(
                 write_response(reader.get_mut(), id, response)?;
             }
             Request::DeleteModel { plugin_id } => {
-                let response = plugin_ack(control.plugin.delete_model(&plugin_id));
+                let response = plugin_ack(control.plugin.delete_model_async(&plugin_id));
                 write_response(reader.get_mut(), id, response)?;
             }
             Request::CancelTagging { job_id } => {
@@ -894,6 +894,45 @@ mod tests {
             ),
             "{response:?}"
         );
+    }
+
+    #[test]
+    fn uninstall_plugin_returns_ok_and_removes_rows_in_the_background() {
+        let (_dir, endpoint, control) = test_control();
+        install_plugin_row(&control);
+        let _server = IpcServer::start(endpoint.clone(), control.clone()).unwrap();
+
+        let response = request(
+            &endpoint,
+            Request::UninstallPlugin {
+                plugin_id: AI_PLUGIN_ID.to_string(),
+                variant: None,
+                version: None,
+                delete_ai_tags: false,
+            },
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(matches!(response, Response::Ok));
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let removed = control
+                .db
+                .lock()
+                .unwrap()
+                .active_plugin_installation(AI_PLUGIN_ID)
+                .unwrap()
+                .is_none();
+            if removed {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the uninstall worker did not remove the installation"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
