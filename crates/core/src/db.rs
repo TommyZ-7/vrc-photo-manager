@@ -4686,6 +4686,44 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Active jobs for the runtime card, ordered so the jobs actually running
+    /// are never pushed out by a large ready queue. Processing jobs come first
+    /// (oldest start first), then pending jobs (oldest first). The waiting
+    /// backlog is excluded: the card never shows waiting rows, so including
+    /// them in the limited snapshot only hides real work.
+    pub fn active_tagging_jobs_for_ui(&self, limit: i64) -> Result<Vec<TaggingJob>> {
+        let limit = limit.max(1);
+        let mut jobs = self.tagging_jobs_with_status(
+            TaggingJobStatus::Processing,
+            "COALESCE(started_at, created_at), created_at, rowid",
+            limit,
+        )?;
+        let remaining = limit - i64::try_from(jobs.len()).unwrap_or(limit);
+        if remaining > 0 {
+            jobs.extend(self.tagging_jobs_with_status(
+                TaggingJobStatus::Pending,
+                "created_at, rowid",
+                remaining,
+            )?);
+        }
+        Ok(jobs)
+    }
+
+    fn tagging_jobs_with_status(
+        &self,
+        status: TaggingJobStatus,
+        order: &str,
+        limit: i64,
+    ) -> Result<Vec<TaggingJob>> {
+        let sql = format!(
+            "SELECT {} FROM tagging_jobs WHERE status = ?1 ORDER BY {order} LIMIT ?2",
+            TAGGING_JOB_COLUMNS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![status.as_str(), limit], row_to_tagging_job)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     pub fn tagging_jobs_for_photo(&self, photo_id: i64) -> Result<Vec<TaggingJob>> {
         let sql = format!(
             "SELECT {} FROM tagging_jobs WHERE photo_id = ?1 \
@@ -8861,6 +8899,49 @@ mod tests {
         assert_eq!(counts.waiting, 0);
         assert_eq!(counts.pending, 2);
         assert_eq!(db.tagging_job_counts("other-plugin").unwrap().waiting, 1);
+    }
+
+    #[test]
+    fn ui_active_jobs_prioritize_processing_over_the_ready_queue() {
+        let db = Db::open_in_memory().unwrap();
+        let photos = seed_photos(&db, 25);
+        assert_eq!(
+            db.enqueue_tagging_jobs(&photos, AI_PLUGIN, TaggingJobStatus::Pending)
+                .unwrap(),
+            25
+        );
+
+        let mut claimed = Vec::new();
+        for _ in 0..3 {
+            claimed.push(db.next_pending_tagging_job().unwrap().unwrap());
+        }
+
+        let ui = db.active_tagging_jobs_for_ui(3).unwrap();
+        assert_eq!(ui.len(), 3, "the three running jobs must fill the card");
+        assert!(
+            ui.iter()
+                .all(|job| job.status == TaggingJobStatus::Processing)
+        );
+        let mut ui_ids: Vec<_> = ui.iter().map(|job| job.id.clone()).collect();
+        let mut claimed_ids: Vec<_> = claimed.iter().map(|job| job.id.clone()).collect();
+        ui_ids.sort();
+        claimed_ids.sort();
+        assert_eq!(ui_ids, claimed_ids);
+
+        // A larger snapshot adds pending work after the running jobs, never
+        // before them.
+        let wider = db.active_tagging_jobs_for_ui(5).unwrap();
+        assert_eq!(wider.len(), 5);
+        assert!(
+            wider[..3]
+                .iter()
+                .all(|job| job.status == TaggingJobStatus::Processing)
+        );
+        assert!(
+            wider[3..]
+                .iter()
+                .all(|job| job.status == TaggingJobStatus::Pending)
+        );
     }
 
     #[test]

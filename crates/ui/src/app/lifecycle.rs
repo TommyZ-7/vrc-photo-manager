@@ -133,6 +133,10 @@ impl App {
                 self.last_status_version = status.version;
                 self.refresh_monitor();
                 self.apply_daemon_status(status);
+                // A restarted daemon may have finished an install/probe while
+                // the link was down. Reload the cards and the inspector.
+                self.refresh_ai_state(cx);
+                self.refresh_selected_ai(cx);
                 // A batch held while disconnected can now be reported.
                 self.flush_thumbnail_notice(cx);
             }
@@ -147,6 +151,10 @@ impl App {
                 self.daemon_shutdown_armed = false;
                 self.scan_progress = None;
                 self.import_scan_target = None;
+                // No daemon event can finish an in-flight install, probe, or
+                // download while the link is down. Drop the transient state so
+                // the cards cannot stay on "Installing…".
+                self.ai.reset_connection();
                 if was_connected {
                     self.refresh_monitor();
                 }
@@ -228,12 +236,13 @@ impl App {
                     self.refresh_monitor();
                 }
             }
-            // AI tagging events are not surfaced yet. The daemon already
-            // publishes them for the screens added in a later change.
-            IpcEvent::TaggingProgress { .. }
+            // AI tagging state is owned by `app::ai`.
+            event @ (IpcEvent::TaggingProgress { .. }
             | IpcEvent::PluginInstallProgress { .. }
             | IpcEvent::PluginStateChanged { .. }
-            | IpcEvent::ModelDownloadProgress { .. } => {}
+            | IpcEvent::ModelDownloadProgress { .. }) => {
+                self.handle_ai_event(event, cx);
+            }
         }
     }
 
@@ -692,6 +701,7 @@ impl App {
         self.reload_send_history(cx);
         let previous_language = self.settings.language.clone();
         let previous_auto_compress = self.settings.auto_compress;
+        let previous_ai_tagging_enabled = self.settings.ai_tagging_enabled;
         let previous_clipboard_enabled = self.settings.clipboard_enabled;
         let previous_discord_enabled = self.settings.discord_enabled;
         let previous_thumbnail_spec = self.settings.thumbnail_spec();
@@ -708,6 +718,14 @@ impl App {
         if self.settings.auto_compress != previous_auto_compress {
             self.integrations_auto_motion =
                 crate::state::motion::ToggleMotion::settled(if self.settings.auto_compress {
+                    0.0
+                } else {
+                    1.0
+                });
+        }
+        if self.settings.ai_tagging_enabled != previous_ai_tagging_enabled {
+            self.integrations_ai_motion =
+                crate::state::motion::ToggleMotion::settled(if self.settings.ai_tagging_enabled {
                     0.0
                 } else {
                     1.0

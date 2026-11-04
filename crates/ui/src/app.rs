@@ -1,3 +1,4 @@
+pub(crate) mod ai;
 pub(crate) mod cli;
 pub(crate) mod compression;
 pub(crate) mod daemon;
@@ -26,6 +27,7 @@ use gpui_kit::component::notification::NotificationType;
 use gpui_kit::component::slider::{SliderEvent, SliderState};
 use gpui_kit::component::*;
 use gpui_kit::*;
+use vrc_photon_core::ai::{PhotoAi, PhotoAiTagView};
 use vrc_photon_core::db::Db;
 use vrc_photon_core::model::{
     CompressionJob, CompressionProfile, DaemonError, DeletionCounts, DeletionRequest, Derivative,
@@ -190,6 +192,8 @@ pub struct App {
     pub(crate) selected_photo: Option<Photo>,
     pub(crate) selected_players: Vec<PhotoPlayer>,
     pub(crate) selected_tags: Vec<String>,
+    pub(crate) selected_ai: Option<PhotoAi>,
+    pub(crate) selected_ai_tags: Vec<PhotoAiTagView>,
     pub(crate) selected_derivatives: Vec<Derivative>,
     pub(crate) compressed_ids: HashSet<i64>,
     pub(crate) duplicate_ids: HashSet<i64>,
@@ -251,8 +255,27 @@ pub struct App {
     /// Library revision the cached stats were computed for.
     pub(crate) stats_revision: i64,
     pub(crate) settings: AppSettings,
+    /// AI tagging plugin, model, queue, and transient operation state.
+    pub(crate) ai: ai::AiUiState,
+    /// A 250 ms event-burst refresh of the AI cards is already queued.
+    pub(crate) ai_refresh_scheduled: bool,
+    /// The queued AI refresh must also reload the selected inspector photo.
+    pub(crate) ai_selected_refresh_pending: bool,
+    /// The focused AI chip whose full tooltip is shown inline. Handles are
+    /// per-panel, so the inspector and Quick Look cannot light up each other's
+    /// chips.
+    pub(crate) ai_tag_focused: Option<FocusHandle>,
+    /// Focus traps for the AI license and uninstall dialogs.
+    pub(crate) ai_license_focus: FocusHandle,
+    pub(crate) ai_uninstall_focus: FocusHandle,
+    /// Focus restored after the AI dialog closes.
+    pub(crate) ai_modal_return_focus: Option<FocusHandle>,
+    /// The next render should move focus into the open AI dialog.
+    pub(crate) ai_modal_focus_pending: bool,
     /// 0 = body expanded, 1 = collapsed to the card header.
     pub(crate) integrations_auto_motion: ToggleMotion,
+    /// 0 = runtime details expanded, 1 = collapsed while AI is disabled.
+    pub(crate) integrations_ai_motion: ToggleMotion,
     pub(crate) integrations_clipboard_motion: ToggleMotion,
     pub(crate) integrations_discord_motion: ToggleMotion,
     /// Stored webhook URL. It is never rendered in full: the card masks it via
@@ -366,15 +389,21 @@ pub struct App {
 }
 
 /// True while any full-window overlay owns the input tree: the quick-look
-/// viewer, the manual-compression dialog, or the import dialog. Global
-/// shortcuts that reshape the shell must not fire through these layers.
+/// viewer, the manual-compression dialog, the import dialog, an AI plugin
+/// dialog, or the notification modal. Global shortcuts that reshape the shell
+/// must not fire through these layers.
 pub(crate) fn any_overlay_open(
     quick_look_open: bool,
     manual_compression_open: bool,
     import_dialog_open: bool,
+    ai_modal_open: bool,
     notification_modal_open: bool,
 ) -> bool {
-    quick_look_open || manual_compression_open || import_dialog_open || notification_modal_open
+    quick_look_open
+        || manual_compression_open
+        || import_dialog_open
+        || ai_modal_open
+        || notification_modal_open
 }
 
 /// Whether a global shortcut (sidebar / inspector / search / quick look)
@@ -440,6 +469,7 @@ impl App {
             self.quick_look_open,
             self.manual_compress.is_some(),
             self.import_dialog.is_some(),
+            self.ai.license_modal_open || self.ai.uninstall_modal_open,
             self.notification_modal_open,
         )
     }
@@ -716,6 +746,8 @@ impl App {
         let quick_look_note_cancel_focus = cx.focus_handle();
         let notification_close_focus = cx.focus_handle();
         let notification_modal_focus = cx.focus_handle();
+        let ai_license_focus = cx.focus_handle();
+        let ai_uninstall_focus = cx.focus_handle();
         let ribbon_collapse_focus = cx.focus_handle();
         let notification_bell_focus = cx.focus_handle();
         let ribbon_import_copy_focus = cx.focus_handle();
@@ -883,6 +915,8 @@ impl App {
             selected_photo: None,
             selected_players: Vec::new(),
             selected_tags: Vec::new(),
+            selected_ai: None,
+            selected_ai_tags: Vec::new(),
             selected_derivatives: Vec::new(),
             compressed_ids: HashSet::new(),
             duplicate_ids: HashSet::new(),
@@ -936,7 +970,20 @@ impl App {
             stats: LibraryStats::default(),
             stats_revision: -1,
             settings: AppSettings::default(),
+            ai: ai::AiUiState::default(),
+            ai_refresh_scheduled: false,
+            ai_selected_refresh_pending: false,
+            ai_tag_focused: None,
+            ai_license_focus,
+            ai_uninstall_focus,
+            ai_modal_return_focus: None,
+            ai_modal_focus_pending: false,
             integrations_auto_motion: ToggleMotion::settled(if initial_settings.auto_compress {
+                0.0
+            } else {
+                1.0
+            }),
+            integrations_ai_motion: ToggleMotion::settled(if initial_settings.ai_tagging_enabled {
                 0.0
             } else {
                 1.0
@@ -1042,6 +1089,7 @@ impl App {
             demo_assets,
         };
         app.ensure_profiles();
+        app.ai.apply_snapshot(ai::collect_ai_snapshot(&app.db));
         app.reload_all(true, cx);
         app.apply_palette(app.palette, cx);
         if let Some(message) = message {
@@ -1220,6 +1268,12 @@ impl Render for App {
             if self.import_dialog.is_some() {
                 root = root.child(self.import_modal_overlay(window, cx));
             }
+            if self.ai.license_modal_open {
+                root = root.child(self.ai_license_overlay(window, cx));
+            }
+            if self.ai.uninstall_modal_open {
+                root = root.child(self.ai_uninstall_overlay(window, cx));
+            }
         } else {
             root = root.child(self.quick_look(window, cx));
         }
@@ -1322,12 +1376,13 @@ mod tests {
     }
 
     #[test]
-    fn overlay_guard_covers_the_viewer_and_both_modals() {
-        assert!(!any_overlay_open(false, false, false, false));
-        assert!(any_overlay_open(true, false, false, false));
-        assert!(any_overlay_open(false, true, false, false));
-        assert!(any_overlay_open(false, false, true, false));
-        assert!(any_overlay_open(false, false, false, true));
+    fn overlay_guard_covers_the_viewer_and_all_modals() {
+        assert!(!any_overlay_open(false, false, false, false, false));
+        assert!(any_overlay_open(true, false, false, false, false));
+        assert!(any_overlay_open(false, true, false, false, false));
+        assert!(any_overlay_open(false, false, true, false, false));
+        assert!(any_overlay_open(false, false, false, true, false));
+        assert!(any_overlay_open(false, false, false, false, true));
     }
 
     #[test]
