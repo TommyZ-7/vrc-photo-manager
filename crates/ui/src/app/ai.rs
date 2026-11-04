@@ -1064,6 +1064,12 @@ pub(crate) fn ai_error_toast_in(language: &str, error: &AiErrorInfo) -> String {
     }
 }
 
+/// The terminal state event after a Recheck/variant switch carries no probe.
+/// That is a failed plugin operation, not an install failure.
+pub(crate) fn probe_failure_info() -> AiErrorInfo {
+    AiErrorInfo::new(AiErrorKind::Operation, "plugin_probe_failed", None)
+}
+
 fn request_error_kind(request: &IpcRequest) -> AiErrorKind {
     match request {
         IpcRequest::InstallPlugin { .. } => AiErrorKind::Install,
@@ -1642,7 +1648,7 @@ impl App {
                 // the authoritative point to reload the inspector.
                 self.refresh_selected_ai(cx);
                 if self.ai.finish_probe() {
-                    let info = AiErrorInfo::new(AiErrorKind::Install, "plugin_probe_failed", None);
+                    let info = probe_failure_info();
                     self.toast_error(
                         ai_error_toast_in(&vrc_photon_i18n::current_locale(), &info),
                         cx,
@@ -1732,8 +1738,8 @@ mod tests {
         download_progress_bar_ratio, enqueue_manual_retag, format_tagged_at,
         install_event_applies_to_ai, installation_row_id, is_active_installation, load_photo_ai,
         model_progress_ratio, needs_license_consent, people_label, people_label_in, place_label,
-        place_label_with_confidence, request_error_kind, uninstall_request_args,
-        variant_backend_label,
+        place_label_with_confidence, probe_failure_info, request_error_kind,
+        uninstall_request_args, variant_backend_label,
     };
     use vrc_photon_ai_protocol::{
         BackendInfo, Catalog, ModelState, PluginInstallStatus, Probe, TagDefinition,
@@ -2220,6 +2226,22 @@ mod tests {
         ai.probe = Some(sample_probe());
         assert!(!ai.finish_probe(), "a stored terminal probe is a success");
         assert!(!ai.finish_probe(), "the pending flag was consumed");
+    }
+
+    #[test]
+    fn probe_failure_uses_the_operation_label() {
+        let error = probe_failure_info();
+        assert_eq!(error.kind, AiErrorKind::Operation);
+
+        let toast = ai_error_toast_in("en", &error);
+        assert_eq!(
+            toast,
+            "The AI tagging operation failed: The plugin probe failed"
+        );
+        assert!(
+            !toast.contains("install"),
+            "a failed probe must not be labelled as an install failure: {toast}"
+        );
     }
 
     #[test]
