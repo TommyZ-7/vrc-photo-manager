@@ -560,3 +560,155 @@ fn progress_events(
     }
     events
 }
+
+/// Manual real-sidecar E2E. Not part of CI: it needs the signed dev ZIP and
+/// the 2 GB d1-2B model files. Run with:
+///
+/// ```text
+/// VRC_PHOTON_AUTOTAG_DEV_ZIP=... VRC_PHOTON_AUTOTAG_MODEL_DIR=... \
+///   cargo test -p vrc-photon-daemon real_sidecar_install_import_and_tag -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "requires VRC_PHOTON_AUTOTAG_DEV_ZIP and VRC_PHOTON_AUTOTAG_MODEL_DIR"]
+fn real_sidecar_install_import_and_tag() {
+    let zip = std::env::var("VRC_PHOTON_AUTOTAG_DEV_ZIP").expect("dev ZIP path");
+    let model_dir =
+        PathBuf::from(std::env::var("VRC_PHOTON_AUTOTAG_MODEL_DIR").expect("model dir"));
+    let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+    let dir = tempfile::Builder::new()
+        .prefix("real-ai-e2e-")
+        .tempdir_in(target)
+        .expect("create the test directory");
+    let photo_dir = dir.path().join("photos");
+    let log_dir = dir.path().join("logs");
+    fs::create_dir_all(&photo_dir).unwrap();
+    fs::create_dir_all(&log_dir).unwrap();
+    let mut daemon = Daemon::open(
+        dir.path().join("library.db"),
+        Some(photo_dir.clone()),
+        Some(log_dir),
+    )
+    .expect("open the daemon");
+    daemon.set_ipc_endpoint(None);
+    daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+    daemon.set_ai_data_dir(dir.path().join("ai"));
+
+    let install_rx = daemon.events.subscribe();
+    daemon
+        .plugin_service()
+        .install_from_zip(Path::new(&zip))
+        .expect("accept the dev ZIP");
+    wait_for_install(&install_rx);
+    let install = daemon
+        .db
+        .lock()
+        .unwrap()
+        .active_plugin_installation(PLUGIN)
+        .unwrap()
+        .expect("the dev ZIP is active");
+    assert_eq!(install.variant, "linux-cpu");
+    assert!(
+        daemon
+            .db
+            .lock()
+            .unwrap()
+            .plugin_state(PLUGIN)
+            .unwrap()
+            .expect("plugin state")
+            .probe_json
+            .is_some(),
+        "the dev ZIP must probe"
+    );
+
+    let models = [
+        model_dir.join("d1-2B-Q8_0.gguf"),
+        model_dir.join("mmproj-d1-2B-Q8_0.gguf"),
+    ];
+    daemon
+        .plugin_service()
+        .import_model_files(PLUGIN, &models)
+        .expect("import the real model");
+    let deadline = Instant::now() + Duration::from_secs(180);
+    loop {
+        let state = daemon.db.lock().unwrap().plugin_state(PLUGIN).unwrap();
+        if state
+            .as_ref()
+            .is_some_and(|state| state.model_state == ModelState::Ready)
+            && !daemon.plugin_service().operation_active(PLUGIN)
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "timed out importing the model");
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(daemon.plugin_service().is_ready(PLUGIN));
+
+    {
+        let db = daemon.db.lock().unwrap();
+        let mut settings = AppSettings::load(&db).unwrap();
+        settings.ai_tagging_enabled = true;
+        settings.ai_tagging_auto = false;
+        settings.save(&db).unwrap();
+    }
+    daemon.settings.ai_tagging_enabled = true;
+    daemon.settings.ai_tagging_auto = false;
+
+    let path = photo_dir.join("VRChat_2026-11-04_20-00-00.000_16x9.png");
+    image::RgbaImage::from_pixel(1280, 720, image::Rgba([20, 30, 40, 255]))
+        .save(&path)
+        .unwrap();
+    daemon.scan_photos().expect("scan the photo");
+    let photo = daemon
+        .db
+        .lock()
+        .unwrap()
+        .photo_by_path(path.to_str().unwrap())
+        .unwrap()
+        .expect("the photo is indexed")
+        .id;
+    daemon
+        .db
+        .lock()
+        .unwrap()
+        .enqueue_tagging_jobs(&[photo], PLUGIN, TaggingJobStatus::Pending)
+        .unwrap();
+    let worker = TaggingWorker::new(
+        daemon.db.clone(),
+        daemon.ai_data_dir.clone(),
+        daemon.plugin_service().clone(),
+        daemon.events.clone(),
+        daemon.running.clone(),
+        daemon.tagging.clone(),
+        daemon.tagging_control.clone(),
+        TaggingWorkerConfig {
+            retry_delays: [Duration::from_secs(1), Duration::from_secs(2)],
+            idle_timeout: Duration::from_secs(600),
+            poll_interval: Duration::from_millis(20),
+        },
+    );
+    assert!(worker.process_once().expect("run the real worker"));
+    let ai = daemon
+        .db
+        .lock()
+        .unwrap()
+        .photo_ai(photo)
+        .unwrap()
+        .expect("the real sidecar wrote photo_ai");
+    println!(
+        "real sidecar: present={} p={} people={:?}..{:?} place={:?} tags={}",
+        ai.character_present,
+        ai.presence_probability,
+        ai.people_min,
+        ai.people_max,
+        ai.place_branch,
+        daemon
+            .db
+            .lock()
+            .unwrap()
+            .photo_ai_tags(photo, false)
+            .unwrap()
+            .len()
+    );
+    assert!(!ai.variant.is_empty());
+    assert_eq!(ai.catalog_version, TEST_CATALOG_VERSION);
+}
