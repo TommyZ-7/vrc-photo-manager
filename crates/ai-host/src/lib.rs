@@ -5,9 +5,11 @@
 //! `manifest.json` whose `files` list covers every other file in the ZIP.
 
 pub mod error;
+pub mod http;
 pub mod install;
 pub mod layout;
 pub mod manifest;
+pub mod model;
 pub mod sidecar;
 pub mod verify;
 
@@ -15,11 +17,15 @@ pub mod verify;
 pub mod test_support;
 
 pub use error::{AiHostError, Result};
+pub use http::{ModelHttpClient, UreqModelClient};
 pub use install::{InstallLimits, InstalledPlugin, install_from_zip, install_from_zip_with_limits};
 pub use layout::{plugin_dir, plugins_root};
 pub use manifest::{
     FORMAT_VERSION, ManifestFile, ManifestModel, ManifestModelFile, ManifestPart, ModelFileRole,
     PluginManifest, model_file_role, parse_manifest, validate_manifest,
+};
+pub use model::{
+    ModelCheck, check_model, delete_model, download_model, import_model_files, model_dir,
 };
 pub use sidecar::{
     CancelToken, ModelPaths, SidecarClient, SidecarConfig, SidecarPaths, SidecarTimeouts,

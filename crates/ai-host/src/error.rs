@@ -28,6 +28,8 @@ pub enum AiHostError {
     UnlistedEntry(String),
     #[error("integrity check failed: {0}")]
     Integrity(String),
+    #[error("model download failed: {0}")]
+    Network(String),
     #[error("install limit exceeded: {0}")]
     LimitExceeded(String),
     #[error("model files split into parts are not supported")]
@@ -79,6 +81,10 @@ mod tests {
         assert_eq!(
             AiHostError::SidecarFatal("boom".to_string()).to_string(),
             "sidecar fatal error: boom"
+        );
+        assert_eq!(
+            AiHostError::Network("timed out".to_string()).to_string(),
+            "model download failed: timed out"
         );
         assert_eq!(
             AiHostError::SidecarRejected(SidecarError {
