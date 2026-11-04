@@ -32,6 +32,7 @@ use vrc_photon_ipc::{Endpoint, Event, JobStatus, Operation, ScanPhase as IpcScan
 mod discord;
 mod discord_http;
 mod ipc_server;
+pub(crate) mod plugin;
 mod signals;
 mod tray;
 mod vrchat_process;
@@ -39,8 +40,10 @@ mod world_name_http;
 mod world_names;
 use discord_http::UreqTransport;
 use ipc_server::{EventBus, IpcControl, IpcServer, status_snapshot};
+use plugin::PluginService;
 use signals::{JobSignal, WakeSignal};
 use tray::{Tray, TrayAction};
+use vrc_photon_ai_host::{ModelHttpClient, UreqModelClient};
 use world_name_http::UreqWorldNameTransport;
 
 const PARSER_VERSION: &str = "1";
@@ -259,6 +262,14 @@ pub struct Daemon {
     /// Bytes of thumbnails the UI generated itself, as reported over IPC.
     thumbnail_external_bytes: Arc<AtomicU64>,
     last_errors: HashMap<DaemonOperation, String>,
+    /// AI plugin installs, model files, probe cache, and the lazy sidecar.
+    plugin: PluginService,
+    #[cfg(test)]
+    ai_data_dir: PathBuf,
+    #[cfg(test)]
+    ai_plugin_keys: Vec<String>,
+    #[cfg(test)]
+    ai_http: Arc<dyn ModelHttpClient>,
 }
 
 impl Daemon {
@@ -371,8 +382,24 @@ impl Daemon {
                 }
             });
 
+        let db = Arc::new(Mutex::new(db));
+        let events = EventBus::default();
+        let ai_data_dir = vrc_photon_core::data_dir().unwrap_or_else(|| PathBuf::from("."));
+        let ai_plugin_keys = vrc_photon_ai_host::effective_plugin_keys();
+        let ai_http: Arc<dyn ModelHttpClient> = Arc::new(UreqModelClient::new());
+        let plugin = PluginService::new(
+            db.clone(),
+            ai_data_dir.clone(),
+            events.clone(),
+            ai_plugin_keys.clone(),
+            ai_http.clone(),
+        );
+        if owns_deletion_executor && let Err(error) = plugin.recover_interrupted_model_state() {
+            tracing::warn!(%error, "cannot recover interrupted AI model state");
+        }
+
         Ok(Self {
-            db: Arc::new(Mutex::new(db)),
+            db,
             settings,
             status: Arc::new(Mutex::new(DaemonStatus::default())),
             running: Arc::new(AtomicBool::new(true)),
@@ -381,7 +408,7 @@ impl Daemon {
             sends: Arc::new(JobSignal::default()),
             world_names: Arc::new(JobSignal::default()),
             world_name_resolution_enabled,
-            events: EventBus::default(),
+            events,
             ipc_endpoint,
             ipc: None,
             watchers: Vec::new(),
@@ -414,6 +441,13 @@ impl Daemon {
             thumbnail_cache_epoch: Arc::new(AtomicU64::new(0)),
             thumbnail_external_bytes: Arc::new(AtomicU64::new(0)),
             last_errors,
+            plugin,
+            #[cfg(test)]
+            ai_data_dir,
+            #[cfg(test)]
+            ai_plugin_keys,
+            #[cfg(test)]
+            ai_http,
         })
     }
 
@@ -430,6 +464,40 @@ impl Daemon {
         if !enabled {
             self.tray = None;
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_ai_data_dir(&mut self, path: PathBuf) {
+        self.ai_data_dir = path;
+        self.rebuild_plugin_service();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_ai_plugin_keys(&mut self, keys: Vec<String>) {
+        self.ai_plugin_keys = keys;
+        self.rebuild_plugin_service();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_ai_http_client(&mut self, client: Arc<dyn ModelHttpClient>) {
+        self.ai_http = client;
+        self.rebuild_plugin_service();
+    }
+
+    #[cfg(test)]
+    fn rebuild_plugin_service(&mut self) {
+        self.plugin = PluginService::new(
+            self.db.clone(),
+            self.ai_data_dir.clone(),
+            self.events.clone(),
+            self.ai_plugin_keys.clone(),
+            self.ai_http.clone(),
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn plugin_service(&self) -> &PluginService {
+        &self.plugin
     }
 
     /// Overrides the resolved IPC endpoint. Tests disable it with `None`.
@@ -2109,6 +2177,7 @@ impl Daemon {
                 tracing::warn!(%error, "cannot finish log ingestion on shutdown");
             }
         }
+        self.plugin.stop_sidecar();
         self.tray = None;
         self.stop_workers();
     }
@@ -4367,6 +4436,19 @@ mod tests {
         let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
         daemon.set_ipc_endpoint(None);
         daemon
+    }
+
+    #[test]
+    fn daemon_ai_plugin_service_uses_injected_configuration() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let ai_dir = dir.path().join("ai");
+
+        daemon.set_ai_data_dir(ai_dir);
+        daemon.set_ai_plugin_keys(vec!["test-key".to_string()]);
+        daemon.set_ai_http_client(Arc::new(UreqModelClient::new()));
+
+        assert!(!daemon.plugin_service().is_ready("vrc-photon-autotag"));
     }
 
     fn original_path(dir: &tempfile::TempDir) -> PathBuf {
