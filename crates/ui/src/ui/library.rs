@@ -20,7 +20,8 @@ use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::App;
 use crate::app::ai::{
-    ai_tag_views_with_context, format_tagged_at, people_label_in, place_label_with_confidence,
+    ai_empty_state_labels, ai_tag_views_with_context, format_tagged_at, people_label_in,
+    place_label_with_confidence,
 };
 use crate::app::cli::log_timing;
 use crate::app::daemon::open_path;
@@ -29,6 +30,15 @@ use crate::state::preview::preview_placeholder_label;
 use crate::state::viewer::ViewerOpenSource;
 use crate::ui::components::{ButtonState, ButtonTone, glass_panel, photo_world_label};
 use crate::ui::theme::*;
+
+/// Stable keyboard-focus state for one AI tag chip. The entity lives in the
+/// window's keyed element state, so the handle and its focus/blur listeners
+/// survive re-renders.
+struct AiTagFocusState {
+    handle: FocusHandle,
+    _focus: Subscription,
+    _blur: Subscription,
+}
 
 impl App {
     pub(crate) fn photos_screen(
@@ -682,18 +692,61 @@ impl App {
                 tagged_at.as_deref().unwrap_or(&ai.tagged_at)
             )
         });
-        let focus_handles: Vec<FocusHandle> = (0..tags.len())
+        let focus_states: Vec<Entity<AiTagFocusState>> = (0..tags.len())
             .map(|index| {
-                window
-                    .use_keyed_state(
-                        SharedString::from(format!("ai-tag-focus-{id}-{index}")),
-                        cx,
-                        |_, cx| cx.focus_handle(),
-                    )
-                    .read(cx)
-                    .clone()
+                let app_entity = cx.entity();
+                window.use_keyed_state(
+                    SharedString::from(format!("ai-tag-focus-{id}-{index}")),
+                    cx,
+                    move |window, cx| {
+                        let handle = cx.focus_handle().tab_stop(true);
+                        let focus_handle = handle.clone();
+                        let focus_entity = app_entity.clone();
+                        let focus = cx.on_focus(
+                            &handle,
+                            window,
+                            move |_state: &mut AiTagFocusState, _, cx| {
+                                let focus_handle = focus_handle.clone();
+                                focus_entity.update(cx, |this, cx| {
+                                    this.ai_tag_focused = Some(focus_handle);
+                                    cx.notify();
+                                });
+                            },
+                        );
+                        let blur_handle = handle.clone();
+                        let blur_entity = app_entity.clone();
+                        let blur = cx.on_blur(
+                            &handle,
+                            window,
+                            move |_state: &mut AiTagFocusState, _, cx| {
+                                let blur_handle = blur_handle.clone();
+                                blur_entity.update(cx, |this, cx| {
+                                    if this.ai_tag_focused.as_ref() == Some(&blur_handle) {
+                                        this.ai_tag_focused = None;
+                                        cx.notify();
+                                    }
+                                });
+                            },
+                        );
+                        AiTagFocusState {
+                            handle,
+                            _focus: focus,
+                            _blur: blur,
+                        }
+                    },
+                )
             })
             .collect();
+        let focus_handles: Vec<FocusHandle> = focus_states
+            .iter()
+            .map(|state| state.read(cx).handle.clone())
+            .collect();
+        let focused_tooltip = self
+            .ai_tag_focused
+            .as_ref()
+            .and_then(|focused| focus_handles.iter().position(|handle| handle == focused))
+            .and_then(|index| tags.get(index))
+            .map(|view| view.tooltip.clone());
 
         let fact = |label: String, value: String| {
             v_flex()
@@ -719,6 +772,7 @@ impl App {
                 )
         };
 
+        let (empty_title, empty_hint) = ai_empty_state_labels(ai.is_some());
         let mut tag_row = h_flex().flex_wrap().gap(px(4.));
         if tags.is_empty() {
             tag_row = tag_row.child(
@@ -729,23 +783,20 @@ impl App {
                             .text_size(px(10.))
                             .font_medium()
                             .text_color(rgb(p.text))
-                            .child(tr!("photos.ai.empty")),
+                            .child(empty_title),
                     )
                     .child(
                         div()
                             .text_size(px(9.))
                             .text_color(rgb(p.muted_2))
-                            .child(tr!("photos.ai.empty_hint")),
+                            .child(empty_hint),
                     ),
             );
         } else {
             tag_row = tag_row.children(focus_handles.into_iter().zip(tags).enumerate().map(
                 |(index, (focus, view))| {
                     let tooltip = view.tooltip.clone();
-                    let bubble_focus = focus.clone();
-                    let bubble_text = tooltip.clone();
                     h_flex()
-                        .relative()
                         .id(SharedString::from(format!("ai-tag-{id}-{index}")))
                         .items_center()
                         .gap(px(3.))
@@ -758,7 +809,6 @@ impl App {
                         .text_size(px(10.))
                         .text_color(rgb(p.green))
                         .track_focus(&focus)
-                        .tab_stop(true)
                         .focus(move |this| this.border_color(rgb(p.green)))
                         .aria_description(tooltip.clone())
                         .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
@@ -769,26 +819,6 @@ impl App {
                                 .text_size(px(9.))
                                 .text_color(rgb(p.muted))
                                 .child(view.probability_label),
-                        )
-                        .child(
-                            div()
-                                .absolute()
-                                .top(px(18.))
-                                .left_0()
-                                .w(px(200.))
-                                .hidden()
-                                .track_focus(&bubble_focus)
-                                .focus(move |this| this.flex())
-                                .whitespace_normal()
-                                .px(px(6.))
-                                .py(px(3.))
-                                .rounded(px(5.))
-                                .bg(rgb(p.panel_deep))
-                                .border_1()
-                                .border_color(rgba(with_alpha(p.green, 0x66)))
-                                .text_size(px(9.))
-                                .text_color(rgb(p.text))
-                                .child(bubble_text),
                         )
                 },
             ));
@@ -822,13 +852,21 @@ impl App {
             .border_1()
             .border_color(rgba(with_alpha(p.green, 0x33)))
             .child(header)
-            .child(tag_row)
-            .child(
-                h_flex()
-                    .gap(px(6.))
-                    .child(fact(tr!("photos.ai.people"), people))
-                    .child(fact(tr!("photos.ai.place"), place)),
+            .child(tag_row);
+        if let Some(tooltip) = focused_tooltip {
+            panel = panel.child(
+                div()
+                    .text_size(px(9.))
+                    .text_color(rgb(p.green))
+                    .child(tooltip),
             );
+        }
+        panel = panel.child(
+            h_flex()
+                .gap(px(6.))
+                .child(fact(tr!("photos.ai.people"), people))
+                .child(fact(tr!("photos.ai.place"), place)),
+        );
         if let Some(foot) = foot {
             panel = panel.child(
                 div()

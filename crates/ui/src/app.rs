@@ -262,6 +262,10 @@ pub struct App {
     pub(crate) ai_refresh_scheduled: bool,
     /// The queued AI refresh must also reload the selected inspector photo.
     pub(crate) ai_selected_refresh_pending: bool,
+    /// The focused AI chip whose full tooltip is shown inline. Handles are
+    /// per-panel, so the inspector and Quick Look cannot light up each other's
+    /// chips.
+    pub(crate) ai_tag_focused: Option<FocusHandle>,
     /// 0 = body expanded, 1 = collapsed to the card header.
     pub(crate) integrations_auto_motion: ToggleMotion,
     /// 0 = runtime details expanded, 1 = collapsed while AI is disabled.
@@ -961,6 +965,7 @@ impl App {
             ai: ai::AiUiState::default(),
             ai_refresh_scheduled: false,
             ai_selected_refresh_pending: false,
+            ai_tag_focused: None,
             integrations_auto_motion: ToggleMotion::settled(if initial_settings.auto_compress {
                 0.0
             } else {

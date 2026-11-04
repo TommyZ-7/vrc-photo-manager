@@ -595,6 +595,7 @@ pub(crate) fn backend_selection_is_disabled_when_not_ready(ready: bool, enabled:
 pub(crate) fn people_label_in(language: &str, min: Option<u32>, max: Option<u32>) -> String {
     match (min, max) {
         (Some(0), Some(0)) => vrc_photon_i18n::tr_in(language, "photos.ai.people.zero"),
+        (Some(1), Some(1)) => vrc_photon_i18n::tr_in(language, "photos.ai.people.one"),
         (Some(min), Some(max)) if min == max => vrc_photon_i18n::tr_args_in(
             language,
             "photos.ai.people.exact",
@@ -610,6 +611,7 @@ pub(crate) fn people_label_in(language: &str, min: Option<u32>, max: Option<u32>
             "photos.ai.people.at_least",
             &[("min", min.to_string())],
         ),
+        (None, Some(1)) => vrc_photon_i18n::tr_in(language, "photos.ai.people.at_most_one"),
         (None, Some(max)) => vrc_photon_i18n::tr_args_in(
             language,
             "photos.ai.people.at_most",
@@ -660,12 +662,32 @@ fn place_probability(branch: &str, probabilities_json: Option<&str>) -> Option<f
     probability.is_finite().then(|| probability.clamp(0.0, 1.0))
 }
 
-/// Formats the stored RFC3339 tagging timestamp for the inspector. A value the
-/// catalog cannot parse is shown unchanged rather than dropped.
+/// Formats the stored RFC3339 tagging timestamp for the inspector in the
+/// user's local timezone. A value the catalog cannot parse is shown unchanged
+/// rather than dropped.
 pub(crate) fn format_tagged_at(tagged_at: &str) -> String {
     chrono::DateTime::parse_from_rfc3339(tagged_at)
-        .map(|value| value.format("%Y-%m-%d %H:%M").to_string())
+        .map(|value| {
+            value
+                .with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        })
         .unwrap_or_else(|_| tagged_at.to_string())
+}
+
+/// Title and hint for the AI tag row when no applied tags are shown. A stored
+/// result with zero applied tags is different from never having tagged the
+/// photo.
+pub(crate) fn ai_empty_state_labels(has_ai: bool) -> (String, String) {
+    if has_ai {
+        (
+            tr!("photos.ai.none_applied"),
+            tr!("photos.ai.none_applied_hint"),
+        )
+    } else {
+        (tr!("photos.ai.empty"), tr!("photos.ai.empty_hint"))
+    }
 }
 
 /// Compact queue summary for the runtime card.
@@ -1329,6 +1351,7 @@ impl App {
         let (ai, tags) = load_photo_ai(&self.db, photo_id);
         self.selected_ai = ai;
         self.selected_ai_tags = tags;
+        self.ai_tag_focused = None;
     }
 
     pub(crate) fn ai_ready(&self) -> bool {
@@ -1344,11 +1367,11 @@ impl App {
 mod tests {
     use super::{
         AI_PLUGIN_ID, AiPluginAction, AiPluginCardState, AiPluginCardView, AiResponseOutcome,
-        AiUiState, ManualRetagOutcome, ModelDownloadView, ai_error_label_in, ai_error_text_in,
-        ai_job_summary_label, ai_manifest_view, ai_plugin_card_state, ai_response_outcome,
-        ai_tag_view, ai_tag_view_with_context, ai_tag_views, apply_install_event, backend_options,
-        backend_selection_is_disabled_when_not_ready, collect_ai_snapshot,
-        download_progress_bar_ratio, enqueue_manual_retag, format_tagged_at,
+        AiUiState, ManualRetagOutcome, ModelDownloadView, ai_empty_state_labels, ai_error_label_in,
+        ai_error_text_in, ai_job_summary_label, ai_manifest_view, ai_plugin_card_state,
+        ai_response_outcome, ai_tag_view, ai_tag_view_with_context, ai_tag_views,
+        apply_install_event, backend_options, backend_selection_is_disabled_when_not_ready,
+        collect_ai_snapshot, download_progress_bar_ratio, enqueue_manual_retag, format_tagged_at,
         install_event_applies_to_ai, installation_row_id, is_active_installation, load_photo_ai,
         model_progress_ratio, needs_license_consent, people_label, people_label_in, place_label,
         place_label_with_confidence, variant_backend_label,
@@ -1905,8 +1928,12 @@ mod tests {
         assert_eq!(people_label(None, None), "—");
         assert_eq!(people_label_in("en", Some(3), Some(3)), "3 people");
         assert_eq!(people_label_in("en", Some(3), Some(5)), "3–5 people");
+        assert_eq!(people_label_in("en", Some(1), Some(1)), "1 person");
         assert_eq!(people_label_in("en", Some(0), Some(0)), "0 people");
+        assert_eq!(people_label_in("en", None, Some(1)), "Up to 1 person");
         assert_eq!(people_label_in("en", None, None), "—");
+        assert_eq!(people_label_in("ja", Some(1), Some(1)), "1人");
+        assert_eq!(people_label_in("ja", None, Some(1)), "1人以下");
         assert_eq!(place_label(Some("indoor")), "屋内");
         assert_eq!(place_label(Some("outdoor")), "屋外");
         assert_eq!(place_label(Some("other")), "その他");
@@ -1992,11 +2019,26 @@ mod tests {
 
     #[test]
     fn tagged_at_is_formatted_for_display() {
+        let raw = "2026-11-04T12:45:01+00:00";
+        let local = chrono::DateTime::parse_from_rfc3339(raw)
+            .unwrap()
+            .with_timezone(&chrono::Local);
         assert_eq!(
-            format_tagged_at("2026-11-04T12:45:01+00:00"),
-            "2026-11-04 12:45"
+            format_tagged_at(raw),
+            local.format("%Y-%m-%d %H:%M").to_string()
         );
         assert_eq!(format_tagged_at("not a timestamp"), "not a timestamp");
+    }
+
+    #[test]
+    fn empty_state_copy_distinguishes_missing_and_unapplied_tags() {
+        let (title, hint) = ai_empty_state_labels(false);
+        assert_eq!(title, "AIタグ未生成");
+        assert_eq!(hint, "「AIタグを再生成」で作成");
+
+        let (title, hint) = ai_empty_state_labels(true);
+        assert_eq!(title, "適用されたAIタグはありません");
+        assert_eq!(hint, "しきい値を満たしたタグはありません");
     }
 
     #[test]
