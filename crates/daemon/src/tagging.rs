@@ -22,7 +22,7 @@ use vrc_photon_ai_protocol::{
     TaggingJobStatus, TaggingStage,
 };
 use vrc_photon_core::CoreError;
-use vrc_photon_core::ai::{NewPhotoAi, TaggingJob};
+use vrc_photon_core::ai::{MAX_TAGGING_RETRIES, NewPhotoAi, TaggingJob};
 use vrc_photon_core::db::Db;
 use vrc_photon_core::model::PhotoStatus;
 use vrc_photon_core::settings::AppSettings;
@@ -179,7 +179,6 @@ impl TaggingWorker {
             job_id: first_job.id.clone(),
         };
         let mut job = first_job;
-        let mut retries = 0usize;
         self.publish_processing(&job, 0.05, None);
 
         loop {
@@ -209,35 +208,30 @@ impl TaggingWorker {
                         self.finish_cancelled(&job)?;
                         break;
                     }
-                    // Record the failed attempt first: retry_tagging_job only
-                    // requeues failed jobs, and retry_count is the budget.
-                    self.db().fail_tagging_job(&job.id, code)?;
-                    if !retryable || retries >= self.config.retry_delays.len() {
+                    if !retryable || job.retry_count >= MAX_TAGGING_RETRIES {
+                        self.db().fail_tagging_job(&job.id, code)?;
                         self.publish_failed(&job, code);
                         break;
                     }
-                    thread::sleep(self.config.retry_delays[retries]);
-                    if self.is_cancelled(&job, &cancel) {
+                    // Keep the claim while backing off. Releasing the job here
+                    // would let another pending job (for example one released
+                    // from the backlog) be claimed under this job's token and
+                    // cleanup, and a daemon restart would lose the retry.
+                    if !self.db().bump_tagging_retry(&job.id)? {
+                        if self.is_cancelled(&job, &cancel) {
+                            self.finish_cancelled(&job)?;
+                        } else {
+                            self.db().fail_tagging_job(&job.id, code)?;
+                            self.publish_failed(&job, code);
+                        }
+                        break;
+                    }
+                    let delay = self.config.retry_delays[job.retry_count as usize];
+                    job.retry_count += 1;
+                    if self.wait_for_retry(delay, &job, &cancel) {
                         self.finish_cancelled(&job)?;
                         break;
                     }
-                    if !self.db().retry_tagging_job(&job.id)? {
-                        self.publish_failed(&job, code);
-                        break;
-                    }
-                    retries += 1;
-                    let Some(next) = self.db().next_pending_tagging_job()? else {
-                        self.publish_failed(&job, code);
-                        break;
-                    };
-                    if next.id != job.id {
-                        tracing::warn!(
-                            expected = %job.id,
-                            claimed = %next.id,
-                            "tagging retry claimed a different job"
-                        );
-                    }
-                    job = next;
                     self.publish_processing(&job, 0.05, None);
                 }
                 Err(JobFailure::Unexpected(error)) => {
@@ -447,6 +441,22 @@ impl TaggingWorker {
                 tracing::warn!(%error, job_id = %job.id, "cannot read tagging job state");
                 false
             }
+        }
+    }
+
+    /// Sleeps through the retry backoff while polling for cancellation. The
+    /// job stays `processing` for the whole delay.
+    fn wait_for_retry(&self, delay: Duration, job: &TaggingJob, cancel: &CancelToken) -> bool {
+        let deadline = Instant::now() + delay;
+        loop {
+            if self.is_cancelled(job, cancel) {
+                return true;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            thread::sleep(remaining.min(Duration::from_millis(25)));
         }
     }
 
@@ -1098,9 +1108,30 @@ mod tests {
         }
     }
 
+    fn wait_until(what: &str, mut condition: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if condition() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("timed out waiting for {what}");
+    }
+
     #[test]
     fn presence_false_skips_count_and_still_writes_place() {
-        let ctx = TaggingTestContext::new("normal", presence_response(false, 0.02));
+        // A nonzero people response proves the count operation was skipped
+        // rather than returning the mock's default 0/0.
+        let ctx = TaggingTestContext::with_scenario(
+            "normal",
+            presence_response(false, 0.02),
+            people_response(3, [2, 4]),
+            "other",
+            None,
+            true,
+            test_config(),
+        );
         ctx.enqueue_one();
         assert!(ctx.worker.process_once().unwrap());
         let ai = ctx.db().photo_ai(ctx.photo_id).unwrap().unwrap();
@@ -1258,10 +1289,15 @@ mod tests {
         wait_for_presence_stage(&events, &job_id);
         // Mirrors the IPC handler: the database row is the authoritative
         // cancellation, and the token stops the in-flight request.
+        let cancelled_at = Instant::now();
         ctx.db().cancel_tagging_job(&job_id).unwrap();
-        ctx.control.cancel(&job_id);
+        assert!(ctx.control.cancel(&job_id));
 
         assert!(handle.join().unwrap().unwrap());
+        assert!(
+            cancelled_at.elapsed() < Duration::from_secs(2),
+            "the worker waited for the 5 s sidecar response despite cancellation"
+        );
         let job = ctx.db().tagging_job(&job_id).unwrap().unwrap();
         assert_eq!(job.status, TaggingJobStatus::Cancelled);
         assert!(ctx.db().photo_ai(ctx.photo_id).unwrap().is_none());
@@ -1272,6 +1308,133 @@ mod tests {
                 .is_empty()
         );
         assert!(!ctx.snapshot_path(&job_id).exists());
+    }
+
+    #[test]
+    fn cancel_during_retry_backoff_marks_cancelled() {
+        let mut config = test_config();
+        config.retry_delays = [Duration::from_secs(2), Duration::from_secs(2)];
+        let ctx = TaggingTestContext::with_scenario(
+            "busy",
+            presence_response(true, 0.99),
+            PeopleResponse::default(),
+            "other",
+            None,
+            true,
+            config,
+        );
+        let job_id = ctx.enqueue_one();
+        let worker = ctx.worker.clone();
+        let handle = thread::spawn(move || worker.process_once());
+
+        wait_until("the first retry backoff", || {
+            ctx.db().tagging_job(&job_id).unwrap().unwrap().retry_count == 1
+        });
+        let backoff = ctx.db().tagging_job(&job_id).unwrap().unwrap();
+        assert_eq!(backoff.status, TaggingJobStatus::Processing);
+
+        let cancelled_at = Instant::now();
+        ctx.db().cancel_tagging_job(&job_id).unwrap();
+        assert!(ctx.control.cancel(&job_id));
+        assert!(handle.join().unwrap().unwrap());
+        assert!(cancelled_at.elapsed() < Duration::from_secs(1));
+
+        let job = ctx.db().tagging_job(&job_id).unwrap().unwrap();
+        assert_eq!(job.status, TaggingJobStatus::Cancelled);
+        assert_eq!(job.retry_count, 1);
+        assert!(ctx.db().photo_ai(ctx.photo_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn restart_during_retry_backoff_recovers() {
+        let ctx = TaggingTestContext::new("normal", presence_response(false, 0.02));
+        let job_id = ctx.enqueue_one();
+        let claimed = ctx
+            .db()
+            .next_pending_tagging_job()
+            .unwrap()
+            .expect("claim the job");
+        assert_eq!(claimed.id, job_id);
+        assert!(ctx.db().bump_tagging_retry(&job_id).unwrap());
+
+        let interrupted = ctx.db().tagging_job(&job_id).unwrap().unwrap();
+        assert_eq!(interrupted.status, TaggingJobStatus::Processing);
+        assert_eq!(interrupted.retry_count, 1);
+
+        assert_eq!(ctx.db().resume_interrupted_tagging_jobs().unwrap(), 1);
+        let resumed = ctx.db().tagging_job(&job_id).unwrap().unwrap();
+        assert_eq!(resumed.status, TaggingJobStatus::Pending);
+        assert_eq!(resumed.retry_count, 1);
+
+        assert!(ctx.worker.process_once().unwrap());
+        let completed = ctx.db().tagging_job(&job_id).unwrap().unwrap();
+        assert_eq!(completed.status, TaggingJobStatus::Completed);
+        assert_eq!(completed.retry_count, 1);
+        assert!(ctx.db().photo_ai(ctx.photo_id).unwrap().is_some());
+    }
+
+    #[test]
+    fn retry_of_one_job_does_not_touch_another_pending_job() {
+        let mut config = test_config();
+        config.retry_delays = [Duration::from_secs(1), Duration::from_secs(1)];
+        let ctx = TaggingTestContext::with_scenario(
+            "busy",
+            presence_response(true, 0.99),
+            PeopleResponse::default(),
+            "other",
+            None,
+            true,
+            config,
+        );
+
+        // B is older than A and is released from the backlog while A backs
+        // off. The retried job must keep its claim instead of claiming B.
+        let second_photo = ctx.add_photo("second.png");
+        ctx.db()
+            .enqueue_tagging_jobs(&[second_photo], AI_PLUGIN_ID, TaggingJobStatus::Waiting)
+            .unwrap();
+        let second_job = ctx
+            .db()
+            .tagging_jobs_for_photo(second_photo)
+            .unwrap()
+            .into_iter()
+            .find(|job| job.status == TaggingJobStatus::Waiting)
+            .expect("the waiting job")
+            .id;
+        let first_job = ctx.enqueue_one();
+
+        fs::create_dir_all(tagging_cache_dir(&ctx.ai_data_dir)).unwrap();
+        fs::write(ctx.snapshot_path(&second_job), b"keep").unwrap();
+        let second_token = ctx.control.register(&second_job);
+
+        let worker = ctx.worker.clone();
+        let handle = thread::spawn(move || worker.process_once());
+        wait_until("the first retry backoff", || {
+            ctx.db()
+                .tagging_job(&first_job)
+                .unwrap()
+                .unwrap()
+                .retry_count
+                == 1
+        });
+        assert_eq!(
+            ctx.db().release_waiting_tagging_jobs(AI_PLUGIN_ID).unwrap(),
+            1
+        );
+        assert!(handle.join().unwrap().unwrap());
+
+        let first = ctx.db().tagging_job(&first_job).unwrap().unwrap();
+        assert_eq!(first.status, TaggingJobStatus::Failed);
+        assert_eq!(first.retry_count, 2);
+        let second = ctx.db().tagging_job(&second_job).unwrap().unwrap();
+        assert_eq!(second.status, TaggingJobStatus::Pending);
+        assert_eq!(second.retry_count, 0);
+        assert!(ctx.db().photo_ai(second_photo).unwrap().is_none());
+        assert!(!second_token.is_cancelled());
+        assert!(ctx.snapshot_path(&second_job).exists());
+        // The token was never unregistered, so a later cancel still reaches it.
+        assert!(ctx.control.cancel(&second_job));
+        assert!(second_token.is_cancelled());
     }
 
     #[test]

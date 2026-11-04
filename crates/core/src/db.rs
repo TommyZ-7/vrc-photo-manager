@@ -4551,6 +4551,21 @@ impl Db {
         Ok(())
     }
 
+    /// Consumes one automatic retry while the job stays claimed (`processing`).
+    ///
+    /// The worker backs off without releasing the job, so a cancel during the
+    /// delay still sees a processing row and a daemon restart leaves enough
+    /// state for `resume_interrupted_tagging_jobs` to continue the same job.
+    pub fn bump_tagging_retry(&self, job_id: &str) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE tagging_jobs SET retry_count = retry_count + 1, progress = 0, \
+                stage = NULL, error = NULL \
+             WHERE id = ?1 AND status = 'processing' AND retry_count < ?2",
+            params![job_id, MAX_TAGGING_RETRIES],
+        )?;
+        Ok(changed == 1)
+    }
+
     /// Returns a failed job to the queue while it still has retries left and
     /// no newer job for the same photo/plugin is active.
     pub fn retry_tagging_job(&self, job_id: &str) -> Result<bool> {
