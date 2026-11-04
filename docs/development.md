@@ -20,6 +20,7 @@
 cargo build -p vrc-photon-ui
 cargo build -p vrc-photon-daemon
 cargo build -p vrc-photon-update
+cargo build -p vrc-photon-ai-protocol -p vrc-photon-ai-host -p vrc-photon-ai-mock-sidecar
 ```
 
 更新の署名・マニフェスト生成ツールはRelease専用:
@@ -82,6 +83,9 @@ cargo run -p vrc-photon-daemon -- --no-tray
 | `VRC_PHOTON_UPDATE_FEED` | 更新マニフェストURLの上書き（ミラー・QA用） |
 | `VRC_PHOTON_UPDATE_PUBLIC_KEY` | デバッグビルドのみ。埋め込み公開鍵を1つ上書き（QA用） |
 | `VRC_PHOTON_HEALTH_TOKEN` | 更新ヘルパーが新UIへ渡す内部トークン。通常は設定しない |
+| `VRC_PHOTON_AI_PLUGIN_PUBLIC_KEY` | デバッグビルドのみ。AI プラグイン ZIP の公開鍵を1つ上書き（QA用） |
+| `VRC_PHOTON_AUTOTAG_DEV_ZIP` | 実 sidecar E2E 用。署名済み開発用 ZIP のパス |
+| `VRC_PHOTON_AUTOTAG_MODEL_DIR` | 実 sidecar E2E 用。`d1-2B-Q8_0.gguf` と `mmproj-d1-2B-Q8_0.gguf` のあるディレクトリ |
 
 ## 4. データの場所
 
@@ -90,6 +94,8 @@ cargo run -p vrc-photon-daemon -- --no-tray
   - Windows: `%LOCALAPPDATA%\vrc-photon\`
 - サムネイル: 同 `thumbnails/`
 - 取り込み先の既定: 同 `imported/`
+- AI プラグイン / モデル: 同 `plugins/<plugin_id>/`
+- タグ付け用一時ファイル: 同 `cache/tagging/`
 - 更新: 同 `updates/`（ダウンロード、ジョブ、健康マーカー、結果、ログ、
   旧版バックアップ）
 
@@ -107,6 +113,69 @@ cargo test --workspace
 ```
 
 **重要**: WSLでは `cargo check` / `build` を並列・バックグラウンドで走らせると操作不能になることがある。1つずつ直列で実行する。
+
+### 5.1 AI タグ付けのテスト
+
+```bash
+cargo test -p vrc-photon-ai-protocol
+cargo test -p vrc-photon-ai-host --features test-support
+cargo test -p vrc-photon-ai-mock-sidecar
+cargo test -p vrc-photon-daemon ai_e2e
+```
+
+- `ai-protocol` は hello / probe / 4 op / error / cancel / shutdown の JSON 往復と
+  1 MiB 制限をテストする。
+- `ai-host` は manifest 検証、署名、ZIP 取込、モデル取込、sidecar 起動を
+  テストする。`test-support` を有効にすると署名済みテスト ZIP を作れる。
+- `ai-mock-sidecar` は `MOCK_SIDECAR_MODE=normal|fatal|crash|slow|no_cancel`
+  などで挙動を切り替える。`MOCK_SIDECAR_CATALOG` でカタログ JSON を
+  差し替えられる。
+- `vrc-photon-daemon` の `ai_e2e` はモック sidecar でインストール・モデル取込・
+  4段パイプライン・キャンセル・クラッシュ復旧を通す。実 sidecar のテストは
+  `#[ignore]` なので、通常の `cargo test` では実行されない。
+
+### 5.2 実 sidecar E2E（手動）
+
+前提:
+
+- `vrc-photon-autotag` の `packaging/dev/build_dev_zip.sh`（PR #2）が
+  manifest と minisign を生成できること。
+- 開発用の secret key（`MINISIGN_SECRET_KEY`）。公開鍵は
+  `packaging/ai/dev-keys.txt` と一致させる。
+- `minisign` CLI が PATH にない場合は、`.minisig` を stdout に出す署名器を
+  `MINISIGN_BIN` に指定する。
+- `MODEL_DIR` に `d1-2B-Q8_0.gguf` と `mmproj-d1-2B-Q8_0.gguf` を置く。
+
+sidecar のビルドと ZIP 生成:
+
+```bash
+cd /path/to/vrc-photon-autotag
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+
+MINISIGN_SECRET_KEY="$HOME/.minisign/vrc-photon-ai-dev.key" \
+MINISIGN_BIN=/path/to/minisign-signer \
+MODEL_DIR=/path/to/models \
+  packaging/dev/build_dev_zip.sh --build-dir build --backend cpu
+```
+
+ホスト側の E2E:
+
+```bash
+cd /path/to/vrc-photon
+VRC_PHOTON_AUTOTAG_DEV_ZIP=/path/to/vrc-photon-autotag/dist/vrc-photon-autotag-dev-linux-cpu.zip \
+VRC_PHOTON_AUTOTAG_MODEL_DIR=/path/to/models \
+  cargo test -p vrc-photon-daemon real_sidecar_install_import_and_tag -- --ignored --nocapture
+```
+
+テストは一時ディレクトリに DB と写真を作るため、実ライブラリを汚さない。
+モデルロードを含むため CPU でも数分かかる。結果と既知の制限は
+[2026-11-04-ai-tagging-m2-e2e.md](superpowers/notes/2026-11-04-ai-tagging-m2-e2e.md)
+に記録している。
+
+release ビルドは M3 までプラグイン鍵を埋め込まないため、開発用 ZIP を
+取り込めない。実 sidecar の確認は debug ビルドで行う。
 
 ## 6. 圧縮のメモリ・時間計測
 
@@ -152,28 +221,37 @@ AVIF はエンコード時間が支配的なため、デコード削減（約40m
 3. `crates/core/src/log_parser.rs` — ログイベントとセッション状態。
 4. `crates/core/src/linker.rs` — 写真と文脈の紐付け。
 5. `crates/core/src/compressor.rs` — 画像圧縮。
-6. `crates/ipc/src/` — IPCプロトコル、エンドポイント、クライアント/サーバー。
-7. `crates/daemon/src/{ipc_server,signals}.rs` — IPCサーバーとwakeシグナル。
-8. `crates/daemon/src/lib.rs` — 監視ループ、ワーカー、トレイ制御。
-9. `crates/ui/src/{main,ipc_bridge,update_view}.rs` — 画面、状態、IPC購読、更新UI。
-10. `crates/update/src/` — 署名付き更新確認、ダウンロード、適用ジョブ、ヘルパー。
-11. `crates/release-tool/src/` — Release時の署名と `latest.json` 生成。
+6. `crates/core/src/ai.rs` — AI プラグイン・AI 結果・タグ付けジョブの型。
+7. `crates/ai-protocol/src/` — sidecar 通信型、JSONL、カタログ。
+8. `crates/ai-host/src/` — manifest、署名、ZIP、モデル、sidecar クライアント。
+9. `crates/ipc/src/` — IPCプロトコル、エンドポイント、クライアント/サーバー。
+10. `crates/daemon/src/{ipc_server,signals}.rs` — IPCサーバーとwakeシグナル。
+11. `crates/daemon/src/{plugin,tagging}.rs` — プラグイン管理、sidecar、タグ付けワーカー。
+12. `crates/daemon/src/lib.rs` — 監視ループ、ワーカー、トレイ制御。
+13. `crates/ui/src/{main,ipc_bridge,update_view}.rs` — 画面、状態、IPC購読、更新UI。
+14. `crates/update/src/` — 署名付き更新確認、ダウンロード、適用ジョブ、ヘルパー。
+15. `crates/release-tool/src/` — Release時の署名と `latest.json` 生成。
 
 ## 8. 変更時のルール
 
 - `core` にUI/GPUI/プロセス依存を持ち込まない。
 - パスやDBの変更は `docs/data-model.md` と `docs/architecture.md` を同時に更新する。
 - 新しい形式・設定・CLIを追加したら `README.md` と `docs/features.md` を更新する。
+- sidecar の通信契約を変えるときは `ai-protocol` と非公開リポジトリの
+  `docs/protocol.md` を同じ PR シリーズで更新する。公開側のテストは
+  公開設計の JSON 例を使い、非公開ファイルに依存させない。
+- AI プラグインの開発鍵は debug ビルドだけに埋め込み、release ビルドへ
+  本番鍵を入れるのは M3 以降。開発鍵の secret はコミットしない。
 - 破壊的変更（既存DBの列削除・意味変更）はしない。必要なら新テーブル＋コピー。
 - 生ログを保存する変更は、プライバシー影響をADRに残す。
 
 ## 9. DBマイグレーションの追加
 
-1. `db.rs` に `SCHEMA_V3` を追加。
-2. `migrate` に `if version < 3` を追加。
-3. `schema_migrations` と `user_version` を更新。
-4. 既存DB（v2）からの起動テストを追加。
-5. `docs/data-model.md` のバージョン表を更新。
+1. `db.rs` に次の `SCHEMA_V*` を追加する（例: `SCHEMA_V13_AI_TAGGING`）。
+2. `migrate` に `if version < N` を追加する。
+3. `schema_migrations` と `user_version` を更新する。
+4. 既存DB（v12 など）からの起動テストと、新規DBの起動テストを追加する。
+5. `docs/data-model.md` のバージョン表を更新する。
 
 ## 10. デバッグ
 

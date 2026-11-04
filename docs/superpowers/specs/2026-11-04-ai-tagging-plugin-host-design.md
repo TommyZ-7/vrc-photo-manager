@@ -2,7 +2,7 @@
 
 - Issue: [#198 有償プラグイン: d1-2B による画像自動タグ付け（sidecar / llama.cpp）](https://github.com/TommyZ-7/vrc-photon/issues/198)
 - 日付: 2026-11-04
-- 状態: Approved（2026-11-04）
+- 状態: Approved（2026-11-04、M2 実装済み）
 - 対象: `crates/ai-protocol`, `crates/ai-host`, `crates/ai-mock-sidecar`, `crates/core`, `crates/ipc`, `crates/daemon`, `crates/ui`, `crates/i18n`, `docs/`
 - 関連 ADR: [ADR-0019](../../adr/0019-ai-tagging-plugin.md)
 - 実装計画: [2026-11-04-ai-tagging-m2-host.md](../plans/2026-11-04-ai-tagging-m2-host.md)
@@ -384,6 +384,9 @@ vrc-photon-autotag-<version>-<os>-<backend>.zip
 
 ### 5.2 manifest.json
 
+次は形式を示す抜粋で、`files` は実際には ZIP 内の全ファイル（`manifest.json` と
+`manifest.minisig` を除く）を含む。
+
 ```json
 {
   "format_version": 1,
@@ -438,6 +441,10 @@ vrc-photon-autotag-<version>-<os>-<backend>.zip
 `model.files[]` は `path` / `size` / `sha256` / `url` を持ち、任意で
 `role` と `parts` を持つ。
 
+例の `host_version_min = "0.11.0"` は M2 のリリース版を想定した仮置きで、
+実際の最小バージョンはリリース時に確定する。開発用 ZIP は
+`host_version_min = "0.0.0"`、`host_version_max = "0.99.99"` を使う。
+
 ### 5.3 role（任意拡張）
 
 `role` はモデルファイルの用途を明示する任意フィールドで、値は `model` または
@@ -487,14 +494,16 @@ vrc-photon-autotag-<version>-<os>-<backend>.zip
 ### 5.5 バージョン互換の再確認
 
 sidecar 起動時、hello の `protocol_version`、`plugin_id`、`variant`、
-`model.catalog_version` を manifest / DB と照合する。不一致なら sidecar を
-起動せず、ジョブを `plugin_not_ready` で待機させる。
+`model.catalog_version` を manifest / DB と照合する。hello を読んだ時点で
+プロセスは起動済みなので、不一致なら sidecar を停止し、ジョブを
+`plugin_not_ready` で待機させる。期待値と一致した hello の `catalog` は、
+その時点で `ai_tag_definitions` に同期する。
 
 ## 6. 信頼モデル
 
 ### 6.1 v1 は製品ライセンスなし
 
-- ライセンスファイル、キー入力、電話 / サーバー照会、機械バインドを持たない。
+- ライセンスファイル、キー入力、サーバー照会、機械バインドを持たない。
 - BOOTH で購入したプラグイン ZIP を本体に取り込めば、すべての機能を利用できる。
 - ZIP がコピーされると購入者以外も使える。v1 はこのリスクを許容する。
 - 必要になった時点で v2 にライセンス検証を追加する。その場合も sidecar 通信規約
@@ -669,6 +678,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_tagging_jobs_active
   `model_revision`、`source` を記録し、後から実行環境を追跡できる。
 - `photo_ai_tags` は判定した分岐のタグだけを持つ（屋内なら屋内26件、
   屋外 / その他なら屋外27件）。`applied` は書き込み時の実効閾値で計算する。
+  再タグ付けで分岐が変わった場合は、既存の `photo_ai_tags` を
+  `DELETE FROM photo_ai_tags WHERE photo_id = ? AND plugin_id = ?` で消してから、
+  今回の分岐のタグだけを INSERT する。前回の分岐のタグを残さない。
 - `tagging_jobs` は既存 `compression_jobs` と同じ状態名を使う。
 
 ### 7.2 ジョブ状態
@@ -1056,8 +1068,8 @@ UI は3か所に分ける。すべての新規文言は `crates/i18n/locales/ja.
 ### 13.1 契約の同期
 
 - 公開側の `ai-protocol` の JSON は、非公開リポジトリの
-  `docs/protocol.md` と一致させる。`ai-protocol` のテストは
-  `docs/protocol.md` の JSON をそのまま使う。
+  `docs/protocol.md` と一致させる。ただし公開側のテストは非公開ファイルに
+  依存させず、本設計の §4 に載せた JSON 例をそのままフィクスチャに使う。
 - プロトコルの変更は両リポジトリで同じ PR シリーズとして扱う。版数を上げる
   場合は `protocol_version` のメジャー / マイナー規則に従う。
 - 公開側の CI はモック sidecar で通す。実 sidecar の CI は非公開側で行う。
@@ -1079,9 +1091,16 @@ minisign の生成を追加する（M2 の前提 PR）。
   - `files` は `manifest.json` と `manifest.minisig` を除く ZIP 内の全ファイルの
     `size` / `sha256`
   - `model.files` は `d1-2B-Q8_0.gguf`（`role: "model"`）と
-    `mmproj-d1-2B-Q8_0.gguf`（`role: "mmproj"`）を含める
+    `mmproj-d1-2B-Q8_0.gguf`（`role: "mmproj"`）を含める。各要素は
+    `path` / `role` / `size` / `sha256` / `url` / `parts` を持ち、`url` は
+    HTTPS、`parts` は空配列にする
+  - `model` は `id` / `quantization` / `revision` / `license` /
+    `license_url` を持つ（完全なスキーマは §5.2）
 - `MINISIGN_SECRET_KEY` で指定した開発鍵で `manifest.json` を署名し、
-  `manifest.minisig` を ZIP に含める。
+  `manifest.minisig` を ZIP に含める。`minisign` CLI がない環境では、
+  `.minisig` を stdout に出す署名器を `MINISIGN_BIN` に指定する。
+- `MODEL_DIR`（または `--model-dir`）にモデル 2 ファイルを置く。モデルは
+  ZIP に含めない。
 - 公開鍵は公開リポジトリの `packaging/ai/dev-keys.txt` と一致させる。
 
 実行例:

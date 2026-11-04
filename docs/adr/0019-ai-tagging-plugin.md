@@ -85,9 +85,10 @@ GGUF を使い、写真は外部へ送らず、すべてローカルで完結さ
 - 製品ライセンスがないため、ZIP のコピーによる利用を技術的に防げない。
   売上損失のリスクは残る。ライセンス検証を追加する場合は、通信規約を変えずに
   v2 で行う。
-- M2 で実機検証するのは Linux Vulkan / CPU だけ。Windows は M3、CUDA / ROCm は
-  M6 まで「未検証」と表記する。タグ精度・presence の誤検出・人数一致の品質検証は
-  今回のスコープ外で、販売前に別途手動で行う。
+- M2 の実機検証対象は Linux Vulkan / CPU だけ。今回の E2E 記録は CPU のみで、
+  Vulkan は再実行していない。Windows は M3、CUDA / ROCm は M6 まで「未検証」と
+  表記する。タグ精度・presence の誤検出・人数一致の品質検証は今回のスコープ外で、
+  販売前に別途手動で行う。
 - 公開ドキュメント（本 ADR、公開ホスト設計、`docs/architecture.md`、
   `docs/data-model.md`、`docs/security-privacy.md`、`docs/development.md`）を
   実装と同期させる必要がある。
