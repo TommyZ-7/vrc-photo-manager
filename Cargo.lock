@@ -8104,6 +8104,7 @@ dependencies = [
  "regex",
  "rgb",
  "rusqlite",
+ "semver",
  "serde",
  "serde_json",
  "tempfile",
@@ -8111,6 +8112,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "vrc-photon-ai-protocol",
  "webp",
 ]
 

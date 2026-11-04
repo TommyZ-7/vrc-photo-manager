@@ -6,7 +6,9 @@ use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Row, Transaction, TransactionBehavior, params,
     params_from_iter,
 };
+use vrc_photon_ai_protocol::{Catalog, ModelState, TagBranch};
 
+use crate::ai::{AiTagDefinition, AiTagThreshold, PluginInstallation, PluginState};
 use crate::error::{CoreError, Result};
 use crate::model::{
     CompressionJob, CompressionProfile, DaemonCommand, DaemonError, DaemonOperation,
@@ -311,6 +313,115 @@ CREATE INDEX IF NOT EXISTS idx_world_name_lookups_due
     ON world_name_lookups(status, next_attempt_at);
 "#;
 
+const SCHEMA_V13_AI_TAGGING: &str = r#"
+CREATE TABLE IF NOT EXISTS plugin_installations (
+    plugin_id TEXT NOT NULL,
+    variant TEXT NOT NULL,
+    version TEXT NOT NULL,
+    protocol_version INTEGER NOT NULL,
+    path TEXT NOT NULL,
+    manifest_json TEXT NOT NULL,
+    catalog_version TEXT,
+    active INTEGER NOT NULL DEFAULT 0,
+    installed_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (plugin_id, variant, version)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_plugin_installations_one_active
+    ON plugin_installations(plugin_id) WHERE active = 1;
+
+CREATE TABLE IF NOT EXISTS plugin_state (
+    plugin_id TEXT PRIMARY KEY,
+    model_state TEXT NOT NULL,
+    model_revision TEXT,
+    model_bytes_downloaded INTEGER NOT NULL DEFAULT 0,
+    model_bytes_total INTEGER,
+    model_error TEXT,
+    probe_json TEXT,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ai_tag_definitions (
+    plugin_id TEXT NOT NULL,
+    tag_key TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    name TEXT NOT NULL,
+    name_en TEXT,
+    description TEXT NOT NULL,
+    default_threshold REAL NOT NULL,
+    sort_order INTEGER NOT NULL,
+    catalog_version TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (plugin_id, tag_key)
+);
+
+CREATE TABLE IF NOT EXISTS ai_tag_thresholds (
+    plugin_id TEXT NOT NULL,
+    tag_key TEXT NOT NULL,
+    threshold REAL NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (plugin_id, tag_key)
+);
+
+CREATE TABLE IF NOT EXISTS photo_ai (
+    photo_id INTEGER PRIMARY KEY REFERENCES photos(id) ON DELETE CASCADE,
+    plugin_id TEXT NOT NULL,
+    variant TEXT NOT NULL,
+    sidecar_version TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    model_revision TEXT NOT NULL,
+    catalog_version TEXT NOT NULL,
+    source TEXT NOT NULL,
+    presence_threshold REAL NOT NULL,
+    character_present INTEGER NOT NULL,
+    presence_probability REAL NOT NULL,
+    people_min INTEGER,
+    people_max INTEGER,
+    people_median INTEGER,
+    place_branch TEXT,
+    place_probabilities_json TEXT,
+    tagged_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS photo_ai_tags (
+    photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+    plugin_id TEXT NOT NULL,
+    tag_key TEXT NOT NULL,
+    probability REAL NOT NULL,
+    applied INTEGER NOT NULL,
+    model_version TEXT NOT NULL,
+    catalog_version TEXT NOT NULL,
+    tagged_at TEXT NOT NULL,
+    PRIMARY KEY (photo_id, plugin_id, tag_key)
+);
+
+CREATE TABLE IF NOT EXISTS tagging_jobs (
+    id TEXT PRIMARY KEY,
+    photo_id INTEGER NOT NULL REFERENCES photos(id) ON DELETE CASCADE,
+    plugin_id TEXT NOT NULL,
+    variant TEXT,
+    status TEXT NOT NULL,
+    progress REAL NOT NULL DEFAULT 0,
+    stage TEXT,
+    error TEXT,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    started_at TEXT,
+    finished_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_photo_ai_tags_applied
+    ON photo_ai_tags(plugin_id, tag_key, applied, photo_id);
+CREATE INDEX IF NOT EXISTS idx_photo_ai_people
+    ON photo_ai(people_min, people_max);
+CREATE INDEX IF NOT EXISTS idx_tagging_jobs_status
+    ON tagging_jobs(status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tagging_jobs_active
+    ON tagging_jobs(photo_id, plugin_id)
+    WHERE status IN ('waiting', 'pending', 'processing');
+"#;
+
 const PHOTO_SELECT: &str = "p.id, p.root_id, p.rel_path, p.abs_path, p.file_name, \
     p.captured_at_utc, p.captured_at_local, p.tz_offset_sec, p.width, p.height, \
     p.file_size, p.mtime, p.blake3, p.status, p.is_favorite, p.note, \
@@ -448,6 +559,9 @@ impl Db {
         }
         if version < 12 {
             self.migrate_v12()?;
+        }
+        if version < 13 {
+            self.migrate_v13()?;
         }
         Ok(())
     }
@@ -760,6 +874,27 @@ impl Db {
             params![now_string()],
         )?;
         tx.pragma_update(None, "user_version", 12)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Adds the AI tagging plugin, catalog, result, and job tables. The
+    /// tables and indexes use `IF NOT EXISTS`, so the step is safe to retry
+    /// after a crash between the DDL and `user_version`.
+    fn migrate_v13(&self) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version >= 13 {
+            tx.commit()?;
+            return Ok(());
+        }
+
+        tx.execute_batch(SCHEMA_V13_AI_TAGGING)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (13, ?1)",
+            params![now_string()],
+        )?;
+        tx.pragma_update(None, "user_version", 13)?;
         tx.commit()?;
         Ok(())
     }
@@ -3702,6 +3837,335 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    // ---------- AI plugins ----------
+
+    /// Inserts or updates one plugin installation. When `install.active` is
+    /// set, every other installation of the same plugin is deactivated in the
+    /// same immediate transaction so the partial unique index always holds.
+    pub fn upsert_plugin_installation(&self, install: &PluginInstallation) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        if install.active {
+            tx.execute(
+                "UPDATE plugin_installations SET active = 0 \
+                 WHERE plugin_id = ?1 AND active = 1",
+                params![install.plugin_id],
+            )?;
+        }
+        tx.execute(
+            "INSERT INTO plugin_installations(plugin_id, variant, version, protocol_version, \
+                path, manifest_json, catalog_version, active, installed_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+             ON CONFLICT(plugin_id, variant, version) DO UPDATE SET \
+                protocol_version = excluded.protocol_version, \
+                path = excluded.path, \
+                manifest_json = excluded.manifest_json, \
+                catalog_version = excluded.catalog_version, \
+                active = excluded.active, \
+                updated_at = excluded.updated_at",
+            params![
+                install.plugin_id,
+                install.variant,
+                install.version,
+                install.protocol_version,
+                install.path,
+                install.manifest_json,
+                install.catalog_version,
+                i64::from(install.active),
+                install.installed_at,
+                install.updated_at,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn list_plugin_installations(&self, plugin_id: &str) -> Result<Vec<PluginInstallation>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT plugin_id, variant, version, protocol_version, path, manifest_json, \
+                catalog_version, active, installed_at, updated_at \
+             FROM plugin_installations WHERE plugin_id = ?1 ORDER BY variant, version",
+        )?;
+        let rows = stmt.query_map(params![plugin_id], row_to_plugin_installation)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn active_plugin_installation(
+        &self,
+        plugin_id: &str,
+    ) -> Result<Option<PluginInstallation>> {
+        let install = self
+            .conn
+            .query_row(
+                "SELECT plugin_id, variant, version, protocol_version, path, manifest_json, \
+                    catalog_version, active, installed_at, updated_at \
+                 FROM plugin_installations WHERE plugin_id = ?1 AND active = 1",
+                params![plugin_id],
+                row_to_plugin_installation,
+            )
+            .optional()?;
+        Ok(install)
+    }
+
+    /// Marks one installation as active and clears the previous one
+    /// atomically. `None` selects the highest semver installed for `variant`.
+    /// Returns whether a matching installation was found.
+    pub fn set_active_plugin_installation(
+        &self,
+        plugin_id: &str,
+        variant: &str,
+        version: Option<&str>,
+    ) -> Result<bool> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let target = match version {
+            Some(version) => tx
+                .query_row(
+                    "SELECT version FROM plugin_installations \
+                     WHERE plugin_id = ?1 AND variant = ?2 AND version = ?3",
+                    params![plugin_id, variant, version],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?,
+            None => {
+                let mut stmt = tx.prepare(
+                    "SELECT version FROM plugin_installations \
+                     WHERE plugin_id = ?1 AND variant = ?2",
+                )?;
+                let versions =
+                    stmt.query_map(params![plugin_id, variant], |row| row.get::<_, String>(0))?;
+                let mut best: Option<(semver::Version, String)> = None;
+                for version in versions {
+                    let version = version?;
+                    let Ok(parsed) = semver::Version::parse(&version) else {
+                        continue;
+                    };
+                    if best.as_ref().is_none_or(|(current, _)| parsed > *current) {
+                        best = Some((parsed, version));
+                    }
+                }
+                best.map(|(_, version)| version)
+            }
+        };
+        let Some(target) = target else {
+            tx.commit()?;
+            return Ok(false);
+        };
+
+        tx.execute(
+            "UPDATE plugin_installations SET active = 0 \
+             WHERE plugin_id = ?1 AND active = 1",
+            params![plugin_id],
+        )?;
+        tx.execute(
+            "UPDATE plugin_installations SET active = 1 \
+             WHERE plugin_id = ?1 AND variant = ?2 AND version = ?3",
+            params![plugin_id, variant, target],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn remove_plugin_installation(
+        &self,
+        plugin_id: &str,
+        variant: &str,
+        version: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM plugin_installations \
+             WHERE plugin_id = ?1 AND variant = ?2 AND version = ?3",
+            params![plugin_id, variant, version],
+        )?;
+        Ok(())
+    }
+
+    pub fn plugin_state(&self, plugin_id: &str) -> Result<Option<PluginState>> {
+        let state = self
+            .conn
+            .query_row(
+                "SELECT plugin_id, model_state, model_revision, model_bytes_downloaded, \
+                    model_bytes_total, model_error, probe_json, updated_at \
+                 FROM plugin_state WHERE plugin_id = ?1",
+                params![plugin_id],
+                row_to_plugin_state,
+            )
+            .optional()?;
+        Ok(state)
+    }
+
+    pub fn set_plugin_model_state(
+        &self,
+        plugin_id: &str,
+        state: ModelState,
+        revision: Option<&str>,
+        downloaded: i64,
+        total: Option<i64>,
+        error: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO plugin_state(plugin_id, model_state, model_revision, \
+                model_bytes_downloaded, model_bytes_total, model_error, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+             ON CONFLICT(plugin_id) DO UPDATE SET \
+                model_state = excluded.model_state, \
+                model_revision = excluded.model_revision, \
+                model_bytes_downloaded = excluded.model_bytes_downloaded, \
+                model_bytes_total = excluded.model_bytes_total, \
+                model_error = excluded.model_error, \
+                updated_at = excluded.updated_at",
+            params![
+                plugin_id,
+                state.as_str(),
+                revision,
+                downloaded.max(0),
+                total,
+                error,
+                now_string(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Stores the raw `--probe` JSON, creating a `missing` model state row if
+    /// the plugin has no state yet. The model columns are left untouched on
+    /// update.
+    pub fn set_plugin_probe_json(&self, plugin_id: &str, probe_json: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO plugin_state(plugin_id, model_state, model_bytes_downloaded, \
+                probe_json, updated_at) \
+             VALUES (?1, ?2, 0, ?3, ?4) \
+             ON CONFLICT(plugin_id) DO UPDATE SET \
+                probe_json = excluded.probe_json, \
+                updated_at = excluded.updated_at",
+            params![
+                plugin_id,
+                ModelState::Missing.as_str(),
+                probe_json,
+                now_string()
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Mirrors the plugin's catalog into the local definition table. User
+    /// threshold overrides are never touched. If a tag's default threshold
+    /// changed, applied flags are recomputed after the upserts.
+    pub fn sync_ai_catalog(&self, plugin_id: &str, catalog: &Catalog) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let mut defaults_changed = false;
+        for (branch, definitions) in [
+            (TagBranch::Outdoor, &catalog.outdoor),
+            (TagBranch::Indoor, &catalog.indoor),
+        ] {
+            for (sort_order, definition) in definitions.iter().enumerate() {
+                let previous: Option<f32> = tx
+                    .query_row(
+                        "SELECT default_threshold FROM ai_tag_definitions \
+                         WHERE plugin_id = ?1 AND tag_key = ?2",
+                        params![plugin_id, definition.key],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if previous.is_some_and(|previous| previous != definition.default_threshold) {
+                    defaults_changed = true;
+                }
+                tx.execute(
+                    "INSERT INTO ai_tag_definitions(plugin_id, tag_key, branch, name, name_en, \
+                        description, default_threshold, sort_order, catalog_version, updated_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+                     ON CONFLICT(plugin_id, tag_key) DO UPDATE SET \
+                        branch = excluded.branch, \
+                        name = excluded.name, \
+                        name_en = excluded.name_en, \
+                        description = excluded.description, \
+                        default_threshold = excluded.default_threshold, \
+                        sort_order = excluded.sort_order, \
+                        catalog_version = excluded.catalog_version, \
+                        updated_at = excluded.updated_at",
+                    params![
+                        plugin_id,
+                        definition.key,
+                        branch.as_str(),
+                        definition.name,
+                        definition.name_en,
+                        definition.description,
+                        definition.default_threshold,
+                        sort_order as i64,
+                        catalog.version,
+                        now_string(),
+                    ],
+                )?;
+            }
+        }
+        if defaults_changed {
+            reapply_thresholds(&tx, plugin_id)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn ai_tag_definitions(&self, plugin_id: &str) -> Result<Vec<AiTagDefinition>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT plugin_id, tag_key, branch, name, name_en, description, \
+                default_threshold, sort_order, catalog_version, updated_at \
+             FROM ai_tag_definitions WHERE plugin_id = ?1 \
+             ORDER BY branch, sort_order, tag_key",
+        )?;
+        let rows = stmt.query_map(params![plugin_id], row_to_ai_tag_definition)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn set_ai_tag_threshold(
+        &self,
+        plugin_id: &str,
+        tag_key: &str,
+        threshold: f32,
+    ) -> Result<()> {
+        if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+            return Err(CoreError::Invalid(format!(
+                "AI tag threshold {threshold} is outside 0.0..=1.0"
+            )));
+        }
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO ai_tag_thresholds(plugin_id, tag_key, threshold, updated_at) \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(plugin_id, tag_key) DO UPDATE SET \
+                threshold = excluded.threshold, \
+                updated_at = excluded.updated_at",
+            params![plugin_id, tag_key, threshold, now_string()],
+        )?;
+        reapply_thresholds(&tx, plugin_id)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn reset_ai_tag_threshold(&self, plugin_id: &str, tag_key: &str) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        tx.execute(
+            "DELETE FROM ai_tag_thresholds WHERE plugin_id = ?1 AND tag_key = ?2",
+            params![plugin_id, tag_key],
+        )?;
+        reapply_thresholds(&tx, plugin_id)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn ai_tag_thresholds(&self, plugin_id: &str) -> Result<Vec<AiTagThreshold>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT plugin_id, tag_key, threshold, updated_at \
+             FROM ai_tag_thresholds WHERE plugin_id = ?1 ORDER BY tag_key",
+        )?;
+        let rows = stmt.query_map(params![plugin_id], row_to_ai_tag_threshold)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Recomputes `photo_ai_tags.applied` from the effective threshold
+    /// (user override, else the catalog default) in one UPDATE. Returns the
+    /// number of tag rows that were re-evaluated.
+    pub fn reapply_ai_tag_thresholds(&self, plugin_id: &str) -> Result<usize> {
+        reapply_thresholds(&self.conn, plugin_id)
+    }
+
     // ---------- log imports / settings ----------
 
     pub fn log_offset(&self, log_file: &str) -> Result<Option<i64>> {
@@ -3783,6 +4247,22 @@ impl Db {
             .execute("DELETE FROM app_settings WHERE key = ?1", params![key])?;
         Ok(())
     }
+}
+
+fn reapply_thresholds(conn: &Connection, plugin_id: &str) -> Result<usize> {
+    let updated = conn.execute(
+        "UPDATE photo_ai_tags SET applied = CASE WHEN probability >= COALESCE( \
+            (SELECT t.threshold FROM ai_tag_thresholds t \
+             WHERE t.plugin_id = photo_ai_tags.plugin_id \
+               AND t.tag_key = photo_ai_tags.tag_key), \
+            (SELECT d.default_threshold FROM ai_tag_definitions d \
+             WHERE d.plugin_id = photo_ai_tags.plugin_id \
+               AND d.tag_key = photo_ai_tags.tag_key)) \
+         THEN 1 ELSE 0 END \
+         WHERE plugin_id = ?1",
+        params![plugin_id],
+    )?;
+    Ok(updated)
 }
 
 fn photo_order(sort: PhotoSort) -> &'static str {
@@ -3942,6 +4422,66 @@ fn row_to_photo_index(row: &Row<'_>) -> rusqlite::Result<PhotoIndexEntry> {
     })
 }
 
+fn row_to_plugin_installation(row: &Row<'_>) -> rusqlite::Result<PluginInstallation> {
+    Ok(PluginInstallation {
+        plugin_id: row.get(0)?,
+        variant: row.get(1)?,
+        version: row.get(2)?,
+        protocol_version: row.get(3)?,
+        path: row.get(4)?,
+        manifest_json: row.get(5)?,
+        catalog_version: row.get(6)?,
+        active: row.get::<_, i64>(7)? != 0,
+        installed_at: row.get(8)?,
+        updated_at: row.get(9)?,
+    })
+}
+
+fn row_to_plugin_state(row: &Row<'_>) -> rusqlite::Result<PluginState> {
+    let model_state: String = row.get(1)?;
+    let model_state = ModelState::parse(&model_state).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            1,
+            rusqlite::types::Type::Text,
+            format!("unknown model state '{model_state}'").into(),
+        )
+    })?;
+    Ok(PluginState {
+        plugin_id: row.get(0)?,
+        model_state,
+        model_revision: row.get(2)?,
+        model_bytes_downloaded: row.get(3)?,
+        model_bytes_total: row.get(4)?,
+        model_error: row.get(5)?,
+        probe_json: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
+}
+
+fn row_to_ai_tag_definition(row: &Row<'_>) -> rusqlite::Result<AiTagDefinition> {
+    Ok(AiTagDefinition {
+        plugin_id: row.get(0)?,
+        tag_key: row.get(1)?,
+        branch: row.get(2)?,
+        name: row.get(3)?,
+        name_en: row.get(4)?,
+        description: row.get(5)?,
+        default_threshold: row.get(6)?,
+        sort_order: row.get(7)?,
+        catalog_version: row.get(8)?,
+        updated_at: row.get(9)?,
+    })
+}
+
+fn row_to_ai_tag_threshold(row: &Row<'_>) -> rusqlite::Result<AiTagThreshold> {
+    Ok(AiTagThreshold {
+        plugin_id: row.get(0)?,
+        tag_key: row.get(1)?,
+        threshold: row.get(2)?,
+        updated_at: row.get(3)?,
+    })
+}
+
 fn row_to_job(row: &Row<'_>) -> rusqlite::Result<CompressionJob> {
     Ok(CompressionJob {
         id: row.get(0)?,
@@ -4036,9 +4576,11 @@ fn now_string() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai::PluginInstallation;
     use crate::model::{
         DeletionReason, DeletionStatus, NewPhoto, PhotoFilter, PhotoPlayer, PhotoStatus,
     };
+    use vrc_photon_ai_protocol::{Catalog, ModelState, TagDefinition};
 
     fn sample_photo(root_id: i64, path: &str, ts: i64) -> NewPhoto {
         NewPhoto {
@@ -4107,6 +4649,72 @@ mod tests {
             blake3: None,
         })
         .unwrap()
+    }
+
+    const AI_PLUGIN: &str = "vrc-photon-autotag";
+
+    fn ai_install(
+        plugin_id: &str,
+        variant: &str,
+        version: &str,
+        active: bool,
+    ) -> PluginInstallation {
+        PluginInstallation {
+            plugin_id: plugin_id.to_string(),
+            variant: variant.to_string(),
+            version: version.to_string(),
+            protocol_version: 1,
+            path: format!("/plugins/{plugin_id}/{variant}/{version}"),
+            manifest_json: format!(r#"{{"version":"{version}"}}"#),
+            catalog_version: Some("2026-11-03.1".to_string()),
+            active,
+            installed_at: "2026-11-04T00:00:00+00:00".to_string(),
+            updated_at: "2026-11-04T00:00:00+00:00".to_string(),
+        }
+    }
+
+    fn tag(key: &str, name: &str, name_en: Option<&str>, default_threshold: f32) -> TagDefinition {
+        TagDefinition {
+            key: key.to_string(),
+            name: name.to_string(),
+            name_en: name_en.map(str::to_string),
+            description: format!("{name} description"),
+            default_threshold,
+        }
+    }
+
+    fn ai_catalog(version: &str, sea_threshold: f32, room_threshold: f32) -> Catalog {
+        Catalog {
+            version: version.to_string(),
+            outdoor: vec![
+                tag("sea", "海", Some("Sea"), sea_threshold),
+                tag("park", "公園", None, 0.5),
+            ],
+            indoor: vec![tag(
+                "japanese_room",
+                "和室",
+                Some("Japanese room"),
+                room_threshold,
+            )],
+        }
+    }
+
+    fn seed_ai_tag(
+        db: &Db,
+        photo_id: i64,
+        plugin_id: &str,
+        tag_key: &str,
+        probability: f32,
+        applied: bool,
+    ) {
+        db.connection()
+            .execute(
+                "INSERT INTO photo_ai_tags(photo_id, plugin_id, tag_key, probability, applied, \
+                    model_version, catalog_version, tagged_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, 'd1-2B-Q8_0', '2026-11-03.1', '2026-11-04T00:00:00+00:00')",
+                params![photo_id, plugin_id, tag_key, probability, i64::from(applied)],
+            )
+            .unwrap();
     }
 
     fn photo_to_new(photo: &Photo) -> NewPhoto {
@@ -4198,7 +4806,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
     }
 
     #[test]
@@ -4244,7 +4852,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
         let author_columns: i64 = db
             .conn
             .query_row(
@@ -4296,7 +4904,7 @@ mod tests {
             }
             for handle in handles {
                 let opened = handle.join().unwrap();
-                assert_eq!(opened.unwrap().unwrap(), 12);
+                assert_eq!(opened.unwrap().unwrap(), 13);
             }
         }
     }
@@ -4308,7 +4916,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
         let has_output_dir: bool = db
             .conn
             .query_row(
@@ -4328,7 +4936,7 @@ mod tests {
             .connection()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
         let table: i64 = db
             .connection()
             .query_row(
@@ -5400,7 +6008,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
 
         let recorded: i64 = db
             .conn
@@ -5443,7 +6051,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
         let retry_column: i64 = db
             .conn
             .query_row(
@@ -5510,7 +6118,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
 
         let jobs = db.list_jobs(10).unwrap();
         assert_eq!(jobs.len(), 1);
@@ -5543,7 +6151,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
         assert_eq!(db.list_jobs(10).unwrap()[0].retry_count, 2);
 
         let tables: i64 = db
@@ -6586,7 +7194,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
         let exists: bool = db
             .conn
             .query_row(
@@ -6618,7 +7226,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
         let table: i64 = db
             .conn
             .query_row(
@@ -6650,6 +7258,415 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(version, 12);
+    }
+
+    #[test]
+    fn migrate_v13_adds_ai_tables_and_is_retryable() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.db");
+        let db = Db::open(&path).unwrap();
+        assert!(db.migrate_v13().is_ok());
+        assert!(db.migrate_v13().is_ok());
+        let version: i64 = db
+            .connection()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 13);
+        assert!(db.active_plugin_installation(AI_PLUGIN).unwrap().is_none());
+
+        for table in [
+            "plugin_installations",
+            "plugin_state",
+            "ai_tag_definitions",
+            "ai_tag_thresholds",
+            "photo_ai",
+            "photo_ai_tags",
+            "tagging_jobs",
+        ] {
+            let exists: bool = db
+                .connection()
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+                    params![table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "missing table {table}");
+        }
+        for index in [
+            "idx_plugin_installations_one_active",
+            "idx_photo_ai_tags_applied",
+            "idx_photo_ai_people",
+            "idx_tagging_jobs_status",
+            "idx_tagging_jobs_active",
+        ] {
+            let exists: bool = db
+                .connection()
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1)",
+                    params![index],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "missing index {index}");
+        }
+    }
+
+    #[test]
+    fn migration_v13_recovers_from_partial_schema() {
+        let db = Db::open_in_memory().unwrap();
+        db.connection()
+            .execute_batch("DROP TABLE photo_ai_tags")
+            .unwrap();
+        db.connection()
+            .pragma_update(None, "user_version", 12)
+            .unwrap();
+
+        db.migrate_v13().unwrap();
+        db.migrate_v13().unwrap();
+
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 13);
+        let exists: bool = db
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master \
+                 WHERE type = 'table' AND name = 'photo_ai_tags')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(exists);
+    }
+
+    #[test]
+    fn active_installation_is_unique_per_plugin() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_plugin_installation(&ai_install(AI_PLUGIN, "linux-vulkan", "1.0.0", true))
+            .unwrap();
+        db.upsert_plugin_installation(&ai_install(AI_PLUGIN, "linux-vulkan", "2.0.0", false))
+            .unwrap();
+        assert_eq!(
+            db.active_plugin_installation(AI_PLUGIN)
+                .unwrap()
+                .unwrap()
+                .version,
+            "1.0.0"
+        );
+
+        // Upserting another install as active must clear the previous one
+        // inside the same transaction instead of violating the unique index.
+        db.upsert_plugin_installation(&ai_install(AI_PLUGIN, "linux-vulkan", "2.0.0", true))
+            .unwrap();
+        let active = db.active_plugin_installation(AI_PLUGIN).unwrap().unwrap();
+        assert_eq!(active.version, "2.0.0");
+        assert_eq!(
+            db.list_plugin_installations(AI_PLUGIN)
+                .unwrap()
+                .iter()
+                .filter(|install| install.active)
+                .count(),
+            1
+        );
+
+        // Active is unique per plugin, not per variant.
+        db.upsert_plugin_installation(&ai_install(AI_PLUGIN, "windows-vulkan", "1.0.0", true))
+            .unwrap();
+        let active = db.active_plugin_installation(AI_PLUGIN).unwrap().unwrap();
+        assert_eq!(active.variant, "windows-vulkan");
+        assert_eq!(
+            db.list_plugin_installations(AI_PLUGIN)
+                .unwrap()
+                .iter()
+                .filter(|install| install.active)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn plugin_installation_crud_roundtrip_and_active_selection() {
+        let db = Db::open_in_memory().unwrap();
+        for version in ["1.2.0", "1.9.9", "1.10.0"] {
+            db.upsert_plugin_installation(&ai_install(AI_PLUGIN, "linux-vulkan", version, false))
+                .unwrap();
+        }
+        let installations = db.list_plugin_installations(AI_PLUGIN).unwrap();
+        assert_eq!(installations.len(), 3);
+        let install = installations
+            .iter()
+            .find(|install| install.version == "1.10.0")
+            .unwrap();
+        assert_eq!(install.plugin_id, AI_PLUGIN);
+        assert_eq!(install.variant, "linux-vulkan");
+        assert_eq!(install.protocol_version, 1);
+        assert_eq!(
+            install.path,
+            "/plugins/vrc-photon-autotag/linux-vulkan/1.10.0"
+        );
+        assert_eq!(install.manifest_json, r#"{"version":"1.10.0"}"#);
+        assert_eq!(install.catalog_version.as_deref(), Some("2026-11-03.1"));
+        assert!(db.active_plugin_installation(AI_PLUGIN).unwrap().is_none());
+
+        // `None` picks the highest semantic version, not the lexicographic
+        // maximum, for the requested variant.
+        assert!(
+            db.set_active_plugin_installation(AI_PLUGIN, "linux-vulkan", None)
+                .unwrap()
+        );
+        let active = db.active_plugin_installation(AI_PLUGIN).unwrap().unwrap();
+        assert_eq!(active.version, "1.10.0");
+
+        assert!(
+            db.set_active_plugin_installation(AI_PLUGIN, "linux-vulkan", Some("1.2.0"))
+                .unwrap()
+        );
+        let active = db.active_plugin_installation(AI_PLUGIN).unwrap().unwrap();
+        assert_eq!(active.version, "1.2.0");
+
+        assert!(
+            !db.set_active_plugin_installation(AI_PLUGIN, "linux-vulkan", Some("9.9.9"))
+                .unwrap()
+        );
+        assert!(
+            !db.set_active_plugin_installation(AI_PLUGIN, "windows-vulkan", None)
+                .unwrap()
+        );
+        let active = db.active_plugin_installation(AI_PLUGIN).unwrap().unwrap();
+        assert_eq!(active.version, "1.2.0");
+
+        db.remove_plugin_installation(AI_PLUGIN, "linux-vulkan", "1.2.0")
+            .unwrap();
+        assert_eq!(db.list_plugin_installations(AI_PLUGIN).unwrap().len(), 2);
+        assert!(db.active_plugin_installation(AI_PLUGIN).unwrap().is_none());
+    }
+
+    #[test]
+    fn plugin_state_upserts_model_and_probe() {
+        let db = Db::open_in_memory().unwrap();
+        assert!(db.plugin_state(AI_PLUGIN).unwrap().is_none());
+
+        db.set_plugin_probe_json(AI_PLUGIN, Some(r#"{"backend":"cpu"}"#))
+            .unwrap();
+        let state = db.plugin_state(AI_PLUGIN).unwrap().unwrap();
+        assert_eq!(state.plugin_id, AI_PLUGIN);
+        assert_eq!(state.model_state, ModelState::Missing);
+        assert_eq!(state.model_bytes_downloaded, 0);
+        assert_eq!(state.model_bytes_total, None);
+        assert_eq!(state.probe_json.as_deref(), Some(r#"{"backend":"cpu"}"#));
+
+        db.set_plugin_model_state(
+            AI_PLUGIN,
+            ModelState::Downloading,
+            Some("rev-1"),
+            512,
+            Some(2048),
+            None,
+        )
+        .unwrap();
+        let state = db.plugin_state(AI_PLUGIN).unwrap().unwrap();
+        assert_eq!(state.model_state, ModelState::Downloading);
+        assert_eq!(state.model_revision.as_deref(), Some("rev-1"));
+        assert_eq!(state.model_bytes_downloaded, 512);
+        assert_eq!(state.model_bytes_total, Some(2048));
+        assert_eq!(state.model_error, None);
+        assert_eq!(state.probe_json.as_deref(), Some(r#"{"backend":"cpu"}"#));
+
+        db.set_plugin_model_state(
+            AI_PLUGIN,
+            ModelState::Error,
+            Some("rev-1"),
+            512,
+            Some(2048),
+            Some("checksum mismatch"),
+        )
+        .unwrap();
+        let state = db.plugin_state(AI_PLUGIN).unwrap().unwrap();
+        assert_eq!(state.model_state, ModelState::Error);
+        assert_eq!(state.model_error.as_deref(), Some("checksum mismatch"));
+
+        // The model-state insert path must work without a prior probe row.
+        db.set_plugin_model_state("other-plugin", ModelState::Ready, None, 0, None, None)
+            .unwrap();
+        let state = db.plugin_state("other-plugin").unwrap().unwrap();
+        assert_eq!(state.model_state, ModelState::Ready);
+        assert_eq!(state.probe_json, None);
+
+        db.set_plugin_probe_json(AI_PLUGIN, None).unwrap();
+        let state = db.plugin_state(AI_PLUGIN).unwrap().unwrap();
+        assert_eq!(state.probe_json, None);
+        assert_eq!(state.model_state, ModelState::Error);
+    }
+
+    #[test]
+    fn catalog_sync_preserves_user_thresholds() {
+        let db = Db::open_in_memory().unwrap();
+        db.sync_ai_catalog(AI_PLUGIN, &ai_catalog("2026-11-03.1", 0.5, 0.5))
+            .unwrap();
+        let definitions = db.ai_tag_definitions(AI_PLUGIN).unwrap();
+        assert_eq!(definitions.len(), 3);
+        let sea = definitions
+            .iter()
+            .find(|definition| definition.tag_key == "sea")
+            .unwrap();
+        assert_eq!(sea.branch, "outdoor");
+        assert_eq!(sea.sort_order, 0);
+        assert_eq!(sea.default_threshold, 0.5);
+        assert_eq!(sea.name_en.as_deref(), Some("Sea"));
+        let room = definitions
+            .iter()
+            .find(|definition| definition.tag_key == "japanese_room")
+            .unwrap();
+        assert_eq!(room.branch, "indoor");
+        assert_eq!(room.sort_order, 0);
+
+        db.set_ai_tag_threshold(AI_PLUGIN, "sea", 0.8).unwrap();
+        let photo = seed_photo(&db);
+        seed_ai_tag(&db, photo, AI_PLUGIN, "sea", 0.75, true);
+
+        db.sync_ai_catalog(AI_PLUGIN, &ai_catalog("2026-11-04.1", 0.7, 0.5))
+            .unwrap();
+        let definitions = db.ai_tag_definitions(AI_PLUGIN).unwrap();
+        let sea = definitions
+            .iter()
+            .find(|definition| definition.tag_key == "sea")
+            .unwrap();
+        assert_eq!(sea.default_threshold, 0.7);
+        assert_eq!(sea.catalog_version, "2026-11-04.1");
+
+        let thresholds = db.ai_tag_thresholds(AI_PLUGIN).unwrap();
+        assert_eq!(thresholds.len(), 1);
+        assert_eq!(thresholds[0].tag_key, "sea");
+        assert_eq!(thresholds[0].threshold, 0.8);
+
+        // The user override (0.8) wins over the new default (0.7).
+        let applied: i64 = db
+            .connection()
+            .query_row(
+                "SELECT applied FROM photo_ai_tags \
+                 WHERE photo_id = ?1 AND plugin_id = ?2 AND tag_key = 'sea'",
+                params![photo, AI_PLUGIN],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(applied, 0);
+    }
+
+    #[test]
+    fn catalog_sync_updates_defaults_and_reapplies() {
+        let db = Db::open_in_memory().unwrap();
+        db.sync_ai_catalog(AI_PLUGIN, &ai_catalog("2026-11-03.1", 0.5, 0.5))
+            .unwrap();
+        let photo = seed_photo(&db);
+        seed_ai_tag(&db, photo, AI_PLUGIN, "sea", 0.6, true);
+        seed_ai_tag(&db, photo, AI_PLUGIN, "park", 0.8, true);
+
+        db.sync_ai_catalog(AI_PLUGIN, &ai_catalog("2026-11-04.1", 0.7, 0.5))
+            .unwrap();
+
+        let definitions = db.ai_tag_definitions(AI_PLUGIN).unwrap();
+        let sea = definitions
+            .iter()
+            .find(|definition| definition.tag_key == "sea")
+            .unwrap();
+        assert_eq!(sea.default_threshold, 0.7);
+        assert_eq!(sea.catalog_version, "2026-11-04.1");
+
+        let applied = |tag_key: &str| -> i64 {
+            db.connection()
+                .query_row(
+                    "SELECT applied FROM photo_ai_tags \
+                     WHERE photo_id = ?1 AND plugin_id = ?2 AND tag_key = ?3",
+                    params![photo, AI_PLUGIN, tag_key],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(applied("sea"), 0);
+        assert_eq!(applied("park"), 1);
+        assert!(db.ai_tag_thresholds(AI_PLUGIN).unwrap().is_empty());
+    }
+
+    #[test]
+    fn reapply_thresholds_updates_applied() {
+        let db = Db::open_in_memory().unwrap();
+        db.sync_ai_catalog(AI_PLUGIN, &ai_catalog("2026-11-03.1", 0.5, 0.5))
+            .unwrap();
+        let photo = seed_photo(&db);
+        seed_ai_tag(&db, photo, AI_PLUGIN, "sea", 0.4, true);
+        seed_ai_tag(&db, photo, AI_PLUGIN, "japanese_room", 0.6, false);
+        db.connection()
+            .execute(
+                "INSERT INTO ai_tag_thresholds(plugin_id, tag_key, threshold, updated_at) \
+                 VALUES (?1, 'japanese_room', 0.7, ?2)",
+                params![AI_PLUGIN, "2026-11-04T00:00:00+00:00"],
+            )
+            .unwrap();
+
+        assert_eq!(db.reapply_ai_tag_thresholds(AI_PLUGIN).unwrap(), 2);
+        let applied = |plugin_id: &str, tag_key: &str| -> i64 {
+            db.connection()
+                .query_row(
+                    "SELECT applied FROM photo_ai_tags \
+                     WHERE photo_id = ?1 AND plugin_id = ?2 AND tag_key = ?3",
+                    params![photo, plugin_id, tag_key],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(applied(AI_PLUGIN, "sea"), 0);
+        assert_eq!(applied(AI_PLUGIN, "japanese_room"), 0);
+
+        seed_ai_tag(&db, photo, "other-plugin", "sea", 0.9, false);
+        assert_eq!(db.reapply_ai_tag_thresholds(AI_PLUGIN).unwrap(), 2);
+        assert_eq!(applied("other-plugin", "sea"), 0);
+    }
+
+    #[test]
+    fn ai_tag_threshold_crud() {
+        let db = Db::open_in_memory().unwrap();
+        assert!(db.ai_tag_thresholds(AI_PLUGIN).unwrap().is_empty());
+
+        db.set_ai_tag_threshold(AI_PLUGIN, "sea", 0.8).unwrap();
+        let thresholds = db.ai_tag_thresholds(AI_PLUGIN).unwrap();
+        assert_eq!(thresholds.len(), 1);
+        assert_eq!(thresholds[0].plugin_id, AI_PLUGIN);
+        assert_eq!(thresholds[0].tag_key, "sea");
+        assert_eq!(thresholds[0].threshold, 0.8);
+
+        db.set_ai_tag_threshold(AI_PLUGIN, "sea", 0.6).unwrap();
+        db.set_ai_tag_threshold(AI_PLUGIN, "park", 0.3).unwrap();
+        let thresholds = db.ai_tag_thresholds(AI_PLUGIN).unwrap();
+        assert_eq!(thresholds.len(), 2);
+        assert_eq!(
+            thresholds
+                .iter()
+                .find(|threshold| threshold.tag_key == "sea")
+                .unwrap()
+                .threshold,
+            0.6
+        );
+
+        db.reset_ai_tag_threshold(AI_PLUGIN, "sea").unwrap();
+        let thresholds = db.ai_tag_thresholds(AI_PLUGIN).unwrap();
+        assert_eq!(thresholds.len(), 1);
+        assert_eq!(thresholds[0].tag_key, "park");
+
+        // Resetting a missing override is a no-op.
+        db.reset_ai_tag_threshold(AI_PLUGIN, "sea").unwrap();
+        assert_eq!(db.ai_tag_thresholds(AI_PLUGIN).unwrap().len(), 1);
+
+        assert!(matches!(
+            db.set_ai_tag_threshold(AI_PLUGIN, "sea", 1.5),
+            Err(CoreError::Invalid(_))
+        ));
+        assert!(matches!(
+            db.set_ai_tag_threshold(AI_PLUGIN, "sea", f32::NAN),
+            Err(CoreError::Invalid(_))
+        ));
     }
 
     #[test]
