@@ -5,6 +5,7 @@
 //! dispatch lives in `ui::shell`.
 
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::scroll::Scrollbar;
 use gpui_kit::component::slider::Slider;
@@ -14,6 +15,9 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::prelude::StatefulInteractiveElement as _;
 use gpui_kit::*;
+use std::path::Path;
+use vrc_photon_ai_protocol::ModelState;
+use vrc_photon_core::ai::PluginInstallation;
 use vrc_photon_core::model::DaemonCommand;
 use vrc_photon_core::settings::CardSize;
 use vrc_photon_core::thumbnail;
@@ -21,10 +25,14 @@ use vrc_photon_i18n::{tr, tr_args};
 use vrc_photon_ipc::Response;
 
 use crate::app::App;
-use crate::app::daemon::autostart_description;
+use crate::app::ai::{
+    AiManifestView, AiPluginAction, AiPluginCardView, ModelDownloadView, ai_error_text_in,
+    ai_manifest_view, model_progress_ratio, variant_backend_label,
+};
+use crate::app::daemon::{autostart_description, open_path};
 use crate::ipc_bridge;
 use crate::state::photo_browser::{anchor_photo_id, list_scroll_top};
-use crate::ui::components::glass_panel;
+use crate::ui::components::{dialog_panel, glass_panel, status_progress_bar};
 use crate::ui::palette::{
     accent_colors, find_accent, find_main, main_colors, preview_accent, preview_main, readable_on,
     resolve,
@@ -220,6 +228,7 @@ impl App {
                                     ),
                             ),
                     )
+                    .child(self.ai_plugin_card(cx))
                     .child(
                         glass_panel(&self.palette)
                             .flex()
@@ -1038,5 +1047,833 @@ impl App {
         }
         cx.set_reduce_motion(enabled);
         cx.notify();
+    }
+
+    fn ai_plugin_card(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.palette;
+        let view = AiPluginCardView::from(&self.ai);
+        let model_state = self.ai.state.as_ref().map(|state| state.model_state);
+        let has_active = self.ai.active.is_some();
+        let (status, status_fg, status_bg) = if self.ai.install_busy {
+            (
+                tr!("settings.ai.status.installing"),
+                p.accent,
+                p.accent_soft,
+            )
+        } else if !has_active {
+            (
+                tr!("settings.ai.status.not_installed"),
+                p.accent,
+                p.accent_soft,
+            )
+        } else if matches!(model_state, Some(ModelState::Downloading)) {
+            (
+                tr!("settings.ai.status.downloading"),
+                p.accent,
+                p.accent_soft,
+            )
+        } else if matches!(model_state, Some(ModelState::Verifying)) {
+            (tr!("settings.ai.status.verifying"), p.accent, p.accent_soft)
+        } else if matches!(model_state, Some(ModelState::Ready)) {
+            (tr!("settings.ai.status.ready"), p.green, p.green_soft)
+        } else if matches!(model_state, Some(ModelState::Error)) {
+            (tr!("settings.ai.status.error"), p.red, p.red_soft)
+        } else {
+            (
+                tr!("settings.ai.status.model_missing"),
+                p.amber,
+                p.amber_soft,
+            )
+        };
+
+        let mut card = glass_panel(&self.palette)
+            .flex()
+            .flex_col()
+            .p(px(14.))
+            .gap(px(12.))
+            .rounded(px(17.))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .font_semibold()
+                                    .text_color(rgb(p.text))
+                                    .child(tr!("settings.ai.title")),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(p.muted_2))
+                                    .child(tr!("settings.ai.hint")),
+                            ),
+                    )
+                    .child(self.badge(status, status_fg, status_bg)),
+            );
+
+        if self.ai.install_busy {
+            return card.child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(rgb(p.muted))
+                    .child(tr!("settings.ai.installing")),
+            );
+        }
+
+        if !has_active {
+            card = card.child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(rgb(p.muted))
+                    .child(tr!("settings.ai.not_installed.body")),
+            );
+            if let Some(error) = self.ai.last_error.clone() {
+                card = card.child(self.ai_error_box(&error));
+            }
+            return card
+                .child(self.ai_primary_action_button(view.primary_action, false, cx))
+                .child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(rgb(p.muted_2))
+                        .child(tr!("settings.ai.install_hint")),
+                );
+        }
+
+        let install = self
+            .ai
+            .active
+            .clone()
+            .expect("the active installation was checked above");
+        let manifest = ai_manifest_view(&install.manifest_json);
+        let model_size = self
+            .ai
+            .state
+            .as_ref()
+            .and_then(|state| state.model_bytes_total)
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .filter(|bytes| *bytes > 0)
+            .or(manifest.model_size);
+        let size_label = model_size
+            .map(format_bytes)
+            .unwrap_or_else(|| tr!("settings.ai.not_downloaded"));
+
+        card = card
+            .child(self.ai_install_meta(&install, &size_label))
+            .child(self.ai_variant_list(cx));
+
+        if let Some(download) = self.ai.download.clone() {
+            card = card.child(self.ai_download_box(&download)).child(
+                h_flex().flex_wrap().items_center().gap(px(8.)).child(
+                    Button::new("ai-cancel-download")
+                        .label(tr!("settings.ai.cancel"))
+                        .small()
+                        .on_click(cx.listener(|this, _, _, cx| this.cancel_ai_model_download(cx))),
+                ),
+            );
+        } else if matches!(model_state, Some(ModelState::Ready)) {
+            card = card
+                .child(self.ai_model_path_box(&install, &manifest, &size_label))
+                .child(
+                    h_flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(self.ai_primary_action_button(view.primary_action, false, cx))
+                        .child(self.ai_action_button(
+                            "ai-import-zip",
+                            AiPluginAction::InstallZip,
+                            tr!("settings.ai.install"),
+                            false,
+                            false,
+                            cx,
+                        ))
+                        .child(self.ai_action_button(
+                            "ai-delete-model",
+                            AiPluginAction::DeleteModel,
+                            tr!("settings.ai.delete_model"),
+                            false,
+                            false,
+                            cx,
+                        ))
+                        .child(self.ai_action_button(
+                            "ai-uninstall",
+                            AiPluginAction::Uninstall,
+                            tr!("settings.ai.uninstall"),
+                            false,
+                            true,
+                            cx,
+                        )),
+                );
+        } else if matches!(model_state, Some(ModelState::Error)) {
+            let code = self
+                .ai
+                .state
+                .as_ref()
+                .and_then(|state| state.model_error.clone())
+                .or_else(|| self.ai.last_error.clone())
+                .unwrap_or_else(|| "model_download_failed".to_string());
+            let error = ai_error_text_in(&vrc_photon_i18n::current_locale(), &code, &code);
+            card = card.child(self.ai_error_box(&error)).child(
+                h_flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(self.ai_primary_action_button(view.primary_action, true, cx))
+                    .child(self.ai_action_button(
+                        "ai-error-import",
+                        AiPluginAction::ImportModel,
+                        tr!("settings.ai.import_model"),
+                        false,
+                        false,
+                        cx,
+                    ))
+                    .child(self.ai_action_button(
+                        "ai-error-recheck",
+                        AiPluginAction::Recheck,
+                        tr!("settings.ai.recheck"),
+                        false,
+                        false,
+                        cx,
+                    ))
+                    .child(self.ai_action_button(
+                        "ai-error-uninstall",
+                        AiPluginAction::Uninstall,
+                        tr!("settings.ai.uninstall"),
+                        false,
+                        true,
+                        cx,
+                    )),
+            );
+        } else {
+            card = card
+                .child(self.ai_model_box(&manifest, &size_label))
+                .child(
+                    h_flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(self.ai_primary_action_button(view.primary_action, false, cx))
+                        .child(self.ai_action_button(
+                            "ai-import-model",
+                            AiPluginAction::ImportModel,
+                            tr!("settings.ai.import_model"),
+                            false,
+                            false,
+                            cx,
+                        ))
+                        .child(self.ai_action_button(
+                            "ai-recheck",
+                            AiPluginAction::Recheck,
+                            tr!("settings.ai.recheck"),
+                            false,
+                            false,
+                            cx,
+                        ))
+                        .child(self.ai_action_button(
+                            "ai-import-zip",
+                            AiPluginAction::InstallZip,
+                            tr!("settings.ai.install"),
+                            false,
+                            false,
+                            cx,
+                        )),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(rgb(p.muted_2))
+                        .child(tr!("settings.ai.download_note")),
+                );
+        }
+
+        card
+    }
+
+    fn ai_install_meta(&self, install: &PluginInstallation, size_label: &str) -> impl IntoElement {
+        v_flex()
+            .gap(px(4.))
+            .child(self.meta_row(tr!("settings.ai.version"), format!("v{}", install.version)))
+            .child(self.meta_row(tr!("settings.ai.variant"), install.variant.clone()))
+            .child(self.meta_row(
+                tr!("settings.ai.backend"),
+                variant_backend_label(&install.variant),
+            ))
+            .child(self.meta_row(tr!("settings.ai.model_size"), size_label.to_string()))
+    }
+
+    fn ai_variant_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.palette;
+        let installations = self.ai.installations.clone();
+        let active_variant = self
+            .ai
+            .active
+            .as_ref()
+            .map(|install| install.variant.clone());
+        v_flex()
+            .gap(px(6.))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(self.section_label(tr!("settings.ai.variants")))
+                    .child(self.badge(installations.len().to_string(), p.muted, p.panel_2)),
+            )
+            .child(
+                v_flex()
+                    .gap(px(4.))
+                    .children(installations.into_iter().map(|install| {
+                        let active = active_variant.as_deref() == Some(install.variant.as_str());
+                        let display_variant = install.variant.clone();
+                        let switch_variant = install.variant.clone();
+                        let version = install.version.clone();
+                        h_flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .p(px(8.))
+                            .rounded(px(8.))
+                            .bg(rgb(if active { p.accent_soft } else { p.panel_2 }))
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap(px(2.))
+                                    .child(
+                                        div()
+                                            .text_size(px(11.))
+                                            .font_medium()
+                                            .text_color(rgb(if active { p.accent } else { p.text }))
+                                            .child(display_variant.clone()),
+                                    )
+                                    .child(
+                                        div().text_size(px(9.)).text_color(rgb(p.muted_2)).child(
+                                            format!(
+                                                "v{version} · {}",
+                                                variant_backend_label(&display_variant)
+                                            ),
+                                        ),
+                                    ),
+                            )
+                            .child(if active {
+                                self.badge(tr!("settings.ai.variant.active"), p.green, p.green_soft)
+                                    .into_any_element()
+                            } else {
+                                Button::new(SharedString::from(format!(
+                                    "ai-variant-{switch_variant}"
+                                )))
+                                .label(tr!("settings.ai.variant.switch"))
+                                .small()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.set_ai_active_variant(&switch_variant, Some(&version), cx);
+                                }))
+                                .into_any_element()
+                            })
+                    })),
+            )
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(rgb(p.muted_2))
+                    .child(tr!("settings.ai.variant.note")),
+            )
+    }
+
+    fn ai_model_box(&self, manifest: &AiManifestView, size_label: &str) -> impl IntoElement {
+        let p = self.palette;
+        h_flex()
+            .items_center()
+            .gap(px(10.))
+            .p(px(10.))
+            .rounded(px(10.))
+            .bg(rgb(p.panel_2))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(2.))
+                    .child(
+                        div().text_size(px(11.)).text_color(rgb(p.text)).child(
+                            manifest
+                                .model_name
+                                .clone()
+                                .unwrap_or_else(|| tr!("settings.ai.model_unknown")),
+                        ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(rgb(p.muted_2))
+                            .child(format!(
+                                "{} · {size_label}",
+                                manifest.revision.clone().unwrap_or_else(|| "—".to_string())
+                            )),
+                    ),
+            )
+            .child(self.badge(tr!("settings.ai.not_downloaded"), p.amber, p.amber_soft))
+    }
+
+    fn ai_model_path_box(
+        &self,
+        install: &PluginInstallation,
+        manifest: &AiManifestView,
+        size_label: &str,
+    ) -> impl IntoElement {
+        let p = self.palette;
+        let revision = manifest.revision.clone().unwrap_or_else(|| "—".to_string());
+        let path = vrc_photon_core::data_dir()
+            .map(|dir| {
+                dir.join("plugins")
+                    .join(&install.plugin_id)
+                    .join("models")
+                    .join(&revision)
+                    .display()
+                    .to_string()
+            })
+            .unwrap_or(revision);
+        v_flex()
+            .gap(px(4.))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(self.section_label(tr!("settings.ai.model_path")))
+                    .child(self.badge(size_label.to_string(), p.muted, p.panel_2)),
+            )
+            .child(
+                div()
+                    .p(px(8.))
+                    .rounded(px(8.))
+                    .bg(rgb(p.panel_2))
+                    .text_size(px(10.))
+                    .text_color(rgb(p.muted))
+                    .truncate()
+                    .child(path),
+            )
+    }
+
+    fn ai_download_box(&self, download: &ModelDownloadView) -> impl IntoElement {
+        let p = self.palette;
+        let ratio = model_progress_ratio(download.bytes, download.total);
+        let percent = (ratio * 100.0).round() as u32;
+        let size = match download.total {
+            Some(total) => format!("{} / {}", format_bytes(download.bytes), format_bytes(total)),
+            None => format_bytes(download.bytes),
+        };
+        let status = if download.state == ModelState::Verifying {
+            tr!("settings.ai.status.verifying")
+        } else {
+            tr!("settings.ai.status.downloading")
+        };
+        v_flex()
+            .gap(px(6.))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(10.))
+                            .text_color(rgb(p.muted))
+                            .child(status),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .font_semibold()
+                            .text_color(rgb(p.text))
+                            .child(format!("{percent}%")),
+                    ),
+            )
+            .child(status_progress_bar(&p, ratio))
+            .child(
+                div()
+                    .text_size(px(9.))
+                    .text_color(rgb(p.muted_2))
+                    .child(size),
+            )
+    }
+
+    fn ai_error_box(&self, text: &str) -> impl IntoElement {
+        let p = self.palette;
+        div()
+            .p(px(10.))
+            .rounded(px(8.))
+            .bg(rgb(p.red_soft))
+            .border_1()
+            .border_color(rgb(p.red_border))
+            .text_size(px(10.))
+            .text_color(rgb(p.red))
+            .child(text.to_string())
+    }
+
+    fn ai_primary_action_button(
+        &self,
+        action: AiPluginAction,
+        retry: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let (label, danger) = match action {
+            AiPluginAction::InstallZip => (tr!("settings.ai.install"), false),
+            AiPluginAction::DownloadModel => (
+                if retry {
+                    tr!("settings.ai.retry")
+                } else {
+                    tr!("settings.ai.download")
+                },
+                false,
+            ),
+            AiPluginAction::ImportModel => (tr!("settings.ai.import_model"), false),
+            AiPluginAction::Recheck => (tr!("settings.ai.recheck"), false),
+            AiPluginAction::DeleteModel => (tr!("settings.ai.delete_model"), false),
+            AiPluginAction::Uninstall => (tr!("settings.ai.uninstall"), true),
+            AiPluginAction::None => return div().into_any_element(),
+        };
+        self.ai_action_button("ai-primary-action", action, label, true, danger, cx)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ai_action_button(
+        &self,
+        id: &'static str,
+        action: AiPluginAction,
+        label: String,
+        primary: bool,
+        danger: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut button = Button::new(id).label(label).small();
+        if primary {
+            button = button.primary();
+        }
+        if danger {
+            button = button.danger();
+        }
+        button
+            .on_click(cx.listener(move |this, _, _, cx| match action {
+                AiPluginAction::InstallZip => this.install_ai_plugin(cx),
+                AiPluginAction::DownloadModel => this.request_ai_model_download(cx),
+                AiPluginAction::ImportModel => this.import_ai_model_files(cx),
+                AiPluginAction::Recheck => this.probe_ai_plugin(cx),
+                AiPluginAction::DeleteModel => this.delete_ai_model(cx),
+                AiPluginAction::Uninstall => {
+                    this.ai.uninstall_modal_open = true;
+                    this.ai.uninstall_delete_tags = false;
+                    cx.notify();
+                }
+                AiPluginAction::None => {}
+            }))
+            .into_any_element()
+    }
+
+    fn ai_license_row(&self, label: String, value: String) -> impl IntoElement {
+        let p = self.palette;
+        v_flex()
+            .gap(px(2.))
+            .child(
+                div()
+                    .text_size(px(9.))
+                    .text_color(rgb(p.muted_2))
+                    .child(label),
+            )
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgb(p.text))
+                    .child(value),
+            )
+    }
+
+    pub(crate) fn ai_license_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
+        let manifest = self
+            .ai
+            .active
+            .as_ref()
+            .map(|install| ai_manifest_view(&install.manifest_json))
+            .unwrap_or_default();
+        let license = manifest
+            .license
+            .clone()
+            .unwrap_or_else(|| tr!("settings.ai.license.unknown"));
+        let license_url = manifest.license_url.clone();
+        let license_file = manifest
+            .license_file
+            .clone()
+            .unwrap_or_else(|| "—".to_string());
+        let install_line = self
+            .ai
+            .active
+            .as_ref()
+            .map(|install| {
+                format!(
+                    "{} · {} · v{}",
+                    install.plugin_id, install.variant, install.version
+                )
+            })
+            .unwrap_or_default();
+
+        let panel = dialog_panel(&self.palette)
+            .id("ai-license-panel")
+            .w(px(520.))
+            .gap(px(14.))
+            .p(px(20.))
+            .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
+            .child(
+                v_flex()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .text_size(px(16.))
+                            .font_semibold()
+                            .text_color(rgb(p.text))
+                            .child(tr!("settings.ai.license.title")),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(p.muted_2))
+                            .child(install_line),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgb(p.muted))
+                    .child(tr!("settings.ai.license.body")),
+            )
+            .child(
+                v_flex()
+                    .gap(px(8.))
+                    .p(px(12.))
+                    .rounded(px(10.))
+                    .bg(rgb(p.panel_2))
+                    .child(self.ai_license_row(
+                        tr!("settings.ai.license.metadata.license"),
+                        license,
+                    ))
+                    .child(self.ai_license_row(
+                        tr!("settings.ai.license.metadata.bundled"),
+                        license_file,
+                    ))
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(p.muted_2))
+                            .child(tr!("settings.ai.license.metadata.review")),
+                    )
+                    .when_some(license_url, |this, url| {
+                        this.child(
+                            Button::new("ai-license-open")
+                                .label(tr!("settings.ai.license.open"))
+                                .small()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Err(error) = open_path(Path::new(&url)) {
+                                        tracing::warn!(%error, %url, "cannot open the model license");
+                                        this.toast_error(
+                                            tr!("settings.ai.license.open_failed"),
+                                            cx,
+                                        );
+                                    }
+                                })),
+                        )
+                    }),
+            )
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(9.))
+                            .text_color(rgb(p.muted_2))
+                            .child(tr!("settings.ai.license.consent_note")),
+                    )
+                    .child(
+                        Button::new("ai-license-cancel")
+                            .label(tr!("common.cancel"))
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.close_ai_license_modal(cx)
+                            })),
+                    )
+                    .child(
+                        Button::new("ai-license-agree")
+                            .label(tr!("settings.ai.license.agree_download"))
+                            .small()
+                            .primary()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.accept_ai_model_license(cx)
+                            })),
+                    ),
+            );
+
+        div()
+            .id("ai-license-scrim")
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .size_full()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .p(px(DIALOG_VIEWPORT_MARGIN))
+            .bg(rgba(p.scrim))
+            .on_click(cx.listener(|this, _, _, cx| this.close_ai_license_modal(cx)))
+            .child(panel)
+            .into_any_element()
+    }
+
+    pub(crate) fn ai_uninstall_overlay(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
+        let install = self.ai.active.clone();
+        let manifest = install
+            .as_ref()
+            .map(|install| ai_manifest_view(&install.manifest_json))
+            .unwrap_or_default();
+        let size_label = self
+            .ai
+            .state
+            .as_ref()
+            .and_then(|state| state.model_bytes_total)
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .filter(|bytes| *bytes > 0)
+            .or(manifest.model_size)
+            .map(format_bytes)
+            .unwrap_or_else(|| "—".to_string());
+        let install_line = install
+            .as_ref()
+            .map(|install| {
+                format!(
+                    "{} · {} · v{}",
+                    install.plugin_id, install.variant, install.version
+                )
+            })
+            .unwrap_or_default();
+        let delete_tags = self.ai.uninstall_delete_tags;
+
+        let panel = dialog_panel(&self.palette)
+            .id("ai-uninstall-panel")
+            .w(px(520.))
+            .gap(px(14.))
+            .p(px(20.))
+            .on_click(cx.listener(|_, _, _, cx| cx.stop_propagation()))
+            .child(
+                v_flex()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .text_size(px(16.))
+                            .font_semibold()
+                            .text_color(rgb(p.text))
+                            .child(tr!("settings.ai.uninstall.title")),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(p.muted_2))
+                            .child(install_line),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(rgb(p.muted))
+                    .child(tr!("settings.ai.uninstall.body")),
+            )
+            .child(self.meta_row(tr!("settings.ai.model_size"), size_label))
+            .child(
+                v_flex()
+                    .gap(px(2.))
+                    .child(
+                        Checkbox::new("ai-uninstall-delete-tags")
+                            .checked(delete_tags)
+                            .label(tr!("settings.ai.uninstall.delete_tags"))
+                            .on_click(cx.listener(|this, checked, _, cx| {
+                                this.ai.uninstall_delete_tags = *checked;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(rgb(p.muted_2))
+                            .child(tr!("settings.ai.uninstall.delete_tags_hint")),
+                    )
+                    .when(!delete_tags, |this| {
+                        this.child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(p.muted_2))
+                                .child(tr!("settings.ai.uninstall.keep_note")),
+                        )
+                    }),
+            )
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(9.))
+                            .text_color(rgb(p.muted_2))
+                            .child(tr!("settings.ai.uninstall.stopping")),
+                    )
+                    .child(
+                        Button::new("ai-uninstall-cancel")
+                            .label(tr!("common.cancel"))
+                            .small()
+                            .ghost()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.ai.uninstall_modal_open = false;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("ai-uninstall-confirm")
+                            .label(tr!("settings.ai.uninstall.confirm"))
+                            .small()
+                            .danger()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                let delete_tags = this.ai.uninstall_delete_tags;
+                                this.ai.uninstall_modal_open = false;
+                                this.uninstall_ai_plugin(delete_tags, cx);
+                            })),
+                    ),
+            );
+
+        div()
+            .id("ai-uninstall-scrim")
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .bottom_0()
+            .size_full()
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .p(px(DIALOG_VIEWPORT_MARGIN))
+            .bg(rgba(p.scrim))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.ai.uninstall_modal_open = false;
+                cx.notify();
+            }))
+            .child(panel)
+            .into_any_element()
     }
 }

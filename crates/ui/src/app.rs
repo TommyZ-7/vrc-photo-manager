@@ -374,15 +374,21 @@ pub struct App {
 }
 
 /// True while any full-window overlay owns the input tree: the quick-look
-/// viewer, the manual-compression dialog, or the import dialog. Global
-/// shortcuts that reshape the shell must not fire through these layers.
+/// viewer, the manual-compression dialog, the import dialog, an AI plugin
+/// dialog, or the notification modal. Global shortcuts that reshape the shell
+/// must not fire through these layers.
 pub(crate) fn any_overlay_open(
     quick_look_open: bool,
     manual_compression_open: bool,
     import_dialog_open: bool,
+    ai_modal_open: bool,
     notification_modal_open: bool,
 ) -> bool {
-    quick_look_open || manual_compression_open || import_dialog_open || notification_modal_open
+    quick_look_open
+        || manual_compression_open
+        || import_dialog_open
+        || ai_modal_open
+        || notification_modal_open
 }
 
 /// Whether a global shortcut (sidebar / inspector / search / quick look)
@@ -448,6 +454,7 @@ impl App {
             self.quick_look_open,
             self.manual_compress.is_some(),
             self.import_dialog.is_some(),
+            self.ai.license_modal_open || self.ai.uninstall_modal_open,
             self.notification_modal_open,
         )
     }
@@ -1232,6 +1239,12 @@ impl Render for App {
             if self.import_dialog.is_some() {
                 root = root.child(self.import_modal_overlay(window, cx));
             }
+            if self.ai.license_modal_open {
+                root = root.child(self.ai_license_overlay(cx));
+            }
+            if self.ai.uninstall_modal_open {
+                root = root.child(self.ai_uninstall_overlay(cx));
+            }
         } else {
             root = root.child(self.quick_look(window, cx));
         }
@@ -1335,11 +1348,12 @@ mod tests {
 
     #[test]
     fn overlay_guard_covers_the_viewer_and_both_modals() {
-        assert!(!any_overlay_open(false, false, false, false));
-        assert!(any_overlay_open(true, false, false, false));
-        assert!(any_overlay_open(false, true, false, false));
-        assert!(any_overlay_open(false, false, true, false));
-        assert!(any_overlay_open(false, false, false, true));
+        assert!(!any_overlay_open(false, false, false, false, false));
+        assert!(any_overlay_open(true, false, false, false, false));
+        assert!(any_overlay_open(false, true, false, false, false));
+        assert!(any_overlay_open(false, false, true, false, false));
+        assert!(any_overlay_open(false, false, false, true, false));
+        assert!(any_overlay_open(false, false, false, false, true));
     }
 
     #[test]

@@ -43,6 +43,8 @@ pub(crate) struct AiUiState {
     pub(crate) job_counts: JobStatusCounts,
     pub(crate) active_jobs: Vec<TaggingJob>,
     pub(crate) license_modal_open: bool,
+    pub(crate) uninstall_modal_open: bool,
+    pub(crate) uninstall_delete_tags: bool,
     pub(crate) last_error: Option<String>,
 }
 
@@ -291,6 +293,130 @@ impl AiUiState {
             state.model_bytes_total = total.map(|total| i64::try_from(total).unwrap_or(i64::MAX));
             state.model_error = error.map(str::to_string);
         }
+    }
+}
+
+/// The primary action a plugin card offers for the current state.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum AiPluginAction {
+    #[default]
+    InstallZip,
+    DownloadModel,
+    ImportModel,
+    Recheck,
+    DeleteModel,
+    Uninstall,
+    None,
+}
+
+/// Pure presentation model for the settings plugin card. Keeping the primary
+/// action here makes the state machine testable without a window.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct AiPluginCardView {
+    pub(crate) primary_action: AiPluginAction,
+}
+
+impl From<&AiUiState> for AiPluginCardView {
+    fn from(ai: &AiUiState) -> Self {
+        let model_state = ai.state.as_ref().map(|state| state.model_state);
+        let primary_action = if ai.install_busy {
+            AiPluginAction::None
+        } else if ai.active.is_none() {
+            AiPluginAction::InstallZip
+        } else if ai.download.is_some() {
+            AiPluginAction::None
+        } else {
+            match model_state {
+                None | Some(ModelState::Missing) | Some(ModelState::Error) => {
+                    AiPluginAction::DownloadModel
+                }
+                Some(ModelState::Ready) => AiPluginAction::Recheck,
+                Some(ModelState::Downloading | ModelState::Verifying) => AiPluginAction::None,
+            }
+        };
+        Self { primary_action }
+    }
+}
+
+/// License and model metadata read from an installed package manifest.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct AiManifestView {
+    pub(crate) license: Option<String>,
+    pub(crate) license_url: Option<String>,
+    pub(crate) license_file: Option<String>,
+    pub(crate) model_name: Option<String>,
+    pub(crate) model_size: Option<u64>,
+    pub(crate) revision: Option<String>,
+}
+
+fn manifest_text(value: Option<&serde_json::Value>, key: &str) -> Option<String> {
+    value
+        .and_then(|value| value.get(key))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .filter(|text| !text.trim().is_empty())
+}
+
+/// Reads the neutral license and model details the settings card displays.
+/// Malformed or older manifests degrade to empty values instead of hiding the
+/// card.
+pub(crate) fn ai_manifest_view(manifest_json: &str) -> AiManifestView {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(manifest_json) else {
+        return AiManifestView::default();
+    };
+    let model = value.get("model");
+    let model_size = model
+        .and_then(|model| model.get("files"))
+        .and_then(serde_json::Value::as_array)
+        .map(|files| {
+            files
+                .iter()
+                .filter_map(|file| file.get("size").and_then(serde_json::Value::as_u64))
+                .sum::<u64>()
+        })
+        .filter(|size| *size > 0);
+    let license_file = value
+        .get("files")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|files| {
+            files
+                .iter()
+                .filter_map(|file| file.get("path").and_then(serde_json::Value::as_str))
+                .find(|path| path.to_ascii_lowercase().contains("license"))
+                .map(str::to_string)
+        });
+    AiManifestView {
+        license: manifest_text(model, "license"),
+        license_url: manifest_text(model, "license_url"),
+        license_file,
+        model_name: match (
+            manifest_text(model, "id"),
+            manifest_text(model, "quantization"),
+        ) {
+            (Some(id), Some(quantization)) => Some(format!("{id} {quantization}")),
+            (Some(id), None) => Some(id),
+            (None, Some(quantization)) => Some(quantization),
+            (None, None) => None,
+        },
+        model_size,
+        revision: manifest_text(model, "revision"),
+    }
+}
+
+/// Display name for the backend encoded in a platform variant such as
+/// `linux-vulkan`.
+pub(crate) fn variant_backend_label(variant: &str) -> String {
+    let kind = variant
+        .rsplit_once('-')
+        .map(|(_, backend)| backend)
+        .unwrap_or(variant);
+    match kind.to_ascii_lowercase().as_str() {
+        "vulkan" => "Vulkan".to_string(),
+        "cpu" => "CPU".to_string(),
+        "cuda" => "CUDA".to_string(),
+        "roc" | "rocm" | "hip" => "ROCm".to_string(),
+        "" => "—".to_string(),
+        _ => kind.to_string(),
     }
 }
 
@@ -988,10 +1114,11 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{
-        AI_PLUGIN_ID, AiResponseOutcome, AiUiState, ai_error_label_in, ai_error_text_in,
-        ai_job_summary_label, ai_response_outcome, ai_tag_view, apply_install_event,
-        backend_options, collect_ai_snapshot, install_event_applies_to_ai, model_progress_ratio,
-        needs_license_consent, people_label, place_label,
+        AI_PLUGIN_ID, AiPluginAction, AiPluginCardView, AiResponseOutcome, AiUiState,
+        ModelDownloadView, ai_error_label_in, ai_error_text_in, ai_job_summary_label,
+        ai_manifest_view, ai_response_outcome, ai_tag_view, apply_install_event, backend_options,
+        collect_ai_snapshot, install_event_applies_to_ai, model_progress_ratio,
+        needs_license_consent, people_label, place_label, variant_backend_label,
     };
     use vrc_photon_ai_protocol::{
         BackendInfo, ModelState, PluginInstallStatus, Probe, TaggingJobStatus,
@@ -1047,6 +1174,27 @@ mod tests {
         }
     }
 
+    fn installed_missing_model() -> AiUiState {
+        let install = sample_install();
+        AiUiState {
+            installations: vec![install.clone()],
+            active: Some(install),
+            state: Some(sample_state(ModelState::Missing)),
+            ..AiUiState::default()
+        }
+    }
+
+    fn ready_state() -> AiUiState {
+        let install = sample_install();
+        AiUiState {
+            installations: vec![install.clone()],
+            active: Some(install),
+            state: Some(sample_state(ModelState::Ready)),
+            probe: Some(sample_probe()),
+            ..AiUiState::default()
+        }
+    }
+
     fn sample_job(id: &str, status: TaggingJobStatus) -> TaggingJob {
         TaggingJob {
             id: id.to_string(),
@@ -1070,6 +1218,84 @@ mod tests {
         assert_eq!(model_progress_ratio(50, Some(100)), 0.5);
         assert_eq!(model_progress_ratio(200, Some(100)), 1.0);
         assert_eq!(model_progress_ratio(10, Some(0)), 0.0);
+    }
+
+    #[test]
+    fn plugin_card_state_selects_the_right_primary_action() {
+        let view = AiPluginCardView::from(&AiUiState::default());
+        assert_eq!(view.primary_action, AiPluginAction::InstallZip);
+
+        let view = AiPluginCardView::from(&installed_missing_model());
+        assert_eq!(view.primary_action, AiPluginAction::DownloadModel);
+
+        let view = AiPluginCardView::from(&ready_state());
+        assert_eq!(view.primary_action, AiPluginAction::Recheck);
+    }
+
+    #[test]
+    fn plugin_card_has_no_primary_action_while_downloading() {
+        let mut ai = installed_missing_model();
+        ai.download = Some(ModelDownloadView {
+            bytes: 5,
+            total: Some(10),
+            state: ModelState::Downloading,
+        });
+        assert_eq!(
+            AiPluginCardView::from(&ai).primary_action,
+            AiPluginAction::None
+        );
+    }
+
+    #[test]
+    fn plugin_card_error_state_retries_the_download() {
+        let mut ai = installed_missing_model();
+        ai.state = Some(sample_state(ModelState::Error));
+        assert_eq!(
+            AiPluginCardView::from(&ai).primary_action,
+            AiPluginAction::DownloadModel
+        );
+    }
+
+    #[test]
+    fn manifest_view_reads_license_and_model_size() {
+        let json = serde_json::json!({
+            "files": [{"path": "LICENSE-LFM.txt"}],
+            "model": {
+                "id": "d1-2B",
+                "quantization": "Q8_0",
+                "revision": "5ebcce3",
+                "license": "LFM Open License v1.0",
+                "license_url": "https://example.com/license",
+                "files": [{"size": 5}, {"size": 6}]
+            }
+        });
+        let view = ai_manifest_view(&json.to_string());
+        assert_eq!(view.license.as_deref(), Some("LFM Open License v1.0"));
+        assert_eq!(
+            view.license_url.as_deref(),
+            Some("https://example.com/license")
+        );
+        assert_eq!(view.license_file.as_deref(), Some("LICENSE-LFM.txt"));
+        assert_eq!(view.model_name.as_deref(), Some("d1-2B Q8_0"));
+        assert_eq!(view.model_size, Some(11));
+        assert_eq!(view.revision.as_deref(), Some("5ebcce3"));
+    }
+
+    #[test]
+    fn manifest_view_tolerates_missing_or_malformed_json() {
+        let view = ai_manifest_view("{}");
+        assert_eq!(view, super::AiManifestView::default());
+        let view = ai_manifest_view("not json");
+        assert_eq!(view, super::AiManifestView::default());
+    }
+
+    #[test]
+    fn variant_backend_labels_are_readable() {
+        assert_eq!(variant_backend_label("linux-vulkan"), "Vulkan");
+        assert_eq!(variant_backend_label("windows-cuda"), "CUDA");
+        assert_eq!(variant_backend_label("linux-cpu"), "CPU");
+        assert_eq!(variant_backend_label("linux-rocm"), "ROCm");
+        assert_eq!(variant_backend_label("generic"), "generic");
     }
 
     #[test]
