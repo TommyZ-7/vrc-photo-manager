@@ -28,6 +28,7 @@ use gpui_kit::component::notification::NotificationType;
 use gpui_kit::component::slider::{SliderEvent, SliderState};
 use gpui_kit::component::*;
 use gpui_kit::*;
+use vrc_photon_core::ai::{PhotoAi, PhotoAiTagView};
 use vrc_photon_core::db::Db;
 use vrc_photon_core::model::{
     CompressionJob, CompressionProfile, DaemonError, DeletionCounts, DeletionRequest, Derivative,
@@ -192,6 +193,8 @@ pub struct App {
     pub(crate) selected_photo: Option<Photo>,
     pub(crate) selected_players: Vec<PhotoPlayer>,
     pub(crate) selected_tags: Vec<String>,
+    pub(crate) selected_ai: Option<PhotoAi>,
+    pub(crate) selected_ai_tags: Vec<PhotoAiTagView>,
     pub(crate) selected_derivatives: Vec<Derivative>,
     pub(crate) compressed_ids: HashSet<i64>,
     pub(crate) duplicate_ids: HashSet<i64>,
@@ -900,6 +903,8 @@ impl App {
             selected_photo: None,
             selected_players: Vec::new(),
             selected_tags: Vec::new(),
+            selected_ai: None,
+            selected_ai_tags: Vec::new(),
             selected_derivatives: Vec::new(),
             compressed_ids: HashSet::new(),
             duplicate_ids: HashSet::new(),

@@ -12,7 +12,7 @@ use gpui_kit::*;
 use vrc_photon_ai_protocol::{
     ModelState, PluginInstallStatus, Probe, TaggingJobStatus, TaggingStage,
 };
-use vrc_photon_core::ai::{PhotoAiTagView, PluginInstallation, PluginState, TaggingJob};
+use vrc_photon_core::ai::{PhotoAi, PhotoAiTagView, PluginInstallation, PluginState, TaggingJob};
 use vrc_photon_core::db::Db;
 use vrc_photon_core::model::JobStatusCounts;
 use vrc_photon_core::settings::AppSettings;
@@ -602,13 +602,14 @@ pub(crate) fn people_label(min: Option<u32>, max: Option<u32>) -> String {
     }
 }
 
-/// Human-readable place branch from the classifier.
+/// Human-readable place branch from the classifier, translated for the active
+/// locale.
 pub(crate) fn place_label(branch: Option<&str>) -> String {
     match branch {
         Some(branch) => match branch.trim().to_ascii_lowercase().as_str() {
-            "indoor" => "屋内".to_string(),
-            "outdoor" => "屋外".to_string(),
-            _ => "その他".to_string(),
+            "indoor" => tr!("photos.ai.place.indoor"),
+            "outdoor" => tr!("photos.ai.place.outdoor"),
+            _ => tr!("photos.ai.place.other"),
         },
         None => "—".to_string(),
     }
@@ -629,6 +630,7 @@ pub(crate) fn ai_job_summary_label(counts: JobStatusCounts) -> String {
 pub(crate) struct AiTagView {
     pub(crate) label: String,
     pub(crate) tooltip: String,
+    pub(crate) probability_label: String,
     pub(crate) ai_badge: bool,
 }
 
@@ -649,8 +651,67 @@ pub(crate) fn ai_tag_view(tag: &PhotoAiTagView, language: &str) -> AiTagView {
     AiTagView {
         label,
         tooltip,
+        probability_label: format!("{:.1}%", tag.probability * 100.0),
         ai_badge: true,
     }
+}
+
+/// Formats every stored tag for the active language.
+pub(crate) fn ai_tag_views(tags: &[PhotoAiTagView], language: &str) -> Vec<AiTagView> {
+    tags.iter().map(|tag| ai_tag_view(tag, language)).collect()
+}
+
+/// Loads the stored AI result and the applied tag chips for one photo.
+pub(crate) fn load_photo_ai(db: &Db, photo_id: i64) -> (Option<PhotoAi>, Vec<PhotoAiTagView>) {
+    let ai = db.photo_ai(photo_id).unwrap_or_else(|error| {
+        tracing::warn!(%error, photo_id, "cannot load photo AI metadata");
+        None
+    });
+    let tags = db
+        .photo_ai_tags_with_names(photo_id)
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, photo_id, "cannot load photo AI tags");
+            Vec::new()
+        })
+        .into_iter()
+        .filter(|tag| tag.applied)
+        .collect();
+    (ai, tags)
+}
+
+/// Why a manual retag did or did not enqueue jobs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ManualRetagOutcome {
+    Disabled,
+    NotReady,
+    Queued(usize),
+}
+
+impl ManualRetagOutcome {
+    /// True when the daemon's tagging worker should be woken. An empty enqueue
+    /// means every photo already has an active job, so there is nothing to run.
+    pub(crate) fn wakes(self) -> bool {
+        matches!(self, Self::Queued(count) if count > 0)
+    }
+}
+
+/// Validates the AI tagging switch and readiness before enqueueing pending
+/// retag jobs. Keeping the decision pure lets the guards be tested without a
+/// window.
+pub(crate) fn enqueue_manual_retag(
+    db: &Db,
+    enabled: bool,
+    ready: bool,
+    photo_ids: &[i64],
+) -> vrc_photon_core::error::Result<ManualRetagOutcome> {
+    if !enabled {
+        return Ok(ManualRetagOutcome::Disabled);
+    }
+    if !ready {
+        return Ok(ManualRetagOutcome::NotReady);
+    }
+    db.enqueue_tagging_jobs(photo_ids, AI_PLUGIN_ID, TaggingJobStatus::Pending)
+        .map(ManualRetagOutcome::Queued)
 }
 
 /// Whether the license modal must be shown before starting a model download.
@@ -994,22 +1055,26 @@ impl App {
     /// Enqueues ready tagging jobs for the given photos. The plugin must be
     /// enabled and have an active installation, a ready model, and a probe.
     pub(crate) fn enqueue_ai_tagging(&mut self, photo_ids: &[i64], cx: &mut Context<Self>) {
-        if !self.settings.ai_tagging_enabled {
-            self.toast_warning(tr!("integrations.ai.disabled"), cx);
-            cx.notify();
-            return;
-        }
-        if !self.ai.ready() {
-            self.toast_warning(tr!("integrations.ai.not_ready"), cx);
-            cx.notify();
-            return;
-        }
-        match self
-            .db
-            .enqueue_tagging_jobs(photo_ids, AI_PLUGIN_ID, TaggingJobStatus::Pending)
-        {
-            Ok(0) => self.toast_info(tr!("integrations.ai.enqueue.none"), cx),
-            Ok(count) => {
+        match enqueue_manual_retag(
+            &self.db,
+            self.settings.ai_tagging_enabled,
+            self.ai.ready(),
+            photo_ids,
+        ) {
+            Ok(ManualRetagOutcome::Disabled) => {
+                self.toast_warning(tr!("integrations.ai.disabled"), cx);
+                cx.notify();
+                return;
+            }
+            Ok(ManualRetagOutcome::NotReady) => {
+                self.toast_warning(tr!("integrations.ai.not_ready"), cx);
+                cx.notify();
+                return;
+            }
+            Ok(ManualRetagOutcome::Queued(0)) => {
+                self.toast_info(tr!("integrations.ai.enqueue.none"), cx);
+            }
+            Ok(ManualRetagOutcome::Queued(count)) => {
                 self.toast_success(
                     tr_args!("integrations.ai.enqueue.queued", count = count),
                     cx,
@@ -1159,14 +1224,21 @@ impl App {
     }
 
     /// Reloads the selected photo's metadata after its AI result changed.
-    /// Task 20 extends `load_selected_meta` with the AI rows, so this stays
-    /// the single refresh path for the inspector.
+    /// `load_selected_meta` also loads the AI rows, so this stays the single
+    /// refresh path for the inspector.
     pub(crate) fn refresh_selected_ai(&mut self, cx: &mut Context<Self>) {
         if let Some(id) = self.selected {
             self.load_selected_meta(id);
             self.refresh_stale_preview(cx);
         }
         cx.notify();
+    }
+
+    /// Loads the selected photo's AI result and applied tag views.
+    pub(crate) fn load_selected_ai(&mut self, photo_id: i64) {
+        let (ai, tags) = load_photo_ai(&self.db, photo_id);
+        self.selected_ai = ai;
+        self.selected_ai_tags = tags;
     }
 
     pub(crate) fn ai_ready(&self) -> bool {
@@ -1182,19 +1254,23 @@ impl App {
 mod tests {
     use super::{
         AI_PLUGIN_ID, AiPluginAction, AiPluginCardState, AiPluginCardView, AiResponseOutcome,
-        AiUiState, ModelDownloadView, ai_error_label_in, ai_error_text_in, ai_job_summary_label,
-        ai_manifest_view, ai_plugin_card_state, ai_response_outcome, ai_tag_view,
-        apply_install_event, backend_options, backend_selection_is_disabled_when_not_ready,
-        collect_ai_snapshot, download_progress_bar_ratio, install_event_applies_to_ai,
-        installation_row_id, is_active_installation, model_progress_ratio, needs_license_consent,
-        people_label, place_label, variant_backend_label,
+        AiUiState, ManualRetagOutcome, ModelDownloadView, ai_error_label_in, ai_error_text_in,
+        ai_job_summary_label, ai_manifest_view, ai_plugin_card_state, ai_response_outcome,
+        ai_tag_view, ai_tag_views, apply_install_event, backend_options,
+        backend_selection_is_disabled_when_not_ready, collect_ai_snapshot,
+        download_progress_bar_ratio, enqueue_manual_retag, install_event_applies_to_ai,
+        installation_row_id, is_active_installation, load_photo_ai, model_progress_ratio,
+        needs_license_consent, people_label, place_label, variant_backend_label,
     };
     use vrc_photon_ai_protocol::{
-        BackendInfo, ModelState, PluginInstallStatus, Probe, TaggingJobStatus,
+        BackendInfo, Catalog, ModelState, PluginInstallStatus, Probe, TagDefinition,
+        TaggingJobStatus,
     };
-    use vrc_photon_core::ai::{PhotoAiTagView, PluginInstallation, PluginState, TaggingJob};
+    use vrc_photon_core::ai::{
+        NewPhotoAi, PhotoAiTagView, PluginInstallation, PluginState, TaggingJob,
+    };
     use vrc_photon_core::db::Db;
-    use vrc_photon_core::model::JobStatusCounts;
+    use vrc_photon_core::model::{JobStatusCounts, NewPhoto};
     use vrc_photon_ipc::{ErrorCode, Response};
 
     fn backend(kind: &str) -> BackendInfo {
@@ -1278,6 +1354,73 @@ mod tests {
             created_at: "2026-11-04T00:00:00Z".to_string(),
             started_at: None,
             finished_at: None,
+        }
+    }
+
+    fn seed_photo(db: &Db) -> i64 {
+        let root = db.add_root("/photos", "reference").unwrap();
+        db.upsert_photo(&NewPhoto {
+            root_id: root,
+            rel_path: "a.png".to_string(),
+            abs_path: "/photos/a.png".to_string(),
+            file_name: "a.png".to_string(),
+            captured_at_utc: 1_700_000_000,
+            captured_at_local: "2023-11-14 22:13:20.000".to_string(),
+            tz_offset_sec: 0,
+            width: 1920,
+            height: 1080,
+            file_size: 1234,
+            mtime: 1_700_000_000,
+            blake3: None,
+        })
+        .unwrap()
+    }
+
+    fn test_catalog() -> Catalog {
+        Catalog {
+            version: "2026-11-03.1".to_string(),
+            outdoor: vec![
+                TagDefinition {
+                    key: "sea".to_string(),
+                    name: "海".to_string(),
+                    name_en: Some("Sea".to_string()),
+                    description: "海辺".to_string(),
+                    default_threshold: 0.5,
+                },
+                TagDefinition {
+                    key: "park".to_string(),
+                    name: "公園".to_string(),
+                    name_en: None,
+                    description: "公園".to_string(),
+                    default_threshold: 0.5,
+                },
+            ],
+            indoor: Vec::new(),
+        }
+    }
+
+    fn test_ai_result(tags: &[(&str, f32)]) -> NewPhotoAi {
+        NewPhotoAi {
+            variant: "linux-cpu".to_string(),
+            sidecar_version: "1.0.0".to_string(),
+            model_version: "d1-2B-Q8_0".to_string(),
+            model_revision: "rev-1".to_string(),
+            catalog_version: "2026-11-03.1".to_string(),
+            source: "original".to_string(),
+            presence_threshold: 0.9,
+            character_present: true,
+            presence_probability: 0.99,
+            people_min: Some(2),
+            people_max: Some(3),
+            people_median: Some(3),
+            place_branch: Some("outdoor".to_string()),
+            place_probabilities_json: Some(
+                r#"{"indoor":0.1,"outdoor":0.8,"other":0.1}"#.to_string(),
+            ),
+            tags: tags
+                .iter()
+                .map(|(key, probability)| ((*key).to_string(), *probability))
+                .collect(),
         }
     }
 
@@ -1706,7 +1849,7 @@ mod tests {
     }
 
     #[test]
-    fn ai_tag_view_uses_the_requested_language_and_probability() {
+    fn ai_tag_chip_shows_probability_and_ai_badge() {
         let tag = PhotoAiTagView {
             tag_key: "sea".to_string(),
             name: "海".to_string(),
@@ -1718,9 +1861,103 @@ mod tests {
         assert_eq!(ja.label, "海");
         assert!(ja.tooltip.contains("0.969"));
         assert!(ja.ai_badge);
+        assert_eq!(ja.probability_label, "96.9%");
 
         let en = ai_tag_view(&tag, "en");
         assert_eq!(en.label, "Sea");
+    }
+
+    #[test]
+    fn selected_ai_tags_use_english_names_when_language_is_en() {
+        let tags = [
+            PhotoAiTagView {
+                tag_key: "sea".to_string(),
+                name: "海".to_string(),
+                name_en: Some("Sea".to_string()),
+                probability: 0.969,
+                applied: true,
+            },
+            PhotoAiTagView {
+                tag_key: "park".to_string(),
+                name: "公園".to_string(),
+                name_en: None,
+                probability: 0.61,
+                applied: true,
+            },
+        ];
+
+        let ja = ai_tag_views(&tags, "ja");
+        assert_eq!(
+            ja.iter()
+                .map(|view| view.label.as_str())
+                .collect::<Vec<_>>(),
+            ["海", "公園"]
+        );
+
+        let en = ai_tag_views(&tags, "en");
+        assert_eq!(
+            en.iter()
+                .map(|view| view.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Sea", "公園"],
+            "a missing English name falls back to the catalog's Japanese name"
+        );
+    }
+
+    #[test]
+    fn load_photo_ai_returns_metadata_and_only_applied_tags() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        db.sync_ai_catalog(AI_PLUGIN_ID, &test_catalog()).unwrap();
+        db.save_photo_ai(
+            photo,
+            AI_PLUGIN_ID,
+            &test_ai_result(&[("sea", 0.97), ("park", 0.4)]),
+        )
+        .unwrap();
+
+        let (ai, tags) = load_photo_ai(&db, photo);
+        let ai = ai.expect("saved AI metadata");
+        assert_eq!(ai.people_min, Some(2));
+        assert_eq!(ai.place_branch.as_deref(), Some("outdoor"));
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].tag_key, "sea");
+        assert!(tags[0].applied);
+
+        let (missing_ai, missing_tags) = load_photo_ai(&db, photo + 1);
+        assert!(missing_ai.is_none());
+        assert!(missing_tags.is_empty());
+    }
+
+    #[test]
+    fn manual_retag_enqueues_one_job_and_wakes() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+
+        let outcome = enqueue_manual_retag(&db, true, true, &[photo]).unwrap();
+        assert_eq!(outcome, ManualRetagOutcome::Queued(1));
+        assert!(outcome.wakes());
+
+        let jobs = db.tagging_jobs_for_photo(photo).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].status, TaggingJobStatus::Pending);
+        assert_eq!(jobs[0].plugin_id, AI_PLUGIN_ID);
+    }
+
+    #[test]
+    fn retag_requires_enabled_plugin() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+
+        let disabled = enqueue_manual_retag(&db, false, true, &[photo]).unwrap();
+        assert_eq!(disabled, ManualRetagOutcome::Disabled);
+        assert!(!disabled.wakes());
+        assert!(db.tagging_jobs_for_photo(photo).unwrap().is_empty());
+
+        let not_ready = enqueue_manual_retag(&db, true, false, &[photo]).unwrap();
+        assert_eq!(not_ready, ManualRetagOutcome::NotReady);
+        assert!(!not_ready.wakes());
+        assert!(db.tagging_jobs_for_photo(photo).unwrap().is_empty());
     }
 
     #[test]

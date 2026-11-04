@@ -10,6 +10,7 @@ use std::time::Instant;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, Textarea};
 use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -18,6 +19,7 @@ use vrc_photon_core::model::Photo;
 use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::App;
+use crate::app::ai::{ai_tag_views, people_label, place_label};
 use crate::app::cli::log_timing;
 use crate::app::daemon::open_path;
 use crate::state::photo_browser::{PAGE_SIZE, PhotoIndex};
@@ -71,6 +73,16 @@ impl App {
                     .child(tr_args!("photos.selected_count", count = count)),
             )
             .child(div().flex_1())
+            .child(
+                Button::new("selection-ai-tag")
+                    .label(tr!("photos.ai.tag_selected"))
+                    .small()
+                    .primary()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let ids = this.selected_ids.to_vec();
+                        this.enqueue_ai_tagging(&ids, cx);
+                    })),
+            )
             .child(
                 Button::new("selection-clear")
                     .label(tr!("chrome.clear_selection"))
@@ -565,7 +577,8 @@ impl App {
             .child(badges)
             .child(meta)
             .child(players_block)
-            .child(tags_block);
+            .child(tags_block)
+            .child(self.ai_meta_block(id, cx));
 
         let actions = v_flex()
             .flex_shrink_0()
@@ -625,6 +638,141 @@ impl App {
             .flex_shrink_0()
             .child(card.w(px(card_width)).rounded(px(17.)))
             .into_any_element()
+    }
+
+    /// Read-only AI tagging history for the selected photo. The same mint
+    /// panel is mounted below the editable tags in the inspector and in the
+    /// Quick Look details panel.
+    pub(crate) fn ai_meta_block(&mut self, id: i64, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = self.palette;
+        let language = self.settings.language.clone();
+        let ai = self.selected_ai.clone();
+        let tags = ai_tag_views(&self.selected_ai_tags, &language);
+        let people = ai
+            .as_ref()
+            .map(|ai| people_label(ai.people_min, ai.people_max))
+            .unwrap_or_else(|| "—".to_string());
+        let place = ai
+            .as_ref()
+            .map(|ai| place_label(ai.place_branch.as_deref()))
+            .unwrap_or_else(|| "—".to_string());
+        let foot = ai
+            .as_ref()
+            .map(|ai| format!("{} · {} · {}", ai.model_version, ai.variant, ai.tagged_at));
+
+        let fact = |label: String, value: String| {
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap(px(1.))
+                .px(px(7.))
+                .py(px(5.))
+                .rounded(px(7.))
+                .bg(rgba(with_alpha(p.green, 0x0a)))
+                .child(
+                    div()
+                        .text_size(px(9.))
+                        .text_color(rgb(p.muted_2))
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .font_medium()
+                        .text_color(rgb(p.text))
+                        .child(value),
+                )
+        };
+
+        let mut tag_row = h_flex().flex_wrap().gap(px(4.));
+        if tags.is_empty() {
+            tag_row = tag_row.child(
+                div()
+                    .text_size(px(10.))
+                    .text_color(rgb(p.muted_2))
+                    .child("—"),
+            );
+        } else {
+            tag_row = tag_row.children(tags.into_iter().enumerate().map(|(index, view)| {
+                let tooltip = view.tooltip.clone();
+                h_flex()
+                    .id(SharedString::from(format!("ai-tag-{id}-{index}")))
+                    .items_center()
+                    .gap(px(3.))
+                    .px(px(7.))
+                    .py(px(2.))
+                    .rounded_full()
+                    .bg(rgba(with_alpha(p.green, 0x14)))
+                    .border_1()
+                    .border_color(rgba(with_alpha(p.green, 0x38)))
+                    .text_size(px(10.))
+                    .text_color(rgb(p.green))
+                    .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                    .child("✦")
+                    .child(view.label)
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(rgb(p.muted))
+                            .child(view.probability_label),
+                    )
+            }));
+        }
+
+        let header = h_flex()
+            .items_center()
+            .flex_wrap()
+            .gap(px(6.))
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .font_semibold()
+                    .text_color(rgb(p.green))
+                    .child(tr!("photos.section.ai_tags")),
+            )
+            .child(self.badge(tr!("photos.ai.badge"), p.green, p.green_soft))
+            .child(
+                div()
+                    .text_size(px(9.))
+                    .text_color(rgb(p.muted_2))
+                    .child(tr!("photos.ai.read_only")),
+            );
+
+        let mut panel = v_flex()
+            .min_w_0()
+            .gap(px(7.))
+            .p(px(9.))
+            .rounded(px(10.))
+            .bg(rgba(with_alpha(p.green, 0x0c)))
+            .border_1()
+            .border_color(rgba(with_alpha(p.green, 0x33)))
+            .child(header)
+            .child(tag_row)
+            .child(
+                h_flex()
+                    .gap(px(6.))
+                    .child(fact(tr!("photos.ai.people"), people))
+                    .child(fact(tr!("photos.ai.place"), place)),
+            );
+        if let Some(foot) = foot {
+            panel = panel.child(
+                div()
+                    .text_size(px(9.))
+                    .text_color(rgb(p.muted_2))
+                    .child(foot),
+            );
+        }
+
+        panel.child(
+            Button::new(SharedString::from(format!("ai-retag-{id}")))
+                .label(tr!("photos.ai.retag"))
+                .small()
+                .primary()
+                .w_full()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.enqueue_ai_tagging(&[id], cx);
+                })),
+        )
     }
 
     /// Metadata and actions for one photo. Shared by the full-screen viewer.
@@ -903,6 +1051,7 @@ impl App {
                     .child(Input::new(&self.tag_edit_input).flex_1())
                     .child(add_tag_button),
             )
+            .child(self.ai_meta_block(id, cx))
             .child(
                 v_flex()
                     .gap(px(6.))
