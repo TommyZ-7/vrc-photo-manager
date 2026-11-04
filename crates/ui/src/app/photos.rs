@@ -64,6 +64,7 @@ impl App {
             tracing::warn!(%error, photo_id = id, "cannot load photo derivatives");
             Vec::new()
         });
+        self.load_selected_ai(id);
         if self.note_edit_id.is_some_and(|edit_id| edit_id != id) {
             self.note_edit_id = None;
         }
@@ -468,6 +469,8 @@ impl App {
         self.selected_photo = None;
         self.selected_players.clear();
         self.selected_tags.clear();
+        self.selected_ai = None;
+        self.selected_ai_tags.clear();
         self.selected_derivatives.clear();
         self.reset_preview_state();
         self.note_edit_id = None;
@@ -896,6 +899,8 @@ impl App {
             self.selected_photo = None;
             self.selected_players.clear();
             self.selected_tags.clear();
+            self.selected_ai = None;
+            self.selected_ai_tags.clear();
             self.selected_derivatives.clear();
             self.reset_preview_state();
         }
@@ -1038,6 +1043,7 @@ fn deletion_warning_lines(summary: &DeletionJobSummary) -> Vec<String> {
     vec![
         job_status_line(tr!("photos.jobs.compression"), summary.compression),
         job_status_line(tr!("photos.jobs.send"), summary.send),
+        job_status_line(tr!("photos.jobs.ai_tagging"), summary.tagging),
         tr!("photos.jobs.note_all"),
         tr!("photos.jobs.note_send_cancelled"),
         tr!("photos.jobs.note_failed"),
@@ -1219,6 +1225,33 @@ mod tests {
             lines
                 .iter()
                 .any(|line| line.contains("送信") && line.contains("失敗 1"))
+        );
+    }
+
+    #[test]
+    fn deletion_warning_lines_include_ai_tagging() {
+        let summary = DeletionJobSummary {
+            compression: JobStatusCounts::default(),
+            send: JobStatusCounts::default(),
+            tagging: JobStatusCounts {
+                waiting: 1,
+                pending: 1,
+                processing: 1,
+                failed: 0,
+            },
+            affected_photos: 1,
+        };
+        let lines = deletion_warning_lines(&summary);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("AIタグ付け") && line.contains("処理中 1")),
+            "AI tagging jobs must be listed with the shared 処理中 label: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("AIタグ付け") && line.contains("未実行 1"))
         );
     }
 

@@ -10,6 +10,7 @@ use std::time::Instant;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, Textarea};
 use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -18,6 +19,10 @@ use vrc_photon_core::model::Photo;
 use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::App;
+use crate::app::ai::{
+    ai_empty_state_labels, ai_tag_views_with_context, format_tagged_at, people_label_in,
+    place_label_with_confidence,
+};
 use crate::app::cli::log_timing;
 use crate::app::daemon::open_path;
 use crate::state::photo_browser::{PAGE_SIZE, PhotoIndex};
@@ -25,6 +30,15 @@ use crate::state::preview::preview_placeholder_label;
 use crate::state::viewer::ViewerOpenSource;
 use crate::ui::components::{ButtonState, ButtonTone, glass_panel, photo_world_label};
 use crate::ui::theme::*;
+
+/// Stable keyboard-focus state for one AI tag chip. The entity lives in the
+/// window's keyed element state, so the handle and its focus/blur listeners
+/// survive re-renders.
+struct AiTagFocusState {
+    handle: FocusHandle,
+    _focus: Subscription,
+    _blur: Subscription,
+}
 
 impl App {
     pub(crate) fn photos_screen(
@@ -71,6 +85,16 @@ impl App {
                     .child(tr_args!("photos.selected_count", count = count)),
             )
             .child(div().flex_1())
+            .child(
+                Button::new("selection-ai-tag")
+                    .label(tr!("photos.ai.tag_selected"))
+                    .small()
+                    .primary()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let ids = this.selected_ids.to_vec();
+                        this.enqueue_ai_tagging(&ids, cx);
+                    })),
+            )
             .child(
                 Button::new("selection-clear")
                     .label(tr!("chrome.clear_selection"))
@@ -565,7 +589,8 @@ impl App {
             .child(badges)
             .child(meta)
             .child(players_block)
-            .child(tags_block);
+            .child(tags_block)
+            .child(self.ai_meta_block(id, window, cx));
 
         let actions = v_flex()
             .flex_shrink_0()
@@ -627,10 +652,247 @@ impl App {
             .into_any_element()
     }
 
+    /// Read-only AI tagging history for the selected photo. The same mint
+    /// panel is mounted below the editable tags in the inspector and in the
+    /// Quick Look details panel.
+    pub(crate) fn ai_meta_block(
+        &mut self,
+        id: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let p = self.palette;
+        let language = self.settings.language.clone();
+        let ai = self.selected_ai.clone();
+        let tagged_at = ai.as_ref().map(|ai| format_tagged_at(&ai.tagged_at));
+        let tags = ai_tag_views_with_context(
+            &self.selected_ai_tags,
+            &language,
+            ai.as_ref().map(|ai| ai.model_version.as_str()),
+            tagged_at.as_deref(),
+        );
+        let people = ai
+            .as_ref()
+            .map(|ai| people_label_in(&language, ai.people_min, ai.people_max))
+            .unwrap_or_else(|| "—".to_string());
+        let place = ai
+            .as_ref()
+            .map(|ai| {
+                place_label_with_confidence(
+                    ai.place_branch.as_deref(),
+                    ai.place_probabilities_json.as_deref(),
+                )
+            })
+            .unwrap_or_else(|| "—".to_string());
+        let foot = ai.as_ref().map(|ai| {
+            format!(
+                "{} · {} · {}",
+                ai.model_version,
+                ai.variant,
+                tagged_at.as_deref().unwrap_or(&ai.tagged_at)
+            )
+        });
+        let focus_states: Vec<Entity<AiTagFocusState>> = (0..tags.len())
+            .map(|index| {
+                let app_entity = cx.entity();
+                window.use_keyed_state(
+                    SharedString::from(format!("ai-tag-focus-{id}-{index}")),
+                    cx,
+                    move |window, cx| {
+                        let handle = cx.focus_handle().tab_stop(true);
+                        let focus_handle = handle.clone();
+                        let focus_entity = app_entity.clone();
+                        let focus = cx.on_focus(
+                            &handle,
+                            window,
+                            move |_state: &mut AiTagFocusState, _, cx| {
+                                let focus_handle = focus_handle.clone();
+                                focus_entity.update(cx, |this, cx| {
+                                    this.ai_tag_focused = Some(focus_handle);
+                                    cx.notify();
+                                });
+                            },
+                        );
+                        let blur_handle = handle.clone();
+                        let blur_entity = app_entity.clone();
+                        let blur = cx.on_blur(
+                            &handle,
+                            window,
+                            move |_state: &mut AiTagFocusState, _, cx| {
+                                let blur_handle = blur_handle.clone();
+                                blur_entity.update(cx, |this, cx| {
+                                    if this.ai_tag_focused.as_ref() == Some(&blur_handle) {
+                                        this.ai_tag_focused = None;
+                                        cx.notify();
+                                    }
+                                });
+                            },
+                        );
+                        AiTagFocusState {
+                            handle,
+                            _focus: focus,
+                            _blur: blur,
+                        }
+                    },
+                )
+            })
+            .collect();
+        let focus_handles: Vec<FocusHandle> = focus_states
+            .iter()
+            .map(|state| state.read(cx).handle.clone())
+            .collect();
+        let focused_tooltip = self
+            .ai_tag_focused
+            .as_ref()
+            .and_then(|focused| focus_handles.iter().position(|handle| handle == focused))
+            .and_then(|index| tags.get(index))
+            .map(|view| view.tooltip.clone());
+
+        let fact = |label: String, value: String| {
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap(px(1.))
+                .px(px(7.))
+                .py(px(5.))
+                .rounded(px(7.))
+                .bg(rgba(with_alpha(p.green, 0x0a)))
+                .child(
+                    div()
+                        .text_size(px(9.))
+                        .text_color(rgb(p.muted_2))
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .font_medium()
+                        .text_color(rgb(p.text))
+                        .child(value),
+                )
+        };
+
+        let (empty_title, empty_hint) = ai_empty_state_labels(ai.is_some());
+        let mut tag_row = h_flex().flex_wrap().gap(px(4.));
+        if tags.is_empty() {
+            tag_row = tag_row.child(
+                v_flex()
+                    .gap(px(1.))
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .font_medium()
+                            .text_color(rgb(p.text))
+                            .child(empty_title),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(rgb(p.muted_2))
+                            .child(empty_hint),
+                    ),
+            );
+        } else {
+            tag_row = tag_row.children(focus_handles.into_iter().zip(tags).enumerate().map(
+                |(index, (focus, view))| {
+                    let tooltip = view.tooltip.clone();
+                    h_flex()
+                        .id(SharedString::from(format!("ai-tag-{id}-{index}")))
+                        .items_center()
+                        .gap(px(3.))
+                        .px(px(7.))
+                        .py(px(2.))
+                        .rounded_full()
+                        .bg(rgba(with_alpha(p.green, 0x14)))
+                        .border_1()
+                        .border_color(rgba(with_alpha(p.green, 0x38)))
+                        .text_size(px(10.))
+                        .text_color(rgb(p.green))
+                        .track_focus(&focus)
+                        .focus(move |this| this.border_color(rgb(p.green)))
+                        .aria_description(tooltip.clone())
+                        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                        .child("✦")
+                        .child(view.label)
+                        .child(
+                            div()
+                                .text_size(px(9.))
+                                .text_color(rgb(p.muted))
+                                .child(view.probability_label),
+                        )
+                },
+            ));
+        }
+
+        let header = h_flex()
+            .items_center()
+            .flex_wrap()
+            .gap(px(6.))
+            .child(
+                div()
+                    .text_size(px(10.))
+                    .font_semibold()
+                    .text_color(rgb(p.green))
+                    .child(tr!("photos.section.ai_tags")),
+            )
+            .child(self.badge(tr!("photos.ai.badge"), p.green, p.green_soft))
+            .child(
+                div()
+                    .text_size(px(9.))
+                    .text_color(rgb(p.muted_2))
+                    .child(tr!("photos.ai.read_only")),
+            );
+
+        let mut panel = v_flex()
+            .min_w_0()
+            .gap(px(7.))
+            .p(px(9.))
+            .rounded(px(10.))
+            .bg(rgba(with_alpha(p.green, 0x0c)))
+            .border_1()
+            .border_color(rgba(with_alpha(p.green, 0x33)))
+            .child(header)
+            .child(tag_row);
+        if let Some(tooltip) = focused_tooltip {
+            panel = panel.child(
+                div()
+                    .text_size(px(9.))
+                    .text_color(rgb(p.green))
+                    .child(tooltip),
+            );
+        }
+        panel = panel.child(
+            h_flex()
+                .gap(px(6.))
+                .child(fact(tr!("photos.ai.people"), people))
+                .child(fact(tr!("photos.ai.place"), place)),
+        );
+        if let Some(foot) = foot {
+            panel = panel.child(
+                div()
+                    .text_size(px(9.))
+                    .text_color(rgb(p.muted_2))
+                    .child(foot),
+            );
+        }
+
+        panel.child(
+            Button::new(SharedString::from(format!("ai-retag-{id}")))
+                .label(tr!("photos.ai.retag"))
+                .small()
+                .primary()
+                .w_full()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.enqueue_ai_tagging(&[id], cx);
+                })),
+        )
+    }
+
     /// Metadata and actions for one photo. Shared by the full-screen viewer.
     pub(crate) fn detail_body(
         &mut self,
         photo: &Photo,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let p = self.palette;
@@ -903,6 +1165,7 @@ impl App {
                     .child(Input::new(&self.tag_edit_input).flex_1())
                     .child(add_tag_button),
             )
+            .child(self.ai_meta_block(id, window, cx))
             .child(
                 v_flex()
                     .gap(px(6.))

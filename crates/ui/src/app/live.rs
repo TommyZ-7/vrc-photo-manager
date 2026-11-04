@@ -20,6 +20,7 @@ use vrc_photon_core::model::{
 use vrc_photon_i18n::tr_args;
 
 use crate::app::App;
+use crate::app::ai::{AiLiveSnapshot, collect_ai_live_snapshot};
 use crate::app::daemon::daemon_liveness;
 use crate::ui::notifications::{FailureNotice, deletion_blocked_transition, failure_transition};
 
@@ -31,6 +32,7 @@ struct LiveSnapshot {
     photo_count: Option<i64>,
     stats: Option<LibraryStats>,
     jobs: JobSnapshot,
+    ai: AiLiveSnapshot,
     deletions: Option<DeletionSnapshot>,
     monitor: MonitorSnapshot,
 }
@@ -159,6 +161,10 @@ impl App {
             notify = true;
         }
 
+        if self.ai.apply_live_snapshot(snapshot.ai) {
+            notify = true;
+        }
+
         if let Some(update) = apply_deletion_snapshot(
             &mut self.deletion_requests,
             &mut self.deletion_counts,
@@ -239,6 +245,7 @@ fn collect_live_snapshot(db: &Db, stats_revision: i64) -> LiveSnapshot {
         photo_count,
         stats,
         jobs: collect_jobs(db),
+        ai: collect_ai_live_snapshot(db),
         deletions: collect_deletions(db),
         monitor: collect_monitor(db),
     }
