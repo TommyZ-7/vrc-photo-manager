@@ -4,14 +4,16 @@
 //! integration tests. It never ships in a release package.
 //!
 //! Environment variables:
-//! - `MOCK_SIDECAR_MODE`: `normal` (default), `fatal`, `crash`, `slow`, or
-//!   `no_cancel`.
-//! - `MOCK_SIDECAR_CATALOG`: path to a `Catalog` JSON file. When absent, the
-//!   built-in two-tag catalog is used.
+//! - `MOCK_SIDECAR_MODE`: `normal` (default), `fatal`, `crash`, `slow`,
+//!   `no_cancel`, or `bad_stdout`.
+//! - `MOCK_SIDECAR_CATALOG`: fallback path to a `Catalog` JSON file when
+//!   `--catalog` is absent. A real sidecar always receives `--catalog`, so
+//!   the flag takes precedence. When neither is usable, the built-in two-tag
+//!   catalog is used.
 
 use std::collections::VecDeque;
 use std::fs;
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -39,6 +41,7 @@ enum Mode {
     Crash,
     Slow,
     NoCancel,
+    BadStdout,
 }
 
 impl Mode {
@@ -48,6 +51,7 @@ impl Mode {
             Ok("crash") => Self::Crash,
             Ok("slow") => Self::Slow,
             Ok("no_cancel") => Self::NoCancel,
+            Ok("bad_stdout") => Self::BadStdout,
             _ => Self::Normal,
         }
     }
@@ -58,7 +62,7 @@ impl Mode {
         match self {
             Self::Slow => Some(SLOW_DELAY),
             Self::NoCancel => Some(NO_CANCEL_DELAY),
-            Self::Normal | Self::Fatal | Self::Crash => None,
+            Self::Normal | Self::Fatal | Self::Crash | Self::BadStdout => None,
         }
     }
 
@@ -132,6 +136,11 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    if mode == Mode::BadStdout {
+        write_raw_stdout_line("this is not a protocol message");
+        return ExitCode::from(1);
+    }
+
     if mode == Mode::Fatal {
         emit(&SidecarMessage::Fatal {
             error: SidecarError {
@@ -149,9 +158,12 @@ fn main() -> ExitCode {
 }
 
 fn load_catalog(explicit: Option<&Path>) -> Catalog {
-    let configured = std::env::var_os("MOCK_SIDECAR_CATALOG")
-        .map(PathBuf::from)
-        .or_else(|| explicit.map(Path::to_path_buf));
+    // The real sidecar always receives `--catalog`; the environment fallback
+    // exists only so tests can exercise the built-in catalog. The flag wins so
+    // a developer's environment cannot override the sidecar's package data.
+    let configured = explicit
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::var_os("MOCK_SIDECAR_CATALOG").map(PathBuf::from));
 
     if let Some(path) = configured {
         match fs::read_to_string(&path) {
@@ -262,6 +274,13 @@ fn emit(message: &SidecarMessage) {
         eprintln!("mock-sidecar: failed to write a message: {error}");
         std::process::exit(1);
     }
+}
+
+fn write_raw_stdout_line(line: &str) {
+    let stdout = io::stdout();
+    let mut stdout = stdout.lock();
+    let _ = writeln!(stdout, "{line}");
+    let _ = stdout.flush();
 }
 
 fn serve(mode: Mode, catalog: &Catalog) {

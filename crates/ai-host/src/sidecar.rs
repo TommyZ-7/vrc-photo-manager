@@ -5,8 +5,8 @@
 //! reader thread with a timeout so a wedged sidecar cannot block the daemon
 //! forever.
 
-use std::fs::OpenOptions;
-use std::io::{BufReader, copy};
+use std::fs::{File, OpenOptions};
+use std::io::{BufReader, Write, copy};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -51,10 +51,12 @@ pub struct SidecarConfig {
     pub variant: String,
     pub backend: String,
     pub log_path: PathBuf,
-    /// Extra environment variables applied to the child process.
+    /// Test-only environment overrides applied to the child process.
     ///
-    /// Production callers leave this empty. Integration tests use it to select
-    /// a mock-sidecar mode without mutating the test process environment.
+    /// This is a test seam, not a production configuration surface:
+    /// production callers must leave it empty. The integration tests use it
+    /// only to set `MOCK_SIDECAR_MODE` and `MOCK_SIDECAR_CATALOG` on the mock
+    /// sidecar.
     pub env: Vec<(String, String)>,
 }
 
@@ -111,6 +113,32 @@ enum ReaderEvent {
     Closed,
 }
 
+/// Append-only sink for stdout protocol violations.
+///
+/// The sidecar writes protocol messages to stdout and free-form logs to
+/// stderr. When stdout contains something that is not a protocol message, the
+/// daemon must both fail the operation and leave the evidence in the same
+/// `sidecar.log` that receives stderr.
+struct ProtocolLog {
+    file: Mutex<File>,
+}
+
+impl ProtocolLog {
+    fn open(path: &Path) -> Result<Self> {
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        Ok(Self {
+            file: Mutex::new(file),
+        })
+    }
+
+    fn record(&self, message: &str) {
+        if let Ok(mut file) = self.file.lock() {
+            let _ = writeln!(file, "{message}");
+            let _ = file.flush();
+        }
+    }
+}
+
 impl SidecarClient {
     /// Starts the sidecar and waits for its `hello` message.
     pub fn spawn(config: SidecarConfig) -> Result<Self> {
@@ -125,6 +153,7 @@ impl SidecarClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
+        let protocol_log = ProtocolLog::open(&config.log_path)?;
         let mut child = command.spawn()?;
         let stdin = match child.stdin.take() {
             Some(stdin) => stdin,
@@ -162,7 +191,7 @@ impl SidecarClient {
         };
 
         let (sender, receiver) = mpsc::channel();
-        let reader = thread::spawn(move || reader_loop(stdout, sender));
+        let reader = thread::spawn(move || reader_loop(stdout, sender, protocol_log));
 
         let startup = match receiver.recv_timeout(timeouts.hello) {
             Ok(ReaderEvent::Message(message)) => match *message {
@@ -241,6 +270,7 @@ impl SidecarClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
+        let protocol_log = ProtocolLog::open(log_path)?;
         let mut child = command.spawn()?;
         let stdout = match child.stdout.take() {
             Some(stdout) => stdout,
@@ -269,7 +299,7 @@ impl SidecarClient {
         };
 
         let (sender, receiver) = mpsc::channel();
-        let reader = thread::spawn(move || reader_loop(stdout, sender));
+        let reader = thread::spawn(move || reader_loop(stdout, sender, protocol_log));
 
         let probe = match receiver.recv_timeout(timeout) {
             Ok(ReaderEvent::Message(message)) => match *message {
@@ -375,7 +405,7 @@ fn prepend_library_path(command: &mut Command, install_dir: &Path) {
     }
 }
 
-fn reader_loop(stdout: ChildStdout, sender: Sender<ReaderEvent>) {
+fn reader_loop(stdout: ChildStdout, sender: Sender<ReaderEvent>, log: ProtocolLog) {
     let mut reader = BufReader::new(stdout);
     loop {
         match read_message(&mut reader) {
@@ -392,6 +422,7 @@ fn reader_loop(stdout: ChildStdout, sender: Sender<ReaderEvent>) {
                 return;
             }
             Err(error) => {
+                log.record(&format!("stdout protocol violation: {error}"));
                 let _ = sender.send(ReaderEvent::Failed(error.to_string()));
                 return;
             }
