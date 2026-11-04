@@ -188,9 +188,19 @@ impl PluginService {
         version: Option<&str>,
         delete_ai_tags: bool,
     ) -> Result<()> {
-        let _guard = self.inner.begin_lifecycle(plugin_id)?;
-        self.inner
-            .uninstall(plugin_id, variant, version, delete_ai_tags)
+        let guard = self.inner.begin_lifecycle(plugin_id)?;
+        let result = self
+            .inner
+            .uninstall(plugin_id, variant, version, delete_ai_tags);
+        // Release the lifecycle key before announcing the terminal state so a
+        // client reacting to the event can start the next operation.
+        drop(guard);
+        if result.is_ok() {
+            self.inner.events.publish(Event::PluginStateChanged {
+                plugin_id: plugin_id.to_string(),
+            });
+        }
+        result
     }
 
     /// Accepts an uninstall, then removes files and rows on a worker thread.
@@ -214,15 +224,23 @@ impl PluginService {
         thread::Builder::new()
             .name("plugin-uninstall".to_string())
             .spawn(move || {
-                let _guard = guard;
-                if let Err(error) = inner.uninstall(
-                    &plugin_id,
-                    variant.as_deref(),
-                    version.as_deref(),
-                    delete_ai_tags,
-                ) {
+                let result = {
+                    let _guard = guard;
+                    inner.uninstall(
+                        &plugin_id,
+                        variant.as_deref(),
+                        version.as_deref(),
+                        delete_ai_tags,
+                    )
+                };
+                if let Err(error) = &result {
                     tracing::warn!(%error, plugin_id = %plugin_id, "AI plugin uninstall failed");
                 }
+                // Publish after the guard is released, on success and failure
+                // alike: a client that already got `Ok` must not wait forever.
+                inner.events.publish(Event::PluginStateChanged {
+                    plugin_id: plugin_id.clone(),
+                });
             })
             .map_err(PluginError::Io)?;
         Ok(())
@@ -230,9 +248,16 @@ impl PluginService {
 
     /// Runs `--probe` for the active installation.
     pub(crate) fn probe(&self, plugin_id: &str) -> Result<()> {
-        let _guard = self.inner.begin_lifecycle(plugin_id)?;
+        let guard = self.inner.begin_lifecycle(plugin_id)?;
         let install = self.inner.active_install(plugin_id)?;
-        self.inner.probe_install(&install)
+        let result = self.inner.run_probe(&install);
+        drop(guard);
+        if result.is_ok() {
+            self.inner.events.publish(Event::PluginStateChanged {
+                plugin_id: install.plugin_id.clone(),
+            });
+        }
+        result
     }
 
     /// Accepts a probe, then spawns and waits for the sidecar on a worker.
@@ -243,18 +268,22 @@ impl PluginService {
         thread::Builder::new()
             .name("plugin-probe".to_string())
             .spawn(move || {
-                let _guard = guard;
-                if let Err(error) = inner.probe_install(&install) {
+                let result = {
+                    let _guard = guard;
+                    inner.run_probe(&install)
+                };
+                if let Err(error) = &result {
                     tracing::warn!(
                         %error,
                         plugin_id = %install.plugin_id,
                         "AI plugin probe failed"
                     );
-                    // The probe cache stays empty; tell clients to re-read it.
-                    inner.events.publish(Event::PluginStateChanged {
-                        plugin_id: install.plugin_id.clone(),
-                    });
                 }
+                // The cache is refreshed on success and stays empty on
+                // failure; either way clients re-read it after the guard drop.
+                inner.events.publish(Event::PluginStateChanged {
+                    plugin_id: install.plugin_id.clone(),
+                });
             })
             .map_err(PluginError::Io)?;
         Ok(())
@@ -302,22 +331,26 @@ impl PluginService {
         thread::Builder::new()
             .name("plugin-variant".to_string())
             .spawn(move || {
-                let _guard = guard;
-                inner.stop_sidecar();
-                let result = (|| -> Result<()> {
-                    let install = inner.active_install(&plugin_id)?;
-                    inner.probe_install(&install)
-                })();
-                if let Err(error) = result {
+                let result = {
+                    let _guard = guard;
+                    inner.stop_sidecar();
+                    (|| -> Result<()> {
+                        let install = inner.active_install(&plugin_id)?;
+                        inner.run_probe(&install)
+                    })()
+                };
+                if let Err(error) = &result {
                     tracing::warn!(
                         %error,
                         plugin_id = %plugin_id,
                         "AI plugin probe after variant switch failed"
                     );
-                    inner.events.publish(Event::PluginStateChanged {
-                        plugin_id: plugin_id.clone(),
-                    });
                 }
+                // Announce the terminal state after releasing the lifecycle
+                // key, whether the probe succeeded or not.
+                inner.events.publish(Event::PluginStateChanged {
+                    plugin_id: plugin_id.clone(),
+                });
             })
             .map_err(PluginError::Io)?;
         Ok(())
@@ -396,9 +429,16 @@ impl PluginService {
 
     /// Stops the sidecar and removes the stored model revision.
     pub(crate) fn delete_model(&self, plugin_id: &str) -> Result<()> {
-        let _guard = self.inner.begin_lifecycle(plugin_id)?;
+        let guard = self.inner.begin_lifecycle(plugin_id)?;
         let revision = self.inner.stored_model_revision(plugin_id)?;
-        self.inner.remove_model_revision(plugin_id, &revision)
+        let result = self.inner.delete_model_files(plugin_id, &revision);
+        drop(guard);
+        if result.is_ok() {
+            self.inner.events.publish(Event::PluginStateChanged {
+                plugin_id: plugin_id.to_string(),
+            });
+        }
+        result
     }
 
     /// Accepts a model deletion, then stops the sidecar and removes the files
@@ -411,10 +451,18 @@ impl PluginService {
         thread::Builder::new()
             .name("plugin-model-delete".to_string())
             .spawn(move || {
-                let _guard = guard;
-                if let Err(error) = inner.remove_model_revision(&plugin_id, &revision) {
+                let result = {
+                    let _guard = guard;
+                    inner.delete_model_files(&plugin_id, &revision)
+                };
+                if let Err(error) = &result {
                     tracing::warn!(%error, plugin_id = %plugin_id, "AI model delete failed");
                 }
+                // Publish after the guard is released, on success and failure
+                // alike: a client that already got `Ok` must not wait forever.
+                inner.events.publish(Event::PluginStateChanged {
+                    plugin_id: plugin_id.clone(),
+                });
             })
             .map_err(PluginError::Io)?;
         Ok(())
@@ -703,9 +751,6 @@ impl PluginServiceInner {
             }
         }
 
-        self.events.publish(Event::PluginStateChanged {
-            plugin_id: plugin_id.to_string(),
-        });
         Ok(())
     }
 
@@ -731,7 +776,10 @@ impl PluginServiceInner {
         Ok(())
     }
 
-    fn probe_install(&self, install: &PluginInstallation) -> Result<()> {
+    /// Runs the probe and stores the result, without announcing it. Callers
+    /// that hold the lifecycle key publish the terminal state after releasing
+    /// it.
+    fn run_probe(&self, install: &PluginInstallation) -> Result<()> {
         let manifest = parse_manifest(install.manifest_json.as_bytes())?;
         let paths = sidecar_paths(install, &manifest);
         let expectations = ProbeExpectations::new(&install.plugin_id, &install.variant)
@@ -749,6 +797,13 @@ impl PluginServiceInner {
         let probe_json = serde_json::to_string(&probe)?;
         self.db()
             .set_plugin_probe_json(&install.plugin_id, Some(&probe_json))?;
+        Ok(())
+    }
+
+    /// Probes and publishes the state change. Used by the install worker,
+    /// which announces its own terminal event afterwards.
+    fn probe_install(&self, install: &PluginInstallation) -> Result<()> {
+        self.run_probe(install)?;
         self.events.publish(Event::PluginStateChanged {
             plugin_id: install.plugin_id.clone(),
         });
@@ -889,13 +944,13 @@ impl PluginServiceInner {
             .ok_or_else(|| PluginError::NotFound(format!("model revision for {plugin_id}")))
     }
 
-    fn remove_model_revision(&self, plugin_id: &str, revision: &str) -> Result<()> {
+    /// Deletes the stored model files and updates the persisted state. The
+    /// caller publishes the terminal `PluginStateChanged` after releasing the
+    /// lifecycle key.
+    fn delete_model_files(&self, plugin_id: &str, revision: &str) -> Result<()> {
         self.stop_sidecar();
         delete_model_revision(&self.data_dir, plugin_id, revision)?;
         self.set_model_state(plugin_id, ModelState::Missing, revision, 0, None, None)?;
-        self.events.publish(Event::PluginStateChanged {
-            plugin_id: plugin_id.to_string(),
-        });
         Ok(())
     }
 
@@ -2174,6 +2229,86 @@ mod tests {
                     == ModelState::Missing
         });
         assert!(!ctx.service.is_ready(PLUGIN));
+    }
+
+    #[test]
+    fn async_delete_model_publishes_state_changed_on_failure() {
+        let ctx = TestContext::new();
+        ctx.install_default();
+        let manifest = sample_manifest();
+        let directory = model_dir(&ctx.data_dir, PLUGIN, &manifest.model.revision);
+        fs::create_dir_all(directory.parent().unwrap()).unwrap();
+        // A regular file where a directory is expected makes remove_dir_all
+        // fail deterministically, including when the test runs as root.
+        fs::write(&directory, b"not a directory").unwrap();
+        ctx.db()
+            .set_plugin_model_state(
+                PLUGIN,
+                ModelState::Ready,
+                Some(&manifest.model.revision),
+                11,
+                Some(11),
+                None,
+            )
+            .unwrap();
+
+        let events = ctx.events.subscribe();
+        ctx.service.delete_model_async(PLUGIN).unwrap();
+
+        let events = ctx.collect_events(&events, |events| {
+            events.iter().any(|event| {
+                matches!(event, Event::PluginStateChanged { plugin_id } if plugin_id == PLUGIN)
+            })
+        });
+        assert!(events.iter().any(|event| {
+            matches!(event, Event::PluginStateChanged { plugin_id } if plugin_id == PLUGIN)
+        }));
+        assert!(
+            !ctx.service.operation_active(PLUGIN),
+            "the failure event must be published after the guard is released"
+        );
+    }
+
+    #[test]
+    fn async_uninstall_publishes_state_changed_on_failure() {
+        let ctx = TestContext::new();
+        ctx.install_default();
+        let path = PathBuf::from(
+            &ctx.db()
+                .active_plugin_installation(PLUGIN)
+                .unwrap()
+                .unwrap()
+                .path,
+        );
+        fs::remove_dir_all(&path).unwrap();
+        // A regular file where the install directory is expected makes
+        // remove_dir_all fail deterministically, including as root.
+        fs::write(&path, b"not a directory").unwrap();
+
+        let events = ctx.events.subscribe();
+        ctx.service
+            .uninstall_async(PLUGIN, None, None, false)
+            .unwrap();
+
+        let events = ctx.collect_events(&events, |events| {
+            events.iter().any(|event| {
+                matches!(event, Event::PluginStateChanged { plugin_id } if plugin_id == PLUGIN)
+            })
+        });
+        assert!(events.iter().any(|event| {
+            matches!(event, Event::PluginStateChanged { plugin_id } if plugin_id == PLUGIN)
+        }));
+        assert!(
+            !ctx.service.operation_active(PLUGIN),
+            "the failure event must be published after the guard is released"
+        );
+        assert!(
+            ctx.db()
+                .active_plugin_installation(PLUGIN)
+                .unwrap()
+                .is_some(),
+            "a failed uninstall must leave the rows intact"
+        );
     }
 
     #[test]
