@@ -102,6 +102,8 @@ fn mock_config(mock: &Path, mode: &str, delay_ms: Option<u64>) -> (TempDir, Side
         model: ModelPaths { model, mmproj },
         variant: "linux-vulkan".to_string(),
         backend: "vulkan".to_string(),
+        plugin_id: "vrc-photon-autotag".to_string(),
+        catalog_version: Some("2026-11-03.1".to_string()),
         log_path: tempdir.path().join("sidecar.log"),
         env,
     };
@@ -190,6 +192,40 @@ fn each_op_maps_to_the_expected_result() {
             .unwrap(),
         SidecarResult::PlaceTags { .. }
     ));
+}
+
+#[test]
+fn a_response_for_the_wrong_op_is_a_protocol_violation() {
+    let mock = spawn_mock("wrong_op");
+
+    let result = mock.client.request(
+        Op::PeopleCount,
+        &test_image(),
+        None,
+        &CancelToken::default(),
+    );
+
+    assert!(
+        matches!(&result, Err(AiHostError::SidecarProtocol(message)) if message.contains("people_count")),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn a_response_for_the_wrong_branch_is_a_protocol_violation() {
+    let mock = spawn_mock("wrong_branch");
+
+    let result = mock.client.request(
+        Op::PlaceTags,
+        &test_image(),
+        Some(TagBranch::Indoor),
+        &CancelToken::default(),
+    );
+
+    assert!(
+        matches!(&result, Err(AiHostError::SidecarProtocol(message)) if message.contains("branch")),
+        "{result:?}"
+    );
 }
 
 #[test]
@@ -377,6 +413,25 @@ fn retryable_error_response_preserves_retryable() {
         }
         other => panic!("expected SidecarRejected, got {other:?}"),
     }
+}
+
+#[test]
+fn fatal_after_hello_preserves_the_structured_error() {
+    let mock = spawn_mock("fatal_after_hello");
+
+    let result = mock
+        .client
+        .request(Op::Presence, &test_image(), None, &CancelToken::default());
+
+    match result {
+        Err(AiHostError::SidecarFatal(error)) => {
+            assert_eq!(error.code, SidecarErrorCode::OutOfMemory);
+            assert_eq!(error.message, "mock fatal after hello");
+            assert!(error.retryable);
+        }
+        other => panic!("expected SidecarFatal, got {other:?}"),
+    }
+    assert!(!mock.client.is_alive());
 }
 
 #[test]

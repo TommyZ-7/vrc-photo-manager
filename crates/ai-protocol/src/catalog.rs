@@ -79,9 +79,7 @@ pub struct TagDefinition {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Catalog {
     pub version: String,
-    #[serde(default)]
     pub outdoor: Vec<TagDefinition>,
-    #[serde(default)]
     pub indoor: Vec<TagDefinition>,
 }
 
@@ -116,5 +114,16 @@ mod tests {
         assert_eq!(tag.name_en, None);
         assert_eq!(tag.key, "japanese_room");
         assert_eq!(tag.default_threshold, 0.5);
+    }
+
+    #[test]
+    fn catalog_requires_both_branches() {
+        assert!(serde_json::from_str::<Catalog>(r#"{"version":"v","indoor":[]}"#).is_err());
+        assert!(serde_json::from_str::<Catalog>(r#"{"version":"v","outdoor":[]}"#).is_err());
+
+        let catalog: Catalog =
+            serde_json::from_str(r#"{"version":"v","outdoor":[],"indoor":[]}"#).unwrap();
+        assert!(catalog.outdoor.is_empty());
+        assert!(catalog.indoor.is_empty());
     }
 }

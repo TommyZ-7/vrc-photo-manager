@@ -431,12 +431,14 @@ git commit -m "feat(ai-host): verify and install signed plugin packages"
 - Produces:
   - `pub struct SidecarPaths { pub install_dir: PathBuf, pub executable: PathBuf, pub catalog: PathBuf, pub calibration: PathBuf }`
   - `pub struct ModelPaths { pub model: PathBuf, pub mmproj: PathBuf }`（Task 5 と共有）
-  - `pub struct SidecarConfig { pub paths: SidecarPaths, pub model: ModelPaths, pub variant: String, pub backend: String, pub log_path: PathBuf }`
+  - `pub struct SidecarConfig { pub paths: SidecarPaths, pub model: ModelPaths, pub variant: String, pub backend: String, pub plugin_id: String, pub catalog_version: Option<String>, pub log_path: PathBuf }`
+  - `pub struct ProbeExpectations { pub plugin_id: Option<String>, pub variant: String, pub catalog_version: Option<String> }`
   - `pub struct SidecarTimeouts { pub hello: Duration, pub request: Duration, pub cancel_ack: Duration, pub shutdown: Duration }`（Default: 60s / 120s / 2s / 5s）
   - `pub struct SidecarClient { /* inner Arc */ }`
-  - `SidecarClient::spawn(config: SidecarConfig) -> Result<Self>`（hello まで待つ）
+  - `SidecarClient::spawn(config: SidecarConfig) -> Result<Self>`（hello まで待つ。hello の protocol/plugin_id/variant/catalog_version/backend を検証する）
   - `SidecarClient::hello(&self) -> &Hello`
   - `SidecarClient::probe(paths: &SidecarPaths, variant: &str, log_path: &Path) -> Result<Probe>`
+  - `SidecarClient::probe_with_expectations(paths: &SidecarPaths, expectations: &ProbeExpectations, log_path: &Path) -> Result<Probe>`
   - `SidecarClient::is_alive(&self) -> bool`
   - `pub fn sidecar_command(config: &SidecarConfig) -> std::process::Command`
   - `pub fn probe_command(paths: &SidecarPaths, variant: &str) -> std::process::Command`
@@ -450,9 +452,12 @@ git commit -m "feat(ai-host): verify and install signed plugin packages"
 - `MOCK_SIDECAR_MODE`:
   - `normal`: 要求に応答する。
   - `fatal`: hello の前に `fatal` を出して exit 1。
+  - `fatal_after_hello`: 最初の request に `fatal` で応答して exit 1。
   - `crash`: 最初の request で exit 1。
   - `slow`: 2秒待ってから応答する。
   - `no_cancel`: cancel を無視して応答を続ける。
+  - `wrong_plugin` / `wrong_variant` / `wrong_catalog` / `wrong_backend`: hello/probe の identity を意図的にずらす。
+  - `wrong_op` / `wrong_branch`: request と異なる `op` / branch を返す。
 - カタログは `MOCK_SIDECAR_CATALOG` のパス、なければ組み込みの最小カタログ（outdoor: sea, indoor: japanese_room）を返す。
 - バイナリは配布物に含めない（`vrc-photon` / `vrc-photon-daemon` のパッケージ対象外）。
 

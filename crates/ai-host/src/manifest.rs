@@ -11,6 +11,9 @@ use crate::error::{AiHostError, Result};
 /// Version of the manifest format understood by this host.
 pub const FORMAT_VERSION: u32 = 1;
 
+/// Backends the host can launch a sidecar for.
+pub const SUPPORTED_BACKENDS: &[&str] = &["vulkan", "cuda", "rocm", "cpu"];
+
 /// Root metadata of an AI plugin package.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PluginManifest {
@@ -136,6 +139,12 @@ pub fn validate_manifest(
     }
     if manifest.backend.trim().is_empty() {
         return Err(AiHostError::ManifestInvalid("backend is empty".to_string()));
+    }
+    if !SUPPORTED_BACKENDS.contains(&manifest.backend.as_str()) {
+        return Err(AiHostError::ManifestInvalid(format!(
+            "unsupported backend: {}",
+            manifest.backend
+        )));
     }
     let expected_variant = format!("{}-{}", manifest.platform, manifest.backend);
     if manifest.variant != expected_variant {
@@ -464,12 +473,35 @@ mod tests {
             Err(AiHostError::UnsafePath(_))
         ));
 
-        // Case variants remain valid identifiers; install-time collision
-        // checks decide whether an existing directory already uses the name.
+        // Case variants are rejected by the backend allowlist rather than by
+        // the path rules, so identifier casing cannot smuggle in a new backend.
         let mut manifest = sample_manifest();
         manifest.backend = "VULKAN".to_string();
         manifest.variant = "linux-VULKAN".to_string();
-        validate_manifest(&manifest, "0.10.1", "linux").unwrap();
+        assert_invalid(&manifest);
+    }
+
+    #[test]
+    fn validate_enforces_the_backend_allowlist() {
+        for backend in ["vulkan", "cuda", "rocm", "cpu"] {
+            let mut manifest = sample_manifest();
+            manifest.backend = backend.to_string();
+            manifest.variant = format!("linux-{backend}");
+            validate_manifest(&manifest, "0.10.1", "linux").unwrap();
+        }
+
+        for backend in ["metal", "opencl", "roc", "Vulkan", ""] {
+            let mut manifest = sample_manifest();
+            manifest.backend = backend.to_string();
+            manifest.variant = format!("linux-{backend}");
+            assert!(
+                matches!(
+                    validate_manifest(&manifest, "0.10.1", "linux"),
+                    Err(AiHostError::ManifestInvalid(_))
+                ),
+                "backend {backend:?} should be rejected"
+            );
+        }
     }
 
     #[test]

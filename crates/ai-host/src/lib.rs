@@ -28,7 +28,7 @@ pub use model::{
     ModelCheck, check_model, delete_model, download_model, import_model_files, model_dir,
 };
 pub use sidecar::{
-    CancelToken, ModelPaths, SidecarClient, SidecarConfig, SidecarPaths, SidecarTimeouts,
-    probe_command, sidecar_command,
+    CancelToken, ModelPaths, ProbeExpectations, SidecarClient, SidecarConfig, SidecarPaths,
+    SidecarTimeouts, probe_command, sidecar_command,
 };
 pub use verify::{effective_plugin_keys, parse_public_keys, verify_manifest_bytes};

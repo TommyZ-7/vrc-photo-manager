@@ -13,7 +13,9 @@ use assert_cmd::cargo::cargo_bin;
 use tempfile::TempDir;
 
 use vrc_photon_ai_host::AiHostError;
-use vrc_photon_ai_host::sidecar::{ModelPaths, SidecarClient, SidecarConfig, SidecarPaths};
+use vrc_photon_ai_host::sidecar::{
+    ModelPaths, ProbeExpectations, SidecarClient, SidecarConfig, SidecarPaths,
+};
 
 const CATALOG_JSON: &str = r#"{
   "version": "2026-11-03.1",
@@ -102,6 +104,8 @@ fn test_config(mock: &Path, mode: &str) -> MockFixture {
         model: ModelPaths { model, mmproj },
         variant: "linux-vulkan".to_string(),
         backend: "vulkan".to_string(),
+        plugin_id: "vrc-photon-autotag".to_string(),
+        catalog_version: Some("2026-11-03.1".to_string()),
         log_path: tempdir.path().join("sidecar.log"),
         env: vec![
             ("MOCK_SIDECAR_MODE".to_string(), mode.to_string()),
@@ -136,7 +140,71 @@ fn spawn_returns_a_typed_error_on_fatal_before_hello() {
 
     let error = SidecarClient::spawn(fixture.config).expect_err("fatal must fail the spawn");
 
-    assert!(matches!(error, AiHostError::SidecarFatal(_)), "{error:?}");
+    let AiHostError::SidecarFatal(error) = &error else {
+        panic!("expected SidecarFatal, got {error:?}");
+    };
+    assert_eq!(
+        error.code,
+        vrc_photon_ai_protocol::SidecarErrorCode::ModelLoadFailed
+    );
+    assert_eq!(error.message, "mock model failed to load");
+    assert!(!error.retryable);
+}
+
+#[test]
+fn spawn_rejects_a_mismatched_plugin_id() {
+    assert_identity_error("wrong_plugin", "plugin_id");
+}
+
+#[test]
+fn spawn_rejects_a_mismatched_variant() {
+    assert_identity_error("wrong_variant", "variant");
+}
+
+#[test]
+fn spawn_rejects_a_mismatched_catalog_version() {
+    assert_identity_error("wrong_catalog", "catalog_version");
+}
+
+fn assert_identity_error(mode: &str, field: &str) {
+    let mock = mock_sidecar();
+    let fixture = test_config(&mock, mode);
+
+    let error = SidecarClient::spawn(fixture.config).expect_err("identity must be checked");
+
+    assert!(
+        matches!(&error, AiHostError::SidecarIdentity(message) if message.contains(field)),
+        "expected a {field} identity error, got {error:?}"
+    );
+}
+
+#[test]
+fn spawn_rejects_a_mismatched_backend() {
+    let mock = mock_sidecar();
+    let fixture = test_config(&mock, "wrong_backend");
+
+    let error = SidecarClient::spawn(fixture.config).expect_err("backend must be checked");
+
+    assert!(
+        matches!(
+            error,
+            AiHostError::SidecarBackendMismatch {
+                ref expected,
+                ref actual,
+            } if expected == "vulkan" && actual == "cpu"
+        ),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn spawn_skips_the_backend_check_for_auto() {
+    let mock = mock_sidecar();
+    let mut fixture = test_config(&mock, "wrong_backend");
+    fixture.config.backend = "auto".to_string();
+
+    let client = SidecarClient::spawn(fixture.config).expect("auto accepts the reported backend");
+    assert_eq!(client.hello().backend.kind, "cpu");
 }
 
 #[test]
@@ -167,6 +235,24 @@ fn probe_reads_backends() {
         "{:?}",
         probe.backends
     );
+}
+
+#[test]
+fn probe_checks_the_full_identity() {
+    let mock = mock_sidecar();
+    let fixture = test_config(&mock, "normal");
+    let expectations = ProbeExpectations::new("vrc-photon-autotag", "linux-vulkan")
+        .with_catalog_version("2026-11-03.1");
+
+    let probe = SidecarClient::probe_with_expectations(
+        &fixture.config.paths,
+        &expectations,
+        &fixture.config.log_path,
+    )
+    .expect("probe the mock sidecar");
+
+    assert_eq!(probe.plugin_id, "vrc-photon-autotag");
+    assert_eq!(probe.variant, "linux-vulkan");
 }
 
 #[test]

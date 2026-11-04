@@ -18,8 +18,8 @@ use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 use vrc_photon_ai_protocol::{
-    Hello, ImageRef, Op, PROTOCOL_VERSION, Probe, ProtocolError, SidecarErrorCode, SidecarMessage,
-    SidecarRequest, SidecarResult, TagBranch, read_message, write_message,
+    Hello, ImageRef, Op, PROTOCOL_VERSION, Probe, ProtocolError, SidecarError, SidecarErrorCode,
+    SidecarMessage, SidecarRequest, SidecarResult, TagBranch, read_message, write_message,
 };
 
 use crate::error::{AiHostError, Result};
@@ -59,6 +59,9 @@ pub struct SidecarConfig {
     pub model: ModelPaths,
     pub variant: String,
     pub backend: String,
+    pub plugin_id: String,
+    /// When set, the `hello` catalog version must match this value.
+    pub catalog_version: Option<String>,
     pub log_path: PathBuf,
     /// Test-only environment overrides applied to the child process.
     ///
@@ -66,6 +69,45 @@ pub struct SidecarConfig {
     /// production callers must leave it empty. The integration tests use it
     /// only to configure the mock sidecar through `MOCK_SIDECAR_*` variables.
     pub env: Vec<(String, String)>,
+}
+
+/// Identity fields a `--probe` result must advertise.
+///
+/// The variant is always checked; the plugin id and catalog version are
+/// checked when the caller knows them. [`SidecarClient::probe`] uses the
+/// variant-only form so existing callers keep working, while the daemon can
+/// use [`SidecarClient::probe_with_expectations`] for the full identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeExpectations {
+    pub plugin_id: Option<String>,
+    pub variant: String,
+    pub catalog_version: Option<String>,
+}
+
+impl ProbeExpectations {
+    /// Checks the variant only.
+    pub fn variant(variant: impl Into<String>) -> Self {
+        Self {
+            plugin_id: None,
+            variant: variant.into(),
+            catalog_version: None,
+        }
+    }
+
+    /// Checks the plugin id and variant.
+    pub fn new(plugin_id: impl Into<String>, variant: impl Into<String>) -> Self {
+        Self {
+            plugin_id: Some(plugin_id.into()),
+            variant: variant.into(),
+            catalog_version: None,
+        }
+    }
+
+    /// Also checks the advertised catalog version.
+    pub fn with_catalog_version(mut self, catalog_version: impl Into<String>) -> Self {
+        self.catalog_version = Some(catalog_version.into());
+        self
+    }
 }
 
 /// Timeouts for each phase of the sidecar lifecycle.
@@ -276,7 +318,7 @@ impl SidecarInner {
 enum RequestFailure {
     Exited,
     Protocol(String),
-    Fatal(String),
+    Fatal(SidecarError),
 }
 
 impl RequestFailure {
@@ -284,7 +326,7 @@ impl RequestFailure {
         match self {
             Self::Exited => AiHostError::SidecarExited,
             Self::Protocol(message) => AiHostError::SidecarProtocol(message),
-            Self::Fatal(message) => AiHostError::SidecarFatal(message),
+            Self::Fatal(error) => AiHostError::SidecarFatal(error),
         }
     }
 }
@@ -394,17 +436,13 @@ impl SidecarClient {
         let startup = match receiver.recv_timeout(timeouts.hello) {
             Ok(ReaderEvent::Message(message)) => match *message {
                 SidecarMessage::Hello(hello) => {
-                    if hello.protocol_version == PROTOCOL_VERSION {
-                        Ok(hello)
-                    } else {
+                    if hello.protocol_version != PROTOCOL_VERSION {
                         Err(AiHostError::UnsupportedProtocol(hello.protocol_version))
+                    } else {
+                        validate_hello(&config, &hello).map(|()| hello)
                     }
                 }
-                SidecarMessage::Fatal { error } => Err(AiHostError::SidecarFatal(format!(
-                    "{}: {}",
-                    error.code.as_str(),
-                    error.message
-                ))),
+                SidecarMessage::Fatal { error } => Err(AiHostError::SidecarFatal(error)),
                 other => Err(AiHostError::SidecarProtocol(format!(
                     "expected hello, got {}",
                     message_kind(&other)
@@ -529,7 +567,12 @@ impl SidecarClient {
             match receiver.recv_timeout(wait) {
                 Ok(Ok(message)) => {
                     let cancelled = self.inner.finish_request(&id);
-                    return interpret_response(message, cancel_sent_at.is_some() || cancelled);
+                    return interpret_response(
+                        message,
+                        op,
+                        branch,
+                        cancel_sent_at.is_some() || cancelled,
+                    );
                 }
                 Ok(Err(failure)) => {
                     let _ = self.inner.finish_request(&id);
@@ -638,20 +681,31 @@ impl SidecarClient {
         matches!(child.try_wait(), Ok(None))
     }
 
-    /// Runs `--probe` and returns the advertised backends.
+    /// Runs `--probe` and checks the advertised variant.
     ///
     /// The probe loads no model, so it gets the shorter 30 second timeout.
     pub fn probe(paths: &SidecarPaths, variant: &str, log_path: &Path) -> Result<Probe> {
-        Self::probe_with_timeout(paths, variant, log_path, Duration::from_secs(30))
+        Self::probe_with_expectations(paths, &ProbeExpectations::variant(variant), log_path)
+    }
+
+    /// Runs `--probe` and checks the full expected identity.
+    ///
+    /// The probe loads no model, so it gets the shorter 30 second timeout.
+    pub fn probe_with_expectations(
+        paths: &SidecarPaths,
+        expectations: &ProbeExpectations,
+        log_path: &Path,
+    ) -> Result<Probe> {
+        Self::probe_with_timeout(paths, expectations, log_path, Duration::from_secs(30))
     }
 
     fn probe_with_timeout(
         paths: &SidecarPaths,
-        variant: &str,
+        expectations: &ProbeExpectations,
         log_path: &Path,
         timeout: Duration,
     ) -> Result<Probe> {
-        let mut command = probe_command(paths, variant);
+        let mut command = probe_command(paths, &expectations.variant);
         command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -691,17 +745,13 @@ impl SidecarClient {
         let probe = match receiver.recv_timeout(timeout) {
             Ok(ReaderEvent::Message(message)) => match *message {
                 SidecarMessage::Probe(probe) => {
-                    if probe.protocol_version == PROTOCOL_VERSION {
-                        Ok(probe)
-                    } else {
+                    if probe.protocol_version != PROTOCOL_VERSION {
                         Err(AiHostError::UnsupportedProtocol(probe.protocol_version))
+                    } else {
+                        validate_probe(expectations, &probe).map(|()| probe)
                     }
                 }
-                SidecarMessage::Fatal { error } => Err(AiHostError::SidecarFatal(format!(
-                    "{}: {}",
-                    error.code.as_str(),
-                    error.message
-                ))),
+                SidecarMessage::Fatal { error } => Err(AiHostError::SidecarFatal(error)),
                 other => Err(AiHostError::SidecarProtocol(format!(
                     "expected probe, got {}",
                     message_kind(&other)
@@ -868,8 +918,7 @@ fn route_message(inner: &SidecarInner, message: SidecarMessage) {
             inner.deliver(&id, message);
         }
         SidecarMessage::Fatal { error } => {
-            let message = format!("{}: {}", error.code.as_str(), error.message);
-            let failure = RequestFailure::Fatal(message);
+            let failure = RequestFailure::Fatal(error);
             inner.fail_all(failure.clone());
             inner.complete_shutdown(Err(failure));
             inner.mark_dead();
@@ -887,7 +936,80 @@ fn route_message(inner: &SidecarInner, message: SidecarMessage) {
     }
 }
 
-fn interpret_response(message: SidecarMessage, cancel_sent: bool) -> Result<SidecarResult> {
+fn validate_hello(config: &SidecarConfig, hello: &Hello) -> Result<()> {
+    if hello.plugin_id != config.plugin_id {
+        return Err(AiHostError::SidecarIdentity(format!(
+            "plugin_id: expected {}, got {}",
+            config.plugin_id, hello.plugin_id
+        )));
+    }
+    if hello.variant != config.variant {
+        return Err(AiHostError::SidecarIdentity(format!(
+            "variant: expected {}, got {}",
+            config.variant, hello.variant
+        )));
+    }
+    if let Some(expected) = &config.catalog_version
+        && hello.catalog.version != *expected
+    {
+        return Err(AiHostError::SidecarIdentity(format!(
+            "catalog_version: expected {}, got {}",
+            expected, hello.catalog.version
+        )));
+    }
+    if !config.backend.eq_ignore_ascii_case("auto")
+        && normalize_backend(&config.backend) != normalize_backend(&hello.backend.kind)
+    {
+        return Err(AiHostError::SidecarBackendMismatch {
+            expected: config.backend.clone(),
+            actual: hello.backend.kind.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_probe(expectations: &ProbeExpectations, probe: &Probe) -> Result<()> {
+    if let Some(expected) = &expectations.plugin_id
+        && probe.plugin_id != *expected
+    {
+        return Err(AiHostError::SidecarIdentity(format!(
+            "plugin_id: expected {}, got {}",
+            expected, probe.plugin_id
+        )));
+    }
+    if probe.variant != expectations.variant {
+        return Err(AiHostError::SidecarIdentity(format!(
+            "variant: expected {}, got {}",
+            expectations.variant, probe.variant
+        )));
+    }
+    if let Some(expected) = &expectations.catalog_version
+        && probe.catalog_version != *expected
+    {
+        return Err(AiHostError::SidecarIdentity(format!(
+            "catalog_version: expected {}, got {}",
+            expected, probe.catalog_version
+        )));
+    }
+    Ok(())
+}
+
+/// The runtime reports ROCm as either `roc` or `rocm`; treat them as one
+/// backend and compare names case-insensitively.
+fn normalize_backend(kind: &str) -> String {
+    let normalized = kind.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "rocm" => "roc".to_string(),
+        _ => normalized,
+    }
+}
+
+fn interpret_response(
+    message: SidecarMessage,
+    expected_op: Op,
+    expected_branch: Option<TagBranch>,
+    cancel_sent: bool,
+) -> Result<SidecarResult> {
     match message {
         SidecarMessage::Response(response) => {
             if cancel_sent {
@@ -896,11 +1018,13 @@ fn interpret_response(message: SidecarMessage, cancel_sent: bool) -> Result<Side
                 return Err(AiHostError::Cancelled);
             }
             if response.ok {
-                response.result.ok_or_else(|| {
+                let result = response.result.ok_or_else(|| {
                     AiHostError::SidecarProtocol(
                         "successful response carried no result".to_string(),
                     )
-                })
+                })?;
+                validate_result(&result, expected_op, expected_branch)?;
+                Ok(result)
             } else if let Some(error) = response.error {
                 if error.code == SidecarErrorCode::Cancelled {
                     Err(AiHostError::Cancelled)
@@ -914,16 +1038,43 @@ fn interpret_response(message: SidecarMessage, cancel_sent: bool) -> Result<Side
             }
         }
         SidecarMessage::Cancelled { .. } => Err(AiHostError::Cancelled),
-        SidecarMessage::Fatal { error } => Err(AiHostError::SidecarFatal(format!(
-            "{}: {}",
-            error.code.as_str(),
-            error.message
-        ))),
+        SidecarMessage::Fatal { error } => Err(AiHostError::SidecarFatal(error)),
         other => Err(AiHostError::SidecarProtocol(format!(
             "unexpected {} during a request",
             message_kind(&other)
         ))),
     }
+}
+
+fn validate_result(
+    result: &SidecarResult,
+    expected_op: Op,
+    expected_branch: Option<TagBranch>,
+) -> Result<()> {
+    let actual_op = match result {
+        SidecarResult::Presence { .. } => Op::Presence,
+        SidecarResult::PeopleCount { .. } => Op::PeopleCount,
+        SidecarResult::PlaceClass { .. } => Op::PlaceClass,
+        SidecarResult::PlaceTags { .. } => Op::PlaceTags,
+    };
+    if actual_op != expected_op {
+        return Err(AiHostError::SidecarProtocol(format!(
+            "response op {} does not match request {}",
+            actual_op.as_str(),
+            expected_op.as_str()
+        )));
+    }
+
+    if let (SidecarResult::PlaceTags { branch, .. }, Some(expected)) = (result, expected_branch)
+        && *branch != expected
+    {
+        return Err(AiHostError::SidecarProtocol(format!(
+            "response branch {} does not match request {}",
+            branch.as_str(),
+            expected.as_str()
+        )));
+    }
+    Ok(())
 }
 
 fn spawn_stderr_logger(stderr: ChildStderr, log_path: &Path) -> Result<JoinHandle<()>> {
@@ -993,6 +1144,8 @@ mod tests {
             },
             variant: "linux-vulkan".to_string(),
             backend: "vulkan".to_string(),
+            plugin_id: "vrc-photon-autotag".to_string(),
+            catalog_version: Some("2026-11-03.1".to_string()),
             log_path: PathBuf::from("/data/logs/sidecar.log"),
             env: vec![("MOCK_SIDECAR_MODE".to_string(), "normal".to_string())],
         }
@@ -1012,6 +1165,65 @@ mod tests {
         assert_eq!(timeouts.request, Duration::from_secs(120));
         assert_eq!(timeouts.cancel_ack, Duration::from_secs(2));
         assert_eq!(timeouts.shutdown, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn backend_names_normalize_roc_and_rocm() {
+        assert_eq!(normalize_backend("rocm"), "roc");
+        assert_eq!(normalize_backend("ROC"), "roc");
+        assert_eq!(normalize_backend(" roc "), "roc");
+        assert_eq!(normalize_backend("Vulkan"), "vulkan");
+    }
+
+    fn sample_probe() -> Probe {
+        Probe {
+            protocol_version: PROTOCOL_VERSION,
+            sidecar_version: "1.0.0".to_string(),
+            plugin_id: "vrc-photon-autotag".to_string(),
+            variant: "linux-vulkan".to_string(),
+            catalog_version: "2026-11-03.1".to_string(),
+            backends: vec![vrc_photon_ai_protocol::BackendInfo {
+                kind: "vulkan".to_string(),
+                device: "Vulkan0".to_string(),
+            }],
+        }
+    }
+
+    #[test]
+    fn probe_identity_mismatches_are_rejected() {
+        let expectations = ProbeExpectations::new("vrc-photon-autotag", "linux-vulkan")
+            .with_catalog_version("2026-11-03.1");
+        assert!(validate_probe(&expectations, &sample_probe()).is_ok());
+
+        let mut probe = sample_probe();
+        probe.plugin_id = "other-plugin".to_string();
+        assert!(matches!(
+            validate_probe(&expectations, &probe),
+            Err(AiHostError::SidecarIdentity(message)) if message.contains("plugin_id")
+        ));
+
+        let mut probe = sample_probe();
+        probe.variant = "linux-cpu".to_string();
+        assert!(matches!(
+            validate_probe(&expectations, &probe),
+            Err(AiHostError::SidecarIdentity(message)) if message.contains("variant")
+        ));
+
+        let mut probe = sample_probe();
+        probe.catalog_version = "2099-01-01.0".to_string();
+        assert!(matches!(
+            validate_probe(&expectations, &probe),
+            Err(AiHostError::SidecarIdentity(message)) if message.contains("catalog_version")
+        ));
+    }
+
+    #[test]
+    fn variant_only_probe_expectations_skip_plugin_and_catalog() {
+        let expectations = ProbeExpectations::variant("linux-vulkan");
+        let mut probe = sample_probe();
+        probe.plugin_id = "any-plugin".to_string();
+        probe.catalog_version = "any-catalog".to_string();
+        assert!(validate_probe(&expectations, &probe).is_ok());
     }
 
     #[test]

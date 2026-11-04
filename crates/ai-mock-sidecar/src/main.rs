@@ -4,8 +4,10 @@
 //! integration tests. It never ships in a release package.
 //!
 //! Environment variables:
-//! - `MOCK_SIDECAR_MODE`: `normal` (default), `fatal`, `crash`, `slow`,
-//!   `no_cancel`, `no_shutdown`, `error`, `busy`, or `bad_stdout`.
+//! - `MOCK_SIDECAR_MODE`: `normal` (default), `fatal`, `fatal_after_hello`,
+//!   `crash`, `slow`, `no_cancel`, `no_shutdown`, `error`, `busy`,
+//!   `bad_stdout`, `wrong_plugin`, `wrong_variant`, `wrong_catalog`,
+//!   `wrong_backend`, `wrong_op`, or `wrong_branch`.
 //! - `MOCK_SIDECAR_DELAY_MS`: overrides the response delay of `slow` and
 //!   `no_cancel`, so timeout and cancel tests can run in milliseconds.
 //! - `MOCK_SIDECAR_CATALOG`: fallback path to a `Catalog` JSON file when
@@ -29,8 +31,11 @@ use vrc_photon_ai_protocol::{
 };
 
 const PLUGIN_ID: &str = "vrc-photon-autotag";
+const OTHER_PLUGIN_ID: &str = "vrc-photon-other";
+const OTHER_VARIANT: &str = "linux-cpu";
 const SIDECAR_VERSION: &str = "1.0.0-mock";
 const DEFAULT_CATALOG_VERSION: &str = "2026-11-03.1";
+const OTHER_CATALOG_VERSION: &str = "2099-01-01.0";
 const SLOW_DELAY: Duration = Duration::from_secs(2);
 /// Longer than the default 2 s cancel-ack timeout so the host reaches its kill
 /// path before the mock answers.
@@ -47,12 +52,20 @@ enum Mode {
     Error,
     Busy,
     BadStdout,
+    WrongPlugin,
+    WrongVariant,
+    WrongCatalog,
+    WrongBackend,
+    WrongOp,
+    WrongBranch,
+    FatalAfterHello,
 }
 
 impl Mode {
     fn from_env() -> Self {
         match std::env::var("MOCK_SIDECAR_MODE").as_deref() {
             Ok("fatal") => Self::Fatal,
+            Ok("fatal_after_hello") => Self::FatalAfterHello,
             Ok("crash") => Self::Crash,
             Ok("slow") => Self::Slow,
             Ok("no_cancel") => Self::NoCancel,
@@ -60,6 +73,12 @@ impl Mode {
             Ok("error") => Self::Error,
             Ok("busy") => Self::Busy,
             Ok("bad_stdout") => Self::BadStdout,
+            Ok("wrong_plugin") => Self::WrongPlugin,
+            Ok("wrong_variant") => Self::WrongVariant,
+            Ok("wrong_catalog") => Self::WrongCatalog,
+            Ok("wrong_backend") => Self::WrongBackend,
+            Ok("wrong_op") => Self::WrongOp,
+            Ok("wrong_branch") => Self::WrongBranch,
             _ => Self::Normal,
         }
     }
@@ -76,7 +95,14 @@ impl Mode {
             | Self::NoShutdown
             | Self::Error
             | Self::Busy
-            | Self::BadStdout => None,
+            | Self::BadStdout
+            | Self::WrongPlugin
+            | Self::WrongVariant
+            | Self::WrongCatalog
+            | Self::WrongBackend
+            | Self::WrongOp
+            | Self::WrongBranch
+            | Self::FatalAfterHello => None,
         }
     }
 
@@ -164,7 +190,7 @@ fn main() -> ExitCode {
     );
 
     if args.probe {
-        emit(&SidecarMessage::Probe(probe(&args, &catalog)));
+        emit(&SidecarMessage::Probe(probe(&args, &catalog, mode)));
         return ExitCode::SUCCESS;
     }
 
@@ -184,7 +210,7 @@ fn main() -> ExitCode {
         return ExitCode::from(1);
     }
 
-    emit(&SidecarMessage::Hello(hello(&args, &catalog)));
+    emit(&SidecarMessage::Hello(hello(&args, &catalog, mode)));
     serve(mode, delay, &catalog);
     ExitCode::SUCCESS
 }
@@ -244,21 +270,25 @@ fn builtin_catalog() -> Catalog {
     }
 }
 
-fn hello(args: &Args, catalog: &Catalog) -> Hello {
+fn hello(args: &Args, catalog: &Catalog, mode: Mode) -> Hello {
+    let plugin_id = emitted_plugin_id(mode);
+    let variant = emitted_variant(mode, &args.variant);
+    let backend = emitted_backend(mode, &args.backend);
+    let catalog_version = emitted_catalog_version(mode, &catalog.version);
     Hello {
         protocol_version: PROTOCOL_VERSION,
         sidecar_version: SIDECAR_VERSION.to_string(),
-        plugin_id: PLUGIN_ID.to_string(),
-        variant: args.variant.clone(),
+        plugin_id: plugin_id.to_string(),
+        variant: variant.to_string(),
         model: ModelInfo {
             id: "d1-2B".to_string(),
             quantization: "Q8_0".to_string(),
             revision: "mock".to_string(),
-            catalog_version: catalog.version.clone(),
+            catalog_version: catalog_version.to_string(),
         },
         backend: BackendInfo {
-            kind: args.backend.clone(),
-            device: device_name(&args.backend),
+            kind: backend.clone(),
+            device: device_name(&backend),
         },
         capabilities: vec![
             "presence".to_string(),
@@ -270,16 +300,20 @@ fn hello(args: &Args, catalog: &Catalog) -> Hello {
             presence_threshold: 0.9,
             multiple_threshold: 0.5,
         },
-        catalog: catalog.clone(),
+        catalog: Catalog {
+            version: catalog_version,
+            ..catalog.clone()
+        },
     }
 }
 
-fn probe(args: &Args, catalog: &Catalog) -> Probe {
+fn probe(args: &Args, catalog: &Catalog, mode: Mode) -> Probe {
+    let backend = emitted_backend(mode, &args.backend);
     let mut backends = vec![BackendInfo {
-        kind: args.backend.clone(),
-        device: device_name(&args.backend),
+        kind: backend.clone(),
+        device: device_name(&backend),
     }];
-    if args.backend != "cpu" {
+    if backend != "cpu" {
         backends.push(BackendInfo {
             kind: "cpu".to_string(),
             device: "CPU".to_string(),
@@ -289,10 +323,42 @@ fn probe(args: &Args, catalog: &Catalog) -> Probe {
     Probe {
         protocol_version: PROTOCOL_VERSION,
         sidecar_version: SIDECAR_VERSION.to_string(),
-        plugin_id: PLUGIN_ID.to_string(),
-        variant: args.variant.clone(),
-        catalog_version: catalog.version.clone(),
+        plugin_id: emitted_plugin_id(mode).to_string(),
+        variant: emitted_variant(mode, &args.variant).to_string(),
+        catalog_version: emitted_catalog_version(mode, &catalog.version),
         backends,
+    }
+}
+
+fn emitted_plugin_id(mode: Mode) -> &'static str {
+    if mode == Mode::WrongPlugin {
+        OTHER_PLUGIN_ID
+    } else {
+        PLUGIN_ID
+    }
+}
+
+fn emitted_variant(mode: Mode, requested: &str) -> &str {
+    if mode == Mode::WrongVariant {
+        OTHER_VARIANT
+    } else {
+        requested
+    }
+}
+
+fn emitted_backend(mode: Mode, requested: &str) -> String {
+    if mode == Mode::WrongBackend {
+        "cpu".to_string()
+    } else {
+        requested.to_string()
+    }
+}
+
+fn emitted_catalog_version(mode: Mode, catalog_version: &str) -> String {
+    if mode == Mode::WrongCatalog {
+        OTHER_CATALOG_VERSION.to_string()
+    } else {
+        catalog_version.to_string()
     }
 }
 
@@ -353,6 +419,17 @@ fn serve(mode: Mode, delay: Option<Duration>, catalog: &Catalog) {
                     std::process::exit(1);
                 }
 
+                if mode == Mode::FatalAfterHello {
+                    emit(&SidecarMessage::Fatal {
+                        error: SidecarError {
+                            code: SidecarErrorCode::OutOfMemory,
+                            message: "mock fatal after hello".to_string(),
+                            retryable: true,
+                        },
+                    });
+                    return;
+                }
+
                 if let Some(error) = mode.response_error() {
                     emit(&SidecarMessage::Response(SidecarResponse {
                         id,
@@ -373,7 +450,7 @@ fn serve(mode: Mode, delay: Option<Duration>, catalog: &Catalog) {
                 emit(&SidecarMessage::Response(SidecarResponse {
                     id,
                     ok: true,
-                    result: Some(mock_result(op, branch, catalog)),
+                    result: Some(response_result(mode, op, branch, catalog)),
                     error: None,
                 }));
             }
@@ -437,6 +514,28 @@ fn wait_for_cancel(
             Ok(request) => queued.push_back(request),
             Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => return false,
         }
+    }
+}
+
+fn response_result(
+    mode: Mode,
+    op: Op,
+    branch: Option<TagBranch>,
+    catalog: &Catalog,
+) -> SidecarResult {
+    match mode {
+        Mode::WrongOp => SidecarResult::Presence {
+            present: true,
+            p_yes: 0.5,
+        },
+        Mode::WrongBranch => {
+            let wrong_branch = match branch.unwrap_or(TagBranch::Outdoor) {
+                TagBranch::Indoor => TagBranch::Outdoor,
+                TagBranch::Outdoor => TagBranch::Indoor,
+            };
+            mock_result(op, Some(wrong_branch), catalog)
+        }
+        _ => mock_result(op, branch, catalog),
     }
 }
 

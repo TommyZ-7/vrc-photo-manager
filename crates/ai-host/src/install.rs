@@ -94,6 +94,27 @@ pub fn install_from_zip_with_limits(
     host_version: &str,
     limits: InstallLimits,
 ) -> Result<InstalledPlugin> {
+    install_from_zip_with_limits_using(
+        zip_path,
+        data_dir,
+        keys,
+        host_version,
+        limits,
+        |from, to| fs::rename(from, to),
+    )
+}
+
+fn install_from_zip_with_limits_using<R>(
+    zip_path: &Path,
+    data_dir: &Path,
+    keys: &[String],
+    host_version: &str,
+    limits: InstallLimits,
+    mut rename: R,
+) -> Result<InstalledPlugin>
+where
+    R: FnMut(&Path, &Path) -> std::io::Result<()>,
+{
     let zip_size = fs::metadata(zip_path)?.len();
     if zip_size > limits.max_zip_bytes {
         return Err(AiHostError::LimitExceeded(format!(
@@ -262,7 +283,7 @@ pub fn install_from_zip_with_limits(
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
     }
-    replace_installation(staging.path(), &target, &root)?;
+    replace_installation_with(staging.path(), &target, &root, &mut rename)?;
 
     tracing::debug!(
         plugin_id = %manifest.plugin_id,
@@ -618,7 +639,15 @@ fn set_file_mode(path: &Path, zip_mode: Option<u32>, is_entrypoint: bool) -> Res
     Ok(())
 }
 
-fn replace_installation(staging: &Path, target: &Path, backup_root: &Path) -> Result<()> {
+fn replace_installation_with<R>(
+    staging: &Path,
+    target: &Path,
+    backup_root: &Path,
+    mut rename: R,
+) -> Result<()>
+where
+    R: FnMut(&Path, &Path) -> std::io::Result<()>,
+{
     let target_exists = match fs::symlink_metadata(target) {
         Ok(_) => true,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
@@ -628,15 +657,15 @@ fn replace_installation(staging: &Path, target: &Path, backup_root: &Path) -> Re
     let backup = if target_exists {
         let directory = Builder::new().prefix(".backup-").tempdir_in(backup_root)?;
         let path = directory.path().join("previous");
-        fs::rename(target, &path)?;
+        rename(target, &path)?;
         Some((directory, path))
     } else {
         None
     };
 
-    if let Err(error) = fs::rename(staging, target) {
+    if let Err(error) = rename(staging, target) {
         if let Some((backup_directory, backup_path)) = backup {
-            match fs::rename(&backup_path, target) {
+            match rename(&backup_path, target) {
                 Ok(()) => drop(backup_directory),
                 Err(restore_error) => {
                     let kept = backup_directory.keep();
@@ -969,7 +998,7 @@ mod tests {
     }
 
     #[test]
-    fn install_rejects_case_insensitive_variant_collisions() {
+    fn install_rejects_an_uppercase_backend_before_the_collision_check() {
         let data_dir = tempdir().unwrap();
         let first = TestPackage::new();
         install(&first, data_dir.path()).unwrap();
@@ -979,7 +1008,10 @@ mod tests {
         second.manifest_mut().variant = "linux-VULKAN".to_string();
         let error = install(&second, data_dir.path()).unwrap_err();
 
-        assert!(matches!(error, AiHostError::UnsafePath(_)));
+        assert!(
+            matches!(error, AiHostError::ManifestInvalid(_)),
+            "{error:?}"
+        );
         assert!(staging_entries(data_dir.path()).is_empty());
     }
 
@@ -1340,7 +1372,10 @@ mod tests {
             .unwrap();
         fs::write(staging.path().join("new.txt"), b"new").unwrap();
 
-        replace_installation(staging.path(), &target, &plugins).unwrap();
+        replace_installation_with(staging.path(), &target, &plugins, |from, to| {
+            fs::rename(from, to)
+        })
+        .unwrap();
 
         assert_eq!(fs::read(target.join("new.txt")).unwrap(), b"new");
         assert!(!target.join("old.txt").exists());
@@ -1362,7 +1397,10 @@ mod tests {
         fs::write(target.join("old.txt"), b"old").unwrap();
         let missing_staging = plugins.join(".staging-missing");
 
-        let error = replace_installation(&missing_staging, &target, &plugins).unwrap_err();
+        let error = replace_installation_with(&missing_staging, &target, &plugins, |from, to| {
+            fs::rename(from, to)
+        })
+        .unwrap_err();
 
         assert!(matches!(error, AiHostError::Io(_)));
         assert_eq!(fs::read(target.join("old.txt")).unwrap(), b"old");
@@ -1376,14 +1414,72 @@ mod tests {
         let installed = install(&package, data_dir.path()).unwrap();
         let original = fs::read(installed.path.join("catalog.json")).unwrap();
 
-        replace_entry_data(&mut package, "catalog.json", b"broken");
+        // Same length as the signed entry, so extraction reaches the SHA-256
+        // check after the staging directory has been populated.
+        replace_entry_data(
+            &mut package,
+            "catalog.json",
+            br#"{"version":"2026-11-03.2"}"#,
+        );
+        assert_eq!(
+            package
+                .entries()
+                .iter()
+                .find(|entry| entry.path == "catalog.json")
+                .unwrap()
+                .data
+                .len(),
+            original.len()
+        );
         let error = install(&package, data_dir.path()).unwrap_err();
-        assert!(matches!(error, AiHostError::Integrity(_)));
+        assert!(
+            matches!(&error, AiHostError::Integrity(message) if message.contains("SHA-256")),
+            "{error:?}"
+        );
 
         assert!(installed.path.join(TEST_ENTRYPOINT).is_file());
         assert_eq!(
             fs::read(installed.path.join("catalog.json")).unwrap(),
             original
+        );
+        assert!(staging_entries(data_dir.path()).is_empty());
+        assert!(backup_entries(data_dir.path()).is_empty());
+    }
+
+    #[test]
+    fn install_restores_the_previous_files_when_the_final_rename_fails() {
+        let data_dir = tempdir().unwrap();
+        let package = TestPackage::new();
+        let installed = install(&package, data_dir.path()).unwrap();
+        let old_catalog = fs::read(installed.path.join("catalog.json")).unwrap();
+        let old_entrypoint = fs::read(installed.path.join(TEST_ENTRYPOINT)).unwrap();
+        let zip = package.temp_zip().unwrap();
+
+        let mut renames = 0;
+        let error = install_from_zip_with_limits_using(
+            zip.path(),
+            data_dir.path(),
+            &[package.public_key()],
+            "0.10.1",
+            InstallLimits::default(),
+            |from: &Path, to: &Path| {
+                renames += 1;
+                if renames == 2 {
+                    return Err(std::io::Error::other("injected final rename failure"));
+                }
+                fs::rename(from, to)
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, AiHostError::Io(_)), "{error:?}");
+        assert_eq!(
+            fs::read(installed.path.join("catalog.json")).unwrap(),
+            old_catalog
+        );
+        assert_eq!(
+            fs::read(installed.path.join(TEST_ENTRYPOINT)).unwrap(),
+            old_entrypoint
         );
         assert!(staging_entries(data_dir.path()).is_empty());
         assert!(backup_entries(data_dir.path()).is_empty());

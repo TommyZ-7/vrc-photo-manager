@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use sha2::{Digest, Sha256};
+use tempfile::Builder;
 
 use crate::error::{AiHostError, Result};
 use crate::http::ModelHttpClient;
@@ -521,27 +522,94 @@ fn create_part(path: &Path) -> Result<File> {
 
 /// Commits verified part files into their final names.
 ///
-/// A commit failure removes the parts that were not renamed and any finals
-/// created by this call. Finals that already existed before the call are left
-/// untouched.
+/// Both existing finals are moved aside before either part is committed. A
+/// failure after the first rename restores the old pair and removes every
+/// final created by this call, so a partial commit can never replace a
+/// previously installed model.
 fn commit_verified(pairs: [(&Path, &Path); 2]) -> Result<()> {
-    let mut created: Vec<&Path> = Vec::new();
-    for (index, &(part, destination)) in pairs.iter().enumerate() {
-        let existed = fs::symlink_metadata(destination).is_ok();
-        if let Err(error) = commit_part(part, destination) {
-            for &(remaining, _) in &pairs[index..] {
-                let _ = fs::remove_file(remaining);
+    commit_verified_with(pairs, commit_part)
+}
+
+fn commit_verified_with<F>(pairs: [(&Path, &Path); 2], mut commit: F) -> Result<()>
+where
+    F: FnMut(&Path, &Path) -> Result<()>,
+{
+    let mut backups: Vec<Option<(tempfile::TempDir, PathBuf)>> = Vec::with_capacity(pairs.len());
+
+    // Back up every existing final before touching the staged files.
+    for &(_, destination) in &pairs {
+        match fs::symlink_metadata(destination) {
+            Ok(_) => {
+                let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+                let backup_dir = match Builder::new().prefix(".backup-").tempdir_in(parent) {
+                    Ok(directory) => directory,
+                    Err(error) => {
+                        remove_parts(&pairs);
+                        restore_backups(pairs, backups);
+                        return Err(error.into());
+                    }
+                };
+                let backup_path = backup_dir.path().join("previous");
+                match fs::rename(destination, &backup_path) {
+                    Ok(()) => backups.push(Some((backup_dir, backup_path))),
+                    Err(error) => {
+                        remove_parts(&pairs);
+                        restore_backups(pairs, backups);
+                        return Err(error.into());
+                    }
+                }
             }
-            for path in created {
-                let _ = fs::remove_file(path);
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => backups.push(None),
+            Err(error) => {
+                remove_parts(&pairs);
+                restore_backups(pairs, backups);
+                return Err(error.into());
             }
-            return Err(error);
-        }
-        if !existed {
-            created.push(destination);
         }
     }
+
+    for &(part, destination) in &pairs {
+        if let Err(error) = commit(part, destination) {
+            // Every pre-existing final is in a backup directory by now, so
+            // anything at a destination belongs to this failed operation.
+            for &(_, path) in &pairs {
+                let _ = fs::remove_file(path);
+            }
+            remove_parts(&pairs);
+            restore_backups(pairs, backups);
+            return Err(error);
+        }
+    }
+
+    // Success: dropping the backup directories removes the old files.
+    drop(backups);
     Ok(())
+}
+
+fn remove_parts(pairs: &[(&Path, &Path); 2]) {
+    for &(part, _) in pairs {
+        let _ = fs::remove_file(part);
+    }
+}
+
+fn restore_backups(pairs: [(&Path, &Path); 2], backups: Vec<Option<(tempfile::TempDir, PathBuf)>>) {
+    for (&(_, destination), backup) in pairs.iter().zip(backups).rev() {
+        let Some((directory, backup_path)) = backup else {
+            continue;
+        };
+        match fs::rename(&backup_path, destination) {
+            Ok(()) => drop(directory),
+            Err(error) => {
+                let kept = directory.keep();
+                tracing::error!(
+                    backup = %kept.display(),
+                    destination = %destination.display(),
+                    error = %error,
+                    "failed to restore the previous model file"
+                );
+            }
+        }
+    }
 }
 
 /// Renames a verified part file into place. On Windows an existing file must
@@ -901,6 +969,100 @@ mod tests {
 
         assert!(matches!(error, AiHostError::UnsupportedParts));
         assert!(!model_directory(&manifest, data_dir.path()).exists());
+    }
+
+    #[test]
+    fn commit_replaces_existing_finals_and_removes_backups() {
+        let manifest = sample_manifest();
+        let data_dir = tempdir().unwrap();
+        let directory = model_directory(&manifest, data_dir.path());
+        fs::create_dir_all(&directory).unwrap();
+        let model_destination = directory.join(MODEL_PATH);
+        let mmproj_destination = directory.join(MMPROJ_PATH);
+        fs::write(&model_destination, b"old model").unwrap();
+        fs::write(&mmproj_destination, b"old mmproj").unwrap();
+        let model_part = part_path(&model_destination);
+        let mmproj_part = part_path(&mmproj_destination);
+        fs::write(&model_part, MODEL_BYTES).unwrap();
+        fs::write(&mmproj_part, MMPROJ_BYTES).unwrap();
+
+        commit_verified([
+            (&model_part, &model_destination),
+            (&mmproj_part, &mmproj_destination),
+        ])
+        .unwrap();
+
+        assert_eq!(fs::read(&model_destination).unwrap(), MODEL_BYTES);
+        assert_eq!(fs::read(&mmproj_destination).unwrap(), MMPROJ_BYTES);
+        assert!(!model_part.exists());
+        assert!(!mmproj_part.exists());
+        assert!(backup_entries(&directory).is_empty());
+    }
+
+    #[test]
+    fn commit_restores_both_existing_finals_when_the_second_commit_fails() {
+        let manifest = sample_manifest();
+        let data_dir = tempdir().unwrap();
+        let directory = model_directory(&manifest, data_dir.path());
+        fs::create_dir_all(&directory).unwrap();
+        let model_destination = directory.join(MODEL_PATH);
+        let mmproj_destination = directory.join(MMPROJ_PATH);
+        fs::write(&model_destination, b"old model").unwrap();
+        fs::write(&mmproj_destination, b"old mmproj").unwrap();
+        let model_part = part_path(&model_destination);
+        let mmproj_part = part_path(&mmproj_destination);
+        fs::write(&model_part, MODEL_BYTES).unwrap();
+        fs::write(&mmproj_part, MMPROJ_BYTES).unwrap();
+
+        let mut commits = 0;
+        let error = commit_verified_with(
+            [
+                (&model_part, &model_destination),
+                (&mmproj_part, &mmproj_destination),
+            ],
+            |part, destination| {
+                commits += 1;
+                if commits == 2 {
+                    return Err(AiHostError::Io(std::io::Error::other(
+                        "injected second commit failure",
+                    )));
+                }
+                fs::rename(part, destination).map_err(AiHostError::from)
+            },
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, AiHostError::Io(_)), "{error:?}");
+        assert_eq!(fs::read(&model_destination).unwrap(), b"old model");
+        assert_eq!(fs::read(&mmproj_destination).unwrap(), b"old mmproj");
+        assert!(!model_part.exists());
+        assert!(!mmproj_part.exists());
+        assert!(backup_entries(&directory).is_empty());
+    }
+
+    #[test]
+    fn backup_entries_are_hidden_siblings_in_the_model_directory() {
+        let manifest = sample_manifest();
+        let data_dir = tempdir().unwrap();
+        let directory = model_directory(&manifest, data_dir.path());
+        fs::create_dir_all(&directory).unwrap();
+        assert!(backup_entries(&directory).is_empty());
+        fs::create_dir_all(directory.join(".backup-test")).unwrap();
+        assert_eq!(backup_entries(&directory).len(), 1);
+    }
+
+    fn backup_entries(directory: &Path) -> Vec<PathBuf> {
+        let Ok(entries) = fs::read_dir(directory) else {
+            return Vec::new();
+        };
+        entries
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with(".backup-"))
+            })
+            .collect()
     }
 
     #[test]
