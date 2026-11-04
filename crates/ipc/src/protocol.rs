@@ -428,33 +428,149 @@ mod tests {
 
     #[test]
     fn ai_requests_and_events_round_trip() {
-        for request in [
-            Request::WakeTagging,
-            Request::InstallPlugin {
-                zip_path: "/tmp/plugin.zip".into(),
-            },
-            Request::CancelTagging {
-                job_id: "job-1".into(),
-            },
-            Request::ImportModelFiles {
-                plugin_id: "vrc-photon-autotag".into(),
-                paths: vec!["/tmp/model.gguf".into()],
-            },
-        ] {
-            let json = serde_json::to_string(&RequestEnvelope { id: 1, request }).unwrap();
-            let _: RequestEnvelope = serde_json::from_str(&json).unwrap();
+        let requests = [
+            ("wake_tagging", Request::WakeTagging),
+            (
+                "install_plugin",
+                Request::InstallPlugin {
+                    zip_path: "/tmp/plugin.zip".into(),
+                },
+            ),
+            (
+                "uninstall_plugin",
+                Request::UninstallPlugin {
+                    plugin_id: "vrc-photon-autotag".into(),
+                    variant: Some("linux-vulkan".into()),
+                    version: Some("1.0.0".into()),
+                    delete_ai_tags: true,
+                },
+            ),
+            (
+                "probe_plugin",
+                Request::ProbePlugin {
+                    plugin_id: "vrc-photon-autotag".into(),
+                },
+            ),
+            (
+                "set_active_variant",
+                Request::SetActiveVariant {
+                    plugin_id: "vrc-photon-autotag".into(),
+                    variant: "linux-vulkan".into(),
+                    version: Some("1.0.0".into()),
+                },
+            ),
+            (
+                "start_model_download",
+                Request::StartModelDownload {
+                    plugin_id: "vrc-photon-autotag".into(),
+                },
+            ),
+            (
+                "cancel_model_download",
+                Request::CancelModelDownload {
+                    plugin_id: "vrc-photon-autotag".into(),
+                },
+            ),
+            (
+                "import_model_files",
+                Request::ImportModelFiles {
+                    plugin_id: "vrc-photon-autotag".into(),
+                    paths: vec!["/tmp/model.gguf".into()],
+                },
+            ),
+            (
+                "delete_model",
+                Request::DeleteModel {
+                    plugin_id: "vrc-photon-autotag".into(),
+                },
+            ),
+            (
+                "cancel_tagging",
+                Request::CancelTagging {
+                    job_id: "job-1".into(),
+                },
+            ),
+        ];
+        for (tag, request) in requests {
+            let value = RequestEnvelope { id: 1, request };
+            let json = serde_json::to_string(&value).unwrap();
+            assert!(
+                json.contains(&format!("\"type\":\"{tag}\"")),
+                "request wire tag {tag} missing: {json}"
+            );
+            assert_eq!(
+                serde_json::from_str::<RequestEnvelope>(&json).unwrap(),
+                value
+            );
         }
 
-        let event = Event::TaggingProgress {
-            job_id: "job-1".into(),
-            photo_id: 1,
-            status: TaggingJobStatus::Processing,
-            progress: 0.5,
-            stage: Some(TaggingStage::PlaceClass),
-            error: None,
-        };
-        let json = serde_json::to_string(&ServerMessage::Event { event }).unwrap();
-        let _: ServerMessage = serde_json::from_str(&json).unwrap();
+        let events = [
+            (
+                "tagging_progress",
+                Event::TaggingProgress {
+                    job_id: "job-1".into(),
+                    photo_id: 1,
+                    status: TaggingJobStatus::Processing,
+                    progress: 0.5,
+                    stage: Some(TaggingStage::PlaceClass),
+                    error: None,
+                },
+            ),
+            (
+                "plugin_install_progress",
+                Event::PluginInstallProgress {
+                    plugin_id: "vrc-photon-autotag".into(),
+                    variant: "linux-vulkan".into(),
+                    version: Some("1.0.0".into()),
+                    status: PluginInstallStatus::Installed,
+                    error: None,
+                },
+            ),
+            (
+                "plugin_state_changed",
+                Event::PluginStateChanged {
+                    plugin_id: "vrc-photon-autotag".into(),
+                },
+            ),
+            (
+                "model_download_progress",
+                Event::ModelDownloadProgress {
+                    plugin_id: "vrc-photon-autotag".into(),
+                    status: ModelState::Downloading,
+                    bytes: 512,
+                    total: Some(2048),
+                    error: None,
+                },
+            ),
+        ];
+        for (tag, event) in events {
+            let value = ServerMessage::Event {
+                event: event.clone(),
+            };
+            let json = serde_json::to_string(&value).unwrap();
+            assert!(
+                json.contains(&format!("\"type\":\"{tag}\"")),
+                "event wire tag {tag} missing: {json}"
+            );
+            assert_eq!(serde_json::from_str::<ServerMessage>(&json).unwrap(), value);
+        }
+
+        for (code, tag) in [
+            (ErrorCode::NotReady, "not_ready"),
+            (ErrorCode::ConsentRequired, "consent_required"),
+        ] {
+            assert_eq!(serde_json::to_string(&code).unwrap(), format!("\"{tag}\""));
+            let value = ServerMessage::Response {
+                id: 2,
+                response: Response::Error {
+                    code,
+                    message: "try again".into(),
+                },
+            };
+            let json = serde_json::to_string(&value).unwrap();
+            assert!(json.contains(tag), "error wire tag {tag} missing: {json}");
+            assert_eq!(serde_json::from_str::<ServerMessage>(&json).unwrap(), value);
+        }
     }
 
     #[test]

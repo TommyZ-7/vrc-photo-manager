@@ -123,6 +123,9 @@ pub struct NewPhotoAi {
     pub tags: Vec<(String, f32)>,
 }
 
+/// Maximum number of user retries for one tagging job.
+pub const MAX_TAGGING_RETRIES: i64 = 2;
+
 /// One durable tagging job.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaggingJob {

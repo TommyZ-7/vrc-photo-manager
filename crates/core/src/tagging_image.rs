@@ -53,7 +53,16 @@ pub fn prepare_tagging_snapshot(
     let bytes = encode_jpeg(&image)?;
 
     fs::create_dir_all(cache_dir)?;
-    fs::write(&temp, &bytes)?;
+    if let Err(error) = fs::write(&temp, &bytes) {
+        if let Err(cleanup) = fs::remove_file(&temp) {
+            tracing::debug!(
+                %cleanup,
+                path = %temp.display(),
+                "cannot remove temporary tagging snapshot after write failure"
+            );
+        }
+        return Err(CoreError::Io(error));
+    }
     if let Err(error) = fs::rename(&temp, &output) {
         if let Err(cleanup) = fs::remove_file(&temp) {
             tracing::debug!(
@@ -300,6 +309,32 @@ mod tests {
         assert_ne!(fs::read(&second.path).unwrap(), first_bytes);
         assert!(!cache.join("job-1.jpg.tmp").exists());
         assert_eq!(fs::read_dir(&cache).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn snapshot_removes_the_temporary_file_after_a_write_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.png");
+        write_source(&source, 8, 8, Rgba([1, 2, 3, 255]));
+        let cache = dir.path().join("cache");
+        fs::create_dir_all(&cache).unwrap();
+        fs::set_permissions(&cache, fs::Permissions::from_mode(0o500)).unwrap();
+
+        // Skip when running as root: mode bits do not deny writes there.
+        if fs::write(cache.join("probe"), b"x").is_ok() {
+            let _ = fs::remove_file(cache.join("probe"));
+            fs::set_permissions(&cache, fs::Permissions::from_mode(0o700)).unwrap();
+            return;
+        }
+
+        let result = prepare_tagging_snapshot(&source, &cache, "job-1");
+        fs::set_permissions(&cache, fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(result.is_err());
+        assert!(!cache.join("job-1.jpg.tmp").exists());
     }
 
     #[test]

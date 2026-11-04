@@ -851,6 +851,24 @@ mod tests {
 
         let old: AppSettings = serde_json::from_str(r#"{"photo_roots":[],"log_dir":null,"managed_dir":null,"language":"ja","autostart":true,"tray":true,"auto_compress":true,"auto_compress_backlog":false,"estimated_link":true,"thumbnail_cache_mb":2048,"compression_workers":1}"#).unwrap();
         assert!(!old.ai_tagging_enabled);
+        assert!(!old.ai_tagging_auto);
+        assert!(!old.ai_tagging_backlog);
+        assert_eq!(old.ai_tagging_backend, "auto");
+        assert_eq!(old.ai_tagging_idle_timeout_sec, 600);
+        assert!(old.ai_presence_threshold.is_none());
+        assert!(old.ai_model_license_consent_at.is_none());
+    }
+
+    #[test]
+    fn non_finite_ai_threshold_normalizes_to_none() {
+        for threshold in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut settings = AppSettings {
+                ai_presence_threshold: Some(threshold),
+                ..Default::default()
+            };
+            settings.normalize_ai_settings();
+            assert_eq!(settings.ai_presence_threshold, None);
+        }
     }
 
     #[test]
