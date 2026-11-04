@@ -591,15 +591,37 @@ pub(crate) fn backend_selection_is_disabled_when_not_ready(ready: bool, enabled:
     !ready || !enabled
 }
 
-/// Human-readable people count from the sidecar interval.
-pub(crate) fn people_label(min: Option<u32>, max: Option<u32>) -> String {
+/// Human-readable people count from the sidecar interval, formatted for `language`.
+pub(crate) fn people_label_in(language: &str, min: Option<u32>, max: Option<u32>) -> String {
     match (min, max) {
-        (Some(min), Some(max)) if min == max => format!("{min}人"),
-        (Some(min), Some(max)) => format!("{min}〜{max}人"),
-        (Some(min), None) => format!("{min}人以上"),
-        (None, Some(max)) => format!("{max}人以下"),
-        (None, None) => "—".to_string(),
+        (Some(0), Some(0)) => vrc_photon_i18n::tr_in(language, "photos.ai.people.zero"),
+        (Some(min), Some(max)) if min == max => vrc_photon_i18n::tr_args_in(
+            language,
+            "photos.ai.people.exact",
+            &[("count", min.to_string())],
+        ),
+        (Some(min), Some(max)) => vrc_photon_i18n::tr_args_in(
+            language,
+            "photos.ai.people.range",
+            &[("min", min.to_string()), ("max", max.to_string())],
+        ),
+        (Some(min), None) => vrc_photon_i18n::tr_args_in(
+            language,
+            "photos.ai.people.at_least",
+            &[("min", min.to_string())],
+        ),
+        (None, Some(max)) => vrc_photon_i18n::tr_args_in(
+            language,
+            "photos.ai.people.at_most",
+            &[("max", max.to_string())],
+        ),
+        (None, None) => vrc_photon_i18n::tr_in(language, "photos.ai.people.unknown"),
     }
+}
+
+/// Human-readable people count for the active locale.
+pub(crate) fn people_label(min: Option<u32>, max: Option<u32>) -> String {
+    people_label_in(&vrc_photon_i18n::current_locale(), min, max)
 }
 
 /// Human-readable place branch from the classifier, translated for the active
@@ -613,6 +635,37 @@ pub(crate) fn place_label(branch: Option<&str>) -> String {
         },
         None => "—".to_string(),
     }
+}
+
+/// Place label with the classifier's confidence for that branch, when the
+/// stored probability JSON contains it.
+pub(crate) fn place_label_with_confidence(
+    branch: Option<&str>,
+    probabilities_json: Option<&str>,
+) -> String {
+    let label = place_label(branch);
+    let Some(branch) = branch else {
+        return label;
+    };
+    let Some(probability) = place_probability(branch, probabilities_json) else {
+        return label;
+    };
+    format!("{label} {:.1}%", probability * 100.0)
+}
+
+fn place_probability(branch: &str, probabilities_json: Option<&str>) -> Option<f32> {
+    let key = branch.trim().to_ascii_lowercase();
+    let value: serde_json::Value = serde_json::from_str(probabilities_json?).ok()?;
+    let probability = value.get(key.as_str())?.as_f64()? as f32;
+    probability.is_finite().then(|| probability.clamp(0.0, 1.0))
+}
+
+/// Formats the stored RFC3339 tagging timestamp for the inspector. A value the
+/// catalog cannot parse is shown unchanged rather than dropped.
+pub(crate) fn format_tagged_at(tagged_at: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(tagged_at)
+        .map(|value| value.format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|_| tagged_at.to_string())
 }
 
 /// Compact queue summary for the runtime card.
@@ -637,17 +690,39 @@ pub(crate) struct AiTagView {
 /// Chooses the catalog name for the active language and formats the
 /// probability tooltip. AI tags are read-only history, hence the badge.
 pub(crate) fn ai_tag_view(tag: &PhotoAiTagView, language: &str) -> AiTagView {
+    ai_tag_view_with_context(tag, language, None, None)
+}
+
+/// Like [`ai_tag_view`], but includes the producing model and the formatted
+/// tagging time in the tooltip when both are available.
+pub(crate) fn ai_tag_view_with_context(
+    tag: &PhotoAiTagView,
+    language: &str,
+    model: Option<&str>,
+    time: Option<&str>,
+) -> AiTagView {
     let label = if language.starts_with("en") {
         tag.name_en.clone().unwrap_or_else(|| tag.name.clone())
     } else {
         tag.name.clone()
     };
     let probability = format!("{:.3}", tag.probability);
-    let tooltip = vrc_photon_i18n::tr_args_in(
-        language,
-        "photos.ai.probability",
-        &[("probability", probability)],
-    );
+    let tooltip = match (model, time) {
+        (Some(model), Some(time)) => vrc_photon_i18n::tr_args_in(
+            language,
+            "photos.ai.probability_tooltip",
+            &[
+                ("probability", probability),
+                ("model", model.to_string()),
+                ("time", time.to_string()),
+            ],
+        ),
+        _ => vrc_photon_i18n::tr_args_in(
+            language,
+            "photos.ai.probability",
+            &[("probability", probability)],
+        ),
+    };
     AiTagView {
         label,
         tooltip,
@@ -659,6 +734,18 @@ pub(crate) fn ai_tag_view(tag: &PhotoAiTagView, language: &str) -> AiTagView {
 /// Formats every stored tag for the active language.
 pub(crate) fn ai_tag_views(tags: &[PhotoAiTagView], language: &str) -> Vec<AiTagView> {
     tags.iter().map(|tag| ai_tag_view(tag, language)).collect()
+}
+
+/// Formats every stored tag with the model and tagging time in its tooltip.
+pub(crate) fn ai_tag_views_with_context(
+    tags: &[PhotoAiTagView],
+    language: &str,
+    model: Option<&str>,
+    time: Option<&str>,
+) -> Vec<AiTagView> {
+    tags.iter()
+        .map(|tag| ai_tag_view_with_context(tag, language, model, time))
+        .collect()
 }
 
 /// Loads the stored AI result and the applied tag chips for one photo.
@@ -1071,15 +1158,18 @@ impl App {
                 cx.notify();
                 return;
             }
-            Ok(ManualRetagOutcome::Queued(0)) => {
-                self.toast_info(tr!("integrations.ai.enqueue.none"), cx);
-            }
-            Ok(ManualRetagOutcome::Queued(count)) => {
-                self.toast_success(
-                    tr_args!("integrations.ai.enqueue.queued", count = count),
-                    cx,
-                );
-                self.wake_daemon(IpcRequest::WakeTagging, cx);
+            Ok(outcome @ ManualRetagOutcome::Queued(count)) => {
+                if count == 0 {
+                    self.toast_info(tr!("integrations.ai.enqueue.none"), cx);
+                } else {
+                    self.toast_success(
+                        tr_args!("integrations.ai.enqueue.queued", count = count),
+                        cx,
+                    );
+                }
+                if outcome.wakes() {
+                    self.wake_daemon(IpcRequest::WakeTagging, cx);
+                }
             }
             Err(error) => {
                 self.toast_error(tr_args!("integrations.ai.enqueue.error", error = error), cx)
@@ -1256,11 +1346,12 @@ mod tests {
         AI_PLUGIN_ID, AiPluginAction, AiPluginCardState, AiPluginCardView, AiResponseOutcome,
         AiUiState, ManualRetagOutcome, ModelDownloadView, ai_error_label_in, ai_error_text_in,
         ai_job_summary_label, ai_manifest_view, ai_plugin_card_state, ai_response_outcome,
-        ai_tag_view, ai_tag_views, apply_install_event, backend_options,
+        ai_tag_view, ai_tag_view_with_context, ai_tag_views, apply_install_event, backend_options,
         backend_selection_is_disabled_when_not_ready, collect_ai_snapshot,
-        download_progress_bar_ratio, enqueue_manual_retag, install_event_applies_to_ai,
-        installation_row_id, is_active_installation, load_photo_ai, model_progress_ratio,
-        needs_license_consent, people_label, place_label, variant_backend_label,
+        download_progress_bar_ratio, enqueue_manual_retag, format_tagged_at,
+        install_event_applies_to_ai, installation_row_id, is_active_installation, load_photo_ai,
+        model_progress_ratio, needs_license_consent, people_label, people_label_in, place_label,
+        place_label_with_confidence, variant_backend_label,
     };
     use vrc_photon_ai_protocol::{
         BackendInfo, Catalog, ModelState, PluginInstallStatus, Probe, TagDefinition,
@@ -1812,10 +1903,33 @@ mod tests {
         assert_eq!(people_label(Some(3), Some(5)), "3〜5人");
         assert_eq!(people_label(Some(0), Some(0)), "0人");
         assert_eq!(people_label(None, None), "—");
+        assert_eq!(people_label_in("en", Some(3), Some(3)), "3 people");
+        assert_eq!(people_label_in("en", Some(3), Some(5)), "3–5 people");
+        assert_eq!(people_label_in("en", Some(0), Some(0)), "0 people");
+        assert_eq!(people_label_in("en", None, None), "—");
         assert_eq!(place_label(Some("indoor")), "屋内");
         assert_eq!(place_label(Some("outdoor")), "屋外");
         assert_eq!(place_label(Some("other")), "その他");
         assert_eq!(place_label(None), "—");
+    }
+
+    #[test]
+    fn place_label_appends_confidence_when_available() {
+        let json = r#"{"indoor":0.019,"outdoor":0.981,"other":0.0}"#;
+        assert_eq!(
+            place_label_with_confidence(Some("outdoor"), Some(json)),
+            "屋外 98.1%"
+        );
+        assert_eq!(
+            place_label_with_confidence(Some("indoor"), Some(json)),
+            "屋内 1.9%"
+        );
+        assert_eq!(place_label_with_confidence(Some("outdoor"), None), "屋外");
+        assert_eq!(
+            place_label_with_confidence(Some("outdoor"), Some("not json")),
+            "屋外"
+        );
+        assert_eq!(place_label_with_confidence(None, Some(json)), "—");
     }
 
     #[test]
@@ -1865,6 +1979,24 @@ mod tests {
 
         let en = ai_tag_view(&tag, "en");
         assert_eq!(en.label, "Sea");
+
+        let with_context =
+            ai_tag_view_with_context(&tag, "ja", Some("d1-2B Q8_0"), Some("2026-11-04 12:45"));
+        assert!(with_context.tooltip.contains("0.969"));
+        assert!(with_context.tooltip.contains("d1-2B Q8_0"));
+        assert!(with_context.tooltip.contains("2026-11-04 12:45"));
+
+        let without_context = ai_tag_view_with_context(&tag, "ja", None, None);
+        assert_eq!(without_context.tooltip, ja.tooltip);
+    }
+
+    #[test]
+    fn tagged_at_is_formatted_for_display() {
+        assert_eq!(
+            format_tagged_at("2026-11-04T12:45:01+00:00"),
+            "2026-11-04 12:45"
+        );
+        assert_eq!(format_tagged_at("not a timestamp"), "not a timestamp");
     }
 
     #[test]

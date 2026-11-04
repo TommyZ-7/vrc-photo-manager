@@ -350,17 +350,19 @@ impl App {
                 .p(px(16.))
                 .gap(px(10.))
                 .overflow_y_scrollbar();
-            let body = body.child(self.detail_body(&photo, cx)).with_animation(
-                ("viewer-details-body", self.quick_look_details_epoch),
-                Animation::new(if self.quick_look_details_epoch == 0 {
-                    Duration::ZERO
-                } else {
-                    MOTION_FAST
-                })
-                .with_easing(ease_motion)
-                .with_max_fps(self.motion_fps(window, cx)),
-                |el, t| el.opacity(t).relative().top(px(6.0 * (1.0 - t))),
-            );
+            let body = body
+                .child(self.detail_body(&photo, window, cx))
+                .with_animation(
+                    ("viewer-details-body", self.quick_look_details_epoch),
+                    Animation::new(if self.quick_look_details_epoch == 0 {
+                        Duration::ZERO
+                    } else {
+                        MOTION_FAST
+                    })
+                    .with_easing(ease_motion)
+                    .with_max_fps(self.motion_fps(window, cx)),
+                    |el, t| el.opacity(t).relative().top(px(6.0 * (1.0 - t))),
+                );
             // The details column stays a fixed-width dock so the image geometry
             // is unchanged; the card inside it is the opaque foreground surface.
             details_panel = details_panel.p(px(14.)).child(

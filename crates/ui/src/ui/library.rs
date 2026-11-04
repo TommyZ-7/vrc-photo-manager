@@ -19,7 +19,9 @@ use vrc_photon_core::model::Photo;
 use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::App;
-use crate::app::ai::{ai_tag_views, people_label, place_label};
+use crate::app::ai::{
+    ai_tag_views_with_context, format_tagged_at, people_label_in, place_label_with_confidence,
+};
 use crate::app::cli::log_timing;
 use crate::app::daemon::open_path;
 use crate::state::photo_browser::{PAGE_SIZE, PhotoIndex};
@@ -578,7 +580,7 @@ impl App {
             .child(meta)
             .child(players_block)
             .child(tags_block)
-            .child(self.ai_meta_block(id, cx));
+            .child(self.ai_meta_block(id, window, cx));
 
         let actions = v_flex()
             .flex_shrink_0()
@@ -643,22 +645,55 @@ impl App {
     /// Read-only AI tagging history for the selected photo. The same mint
     /// panel is mounted below the editable tags in the inspector and in the
     /// Quick Look details panel.
-    pub(crate) fn ai_meta_block(&mut self, id: i64, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn ai_meta_block(
+        &mut self,
+        id: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let p = self.palette;
         let language = self.settings.language.clone();
         let ai = self.selected_ai.clone();
-        let tags = ai_tag_views(&self.selected_ai_tags, &language);
+        let tagged_at = ai.as_ref().map(|ai| format_tagged_at(&ai.tagged_at));
+        let tags = ai_tag_views_with_context(
+            &self.selected_ai_tags,
+            &language,
+            ai.as_ref().map(|ai| ai.model_version.as_str()),
+            tagged_at.as_deref(),
+        );
         let people = ai
             .as_ref()
-            .map(|ai| people_label(ai.people_min, ai.people_max))
+            .map(|ai| people_label_in(&language, ai.people_min, ai.people_max))
             .unwrap_or_else(|| "—".to_string());
         let place = ai
             .as_ref()
-            .map(|ai| place_label(ai.place_branch.as_deref()))
+            .map(|ai| {
+                place_label_with_confidence(
+                    ai.place_branch.as_deref(),
+                    ai.place_probabilities_json.as_deref(),
+                )
+            })
             .unwrap_or_else(|| "—".to_string());
-        let foot = ai
-            .as_ref()
-            .map(|ai| format!("{} · {} · {}", ai.model_version, ai.variant, ai.tagged_at));
+        let foot = ai.as_ref().map(|ai| {
+            format!(
+                "{} · {} · {}",
+                ai.model_version,
+                ai.variant,
+                tagged_at.as_deref().unwrap_or(&ai.tagged_at)
+            )
+        });
+        let focus_handles: Vec<FocusHandle> = (0..tags.len())
+            .map(|index| {
+                window
+                    .use_keyed_state(
+                        SharedString::from(format!("ai-tag-focus-{id}-{index}")),
+                        cx,
+                        |_, cx| cx.focus_handle(),
+                    )
+                    .read(cx)
+                    .clone()
+            })
+            .collect();
 
         let fact = |label: String, value: String| {
             v_flex()
@@ -687,36 +722,76 @@ impl App {
         let mut tag_row = h_flex().flex_wrap().gap(px(4.));
         if tags.is_empty() {
             tag_row = tag_row.child(
-                div()
-                    .text_size(px(10.))
-                    .text_color(rgb(p.muted_2))
-                    .child("—"),
-            );
-        } else {
-            tag_row = tag_row.children(tags.into_iter().enumerate().map(|(index, view)| {
-                let tooltip = view.tooltip.clone();
-                h_flex()
-                    .id(SharedString::from(format!("ai-tag-{id}-{index}")))
-                    .items_center()
-                    .gap(px(3.))
-                    .px(px(7.))
-                    .py(px(2.))
-                    .rounded_full()
-                    .bg(rgba(with_alpha(p.green, 0x14)))
-                    .border_1()
-                    .border_color(rgba(with_alpha(p.green, 0x38)))
-                    .text_size(px(10.))
-                    .text_color(rgb(p.green))
-                    .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-                    .child("✦")
-                    .child(view.label)
+                v_flex()
+                    .gap(px(1.))
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .font_medium()
+                            .text_color(rgb(p.text))
+                            .child(tr!("photos.ai.empty")),
+                    )
                     .child(
                         div()
                             .text_size(px(9.))
-                            .text_color(rgb(p.muted))
-                            .child(view.probability_label),
-                    )
-            }));
+                            .text_color(rgb(p.muted_2))
+                            .child(tr!("photos.ai.empty_hint")),
+                    ),
+            );
+        } else {
+            tag_row = tag_row.children(focus_handles.into_iter().zip(tags).enumerate().map(
+                |(index, (focus, view))| {
+                    let tooltip = view.tooltip.clone();
+                    let bubble_focus = focus.clone();
+                    let bubble_text = tooltip.clone();
+                    h_flex()
+                        .relative()
+                        .id(SharedString::from(format!("ai-tag-{id}-{index}")))
+                        .items_center()
+                        .gap(px(3.))
+                        .px(px(7.))
+                        .py(px(2.))
+                        .rounded_full()
+                        .bg(rgba(with_alpha(p.green, 0x14)))
+                        .border_1()
+                        .border_color(rgba(with_alpha(p.green, 0x38)))
+                        .text_size(px(10.))
+                        .text_color(rgb(p.green))
+                        .track_focus(&focus)
+                        .tab_stop(true)
+                        .focus(move |this| this.border_color(rgb(p.green)))
+                        .aria_description(tooltip.clone())
+                        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                        .child("✦")
+                        .child(view.label)
+                        .child(
+                            div()
+                                .text_size(px(9.))
+                                .text_color(rgb(p.muted))
+                                .child(view.probability_label),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .top(px(18.))
+                                .left_0()
+                                .w(px(200.))
+                                .hidden()
+                                .track_focus(&bubble_focus)
+                                .focus(move |this| this.flex())
+                                .whitespace_normal()
+                                .px(px(6.))
+                                .py(px(3.))
+                                .rounded(px(5.))
+                                .bg(rgb(p.panel_deep))
+                                .border_1()
+                                .border_color(rgba(with_alpha(p.green, 0x66)))
+                                .text_size(px(9.))
+                                .text_color(rgb(p.text))
+                                .child(bubble_text),
+                        )
+                },
+            ));
         }
 
         let header = h_flex()
@@ -779,6 +854,7 @@ impl App {
     pub(crate) fn detail_body(
         &mut self,
         photo: &Photo,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let p = self.palette;
@@ -1051,7 +1127,7 @@ impl App {
                     .child(Input::new(&self.tag_edit_input).flex_1())
                     .child(add_tag_button),
             )
-            .child(self.ai_meta_block(id, cx))
+            .child(self.ai_meta_block(id, window, cx))
             .child(
                 v_flex()
                     .gap(px(6.))
