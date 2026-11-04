@@ -30,6 +30,8 @@ use vrc_photon_core::settings::{AppSettings, detect_vrchat_paths};
 use vrc_photon_core::thumbnail;
 use vrc_photon_ipc::{Endpoint, Event, JobStatus, Operation, ScanPhase as IpcScanPhase};
 
+#[cfg(test)]
+mod ai_e2e;
 mod discord;
 mod discord_http;
 mod ipc_server;
