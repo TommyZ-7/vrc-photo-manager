@@ -24,6 +24,7 @@ smallvec = "1"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 trash = "5"
+vrc-photon-ai-protocol = { path = "../ai-protocol" }
 vrc-photon-core = { path = "../core" }
 vrc-photon-i18n = { path = "../i18n" }
 vrc-photon-ipc = { path = "../ipc" }

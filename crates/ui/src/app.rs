@@ -1,3 +1,5 @@
+#[allow(dead_code)] // Actions and state are consumed by the AI cards/inspector (tasks 18–20).
+pub(crate) mod ai;
 pub(crate) mod cli;
 pub(crate) mod compression;
 pub(crate) mod daemon;
@@ -251,6 +253,12 @@ pub struct App {
     /// Library revision the cached stats were computed for.
     pub(crate) stats_revision: i64,
     pub(crate) settings: AppSettings,
+    /// AI tagging plugin, model, queue, and transient operation state.
+    pub(crate) ai: ai::AiUiState,
+    /// A 250 ms event-burst refresh of the AI cards is already queued.
+    pub(crate) ai_refresh_scheduled: bool,
+    /// The queued AI refresh must also reload the selected inspector photo.
+    pub(crate) ai_selected_refresh_pending: bool,
     /// 0 = body expanded, 1 = collapsed to the card header.
     pub(crate) integrations_auto_motion: ToggleMotion,
     pub(crate) integrations_clipboard_motion: ToggleMotion,
@@ -936,6 +944,9 @@ impl App {
             stats: LibraryStats::default(),
             stats_revision: -1,
             settings: AppSettings::default(),
+            ai: ai::AiUiState::default(),
+            ai_refresh_scheduled: false,
+            ai_selected_refresh_pending: false,
             integrations_auto_motion: ToggleMotion::settled(if initial_settings.auto_compress {
                 0.0
             } else {
@@ -1042,6 +1053,7 @@ impl App {
             demo_assets,
         };
         app.ensure_profiles();
+        app.ai.apply_snapshot(ai::collect_ai_snapshot(&app.db));
         app.reload_all(true, cx);
         app.apply_palette(app.palette, cx);
         if let Some(message) = message {

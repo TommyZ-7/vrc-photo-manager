@@ -228,12 +228,13 @@ impl App {
                     self.refresh_monitor();
                 }
             }
-            // AI tagging events are not surfaced yet. The daemon already
-            // publishes them for the screens added in a later change.
-            IpcEvent::TaggingProgress { .. }
+            // AI tagging state is owned by `app::ai`.
+            event @ (IpcEvent::TaggingProgress { .. }
             | IpcEvent::PluginInstallProgress { .. }
             | IpcEvent::PluginStateChanged { .. }
-            | IpcEvent::ModelDownloadProgress { .. } => {}
+            | IpcEvent::ModelDownloadProgress { .. }) => {
+                self.handle_ai_event(event, cx);
+            }
         }
     }
 
