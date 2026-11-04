@@ -726,13 +726,14 @@ impl JobStatusCounts {
 pub struct DeletionJobSummary {
     pub compression: JobStatusCounts,
     pub send: JobStatusCounts,
+    pub tagging: JobStatusCounts,
     /// Distinct selected photos with at least one unfinished or failed job.
     pub affected_photos: i64,
 }
 
 impl DeletionJobSummary {
     pub fn needs_warning(self) -> bool {
-        self.compression.total() + self.send.total() > 0
+        self.compression.total() + self.send.total() + self.tagging.total() > 0
     }
 }
 

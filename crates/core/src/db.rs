@@ -6,9 +6,14 @@ use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Row, Transaction, TransactionBehavior, params,
     params_from_iter,
 };
-use vrc_photon_ai_protocol::{Catalog, ModelState, TagBranch};
+use vrc_photon_ai_protocol::{
+    Catalog, ModelState, TagBranch, TaggingErrorCode, TaggingJobStatus, TaggingStage,
+};
 
-use crate::ai::{AiTagDefinition, AiTagThreshold, PluginInstallation, PluginState};
+use crate::ai::{
+    AiTagDefinition, AiTagThreshold, NewPhotoAi, PhotoAi, PhotoAiTag, PhotoAiTagView,
+    PluginInstallation, PluginState, TaggingJob,
+};
 use crate::error::{CoreError, Result};
 use crate::model::{
     CompressionJob, CompressionProfile, DaemonCommand, DaemonError, DaemonOperation,
@@ -2526,15 +2531,16 @@ impl Db {
         })
     }
 
-    /// Counts compression and send work per status for the warning modal.
-    /// Unknown compression statuses count as pending in the body. Unknown send
-    /// statuses also count as pending: a status written by a newer version is
-    /// never terminal. `affected_photos` is the union of distinct selected
-    /// photos with non-terminal compression jobs and photos with a send that
-    /// has not ended as `sent`/`cancelled`, so a photo with both counts once.
+    /// Counts compression, send, and tagging work per status for the warning
+    /// modal. Unknown compression statuses count as pending in the body.
+    /// Unknown send and tagging statuses also count as pending: a status
+    /// written by a newer version is never terminal. `affected_photos` is the
+    /// union of distinct selected photos with non-terminal jobs, so a photo
+    /// with several kinds of work counts once.
     pub fn deletion_job_summary(&self, photo_ids: &[i64]) -> Result<DeletionJobSummary> {
         let mut compression = JobStatusCounts::default();
         let mut send = JobStatusCounts::default();
+        let mut tagging = JobStatusCounts::default();
         let mut affected_photos = 0;
         for chunk in photo_ids.chunks(500) {
             if chunk.is_empty() {
@@ -2580,8 +2586,32 @@ impl Db {
                 }
             }
 
-            let union_params: Vec<i64> =
-                chunk.iter().copied().chain(chunk.iter().copied()).collect();
+            let sql = format!(
+                "SELECT status, COUNT(*) FROM tagging_jobs \
+                 WHERE photo_id IN ({placeholders}) GROUP BY status"
+            );
+            let mut stmt = self.conn.prepare(&sql)?;
+            let rows = stmt.query_map(params_from_iter(chunk.iter().copied()), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            for row in rows {
+                let (status, count) = row?;
+                match TaggingJobStatus::parse(&status) {
+                    Some(TaggingJobStatus::Waiting) => tagging.waiting += count,
+                    Some(TaggingJobStatus::Pending) => tagging.pending += count,
+                    Some(TaggingJobStatus::Processing) => tagging.processing += count,
+                    Some(TaggingJobStatus::Failed) => tagging.failed += count,
+                    Some(TaggingJobStatus::Completed | TaggingJobStatus::Cancelled) => {}
+                    None => tagging.pending += count,
+                }
+            }
+
+            let union_params: Vec<i64> = chunk
+                .iter()
+                .copied()
+                .chain(chunk.iter().copied())
+                .chain(chunk.iter().copied())
+                .collect();
             affected_photos += self.conn.query_row(
                 &format!(
                     "SELECT COUNT(*) FROM ( \
@@ -2592,6 +2622,10 @@ impl Db {
                          SELECT photo_id FROM send_outbox \
                          WHERE photo_id IN ({placeholders}) \
                            AND status NOT IN ('sent', 'cancelled') \
+                         UNION \
+                         SELECT photo_id FROM tagging_jobs \
+                         WHERE photo_id IN ({placeholders}) \
+                           AND status NOT IN ('completed', 'cancelled') \
                      )"
                 ),
                 params_from_iter(union_params),
@@ -2601,21 +2635,27 @@ impl Db {
         Ok(DeletionJobSummary {
             compression,
             send,
+            tagging,
             affected_photos,
         })
     }
 
-    /// Counts work that still blocks a deletion. Active sends block like active
-    /// compression jobs; failed sends do not, because they carry no data-loss
-    /// risk and are cancelled when the request is recorded.
+    /// Counts work that still blocks a deletion. Active sends and tagging jobs
+    /// block like active compression jobs. Failed sends do not, because they
+    /// carry no data-loss risk and are cancelled when the request is recorded;
+    /// failed compression and tagging jobs keep the request blocked.
     pub fn deletion_blockers(&self, photo_id: i64) -> Result<DeletionBlockers> {
         let blockers = self.conn.query_row(
             "SELECT \
                 (SELECT COUNT(*) FROM compression_jobs \
                  WHERE photo_id = ?1 AND status IN ('waiting', 'pending', 'processing')) \
               + (SELECT COUNT(*) FROM send_outbox \
+                 WHERE photo_id = ?1 AND status IN ('waiting', 'pending', 'processing')) \
+              + (SELECT COUNT(*) FROM tagging_jobs \
                  WHERE photo_id = ?1 AND status IN ('waiting', 'pending', 'processing')), \
                 (SELECT COUNT(*) FROM compression_jobs \
+                 WHERE photo_id = ?1 AND status = 'failed') \
+              + (SELECT COUNT(*) FROM tagging_jobs \
                  WHERE photo_id = ?1 AND status = 'failed')",
             params![photo_id],
             |row| {
@@ -2631,11 +2671,12 @@ impl Db {
     /// Pending requests the executor can try now, ordered so manual requests
     /// come first: a manual deletion must not wait behind any auto_replace
     /// backlog, and the row limit must not hide it. Each group keeps
-    /// `requested_at` order. Known reasons with an active compression job or an
-    /// active send are skipped so they cannot starve ready requests behind the
-    /// row limit, while unknown reasons are always returned so they can be
-    /// blocked immediately. Requests with failed jobs stay in the list: the
-    /// executor still needs to transition them to `blocked`.
+    /// `requested_at` order. Known reasons with an active compression job, an
+    /// active send, or an active tagging job are skipped so they cannot starve
+    /// ready requests behind the row limit, while unknown reasons are always
+    /// returned so they can be blocked immediately. Requests with failed jobs
+    /// stay in the list: the executor still needs to transition them to
+    /// `blocked`.
     pub fn pending_deletion_requests(&self, limit: i64) -> Result<Vec<DeletionRequest>> {
         let sql = "SELECT dr.id, dr.photo_id, p.file_name, dr.reason, dr.status, dr.force, \
                 dr.blocked_reason, dr.error, dr.requested_at, dr.started_at, dr.finished_at \
@@ -2652,6 +2693,10 @@ impl Db {
                            SELECT s.photo_id FROM send_outbox s \
                            WHERE s.photo_id IS NOT NULL \
                              AND s.status IN ('waiting', 'pending', 'processing') \
+                       ) \
+                       AND dr.photo_id NOT IN ( \
+                           SELECT t.photo_id FROM tagging_jobs t \
+                           WHERE t.status IN ('waiting', 'pending', 'processing') \
                        ) \
                    ) \
                ) \
@@ -2675,8 +2720,8 @@ impl Db {
     /// Atomically claims a pending request and returns the current row. The
     /// caller must execute from the returned object, not from an earlier
     /// snapshot: a UI request may have upgraded `auto_replace` to `manual`
-    /// between the snapshot and this call. An active send blocks the claim even
-    /// when the request is forced; a failed send never does.
+    /// between the snapshot and this call. Active sends and tagging jobs block
+    /// the claim even when the request is forced; failed sends never do.
     pub fn claim_deletion(&self, request_id: i64) -> Result<Option<DeletionRequest>> {
         let changed = self.conn.execute(
             "UPDATE deletion_requests \
@@ -2692,11 +2737,23 @@ impl Db {
                    WHERE s.photo_id = deletion_requests.photo_id \
                      AND s.status IN ('waiting', 'pending', 'processing') \
                ) \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM tagging_jobs t \
+                   WHERE t.photo_id = deletion_requests.photo_id \
+                     AND t.status IN ('waiting', 'pending', 'processing') \
+               ) \
                AND ( \
-                   force = 1 OR NOT EXISTS ( \
-                       SELECT 1 FROM compression_jobs j \
-                       WHERE j.photo_id = deletion_requests.photo_id \
-                         AND j.status = 'failed' \
+                   force = 1 OR ( \
+                       NOT EXISTS ( \
+                           SELECT 1 FROM compression_jobs j \
+                           WHERE j.photo_id = deletion_requests.photo_id \
+                             AND j.status = 'failed' \
+                       ) \
+                       AND NOT EXISTS ( \
+                           SELECT 1 FROM tagging_jobs t \
+                           WHERE t.photo_id = deletion_requests.photo_id \
+                             AND t.status = 'failed' \
+                       ) \
                    ) \
                )",
             params![now_string(), request_id],
@@ -2720,10 +2777,22 @@ impl Db {
                    WHERE j.photo_id = deletion_requests.photo_id \
                      AND j.status IN ('waiting', 'pending', 'processing') \
                ) \
-               AND EXISTS ( \
-                   SELECT 1 FROM compression_jobs j \
-                   WHERE j.photo_id = deletion_requests.photo_id \
-                     AND j.status = 'failed' \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM tagging_jobs t \
+                   WHERE t.photo_id = deletion_requests.photo_id \
+                     AND t.status IN ('waiting', 'pending', 'processing') \
+               ) \
+               AND ( \
+                   EXISTS ( \
+                       SELECT 1 FROM compression_jobs j \
+                       WHERE j.photo_id = deletion_requests.photo_id \
+                         AND j.status = 'failed' \
+                   ) \
+                   OR EXISTS ( \
+                       SELECT 1 FROM tagging_jobs t \
+                       WHERE t.photo_id = deletion_requests.photo_id \
+                         AND t.status = 'failed' \
+                   ) \
                )",
             params![request_id],
         )?;
@@ -2782,6 +2851,8 @@ impl Db {
     /// Ignores failed jobs and cancels queued work. A running compression job
     /// or send still has to finish before `claim_deletion` can advance, so
     /// queued and failed sends are cancelled without touching `processing`.
+    /// Tagging jobs are cancelled even while processing: a late sidecar result
+    /// is rejected by `save_photo_ai_for_job`.
     pub fn force_deletion(&self, request_id: i64) -> Result<bool> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let request: Option<(i64, String)> = tx
@@ -2812,6 +2883,11 @@ impl Db {
         tx.execute(
             "UPDATE send_outbox SET status = 'cancelled', finished_at = ?1 \
              WHERE photo_id = ?2 AND status IN ('waiting', 'pending', 'failed')",
+            params![now, photo_id],
+        )?;
+        tx.execute(
+            "UPDATE tagging_jobs SET status = 'cancelled', finished_at = ?1 \
+             WHERE photo_id = ?2 AND status IN ('waiting', 'pending', 'processing')",
             params![now, photo_id],
         )?;
         tx.commit()?;
@@ -2896,6 +2972,11 @@ impl Db {
                    SELECT 1 FROM compression_jobs j \
                    WHERE j.photo_id = ?1 \
                      AND j.status IN ('waiting', 'pending', 'processing', 'failed') \
+               ) \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM tagging_jobs t \
+                   WHERE t.photo_id = ?1 \
+                     AND t.status IN ('waiting', 'pending', 'processing', 'failed') \
                )",
             params![photo_id],
         )?;
@@ -4166,6 +4247,387 @@ impl Db {
         reapply_thresholds(&self.conn, plugin_id)
     }
 
+    // ---------- AI results ----------
+
+    /// Stores one tagging result for `photo_id`. The photo must still be in
+    /// the library (`present` or `replaced`); missing, deleting, or unknown
+    /// photos are skipped without writing anything. The judged tags replace
+    /// the previous result for this plugin, and `applied` is derived from the
+    /// effective threshold (user override, else catalog default). Manual tags
+    /// are never touched. The library revision advances after the commit.
+    pub fn save_photo_ai(
+        &self,
+        photo_id: i64,
+        plugin_id: &str,
+        result: &NewPhotoAi,
+    ) -> Result<bool> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let saved = write_photo_ai(&tx, photo_id, plugin_id, result)?;
+        tx.commit()?;
+        if saved {
+            self.bump_library_revision()?;
+        }
+        Ok(saved)
+    }
+
+    /// Stores a result only while its job is still `processing`. A cancelled,
+    /// completed, failed, or missing job makes this a no-op so late sidecar
+    /// results are never written after a cancellation.
+    pub fn save_photo_ai_for_job(&self, job_id: &str, result: &NewPhotoAi) -> Result<bool> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let job: Option<(i64, String, String)> = tx
+            .query_row(
+                "SELECT photo_id, plugin_id, status FROM tagging_jobs WHERE id = ?1",
+                params![job_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((photo_id, plugin_id, status)) = job else {
+            tx.commit()?;
+            return Ok(false);
+        };
+        if status != TaggingJobStatus::Processing.as_str() {
+            tx.commit()?;
+            return Ok(false);
+        }
+        let saved = write_photo_ai(&tx, photo_id, &plugin_id, result)?;
+        tx.commit()?;
+        if saved {
+            self.bump_library_revision()?;
+        }
+        Ok(saved)
+    }
+
+    pub fn photo_ai(&self, photo_id: i64) -> Result<Option<PhotoAi>> {
+        let ai = self
+            .conn
+            .query_row(
+                "SELECT photo_id, plugin_id, variant, sidecar_version, model_version, \
+                    model_revision, catalog_version, source, presence_threshold, \
+                    character_present, presence_probability, people_min, people_max, \
+                    people_median, place_branch, place_probabilities_json, tagged_at \
+                 FROM photo_ai WHERE photo_id = ?1",
+                params![photo_id],
+                row_to_photo_ai,
+            )
+            .optional()?;
+        Ok(ai)
+    }
+
+    pub fn photo_ai_tags(&self, photo_id: i64, applied_only: bool) -> Result<Vec<PhotoAiTag>> {
+        let applied_clause = if applied_only { " AND applied = 1" } else { "" };
+        let sql = format!(
+            "SELECT photo_id, plugin_id, tag_key, probability, applied, model_version, \
+                catalog_version, tagged_at FROM photo_ai_tags \
+             WHERE photo_id = ?1{applied_clause} ORDER BY tag_key"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![photo_id], row_to_photo_ai_tag)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Returns every judged tag with its catalog display names. Tags that are
+    /// no longer in the catalog fall back to the raw key.
+    pub fn photo_ai_tags_with_names(&self, photo_id: i64) -> Result<Vec<PhotoAiTagView>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT t.tag_key, COALESCE(d.name, t.tag_key), d.name_en, t.probability, \
+                t.applied \
+             FROM photo_ai_tags t \
+             LEFT JOIN ai_tag_definitions d \
+               ON d.plugin_id = t.plugin_id AND d.tag_key = t.tag_key \
+             WHERE t.photo_id = ?1 \
+             ORDER BY COALESCE(d.branch, ''), COALESCE(d.sort_order, 9223372036854775807), \
+                t.tag_key",
+        )?;
+        let rows = stmt.query_map(params![photo_id], |row| {
+            Ok(PhotoAiTagView {
+                tag_key: row.get(0)?,
+                name: row.get(1)?,
+                name_en: row.get(2)?,
+                probability: row.get(3)?,
+                applied: row.get::<_, i64>(4)? != 0,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    // ---------- tagging jobs ----------
+
+    /// Enqueues one job per photo for `plugin_id`. Only `waiting` (backlog)
+    /// and `pending` (ready) are accepted. The partial active index dedupes
+    /// when the photo already has an unfinished job; photos outside the
+    /// library or pending deletion are skipped. Returns the inserted count.
+    pub fn enqueue_tagging_jobs(
+        &self,
+        photo_ids: &[i64],
+        plugin_id: &str,
+        status: TaggingJobStatus,
+    ) -> Result<usize> {
+        if !matches!(
+            status,
+            TaggingJobStatus::Waiting | TaggingJobStatus::Pending
+        ) {
+            return Err(CoreError::Invalid(format!(
+                "cannot enqueue a tagging job as {}",
+                status.as_str()
+            )));
+        }
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let now = now_string();
+        let mut inserted = 0;
+        for photo_id in photo_ids {
+            inserted += tx.execute(
+                "INSERT OR IGNORE INTO tagging_jobs \
+                    (id, photo_id, plugin_id, status, progress, created_at) \
+                 SELECT ?1, p.id, ?2, ?3, 0, ?4 FROM photos p \
+                 WHERE p.id = ?5 AND p.status IN ('present', 'replaced') \
+                   AND NOT EXISTS ( \
+                       SELECT 1 FROM deletion_requests dr \
+                       WHERE dr.photo_id = p.id AND dr.status IN ('pending', 'blocked', 'running') \
+                   )",
+                params![
+                    uuid::Uuid::new_v4().to_string(),
+                    plugin_id,
+                    status.as_str(),
+                    now,
+                    photo_id,
+                ],
+            )?;
+        }
+        tx.commit()?;
+        Ok(inserted)
+    }
+
+    /// Queues every visible photo without an AI result as `waiting`, newest
+    /// first. Re-running it is idempotent: the active index keeps existing
+    /// waiting/pending/processing rows from being duplicated.
+    pub fn enqueue_tagging_backlog(&self, plugin_id: &str) -> Result<usize> {
+        let photo_ids = {
+            let mut stmt = self.conn.prepare(
+                "SELECT p.id FROM photos p \
+                 WHERE p.status IN ('present', 'replaced') \
+                   AND NOT EXISTS (SELECT 1 FROM photo_ai a WHERE a.photo_id = p.id) \
+                 ORDER BY p.captured_at_utc DESC, p.id DESC",
+            )?;
+            let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        self.enqueue_tagging_jobs(&photo_ids, plugin_id, TaggingJobStatus::Waiting)
+    }
+
+    /// Moves every `waiting` backlog job for the plugin to `pending`.
+    pub fn release_waiting_tagging_jobs(&self, plugin_id: &str) -> Result<usize> {
+        let changed = self.conn.execute(
+            "UPDATE tagging_jobs SET status = 'pending', progress = 0, stage = NULL, \
+                error = NULL, started_at = NULL, finished_at = NULL \
+             WHERE plugin_id = ?1 AND status = 'waiting'",
+            params![plugin_id],
+        )?;
+        Ok(changed)
+    }
+
+    /// Atomically claims the oldest pending job, records its start time, and
+    /// stamps the active installation's variant when one exists.
+    pub fn next_pending_tagging_job(&self) -> Result<Option<TaggingJob>> {
+        let job = self
+            .conn
+            .query_row(
+                "UPDATE tagging_jobs SET status = 'processing', started_at = ?1, \
+                    progress = 0, stage = NULL, error = NULL, \
+                    variant = COALESCE(( \
+                        SELECT pi.variant FROM plugin_installations pi \
+                        WHERE pi.plugin_id = tagging_jobs.plugin_id AND pi.active = 1 \
+                    ), variant) \
+                 WHERE id = ( \
+                     SELECT id FROM tagging_jobs WHERE status = 'pending' \
+                     ORDER BY created_at, rowid LIMIT 1 \
+                 ) \
+                 RETURNING id, photo_id, plugin_id, variant, status, progress, stage, error, \
+                    retry_count, created_at, started_at, finished_at",
+                params![now_string()],
+                row_to_tagging_job,
+            )
+            .optional()?;
+        Ok(job)
+    }
+
+    pub fn tagging_job(&self, job_id: &str) -> Result<Option<TaggingJob>> {
+        let job = self
+            .conn
+            .query_row(
+                &format!(
+                    "SELECT {} FROM tagging_jobs WHERE id = ?1",
+                    TAGGING_JOB_COLUMNS
+                ),
+                params![job_id],
+                row_to_tagging_job,
+            )
+            .optional()?;
+        Ok(job)
+    }
+
+    /// Records progress for a job that is still processing. Cancelled jobs
+    /// keep their last visible state instead of moving backwards.
+    pub fn update_tagging_progress(
+        &self,
+        job_id: &str,
+        progress: f64,
+        stage: TaggingStage,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tagging_jobs SET progress = ?1, stage = ?2 \
+             WHERE id = ?3 AND status = 'processing'",
+            params![progress, stage.as_str(), job_id],
+        )?;
+        Ok(())
+    }
+
+    /// Marks a processing job completed. Terminal jobs are never overwritten.
+    pub fn complete_tagging_job(&self, job_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tagging_jobs SET status = 'completed', progress = 1, stage = NULL, \
+                error = NULL, finished_at = ?1 \
+             WHERE id = ?2 AND status = 'processing'",
+            params![now_string(), job_id],
+        )?;
+        Ok(())
+    }
+
+    /// Marks a processing job failed with a host error code.
+    pub fn fail_tagging_job(&self, job_id: &str, error: TaggingErrorCode) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tagging_jobs SET status = 'failed', progress = 0, stage = NULL, \
+                error = ?1, finished_at = ?2 \
+             WHERE id = ?3 AND status = 'processing'",
+            params![error.as_str(), now_string(), job_id],
+        )?;
+        Ok(())
+    }
+
+    /// Returns a processing job to `pending` while the plugin is not ready.
+    /// The error stays visible for the UI, and `retry_count` is unchanged.
+    pub fn defer_tagging_job(&self, job_id: &str, error: TaggingErrorCode) -> Result<()> {
+        self.conn.execute(
+            "UPDATE tagging_jobs SET status = 'pending', progress = 0, stage = NULL, \
+                error = ?1, started_at = NULL, finished_at = NULL \
+             WHERE id = ?2 AND status = 'processing'",
+            params![error.as_str(), job_id],
+        )?;
+        Ok(())
+    }
+
+    /// Returns a failed job to the queue while it still has retries left.
+    pub fn retry_tagging_job(&self, job_id: &str) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE tagging_jobs SET status = 'pending', retry_count = retry_count + 1, \
+                progress = 0, stage = NULL, error = NULL, started_at = NULL, finished_at = NULL \
+             WHERE id = ?1 AND status = 'failed' AND retry_count < 2",
+            params![job_id],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Cancels an unfinished job. Returns false for terminal or missing jobs.
+    pub fn cancel_tagging_job(&self, job_id: &str) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE tagging_jobs SET status = 'cancelled', finished_at = ?1 \
+             WHERE id = ?2 AND status IN ('waiting', 'pending', 'processing')",
+            params![now_string(), job_id],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// Cancels every unfinished job for one photo, including one currently
+    /// processing. Returns the number of cancelled rows.
+    pub fn cancel_tagging_jobs_for_photo(&self, photo_id: i64) -> Result<usize> {
+        let changed = self.conn.execute(
+            "UPDATE tagging_jobs SET status = 'cancelled', finished_at = ?1 \
+             WHERE photo_id = ?2 AND status IN ('waiting', 'pending', 'processing')",
+            params![now_string(), photo_id],
+        )?;
+        Ok(changed)
+    }
+
+    /// Returns jobs left `processing` by a crash to the queue without
+    /// consuming a retry.
+    pub fn resume_interrupted_tagging_jobs(&self) -> Result<usize> {
+        let changed = self.conn.execute(
+            "UPDATE tagging_jobs SET status = 'pending', progress = 0, stage = NULL, \
+                error = NULL, started_at = NULL, finished_at = NULL \
+             WHERE status = 'processing'",
+            [],
+        )?;
+        Ok(changed)
+    }
+
+    pub fn tagging_job_counts(&self, plugin_id: &str) -> Result<JobStatusCounts> {
+        let mut counts = JobStatusCounts::default();
+        let mut stmt = self.conn.prepare(
+            "SELECT status, COUNT(*) FROM tagging_jobs WHERE plugin_id = ?1 GROUP BY status",
+        )?;
+        let rows = stmt.query_map(params![plugin_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        for row in rows {
+            let (status, count) = row?;
+            match TaggingJobStatus::parse(&status) {
+                Some(TaggingJobStatus::Waiting) => counts.waiting += count,
+                Some(TaggingJobStatus::Pending) => counts.pending += count,
+                Some(TaggingJobStatus::Processing) => counts.processing += count,
+                Some(TaggingJobStatus::Failed) => counts.failed += count,
+                Some(TaggingJobStatus::Completed | TaggingJobStatus::Cancelled) => {}
+                None => counts.pending += count,
+            }
+        }
+        Ok(counts)
+    }
+
+    /// Newest unfinished jobs, for the settings/integrations status card.
+    /// `limit` is clamped to at least 1.
+    pub fn active_tagging_jobs(&self, limit: i64) -> Result<Vec<TaggingJob>> {
+        let sql = format!(
+            "SELECT {} FROM tagging_jobs \
+             WHERE status IN ('waiting', 'pending', 'processing') \
+             ORDER BY created_at DESC, rowid DESC LIMIT ?1",
+            TAGGING_JOB_COLUMNS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![limit.max(1)], row_to_tagging_job)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn tagging_jobs_for_photo(&self, photo_id: i64) -> Result<Vec<TaggingJob>> {
+        let sql = format!(
+            "SELECT {} FROM tagging_jobs WHERE photo_id = ?1 \
+             ORDER BY created_at, rowid",
+            TAGGING_JOB_COLUMNS
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![photo_id], row_to_tagging_job)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Removes every AI result and catalog row for one plugin in a single
+    /// transaction. Manual tags and other plugins' data are left untouched.
+    /// The library revision advances only when something was removed.
+    pub fn delete_ai_data(&self, plugin_id: &str) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let mut removed = 0;
+        for statement in [
+            "DELETE FROM photo_ai_tags WHERE plugin_id = ?1",
+            "DELETE FROM photo_ai WHERE plugin_id = ?1",
+            "DELETE FROM ai_tag_definitions WHERE plugin_id = ?1",
+            "DELETE FROM ai_tag_thresholds WHERE plugin_id = ?1",
+        ] {
+            removed += tx.execute(statement, params![plugin_id])?;
+        }
+        tx.commit()?;
+        if removed > 0 {
+            self.bump_library_revision()?;
+        }
+        Ok(())
+    }
+
     // ---------- log imports / settings ----------
 
     pub fn log_offset(&self, log_file: &str) -> Result<Option<i64>> {
@@ -4247,6 +4709,163 @@ impl Db {
             .execute("DELETE FROM app_settings WHERE key = ?1", params![key])?;
         Ok(())
     }
+}
+
+/// Writes one AI result and its judged tags. Returns false without touching
+/// the database when the photo is no longer in the library.
+fn write_photo_ai(
+    conn: &Connection,
+    photo_id: i64,
+    plugin_id: &str,
+    result: &NewPhotoAi,
+) -> Result<bool> {
+    let visible: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM photos \
+         WHERE id = ?1 AND status IN ('present', 'replaced'))",
+        params![photo_id],
+        |row| row.get(0),
+    )?;
+    if !visible {
+        return Ok(false);
+    }
+
+    let now = now_string();
+    conn.execute(
+        "INSERT INTO photo_ai(photo_id, plugin_id, variant, sidecar_version, model_version, \
+            model_revision, catalog_version, source, presence_threshold, character_present, \
+            presence_probability, people_min, people_max, people_median, place_branch, \
+            place_probabilities_json, tagged_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17) \
+         ON CONFLICT(photo_id) DO UPDATE SET \
+            plugin_id = excluded.plugin_id, \
+            variant = excluded.variant, \
+            sidecar_version = excluded.sidecar_version, \
+            model_version = excluded.model_version, \
+            model_revision = excluded.model_revision, \
+            catalog_version = excluded.catalog_version, \
+            source = excluded.source, \
+            presence_threshold = excluded.presence_threshold, \
+            character_present = excluded.character_present, \
+            presence_probability = excluded.presence_probability, \
+            people_min = excluded.people_min, \
+            people_max = excluded.people_max, \
+            people_median = excluded.people_median, \
+            place_branch = excluded.place_branch, \
+            place_probabilities_json = excluded.place_probabilities_json, \
+            tagged_at = excluded.tagged_at",
+        params![
+            photo_id,
+            plugin_id,
+            result.variant,
+            result.sidecar_version,
+            result.model_version,
+            result.model_revision,
+            result.catalog_version,
+            result.source,
+            result.presence_threshold,
+            i64::from(result.character_present),
+            result.presence_probability,
+            result.people_min.map(i64::from),
+            result.people_max.map(i64::from),
+            result.people_median.map(i64::from),
+            result.place_branch,
+            result.place_probabilities_json,
+            now,
+        ],
+    )?;
+
+    // Re-tagging may move the photo to another branch, so replace the whole
+    // judged set for this plugin instead of only upserting the new keys.
+    conn.execute(
+        "DELETE FROM photo_ai_tags WHERE photo_id = ?1 AND plugin_id = ?2",
+        params![photo_id, plugin_id],
+    )?;
+    for (tag_key, probability) in &result.tags {
+        conn.execute(
+            "INSERT INTO photo_ai_tags(photo_id, plugin_id, tag_key, probability, applied, \
+                model_version, catalog_version, tagged_at) \
+             VALUES (?1, ?2, ?3, ?4, CASE WHEN ?4 >= COALESCE( \
+                (SELECT threshold FROM ai_tag_thresholds \
+                 WHERE plugin_id = ?2 AND tag_key = ?3), \
+                (SELECT default_threshold FROM ai_tag_definitions \
+                 WHERE plugin_id = ?2 AND tag_key = ?3)) \
+             THEN 1 ELSE 0 END, ?5, ?6, ?7)",
+            params![
+                photo_id,
+                plugin_id,
+                tag_key,
+                probability,
+                result.model_version,
+                result.catalog_version,
+                now,
+            ],
+        )?;
+    }
+    Ok(true)
+}
+
+const TAGGING_JOB_COLUMNS: &str = "id, photo_id, plugin_id, variant, status, progress, stage, \
+    error, retry_count, created_at, started_at, finished_at";
+
+fn row_to_photo_ai(row: &Row<'_>) -> rusqlite::Result<PhotoAi> {
+    Ok(PhotoAi {
+        photo_id: row.get(0)?,
+        plugin_id: row.get(1)?,
+        variant: row.get(2)?,
+        sidecar_version: row.get(3)?,
+        model_version: row.get(4)?,
+        model_revision: row.get(5)?,
+        catalog_version: row.get(6)?,
+        source: row.get(7)?,
+        presence_threshold: row.get(8)?,
+        character_present: row.get::<_, i64>(9)? != 0,
+        presence_probability: row.get(10)?,
+        people_min: row
+            .get::<_, Option<i64>>(11)?
+            .map(|value| value.max(0) as u32),
+        people_max: row
+            .get::<_, Option<i64>>(12)?
+            .map(|value| value.max(0) as u32),
+        people_median: row
+            .get::<_, Option<i64>>(13)?
+            .map(|value| value.max(0) as u32),
+        place_branch: row.get(14)?,
+        place_probabilities_json: row.get(15)?,
+        tagged_at: row.get(16)?,
+    })
+}
+
+fn row_to_photo_ai_tag(row: &Row<'_>) -> rusqlite::Result<PhotoAiTag> {
+    Ok(PhotoAiTag {
+        photo_id: row.get(0)?,
+        plugin_id: row.get(1)?,
+        tag_key: row.get(2)?,
+        probability: row.get(3)?,
+        applied: row.get::<_, i64>(4)? != 0,
+        model_version: row.get(5)?,
+        catalog_version: row.get(6)?,
+        tagged_at: row.get(7)?,
+    })
+}
+
+fn row_to_tagging_job(row: &Row<'_>) -> rusqlite::Result<TaggingJob> {
+    let status = row.get::<_, String>(4)?;
+    Ok(TaggingJob {
+        id: row.get(0)?,
+        photo_id: row.get(1)?,
+        plugin_id: row.get(2)?,
+        variant: row.get(3)?,
+        status: TaggingJobStatus::parse(&status).unwrap_or(TaggingJobStatus::Pending),
+        progress: row.get(5)?,
+        stage: row
+            .get::<_, Option<String>>(6)?
+            .and_then(|stage| TaggingStage::parse(&stage)),
+        error: row.get(7)?,
+        retry_count: row.get(8)?,
+        created_at: row.get(9)?,
+        started_at: row.get(10)?,
+        finished_at: row.get(11)?,
+    })
 }
 
 fn reapply_thresholds(conn: &Connection, plugin_id: &str) -> Result<usize> {
@@ -4576,11 +5195,13 @@ fn now_string() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ai::PluginInstallation;
+    use crate::ai::{NewPhotoAi, PluginInstallation};
     use crate::model::{
         DeletionReason, DeletionStatus, NewPhoto, PhotoFilter, PhotoPlayer, PhotoStatus,
     };
-    use vrc_photon_ai_protocol::{Catalog, ModelState, TagDefinition};
+    use vrc_photon_ai_protocol::{
+        Catalog, ModelState, TagDefinition, TaggingErrorCode, TaggingJobStatus, TaggingStage,
+    };
 
     fn sample_photo(root_id: i64, path: &str, ts: i64) -> NewPhoto {
         NewPhoto {
@@ -7667,6 +8288,653 @@ mod tests {
             db.set_ai_tag_threshold(AI_PLUGIN, "sea", f32::NAN),
             Err(CoreError::Invalid(_))
         ));
+    }
+
+    fn install_test_catalog(db: &Db) {
+        db.sync_ai_catalog(AI_PLUGIN, &ai_catalog("2026-11-03.1", 0.5, 0.5))
+            .unwrap();
+    }
+
+    fn test_ai_result(tags: &[(&str, f32)]) -> NewPhotoAi {
+        NewPhotoAi {
+            variant: "linux-cpu".to_string(),
+            sidecar_version: "1.0.0".to_string(),
+            model_version: "d1-2B-Q8_0".to_string(),
+            model_revision: "rev-1".to_string(),
+            catalog_version: "2026-11-03.1".to_string(),
+            source: "original".to_string(),
+            presence_threshold: 0.9,
+            character_present: true,
+            presence_probability: 0.99,
+            people_min: Some(2),
+            people_max: Some(3),
+            people_median: Some(3),
+            place_branch: Some("outdoor".to_string()),
+            place_probabilities_json: Some(
+                r#"{"indoor":0.1,"outdoor":0.8,"other":0.1}"#.to_string(),
+            ),
+            tags: tags
+                .iter()
+                .map(|(key, probability)| ((*key).to_string(), *probability))
+                .collect(),
+        }
+    }
+
+    fn seed_photos(db: &Db, count: usize) -> Vec<i64> {
+        let root = db.add_root("/photos", "reference").unwrap();
+        (0..count)
+            .map(|index| {
+                db.upsert_photo(&sample_photo(
+                    root,
+                    &format!("/photos/bulk-{index}.png"),
+                    1_700_000_000 + index as i64,
+                ))
+                .unwrap()
+            })
+            .collect()
+    }
+
+    fn claim_tagging_job(db: &Db, photo_id: i64) -> TaggingJob {
+        assert_eq!(
+            db.enqueue_tagging_jobs(&[photo_id], AI_PLUGIN, TaggingJobStatus::Pending)
+                .unwrap(),
+            1
+        );
+        let job = db.next_pending_tagging_job().unwrap().unwrap();
+        assert_eq!(job.photo_id, photo_id);
+        job
+    }
+
+    #[test]
+    fn ai_tags_never_touch_manual_tags() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        db.set_photo_tags(photo, &["manual".to_string()]).unwrap();
+        install_test_catalog(&db);
+
+        let result = NewPhotoAi {
+            variant: "linux-cpu".into(),
+            sidecar_version: "1.0.0".into(),
+            model_version: "d1-2B".into(),
+            model_revision: "rev".into(),
+            catalog_version: "2026-11-03.1".into(),
+            source: "original".into(),
+            presence_threshold: 0.9,
+            character_present: true,
+            presence_probability: 0.99,
+            people_min: Some(2),
+            people_max: Some(3),
+            people_median: Some(3),
+            place_branch: Some("outdoor".into()),
+            place_probabilities_json: Some(r#"{"indoor":0.1,"outdoor":0.8,"other":0.1}"#.into()),
+            tags: vec![("sea".into(), 0.97), ("park".into(), 0.4)],
+        };
+        assert!(
+            db.save_photo_ai(photo, "vrc-photon-autotag", &result)
+                .unwrap()
+        );
+        assert_eq!(db.photo_tags(photo).unwrap(), vec!["manual".to_string()]);
+        let tags = db.photo_ai_tags(photo, false).unwrap();
+        assert_eq!(tags.len(), 2);
+        assert!(
+            tags.iter()
+                .find(|tag| tag.tag_key == "sea")
+                .unwrap()
+                .applied
+        );
+        assert!(
+            !tags
+                .iter()
+                .find(|tag| tag.tag_key == "park")
+                .unwrap()
+                .applied
+        );
+    }
+
+    #[test]
+    fn save_photo_ai_skips_missing_or_deleting_photos() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        install_test_catalog(&db);
+        let result = test_ai_result(&[("sea", 0.97)]);
+        let before = db.library_revision().unwrap();
+
+        db.connection()
+            .execute(
+                "UPDATE photos SET status = 'missing' WHERE id = ?1",
+                params![photo],
+            )
+            .unwrap();
+        assert!(!db.save_photo_ai(photo, AI_PLUGIN, &result).unwrap());
+        assert!(db.photo_ai(photo).unwrap().is_none());
+        assert!(db.photo_ai_tags(photo, false).unwrap().is_empty());
+
+        db.connection()
+            .execute(
+                "UPDATE photos SET status = 'deleting' WHERE id = ?1",
+                params![photo],
+            )
+            .unwrap();
+        assert!(!db.save_photo_ai(photo, AI_PLUGIN, &result).unwrap());
+        assert!(db.photo_ai(photo).unwrap().is_none());
+        assert_eq!(db.library_revision().unwrap(), before);
+
+        db.connection()
+            .execute(
+                "UPDATE photos SET status = 'present' WHERE id = ?1",
+                params![photo],
+            )
+            .unwrap();
+        assert!(db.save_photo_ai(photo, AI_PLUGIN, &result).unwrap());
+        assert!(db.library_revision().unwrap() > before);
+    }
+
+    #[test]
+    fn saving_ai_result_replaces_the_previous_branch_tags() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        install_test_catalog(&db);
+
+        assert!(
+            db.save_photo_ai(
+                photo,
+                AI_PLUGIN,
+                &test_ai_result(&[("sea", 0.9), ("park", 0.8)])
+            )
+            .unwrap()
+        );
+        assert_eq!(db.photo_ai_tags(photo, false).unwrap().len(), 2);
+
+        let mut indoor = test_ai_result(&[("japanese_room", 0.6)]);
+        indoor.place_branch = Some("indoor".to_string());
+        assert!(db.save_photo_ai(photo, AI_PLUGIN, &indoor).unwrap());
+
+        let tags = db.photo_ai_tags(photo, false).unwrap();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].tag_key, "japanese_room");
+        let ai = db.photo_ai(photo).unwrap().unwrap();
+        assert_eq!(ai.place_branch.as_deref(), Some("indoor"));
+    }
+
+    #[test]
+    fn saved_ai_tags_follow_threshold_changes() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        install_test_catalog(&db);
+        db.save_photo_ai(
+            photo,
+            AI_PLUGIN,
+            &test_ai_result(&[("sea", 0.6), ("park", 0.4)]),
+        )
+        .unwrap();
+
+        let applied = |tag_key: &str| -> bool {
+            db.photo_ai_tags(photo, false)
+                .unwrap()
+                .into_iter()
+                .find(|tag| tag.tag_key == tag_key)
+                .unwrap()
+                .applied
+        };
+        assert!(applied("sea"));
+        assert!(!applied("park"));
+
+        db.set_ai_tag_threshold(AI_PLUGIN, "sea", 0.7).unwrap();
+        assert!(!applied("sea"));
+        db.reset_ai_tag_threshold(AI_PLUGIN, "sea").unwrap();
+        assert!(applied("sea"));
+    }
+
+    #[test]
+    fn photo_ai_tags_with_names_join_the_catalog() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        install_test_catalog(&db);
+        db.save_photo_ai(
+            photo,
+            AI_PLUGIN,
+            &test_ai_result(&[("sea", 0.97), ("park", 0.4)]),
+        )
+        .unwrap();
+
+        let views = db.photo_ai_tags_with_names(photo).unwrap();
+        assert_eq!(views.len(), 2);
+        let sea = views.iter().find(|view| view.tag_key == "sea").unwrap();
+        assert_eq!(sea.name, "海");
+        assert_eq!(sea.name_en.as_deref(), Some("Sea"));
+        assert!((sea.probability - 0.97).abs() < f32::EPSILON);
+        assert!(sea.applied);
+        let park = views.iter().find(|view| view.tag_key == "park").unwrap();
+        assert_eq!(park.name, "公園");
+        assert_eq!(park.name_en, None);
+        assert!(!park.applied);
+    }
+
+    #[test]
+    fn ai_results_cascade_on_photo_delete() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        install_test_catalog(&db);
+        db.save_photo_ai(photo, AI_PLUGIN, &test_ai_result(&[("sea", 0.97)]))
+            .unwrap();
+        assert!(db.photo_ai(photo).unwrap().is_some());
+        assert_eq!(db.photo_ai_tags(photo, false).unwrap().len(), 1);
+
+        db.connection()
+            .execute("DELETE FROM photos WHERE id = ?1", params![photo])
+            .unwrap();
+        assert!(db.photo_ai(photo).unwrap().is_none());
+        assert!(db.photo_ai_tags(photo, false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn tagging_jobs_dedupe_active_work_and_respect_waiting() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        assert_eq!(
+            db.enqueue_tagging_jobs(&[photo], AI_PLUGIN, TaggingJobStatus::Pending)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.enqueue_tagging_jobs(&[photo], AI_PLUGIN, TaggingJobStatus::Pending)
+                .unwrap(),
+            0
+        );
+        assert_eq!(db.tagging_job_counts(AI_PLUGIN).unwrap().pending, 1);
+        assert!(db.next_pending_tagging_job().unwrap().is_some());
+        assert!(db.next_pending_tagging_job().unwrap().is_none());
+    }
+
+    #[test]
+    fn tagging_enqueue_rejects_terminal_statuses() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        for status in [
+            TaggingJobStatus::Processing,
+            TaggingJobStatus::Completed,
+            TaggingJobStatus::Failed,
+            TaggingJobStatus::Cancelled,
+        ] {
+            assert!(matches!(
+                db.enqueue_tagging_jobs(&[photo], AI_PLUGIN, status),
+                Err(CoreError::Invalid(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn next_pending_tagging_job_claims_with_the_active_variant() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        db.enqueue_tagging_jobs(&[photo], AI_PLUGIN, TaggingJobStatus::Pending)
+            .unwrap();
+        let job = db.next_pending_tagging_job().unwrap().unwrap();
+        assert_eq!(job.status, TaggingJobStatus::Processing);
+        assert_eq!(job.variant, None);
+
+        db.upsert_plugin_installation(&ai_install(AI_PLUGIN, "linux-vulkan", "1.0.0", true))
+            .unwrap();
+        let photo = seed_other_photo(&db);
+        db.enqueue_tagging_jobs(&[photo], AI_PLUGIN, TaggingJobStatus::Pending)
+            .unwrap();
+        let job = db.next_pending_tagging_job().unwrap().unwrap();
+        assert_eq!(job.variant.as_deref(), Some("linux-vulkan"));
+    }
+
+    #[test]
+    fn backlog_enqueue_is_idempotent_and_newest_first() {
+        let db = Db::open_in_memory().unwrap();
+        let photos = seed_photos(&db, 1000);
+
+        assert_eq!(db.enqueue_tagging_backlog(AI_PLUGIN).unwrap(), 1000);
+        assert_eq!(db.enqueue_tagging_backlog(AI_PLUGIN).unwrap(), 0);
+        assert_eq!(db.tagging_job_counts(AI_PLUGIN).unwrap().waiting, 1000);
+        assert!(db.next_pending_tagging_job().unwrap().is_none());
+
+        assert_eq!(db.release_waiting_tagging_jobs(AI_PLUGIN).unwrap(), 1000);
+        assert_eq!(db.enqueue_tagging_backlog(AI_PLUGIN).unwrap(), 0);
+        let first = db.next_pending_tagging_job().unwrap().unwrap();
+        assert_eq!(
+            first.photo_id,
+            *photos.last().unwrap(),
+            "the newest photo is claimed first"
+        );
+    }
+
+    #[test]
+    fn release_waiting_moves_only_waiting_jobs_for_the_plugin() {
+        let db = Db::open_in_memory().unwrap();
+        let waiting = seed_photo(&db);
+        let pending = seed_other_photo(&db);
+        let other_plugin = seed_photos(&db, 3)[2];
+        db.enqueue_tagging_jobs(&[waiting], AI_PLUGIN, TaggingJobStatus::Waiting)
+            .unwrap();
+        db.enqueue_tagging_jobs(&[pending], AI_PLUGIN, TaggingJobStatus::Pending)
+            .unwrap();
+        db.enqueue_tagging_jobs(&[other_plugin], "other-plugin", TaggingJobStatus::Waiting)
+            .unwrap();
+
+        assert_eq!(db.release_waiting_tagging_jobs(AI_PLUGIN).unwrap(), 1);
+        let counts = db.tagging_job_counts(AI_PLUGIN).unwrap();
+        assert_eq!(counts.waiting, 0);
+        assert_eq!(counts.pending, 2);
+        assert_eq!(db.tagging_job_counts("other-plugin").unwrap().waiting, 1);
+    }
+
+    #[test]
+    fn retry_caps_at_two() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        let job = claim_tagging_job(&db, photo);
+        db.fail_tagging_job(&job.id, TaggingErrorCode::Internal)
+            .unwrap();
+
+        for expected_retry in 1..=2 {
+            assert!(db.retry_tagging_job(&job.id).unwrap());
+            let retried = db.tagging_job(&job.id).unwrap().unwrap();
+            assert_eq!(retried.status, TaggingJobStatus::Pending);
+            assert_eq!(retried.retry_count, expected_retry);
+            assert_eq!(retried.progress, 0.0);
+            assert_eq!(retried.stage, None);
+            assert_eq!(retried.started_at, None);
+            assert_eq!(retried.error, None);
+
+            let claimed = db.next_pending_tagging_job().unwrap().unwrap();
+            assert_eq!(claimed.id, job.id);
+            db.fail_tagging_job(&job.id, TaggingErrorCode::Internal)
+                .unwrap();
+        }
+
+        assert!(!db.retry_tagging_job(&job.id).unwrap());
+        let failed = db.tagging_job(&job.id).unwrap().unwrap();
+        assert_eq!(failed.status, TaggingJobStatus::Failed);
+        assert_eq!(failed.retry_count, 2);
+    }
+
+    #[test]
+    fn defer_tagging_job_waits_without_counting_a_retry() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        let job = claim_tagging_job(&db, photo);
+        db.update_tagging_progress(&job.id, 0.3, TaggingStage::PeopleCount)
+            .unwrap();
+        db.defer_tagging_job(&job.id, TaggingErrorCode::PluginNotReady)
+            .unwrap();
+
+        let deferred = db.tagging_job(&job.id).unwrap().unwrap();
+        assert_eq!(deferred.status, TaggingJobStatus::Pending);
+        assert_eq!(deferred.error.as_deref(), Some("plugin_not_ready"));
+        assert_eq!(deferred.retry_count, 0);
+        assert_eq!(deferred.progress, 0.0);
+        assert_eq!(deferred.stage, None);
+        assert_eq!(deferred.started_at, None);
+
+        let claimed = db.next_pending_tagging_job().unwrap().unwrap();
+        assert_eq!(claimed.status, TaggingJobStatus::Processing);
+        assert_eq!(claimed.error, None);
+    }
+
+    #[test]
+    fn cancel_processing_blocks_late_write() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        install_test_catalog(&db);
+        let job = claim_tagging_job(&db, photo);
+        db.update_tagging_progress(&job.id, 0.7, TaggingStage::PlaceTags)
+            .unwrap();
+        assert!(db.cancel_tagging_job(&job.id).unwrap());
+        assert_eq!(
+            db.tagging_job(&job.id).unwrap().unwrap().status,
+            TaggingJobStatus::Cancelled
+        );
+        assert!(!db.cancel_tagging_job(&job.id).unwrap());
+
+        assert!(
+            !db.save_photo_ai_for_job(&job.id, &test_ai_result(&[("sea", 0.97)]))
+                .unwrap()
+        );
+        assert!(db.photo_ai(photo).unwrap().is_none());
+
+        db.complete_tagging_job(&job.id).unwrap();
+        db.fail_tagging_job(&job.id, TaggingErrorCode::Internal)
+            .unwrap();
+        assert_eq!(
+            db.tagging_job(&job.id).unwrap().unwrap().status,
+            TaggingJobStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn save_photo_ai_for_job_requires_processing_status() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        install_test_catalog(&db);
+        db.enqueue_tagging_jobs(&[photo], AI_PLUGIN, TaggingJobStatus::Pending)
+            .unwrap();
+        let job = db.tagging_jobs_for_photo(photo).unwrap()[0].id.clone();
+        let result = test_ai_result(&[("sea", 0.97)]);
+        let before = db.library_revision().unwrap();
+
+        assert!(!db.save_photo_ai_for_job(&job, &result).unwrap());
+        assert!(db.photo_ai(photo).unwrap().is_none());
+        assert!(!db.save_photo_ai_for_job("missing-job", &result).unwrap());
+        assert_eq!(db.library_revision().unwrap(), before);
+
+        db.next_pending_tagging_job().unwrap().unwrap();
+        assert!(db.save_photo_ai_for_job(&job, &result).unwrap());
+        assert_eq!(db.photo_ai(photo).unwrap().unwrap().plugin_id, AI_PLUGIN);
+        assert!(db.library_revision().unwrap() > before);
+        db.complete_tagging_job(&job).unwrap();
+        assert_eq!(
+            db.tagging_job(&job).unwrap().unwrap().status,
+            TaggingJobStatus::Completed
+        );
+
+        let missing_photo = seed_other_photo(&db);
+        let missing_job = claim_tagging_job(&db, missing_photo);
+        db.mark_missing(missing_photo).unwrap();
+        assert!(!db.save_photo_ai_for_job(&missing_job.id, &result).unwrap());
+        assert!(db.photo_ai(missing_photo).unwrap().is_none());
+    }
+
+    #[test]
+    fn resume_processing_as_pending() {
+        let db = Db::open_in_memory().unwrap();
+        let first = seed_photo(&db);
+        let second = seed_other_photo(&db);
+        db.enqueue_tagging_jobs(&[first], AI_PLUGIN, TaggingJobStatus::Pending)
+            .unwrap();
+        db.enqueue_tagging_jobs(&[second], AI_PLUGIN, TaggingJobStatus::Pending)
+            .unwrap();
+        let claimed = db.next_pending_tagging_job().unwrap().unwrap();
+        assert_eq!(claimed.photo_id, first);
+
+        assert_eq!(db.resume_interrupted_tagging_jobs().unwrap(), 1);
+        let resumed = db.tagging_job(&claimed.id).unwrap().unwrap();
+        assert_eq!(resumed.status, TaggingJobStatus::Pending);
+        assert_eq!(resumed.retry_count, 0);
+        assert_eq!(resumed.started_at, None);
+        assert_eq!(db.tagging_job_counts(AI_PLUGIN).unwrap().processing, 0);
+        assert_eq!(db.tagging_job_counts(AI_PLUGIN).unwrap().pending, 2);
+
+        let reclaimed = db.next_pending_tagging_job().unwrap().unwrap();
+        assert_eq!(reclaimed.id, claimed.id);
+        db.complete_tagging_job(&claimed.id).unwrap();
+        assert_eq!(db.resume_interrupted_tagging_jobs().unwrap(), 0);
+        assert_eq!(
+            db.tagging_job(&claimed.id).unwrap().unwrap().status,
+            TaggingJobStatus::Completed
+        );
+    }
+
+    #[test]
+    fn cancel_tagging_jobs_for_photo_only_touches_active_jobs() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        let completed = seed_other_photo(&db);
+        let job = claim_tagging_job(&db, completed);
+        db.complete_tagging_job(&job.id).unwrap();
+        db.enqueue_tagging_jobs(&[photo], AI_PLUGIN, TaggingJobStatus::Pending)
+            .unwrap();
+        db.enqueue_tagging_jobs(&[photo], "other-plugin", TaggingJobStatus::Waiting)
+            .unwrap();
+
+        assert_eq!(db.cancel_tagging_jobs_for_photo(photo).unwrap(), 2);
+        for job in db.tagging_jobs_for_photo(photo).unwrap() {
+            assert_eq!(job.status, TaggingJobStatus::Cancelled);
+        }
+        assert_eq!(
+            db.tagging_job(&job.id).unwrap().unwrap().status,
+            TaggingJobStatus::Completed
+        );
+    }
+
+    #[test]
+    fn active_tagging_jobs_exclude_terminal_jobs() {
+        let db = Db::open_in_memory().unwrap();
+        let photos = seed_photos(&db, 3);
+        for photo in photos {
+            db.enqueue_tagging_jobs(&[photo], AI_PLUGIN, TaggingJobStatus::Pending)
+                .unwrap();
+        }
+        assert_eq!(db.active_tagging_jobs(10).unwrap().len(), 3);
+        assert_eq!(db.active_tagging_jobs(2).unwrap().len(), 2);
+
+        let claimed = db.next_pending_tagging_job().unwrap().unwrap();
+        db.complete_tagging_job(&claimed.id).unwrap();
+        assert_eq!(db.active_tagging_jobs(10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn delete_ai_data_removes_only_the_plugin_rows() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        install_test_catalog(&db);
+        db.save_photo_ai(photo, AI_PLUGIN, &test_ai_result(&[("sea", 0.97)]))
+            .unwrap();
+        db.set_ai_tag_threshold(AI_PLUGIN, "sea", 0.8).unwrap();
+        seed_ai_tag(&db, photo, "other-plugin", "sea", 0.9, true);
+
+        db.delete_ai_data(AI_PLUGIN).unwrap();
+
+        assert!(db.photo_ai(photo).unwrap().is_none());
+        assert!(db.ai_tag_definitions(AI_PLUGIN).unwrap().is_empty());
+        assert!(db.ai_tag_thresholds(AI_PLUGIN).unwrap().is_empty());
+        let remaining = db.photo_ai_tags(photo, false).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].plugin_id, "other-plugin");
+    }
+
+    #[test]
+    fn deletion_summary_includes_tagging() {
+        let db = Db::open_in_memory().unwrap();
+        let photos = seed_photos(&db, 4);
+
+        db.enqueue_tagging_jobs(&[photos[0]], AI_PLUGIN, TaggingJobStatus::Waiting)
+            .unwrap();
+        db.enqueue_tagging_jobs(&[photos[2]], AI_PLUGIN, TaggingJobStatus::Pending)
+            .unwrap();
+        let processing = db.next_pending_tagging_job().unwrap().unwrap();
+        assert_eq!(processing.photo_id, photos[2]);
+        db.enqueue_tagging_jobs(&[photos[3]], AI_PLUGIN, TaggingJobStatus::Pending)
+            .unwrap();
+        let failed = db.next_pending_tagging_job().unwrap().unwrap();
+        assert_eq!(failed.photo_id, photos[3]);
+        db.fail_tagging_job(&failed.id, TaggingErrorCode::Internal)
+            .unwrap();
+        db.enqueue_tagging_jobs(&[photos[1]], AI_PLUGIN, TaggingJobStatus::Pending)
+            .unwrap();
+
+        let summary = db.deletion_job_summary(&photos).unwrap();
+        assert_eq!(summary.tagging.waiting, 1);
+        assert_eq!(summary.tagging.pending, 1);
+        assert_eq!(summary.tagging.processing, 1);
+        assert_eq!(summary.tagging.failed, 1);
+        assert_eq!(summary.affected_photos, 4);
+        assert!(summary.needs_warning());
+        assert_eq!(summary.compression.total(), 0);
+        assert_eq!(summary.send.total(), 0);
+    }
+
+    #[test]
+    fn deletion_summary_excludes_terminal_tagging_jobs() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        let job = claim_tagging_job(&db, photo);
+        db.cancel_tagging_job(&job.id).unwrap();
+
+        let summary = db.deletion_job_summary(&[photo]).unwrap();
+        assert_eq!(summary.tagging.total(), 0);
+        assert_eq!(summary.affected_photos, 0);
+        assert!(!summary.needs_warning());
+    }
+
+    #[test]
+    fn deletion_blockers_wait_for_tagging() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        db.enqueue_tagging_jobs(&[photo], AI_PLUGIN, TaggingJobStatus::Pending)
+            .unwrap();
+        assert_eq!(db.deletion_blockers(photo).unwrap().active, 1);
+
+        let request = db
+            .request_deletion(&[photo], DeletionReason::Manual, false)
+            .unwrap()[0];
+        assert!(db.claim_deletion(request).unwrap().is_none());
+        let job = db.next_pending_tagging_job().unwrap().unwrap();
+        db.cancel_tagging_job(&job.id).unwrap();
+        assert_eq!(db.deletion_blockers(photo).unwrap().active, 0);
+        assert!(db.claim_deletion(request).unwrap().is_some());
+    }
+
+    #[test]
+    fn failed_tagging_blocks_a_non_forced_deletion() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        let job = claim_tagging_job(&db, photo);
+        db.fail_tagging_job(&job.id, TaggingErrorCode::Internal)
+            .unwrap();
+        assert_eq!(db.deletion_blockers(photo).unwrap().failed, 1);
+
+        let request = db
+            .request_deletion(&[photo], DeletionReason::Manual, false)
+            .unwrap()[0];
+        assert!(db.claim_deletion(request).unwrap().is_none());
+        assert!(db.block_deletion_if_jobs_failed(request).unwrap());
+        let blocked = db.deletion_request_by_id(request).unwrap().unwrap();
+        assert_eq!(blocked.blocked_reason.as_deref(), Some("job_failed"));
+
+        assert!(db.force_deletion(request).unwrap());
+        assert!(db.claim_deletion(request).unwrap().is_some());
+    }
+
+    #[test]
+    fn force_delete_cancels_tagging_before_claiming() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        install_test_catalog(&db);
+        let job = claim_tagging_job(&db, photo);
+        assert_eq!(
+            db.tagging_job(&job.id).unwrap().unwrap().status,
+            TaggingJobStatus::Processing
+        );
+
+        let request = db
+            .request_deletion(&[photo], DeletionReason::Manual, false)
+            .unwrap()[0];
+        assert!(db.claim_deletion(request).unwrap().is_none());
+        assert!(db.force_deletion(request).unwrap());
+        assert_eq!(
+            db.tagging_job(&job.id).unwrap().unwrap().status,
+            TaggingJobStatus::Cancelled
+        );
+        assert!(
+            !db.save_photo_ai_for_job(&job.id, &test_ai_result(&[("sea", 0.97)]))
+                .unwrap()
+        );
+        assert!(db.photo_ai(photo).unwrap().is_none());
+        assert!(db.claim_deletion(request).unwrap().is_some());
     }
 
     #[test]

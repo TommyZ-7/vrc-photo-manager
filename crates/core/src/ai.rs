@@ -1,6 +1,7 @@
-//! Storage types for AI tagging plugins and their tag catalogs.
+//! Storage types for AI tagging plugins, their tag catalogs, results, and jobs.
 
 pub use vrc_photon_ai_protocol::ModelState;
+use vrc_photon_ai_protocol::{TaggingJobStatus, TaggingStage};
 
 /// One installed plugin package: a plugin version for a platform variant.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,4 +56,86 @@ pub struct AiTagThreshold {
     pub tag_key: String,
     pub threshold: f32,
     pub updated_at: String,
+}
+
+/// The stored result of one tagging run for a photo.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PhotoAi {
+    pub photo_id: i64,
+    pub plugin_id: String,
+    pub variant: String,
+    pub sidecar_version: String,
+    pub model_version: String,
+    pub model_revision: String,
+    pub catalog_version: String,
+    pub source: String,
+    pub presence_threshold: f32,
+    pub character_present: bool,
+    pub presence_probability: f32,
+    pub people_min: Option<u32>,
+    pub people_max: Option<u32>,
+    pub people_median: Option<u32>,
+    pub place_branch: Option<String>,
+    pub place_probabilities_json: Option<String>,
+    pub tagged_at: String,
+}
+
+/// One judged tag emitted by a tagging run.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PhotoAiTag {
+    pub photo_id: i64,
+    pub plugin_id: String,
+    pub tag_key: String,
+    pub probability: f32,
+    pub applied: bool,
+    pub model_version: String,
+    pub catalog_version: String,
+    pub tagged_at: String,
+}
+
+/// A tag row joined with its catalog display names for the inspector.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PhotoAiTagView {
+    pub tag_key: String,
+    pub name: String,
+    pub name_en: Option<String>,
+    pub probability: f32,
+    pub applied: bool,
+}
+
+/// A complete result ready to be written for one photo.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewPhotoAi {
+    pub variant: String,
+    pub sidecar_version: String,
+    pub model_version: String,
+    pub model_revision: String,
+    pub catalog_version: String,
+    pub source: String,
+    pub presence_threshold: f32,
+    pub character_present: bool,
+    pub presence_probability: f32,
+    pub people_min: Option<u32>,
+    pub people_max: Option<u32>,
+    pub people_median: Option<u32>,
+    pub place_branch: Option<String>,
+    pub place_probabilities_json: Option<String>,
+    pub tags: Vec<(String, f32)>,
+}
+
+/// One durable tagging job.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TaggingJob {
+    pub id: String,
+    pub photo_id: i64,
+    pub plugin_id: String,
+    pub variant: Option<String>,
+    pub status: TaggingJobStatus,
+    pub progress: f64,
+    pub stage: Option<TaggingStage>,
+    pub error: Option<String>,
+    pub retry_count: i64,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
 }
