@@ -39,6 +39,8 @@ pub(crate) enum AiErrorKind {
     Install,
     Model,
     Job,
+    /// Probe, variant switch, or plugin uninstall.
+    Operation,
 }
 
 impl AiErrorKind {
@@ -47,6 +49,7 @@ impl AiErrorKind {
             Self::Install => 0,
             Self::Model => 1,
             Self::Job => 2,
+            Self::Operation => 3,
         }
     }
 }
@@ -129,7 +132,7 @@ pub(crate) struct AiUiState {
     pub(crate) uninstall_delete_tags: bool,
     /// Latest failure per origin, so an install warning and a tagging failure
     /// can stay visible at the same time.
-    errors: [Option<AiErrorInfo>; 3],
+    errors: [Option<AiErrorInfo>; 4],
 }
 
 /// Progress of the model download, kept separately from the persisted state
@@ -1029,6 +1032,7 @@ pub(crate) fn ai_error_summary_in(language: &str, error: &AiErrorInfo) -> String
         AiErrorKind::Install => "settings.ai.install_failed",
         AiErrorKind::Model => "settings.ai.model_failed",
         AiErrorKind::Job => "integrations.ai.jobs.failure_generic",
+        AiErrorKind::Operation => "settings.ai.operation_failed",
     };
     vrc_photon_i18n::tr_in(language, key)
 }
@@ -1062,18 +1066,25 @@ pub(crate) fn ai_error_toast_in(language: &str, error: &AiErrorInfo) -> String {
 
 fn request_error_kind(request: &IpcRequest) -> AiErrorKind {
     match request {
-        IpcRequest::InstallPlugin { .. } | IpcRequest::UninstallPlugin { .. } => {
-            AiErrorKind::Install
-        }
+        IpcRequest::InstallPlugin { .. } => AiErrorKind::Install,
         IpcRequest::StartModelDownload { .. }
         | IpcRequest::CancelModelDownload { .. }
         | IpcRequest::ImportModelFiles { .. }
         | IpcRequest::DeleteModel { .. } => AiErrorKind::Model,
-        IpcRequest::ProbePlugin { .. } | IpcRequest::SetActiveVariant { .. } => {
-            AiErrorKind::Install
-        }
+        IpcRequest::ProbePlugin { .. }
+        | IpcRequest::SetActiveVariant { .. }
+        | IpcRequest::UninstallPlugin { .. } => AiErrorKind::Operation,
         _ => AiErrorKind::Job,
     }
+}
+
+/// Error codes are stable snake_case identifiers. Raw daemon messages often
+/// contain spaces or prose, so they must not be repeated in the error-code row.
+pub(crate) fn ai_error_code_is_stable(code: &str) -> bool {
+    !code.is_empty()
+        && code
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
 }
 
 fn error_code_str(code: ErrorCode) -> &'static str {
@@ -1626,6 +1637,10 @@ impl App {
                     return false;
                 }
                 self.refresh_ai_state(cx);
+                // Uninstall with delete-tags and a completed retag finish in
+                // the worker after the request ack; the terminal state event is
+                // the authoritative point to reload the inspector.
+                self.refresh_selected_ai(cx);
                 if self.ai.finish_probe() {
                     let info = AiErrorInfo::new(AiErrorKind::Install, "plugin_probe_failed", None);
                     self.toast_error(
@@ -1709,15 +1724,16 @@ mod tests {
     use super::{
         AI_PLUGIN_ID, AiErrorInfo, AiErrorKind, AiPluginAction, AiPluginCardState,
         AiPluginCardView, AiResponseOutcome, AiUiState, ManualRetagOutcome, ModelDownloadView,
-        UninstallTarget, active_job_photo_label, ai_empty_state_labels, ai_error_detail_in,
-        ai_error_label_in, ai_error_summary_in, ai_error_toast_in, ai_manifest_view,
-        ai_plugin_card_state, ai_response_outcome, ai_tag_view, ai_tag_view_with_context,
-        ai_tag_views, apply_install_event, backend_options,
+        UninstallTarget, active_job_photo_label, ai_empty_state_labels, ai_error_code_is_stable,
+        ai_error_detail_in, ai_error_label_in, ai_error_summary_in, ai_error_toast_in,
+        ai_manifest_view, ai_plugin_card_state, ai_response_outcome, ai_tag_view,
+        ai_tag_view_with_context, ai_tag_views, apply_install_event, backend_options,
         backend_selection_is_disabled_when_not_ready, collect_ai_snapshot,
         download_progress_bar_ratio, enqueue_manual_retag, format_tagged_at,
         install_event_applies_to_ai, installation_row_id, is_active_installation, load_photo_ai,
         model_progress_ratio, needs_license_consent, people_label, people_label_in, place_label,
-        place_label_with_confidence, uninstall_request_args, variant_backend_label,
+        place_label_with_confidence, request_error_kind, uninstall_request_args,
+        variant_backend_label,
     };
     use vrc_photon_ai_protocol::{
         BackendInfo, Catalog, ModelState, PluginInstallStatus, Probe, TagDefinition,
@@ -1728,7 +1744,7 @@ mod tests {
     };
     use vrc_photon_core::db::Db;
     use vrc_photon_core::model::{JobStatusCounts, NewPhoto};
-    use vrc_photon_ipc::{ErrorCode, Response};
+    use vrc_photon_ipc::{ErrorCode, Request, Response};
 
     fn backend(kind: &str) -> BackendInfo {
         BackendInfo {
@@ -2161,9 +2177,14 @@ mod tests {
         );
         assert!(!ai.install_busy);
         assert!(
-            [AiErrorKind::Install, AiErrorKind::Model, AiErrorKind::Job]
-                .into_iter()
-                .all(|kind| ai.error_of(kind).is_none())
+            [
+                AiErrorKind::Install,
+                AiErrorKind::Model,
+                AiErrorKind::Job,
+                AiErrorKind::Operation,
+            ]
+            .into_iter()
+            .all(|kind| ai.error_of(kind).is_none())
         );
     }
 
@@ -2186,20 +2207,19 @@ mod tests {
     }
 
     #[test]
-    fn pending_probe_reports_a_missing_probe_once() {
+    fn pending_probe_resolves_with_the_terminal_state() {
+        // The first event after a switch may still have no probe; only the
+        // terminal event decides success or failure.
         let mut ai = AiUiState::default();
         ai.begin_probe();
-        assert!(ai.finish_probe(), "a missing probe is a failure");
+        assert!(ai.finish_probe(), "an absent terminal probe is a failure");
         assert!(!ai.finish_probe(), "the pending flag was consumed");
 
-        let mut ai = ready_state();
-        ai.probe = None;
+        let mut ai = AiUiState::default();
         ai.begin_probe();
-        assert!(ai.finish_probe());
-
-        let mut ai = ready_state();
-        ai.begin_probe();
-        assert!(!ai.finish_probe(), "a stored probe is a success");
+        ai.probe = Some(sample_probe());
+        assert!(!ai.finish_probe(), "a stored terminal probe is a success");
+        assert!(!ai.finish_probe(), "the pending flag was consumed");
     }
 
     #[test]
@@ -2363,6 +2383,54 @@ mod tests {
             ai_error_detail_in("ja", &unknown).as_deref(),
             Some("raw detail")
         );
+    }
+
+    #[test]
+    fn probe_and_uninstall_failures_use_the_operation_label() {
+        assert_eq!(
+            request_error_kind(&Request::ProbePlugin {
+                plugin_id: AI_PLUGIN_ID.to_string(),
+            }),
+            AiErrorKind::Operation
+        );
+        assert_eq!(
+            request_error_kind(&Request::UninstallPlugin {
+                plugin_id: AI_PLUGIN_ID.to_string(),
+                variant: None,
+                version: None,
+                delete_ai_tags: false,
+            }),
+            AiErrorKind::Operation
+        );
+        assert_eq!(
+            request_error_kind(&Request::InstallPlugin {
+                zip_path: "plugin.zip".to_string(),
+            }),
+            AiErrorKind::Install
+        );
+        assert_eq!(
+            request_error_kind(&Request::StartModelDownload {
+                plugin_id: AI_PLUGIN_ID.to_string(),
+            }),
+            AiErrorKind::Model
+        );
+        assert_eq!(
+            ai_error_summary_in(
+                "en",
+                &AiErrorInfo::new(AiErrorKind::Operation, "not_ready", None)
+            ),
+            "The AI tagging operation failed"
+        );
+    }
+
+    #[test]
+    fn error_code_line_only_accepts_stable_identifiers() {
+        assert!(ai_error_code_is_stable("model_download_failed"));
+        assert!(ai_error_code_is_stable("plugin_probe_failed"));
+        assert!(ai_error_code_is_stable("internal"));
+        assert!(!ai_error_code_is_stable("signature verification failed"));
+        assert!(!ai_error_code_is_stable("Could not open the file"));
+        assert!(!ai_error_code_is_stable(""));
     }
 
     #[test]

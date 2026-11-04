@@ -28,9 +28,9 @@ use vrc_photon_ipc::Response;
 use crate::app::App;
 use crate::app::ai::{
     AI_PLUGIN_ID, AiErrorInfo, AiErrorKind, AiManifestView, AiPluginAction, AiPluginCardState,
-    AiPluginCardView, ModelDownloadView, UninstallTarget, ai_error_detail_in, ai_error_summary_in,
-    ai_manifest_view, installation_row_id, is_active_installation, model_progress_ratio,
-    variant_backend_label,
+    AiPluginCardView, ModelDownloadView, UninstallTarget, ai_error_code_is_stable,
+    ai_error_detail_in, ai_error_summary_in, ai_manifest_view, installation_row_id,
+    is_active_installation, model_progress_ratio, variant_backend_label,
 };
 use crate::app::daemon::{autostart_description, open_path};
 use crate::ipc_bridge;
@@ -1569,7 +1569,9 @@ impl App {
         let p = self.palette;
         let language = vrc_photon_i18n::current_locale();
         let summary = ai_error_summary_in(&language, error);
-        let detail = ai_error_detail_in(&language, error);
+        let show_code = ai_error_code_is_stable(&error.code);
+        let detail = ai_error_detail_in(&language, error)
+            .filter(|detail| !(show_code && detail == &error.code));
         let code = error.code.clone();
         v_flex()
             .gap(px(3.))
@@ -1593,12 +1595,14 @@ impl App {
                         .child(detail),
                 )
             })
-            .child(
-                div()
-                    .text_size(px(9.))
-                    .text_color(rgb(p.muted_2))
-                    .child(tr_args!("settings.ai.error_code", code = code)),
-            )
+            .when(show_code, |this| {
+                this.child(
+                    div()
+                        .text_size(px(9.))
+                        .text_color(rgb(p.muted_2))
+                        .child(tr_args!("settings.ai.error_code", code = code)),
+                )
+            })
             .child(
                 Button::new("ai-error-open-logs")
                     .label(tr!("settings.ai.open_logs"))

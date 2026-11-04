@@ -346,9 +346,11 @@ impl PluginService {
             )));
         }
         self.inner.db().set_plugin_probe_json(plugin_id, None)?;
-        self.inner.events.publish(Event::PluginStateChanged {
-            plugin_id: plugin_id.to_string(),
-        });
+        // The row change and cleared probe are persisted before this returns,
+        // so the UI can refresh from the database after the request ack. Only
+        // the terminal state after the worker probe is published: an early
+        // `PluginStateChanged` with an empty probe would look like a probe
+        // failure to the UI and consume its pending-probe state.
 
         let inner = self.inner.clone();
         let plugin_id = plugin_id.to_string();
@@ -2580,7 +2582,7 @@ mod tests {
     }
 
     #[test]
-    fn async_variant_switch_updates_the_row_before_the_sidecar_work() {
+    fn async_variant_switch_publishes_one_terminal_state_change() {
         let ctx = TestContext::new();
         ctx.install_default();
         let vulkan = ctx.package("linux-vulkan", "vulkan", &[]);
@@ -2613,11 +2615,26 @@ mod tests {
             ctx.service.sidecar().unwrap().hello().variant,
             "linux-vulkan"
         );
-        ctx.collect_events(&events, |events| {
+
+        // Give a second event time to arrive if an early publication is still
+        // present. The row update is read from the database by the UI on the
+        // request ack; only the post-probe event may be published.
+        thread::sleep(Duration::from_millis(100));
+        let events = ctx.collect_events(&events, |events| {
             events.iter().any(|event| {
                 matches!(event, Event::PluginStateChanged { plugin_id } if plugin_id == PLUGIN)
             })
         });
+        let state_events = events
+            .iter()
+            .filter(|event| {
+                matches!(event, Event::PluginStateChanged { plugin_id } if plugin_id == PLUGIN)
+            })
+            .count();
+        assert_eq!(
+            state_events, 1,
+            "a variant switch must publish only the terminal probe state: {events:?}"
+        );
     }
 
     #[test]
