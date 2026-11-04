@@ -693,6 +693,7 @@ impl App {
         self.reload_send_history(cx);
         let previous_language = self.settings.language.clone();
         let previous_auto_compress = self.settings.auto_compress;
+        let previous_ai_tagging_enabled = self.settings.ai_tagging_enabled;
         let previous_clipboard_enabled = self.settings.clipboard_enabled;
         let previous_discord_enabled = self.settings.discord_enabled;
         let previous_thumbnail_spec = self.settings.thumbnail_spec();
@@ -709,6 +710,14 @@ impl App {
         if self.settings.auto_compress != previous_auto_compress {
             self.integrations_auto_motion =
                 crate::state::motion::ToggleMotion::settled(if self.settings.auto_compress {
+                    0.0
+                } else {
+                    1.0
+                });
+        }
+        if self.settings.ai_tagging_enabled != previous_ai_tagging_enabled {
+            self.integrations_ai_motion =
+                crate::state::motion::ToggleMotion::settled(if self.settings.ai_tagging_enabled {
                     0.0
                 } else {
                     1.0

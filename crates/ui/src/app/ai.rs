@@ -575,6 +575,22 @@ pub(crate) fn backend_options(probe: &Probe, selected: &str) -> Vec<(String, boo
     options
 }
 
+/// Ratio for a tagging job progress bar. The stored progress is a fraction in
+/// `0..=1`; non-finite and out-of-range values are clamped so a bad sidecar
+/// event cannot overdraw the bar.
+pub(crate) fn download_progress_bar_ratio(progress: f64) -> f32 {
+    if !progress.is_finite() {
+        return 0.0;
+    }
+    progress.clamp(0.0, 1.0) as f32
+}
+
+/// Backend chips are selectable only once the plugin is ready and AI tagging
+/// is enabled, matching the mockup's "有効化後に選択" state.
+pub(crate) fn backend_selection_is_disabled_when_not_ready(ready: bool, enabled: bool) -> bool {
+    !ready || !enabled
+}
+
 /// Human-readable people count from the sidecar interval.
 pub(crate) fn people_label(min: Option<u32>, max: Option<u32>) -> String {
     match (min, max) {
@@ -1168,7 +1184,8 @@ mod tests {
         AI_PLUGIN_ID, AiPluginAction, AiPluginCardState, AiPluginCardView, AiResponseOutcome,
         AiUiState, ModelDownloadView, ai_error_label_in, ai_error_text_in, ai_job_summary_label,
         ai_manifest_view, ai_plugin_card_state, ai_response_outcome, ai_tag_view,
-        apply_install_event, backend_options, collect_ai_snapshot, install_event_applies_to_ai,
+        apply_install_event, backend_options, backend_selection_is_disabled_when_not_ready,
+        collect_ai_snapshot, download_progress_bar_ratio, install_event_applies_to_ai,
         installation_row_id, is_active_installation, model_progress_ratio, needs_license_consent,
         people_label, place_label, variant_backend_label,
     };
@@ -1656,6 +1673,23 @@ mod tests {
         assert_eq!(place_label(Some("outdoor")), "屋外");
         assert_eq!(place_label(Some("other")), "その他");
         assert_eq!(place_label(None), "—");
+    }
+
+    #[test]
+    fn job_progress_ratio_clamps_out_of_range_values() {
+        assert_eq!(download_progress_bar_ratio(0.0), 0.0);
+        assert!((download_progress_bar_ratio(0.68) - 0.68).abs() < f32::EPSILON);
+        assert_eq!(download_progress_bar_ratio(1.5), 1.0);
+        assert_eq!(download_progress_bar_ratio(-0.2), 0.0);
+        assert_eq!(download_progress_bar_ratio(f64::NAN), 0.0);
+    }
+
+    #[test]
+    fn backend_selection_is_disabled_until_ready_and_enabled() {
+        assert!(backend_selection_is_disabled_when_not_ready(false, false));
+        assert!(backend_selection_is_disabled_when_not_ready(false, true));
+        assert!(backend_selection_is_disabled_when_not_ready(true, false));
+        assert!(!backend_selection_is_disabled_when_not_ready(true, true));
     }
 
     #[test]

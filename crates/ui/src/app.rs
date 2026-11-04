@@ -261,6 +261,8 @@ pub struct App {
     pub(crate) ai_selected_refresh_pending: bool,
     /// 0 = body expanded, 1 = collapsed to the card header.
     pub(crate) integrations_auto_motion: ToggleMotion,
+    /// 0 = runtime details expanded, 1 = collapsed while AI is disabled.
+    pub(crate) integrations_ai_motion: ToggleMotion,
     pub(crate) integrations_clipboard_motion: ToggleMotion,
     pub(crate) integrations_discord_motion: ToggleMotion,
     /// Stored webhook URL. It is never rendered in full: the card masks it via
@@ -955,6 +957,11 @@ impl App {
             ai_refresh_scheduled: false,
             ai_selected_refresh_pending: false,
             integrations_auto_motion: ToggleMotion::settled(if initial_settings.auto_compress {
+                0.0
+            } else {
+                1.0
+            }),
+            integrations_ai_motion: ToggleMotion::settled(if initial_settings.ai_tagging_enabled {
                 0.0
             } else {
                 1.0

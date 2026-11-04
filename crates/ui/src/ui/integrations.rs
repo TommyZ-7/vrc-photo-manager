@@ -1,23 +1,42 @@
-//! Integrations & automation screen: automatic compression and clipboard
-//! settings, with Discord destined for the same card stack (#142).
+//! Integrations & automation screen: automatic compression, AI tagging
+//! runtime settings, and clipboard settings, with Discord in the same card
+//! stack (#142).
 
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::checkbox::Checkbox;
 use gpui_kit::component::scroll::{ScrollableElement as _, Scrollbar};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use vrc_photon_ai_protocol::{TaggingJobStatus, TaggingStage};
 use vrc_photon_i18n::tr;
 
 use crate::app::App;
+use crate::app::Screen;
+use crate::app::ai::{
+    backend_options, backend_selection_is_disabled_when_not_ready, download_progress_bar_ratio,
+    variant_backend_label,
+};
 use crate::state::motion::ToggleMotion;
-use crate::ui::components::{compression_policy_warning, glass_panel, manual_option_row};
+use crate::ui::components::{
+    chip, compression_policy_warning, glass_panel, manual_option_row, status_progress_bar,
+};
 use crate::ui::theme::*;
 
 /// Generous bounds for the collapsed-body height animation. The profile lists
 /// scroll above these sizes, so the body never exceeds its bound.
 const AUTO_BODY_MAX: f32 = 430.0;
 const CLIPBOARD_BODY_MAX: f32 = 330.0;
+const AI_BODY_MAX: f32 = 520.0;
+
+/// Which runtime setting a switch row writes.
+#[derive(Clone, Copy)]
+enum AiToggle {
+    Enabled,
+    Auto,
+    Backlog,
+}
 
 impl App {
     pub(crate) fn integrations_screen(
@@ -41,6 +60,7 @@ impl App {
                     .gap(px(CARD_GAP))
                     .child(self.discord_card(window, cx))
                     .child(self.auto_compression_card(window, cx))
+                    .child(self.ai_tagging_card(window, cx))
                     .child(self.clipboard_card(window, cx))
                     .child(self.send_history_card(window, cx)),
             )
@@ -193,6 +213,451 @@ impl App {
                 body,
             ))
             .into_any_element()
+    }
+
+    fn ai_tagging_card(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.palette;
+        let ready = self.ai.ready();
+        let enabled = self.settings.ai_tagging_enabled;
+        let motion = self.integrations_ai_motion;
+        let (status, status_fg, status_bg) = if !ready {
+            (
+                tr!("integrations.ai.status.not_ready"),
+                p.amber,
+                p.amber_soft,
+            )
+        } else if enabled {
+            (tr!("integrations.ai.status.enabled"), p.green, p.green_soft)
+        } else {
+            (
+                tr!("integrations.ai.status.not_enabled"),
+                p.muted,
+                p.panel_2,
+            )
+        };
+
+        let card = glass_panel(&self.palette)
+            .flex()
+            .flex_col()
+            .p(px(14.))
+            .rounded(px(17.))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(2.))
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .font_semibold()
+                                    .text_color(rgb(p.text))
+                                    .child(tr!("integrations.ai.title")),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(p.muted_2))
+                                    .child(tr!("integrations.ai.hint")),
+                            ),
+                    )
+                    .child(self.badge(status, status_fg, status_bg)),
+            );
+
+        if !ready {
+            return card
+                .child(
+                    v_flex()
+                        .pt(px(12.))
+                        .gap(px(10.))
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(p.muted))
+                                .child(tr!("integrations.ai.not_ready")),
+                        )
+                        .child(
+                            Button::new("integrations-ai-open-settings-not-ready")
+                                .label(tr!("integrations.ai.open_settings"))
+                                .small()
+                                .primary()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.switch_screen(Screen::Settings, cx);
+                                })),
+                        ),
+                )
+                .into_any_element();
+        }
+
+        let auto = self.settings.ai_tagging_auto;
+        let backlog = self.settings.ai_tagging_backlog;
+        let counts = self.ai.job_counts;
+        let active_jobs: Vec<_> = self
+            .ai
+            .active_jobs
+            .iter()
+            .filter(|job| {
+                matches!(
+                    job.status,
+                    TaggingJobStatus::Pending | TaggingJobStatus::Processing
+                )
+            })
+            .take(3)
+            .cloned()
+            .collect();
+        let backend_selection_disabled =
+            backend_selection_is_disabled_when_not_ready(ready, enabled);
+        let backends = self
+            .ai
+            .probe
+            .as_ref()
+            .map(|probe| backend_options(probe, &self.settings.ai_tagging_backend))
+            .unwrap_or_default();
+
+        let details =
+            v_flex()
+                .gap(px(10.))
+                .child(
+                    h_flex()
+                        .gap(px(6.))
+                        .child(ai_job_stat(
+                            &p,
+                            tr!("integrations.ai.jobs.waiting"),
+                            counts.waiting,
+                            p.amber,
+                        ))
+                        .child(ai_job_stat(
+                            &p,
+                            tr!("integrations.ai.jobs.processing"),
+                            counts.pending + counts.processing,
+                            p.accent,
+                        ))
+                        .child(ai_job_stat(
+                            &p,
+                            tr!("integrations.ai.jobs.failed"),
+                            counts.failed,
+                            p.red,
+                        )),
+                )
+                .child(if active_jobs.is_empty() {
+                    v_flex()
+                        .gap(px(2.))
+                        .p(px(10.))
+                        .rounded(px(10.))
+                        .bg(rgb(p.panel_2))
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .font_medium()
+                                .text_color(rgb(p.muted))
+                                .child(tr!("integrations.ai.jobs.empty")),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(p.muted_2))
+                                .child(tr!("integrations.ai.jobs.empty_hint")),
+                        )
+                        .into_any_element()
+                } else {
+                    v_flex()
+                        .id("integrations-ai-jobs")
+                        .gap(px(6.))
+                        .children(active_jobs.into_iter().map(|job| {
+                            let job_id = job.id.clone();
+                            let ratio = download_progress_bar_ratio(job.progress);
+                            let percent = (ratio * 100.0).round() as u32;
+                            v_flex()
+                                .gap(px(5.))
+                                .p(px(10.))
+                                .rounded(px(10.))
+                                .bg(rgb(p.panel_2))
+                                .child(
+                                    h_flex()
+                                        .items_center()
+                                        .gap(px(8.))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .text_size(px(11.))
+                                                .font_medium()
+                                                .text_color(rgb(p.text))
+                                                .truncate()
+                                                .child(format!(
+                                                    "{} #{}",
+                                                    tr!("integrations.ai.jobs.photo"),
+                                                    job.photo_id
+                                                )),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(10.))
+                                                .text_color(rgb(p.accent))
+                                                .child(format!("{percent}%")),
+                                        ),
+                                )
+                                .child(status_progress_bar(&p, ratio))
+                                .child(
+                                    h_flex()
+                                        .items_center()
+                                        .gap(px(8.))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .text_size(px(10.))
+                                                .text_color(rgb(p.muted_2))
+                                                .truncate()
+                                                .child(ai_stage_label(job.stage)),
+                                        )
+                                        .child(
+                                            Button::new(SharedString::from(format!(
+                                                "integrations-ai-cancel-{job_id}"
+                                            )))
+                                            .label(tr!("integrations.ai.cancel_job"))
+                                            .small()
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.cancel_ai_job(&job_id, cx);
+                                            })),
+                                        ),
+                                )
+                                .into_any_element()
+                        }))
+                        .into_any_element()
+                })
+                .when(counts.waiting > 0, |this| {
+                    this.child(
+                        v_flex()
+                            .gap(px(6.))
+                            .p(px(10.))
+                            .rounded(px(10.))
+                            .bg(rgb(p.panel_2))
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .font_medium()
+                                    .text_color(rgb(p.text))
+                                    .child(tr!("integrations.ai.start_backlog")),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .text_color(rgb(p.muted_2))
+                                    .child(tr!("integrations.ai.start_backlog_hint")),
+                            )
+                            .child(
+                                Button::new("integrations-ai-start-backlog")
+                                    .label(tr!("integrations.ai.start_backlog"))
+                                    .small()
+                                    .primary()
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.start_ai_backlog(cx);
+                                    })),
+                            ),
+                    )
+                });
+
+        let settings_row = h_flex()
+            .items_center()
+            .gap(px(8.))
+            .child(
+                Button::new("integrations-ai-open-settings-ready")
+                    .label(tr!("integrations.ai.open_settings"))
+                    .small()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.switch_screen(Screen::Settings, cx);
+                    })),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .text_size(px(9.))
+                    .text_color(rgb(p.muted_2))
+                    .child(tr!("integrations.ai.jobs.limit_hint")),
+            );
+
+        let body = v_flex()
+            .pt(px(12.))
+            .gap(px(12.))
+            .child(self.ai_switch_row(
+                tr!("integrations.ai.enabled"),
+                tr!("integrations.ai.enabled_hint"),
+                enabled,
+                true,
+                AiToggle::Enabled,
+                cx,
+            ))
+            .child(self.ai_switch_row(
+                tr!("integrations.ai.auto"),
+                tr!("integrations.ai.auto_hint"),
+                auto,
+                enabled,
+                AiToggle::Auto,
+                cx,
+            ))
+            .child(self.ai_switch_row(
+                tr!("integrations.ai.backlog"),
+                tr!("integrations.ai.backlog_hint"),
+                backlog,
+                enabled,
+                AiToggle::Backlog,
+                cx,
+            ))
+            .child(
+                v_flex()
+                    .gap(px(6.))
+                    .child(
+                        h_flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(rgb(p.text))
+                                    .child(tr!("integrations.ai.backend")),
+                            )
+                            .child(div().flex_1())
+                            .when(backend_selection_disabled, |this| {
+                                this.child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .text_color(rgb(p.muted_2))
+                                        .child(tr!("integrations.ai.backend_enable_hint")),
+                                )
+                            }),
+                    )
+                    .child(
+                        h_flex()
+                            .flex_wrap()
+                            .gap(px(4.))
+                            .children(backends.into_iter().map(|(id, selected)| {
+                                let click_id = id.clone();
+                                let label = if id == "auto" {
+                                    tr!("integrations.ai.backend.auto")
+                                } else {
+                                    variant_backend_label(&id)
+                                };
+                                chip(&p, &label, selected)
+                                    .id(SharedString::from(format!("integrations-ai-backend-{id}")))
+                                    .opacity(if backend_selection_disabled { 0.5 } else { 1.0 })
+                                    .when(!backend_selection_disabled, |this| {
+                                        this.cursor_pointer().on_click(cx.listener(
+                                            move |this, _, _, cx| {
+                                                let backend = click_id.clone();
+                                                this.save_ai_runtime_settings(
+                                                    cx,
+                                                    move |settings| {
+                                                        settings.ai_tagging_backend = backend;
+                                                    },
+                                                );
+                                            },
+                                        ))
+                                    })
+                                    .into_any_element()
+                            })),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(p.muted_2))
+                            .child(tr!("integrations.ai.backend_hint")),
+                    ),
+            )
+            .child(self.collapsible_body(
+                "integrations-ai-body",
+                motion,
+                AI_BODY_MAX,
+                window,
+                cx,
+                details,
+            ))
+            .child(settings_row);
+
+        card.child(body).into_any_element()
+    }
+
+    fn ai_switch_row(
+        &self,
+        label: String,
+        hint: String,
+        checked: bool,
+        enabled: bool,
+        toggle: AiToggle,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let p = self.palette;
+        let id = match toggle {
+            AiToggle::Enabled => "integrations-ai-enabled",
+            AiToggle::Auto => "integrations-ai-auto",
+            AiToggle::Backlog => "integrations-ai-backlog",
+        };
+        h_flex()
+            .items_center()
+            .gap(px(12.))
+            .py(px(2.))
+            .child(
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(rgb(if enabled { p.text } else { p.muted_2 }))
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(p.muted_2))
+                            .child(hint),
+                    ),
+            )
+            .child(
+                Switch::new(id)
+                    .checked(checked)
+                    .disabled(!enabled)
+                    .on_click(cx.listener(move |this, value, _, cx| {
+                        if !enabled {
+                            return;
+                        }
+                        match toggle {
+                            AiToggle::Enabled => this.set_ai_tagging_enabled(*value, cx),
+                            AiToggle::Auto => this.save_ai_runtime_settings(cx, |settings| {
+                                settings.ai_tagging_auto = *value;
+                            }),
+                            AiToggle::Backlog => this.save_ai_runtime_settings(cx, |settings| {
+                                settings.ai_tagging_backlog = *value;
+                            }),
+                        }
+                    })),
+            )
+    }
+
+    fn set_ai_tagging_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
+        if self.settings.ai_tagging_enabled == enabled {
+            return;
+        }
+        self.save_ai_runtime_settings(cx, move |settings| {
+            settings.ai_tagging_enabled = enabled;
+        });
+        // A failed save rolls the setting back; animate to the persisted
+        // value so the runtime section cannot claim a state it did not save.
+        let target = if self.settings.ai_tagging_enabled {
+            0.0
+        } else {
+            1.0
+        };
+        if cx.reduce_motion() {
+            self.integrations_ai_motion = ToggleMotion::settled(target);
+        } else {
+            self.integrations_ai_motion.animate_to(target, MOTION_FAST);
+        }
+        cx.notify();
     }
 
     fn clipboard_card(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
@@ -348,5 +813,42 @@ impl App {
                 .animate_to(target, MOTION_FAST);
         }
         cx.notify();
+    }
+}
+
+/// One queue counter in the AI runtime card.
+fn ai_job_stat(p: &Palette, label: String, value: i64, color: u32) -> Div {
+    v_flex()
+        .flex_1()
+        .min_w_0()
+        .gap(px(2.))
+        .p(px(10.))
+        .rounded(px(10.))
+        .bg(rgb(p.panel_2))
+        .child(
+            div()
+                .text_size(px(10.))
+                .text_color(rgb(p.muted_2))
+                .truncate()
+                .child(label),
+        )
+        .child(
+            div()
+                .text_size(px(18.))
+                .font_semibold()
+                .text_color(rgb(color))
+                .child(value.to_string()),
+        )
+}
+
+/// The localized stage description shown under one job's progress bar.
+fn ai_stage_label(stage: Option<TaggingStage>) -> String {
+    match stage {
+        Some(TaggingStage::Presence) => tr!("integrations.ai.jobs.stage.presence"),
+        Some(TaggingStage::PeopleCount) => tr!("integrations.ai.jobs.stage.people_count"),
+        Some(TaggingStage::PlaceClass) => tr!("integrations.ai.jobs.stage.place_class"),
+        Some(TaggingStage::PlaceTags) => tr!("integrations.ai.jobs.stage.place_tags"),
+        Some(TaggingStage::Write) => tr!("integrations.ai.jobs.stage.write"),
+        None => tr!("integrations.ai.jobs.stage.queued"),
     }
 }
