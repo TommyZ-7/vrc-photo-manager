@@ -17,7 +17,9 @@ use vrc_photon_ai_host::AiHostError;
 use vrc_photon_ai_host::sidecar::{
     CancelToken, ModelPaths, SidecarClient, SidecarConfig, SidecarPaths, SidecarTimeouts,
 };
-use vrc_photon_ai_protocol::{ImageRef, Op, PlaceBranch, SidecarResult, TagBranch};
+use vrc_photon_ai_protocol::{
+    ImageRef, Op, PlaceBranch, SidecarErrorCode, SidecarResult, TagBranch,
+};
 
 const CATALOG_JSON: &str = r#"{
   "version": "2026-11-03.1",
@@ -328,6 +330,56 @@ fn cancel_current_without_ack_kills_the_process() {
 }
 
 #[test]
+fn cancel_current_while_idle_does_not_poison_the_next_request() {
+    let mock = spawn_mock("normal");
+
+    mock.client.cancel_current();
+    let result = mock
+        .client
+        .request(Op::Presence, &test_image(), None, &CancelToken::default())
+        .expect("a stale cancel_current must not cancel the next request");
+
+    assert!(matches!(
+        result,
+        SidecarResult::Presence { present: false, .. }
+    ));
+}
+
+#[test]
+fn error_response_preserves_the_structured_code_and_retryable() {
+    let mock = spawn_mock("error");
+
+    match mock
+        .client
+        .request(Op::Presence, &test_image(), None, &CancelToken::default())
+    {
+        Err(AiHostError::SidecarRejected(error)) => {
+            assert_eq!(error.code, SidecarErrorCode::ImageDecodeFailed);
+            assert_eq!(error.message, "mock image decode failed");
+            assert!(!error.retryable);
+        }
+        other => panic!("expected SidecarRejected, got {other:?}"),
+    }
+}
+
+#[test]
+fn retryable_error_response_preserves_retryable() {
+    let mock = spawn_mock("busy");
+
+    match mock
+        .client
+        .request(Op::Presence, &test_image(), None, &CancelToken::default())
+    {
+        Err(AiHostError::SidecarRejected(error)) => {
+            assert_eq!(error.code, SidecarErrorCode::Busy);
+            assert_eq!(error.message, "mock sidecar is busy");
+            assert!(error.retryable);
+        }
+        other => panic!("expected SidecarRejected, got {other:?}"),
+    }
+}
+
+#[test]
 fn crash_returns_sidecar_exited() {
     let mock = spawn_mock("crash");
 
@@ -352,6 +404,35 @@ fn shutdown_acks_and_exits() {
     mock.client
         .shutdown()
         .expect("shutdown is idempotent after exit");
+}
+
+#[test]
+fn shutdown_without_ack_kills_the_process_within_the_timeout() {
+    let mock = spawn_mock_with(
+        "no_shutdown",
+        None,
+        test_timeouts(
+            Duration::from_secs(5),
+            Duration::from_secs(1),
+            Duration::from_millis(250),
+        ),
+    );
+    let started = Instant::now();
+
+    mock.client
+        .shutdown()
+        .expect("a missing shutdown ack must force-stop the sidecar");
+
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(200),
+        "shutdown must wait for the ack before killing: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "shutdown must not hang: {elapsed:?}"
+    );
+    assert!(!mock.client.is_alive());
 }
 
 #[test]

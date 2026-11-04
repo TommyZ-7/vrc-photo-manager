@@ -5,7 +5,7 @@
 //!
 //! Environment variables:
 //! - `MOCK_SIDECAR_MODE`: `normal` (default), `fatal`, `crash`, `slow`,
-//!   `no_cancel`, or `bad_stdout`.
+//!   `no_cancel`, `no_shutdown`, `error`, `busy`, or `bad_stdout`.
 //! - `MOCK_SIDECAR_DELAY_MS`: overrides the response delay of `slow` and
 //!   `no_cancel`, so timeout and cancel tests can run in milliseconds.
 //! - `MOCK_SIDECAR_CATALOG`: fallback path to a `Catalog` JSON file when
@@ -43,6 +43,9 @@ enum Mode {
     Crash,
     Slow,
     NoCancel,
+    NoShutdown,
+    Error,
+    Busy,
     BadStdout,
 }
 
@@ -53,6 +56,9 @@ impl Mode {
             Ok("crash") => Self::Crash,
             Ok("slow") => Self::Slow,
             Ok("no_cancel") => Self::NoCancel,
+            Ok("no_shutdown") => Self::NoShutdown,
+            Ok("error") => Self::Error,
+            Ok("busy") => Self::Busy,
             Ok("bad_stdout") => Self::BadStdout,
             _ => Self::Normal,
         }
@@ -64,12 +70,35 @@ impl Mode {
         match self {
             Self::Slow => Some(override_delay.unwrap_or(SLOW_DELAY)),
             Self::NoCancel => Some(override_delay.unwrap_or(NO_CANCEL_DELAY)),
-            Self::Normal | Self::Fatal | Self::Crash | Self::BadStdout => None,
+            Self::Normal
+            | Self::Fatal
+            | Self::Crash
+            | Self::NoShutdown
+            | Self::Error
+            | Self::Busy
+            | Self::BadStdout => None,
         }
     }
 
     fn honours_cancel(self) -> bool {
         !matches!(self, Self::NoCancel)
+    }
+
+    /// Responses that exercise the host's structured error handling.
+    fn response_error(self) -> Option<SidecarError> {
+        match self {
+            Self::Error => Some(SidecarError {
+                code: SidecarErrorCode::ImageDecodeFailed,
+                message: "mock image decode failed".to_string(),
+                retryable: false,
+            }),
+            Self::Busy => Some(SidecarError {
+                code: SidecarErrorCode::Busy,
+                message: "mock sidecar is busy".to_string(),
+                retryable: true,
+            }),
+            _ => None,
+        }
     }
 }
 
@@ -309,6 +338,10 @@ fn serve(mode: Mode, delay: Option<Duration>, catalog: &Catalog) {
 
         match request {
             SidecarRequest::Shutdown => {
+                if mode == Mode::NoShutdown {
+                    // Stay alive so the host has to exercise its kill path.
+                    continue;
+                }
                 emit(&SidecarMessage::ShutdownAck);
                 return;
             }
@@ -318,6 +351,16 @@ fn serve(mode: Mode, delay: Option<Duration>, catalog: &Catalog) {
             SidecarRequest::Request { id, op, branch, .. } => {
                 if mode == Mode::Crash {
                     std::process::exit(1);
+                }
+
+                if let Some(error) = mode.response_error() {
+                    emit(&SidecarMessage::Response(SidecarResponse {
+                        id,
+                        ok: false,
+                        result: None,
+                        error: Some(error),
+                    }));
+                    continue;
                 }
 
                 if let Some(delay) = delay

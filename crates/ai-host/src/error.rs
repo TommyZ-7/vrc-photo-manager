@@ -1,5 +1,7 @@
 //! Errors returned by the AI plugin host.
 
+use vrc_photon_ai_protocol::SidecarError;
+
 /// Result alias for plugin host operations.
 pub type Result<T> = std::result::Result<T, AiHostError>;
 
@@ -36,6 +38,12 @@ pub enum AiHostError {
     UnsupportedProtocol(u32),
     #[error("sidecar fatal error: {0}")]
     SidecarFatal(String),
+    /// The sidecar answered a request with `ok: false`.
+    ///
+    /// The structured code and `retryable` flag drive the daemon's retry
+    /// policy, so they must survive the host boundary.
+    #[error("sidecar rejected the request: {}: {}", .0.code.as_str(), .0.message)]
+    SidecarRejected(SidecarError),
     #[error("sidecar exited unexpectedly")]
     SidecarExited,
     #[error("sidecar request timed out")]
@@ -54,6 +62,8 @@ mod tests {
 
     #[test]
     fn errors_have_human_readable_messages() {
+        use vrc_photon_ai_protocol::SidecarErrorCode;
+
         assert_eq!(
             AiHostError::Signature.to_string(),
             "manifest signature verification failed"
@@ -69,6 +79,15 @@ mod tests {
         assert_eq!(
             AiHostError::SidecarFatal("boom".to_string()).to_string(),
             "sidecar fatal error: boom"
+        );
+        assert_eq!(
+            AiHostError::SidecarRejected(SidecarError {
+                code: SidecarErrorCode::Busy,
+                message: "another request is in flight".to_string(),
+                retryable: true,
+            })
+            .to_string(),
+            "sidecar rejected the request: busy: another request is in flight"
         );
         assert_eq!(
             AiHostError::ConsentRequired.to_string(),

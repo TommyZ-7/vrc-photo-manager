@@ -123,19 +123,64 @@ impl CancelToken {
     }
 }
 
+/// The in-flight request and a cancel that belongs to exactly that request.
+///
+/// `cancel_current` records an id instead of writing to stdin. The request
+/// loop consumes the pending cancel only when the id matches its own, so a
+/// late `cancel_current` cannot cancel the next request.
+#[derive(Debug, Default)]
+struct CurrentRequest {
+    id: Option<String>,
+    cancel: Option<String>,
+}
+
+impl CurrentRequest {
+    /// Publishes the request that is about to be written to the sidecar.
+    fn begin(&mut self, id: &str) {
+        self.id = Some(id.to_string());
+        self.cancel = None;
+    }
+
+    /// Records a cancel for `id`; ignored once another request is current.
+    fn mark_cancel(&mut self, id: &str) {
+        if self.id.as_deref() == Some(id) {
+            self.cancel = Some(id.to_string());
+        }
+    }
+
+    /// Consumes a pending cancel only when it belongs to `id`.
+    fn take_cancel(&mut self, id: &str) -> bool {
+        if self.id.as_deref() == Some(id) && self.cancel.as_deref() == Some(id) {
+            self.cancel = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Clears the in-flight request; a stale id is ignored.
+    fn finish(&mut self, id: &str) {
+        if self.id.as_deref() == Some(id) {
+            self.clear();
+        }
+    }
+
+    fn clear(&mut self) {
+        self.id = None;
+        self.cancel = None;
+    }
+}
+
 struct SidecarInner {
     hello: Hello,
     timeouts: SidecarTimeouts,
-    /// The child's stdin, shared by requests and `cancel_current`.
+    /// The child's stdin. Only the request loop writes to it.
     stdin: Mutex<ChildStdin>,
     child: Mutex<Child>,
     /// The sidecar handles one request at a time; serialise them here.
     request_lock: Mutex<()>,
-    /// The id of the request currently in flight, used by `cancel_current`.
-    current_id: Mutex<Option<String>>,
-    /// Set by `cancel_current` after it writes a cancel line, so the waiting
-    /// request also arms its cancel-ack deadline.
-    cancel_requested: AtomicBool,
+    /// The request currently in flight and its id-scoped pending cancel.
+    current: Mutex<CurrentRequest>,
     /// Per-request response channels keyed by request id.
     pending: Mutex<HashMap<String, Sender<std::result::Result<SidecarMessage, RequestFailure>>>>,
     /// The waiter for an outstanding `shutdown`.
@@ -160,12 +205,15 @@ impl SidecarInner {
     }
 
     /// Clears the bookkeeping for a request that just finished.
-    fn finish_request(&self, id: &str) {
+    ///
+    /// Returns whether `cancel_current` recorded a cancel before the request
+    /// finished, so an already-delivered result can still be discarded.
+    fn finish_request(&self, id: &str) -> bool {
         lock_unpoisoned(&self.pending).remove(id);
-        let mut current = lock_unpoisoned(&self.current_id);
-        if current.as_deref() == Some(id) {
-            *current = None;
-        }
+        let mut current = lock_unpoisoned(&self.current);
+        let cancelled = current.take_cancel(id);
+        current.finish(id);
+        cancelled
     }
 
     fn fail_all(&self, failure: RequestFailure) {
@@ -376,8 +424,7 @@ impl SidecarClient {
                     stdin: Mutex::new(stdin),
                     child: Mutex::new(child),
                     request_lock: Mutex::new(()),
-                    current_id: Mutex::new(None),
-                    cancel_requested: AtomicBool::new(false),
+                    current: Mutex::new(CurrentRequest::default()),
                     pending: Mutex::new(HashMap::new()),
                     shutdown: Mutex::new(None),
                     alive: AtomicBool::new(true),
@@ -420,11 +467,9 @@ impl SidecarClient {
             return Err(AiHostError::SidecarExited);
         }
 
-        self.inner.cancel_requested.store(false, Ordering::SeqCst);
         let id = Uuid::new_v4().to_string();
         let (sender, receiver) = mpsc::channel();
         lock_unpoisoned(&self.inner.pending).insert(id.clone(), sender);
-        *lock_unpoisoned(&self.inner.current_id) = Some(id.clone());
 
         let request = SidecarRequest::Request {
             id: id.clone(),
@@ -432,9 +477,18 @@ impl SidecarClient {
             image: image.clone(),
             branch,
         };
-        if let Err(error) = self.inner.write(&request) {
-            self.kill();
-            return Err(error);
+        {
+            // Publishing the id and writing the request under one lock keeps
+            // `cancel_current` from targeting a request line that has not
+            // reached the sidecar yet.
+            let mut current = lock_unpoisoned(&self.inner.current);
+            current.begin(&id);
+            if let Err(error) = self.inner.write(&request) {
+                current.clear();
+                drop(current);
+                self.kill();
+                return Err(error);
+            }
         }
 
         let request_deadline = Instant::now() + self.inner.timeouts.request;
@@ -443,20 +497,15 @@ impl SidecarClient {
         loop {
             let now = Instant::now();
 
-            let external_cancel = self.inner.cancel_requested.swap(false, Ordering::SeqCst);
-            if cancel_sent_at.is_none() {
-                if cancel.is_cancelled() {
-                    let cancel_line = SidecarRequest::Cancel { id: id.clone() };
-                    match self.inner.write(&cancel_line) {
-                        Ok(()) => cancel_sent_at = Some(Instant::now()),
-                        Err(_) => {
-                            self.kill();
-                            return Err(AiHostError::SidecarExited);
-                        }
+            let external_cancel = lock_unpoisoned(&self.inner.current).take_cancel(&id);
+            if cancel_sent_at.is_none() && (external_cancel || cancel.is_cancelled()) {
+                let cancel_line = SidecarRequest::Cancel { id: id.clone() };
+                match self.inner.write(&cancel_line) {
+                    Ok(()) => cancel_sent_at = Some(Instant::now()),
+                    Err(_) => {
+                        self.kill();
+                        return Err(AiHostError::SidecarExited);
                     }
-                } else if external_cancel {
-                    // `cancel_current` already wrote the line.
-                    cancel_sent_at = Some(Instant::now());
                 }
             }
 
@@ -479,36 +528,35 @@ impl SidecarClient {
                 .min(CANCEL_POLL_INTERVAL);
             match receiver.recv_timeout(wait) {
                 Ok(Ok(message)) => {
-                    self.inner.finish_request(&id);
-                    return interpret_response(message, cancel_sent_at.is_some());
+                    let cancelled = self.inner.finish_request(&id);
+                    return interpret_response(message, cancel_sent_at.is_some() || cancelled);
                 }
                 Ok(Err(failure)) => {
-                    self.inner.finish_request(&id);
+                    let _ = self.inner.finish_request(&id);
                     return Err(failure.into_error());
                 }
                 Err(RecvTimeoutError::Timeout) => continue,
                 Err(RecvTimeoutError::Disconnected) => {
-                    self.inner.finish_request(&id);
+                    let _ = self.inner.finish_request(&id);
                     return Err(AiHostError::SidecarExited);
                 }
             }
         }
     }
 
-    /// Sends a `cancel` for the request currently in flight, if any.
+    /// Requests cancellation of the request currently in flight, if any.
     ///
     /// Safe to call from another thread (the IPC handler) while `request` is
-    /// blocked. A request that has already finished is simply ignored by the
-    /// sidecar.
+    /// blocked. The waiting request loop writes the `cancel` line and starts
+    /// the cancel-ack deadline only if it still owns the matching id, so a
+    /// call that races with completion cannot cancel or poison the next
+    /// request.
     pub fn cancel_current(&self) {
-        let id = lock_unpoisoned(&self.inner.current_id).clone();
-        let Some(id) = id else {
+        let mut current = lock_unpoisoned(&self.inner.current);
+        let Some(id) = current.id.clone() else {
             return;
         };
-        match self.inner.write(&SidecarRequest::Cancel { id }) {
-            Ok(()) => self.inner.cancel_requested.store(true, Ordering::SeqCst),
-            Err(_) => self.kill(),
-        }
+        current.mark_cancel(&id);
     }
 
     /// Shuts the sidecar down and waits for the process to exit.
@@ -572,8 +620,7 @@ impl SidecarClient {
     pub fn kill(&self) {
         self.inner.mark_dead();
         self.inner.fail_all(RequestFailure::Exited);
-        self.inner.cancel_requested.store(false, Ordering::SeqCst);
-        *lock_unpoisoned(&self.inner.current_id) = None;
+        lock_unpoisoned(&self.inner.current).clear();
         self.inner.kill_child();
     }
 
@@ -858,11 +905,7 @@ fn interpret_response(message: SidecarMessage, cancel_sent: bool) -> Result<Side
                 if error.code == SidecarErrorCode::Cancelled {
                     Err(AiHostError::Cancelled)
                 } else {
-                    Err(AiHostError::SidecarFatal(format!(
-                        "{}: {}",
-                        error.code.as_str(),
-                        error.message
-                    )))
+                    Err(AiHostError::SidecarRejected(error))
                 }
             } else {
                 Err(AiHostError::SidecarProtocol(
@@ -1032,5 +1075,46 @@ mod tests {
             command.get_current_dir(),
             Some(Path::new("/data/plugins/autotag/linux-vulkan/1.0.0"))
         );
+    }
+
+    #[test]
+    fn pending_cancel_is_scoped_to_the_matching_request() {
+        let mut current = CurrentRequest::default();
+        current.begin("a");
+        current.mark_cancel("a");
+        current.mark_cancel("stale");
+
+        // A cancel recorded for "a" must never be consumed by another id.
+        assert!(!current.take_cancel("b"));
+        assert!(current.take_cancel("a"));
+        assert!(!current.take_cancel("a"));
+    }
+
+    #[test]
+    fn a_new_request_drops_the_previous_pending_cancel() {
+        let mut current = CurrentRequest::default();
+        current.begin("a");
+        current.mark_cancel("a");
+
+        // Even if a stale cancel survives, publishing a new request must not
+        // let the next request consume it.
+        current.begin("b");
+        assert!(!current.take_cancel("a"));
+        assert!(!current.take_cancel("b"));
+    }
+
+    #[test]
+    fn finishing_a_different_request_keeps_the_current_one() {
+        let mut current = CurrentRequest::default();
+        current.begin("a");
+        current.mark_cancel("a");
+        current.finish("b");
+
+        assert!(current.take_cancel("a"));
+        current.finish("b");
+        assert!(!current.take_cancel("b"));
+        current.finish("a");
+        assert!(!current.take_cancel("a"));
+        assert!(current.id.is_none());
     }
 }
