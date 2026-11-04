@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use image::DynamicImage;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use vrc_photon_ai_protocol::TaggingJobStatus;
 use vrc_photon_core::compressor;
 use vrc_photon_core::db::Db;
 use vrc_photon_core::hashing;
@@ -18,7 +19,7 @@ use vrc_photon_core::linker;
 use vrc_photon_core::log_parser::LogIngestor;
 use vrc_photon_core::model::{
     CompressionJob, CompressionProfile, DaemonCommand, DaemonOperation, DeletionReason,
-    DeletionRequest, Derivative, Photo, PhotoStatus, QueueStatus,
+    DeletionRequest, DeletionStatus, Derivative, Photo, PhotoStatus, QueueStatus,
 };
 use vrc_photon_core::photo_filename::is_source_photo;
 use vrc_photon_core::scanner::{
@@ -41,9 +42,9 @@ mod world_name_http;
 mod world_names;
 use discord_http::UreqTransport;
 use ipc_server::{EventBus, IpcControl, IpcServer, status_snapshot, tagging_status};
-use plugin::PluginService;
+use plugin::{AI_PLUGIN_ID, PluginService};
 use signals::{JobSignal, WakeSignal};
-use tagging::TaggingControl;
+use tagging::{TaggingControl, TaggingWorker, TaggingWorkerConfig};
 use tray::{Tray, TrayAction};
 use vrc_photon_ai_host::{ModelHttpClient, UreqModelClient};
 use world_name_http::UreqWorldNameTransport;
@@ -74,6 +75,10 @@ pub struct DaemonStatus {
     pub photo_count: i64,
     pub pending_jobs: i64,
     pub pending_sends: i64,
+    /// `waiting` + `pending` + `processing` AI tagging jobs.
+    pub pending_tagging_jobs: i64,
+    /// Whether an install, ready model, and saved probe are all present.
+    pub tagging_ready: bool,
     pub scanning: bool,
     pub scan_phase: Option<vrc_photon_ipc::ScanPhase>,
     pub scan_processed: usize,
@@ -270,6 +275,7 @@ pub struct Daemon {
     tagging: Arc<JobSignal>,
     /// In-flight tagging cancel tokens shared with IPC.
     tagging_control: Arc<TaggingControl>,
+    tagging_handle: Option<JoinHandle<()>>,
     /// Root for AI plugin installs, model files, snapshots, and logs.
     ai_data_dir: PathBuf,
     #[cfg(test)]
@@ -313,9 +319,15 @@ impl Daemon {
         if owns_deletion_executor {
             db.reset_running_deletions()
                 .context("cannot recover interrupted deletions")?;
+            let resumed = db
+                .resume_interrupted_tagging_jobs()
+                .context("cannot recover interrupted tagging jobs")?;
+            if resumed > 0 {
+                tracing::info!(jobs = resumed, "resumed interrupted tagging jobs");
+            }
         } else {
             tracing::debug!(
-                "preserving running deletions because this process does not own the executor lock"
+                "preserving running deletions and tagging jobs because this process does not own the executor lock"
             );
         }
         let mut settings = AppSettings::load(&db).context("cannot load settings")?;
@@ -452,6 +464,7 @@ impl Daemon {
             plugin,
             tagging,
             tagging_control,
+            tagging_handle: None,
             ai_data_dir,
             #[cfg(test)]
             ai_plugin_keys,
@@ -533,12 +546,7 @@ impl Daemon {
     }
 
     fn publish_status(&self) {
-        let (pending_tagging_jobs, tagging_ready) = tagging_status(&self.db, &self.plugin);
-        let status = status_snapshot(
-            &mut self.status.lock().unwrap(),
-            pending_tagging_jobs,
-            tagging_ready,
-        );
+        let status = status_snapshot(&mut self.status.lock().unwrap());
         self.events.publish(Event::StatusChanged { status });
     }
 
@@ -884,6 +892,18 @@ impl Daemon {
         Ok(())
     }
 
+    /// Moves the AI backlog from `waiting` to `pending` and wakes the worker.
+    /// The settings UI performs the same database update directly; this
+    /// method exists for in-process callers and tests.
+    pub fn release_ai_backlog(&mut self) -> Result<usize> {
+        let released = {
+            let db = self.db.lock().unwrap();
+            db.release_waiting_tagging_jobs(AI_PLUGIN_ID)?
+        };
+        self.tagging.notify();
+        Ok(released)
+    }
+
     /// Executes every deletion that has no remaining job blocker. The
     /// background thread calls the same routine on a timer. A process that
     /// does not own the instance lock must leave deletion execution to the
@@ -1074,6 +1094,7 @@ impl Daemon {
             return Ok(());
         }
         self.refresh_compression_settings();
+        let tagging_ready = self.plugin.is_ready(AI_PLUGIN_ID);
         paths.sort_by_key(|path| !path.is_file());
         paths.dedup();
         let roots = self.settings.photo_roots();
@@ -1158,6 +1179,13 @@ impl Daemon {
                     self.settings.auto_compress_immediate,
                 )?;
                 self.jobs.notify();
+            }
+            if !new_ids.is_empty() {
+                let tagging_enqueued =
+                    enqueue_auto_tagging(&db, &new_ids, &self.settings, tagging_ready)?;
+                if tagging_enqueued > 0 {
+                    self.tagging.notify();
+                }
             }
         }
         if let Some(tx) = &self.thumbnail_tx {
@@ -1280,6 +1308,7 @@ impl Daemon {
         initial_scan_override: Option<bool>,
     ) -> Result<(ScanReport, usize)> {
         self.refresh_compression_settings();
+        let tagging_ready = self.plugin.is_ready(AI_PLUGIN_ID);
         let mut report = ScanReport::default();
         let mut auto_enqueued = 0;
         let root_count = roots.len();
@@ -1386,6 +1415,13 @@ impl Daemon {
                     self.settings.auto_compress_immediate,
                 )?;
                 self.jobs.notify();
+            }
+            if !report.new_ids.is_empty() {
+                let tagging_enqueued =
+                    enqueue_auto_tagging(&db, &report.new_ids, &self.settings, tagging_ready)?;
+                if tagging_enqueued > 0 {
+                    self.tagging.notify();
+                }
             }
         }
         self.verify_replaced_assets()?;
@@ -1756,19 +1792,29 @@ impl Daemon {
     }
 
     fn refresh_status(&self) -> Result<()> {
-        let db = self.db.lock().unwrap();
-        let now = chrono::Utc::now().timestamp();
-        let session = db.session_at(now)?;
-        let (world_name, players) = if let Some(session) = &session {
-            let world = db.world_by_id(session.world_id)?;
-            let players = db.players_at(session.id, now)?.len();
-            (world.and_then(|world| world.alias.or(world.name)), players)
-        } else {
-            (None, 0)
+        let (world_name, players, photo_count, pending_jobs, pending_sends) = {
+            let db = self.db.lock().unwrap();
+            let now = chrono::Utc::now().timestamp();
+            let session = db.session_at(now)?;
+            let (world_name, players) = if let Some(session) = &session {
+                let world = db.world_by_id(session.world_id)?;
+                let players = db.players_at(session.id, now)?.len();
+                (world.and_then(|world| world.alias.or(world.name)), players)
+            } else {
+                (None, 0)
+            };
+            (
+                world_name,
+                players,
+                db.count_photos()?,
+                db.count_jobs(QueueStatus::Pending)?,
+                db.count_pending_sends()?,
+            )
         };
-        let photo_count = db.count_photos()?;
-        let pending_jobs = db.count_jobs(QueueStatus::Pending)?;
-        let pending_sends = db.count_pending_sends()?;
+        // The readiness check reads the database, so it must run after the
+        // block above released the lock. The cached values keep IPC snapshots
+        // cheap and lock-order safe.
+        let (pending_tagging_jobs, tagging_ready) = tagging_status(&self.db, &self.plugin);
         let mut status = self.status.lock().unwrap();
         status.watching = self.settings.log_dir.is_some();
         status.world_name = world_name;
@@ -1776,6 +1822,8 @@ impl Daemon {
         status.photo_count = photo_count;
         status.pending_jobs = pending_jobs;
         status.pending_sends = pending_sends;
+        status.pending_tagging_jobs = pending_tagging_jobs;
+        status.tagging_ready = tagging_ready;
         status.last_log = self
             .log_tail
             .as_ref()
@@ -1877,6 +1925,10 @@ impl Daemon {
         self.settings.auto_compress_backlog = settings.auto_compress_backlog;
         self.settings.auto_compress_immediate = settings.auto_compress_immediate;
         self.settings.auto_compress_keep_original = settings.auto_compress_keep_original;
+        self.settings.ai_tagging_enabled = settings.ai_tagging_enabled;
+        self.settings.ai_tagging_auto = settings.ai_tagging_auto;
+        self.settings.ai_tagging_backlog = settings.ai_tagging_backlog;
+        self.settings.ai_tagging_idle_timeout_sec = settings.ai_tagging_idle_timeout_sec;
         self.settings.thumbnail_quality = settings.thumbnail_quality;
         self.settings.thumbnail_size = settings.thumbnail_size;
         self.thumbnail_cache_limit.store(
@@ -2028,6 +2080,27 @@ impl Daemon {
         }
     }
 
+    fn start_tagging_worker(&mut self) {
+        if self.tagging_handle.is_some() {
+            return;
+        }
+        let config = TaggingWorkerConfig {
+            idle_timeout: Duration::from_secs(self.settings.ai_tagging_idle_timeout_sec),
+            ..TaggingWorkerConfig::default()
+        };
+        let worker = TaggingWorker::new(
+            self.db.clone(),
+            self.ai_data_dir.clone(),
+            self.plugin.clone(),
+            self.events.clone(),
+            self.running.clone(),
+            self.tagging.clone(),
+            self.tagging_control.clone(),
+            config,
+        );
+        self.tagging_handle = Some(tagging::start_tagging_worker(worker));
+    }
+
     fn start_workers(&mut self) {
         if self.thumbnail_tx.is_none() {
             let (tx, rx) = mpsc::channel();
@@ -2126,6 +2199,7 @@ impl Daemon {
                 .expect("cannot spawn world name worker");
             self.world_name_handle = Some(handle);
         }
+        self.start_tagging_worker();
         if !self.workers.is_empty() {
             return;
         }
@@ -2148,6 +2222,7 @@ impl Daemon {
         self.jobs.notify();
         self.sends.notify();
         self.world_names.notify();
+        self.tagging.notify();
         self.thumbnail_tx = None;
         if let Some(handle) = self.thumbnail_handle.take()
             && handle.join().is_err()
@@ -2174,6 +2249,11 @@ impl Daemon {
         {
             tracing::error!("world name worker panicked");
         }
+        if let Some(handle) = self.tagging_handle.take()
+            && handle.join().is_err()
+        {
+            tracing::error!("tagging worker panicked");
+        }
         for (index, handle) in self.workers.drain(..).enumerate() {
             if handle.join().is_err() {
                 tracing::error!(worker = index, "compression worker panicked");
@@ -2196,9 +2276,9 @@ impl Daemon {
                 tracing::warn!(%error, "cannot finish log ingestion on shutdown");
             }
         }
+        self.stop_workers();
         self.plugin.stop_sidecar();
         self.tray = None;
-        self.stop_workers();
     }
 }
 
@@ -2351,6 +2431,31 @@ fn enqueue_auto_jobs(
         profiles = auto_profiles.len(),
         jobs = enqueued,
         "auto compression jobs enqueued"
+    );
+    Ok(enqueued)
+}
+
+/// Enqueues pending AI tagging jobs for newly indexed photos. Automatic
+/// tagging is opt-in twice (enabled and auto) and requires a ready plugin;
+/// everything else is left for the manual and backlog paths.
+fn enqueue_auto_tagging(
+    db: &Db,
+    new_ids: &[i64],
+    settings: &AppSettings,
+    plugin_ready: bool,
+) -> Result<usize> {
+    if new_ids.is_empty()
+        || !settings.ai_tagging_enabled
+        || !settings.ai_tagging_auto
+        || !plugin_ready
+    {
+        return Ok(0);
+    }
+    let enqueued = db.enqueue_tagging_jobs(new_ids, AI_PLUGIN_ID, TaggingJobStatus::Pending)?;
+    tracing::info!(
+        photos = new_ids.len(),
+        jobs = enqueued,
+        "automatic AI tagging jobs enqueued"
     );
     Ok(enqueued)
 }
@@ -2705,10 +2810,44 @@ fn deletion_loop(db: Arc<Mutex<Db>>, running: Arc<AtomicBool>, jobs: Arc<JobSign
     }
 }
 
+/// A forced request may be recorded directly with `force = 1` instead of
+/// through `force_deletion`, which cancels tagging jobs itself. Requests with
+/// active tagging jobs are hidden from `pending_deletion_requests`, so cancel
+/// those jobs first; the late sidecar result is rejected by the cancelled job
+/// state. `claim_deletion` then only waits for runs that were not forced.
+fn cancel_tagging_for_forced_deletions(db: &Arc<Mutex<Db>>) -> Result<()> {
+    let active = {
+        let db = db.lock().unwrap();
+        db.active_deletion_requests(i64::MAX)?
+    };
+    for request in active {
+        if !request.force
+            || request.status != DeletionStatus::Pending
+            || request.reason == DeletionReason::Unknown
+        {
+            continue;
+        }
+        let cancelled = {
+            let db = db.lock().unwrap();
+            db.cancel_tagging_jobs_for_photo(request.photo_id)?
+        };
+        if cancelled > 0 {
+            tracing::info!(
+                request = request.id,
+                photo_id = request.photo_id,
+                cancelled,
+                "cancelled tagging jobs for forced deletion"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Claims and executes every pending deletion whose jobs are terminal. A
 /// dependency failure blocks the request instead of busy-polling it; a file
 /// failure blocks it until the user retries or forces.
 fn run_deletions_once(db: &Arc<Mutex<Db>>) -> Result<usize> {
+    cancel_tagging_for_forced_deletions(db)?;
     let requests = {
         let db = db.lock().unwrap();
         db.pending_deletion_requests(100)?
@@ -3227,7 +3366,12 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::time::SystemTime;
-    use vrc_photon_core::model::{DeletionStatus, NewPhoto, PhotoContext, SendOrigin, SendStatus};
+    use vrc_photon_ai_host::test_support::sample_manifest;
+    use vrc_photon_ai_protocol::Probe;
+    use vrc_photon_core::ai::PluginInstallation;
+    use vrc_photon_core::model::{
+        DeletionStatus, JobStatusCounts, NewPhoto, PhotoContext, SendOrigin, SendStatus,
+    };
     use vrc_photon_core::settings::{DiscordAutoMode, save_discord_webhook};
 
     #[test]
@@ -4468,6 +4612,478 @@ mod tests {
         daemon.set_ai_http_client(Arc::new(UreqModelClient::new()));
 
         assert!(!daemon.plugin_service().is_ready("vrc-photon-autotag"));
+    }
+
+    const PLUGIN: &str = AI_PLUGIN_ID;
+
+    /// A daemon with an isolated library and a test plugin that can be marked
+    /// ready without spawning a sidecar.
+    struct DaemonAiTest {
+        _dir: tempfile::TempDir,
+        daemon: Daemon,
+        db: Arc<Mutex<Db>>,
+        photo_dir: PathBuf,
+        photo_seq: usize,
+    }
+
+    impl DaemonAiTest {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let photo_dir = dir.path().join("photos");
+            let log_dir = dir.path().join("logs");
+            std::fs::create_dir_all(&photo_dir).unwrap();
+            std::fs::create_dir_all(&log_dir).unwrap();
+            let db_path = dir.path().join("library.db");
+            let mut daemon =
+                Daemon::open(&db_path, Some(photo_dir.clone()), Some(log_dir)).unwrap();
+            daemon.set_ipc_endpoint(None);
+            daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+            daemon.set_ai_data_dir(dir.path().join("ai"));
+            let db = daemon.db.clone();
+            Self {
+                _dir: dir,
+                daemon,
+                db,
+                photo_dir,
+                photo_seq: 0,
+            }
+        }
+
+        fn enable_ai(&mut self, enabled: bool, auto: bool) {
+            save_daemon_settings(&self.daemon, |settings| {
+                settings.ai_tagging_enabled = enabled;
+                settings.ai_tagging_auto = auto;
+            });
+            self.daemon.settings.ai_tagging_enabled = enabled;
+            self.daemon.settings.ai_tagging_auto = auto;
+        }
+
+        /// Stores the install, model state, and probe rows `is_ready` checks.
+        /// The model files and sidecar are intentionally not created: the
+        /// auto-enqueue paths only consult readiness.
+        fn mark_plugin_ready(&self) {
+            let manifest = sample_manifest();
+            let now = chrono::Utc::now().to_rfc3339();
+            let install = PluginInstallation {
+                plugin_id: manifest.plugin_id.clone(),
+                variant: manifest.variant.clone(),
+                version: manifest.plugin_version.clone(),
+                protocol_version: manifest.protocol_version,
+                path: self
+                    ._dir
+                    .path()
+                    .join("plugin")
+                    .to_string_lossy()
+                    .into_owned(),
+                manifest_json: serde_json::to_string(&manifest).unwrap(),
+                catalog_version: Some(manifest.catalog_version.clone()),
+                active: true,
+                installed_at: now.clone(),
+                updated_at: now,
+            };
+            let probe = Probe {
+                protocol_version: manifest.protocol_version,
+                sidecar_version: "1.0.0".to_string(),
+                plugin_id: manifest.plugin_id.clone(),
+                variant: manifest.variant.clone(),
+                catalog_version: manifest.catalog_version.clone(),
+                backends: Vec::new(),
+            };
+            {
+                let db = self.db.lock().unwrap();
+                db.upsert_plugin_installation(&install).unwrap();
+                db.set_plugin_model_state(
+                    PLUGIN,
+                    vrc_photon_core::ai::ModelState::Ready,
+                    Some(&manifest.model.revision),
+                    0,
+                    None,
+                    None,
+                )
+                .unwrap();
+                db.set_plugin_probe_json(PLUGIN, Some(&serde_json::to_string(&probe).unwrap()))
+                    .unwrap();
+            }
+            assert!(self.daemon.plugin_service().is_ready(PLUGIN));
+        }
+
+        fn add_photo(&mut self) -> PathBuf {
+            self.photo_seq += 1;
+            let path = self.photo_dir.join(format!(
+                "VRChat_2026-10-21_21-{:02}-00.000_4x3.png",
+                self.photo_seq
+            ));
+            write_photo(&path);
+            path
+        }
+
+        fn scan(&mut self) -> ScanReport {
+            self.daemon
+                .scan_root_photos(self.photo_dir.clone())
+                .unwrap()
+        }
+
+        fn add_photo_and_scan(&mut self) -> (i64, PathBuf) {
+            let path = self.add_photo();
+            let report = self.scan();
+            assert_eq!(report.new_ids.len(), 1, "one new photo per call");
+            (report.new_ids[0], path)
+        }
+
+        fn photo_id(&self, path: &Path) -> i64 {
+            self.db
+                .lock()
+                .unwrap()
+                .photo_by_path(path.to_str().unwrap())
+                .unwrap()
+                .unwrap()
+                .id
+        }
+
+        fn tagging_counts(&self) -> JobStatusCounts {
+            self.db.lock().unwrap().tagging_job_counts(PLUGIN).unwrap()
+        }
+    }
+
+    #[test]
+    fn auto_tagging_enqueues_only_new_photos_when_ready() {
+        let mut ctx = DaemonAiTest::new();
+        ctx.enable_ai(true, true);
+        ctx.mark_plugin_ready();
+
+        let (new_id, _) = ctx.add_photo_and_scan();
+        assert_eq!(ctx.tagging_counts().pending, 1);
+        assert_eq!(
+            ctx.db
+                .lock()
+                .unwrap()
+                .tagging_jobs_for_photo(new_id)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        ctx.add_photo_and_scan();
+        assert_eq!(ctx.tagging_counts().pending, 2);
+
+        // Rescanning the same photos must not duplicate their active jobs.
+        ctx.scan();
+        assert_eq!(ctx.tagging_counts().pending, 2);
+        assert_eq!(
+            ctx.db
+                .lock()
+                .unwrap()
+                .tagging_jobs_for_photo(new_id)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn auto_tagging_does_nothing_when_not_ready() {
+        let mut ctx = DaemonAiTest::new();
+        ctx.enable_ai(true, true);
+
+        ctx.add_photo_and_scan();
+        assert_eq!(ctx.tagging_counts().unfinished(), 0);
+
+        ctx.daemon.refresh_status().unwrap();
+        assert!(!ctx.daemon.status.lock().unwrap().tagging_ready);
+    }
+
+    #[test]
+    fn auto_tagging_requires_enabled_and_auto_switches() {
+        let mut ctx = DaemonAiTest::new();
+        ctx.mark_plugin_ready();
+
+        ctx.enable_ai(false, true);
+        ctx.add_photo_and_scan();
+        assert_eq!(ctx.tagging_counts().unfinished(), 0);
+
+        ctx.enable_ai(true, false);
+        ctx.add_photo_and_scan();
+        assert_eq!(ctx.tagging_counts().unfinished(), 0);
+
+        ctx.enable_ai(true, true);
+        ctx.add_photo_and_scan();
+        assert_eq!(ctx.tagging_counts().pending, 1);
+    }
+
+    #[test]
+    fn watcher_new_photo_enqueues_tagging() {
+        let mut ctx = DaemonAiTest::new();
+        ctx.enable_ai(true, true);
+        ctx.mark_plugin_ready();
+        let path = ctx.add_photo();
+        ctx.daemon.dirty_paths.push(path.clone());
+
+        ctx.daemon.index_dirty_paths().unwrap();
+
+        let photo_id = ctx.photo_id(&path);
+        assert_eq!(ctx.tagging_counts().pending, 1);
+        assert_eq!(
+            ctx.db
+                .lock()
+                .unwrap()
+                .tagging_jobs_for_photo(photo_id)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn backlog_enqueue_is_waiting_until_released() {
+        let mut ctx = DaemonAiTest::new();
+        ctx.add_photo_and_scan();
+        ctx.add_photo_and_scan();
+        assert_eq!(
+            ctx.db
+                .lock()
+                .unwrap()
+                .enqueue_tagging_backlog(PLUGIN)
+                .unwrap(),
+            2
+        );
+        assert_eq!(ctx.tagging_counts().waiting, 2);
+        assert_eq!(ctx.tagging_counts().pending, 0);
+
+        assert_eq!(ctx.daemon.release_ai_backlog().unwrap(), 2);
+        let counts = ctx.tagging_counts();
+        assert_eq!(counts.waiting, 0);
+        assert_eq!(counts.pending, 2);
+    }
+
+    #[test]
+    fn release_backlog_wakes_the_worker() {
+        let mut ctx = DaemonAiTest::new();
+        let (photo_id, _) = ctx.add_photo_and_scan();
+        ctx.db
+            .lock()
+            .unwrap()
+            .enqueue_tagging_jobs(&[photo_id], PLUGIN, TaggingJobStatus::Waiting)
+            .unwrap();
+        let before = ctx.daemon.tagging.generation();
+
+        assert_eq!(ctx.daemon.release_ai_backlog().unwrap(), 1);
+        assert!(
+            ctx.daemon.tagging.generation() > before,
+            "release must notify the tagging worker"
+        );
+    }
+
+    #[test]
+    fn status_counts_include_tagging() {
+        let mut ctx = DaemonAiTest::new();
+        ctx.enable_ai(true, true);
+        ctx.mark_plugin_ready();
+        ctx.add_photo_and_scan();
+        ctx.add_photo_and_scan();
+        assert_eq!(ctx.tagging_counts().pending, 2);
+
+        // A backlog job is unfinished too, even though the worker never claims
+        // it until release.
+        ctx.enable_ai(false, false);
+        let (backlog_photo, _) = ctx.add_photo_and_scan();
+        ctx.db
+            .lock()
+            .unwrap()
+            .enqueue_tagging_jobs(&[backlog_photo], PLUGIN, TaggingJobStatus::Waiting)
+            .unwrap();
+        ctx.enable_ai(true, true);
+        assert_eq!(ctx.tagging_counts().waiting, 1);
+        assert_eq!(ctx.tagging_counts().unfinished(), 3);
+
+        ctx.daemon.refresh_status().unwrap();
+        {
+            let mut status = ctx.daemon.status.lock().unwrap();
+            assert_eq!(status.pending_tagging_jobs, 3);
+            assert!(status.tagging_ready);
+            let snapshot = status_snapshot(&mut status);
+            assert_eq!(snapshot.pending_tagging_jobs, 3);
+            assert!(snapshot.tagging_ready);
+        }
+
+        // A processing job still counts as unfinished.
+        let claimed = {
+            let db = ctx.db.lock().unwrap();
+            db.next_pending_tagging_job().unwrap().unwrap()
+        };
+        assert_eq!(claimed.status, TaggingJobStatus::Processing);
+        ctx.daemon.refresh_status().unwrap();
+        assert_eq!(ctx.daemon.status.lock().unwrap().pending_tagging_jobs, 3);
+    }
+
+    #[test]
+    fn run_once_does_not_start_the_tagging_worker() {
+        let mut ctx = DaemonAiTest::new();
+        ctx.enable_ai(true, true);
+        ctx.mark_plugin_ready();
+        ctx.add_photo();
+
+        ctx.daemon.run_once().unwrap();
+
+        assert!(ctx.daemon.tagging_handle.is_none());
+        assert_eq!(ctx.tagging_counts().pending, 1);
+    }
+
+    #[test]
+    fn start_workers_spawns_and_stops_the_tagging_worker() {
+        let mut ctx = DaemonAiTest::new();
+        ctx.daemon.start_workers();
+        assert!(ctx.daemon.tagging_handle.is_some());
+        ctx.daemon.stop_workers();
+        assert!(ctx.daemon.tagging_handle.is_none());
+    }
+
+    #[test]
+    fn startup_resumes_interrupted_tagging_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let photo_path = photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&photo_path);
+        let db_path = dir.path().join("library.db");
+        let job_id = {
+            let db = Db::open(&db_path).unwrap();
+            let root = db
+                .add_root(photo_dir.to_str().unwrap(), "reference")
+                .unwrap();
+            let photo_id = db
+                .upsert_photo(&NewPhoto {
+                    root_id: root,
+                    rel_path: photo_path
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                    abs_path: photo_path.to_string_lossy().into_owned(),
+                    file_name: photo_path
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                    captured_at_utc: 1_700_000_000,
+                    captured_at_local: "2026-10-21 21:24:00".to_string(),
+                    tz_offset_sec: 9 * 3600,
+                    width: 16,
+                    height: 10,
+                    file_size: 10,
+                    mtime: 1_700_000_000,
+                    blake3: None,
+                })
+                .unwrap();
+            db.enqueue_tagging_jobs(&[photo_id], PLUGIN, TaggingJobStatus::Pending)
+                .unwrap();
+            db.next_pending_tagging_job().unwrap().unwrap().id
+        };
+
+        // A maintenance process must not steal the live daemon's jobs.
+        let preserving = Daemon::open_preserving_running_deletions(
+            &db_path,
+            Some(photo_dir.clone()),
+            Some(log_dir.clone()),
+        )
+        .unwrap();
+        assert_eq!(
+            preserving
+                .db
+                .lock()
+                .unwrap()
+                .tagging_job(&job_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            TaggingJobStatus::Processing
+        );
+        drop(preserving);
+
+        let owning = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        assert_eq!(
+            owning
+                .db
+                .lock()
+                .unwrap()
+                .tagging_job(&job_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            TaggingJobStatus::Pending
+        );
+    }
+
+    #[test]
+    fn force_delete_cancels_tagging_before_claim() {
+        let mut ctx = DaemonAiTest::new();
+        let (photo_id, path) = ctx.add_photo_and_scan();
+        let job_id = {
+            let db = ctx.db.lock().unwrap();
+            db.enqueue_tagging_jobs(&[photo_id], PLUGIN, TaggingJobStatus::Pending)
+                .unwrap();
+            db.next_pending_tagging_job().unwrap().unwrap().id
+        };
+        let request = {
+            let db = ctx.db.lock().unwrap();
+            db.request_deletion(&[photo_id], DeletionReason::Manual, true)
+                .unwrap()[0]
+        };
+
+        ctx.daemon.process_deletions().unwrap();
+
+        let db = ctx.db.lock().unwrap();
+        assert_eq!(
+            db.tagging_job(&job_id).unwrap().unwrap().status,
+            TaggingJobStatus::Cancelled
+        );
+        assert_eq!(
+            db.deletion_request_by_id(request).unwrap().unwrap().status,
+            DeletionStatus::Completed
+        );
+        assert!(!path.exists(), "the forced deletion must remove the file");
+    }
+
+    #[test]
+    fn deletion_waits_for_processing_tagging() {
+        let mut ctx = DaemonAiTest::new();
+        let (photo_id, path) = ctx.add_photo_and_scan();
+        let (job_id, request) = {
+            let db = ctx.db.lock().unwrap();
+            db.enqueue_tagging_jobs(&[photo_id], PLUGIN, TaggingJobStatus::Pending)
+                .unwrap();
+            let job_id = db.next_pending_tagging_job().unwrap().unwrap().id;
+            let request = db
+                .request_deletion(&[photo_id], DeletionReason::Manual, false)
+                .unwrap()[0];
+            (job_id, request)
+        };
+
+        ctx.daemon.process_deletions().unwrap();
+        {
+            let db = ctx.db.lock().unwrap();
+            assert_eq!(
+                db.tagging_job(&job_id).unwrap().unwrap().status,
+                TaggingJobStatus::Processing,
+                "a non-forced deletion must not cancel the job"
+            );
+            assert_eq!(
+                db.deletion_request_by_id(request).unwrap().unwrap().status,
+                DeletionStatus::Pending
+            );
+        }
+        assert!(path.exists(), "the photo must survive while tagging runs");
+
+        ctx.db.lock().unwrap().cancel_tagging_job(&job_id).unwrap();
+        ctx.daemon.process_deletions().unwrap();
+
+        let db = ctx.db.lock().unwrap();
+        assert_eq!(
+            db.deletion_request_by_id(request).unwrap().unwrap().status,
+            DeletionStatus::Completed
+        );
+        assert!(!path.exists());
     }
 
     fn original_path(dir: &tempfile::TempDir) -> PathBuf {

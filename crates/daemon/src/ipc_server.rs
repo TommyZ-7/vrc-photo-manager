@@ -61,15 +61,7 @@ pub(crate) struct IpcControl {
 
 impl IpcControl {
     fn snapshot(&self) -> StatusSnapshot {
-        // Read the database before taking the status lock: the daemon's
-        // status refresher holds the database lock while taking the status
-        // lock, so the reverse order here would deadlock.
-        let (pending_tagging_jobs, tagging_ready) = tagging_status(&self.db, &self.plugin);
-        status_snapshot(
-            &mut self.status.lock().unwrap(),
-            pending_tagging_jobs,
-            tagging_ready,
-        )
+        status_snapshot(&mut self.status.lock().unwrap())
     }
 
     fn set_paused(&self, paused: bool) {
@@ -94,11 +86,7 @@ impl IpcControl {
 /// against the state it was read from: a snapshot read before a state
 /// change always carries a lower version than one read after it, no
 /// matter when each is published.
-pub(crate) fn status_snapshot(
-    status: &mut DaemonStatus,
-    pending_tagging_jobs: i64,
-    tagging_ready: bool,
-) -> StatusSnapshot {
+pub(crate) fn status_snapshot(status: &mut DaemonStatus) -> StatusSnapshot {
     status.version += 1;
     StatusSnapshot {
         paused: status.paused,
@@ -114,8 +102,8 @@ pub(crate) fn status_snapshot(
         pending_jobs: status.pending_jobs,
         pending_sends: status.pending_sends,
         version: status.version,
-        pending_tagging_jobs,
-        tagging_ready,
+        pending_tagging_jobs: status.pending_tagging_jobs,
+        tagging_ready: status.tagging_ready,
     }
 }
 
@@ -1032,6 +1020,14 @@ mod tests {
         mark_plugin_ready(&control);
         add_tagging_job(&control, "waiting", TaggingJobStatus::Waiting);
         add_tagging_job(&control, "pending", TaggingJobStatus::Pending);
+        // The daemon refreshes these cached fields; snapshots do not query the
+        // database on the IPC hot path.
+        let (pending_tagging_jobs, tagging_ready) = tagging_status(&control.db, &control.plugin);
+        {
+            let mut status = control.status.lock().unwrap();
+            status.pending_tagging_jobs = pending_tagging_jobs;
+            status.tagging_ready = tagging_ready;
+        }
         let _server = IpcServer::start(endpoint.clone(), control.clone()).unwrap();
 
         let response = request(&endpoint, Request::Status, Duration::from_secs(1)).unwrap();
