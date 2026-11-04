@@ -71,7 +71,7 @@ MINISIGN_BIN=/path/to/minisign-signer \
 `MINISIGN_BIN` は `minisign` CLI が無い環境で、秘密鍵と manifest を受け取って
 `.minisig` を stdout に出す署名器を指定する。本 E2E では Rust の `minisign`
 クレートで作った一時署名器を使用した。`MODEL_DIR` / `MINISIGN_BIN` を含む
-完全な手順は `docs/development.md` の「AI タグ付けプラグイン」を参照。
+完全な手順は `docs/development.md` の「5.2 実 sidecar E2E（手動）」を参照。
 
 生成物: `dist/vrc-photon-autotag-dev-linux-cpu.zip`
 
