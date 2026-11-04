@@ -203,12 +203,35 @@ mod tests {
         let image = image::open(&snapshot.path).unwrap();
         assert_eq!(image.dimensions(), (1024, 512));
         assert_eq!(
+            image::guess_format(&fs::read(&snapshot.path).unwrap()).unwrap(),
+            image::ImageFormat::Jpeg
+        );
+        assert_eq!(
             snapshot.path.file_name().and_then(|name| name.to_str()),
             Some("job-1.jpg")
         );
         assert!(snapshot.bytes > 0);
         assert_eq!(snapshot.bytes, fs::metadata(&snapshot.path).unwrap().len());
         assert!(snapshot.mtime_ms > 0);
+    }
+
+    #[test]
+    fn snapshot_handles_tiff_sources() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.tiff");
+        DynamicImage::new_rgb8(1600, 800)
+            .save_with_format(&source, image::ImageFormat::Tiff)
+            .unwrap();
+        let cache = dir.path().join("cache");
+
+        let snapshot = prepare_tagging_snapshot(&source, &cache, "job-1").unwrap();
+
+        let image = image::open(&snapshot.path).unwrap();
+        assert_eq!(image.dimensions(), (1024, 512));
+        assert_eq!(
+            image::guess_format(&fs::read(&snapshot.path).unwrap()).unwrap(),
+            image::ImageFormat::Jpeg
+        );
     }
 
     #[test]
@@ -237,6 +260,21 @@ mod tests {
         let snapshot = prepare_tagging_snapshot(&source, &cache, "job-1").unwrap();
 
         assert_eq!(image::image_dimensions(&snapshot.path).unwrap(), (100, 200));
+    }
+
+    #[test]
+    fn snapshot_rotates_large_exif_jpegs_before_downscaling() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("rotated-large.jpg");
+        write_jpeg_with_orientation(&source, 2000, 1000, 6);
+        let cache = dir.path().join("cache");
+
+        let snapshot = prepare_tagging_snapshot(&source, &cache, "job-1").unwrap();
+
+        assert_eq!(
+            image::image_dimensions(&snapshot.path).unwrap(),
+            (512, 1024)
+        );
     }
 
     #[test]
