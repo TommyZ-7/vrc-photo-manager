@@ -7,6 +7,9 @@
   - Windows: `%LOCALAPPDATA%\vrc-photon\library.db`
 - サムネイル: 同ディレクトリの `thumbnails/<photo_id>.webp`
 - プレビュー: 同ディレクトリの `previews/<photo_id>-<variant>.webp`（`variant` は表示derivative ID、元画像は `0`）
+- AI プラグイン: 同ディレクトリの `plugins/<plugin_id>/<variant>/<version>/`
+- AI モデル: 同ディレクトリの `plugins/<plugin_id>/models/<revision>/`
+- タグ付け用スナップショット: 同ディレクトリの `cache/tagging/<job_id>.jpg`（一時ファイル）
 - アプリログ: 同ディレクトリの `logs/`
   - UI: `logs/vrc-photon.log`
   - デーモン: `logs/vrc-photon-daemon.log`
@@ -27,7 +30,7 @@ PRAGMA busy_timeout = 5000;
 ```
 
 - `user_version` でスキーマバージョンを管理する。
-- 現在のバージョンは **12**。
+- 現在のバージョンは **13**。
 - マイグレーションは `Db::migrate` で起動時に自動実行する。
 
 ## 3. テーブル
@@ -205,6 +208,196 @@ VRChatの1滞在。
 |---|---|
 | `tags` | `id`, `name UNIQUE` |
 | `photo_tags` | `photo_id`, `tag_id`（主キー両方） |
+
+AI タグはこの2テーブルを使わず、下記の `photo_ai` / `photo_ai_tags` に分離する。
+
+### `plugin_installations`
+
+AI プラグインのインストール単位。`(plugin_id, variant, version)` で複数の
+variant / version を共存させる。active は plugin ごとに1行だけ。
+
+| 列 | 型 | 説明 |
+|---|---|---|
+| plugin_id | TEXT | `vrc-photon-autotag` など |
+| variant | TEXT | `<platform>-<backend>`（例: `linux-vulkan`） |
+| version | TEXT | プラグインの semver |
+| protocol_version | INTEGER | sidecar 通信規約のメジャー |
+| path | TEXT | 展開先ディレクトリ |
+| manifest_json | TEXT | 署名検証済み manifest の生 JSON |
+| catalog_version | TEXT | 同期したカタログ版 |
+| active | INTEGER | 0/1 |
+| installed_at / updated_at | TEXT | RFC3339 |
+
+制約・インデックス:
+
+```sql
+PRIMARY KEY (plugin_id, variant, version);
+CREATE UNIQUE INDEX idx_plugin_installations_one_active
+    ON plugin_installations(plugin_id) WHERE active = 1;
+```
+
+### `plugin_state`
+
+プラグインごとのモデル状態・進捗・probe 結果。モデルは variant ではなく
+`plugin_id` 単位で共有する。
+
+| 列 | 型 | 説明 |
+|---|---|---|
+| plugin_id | TEXT PK | |
+| model_state | TEXT | `missing` / `downloading` / `verifying` / `ready` / `error` |
+| model_revision | TEXT | manifest の `model.revision` |
+| model_bytes_downloaded | INTEGER | ファイル横断の累計バイト |
+| model_bytes_total | INTEGER | 合計サイズ。不明なら NULL |
+| model_error | TEXT | 失敗理由（`interrupted` など） |
+| probe_json | TEXT | `--probe` の JSON をそのまま保存（v13 の拡張） |
+| updated_at | TEXT | RFC3339 |
+
+`probe_json` は設定画面のバックエンド表示、`tagging_ready` の判定、
+再起動後の状態復元に使う。ファイルの存在とサイズだけでは probe の成否を
+判断できないため、v13 で追加した。
+
+### `ai_tag_definitions`
+
+sidecar の hello が返すカタログを同期したもの。`tag_key` は不変で、
+表示名・説明・既定閾値はカタログ更新で変わる。
+
+| 列 | 型 | 説明 |
+|---|---|---|
+| plugin_id | TEXT | |
+| tag_key | TEXT | タグの安定キー（例: `sea`） |
+| branch | TEXT | `indoor` / `outdoor` |
+| name | TEXT | 日本語表示名。プロンプトにも使う |
+| name_en | TEXT | 英語表示名。NULL 可 |
+| description | TEXT | タグの説明 |
+| default_threshold | REAL | 既定閾値 |
+| sort_order | INTEGER | 表示順 |
+| catalog_version | TEXT | 同期元のカタログ版 |
+| updated_at | TEXT | RFC3339 |
+
+主キー: `(plugin_id, tag_key)`
+
+### `ai_tag_thresholds`
+
+利用者によるタグ別閾値の上書き。行がなければ
+`ai_tag_definitions.default_threshold` を使う。
+
+| 列 | 型 | 説明 |
+|---|---|---|
+| plugin_id | TEXT | |
+| tag_key | TEXT | |
+| threshold | REAL | 0.0〜1.0 |
+| updated_at | TEXT | RFC3339 |
+
+主キー: `(plugin_id, tag_key)`。閾値を変更すると、再推論せずに
+`photo_ai_tags.applied` を再計算する。
+
+### `photo_ai`
+
+写真1枚につき最大1行の AI 判定結果。
+
+| 列 | 型 | 説明 |
+|---|---|---|
+| photo_id | INTEGER PK/FK | `photos.id`。`ON DELETE CASCADE` |
+| plugin_id | TEXT | |
+| variant | TEXT | 実行時の active variant |
+| sidecar_version | TEXT | hello の `sidecar_version` |
+| model_version | TEXT | `model.id` + `model.quantization` |
+| model_revision | TEXT | hello の `model.revision` |
+| catalog_version | TEXT | hello の `catalog.version` |
+| source | TEXT | `original` / `derivative` |
+| presence_threshold | REAL | 判定時の存在閾値 |
+| character_present | INTEGER | 0/1 |
+| presence_probability | REAL | P(yes) |
+| people_min / people_max | INTEGER | 人数区間。present=false なら 0 |
+| people_median | INTEGER | 人数の中央値 |
+| place_branch | TEXT | `indoor` / `outdoor` / `other` |
+| place_probabilities_json | TEXT | 3分岐の確率 JSON |
+| tagged_at | TEXT | RFC3339 |
+
+### `photo_ai_tags`
+
+判定した分岐のタグ別確率。屋内なら屋内タグ、屋外 / その他なら屋外タグを
+持つ。
+
+| 列 | 型 | 説明 |
+|---|---|---|
+| photo_id | INTEGER FK | `photos.id`。`ON DELETE CASCADE` |
+| plugin_id | TEXT | |
+| tag_key | TEXT | |
+| probability | REAL | P(yes) |
+| applied | INTEGER | 実効閾値以上なら 1 |
+| model_version | TEXT | |
+| catalog_version | TEXT | |
+| tagged_at | TEXT | RFC3339 |
+
+主キー: `(photo_id, plugin_id, tag_key)`
+
+- `applied` は `probability >= COALESCE(ai_tag_thresholds.threshold,
+  ai_tag_definitions.default_threshold)`。
+- 再タグ付けで写真の分岐が変わることがあるため、結果の書き込み時は
+  既存の `photo_ai_tags` を `DELETE` してから、その回の判定タグだけを
+  INSERT する。前回の分岐のタグを残さない。
+- 手動タグ（`tags` / `photo_tags`）とは SQL レベルで分離し、AI タグの
+  読み書きが手動タグに触れないようにする。
+
+インデックス:
+
+```sql
+idx_photo_ai_tags_applied(plugin_id, tag_key, applied, photo_id);
+idx_photo_ai_people(people_min, people_max);
+```
+
+### `tagging_jobs`
+
+AI タグ付けの耐久キュー。デーモン再起動後も `pending` を再開できる。
+
+| 列 | 型 | 説明 |
+|---|---|---|
+| id | TEXT PK | UUID |
+| photo_id | INTEGER FK | `photos.id`。`ON DELETE CASCADE` |
+| plugin_id | TEXT | |
+| variant | TEXT | claim 時に確定。未 claim は NULL |
+| status | TEXT | `waiting` / `pending` / `processing` / `completed` / `failed` / `cancelled` |
+| progress | REAL | 0.0〜1.0 |
+| stage | TEXT | `presence` / `people_count` / `place_class` / `place_tags` / `write` |
+| error | TEXT | `TaggingErrorCode`（`plugin_not_ready`、`sidecar_exited` など） |
+| retry_count | INTEGER | 自動再試行の回数。既定0、上限2 |
+| created_at / started_at / finished_at | TEXT | RFC3339 |
+
+`status` の意味:
+
+| status | 意味 | claim 対象 |
+|---|---|---|
+| `waiting` | バックログ専用。利用者が「バックログを開始」するまで実行しない | いいえ |
+| `pending` | 実行可能。ワーカーが取得する | はい |
+| `processing` | 実行中 | いいえ |
+| `completed` | 正常終了 | いいえ |
+| `failed` | 自動再試行の上限到達、または非 retryable エラー | いいえ |
+| `cancelled` | 利用者キャンセル、写真消失、強制削除 | いいえ |
+
+- 新規写真の自動投入と手動実行は `pending` で積む。バックログは `waiting` で
+  積み、解放操作で一括して `pending` へ移す。
+- active なジョブ（`waiting` / `pending` / `processing`）は partial unique
+  index により写真・プラグイン単位で重複しない。
+- デーモン起動時に `processing` が残っていれば `pending` に戻す。
+  `retry_count` は増やさない。
+- 削除要求は active なタグ付けジョブをブロッカーとして扱う。失敗ジョブは
+  `force=0` の削除をブロックする。強制削除は対象写真のタグ付けジョブを
+  `cancelled` にし、sidecar の遅延結果を書き込まない。
+
+インデックス:
+
+```sql
+idx_tagging_jobs_status(status);
+idx_tagging_jobs_claim(status, created_at);
+idx_tagging_jobs_photo(photo_id, created_at);
+idx_tagging_jobs_plugin_status(plugin_id, status);
+idx_tagging_jobs_active_list(created_at DESC, id DESC)
+    WHERE status IN ('waiting', 'pending', 'processing');
+CREATE UNIQUE INDEX idx_tagging_jobs_active
+    ON tagging_jobs(photo_id, plugin_id)
+    WHERE status IN ('waiting', 'pending', 'processing');
+```
 
 ### `compression_profiles`
 
@@ -457,12 +650,25 @@ estimated_link, thumbnail_cache_mb, compression_workers,
 world_name_resolution_enabled,
 discord_enabled, discord_destination, discord_include_players,
 discord_send_original, discord_auto_mode, discord_auto_since,
-discord_consent_at
+discord_consent_at,
+ai_tagging_enabled, ai_tagging_auto, ai_tagging_backlog,
+ai_presence_threshold, ai_tagging_backend, ai_tagging_idle_timeout_sec,
+ai_model_license_consent_at
 ```
 
 ワールド名解決の既定値:
 
 - `world_name_resolution_enabled = false`
+
+AI タグ付けの既定値:
+
+- `ai_tagging_enabled = false`
+- `ai_tagging_auto = false`
+- `ai_tagging_backlog = false`
+- `ai_presence_threshold = None`（sidecar の hello が返す既定値を使う。0.0〜1.0 に clamp）
+- `ai_tagging_backend = "auto"`（`auto` / `vulkan` / `cuda` / `roc` / `cpu`。不明値は `auto`）
+- `ai_tagging_idle_timeout_sec = 600`（30〜3600 に clamp）
+- `ai_model_license_consent_at = None`（初回モデル DL 前の同意日時）
 
 Discord 関連の既定値:
 
@@ -494,6 +700,12 @@ Discord 関連の既定値:
 16. `send_outbox.processing` はデーモン再起動時に `failed(interrupted)` へ移し、自動再送しない。送信結果が不明なメッセージを二重投稿しないため。
 17. アクティブな送信がある写真は削除を開始しない。削除要求は `waiting` / `pending` / `failed` をキャンセルし、`processing` は完了まで残す。`failed` は削除をブロックしない。
 18. `world_name_lookups` は1ワールドにつき1行。`resolved` / `failed` は再取得しない。`not_found` は24時間後にだけ再試行する。API 名は `worlds.name` が NULL のときだけ保存し、ログ/XMP/手動エイリアスを上書きしない。
+19. AI タグ（`photo_ai` / `photo_ai_tags`）は手動タグ（`tags` / `photo_tags`）と独立する。AI の再計算・削除・アンインストールが手動タグを変更しない。
+20. 同じ `plugin_id` の `plugin_installations.active = 1` は1行だけ。variant / version は共存でき、モデルは `plugin_id` 単位で共有する。
+21. `tagging_jobs` の active（`waiting` / `pending` / `processing`）は写真・プラグイン単位で1件だけ。`waiting` はバックログ専用で、明示的な解放だけが `pending` に移す。
+22. active な `tagging_jobs` は削除をブロックする。`failed` のタグ付けジョブは `force=0` の削除をブロックし、強制削除は active なジョブをキャンセルしてから実行する。
+23. プラグインのアンインストールで `delete_ai_tags=true` を選んだ場合だけ、`photo_ai` / `photo_ai_tags` / `ai_tag_definitions` / `ai_tag_thresholds` を削除する。既定は AI タグを残す。
+24. モデルの readiness 判定はファイルの存在とサイズだけを見る。SHA-256 はダウンロード / オフライン取込のときだけ検証する。
 
 ## 5. タイムゾーンと時刻
 
@@ -520,11 +732,13 @@ Discord 関連の既定値:
 | 10 | `daemon_errors.message_key` / `message_args` 追加（翻訳キーと引数） |
 | 11 | `send_outbox` と active / due / photo インデックス追加（Discord 送信 outbox） |
 | 12 | `world_name_lookups` と due インデックス追加（VRChat API ワールド名解決） |
+| 13 | AI プラグイン・カタログ・AI 結果・タグ付けジョブのテーブル追加（`plugin_installations`、`plugin_state`、`ai_tag_definitions`、`ai_tag_thresholds`、`photo_ai`、`photo_ai_tags`、`tagging_jobs`） |
 
 V4以降は `IMMEDIATE` トランザクションで適用する。UIとデーモンが同時に起動しても、書き込みロックで直列化し、`user_version` と列・テーブルの存在を再確認してから進めるため、中断後の再実行でも安全。
 
-v11 の `send_outbox` と v12 の `world_name_lookups` は
+v11 の `send_outbox`、v12 の `world_name_lookups`、v13 の AI テーブルは
 `CREATE TABLE IF NOT EXISTS` とインデックス追加だけで、既存データを変更しない。
+v13 は `plugin_state.probe_json` を含めて新規テーブルとして作成する。
 ロールバック時はテーブルを残しても既存機能は動く。
 
 追加手順:
@@ -550,4 +764,6 @@ v11 の `send_outbox` と v12 の `world_name_lookups` は
 - DBをバックアップする場合は、WAL/SHMを含めずにSQLiteの `.backup` を使うか、アプリ終了後に `library.db` をコピーする。
 - サムネイルは再生成可能。バックアップ必須ではない。
 - プレビューも再生成可能なキャッシュ。バックアップ必須ではない。
+- AI の推論結果は DB に含まれる。プラグイン本体とモデルファイルは
+  `plugins/` 配下にあり、ZIP / manifest / モデルから再取得できる。
 - 写真ファイルとログはDBに含まれない。

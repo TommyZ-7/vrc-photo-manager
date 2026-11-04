@@ -13,8 +13,9 @@ VRChatの写真を、撮影時のワールド・同接プレイヤー・撮影�
 │                              │          │                              │
 │ gpui-kit 0.8                 │          │ ログ監視 / 写真監視           │
 │ 一覧・詳細・圧縮・検索        │          │ 紐付け / 自動圧縮 / トレイ     │
-│ 監視・設定                    │          │ 自動起動 / サムネイル生成      │
-└──────────────┬───────────────┘          └──────────────┬───────────────┘
+│ AIタグ表示・設定・監視        │          │ 自動起動 / サムネイル生成      │
+└──────────────┬───────────────┘          │ AIプラグイン / タグ付け        │
+               │                          └──────────────┬───────────────┘
                │                                          │
                │ 読み取り・短い書き込み                     │ 主な書き込み
                ▼                                          ▼
@@ -22,11 +23,18 @@ VRChatの写真を、撮影時のワールド・同接プレイヤー・撮影�
         │ SQLite (WAL)                                           │
         │ photos / photo_context / sessions / jobs / settings …  │
         │ send_outbox / world_name_lookups / daemon_errors / …   │
+        │ plugin_installations / photo_ai / tagging_jobs / …     │
         └────────────────────────────────────────────────────────┘
                ▲                                          ▲
                │                                          │
         VRChat写真フォルダ                         VRChatログ / XMP
 ```
+
+デーモンはタグ付けジョブを実行するときだけ、AIプラグインの sidecar
+（`d1-sidecar`）を子プロセスとして起動する。sidecar は stdin/stdout の
+改行区切り JSON で推論要求を受け、写真のスナップショットだけを読む。
+DB・UI・ネットワークには触れない。sidecar が落ちてもデーモンは落ちず、
+該当ジョブだけを失敗させる。
 
 UIとデーモンは同じSQLite（WAL）に加えて、ローカルIPC（Unix domain socket / Windows名前付きパイプ、改行区切りJSON）で接続する。IPCは即時wake-upとイベント配信だけを担い、耐久データの正はSQLiteのまま。
 
@@ -34,32 +42,58 @@ UIとデーモンは同じSQLite（WAL）に加えて、ローカルIPC（Unix d
 
 | プロセス | バイナリ | 役割 |
 |---|---|---|
-| UI | `crates/ui` → `vrc-photon` | 画面表示、検索、タグ・お気に入り・メモ編集、手動圧縮のキュー投入、取り込み、Discord 設定と送信 enqueue |
-| デーモン | `crates/daemon` → `vrc-photon-daemon` | 写真・ログの監視、索引、文脈紐付け、サムネイル、自動圧縮、Discord 送信、任意の VRChat API ワールド名解決、トレイ、自動起動、IPCサーバー |
+| UI | `crates/ui` → `vrc-photon` | 画面表示、検索、タグ・お気に入り・メモ編集、手動圧縮のキュー投入、取り込み、Discord 設定と送信 enqueue、AI プラグイン設定・AI タグ表示・手動再生成 |
+| デーモン | `crates/daemon` → `vrc-photon-daemon` | 写真・ログの監視、索引、文脈紐付け、サムネイル、自動圧縮、Discord 送信、任意の VRChat API ワールド名解決、AI プラグイン取込・モデル管理・sidecar 起動・タグ付け、トレイ、自動起動、IPCサーバー |
 | 共通IPC | `crates/ipc` | プロトコル型、エンドポイント、改行区切りJSON、ローカルソケットの送受信 |
-| 共通コア | `crates/core` | DB、スキャン、ログ解析、XMP、圧縮、Discord の URL 検証・payload・送信元選択、ワールド名解決の状態とレスポンス解析、設定、サムネイル |
+| 共通コア | `crates/core` | DB、スキャン、ログ解析、XMP、圧縮、Discord の URL 検証・payload・送信元選択、ワールド名解決の状態とレスポンス解析、AI 設定・AI 結果・タグ付けジョブ、設定、サムネイル |
+| AIプロトコル | `crates/ai-protocol` | sidecar 通信の型、`PROTOCOL_VERSION = 1`、JSONL フレーミング、カタログ型、状態 enum |
+| AIホスト | `crates/ai-host` | manifest 検証、minisign、ZIP 取込、モデル DL / 取込 / 検査 / 削除、sidecar の起動・要求・停止 |
+| モックsidecar | `crates/ai-mock-sidecar` | 公開リポジトリのテスト専用バイナリ。配布物には含めない |
 
-UIとデーモンは同じSQLite（WAL）を共有し、状態とジョブをやり取りする。これに加えて、即時コマンドのwake-upとイベント配信のためにローカルIPCを使う（ADR-0011）。UIはデーモンのハートビート（`app_settings.daemon_heartbeat`）とIPC購読のどちらかが生きていれば稼働中と判定する。デーモンの処理エラーは `daemon_errors`、UIからの再実行要求は `daemon_commands` に置く。IPCは `daemon_commands` / `compression_jobs` / `send_outbox` を置き換えず、デーモンを起こすだけ。デーモン停止中も要求はDBに残り、起動後に処理される。
+UIとデーモンは同じSQLite（WAL）を共有し、状態とジョブをやり取りする。これに加えて、即時コマンドのwake-upとイベント配信のためにローカルIPCを使う（ADR-0011）。UIはデーモンのハートビート（`app_settings.daemon_heartbeat`）とIPC購読のどちらかが生きていれば稼働中と判定する。デーモンの処理エラーは `daemon_errors`、UIからの再実行要求は `daemon_commands` に置く。IPCは `daemon_commands` / `compression_jobs` / `send_outbox` を置き換えず、デーモンを起こすだけ。デーモン停止中も要求はDBに残り、起動後に処理される。AI の取込・モデル・probe・キャンセルは IPC 要求としてデーモンだけが実行し、AI 結果の書き込みもデーモンに限定する。
 
-IPCは `PROTOCOL_VERSION = 4`。`WakeSends` で Discord 送信ワーカーを起床し、
-`SendProgress`（outbox_id、photo_id、status、error_code）を配信する。
-`StatusSnapshot.pending_sends` は待機・実行待ちの送信件数。旧デーモンと新UIは
-`hello` のバージョン不一致で切断され、UIは既存どおり3秒ポーリングへ
-フォールバックする。`WakeSends` が届かなくても、送信ワーカーは500 msごとに
-DBを見るため送信が遅れるだけで失われない。
+IPCは `PROTOCOL_VERSION = 5`。v4 の要求・イベントに加えて、AI プラグインの
+取込・アンインストール・probe・variant 切替・モデル DL / 取込 / 削除と、
+タグ付けジョブの起床・キャンセルを追加した。`StatusSnapshot` は
+`pending_tagging_jobs`（`waiting` + `pending` + `processing`）と
+`tagging_ready`（active install・ready model・probe が揃っている）を持つ。
+`WakeSends` で Discord 送信ワーカー、`WakeTagging` でタグ付けワーカーを起床し、
+`SendProgress` / `TaggingProgress` / `PluginInstallProgress` /
+`PluginStateChanged` / `ModelDownloadProgress` を配信する。
+旧デーモンと新UIは `hello` のバージョン不一致で切断され、UIは既存どおり
+3秒ポーリングへフォールバックする。`WakeSends` / `WakeTagging` が届かなくても、
+各ワーカーは数百 ms ごとに DB を見るため処理が遅れるだけで失われない。
 
 ## 3. クレート構成
 
 ```text
 crates/
+  ai-protocol/
+    src/lib.rs            # sidecar 通信型、PROTOCOL_VERSION = 1
+    src/catalog.rs        # Catalog / TagDefinition / Branch
+    src/framing.rs        # JSONL の読み書き、1 MiB 上限
+    src/protocol.rs       # Hello / Probe / Request / Response / Result
+    src/status.rs         # TaggingJobStatus / TaggingStage / ModelState など
+  ai-host/
+    src/manifest.rs       # manifest.json の型と検証
+    src/verify.rs         # minisign 検証、開発鍵と release の空鍵
+    src/install.rs        # ZIP -> staging -> plugins/
+    src/sidecar.rs        # spawn / hello / request / cancel / shutdown
+    src/model.rs          # モデル DL / 取込 / 検査 / 削除
+    src/http.rs           # HTTPS のみのモデル DL クライアント
+    src/test_support.rs   # 署名済みテスト ZIP（test-support フィーチャー）
+  ai-mock-sidecar/
+    src/main.rs           # テスト専用のモック sidecar
   ipc/
     src/lib.rs            # プロトコル型、エンドポイント、フレーミング
+    src/protocol.rs       # Request / Event / StatusSnapshot / ErrorCode
     src/client.rs         # リクエストと購読
     src/server.rs         # ローカルソケットのbind/accept
   core/
     src/lib.rs            # アプリ名、データディレクトリ
     src/db.rs             # SQLiteスキーマ、マイグレーション、CRUD、検索
     src/model.rs          # Photo / Context / Profile / Job など
+    src/ai.rs             # プラグイン・AI結果・タグ付けジョブの型
     src/scanner.rs        # フォルダ走査、増分スキャン
     src/photo_filename.rs # VRChatファイル名の時刻解析
     src/log_parser.rs     # output_log の解析とセッション状態
@@ -70,9 +104,11 @@ crates/
     src/discord.rs        # Webhook URL検証、送信元選択、embed payload
     src/thumbnail.rs      # 256px WebPサムネイル
     src/importer.rs       # コピー/移動取り込み
-    src/settings.rs       # 設定、VRChatパス検出
+    src/settings.rs       # 設定、VRChatパス検出、AI設定
   daemon/
     src/lib.rs            # 監視ループ、ジョブワーカー、トレイ制御
+    src/plugin.rs         # PluginService: 取込・probe・variant・モデル・sidecar所有
+    src/tagging.rs        # TaggingWorker: 4段パイプライン、キャンセル、再試行、アイドル停止
     src/discord.rs        # Discord 送信ワーカー、outbox、自動 enqueue
     src/discord_http.rs   # multipart POST、429/4xx/5xx の分類
     src/world_names.rs    # ワールド名解決ワーカー、60秒間隔の予約
@@ -104,21 +140,31 @@ crates/
 ### 依存方向
 
 ```text
-ui ────────┬──> ipc
-           ├──> core
+ui ────────┬──> ipc ──> ai-protocol
+           ├──> core ──> ai-protocol
            └──> update
-daemon ────┼──> ipc
-           └──> core
+daemon ────┼──> ipc ──> ai-protocol
+           ├──> core ──> ai-protocol
+           ├──> ai-host ──> ai-protocol
+           └──> ai-protocol
 release-tool ───> update
+ai-mock-sidecar ───> ai-protocol
 ```
 
-- `core` はUI・プロセス・トレイ・IPCに依存しない。
+- `core` はUI・プロセス・トレイ・IPCに依存しない。AI では `ai-protocol` の
+  カタログ型・状態型だけを使い、sidecar は起動しない。
 - `ipc` はプロトコルとトランスポートだけを持ち、`core` / `daemon` / `ui` に依存しない。
+  AI の要求・イベント型のために `ai-protocol` に依存する。
 - `update` はUI・GPUI・SQLiteに依存しない。署名検証、HTTP、適用ジョブ、ヘルパーだけを持つ。
 - `release-tool` は `update` のマニフェスト型を使うRelease専用ツールで、アプリには同梱しない。
-- `daemon` は `core` のDB・スキャナ・解析・圧縮・サムネイルと、`ipc` のサーバー/プロトコルを使う。
-- `ui` は `core` のDB・モデル・設定・圧縮キュー、`ipc` のクライアント/プロトコル、`update` の確認/DL/適用を使う。
-- GPUI（`gpui-kit` / `gpui-pre`）に依存するのは `ui` のみ。`core` / `daemon` / `ipc` / `update` はGPUI非依存。
+- `ai-protocol` は serde とフレーミングだけを持ち、DB・GPUI・プロセス起動に依存しない。
+- `ai-host` は ZIP 検証・モデル DL / 取込・sidecar クライアントだけを持ち、
+  `core` に依存しない。デーモン専用で、UI からは呼ばない。
+- `ai-mock-sidecar` はテスト専用で、配布物には含めない。
+- `daemon` は `core` のDB・スキャナ・解析・圧縮・サムネイル、`ipc` のサーバー/プロトコル、
+  `ai-host` のプラグイン・モデル・sidecar を使う。
+- `ui` は `core` のDB・モデル・設定・圧縮キュー、`ipc` のクライアント/プロトコル、`update` の確認/DL/適用を使う。`ai-host` は使わない。
+- GPUI（`gpui-kit` / `gpui-pre`）に依存するのは `ui` のみ。`core` / `daemon` / `ipc` / `ai-protocol` / `ai-host` / `update` はGPUI非依存。
 
 ### 3.1 UIモジュール構成
 
@@ -133,6 +179,7 @@ crates/ui/src/
     search.rs             # 検索実行・結果適用
     compression.rs        # プロファイル/手動圧縮
     discord.rs            # Discord 設定・送信 enqueue・履歴更新
+    ai.rs                 # AI プラグイン設定・モデル・AI タグ・手動実行
     daemon.rs             # デーモン操作、ログ、プロセス起動
     import.rs             # 取り込みダイアログ/実行/再試行/再開
     viewer.rs             # ビューア開閉、フォーカス、前後移動
@@ -352,6 +399,43 @@ crates/ui/src/
 7. 失敗してもワールドID表示のままで、他の機能には影響しない。定期的な
    ポーリングはしない。`--once` ではワーカーを起動せず、ネットワークも使わない。
 
+### 4.11 AI タグ付け（M2）
+
+1. UI がプラグイン ZIP のパスを `InstallPlugin` で送る。デーモンの
+   `PluginService` が manifest の署名・ハッシュ・パス・ホストバージョンを検証し、
+   `<data_dir>/plugins/<plugin_id>/<variant>/<version>/` へ原子的に展開する。
+   成功した版はカタログを `ai_tag_definitions` に同期し、`--probe` を実行して
+   結果を `plugin_state.probe_json` に保存してから active にする。失敗した版は
+   active にせず、既存の active と probe を維持する。
+2. モデルは署名済み manifest の HTTPS URL からダウンロードするか、利用者が
+   選択した完全な `model` / `mmproj` ファイルを取り込む。どちらもサイズと
+   SHA-256 を検証し、`<data_dir>/plugins/<plugin_id>/models/<revision>/` に置く。
+   M2 はダウンロード再開と分割パートに対応しない。
+3. タグ付けジョブは `tagging_jobs` に積む。手動実行と自動投入は `pending`、
+   バックログは `waiting` で積み、利用者の「バックログを開始」で `pending` に
+   移す。active なジョブが同じ写真にある場合は partial unique index で重複しない。
+   `--once` のメンテナンス実行ではタグ付けワーカーを起動しない。
+4. `TaggingWorker` は `pending` を1件ずつ原子的に取得し、`variant` を確定する。
+   写真の表示用パスから長辺 1024px の一時 JPEG を作り、sidecar を遅延起動して
+   presence → people_count → place_class → place_tags の順に要求する。
+   presence が閾値未満なら人数推論をスキップする。
+5. 結果は `photo_ai` と `photo_ai_tags` に1トランザクションで書く。書き込み前に
+   ジョブがまだ `processing` か確認し、キャンセル済みなら書かない。AI タグは
+   手動タグ（`tags` / `photo_tags`）と SQL レベルで分離する。
+6. 進捗・状態は `TaggingProgress` で配信する。キャンセルは DB の状態を
+   `cancelled` にし、実行中なら sidecar に `cancel` を送る。自動再試行は
+   retryable な失敗に限り最大2回（5秒 / 30秒）。`plugin_not_ready` は
+   `pending` に戻して待機する。
+7. sidecar は最後の処理から `ai_tagging_idle_timeout_sec`（既定600秒）を
+   超えると停止する。落ちた場合は現在のジョブを `sidecar_exited` として扱い、
+   retryable なら再試行し、上限到達後は `failed` にする。次にジョブを処理する
+   ときに sidecar を起動し直す。デーモン再起動時は `processing` を `pending` に
+   戻す。
+8. 削除要求は active なタグ付けジョブを圧縮・送信と同じブロッカーとして扱う。
+   強制削除はタグ付けジョブをキャンセルしてから実行する。プラグインの
+   アンインストールで「AIタグも削除する」を選んだ場合だけ、`photo_ai` /
+   `photo_ai_tags` / カタログ / 閾値を削除する。
+
 ## 5. 並行性
 
 | 実行単位 | 役割 | 共有状態 |
@@ -369,6 +453,8 @@ crates/ui/src/
 | 削除エグゼキュータ | 1スレッド。依存ジョブの完了後に要求を実行 | `Arc<Mutex<Db>>`、`JobSignal` |
 | Discord送信ワーカー | 1スレッド（`discord-send`）。outboxを原子的に取得し、HTTP中はDBロックを持たない | `Arc<Mutex<Db>>`、`JobSignal`、`EventBus` |
 | ワールド名解決ワーカー | 1スレッド（`world-name`）。`world_name_lookups` を1件ずつ処理し、HTTP中はDBロックを持たない | `Arc<Mutex<Db>>`、`JobSignal`、`AtomicBool` |
+| AIプラグインサービス | 取込・probe・モデル・sidecar を所有。操作中の plugin キーで排他し、sidecar は遅延起動する | `Arc<Mutex<Db>>`、`EventBus`、sidecar キャッシュ |
+| タグ付けワーカー | 1スレッド（`tagging`）。`pending` を1件ずつ処理し、推論中はDBロックを持たない | `Arc<Mutex<Db>>`、`JobSignal`、`EventBus`、`TaggingControl` |
 | サムネイルワーカー | 1スレッド。キューを順次処理 | `Arc<Mutex<Db>>` |
 | トレイ | Windowsメッセージポンプ / Linux StatusNotifierItem | `DaemonStatus` |
 
@@ -377,6 +463,8 @@ crates/ui/src/
 - 削除のファイル移動中もDBロックを持たない。対象パスを読んで解放し、移動後に再ロックしてDBを更新する。
 - Discordのファイル読み込み・エンコード・アップロード中もDBロックを持たない。結果の記録時だけ再ロックする。
 - ワールド名解決のHTTP中もDBロックを持たない。送信前に次回リクエスト時刻を予約し、結果の記録時だけ再ロックする。
+- タグ付けの sidecar 推論中もDBロックを持たない。スナップショット作成、要求、結果の書き込みで短くロックする。
+- 同じプラグインの取込・probe・variant 切替・モデル操作は `PluginService` の操作キーで排他する。sidecar は active install とモデル revision の組が変わると停止して作り直す。
 - ジョブ取得は `UPDATE ... WHERE status='pending' RETURNING` で二重取得を防ぐ。
 - デーモンは `single-instance` で二重起動を防ぐ。
 
@@ -393,7 +481,11 @@ crates/ui/src/
 - デーモンは `/proc/self/cgroup` が `vrc-photon-daemon.service` を含むか、`INVOCATION_ID` と `SYSTEMD_EXEC_PID` が自プロセスを指す場合に systemd 管理下と判定し、`app_settings.daemon_supervisor` に `systemd` / `app` を記録する。UIはハートビートが新しい間だけこの値を表示に使う。
 - デーモンは初期スキャンの前にIPCサーバーを起動する。Unixでは `$XDG_RUNTIME_DIR/vrc-photon/daemon.sock`（未設定なら `<data_dir>/run/daemon.sock`）を使い、ディレクトリ `0700`、ソケット `0600` にする。Windowsはユーザー名の安定ハッシュを含む名前付きパイプを使う。
 - bind前に既存エンドポイントへ接続し、生存中ならunlinkしない。接続拒否ならstaleとして削除する。
-- 終了時、デーモンはIPCサーバーを止め、開いているログセッションを閉じ、ワーカーを停止する。
+- デーモンは起動時に、中断されたモデル DL / 検証を `missing` に戻し、
+  `processing` のまま残ったタグ付けジョブを `pending` に戻す。sidecar はまだ
+  起動しない。
+- 終了時、デーモンはIPCサーバーを止め、開いているログセッションを閉じ、
+  ワーカーを停止し、sidecar を shutdown（応答がなければ kill）する。
 
 ## 7. 障害時の考え方
 
@@ -402,6 +494,10 @@ crates/ui/src/
 - 圧縮に失敗した場合、元画像は変更しない。ジョブは `failed` として理由を残し、ユーザー操作で最大3回まで再試行できる。
 - 削除は依存ジョブが失敗した場合に実行しない。要求は `blocked` として残り、ダッシュボードと通知に理由を出す。失敗ジョブの再試行成功で自動再開し、ユーザーは取消・再試行・強制削除を選べる。
 - 取り込みはファイル単位で継続する。コピー失敗は元パス付きで再試行でき、部分移動は移動先を取り込み済みとして警告する。
+- AI の sidecar がクラッシュ・OOM・タイムアウトしても、デーモンは落とさない。
+  該当ジョブを `sidecar_exited` / `sidecar_timeout` などで失敗させ、retryable
+  なら最大2回まで再試行する。プラグイン未準備（`plugin_not_ready`）は失敗に
+  せず `pending` に戻して待機する。
 - DBが壊れた場合は、ユーザーデータディレクトリの `library.db` をバックアップしてから再作成する（写真ファイルは削除しない）。
 - 生ログは保存しない。解析済みイベントのみ残す。
 

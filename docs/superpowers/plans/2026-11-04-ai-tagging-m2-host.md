@@ -171,24 +171,24 @@ docs/
   - 開発鍵の生成（`minisign -G -p dev-keys.txt -s ~/.minisign/vrc-photon-ai-dev.key`）と、secret key をコミットしないこと
   - テスト方針（mock sidecar / 実 sidecar 手動 E2E）
 
-- [ ] **Step 1: ADR を書く**
+- [x] **Step 1: ADR を書く**
 
 `docs/adr/0019-ai-tagging-plugin.md` に、Status: Accepted、Context、Decision、Consequences を書く。決定は「sidecar 分離」「ホストが状態変更を所有」「AIタグは別テーブル」「ZIP 署名は整合性のみ」「v1 は製品ライセンスなし」「M2 は開発鍵」の6点。
 
-- [ ] **Step 2: 公開ホスト設計書を書く**
+- [x] **Step 2: 公開ホスト設計書を書く**
 
 `docs/superpowers/specs/2026-11-04-ai-tagging-plugin-host-design.md` に上記の内容を書く。JSON 例は `vrc-photon-autotag/docs/protocol.md` と一致させる。
 
-- [ ] **Step 3: ADR 一覧を更新する**
+- [x] **Step 3: ADR 一覧を更新する**
 
 `docs/adr/README.md` の表に 0019 を追加する。
 
-- [ ] **Step 4: 表記を確認する**
+- [x] **Step 4: 表記を確認する**
 
 Run: `git diff --check`
 Expected: 出力なし。リンク切れ（相対パス）がないことを目視確認。
 
-- [ ] **Step 5: コミットして PR 0 を出す**
+- [x] **Step 5: コミットして PR 0 を出す**
 
 ```bash
 git add docs/adr/0019-ai-tagging-plugin.md docs/adr/README.md docs/superpowers/specs/2026-11-04-ai-tagging-plugin-host-design.md
@@ -245,7 +245,7 @@ PR ラベルは `enhancement`。CI 緑でマージし、`main` に戻る。
   - `pub fn read_message<R: BufRead>(reader: &mut R) -> Result<Option<SidecarMessage>, ProtocolError>`
   - `pub fn write_message<W: Write>(writer: &mut W, value: &impl Serialize) -> Result<(), ProtocolError>`
 
-- [ ] **Step 1: 失敗するプロトコルテストを書く**
+- [x] **Step 1: 失敗するプロトコルテストを書く**
 
 `crates/ai-protocol/src/protocol.rs` の `mod tests` に、`docs/protocol.md` の JSON をそのまま使う。
 
@@ -275,12 +275,12 @@ fn read_message_rejects_a_line_over_one_mebibyte() {
 }
 ```
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-ai-protocol`
 Expected: クレート未作成のため失敗。
 
-- [ ] **Step 3: 最小実装を書く**
+- [x] **Step 3: 最小実装を書く**
 
 - serde の tag は `"type"`。フィールド名は sidecar の JSON と完全一致させる。
 - `read_message` は `read_until(b'\n')`、長さ検査、`\r\n`/`\n` の除去、UTF-8/JSON 検査を行う。EOF は `Ok(None)`。
@@ -288,12 +288,12 @@ Expected: クレート未作成のため失敗。
 - `status.rs` の enum は `as_str` / `parse` を持ち、DB の文字列と相互変換する。
 - `catalog.rs` の `TagDefinition` は `name_en` を `#[serde(default)]` にする。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-ai-protocol`
 Expected: 全テスト PASS。
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add Cargo.toml crates/ai-protocol
@@ -344,7 +344,7 @@ git commit -m "feat(ai-protocol): define the sidecar protocol v1"
   - `pub fn parse_public_keys(text: &str) -> Vec<String>`
   - `pub fn model_file_role(file: &ManifestModelFile) -> Result<ModelFileRole>`（`role` がなければファイル名 `mmproj` 接頭辞で判定）
 
-- [ ] **Step 1: manifest の失敗テストを書く**
+- [x] **Step 1: manifest の失敗テストを書く**
 
 ```rust
 #[test]
@@ -365,7 +365,7 @@ fn validate_rejects_protocol_and_host_version_mismatch() {
 
 `validate_rejects_traversal_and_absolute_paths`、`validate_requires_https_model_urls`、`validate_requires_entrypoint_in_files` も書く。
 
-- [ ] **Step 2: 署名と ZIP 取込の失敗テストを書く**
+- [x] **Step 2: 署名と ZIP 取込の失敗テストを書く**
 
 `test_support` に、テスト用 minisign 鍵で `manifest.json` と `manifest.minisig` を含む ZIP を作る helper を置く。
 
@@ -385,12 +385,12 @@ fn install_rejects_traversal_and_symlink() {
 
 さらに `install_accepts_a_valid_plugin`、`install_rejects_tampered_manifest`、`install_rejects_file_hash_mismatch`、`install_rejects_duplicate_entries`、`install_rejects_entry_and_size_limits`、`install_is_atomic_on_failure` を書く。
 
-- [ ] **Step 3: テストが失敗することを確認**
+- [x] **Step 3: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-ai-host --features test-support`
 Expected: クレート未作成のため失敗。
 
-- [ ] **Step 4: 最小実装を書く**
+- [x] **Step 4: 最小実装を書く**
 
 - `verify.rs` は `minisign_verify::PublicKey` / `Signature` を使い、`verify_stream` で manifest バイト列を検証する。`update` クレートには依存しない。
 - `install.rs` は `zip::ZipArchive` を開き、`manifest.json` / `manifest.minisig` をルートから読む。`enclosed_name()`、絶対パス、`..`、Windows ドライブ/UNC、シンボリックリンク（`unix_mode() & 0o170000 == 0o120000`）を拒否する。
@@ -399,12 +399,12 @@ Expected: クレート未作成のため失敗。
 - `effective_plugin_keys()` は debug ビルドだけ `packaging/ai/dev-keys.txt` を `include_str!` する。`VRC_PHOTON_AI_PLUGIN_PUBLIC_KEY` は debug ビルドだけ上書きに使う。
 - `packaging/ai/dev-keys.txt` には開発用公開鍵（`RW...` 行）を置く。鍵の生成（`minisign -G -p dev-keys.txt -s ~/.minisign/vrc-photon-ai-dev.key`）と、secret key をコミットしない手順は Task 0 の公開設計書に記載済み。
 
-- [ ] **Step 5: テストが通ることを確認**
+- [x] **Step 5: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-ai-host --features test-support`
 Expected: 全テスト PASS。
 
-- [ ] **Step 6: コミット**
+- [x] **Step 6: コミット**
 
 ```bash
 git add Cargo.toml crates/ai-host packaging/ai
@@ -443,7 +443,7 @@ git commit -m "feat(ai-host): verify and install signed plugin packages"
   - `pub fn sidecar_command(config: &SidecarConfig) -> std::process::Command`
   - `pub fn probe_command(paths: &SidecarPaths, variant: &str) -> std::process::Command`
 
-- [ ] **Step 1: モック sidecar を作る**
+- [x] **Step 1: モック sidecar を作る**
 
 `crates/ai-mock-sidecar/src/main.rs`:
 - `--probe` なら `probe` JSON を1行出して終了。
@@ -461,7 +461,7 @@ git commit -m "feat(ai-host): verify and install signed plugin packages"
 - カタログは `MOCK_SIDECAR_CATALOG` のパス、なければ組み込みの最小カタログ（outdoor: sea, indoor: japanese_room）を返す。
 - バイナリは配布物に含めない（`vrc-photon` / `vrc-photon-daemon` のパッケージ対象外）。
 
-- [ ] **Step 2: 起動・probe の失敗テストを書く**
+- [x] **Step 2: 起動・probe の失敗テストを書く**
 
 ```rust
 #[test]
@@ -485,12 +485,12 @@ fn spawn_returns_a_typed_error_on_fatal_before_hello() {
 
 `probe_reads_backends`、`spawn_redirects_stderr_to_the_log` も書く。
 
-- [ ] **Step 3: テストが失敗することを確認**
+- [x] **Step 3: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-ai-host --test sidecar_process`
 Expected: `SidecarClient` 未定義で失敗。
 
-- [ ] **Step 4: 最小実装を書く**
+- [x] **Step 4: 最小実装を書く**
 
 - 起動引数は `<entrypoint> --model <model> --mmproj <mmproj> --catalog <catalog> --calibration <calibration> --backend <backend> --variant <variant>`。probe は `<entrypoint> --probe --catalog <catalog> --calibration <calibration> --variant <variant>`。
 - `Stdio::piped()` で stdin/stdout/stderr を取得。`current_dir(install_dir)`。
@@ -500,12 +500,12 @@ Expected: `SidecarClient` 未定義で失敗。
 - `probe` は `--probe --catalog ... --calibration ... --variant ...` で起動し、`probe` 行を読む。30秒でタイムアウト。
 - `SidecarClient` の内部は Task 4 で拡張する。
 
-- [ ] **Step 5: テストが通ることを確認**
+- [x] **Step 5: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-ai-host --test sidecar_process`
 Expected: 全テスト PASS。
 
-- [ ] **Step 6: コミット**
+- [x] **Step 6: コミット**
 
 ```bash
 git add Cargo.toml crates/ai-host crates/ai-mock-sidecar
@@ -530,7 +530,7 @@ git commit -m "feat(ai-host): spawn the sidecar and probe its backends"
   - `SidecarClient::shutdown(&self)`
   - `SidecarClient::kill(&self)`
 
-- [ ] **Step 1: 要求テストを書く**
+- [x] **Step 1: 要求テストを書く**
 
 ```rust
 #[test]
@@ -558,12 +558,12 @@ fn each_op_maps_to_the_expected_result() {
 
 `cancel_during_slow_request_returns_cancelled`、`cancel_without_ack_kills_the_process`、`crash_returns_sidecar_exited`、`shutdown_acks_and_exits`、`request_timeout_is_typed` も書く。
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-ai-host --test sidecar_requests`
 Expected: `request` / `CancelToken` 未定義で失敗。
 
-- [ ] **Step 3: 最小実装を書く**
+- [x] **Step 3: 最小実装を書く**
 
 - `SidecarClient` は `Arc<SidecarInner>` を持ち、`SidecarInner` に `stdin: Mutex<ChildStdin>`、`child: Mutex<Child>`、`current_id: AtomicU64`、`pending: Mutex<HashMap<String, Sender<SidecarMessage>>>`、`reader thread` を持つ。
 - `request` は UUID を id にし、`current_id` を更新してから書き込み、`recv_timeout` で応答を待つ。`CancelToken` が立ったら `cancel` 行を書き、2秒待って `cancelled` が来なければ kill する。
@@ -572,12 +572,12 @@ Expected: `request` / `CancelToken` 未定義で失敗。
 - `shutdown` は `shutdown` を書き、5秒待って `shutdown_ack` が来なければ kill。
 - テスト用に `SidecarTimeouts` を短くできるコンストラクタ `spawn_with_timeouts` を用意する。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-ai-host --test sidecar_requests`
 Expected: 全テスト PASS。
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/ai-host crates/ai-mock-sidecar
@@ -605,7 +605,7 @@ git commit -m "feat(ai-host): add sidecar requests, cancel, and shutdown"
   - `pub trait ModelHttpClient { fn download(&self, url: &str, on_chunk: &mut dyn FnMut(&[u8]) -> Result<()>) -> Result<()>; }`
   - `pub struct UreqModelClient { /* timeouts */ }`
 
-- [ ] **Step 1: モデル取得の失敗テストを書く**
+- [x] **Step 1: モデル取得の失敗テストを書く**
 
 ```rust
 #[test]
@@ -622,12 +622,12 @@ fn download_verifies_size_and_sha256_before_rename() {
 
 `import_accepts_full_files`、`import_rejects_wrong_hash`、`import_rejects_missing_mmproj`、`import_rejects_parts`（M3 スコープ）、`check_model_detects_size_mismatch`、`cancel_stops_download`、`delete_model_removes_only_its_dir` を書く。
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-ai-host model::tests`
 Expected: 未定義で失敗。
 
-- [ ] **Step 3: 最小実装を書く**
+- [x] **Step 3: 最小実装を書く**
 
 - `role` で model / mmproj を特定する。`role` がない場合はファイル名が `mmproj` で始まるものを mmproj、それ以外を model とする。
 - `parts` が空でない場合は `AiHostError::UnsupportedParts`（M3）。
@@ -636,12 +636,12 @@ Expected: 未定義で失敗。
 - `check_model` は存在とサイズだけを見る（起動時の 2GB ハッシュを避ける）。完全ハッシュは DL / 取込時だけ。
 - `UreqModelClient` は HTTPS のみ許可し、`vrc-photon/<version>` User-Agent を設定する。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-ai-host model::tests`
 Expected: 全テスト PASS。
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/ai-host
@@ -650,8 +650,8 @@ git commit -m "feat(ai-host): download and import d1-2B model files"
 
 ### PR 1a の完了条件
 
-- [ ] `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test -p vrc-photon-ai-protocol -p vrc-photon-ai-mock-sidecar && cargo test -p vrc-photon-ai-host --features test-support`
-- [ ] PR 1a を出す（ラベル `enhancement`）。CI 緑でマージし、`main` に戻る。
+- [x] `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test -p vrc-photon-ai-protocol -p vrc-photon-ai-mock-sidecar && cargo test -p vrc-photon-ai-host --features test-support`
+- [x] PR 1a を出す（ラベル `enhancement`）。CI 緑でマージし、`main` に戻る。
 
 ---
 
@@ -670,7 +670,7 @@ git commit -m "feat(ai-host): download and import d1-2B model files"
   - `#[serde(default = "default_ai_idle_timeout")] pub ai_tagging_idle_timeout_sec: u64`（既定 `600`）
   - `#[serde(default)] pub ai_model_license_consent_at: Option<i64>`（既定 `None`）
 
-- [ ] **Step 1: 失敗する設定テストを書く**
+- [x] **Step 1: 失敗する設定テストを書く**
 
 ```rust
 #[test]
@@ -691,21 +691,21 @@ fn ai_settings_default_off_and_survive_old_json() {
 
 `ai_settings_are_normalized`（存在閾値を 0..1 に clamp、不明 backend を `auto`、idle timeout を 30..3600 に clamp）も書く。
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-core settings::tests::ai_settings_default_off_and_survive_old_json`
 Expected: フィールド未定義で失敗。
 
-- [ ] **Step 3: 最小実装を書く**
+- [x] **Step 3: 最小実装を書く**
 
 `AppSettings::load` の中で `normalize_ai_settings()` を呼ぶ。`Default` と `save` は既存のパターンに合わせる。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-core settings::tests`
 Expected: 全テスト PASS。
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/core/src/settings.rs
@@ -744,7 +744,7 @@ git commit -m "feat(core): add AI tagging settings"
   - `Db::ai_tag_thresholds(&self, plugin_id: &str) -> Result<Vec<AiTagThreshold>>`
   - `Db::reapply_ai_tag_thresholds(&self, plugin_id: &str) -> Result<usize>`
 
-- [ ] **Step 1: v13 マイグレーションの失敗テストを書く**
+- [x] **Step 1: v13 マイグレーションの失敗テストを書く**
 
 ```rust
 #[test]
@@ -762,12 +762,12 @@ fn migrate_v13_adds_ai_tables_and_is_retryable() {
 
 `active_installation_is_unique_per_plugin`、`catalog_sync_preserves_user_thresholds`、`catalog_sync_updates_defaults`、`reapply_thresholds_updates_applied` も書く。
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-core db::tests::migrate_v13_adds_ai_tables_and_is_retryable`
 Expected: メソッド未定義で失敗。
 
-- [ ] **Step 3: 最小実装を書く**
+- [x] **Step 3: 最小実装を書く**
 
 `SCHEMA_V13_AI_TAGGING` に次の DDL を入れる（設計書 8.2 + `probe_json` 拡張）。
 
@@ -824,12 +824,12 @@ CREATE TABLE IF NOT EXISTS ai_tag_thresholds (
 
 `migrate()` に `if version < 13 { self.migrate_v13()?; }` を追加。`active` の切り替えは `BEGIN IMMEDIATE` で「同一 plugin の active=0 → 対象を active=1」。`sync_ai_catalog` は UPSERT し、ユーザー閾値は触らない。既定閾値 (`default_threshold`) が変わったタグがあれば、同期後に `reapply_ai_tag_thresholds` を呼んで `applied` を再計算する。`reapply_ai_tag_thresholds` は `applied = probability >= COALESCE(override, default)` を1 UPDATE で行う。`set_plugin_model_state` / `set_plugin_probe_json` は `INSERT ... ON CONFLICT(plugin_id) DO UPDATE` の upsert にする。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-core db::tests::migrate_v13_adds_ai_tables_and_is_retryable && cargo test -p vrc-photon-core db::tests::catalog`
 Expected: PASS。
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/core/Cargo.toml crates/core/src/lib.rs crates/core/src/ai.rs crates/core/src/db.rs
@@ -878,7 +878,7 @@ git commit -m "feat(core): add schema v13 plugin and AI catalog storage"
   - `deletion_job_summary` / `deletion_blockers` / `claim_deletion` / `block_deletion_if_jobs_failed` が tagging を扱う。
   - 既存の `DeletionJobSummary { ... }` 構造体リテラル（`crates/core/src/db.rs`、`crates/ui/src/app/photos.rs`、daemon のテスト）に `tagging: JobStatusCounts::default()` を追加する。
 
-- [ ] **Step 1: AI 保存の失敗テストを書く**
+- [x] **Step 1: AI 保存の失敗テストを書く**
 
 ```rust
 #[test]
@@ -916,7 +916,7 @@ fn ai_tags_never_touch_manual_tags() {
 
 `save_photo_ai_skips_missing_or_deleting_photos`、`reapply_thresholds_updates_applied`、`ai_results_cascade_on_photo_delete` も書く。
 
-- [ ] **Step 2: ジョブと削除の失敗テストを書く**
+- [x] **Step 2: ジョブと削除の失敗テストを書く**
 
 ```rust
 #[test]
@@ -933,12 +933,12 @@ fn tagging_jobs_dedupe_active_work_and_respect_waiting() {
 
 `backlog_enqueue_is_idempotent`（1000枚でも2回目は0、active job を重複させない）、`release_waiting_moves_only_waiting`、`retry_caps_at_two`、`cancel_processing_blocks_late_write`、`resume_processing_as_pending`、`deletion_summary_includes_tagging`、`deletion_blockers_wait_for_tagging`、`force_delete_cancels_tagging` も書く。
 
-- [ ] **Step 3: テストが失敗することを確認**
+- [x] **Step 3: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-core db::tests::ai`
 Expected: メソッド未定義で失敗。
 
-- [ ] **Step 4: 最小実装を書く**
+- [x] **Step 4: 最小実装を書く**
 
 - `SCHEMA_V13_AI_TAGGING` に `photo_ai`, `photo_ai_tags`, `tagging_jobs` と次のインデックスを追加する（設計書 8.2 のとおり）。
 
@@ -962,12 +962,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_tagging_jobs_active
 - `delete_ai_data` は `photo_ai` / `photo_ai_tags` / `ai_tag_definitions` / `ai_tag_thresholds` を1トランザクションで消す。
 - `DeletionJobSummary` の `tagging` を追加し、`deletion_job_summary` の SQL に tagging_jobs を OR で追加。`deletion_blockers` の active 条件に tagging を追加。`claim_deletion` は tagging active がある間は進まない。`force` のときは `cancel_tagging_jobs_for_photo` を先に呼ぶ。
 
-- [ ] **Step 5: テストが通ることを確認**
+- [x] **Step 5: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-core db::tests`
 Expected: 全テスト PASS。
 
-- [ ] **Step 6: コミット**
+- [x] **Step 6: コミット**
 
 ```bash
 git add crates/core/src/ai.rs crates/core/src/db.rs crates/core/src/model.rs
@@ -992,7 +992,7 @@ git commit -m "feat(core): store AI results and tagging jobs"
   - `pub fn tagging_cache_dir(data_dir: &Path) -> PathBuf` = `<data_dir>/cache/tagging`
   - `pub fn apply_tagging_transform(image: DynamicImage) -> DynamicImage`（downscale only）
 
-- [ ] **Step 1: 失敗するスナップショットテストを書く**
+- [x] **Step 1: 失敗するスナップショットテストを書く**
 
 ```rust
 #[test]
@@ -1017,12 +1017,12 @@ fn snapshot_never_upscales_small_images() {
 
 `tagging_transform_applies_exif_orientation`（`Orientation::Rotate90` を直接 `apply_orientation` に渡す pure test）、`snapshot_is_atomic_and_overwrites_same_job`、`snapshot_reports_missing_source` も書く。
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-core tagging_image::tests`
 Expected: モジュール未定義で失敗。
 
-- [ ] **Step 3: 最小実装を書く**
+- [x] **Step 3: 最小実装を書く**
 
 - JPEG/WebP/TIFF は `image::ImageReader::open(...).with_guessed_format()?.into_decoder()` で `orientation()` を取得し、`DynamicImage::from_decoder` の後に `apply_orientation`。AVIF/JXL は既存 `image_decode::decode_image` を使い、orientation なし。
 - 長辺が 1024 を超える場合だけ Lanczos3 で縮小。縦横比を維持。
@@ -1030,12 +1030,12 @@ Expected: モジュール未定義で失敗。
 - `mtime_ms` は書き込み後の `metadata.modified()` から epoch ミリ秒。
 - `fs::create_dir_all(cache_dir)`。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-core tagging_image::tests`
 Expected: 全テスト PASS。
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/core/src/tagging_image.rs crates/core/src/lib.rs
@@ -1074,7 +1074,7 @@ git commit -m "feat(core): prepare 1024px JPEG snapshots for tagging"
   - `StatusSnapshot` 追加: `#[serde(default)] pub pending_tagging_jobs: i64`, `#[serde(default)] pub tagging_ready: bool`
   - `ErrorCode` 追加: `NotFound`, `Busy`, `NotReady`, `ConsentRequired`
 
-- [ ] **Step 1: 失敗する IPC テストを書く**
+- [x] **Step 1: 失敗する IPC テストを書く**
 
 ```rust
 #[test]
@@ -1110,21 +1110,21 @@ fn status_snapshot_without_ai_fields_decodes() {
 }
 ```
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-ipc`
 Expected: variant 未定義で失敗。
 
-- [ ] **Step 3: 最小実装を書く**
+- [x] **Step 3: 最小実装を書く**
 
 `PROTOCOL_VERSION` を 5 に上げ、上記の型を追加する。`StatusSnapshot` の新フィールドは `#[serde(default)]`。`ErrorCode` の追加は既存の `InvalidRequest` を壊さない。既存の `StatusSnapshot { ... }` 構造体リテラル（`crates/ipc/src/protocol.rs`、`crates/ui/src/ipc_bridge.rs`、daemon のテスト）は `..StatusSnapshot::default()` か新フィールドを追加して更新する。`PROTOCOL_VERSION == 4` を期待する既存テストも 5 に更新する。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-ipc`
 Expected: 全テスト PASS。
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/ipc
@@ -1135,12 +1135,12 @@ git commit -m "feat(ipc): add plugin and AI tagging messages for protocol v5"
 
 ### PR 1b の完了条件
 
-- [ ] **Step 1: ワークスペース全体を検証する**
+- [x] **Step 1: ワークスペース全体を検証する**
 
 Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`
 Expected: 全コマンド成功。
 
-- [ ] **Step 2: PR 1b を出す**
+- [x] **Step 2: PR 1b を出す**
 
 PR ラベル `enhancement`。CI 緑でマージし、`main` に戻る。
 
@@ -1184,7 +1184,7 @@ PR ラベル `enhancement`。CI 緑でマージし、`main` に戻る。
     - `Daemon::set_ai_http_client(&mut self, client: Arc<dyn ModelHttpClient>)`
     - `Daemon::plugin_service(&self) -> &PluginService`
 
-- [ ] **Step 1: 失敗する PluginService テストを書く**
+- [x] **Step 1: 失敗する PluginService テストを書く**
 
 `ai-host` の `test-support` feature を dev-dependency で有効にし、署名済みテスト ZIP とモック sidecar を使う。
 
@@ -1204,12 +1204,12 @@ fn install_probes_and_syncs_the_catalog() {
 
 `active_variant_switch_stops_the_sidecar`、`uninstall_keeps_or_deletes_ai_tags`、`model_download_rejects_without_license_consent`、`model_download_updates_state_and_progress`、`import_model_files_updates_state`、`busy_operation_rejects_a_second_install` も書く。
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-daemon plugin::tests`
 Expected: モジュール未定義で失敗。
 
-- [ ] **Step 3: 最小実装を書く**
+- [x] **Step 3: 最小実装を書く**
 
 - `PluginServiceInner` は `db`, `data_dir`, `events`, `keys`, `http`, `sidecar: Mutex<Option<Arc<SidecarClient>>>`, `operations: Mutex<HashSet<String>>`, `model_cancel: Mutex<HashMap<String, Arc<AtomicBool>>>`, `host_version: String` を持つ。
 - 取込: 先に sidecar を停止し、`install_from_zip(..., data_dir, &keys, env!("CARGO_PKG_VERSION"))` を別スレッドで実行。`Event::PluginInstallProgress` を Running / Installed / Failed で出す。成功時に `upsert_plugin_installation`（新規を active に）→ `sync_catalog_from_install` → `probe`。
@@ -1227,12 +1227,12 @@ Expected: モジュール未定義で失敗。
 - daemon の `open_inner` で `PluginService::new(..., ai_host::effective_plugin_keys(), ...)` を作り、`Daemon` に保持する。`HttpClient` は本番 `UreqModelClient`、テストは fake を注入する。
 - `crates/daemon/src/lib.rs` に `pub(crate) mod plugin;` を追加する。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-daemon plugin::tests`
 Expected: 全テスト PASS。
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/daemon/Cargo.toml crates/daemon/src/plugin.rs crates/daemon/src/lib.rs
@@ -1254,7 +1254,7 @@ git commit -m "feat(daemon): own plugin install, probe, model, and sidecar lifec
   - `handle_request` が新 Request を処理する。
   - `status_snapshot` が `pending_tagging_jobs` と `tagging_ready` を埋める。
 
-- [ ] **Step 1: 失敗する IPC テストを書く**
+- [x] **Step 1: 失敗する IPC テストを書く**
 
 ```rust
 #[test]
@@ -1277,12 +1277,12 @@ fn model_download_requires_license_consent() {
 
 `install_plugin_returns_ok_and_emits_progress`、`cancel_tagging_cancels_db_and_token`、`unknown_plugin_returns_not_found`、`status_includes_ai_counts` も書く。
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-daemon ipc_server::tests`
 Expected: 未定義で失敗。
 
-- [ ] **Step 3: 最小実装を書く**
+- [x] **Step 3: 最小実装を書く**
 
 - `WakeTagging` → `tagging.notify()`。
 - `InstallPlugin` / `ProbePlugin` / `SetActiveVariant` / `StartModelDownload` / `CancelModelDownload` / `ImportModelFiles` / `DeleteModel` / `UninstallPlugin` は `PluginService` に委譲。受付成功は `Response::Ok`、即時エラーは `Response::Error`。
@@ -1290,12 +1290,12 @@ Expected: 未定義で失敗。
 - `Status` / `Hello` の snapshot に `pending_tagging_jobs`（waiting+pending+processing）と `tagging_ready` を入れる。
 - `--once` では tagging worker も plugin 操作も起動しない（既存の `run_once` の挙動を維持）。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-daemon ipc_server::tests`
 Expected: 全テスト PASS。
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/daemon/src/ipc_server.rs crates/daemon/src/lib.rs
@@ -1324,7 +1324,7 @@ git commit -m "feat(daemon): handle plugin and tagging IPC v5 requests"
   - `pub(crate) struct TaggingWorkerConfig { pub retry_delays: [Duration; 2], pub idle_timeout: Duration, pub poll_interval: Duration }`
   - `Daemon` に `tagging: Arc<JobSignal>` と `tagging_control: Arc<TaggingControl>` を追加し、`IpcControl` と worker で共有する。
 
-- [ ] **Step 1: 失敗するパイプラインテストを書く**
+- [x] **Step 1: 失敗するパイプラインテストを書く**
 
 ```rust
 #[test]
@@ -1343,12 +1343,12 @@ fn presence_false_skips_count_and_still_writes_place() {
 
 `presence_true_runs_all_four_ops_and_publishes_progress`、`place_class_indoor_uses_indoor_tags`、`plugin_not_ready_defers_without_retry`、`retryable_error_retries_twice_then_fails`、`non_retryable_error_fails_immediately`、`cancel_during_request_marks_job_cancelled_and_writes_nothing`、`crash_marks_job_failed_and_keeps_other_jobs`、`snapshot_is_deleted_after_success_and_failure`、`idle_timeout_shuts_down_the_sidecar` も書く。
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-daemon tagging::tests`
 Expected: モジュール未定義で失敗。
 
-- [ ] **Step 3: 最小実装を書く**
+- [x] **Step 3: 最小実装を書く**
 
 - ループ: `db.next_pending_tagging_job()` → 空なら `signal.wait(400ms)`。`process_once` は1件だけ。
 - ジョブ開始時に `TaggingControl::register(job.id)`。`Event::TaggingProgress` を Processing 0.05 で出す。
@@ -1365,12 +1365,12 @@ Expected: モジュール未定義で失敗。
 - `save_photo_ai_for_job` は `job_id` の status が Processing のときだけ書き、`library_revision` を進める。`Ok(false)`（cancelled / photo missing）なら completed を出さず、cancelled として終了する。`complete_tagging_job` は processing のときだけ更新する。
 - アイドル: 最後の処理から `AppSettings.ai_tagging_idle_timeout_sec`（既定600秒、テストでは `TaggingWorkerConfig` で短縮）を超え、pending がなければ `plugin.stop_sidecar()`。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-daemon tagging::tests`
 Expected: 全テスト PASS。
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/daemon/src/tagging.rs crates/daemon/src/lib.rs
@@ -1395,7 +1395,7 @@ git commit -m "feat(daemon): run the four-stage tagging pipeline"
   - `DaemonStatus` に `pending_tagging_jobs: i64`, `tagging_ready: bool` を追加
   - `Daemon::refresh_status` で `tagging_job_counts` と `plugin.is_ready` を反映
 
-- [ ] **Step 1: 失敗する自動投入テストを書く**
+- [x] **Step 1: 失敗する自動投入テストを書く**
 
 ```rust
 #[test]
@@ -1413,12 +1413,12 @@ fn auto_tagging_enqueues_only_new_photos_when_ready() {
 
 `auto_tagging_does_nothing_when_not_ready`、`backlog_enqueue_is_waiting_until_released`、`release_backlog_wakes_the_worker`、`status_counts_include_tagging`、`force_delete_cancels_tagging_before_claim`、`deletion_waits_for_processing_tagging` も書く。
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-daemon auto_tagging`
 Expected: 未定義で失敗。
 
-- [ ] **Step 3: 最小実装を書く**
+- [x] **Step 3: 最小実装を書く**
 
 - `scan_root_photos` と `scan_roots_with_initial` の両方で、圧縮の auto enqueue の直後に `enqueue_auto_tagging` を呼ぶ。`tagging.notify()`。
 - daemon 起動時に `db.resume_interrupted_tagging_jobs()` を呼び、`processing` を `pending` に戻す。`plugin.recover_interrupted_model_state()` も呼ぶ。
@@ -1428,12 +1428,12 @@ Expected: 未定義で失敗。
 - `process_deletions` / `claim_deletion` の前に、強制削除なら `cancel_tagging_jobs_for_photo` を呼ぶ。DB 側の blocker は Task 8 で実装済み。
 - `Daemon::release_ai_backlog` は UI から直接 DB を更新して `WakeTagging` を送るだけでもよいが、テスト用にメソッドを用意する。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-daemon auto_tagging && cargo test -p vrc-photon-daemon deletion`
 Expected: 全テスト PASS。
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/daemon/src/lib.rs crates/daemon/src/tagging.rs crates/daemon/src/plugin.rs
@@ -1453,7 +1453,7 @@ git commit -m "feat(daemon): enqueue, release, and track AI tagging jobs"
 - Consumes: Tasks 11–14。`PluginService` は `pub(crate)` のため、外部 integration test ではなくデーモン内部のテストモジュールに置く。
 - Produces: 1つのテストで「署名ZIP取込 → probe → モデル取込 → ジョブ投入 → 4段推論 → `photo_ai` / `photo_ai_tags` → 進捗イベント → キャンセル → 再起動復旧」を通す。モック sidecar は `assert_cmd::cargo::cargo_bin("mock-sidecar")` で解決する。
 
-- [ ] **Step 1: 縦断テストを書く**
+- [x] **Step 1: 縦断テストを書く**
 
 ```rust
 #[test]
@@ -1482,21 +1482,21 @@ fn install_import_tag_cancel_and_resume() {
 }
 ```
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-daemon ai_e2e`
 Expected: 未定義で失敗。
 
-- [ ] **Step 3: テスト用の配線を整える**
+- [x] **Step 3: テスト用の配線を整える**
 
 `Daemon::set_ai_data_dir`, `Daemon::set_thumbnail_dir`, `Daemon::set_ai_plugin_keys`, `Daemon::set_ai_http_client`, `PluginService` の `test_support` ZIP、`assert_cmd::cargo::cargo_bin("mock-sidecar")` を使う。`MockModelClient` は `ModelHttpClient` を実装し、テスト用 GGUF バイト列を返す。`ai-host` の `test_support` で manifest のハッシュと一致させる。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-daemon ai_e2e`
 Expected: PASS。
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/daemon/src/ai_e2e.rs crates/daemon/src/lib.rs
@@ -1507,17 +1507,17 @@ git commit -m "test(daemon): cover plugin install through tagging cancel and res
 
 ### Phase 2 の完了条件
 
-- [ ] **Step 1: デーモン全体を検証する**
+- [x] **Step 1: デーモン全体を検証する**
 
 Run: `cargo test -p vrc-photon-daemon`
 Expected: 既存テストと新規テストがすべて PASS。
 
-- [ ] **Step 2: ワークスペース全体を検証する**
+- [x] **Step 2: ワークスペース全体を検証する**
 
 Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`
 Expected: 成功。
 
-- [ ] **Step 3: PR 2 を出す**
+- [x] **Step 3: PR 2 を出す**
 
 PR ラベル `enhancement`。CI 緑でマージし、`main` に戻る。
 
@@ -1538,15 +1538,15 @@ PR ラベル `enhancement`。CI 緑でマージし、`main` に戻る。
   - 削除警告: AIタグ付けの件数を含む
 - デザインは既存の `docs/ui-glass-ribbon-mockup.html` のトーンに合わせる。
 
-- [ ] **Step 1: モックを作る**
+- [x] **Step 1: モックを作る**
 
 既存モックの CSS 変数・パネル・チップを再利用し、上記の状態を横並びまたはタブで表示する。文言は `ja.yml` に入れる予定のキーと同じ日本語にする。
 
-- [ ] **Step 2: レビューを依頼する**
+- [x] **Step 2: レビューを依頼する**
 
 ユーザーにモックを提示し、レイアウト・文言・状態遷移の承認を得る。承認前に PR 3b の UI 実装を始めない。
 
-- [ ] **Step 3: コミットして PR 3a を出す**
+- [x] **Step 3: コミットして PR 3a を出す**
 
 ```bash
 git add docs/ai-tagging-m2-mockup.html
@@ -1598,7 +1598,7 @@ PR ラベル `enhancement`。CI 緑でマージ。
     - `pub(crate) struct AiTagView { pub label: String, pub tooltip: String, pub ai_badge: bool }`
     - `pub(crate) fn ai_tag_view(tag: &PhotoAiTagView, language: &str) -> AiTagView`
 
-- [ ] **Step 1: 失敗する状態テストを書く**
+- [x] **Step 1: 失敗する状態テストを書く**
 
 ```rust
 #[test]
@@ -1620,12 +1620,12 @@ fn backend_options_only_include_probe_backends_and_auto() {
 
 `ai_ready_requires_install_model_and_probe`、`handle_tagging_progress_updates_counts`、`license_required_only_once`、`error_label_maps_known_codes` も書く。
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-ui app::ai::tests`
 Expected: 未定義で失敗。
 
-- [ ] **Step 3: 最小実装を書く**
+- [x] **Step 3: 最小実装を書く**
 
 - `refresh_ai_state` は `db.active_plugin_installation`、`db.list_plugin_installations`、`db.plugin_state`、`db.tagging_job_counts`、`db.active_tagging_jobs(20)` を読む。`probe_json` を `serde_json::from_str::<Probe>` する。
 - `install_ai_plugin` などは `send_ai_request` で送る（`InstallPlugin` / `ProbePlugin` / `SetActiveVariant` / `StartModelDownload` / `CancelModelDownload` / `ImportModelFiles` / `DeleteModel` / `UninstallPlugin` / `CancelTagging`）。ファイル選択は `rfd::FileDialog`。
@@ -1634,12 +1634,12 @@ Expected: 未定義で失敗。
 - `lifecycle.rs` の `handle_ipc_event` に `self.handle_ai_event(event, cx)` を追加。
 - `live.rs` の `LiveSnapshot` に `ai: AiLiveSnapshot` を追加し、3秒ごとに counts / active_jobs / plugin_state を反映する。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-ui app::ai::tests`
 Expected: 全テスト PASS。
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/ui/Cargo.toml crates/ui/src/app.rs crates/ui/src/app/ai.rs crates/ui/src/app/lifecycle.rs crates/ui/src/app/live.rs
@@ -1673,7 +1673,7 @@ git commit -m "feat(ui): add AI tagging state, actions, and events"
     - アンインストール: 確認 + `AIタグも削除する` チェック
     - ライセンス同意モーダル: `settings.ai.license.title` / `body` / `open` / `agree_download`
 
-- [ ] **Step 1: カードの状態ラベル helper をテストする**
+- [x] **Step 1: カードの状態ラベル helper をテストする**
 
 ```rust
 #[test]
@@ -1689,12 +1689,12 @@ fn plugin_card_state_selects_the_right_primary_action() {
 }
 ```
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-ui app::ai::tests::plugin_card_state`
 Expected: 未定義で失敗。
 
-- [ ] **Step 3: 最小実装を書く**
+- [x] **Step 3: 最小実装を書く**
 
 - `glass_panel` と既存の `Button` / `Switch` / `Checkbox` / `Scrollbar` を使う。
 - ZIP 選択は `rfd::FileDialog::new().add_filter("ZIP", &["zip"]).pick_file()`。
@@ -1702,12 +1702,12 @@ Expected: 未定義で失敗。
 - ライセンス同意は `ai_model_license_consent_at` を保存してから `StartModelDownload`。
 - `ja.yml` / `en.yml` に `settings.ai.*` を追加する。`source_keys` テストが通ることを確認。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-ui app::ai::tests && cargo test -p vrc-photon-i18n`
 Expected: 全テスト PASS。
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/ui/src/ui/settings.rs crates/i18n/locales/ja.yml crates/i18n/locales/en.yml
@@ -1733,7 +1733,7 @@ git commit -m "feat(ui): add the AI plugin management card to settings"
     - 準備完了: `有効化` スイッチ、`自動` スイッチ、`バックログ` スイッチ、backend 選択（auto + probe の backend）、件数、active job の進捗 + キャンセル、`バックログを開始`（waiting > 0 のとき）、`設定を開く`
   - 既存の `collapsible_body` と `ToggleMotion` を使う。
 
-- [ ] **Step 1: 失敗する表示 helper テストを書く**
+- [x] **Step 1: 失敗する表示 helper テストを書く**
 
 ```rust
 #[test]
@@ -1750,12 +1750,12 @@ fn people_and_place_labels_are_readable() {
 
 `ai_job_summary_label`（待機/実行中/失敗）、`download_progress_bar_ratio`、`backend_selection_is_disabled_when_not_ready` も書く。
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-ui app::ai::tests::people_and_place`
 Expected: 未定義で失敗。
 
-- [ ] **Step 3: 最小実装を書く**
+- [x] **Step 3: 最小実装を書く**
 
 - `setting_switch` で `ai_tagging_enabled` / `ai_tagging_auto` / `ai_tagging_backlog` を保存する。バックログ ON は `enqueue_tagging_backlog` を呼ぶ。
 - backend は `probe.backends` + `auto` のチップ/チェックボックス。選択を `ai_tagging_backend` に保存。
@@ -1763,12 +1763,12 @@ Expected: 未定義で失敗。
 - waiting > 0 のとき `start_ai_backlog` ボタン。
 - `ja.yml` / `en.yml` に `integrations.ai.*` と `tagging.error.*` を追加。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-ui app::ai::tests && cargo test -p vrc-photon-i18n`
 Expected: 全 PASS。
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/ui/src/ui/integrations.rs crates/i18n/locales/ja.yml crates/i18n/locales/en.yml
@@ -1796,7 +1796,7 @@ git commit -m "feat(ui): add the AI tagging runtime card"
   - `selection_bar` に `AIタグ付け` ボタンを追加（`enqueue_ai_tagging(&selected_ids)`）
   - 削除警告 `deletion_warning_lines` に AIタグ付けの行を追加
 
-- [ ] **Step 1: 失敗する表示・警告テストを書く**
+- [x] **Step 1: 失敗する表示・警告テストを書く**
 
 ```rust
 #[test]
@@ -1823,12 +1823,12 @@ fn deletion_warning_lines_include_ai_tagging() {
 
 `selected_ai_tags_use_english_names_when_language_is_en`、`manual_retag_enqueues_one_job_and_wakes`、`retag_requires_enabled_plugin` も書く。
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-ui app::ai::tests::ai_tag_chip && cargo test -p vrc-photon-ui app::photos::tests::deletion_warning_lines_include_ai`
 Expected: 未定義で失敗。
 
-- [ ] **Step 3: 最小実装を書く**
+- [x] **Step 3: 最小実装を書く**
 
 - `load_selected_meta` の末尾で `load_selected_ai(id)`。`db.photo_ai` + `db.photo_ai_tags_with_names`。
 - `ai_meta_block`: `photos.section.ai_tags`、AIバッジ付きチップ、`photos.ai.people`、`photos.ai.place`、`photos.ai.retag` ボタン。手動タグのセクションとは視覚的に分離する（別パネルまたは区切り線）。
@@ -1836,12 +1836,12 @@ Expected: 未定義で失敗。
 - `deletion_warning_lines` に `job_status_line(tr!("photos.jobs.ai_tagging"), summary.tagging)` を追加。
 - `ja.yml` / `en.yml` に `photos.ai.*` と `photos.jobs.ai_tagging` を追加。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-ui app::ai::tests && cargo test -p vrc-photon-ui app::photos::tests`
 Expected: 全 PASS。
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/ui/src/ui/library.rs crates/ui/src/app/photos.rs crates/ui/src/app/ai.rs crates/i18n/locales/ja.yml crates/i18n/locales/en.yml
@@ -1852,17 +1852,17 @@ git commit -m "feat(ui): show AI tags and add manual retagging"
 
 ### Phase 3 の完了条件
 
-- [ ] **Step 1: UI 全体を検証する**
+- [x] **Step 1: UI 全体を検証する**
 
 Run: `cargo test -p vrc-photon-ui && cargo test -p vrc-photon-i18n`
 Expected: 全テスト PASS。
 
-- [ ] **Step 2: ワークスペース全体を検証する**
+- [x] **Step 2: ワークスペース全体を検証する**
 
 Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`
 Expected: 成功。
 
-- [ ] **Step 3: PR 3b を出す**
+- [x] **Step 3: PR 3b を出す**
 
 PR ラベル `enhancement`。CI 緑でマージし、`main` に戻る。
 
@@ -1885,7 +1885,7 @@ PR ラベル `enhancement`。CI 緑でマージし、`main` に戻る。
 - manifest は `host_version_min = "0.0.0"`, `host_version_max = "0.99.99"` の開発用でよい。`catalog_version` は `data/catalog.json` から取る。`files` は ZIP 内の全ファイルの size/sha256 を含める。`model.files` は `role` 付きで `d1-2B-Q8_0.gguf` と `mmproj-d1-2B-Q8_0.gguf` を含める。
 - 署名は `MINISIGN_SECRET_KEY` 環境変数で指定した開発鍵を使い、`packaging/ai/dev-keys.txt` の公開鍵と一致させる。
 
-- [ ] **Step 1: sidecar をビルドする**
+- [x] **Step 1: sidecar をビルドする**
 
 ```bash
 cd /home/tommyz7/work/vrc-photon-autotag
@@ -1895,7 +1895,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
 
-- [ ] **Step 2: 開発用署名ZIPを作る**
+- [x] **Step 2: 開発用署名ZIPを作る**
 
 ```bash
 cd /home/tommyz7/work/vrc-photon-autotag
@@ -1905,7 +1905,7 @@ MINISIGN_SECRET_KEY="$HOME/.minisign/vrc-photon-ai-dev.key" \
   packaging/dev/build_dev_zip.sh --build-dir build --backend cpu
 ```
 
-- [ ] **Step 3: 本体をdebugビルドして起動する**
+- [x] **Step 3: 本体をdebugビルドして起動する**
 
 ```bash
 cd /home/tommyz7/work/vrc-photo-manager
@@ -1915,7 +1915,7 @@ cargo build -p vrc-photon
 
 設定画面で Vulkan ZIP を取り込み、モデルを `/home/tommyz7/work-saeki/d1-spike/models` から取り込む（`d1-2B-Q8_0.gguf` + `mmproj-d1-2B-Q8_0.gguf`）。ライセンス同意を確認し、probe のバックエンドが Vulkan になることを確認する。実データを汚したくない場合は、使い捨てのユーザープロファイルまたは VM で実行する。終了後は設定画面からプラグインをアンインストール（AIタグも削除）し、モデルを削除する。
 
-- [ ] **Step 4: タグ付けを実行する**
+- [x] **Step 4: タグ付けを実行する**
 
 - 連携・自動画面で有効化し、3枚の VRChat 写真を手動実行する。
 - インスペクタで AIタグ・人数・場所・確率を確認する。
@@ -1925,7 +1925,7 @@ cargo build -p vrc-photon
 - 同じ画像を CPU variant でも実行し、結果が許容差内（place 0.05、count ±2、タグ集合の大きな差なし）であることを確認する。
 - GNOME Wayland では `gnome-wayland-visual-qa` スキルで設定画面・連携・自動画面・インスペクタのスクリーンショットを取得し、モックとの差分（余白・文字切れ・状態遷移）を確認する。
 
-- [ ] **Step 5: 結果を記録する**
+- [x] **Step 5: 結果を記録する**
 
 `docs/superpowers/notes/2026-11-04-ai-tagging-m2-e2e.md` に次を書く。
 
@@ -1935,7 +1935,7 @@ cargo build -p vrc-photon
 - キャンセル・再起動復旧・削除警告の確認結果
 - 既知の制限（Windows / CUDA / ROCm / 品質未検証 / 閾値UI未実装）
 
-- [ ] **Step 6: ドキュメントを更新する**
+- [x] **Step 6: ドキュメントを更新する**
 
 - `docs/architecture.md`: `ai-protocol` / `ai-host` / daemon worker / UI の責務、プロトコル v5、sidecar 起動。
 - `docs/data-model.md`: v13 のテーブルと `probe_json` 拡張、`tagging_jobs.waiting` の意味、AIタグと手動タグの分離。
@@ -1943,7 +1943,7 @@ cargo build -p vrc-photon
 - `docs/features.md`: AIタグ付けのユーザー向け説明（M2 の範囲）。
 - `docs/development.md`: mock sidecar / 実 sidecar E2E のコマンド、`cargo test` の追加クレート。
 
-- [ ] **Step 7: 検証して PR 4 を出す**
+- [x] **Step 7: 検証して PR 4 を出す**
 
 Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`
 Expected: 成功。
