@@ -2525,7 +2525,7 @@
               <div class="modal-body">
                 <p class="modal-lede keyed" data-key="settings.ai.uninstall.body">プラグイン本体とモデル（2.0 GB）を削除します。AIタグは既定で残り、プラグイン未導入でも履歴として表示できます。</p>
                 <label class="check-row">
-                  <input type="checkbox" id="deleteAiTags" class="check-box" aria-describedby="deleteAiTagsHint">
+                  <input type="checkbox" id="deleteAiTags" class="check-box">
                   <span class="check-copy">
                     <span class="check-label keyed" data-key="settings.ai.uninstall.delete_tags">AIタグも削除する</span>
                     <span class="check-desc keyed" id="deleteAiTagsHint" data-key="settings.ai.uninstall.delete_tags_hint">photo_ai / photo_ai_tags も削除します（取り消せません）</span>
@@ -3187,8 +3187,9 @@
             写真ごとに 1 件なので、選択 5 枚では最大 5 件です。ライブラリ全体のバックログ（待機 128 件）は
             削除警告には含めません。Task 20 のテスト文言は <code>処理中</code> を期待します
             （<code>実行中</code> ではない）。共有の <code>photos.jobs.*</code> 文言を変える場合のみ
-            <code>実行中</code> に合わせます。なお <code>job_status_line</code> は 0 件の状態を省略するため、
-            実装時の表示は「未実行 2 / 処理中 1」になります（モックでは全状態を見せるため 失敗 0 を残しています）。
+            <code>実行中</code> に合わせます。なお <code>job_status_line</code> は 0 件の状態を省略し、
+            <code>processing</code> → <code>waiting</code> の順に並べるため、実装時の表示は
+            「処理中 1 / 未実行 2」になります（モックでは全状態を見せるため 失敗 0 を残しています）。
           </div>
         </aside>
       </div>
@@ -3235,7 +3236,7 @@
               <tr><td class="key">settings.ai.download</td><td class="ja">モデルをダウンロード</td><td class="use">モデルなしの主ボタン</td></tr>
               <tr><td class="key">settings.ai.import_model</td><td class="ja">ファイルから取り込む</td><td class="use">モデルなしの副ボタン</td></tr>
               <tr><td class="key">settings.ai.status.downloading</td><td class="ja">ダウンロード中</td><td class="use">状態バッジ</td></tr>
-              <tr><td class="key">settings.ai.download.progress</td><td class="ja">64% · 1.3 GB / 2.0 GB · 18.2 MB/s（テンプレート: %{percent}% · %{done} / %{total} · %{speed}）</td><td class="use">進捗表示</td></tr>
+              <tr><td class="key">settings.ai.download.progress</td><td class="ja">64% · 1.3 GB / 2.0 GB · 18.2 MB/s</td><td class="use">進捗表示（テンプレート: %{percent}% · %{done} / %{total} · %{speed}）</td></tr>
               <tr><td class="key">settings.ai.cancel</td><td class="ja">キャンセル</td><td class="use">DL キャンセル</td></tr>
               <tr><td class="key">settings.ai.status.ready</td><td class="ja">準備完了</td><td class="use">状態バッジ</td></tr>
               <tr><td class="key">settings.ai.variants</td><td class="ja">インストール済み variant</td><td class="use">variant 一覧の見出し</td></tr>
@@ -3247,7 +3248,7 @@
               <tr><td class="key">settings.ai.status.error</td><td class="ja">エラー</td><td class="use">状態バッジ</td></tr>
               <tr><td class="key">settings.ai.retry</td><td class="ja">再試行</td><td class="use">エラーからの再試行</td></tr>
               <tr><td class="key">settings.ai.open_logs</td><td class="ja">ログを開く</td><td class="use">エラー時のログ導線</td></tr>
-              <tr><td class="key">settings.ai.error.code</td><td class="ja">エラーコード: E-AI-002 · model_checksum_mismatch（テンプレート: エラーコード: %{code}）</td><td class="use">エラーコード表示</td></tr>
+              <tr><td class="key">settings.ai.error.code</td><td class="ja">エラーコード: E-AI-002 · model_checksum_mismatch</td><td class="use">エラーコード表示（テンプレート: エラーコード: %{code}）</td></tr>
               <tr><td class="key">settings.ai.license.title</td><td class="ja">モデルライセンスへの同意</td><td class="use">ライセンスモーダル</td></tr>
               <tr><td class="key">settings.ai.license.body</td><td class="ja">d1-2B モデルの利用には LFM Open License への同意が必要です。内容を確認してからダウンロードを開始してください。</td><td class="use">ライセンスモーダル</td></tr>
               <tr><td class="key">settings.ai.license.metadata.license</td><td class="ja">ライセンス: LFM Open License v1.0（manifest の model.license）</td><td class="use">manifest 由来のライセンス名</td></tr>
@@ -3296,7 +3297,7 @@
               <tr><td class="key">integrations.ai.jobs.empty</td><td class="ja">実行中のジョブはありません</td><td class="use">active job 0 件の表示</td></tr>
               <tr><td class="key">integrations.ai.jobs.empty_hint</td><td class="ja">バックログを開始すると、待機中の写真から処理が始まります。</td><td class="use">待機状態の説明</td></tr>
               <tr><td class="key">integrations.ai.start_backlog</td><td class="ja">バックログを開始</td><td class="use">待機 &gt; 0 の主ボタン</td></tr>
-              <tr><td class="key">integrations.ai.start_backlog_hint</td><td class="ja">待機 128 件を実行キューへ移します（テンプレート: 待機 %{count} 件を実行キューへ移します）</td><td class="use">バックログ説明</td></tr>
+              <tr><td class="key">integrations.ai.start_backlog_hint</td><td class="ja">待機 128 件を実行キューへ移します</td><td class="use">バックログ説明（テンプレート: 待機 %{count} 件を実行キューへ移します）</td></tr>
               <tr><td class="key">integrations.ai.cancel_job</td><td class="ja">キャンセル</td><td class="use">active job の操作</td></tr>
               <tr><td class="key">integrations.ai.status.not_enabled</td><td class="ja">未有効</td><td class="use">状態バッジ</td></tr>
               <tr><td class="key">integrations.ai.status.enabled</td><td class="ja">有効</td><td class="use">状態バッジ</td></tr>
@@ -3323,7 +3324,7 @@
               <tr><td class="key">photos.ai.place.indoor</td><td class="ja">屋内</td><td class="use">場所の値</td></tr>
               <tr><td class="key">photos.ai.place.outdoor</td><td class="ja">屋外</td><td class="use">場所の値</td></tr>
               <tr><td class="key">photos.ai.place.other</td><td class="ja">その他</td><td class="use">場所の値</td></tr>
-              <tr><td class="key">photos.ai.probability_tooltip</td><td class="ja">確率 0.969 · d1-2B Q8_0 · 2026-11-04 12:45（テンプレート: 確率 %{probability} · %{model} · %{time}）</td><td class="use">チップのツールチップ</td></tr>
+              <tr><td class="key">photos.ai.probability_tooltip</td><td class="ja">確率 0.969 · d1-2B Q8_0 · 2026-11-04 12:45</td><td class="use">チップのツールチップ（テンプレート: 確率 %{probability} · %{model} · %{time}）</td></tr>
               <tr><td class="key">photos.ai.retag</td><td class="ja">AIタグを再生成</td><td class="use">再生成ボタン</td></tr>
               <tr><td class="key">photos.ai.tag_selected</td><td class="ja">AIタグ付け</td><td class="use">選択バーのボタン</td></tr>
               <tr><td class="key">photos.jobs.ai_tagging</td><td class="ja">AIタグ付け</td><td class="use">削除警告の行ラベル</td></tr>
