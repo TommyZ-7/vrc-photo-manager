@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use chrono::Utc;
 use vrc_photon_ai_host::{
     AiHostError, ModelCheck, ModelHttpClient, PluginManifest, ProbeExpectations, SidecarClient,
-    SidecarConfig, SidecarPaths, check_model, delete_model as delete_model_files,
+    SidecarConfig, SidecarPaths, check_model, delete_model_revision,
     download_model as download_plugin_model, import_model_files as import_model_files_from_disk,
     install_from_zip as install_plugin_zip, parse_manifest, plugins_root,
 };
@@ -36,6 +36,18 @@ pub(crate) const AI_PLUGIN_ID: &str = "vrc-photon-autotag";
 
 /// How often model progress is written to the database and event bus.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Operation key held by a plugin ZIP install (the plugin id is unknown until
+/// the signed manifest is read).
+const INSTALL_OPERATION: &str = "install";
+
+fn lifecycle_operation(plugin_id: &str) -> String {
+    format!("lifecycle:{plugin_id}")
+}
+
+fn model_operation(plugin_id: &str) -> String {
+    format!("model:{plugin_id}")
+}
 
 /// Failures returned by [`PluginService`].
 #[derive(Debug, thiserror::Error)]
@@ -79,20 +91,20 @@ struct PluginServiceInner {
     keys: Vec<String>,
     http: Arc<dyn ModelHttpClient>,
     sidecar: Mutex<Option<Arc<SidecarClient>>>,
-    operations: Mutex<HashSet<String>>,
+    operations: Arc<Mutex<HashSet<String>>>,
     model_cancel: Mutex<HashMap<String, Arc<AtomicBool>>>,
     host_version: String,
 }
 
 /// Removes an in-flight operation marker even when the worker panics.
 struct OperationGuard {
-    inner: Arc<PluginServiceInner>,
+    operations: Arc<Mutex<HashSet<String>>>,
     key: String,
 }
 
 impl Drop for OperationGuard {
     fn drop(&mut self) {
-        lock_unpoisoned(&self.inner.operations).remove(&self.key);
+        lock_unpoisoned(&self.operations).remove(&self.key);
     }
 }
 
@@ -112,7 +124,7 @@ impl PluginService {
                 keys,
                 http,
                 sidecar: Mutex::new(None),
-                operations: Mutex::new(HashSet::new()),
+                operations: Arc::new(Mutex::new(HashSet::new())),
                 model_cancel: Mutex::new(HashMap::new()),
                 host_version: env!("CARGO_PKG_VERSION").to_string(),
             }),
@@ -121,14 +133,18 @@ impl PluginService {
 
     /// Accepts a signed plugin ZIP and processes it on a worker thread.
     pub(crate) fn install_from_zip(&self, zip_path: &Path) -> Result<()> {
-        let guard = self.inner.begin_operation("install")?;
+        let guard = self.inner.begin_install()?;
         let inner = self.inner.clone();
         let zip_path = zip_path.to_path_buf();
         thread::Builder::new()
             .name("plugin-install".to_string())
             .spawn(move || {
-                let _guard = guard;
-                match inner.install(&zip_path) {
+                let result = inner.install(&zip_path);
+                // Publish the terminal event only after the operation keys are
+                // released, so a client reacting to `installed` can start the
+                // next operation immediately.
+                drop(guard);
+                match result {
                     Ok(install) => {
                         tracing::info!(
                             plugin_id = %install.plugin_id,
@@ -172,12 +188,14 @@ impl PluginService {
         version: Option<&str>,
         delete_ai_tags: bool,
     ) -> Result<()> {
+        let _guard = self.inner.begin_lifecycle(plugin_id)?;
         self.inner
             .uninstall(plugin_id, variant, version, delete_ai_tags)
     }
 
     /// Runs `--probe` for the active installation.
     pub(crate) fn probe(&self, plugin_id: &str) -> Result<()> {
+        let _guard = self.inner.begin_lifecycle(plugin_id)?;
         let install = self.inner.active_install(plugin_id)?;
         self.inner.probe_install(&install)
     }
@@ -188,11 +206,13 @@ impl PluginService {
         variant: &str,
         version: Option<&str>,
     ) -> Result<()> {
+        let _guard = self.inner.begin_lifecycle(plugin_id)?;
         self.inner.set_active_variant(plugin_id, variant, version)
     }
 
     /// Starts a model download after checking the licence consent.
     pub(crate) fn start_model_download(&self, plugin_id: &str) -> Result<()> {
+        let guard = self.inner.begin_model(plugin_id)?;
         let (_, manifest) = self.inner.active_install_and_manifest(plugin_id)?;
         {
             let db = self.inner.db();
@@ -202,7 +222,6 @@ impl PluginService {
             }
         }
 
-        let guard = self.inner.begin_operation(format!("model:{plugin_id}"))?;
         let cancel = Arc::new(AtomicBool::new(false));
         lock_unpoisoned(&self.inner.model_cancel).insert(plugin_id.to_string(), cancel.clone());
         let inner = self.inner.clone();
@@ -245,8 +264,8 @@ impl PluginService {
 
     /// Imports full model files selected by the user on a worker thread.
     pub(crate) fn import_model_files(&self, plugin_id: &str, paths: &[PathBuf]) -> Result<()> {
+        let guard = self.inner.begin_model(plugin_id)?;
         let (_, manifest) = self.inner.active_install_and_manifest(plugin_id)?;
-        let guard = self.inner.begin_operation(format!("model:{plugin_id}"))?;
         let inner = self.inner.clone();
         let plugin_id = plugin_id.to_string();
         let paths = paths.to_vec();
@@ -262,11 +281,11 @@ impl PluginService {
         Ok(())
     }
 
-    /// Stops the sidecar and removes the model files.
+    /// Stops the sidecar and removes the stored model revision.
     pub(crate) fn delete_model(&self, plugin_id: &str) -> Result<()> {
-        let (_, manifest) = self.inner.active_install_and_manifest(plugin_id)?;
-        let _guard = self.inner.begin_operation(format!("model:{plugin_id}"))?;
-        self.inner.delete_model_files(plugin_id, &manifest)
+        let _guard = self.inner.begin_lifecycle(plugin_id)?;
+        let revision = self.inner.stored_model_revision(plugin_id)?;
+        self.inner.remove_model_revision(plugin_id, &revision)
     }
 
     /// Shuts the sidecar down and waits up to its shutdown timeout.
@@ -296,6 +315,16 @@ impl PluginService {
     pub(crate) fn recover_interrupted_model_state(&self) -> Result<()> {
         self.inner.recover_interrupted_model_state()
     }
+
+    /// Test-only: reports whether an install/lifecycle/model operation is
+    /// still holding this plugin's keys.
+    #[cfg(test)]
+    pub(crate) fn operation_active(&self, plugin_id: &str) -> bool {
+        let operations = lock_unpoisoned(&self.inner.operations);
+        operations.contains(INSTALL_OPERATION)
+            || operations.contains(&lifecycle_operation(plugin_id))
+            || operations.contains(&model_operation(plugin_id))
+    }
 }
 
 impl PluginServiceInner {
@@ -303,15 +332,66 @@ impl PluginServiceInner {
         lock_unpoisoned(&self.db)
     }
 
-    fn begin_operation(self: &Arc<Self>, key: impl Into<String>) -> Result<OperationGuard> {
-        let key = key.into();
+    fn begin_install(&self) -> Result<OperationGuard> {
         let mut operations = lock_unpoisoned(&self.operations);
-        if !operations.insert(key.clone()) {
-            return Err(PluginError::Busy(key));
+        if !operations.is_empty() {
+            return Err(PluginError::Busy(INSTALL_OPERATION.to_string()));
         }
+        operations.insert(INSTALL_OPERATION.to_string());
         drop(operations);
         Ok(OperationGuard {
-            inner: self.clone(),
+            operations: self.operations.clone(),
+            key: INSTALL_OPERATION.to_string(),
+        })
+    }
+
+    /// Reserves the plugin lifecycle key while the install worker already
+    /// holds the global install key. Other operations are blocked by the
+    /// install key, so this cannot race a new lifecycle operation.
+    fn begin_install_lifecycle(&self, plugin_id: &str) -> Result<OperationGuard> {
+        let key = lifecycle_operation(plugin_id);
+        let mut operations = lock_unpoisoned(&self.operations);
+        if operations.contains(&key) || operations.contains(&model_operation(plugin_id)) {
+            return Err(PluginError::Busy(plugin_id.to_string()));
+        }
+        operations.insert(key.clone());
+        drop(operations);
+        Ok(OperationGuard {
+            operations: self.operations.clone(),
+            key,
+        })
+    }
+
+    fn begin_lifecycle(&self, plugin_id: &str) -> Result<OperationGuard> {
+        let key = lifecycle_operation(plugin_id);
+        let mut operations = lock_unpoisoned(&self.operations);
+        if operations.contains(INSTALL_OPERATION)
+            || operations.contains(&key)
+            || operations.contains(&model_operation(plugin_id))
+        {
+            return Err(PluginError::Busy(plugin_id.to_string()));
+        }
+        operations.insert(key.clone());
+        drop(operations);
+        Ok(OperationGuard {
+            operations: self.operations.clone(),
+            key,
+        })
+    }
+
+    fn begin_model(&self, plugin_id: &str) -> Result<OperationGuard> {
+        let key = model_operation(plugin_id);
+        let mut operations = lock_unpoisoned(&self.operations);
+        if operations.contains(INSTALL_OPERATION)
+            || operations.contains(&key)
+            || operations.contains(&lifecycle_operation(plugin_id))
+        {
+            return Err(PluginError::Busy(plugin_id.to_string()));
+        }
+        operations.insert(key.clone());
+        drop(operations);
+        Ok(OperationGuard {
+            operations: self.operations.clone(),
             key,
         })
     }
@@ -336,6 +416,13 @@ impl PluginServiceInner {
         let installed =
             install_plugin_zip(zip_path, &self.data_dir, &self.keys, &self.host_version)?;
         let manifest = installed.manifest.clone();
+        let _lifecycle = self.begin_install_lifecycle(&installed.plugin_id)?;
+
+        let previous_active = self.db().active_plugin_installation(&installed.plugin_id)?;
+        // The package contents are about to change under the plugin. Drop the
+        // cached readiness until the new package passes catalog sync + probe.
+        self.db()
+            .set_plugin_probe_json(&installed.plugin_id, None)?;
 
         self.events.publish(Event::PluginInstallProgress {
             plugin_id: installed.plugin_id.clone(),
@@ -354,14 +441,67 @@ impl PluginServiceInner {
             path: installed.path.to_string_lossy().into_owned(),
             manifest_json: installed.manifest_json,
             catalog_version: Some(manifest.catalog_version.clone()),
-            active: true,
+            // The previous active installation stays active until this one has
+            // passed catalog sync and probe.
+            active: false,
             installed_at: now.clone(),
             updated_at: now,
         };
         self.db().upsert_plugin_installation(&install)?;
-        self.sync_catalog_from_install(&install)?;
-        self.probe_install(&install)?;
-        Ok(install)
+
+        let result = (|| -> Result<()> {
+            self.sync_catalog_from_install(&install)?;
+            self.probe_install(&install)?;
+            if !self.db().set_active_plugin_installation(
+                &install.plugin_id,
+                &install.variant,
+                Some(&install.version),
+            )? {
+                return Err(PluginError::NotFound(format!(
+                    "{} {} {}",
+                    install.plugin_id, install.variant, install.version
+                )));
+            }
+            Ok(())
+        })();
+
+        if let Err(error) = &result {
+            // Never leave a failed package looking ready.
+            let _ = self.db().set_plugin_probe_json(&install.plugin_id, None);
+            if let Some(previous) = &previous_active
+                && matches!(
+                    self.db().active_plugin_installation(&install.plugin_id),
+                    Ok(None)
+                )
+                && let Err(restore) = self.db().set_active_plugin_installation(
+                    &install.plugin_id,
+                    &previous.variant,
+                    Some(&previous.version),
+                )
+            {
+                tracing::warn!(
+                    %restore,
+                    plugin_id = %install.plugin_id,
+                    "cannot restore the previous AI plugin installation"
+                );
+            }
+            if let Some(previous) = &previous_active
+                && let Err(error) = self.sync_catalog_from_install(previous)
+            {
+                tracing::warn!(
+                    %error,
+                    plugin_id = %install.plugin_id,
+                    "cannot restore the previous AI plugin catalog"
+                );
+            }
+            tracing::warn!(
+                %error,
+                plugin_id = %install.plugin_id,
+                "AI plugin install did not activate"
+            );
+        }
+
+        result.map(|()| install)
     }
 
     fn uninstall(
@@ -441,6 +581,7 @@ impl PluginServiceInner {
                 "{plugin_id} variant={variant} version={version:?}"
             )));
         }
+        self.db().set_plugin_probe_json(plugin_id, None)?;
         self.stop_sidecar();
         self.events.publish(Event::PluginStateChanged {
             plugin_id: plugin_id.to_string(),
@@ -502,20 +643,30 @@ impl PluginServiceInner {
 
     fn is_ready(&self, plugin_id: &str) -> bool {
         let db = self.db();
-        if db
-            .active_plugin_installation(plugin_id)
-            .ok()
-            .flatten()
-            .is_none()
-        {
+        let Ok(Some(install)) = db.active_plugin_installation(plugin_id) else {
+            return false;
+        };
+        let Ok(Some(state)) = db.plugin_state(plugin_id) else {
+            return false;
+        };
+        if state.model_state != ModelState::Ready {
             return false;
         }
-        db.plugin_state(plugin_id)
-            .ok()
-            .flatten()
-            .is_some_and(|state| {
-                state.model_state == ModelState::Ready && state.probe_json.is_some()
-            })
+        let Ok(manifest) = parse_manifest(install.manifest_json.as_bytes()) else {
+            return false;
+        };
+        if state.model_revision.as_deref() != Some(manifest.model.revision.as_str()) {
+            return false;
+        }
+        let Some(probe_json) = state.probe_json.as_deref() else {
+            return false;
+        };
+        let Ok(probe) = serde_json::from_str::<Probe>(probe_json) else {
+            return false;
+        };
+        probe.plugin_id == install.plugin_id
+            && probe.variant == install.variant
+            && probe.catalog_version == manifest.catalog_version
     }
 
     fn stop_sidecar(&self) {
@@ -589,11 +740,17 @@ impl PluginServiceInner {
         Ok(client)
     }
 
-    fn delete_model_files(&self, plugin_id: &str, manifest: &PluginManifest) -> Result<()> {
+    fn stored_model_revision(&self, plugin_id: &str) -> Result<String> {
+        self.db()
+            .plugin_state(plugin_id)?
+            .and_then(|state| state.model_revision)
+            .ok_or_else(|| PluginError::NotFound(format!("model revision for {plugin_id}")))
+    }
+
+    fn remove_model_revision(&self, plugin_id: &str, revision: &str) -> Result<()> {
         self.stop_sidecar();
-        delete_model_files(manifest, &self.data_dir)?;
-        let revision = manifest.model.revision.clone();
-        self.set_model_state(plugin_id, ModelState::Missing, &revision, 0, None, None)?;
+        delete_model_revision(&self.data_dir, plugin_id, revision)?;
+        self.set_model_state(plugin_id, ModelState::Missing, revision, 0, None, None)?;
         self.events.publish(Event::PluginStateChanged {
             plugin_id: plugin_id.to_string(),
         });
@@ -1056,6 +1213,16 @@ mod tests {
         extra: &[TestEntry],
     ) -> TestPackage {
         let entrypoint = fs::read(mock).expect("read the mock sidecar binary");
+        package_from_entrypoint(key, entrypoint, variant, backend, extra)
+    }
+
+    fn package_from_entrypoint(
+        key: &TestKey,
+        entrypoint: Vec<u8>,
+        variant: &str,
+        backend: &str,
+        extra: &[TestEntry],
+    ) -> TestPackage {
         let mut entries = vec![
             TestEntry::with_mode(TEST_ENTRYPOINT, entrypoint, 0o755),
             TestEntry::new("catalog.json", CATALOG_JSON),
@@ -1177,6 +1344,27 @@ mod tests {
             }
         }
 
+        fn wait_for_install_failure(&self) -> String {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                match self.install_rx.recv_timeout(remaining) {
+                    Ok(Event::PluginInstallProgress {
+                        status: PluginInstallStatus::Failed,
+                        error,
+                        ..
+                    }) => return error.unwrap_or_default(),
+                    Ok(_) => {}
+                    Err(RecvTimeoutError::Timeout) => {
+                        panic!("timed out waiting for the plugin install failure")
+                    }
+                    Err(RecvTimeoutError::Disconnected) => {
+                        panic!("the event bus stopped before the install failed")
+                    }
+                }
+            }
+        }
+
         fn wait_for(&self, what: &str, mut condition: impl FnMut() -> bool) {
             let deadline = Instant::now() + Duration::from_secs(30);
             while Instant::now() < deadline {
@@ -1199,11 +1387,13 @@ mod tests {
 
         fn wait_for_model_state(&self, expected: ModelState) {
             self.wait_for("the model state", || {
-                self.db()
-                    .plugin_state(PLUGIN)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|state| state.model_state == expected)
+                !self.service.operation_active(PLUGIN)
+                    && self
+                        .db()
+                        .plugin_state(PLUGIN)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|state| state.model_state == expected)
             });
         }
 
@@ -1312,6 +1502,44 @@ mod tests {
     }
 
     #[test]
+    fn failed_install_keeps_the_previous_install_active_and_not_ready() {
+        let ctx = TestContext::new();
+        ctx.install_default();
+        ctx.make_model_ready();
+        assert!(ctx.service.is_ready(PLUGIN));
+
+        let mut bad = package_from_entrypoint(
+            &ctx.key,
+            b"#!/bin/sh\nexit 1\n".to_vec(),
+            "linux-cpu",
+            "cpu",
+            &[],
+        );
+        bad.manifest_mut().plugin_version = "2.0.0".to_string();
+        let zip = ctx.write_zip("bad-probe.zip", &bad);
+
+        ctx.service.install_from_zip(&zip).unwrap();
+        let error = ctx.wait_for_install_failure();
+        assert!(!error.is_empty());
+
+        let active = ctx
+            .db()
+            .active_plugin_installation(PLUGIN)
+            .unwrap()
+            .unwrap();
+        assert_eq!(active.version, "1.0.0");
+        assert!(!ctx.service.is_ready(PLUGIN));
+        assert!(
+            ctx.db()
+                .plugin_state(PLUGIN)
+                .unwrap()
+                .unwrap()
+                .probe_json
+                .is_none()
+        );
+    }
+
+    #[test]
     fn active_variant_switch_stops_the_sidecar() {
         let ctx = TestContext::new();
         ctx.install_default();
@@ -1355,6 +1583,71 @@ mod tests {
 
         let next = ctx.service.sidecar().unwrap();
         assert_eq!(next.hello().variant, "linux-vulkan");
+    }
+
+    #[test]
+    fn switching_variants_clears_the_probe_cache() {
+        let ctx = TestContext::new();
+        ctx.install_default();
+
+        let vulkan = ctx.package("linux-vulkan", "vulkan", &[]);
+        let zip = ctx.write_zip("vulkan-cache.zip", &vulkan);
+        ctx.service.install_from_zip(&zip).unwrap();
+        ctx.wait_for_install();
+        ctx.make_model_ready();
+        assert!(ctx.service.is_ready(PLUGIN));
+
+        ctx.service
+            .set_active_variant(PLUGIN, "linux-cpu", None)
+            .unwrap();
+        assert!(
+            !ctx.service.is_ready(PLUGIN),
+            "a new active variant must be probed again"
+        );
+        assert!(
+            ctx.db()
+                .plugin_state(PLUGIN)
+                .unwrap()
+                .unwrap()
+                .probe_json
+                .is_none()
+        );
+
+        ctx.service.probe(PLUGIN).unwrap();
+        assert!(ctx.service.is_ready(PLUGIN));
+    }
+
+    #[test]
+    fn readiness_requires_the_active_model_revision() {
+        let ctx = TestContext::new();
+        ctx.install_default();
+        ctx.make_model_ready();
+        assert!(ctx.service.is_ready(PLUGIN));
+
+        ctx.db()
+            .set_plugin_model_state(
+                PLUGIN,
+                ModelState::Ready,
+                Some("other-revision"),
+                11,
+                Some(11),
+                None,
+            )
+            .unwrap();
+        assert!(!ctx.service.is_ready(PLUGIN));
+
+        let revision = sample_manifest().model.revision;
+        ctx.db()
+            .set_plugin_model_state(
+                PLUGIN,
+                ModelState::Ready,
+                Some(&revision),
+                11,
+                Some(11),
+                None,
+            )
+            .unwrap();
+        assert!(ctx.service.is_ready(PLUGIN));
     }
 
     #[test]
@@ -1487,6 +1780,64 @@ mod tests {
     }
 
     #[test]
+    fn delete_model_uses_the_stored_revision() {
+        let ctx = TestContext::new();
+        ctx.install_default();
+        let manifest_dir = model_dir(&ctx.data_dir, PLUGIN, &sample_manifest().model.revision);
+        fs::create_dir_all(&manifest_dir).unwrap();
+
+        let stored_revision = "stored-revision";
+        let stored_dir = model_dir(&ctx.data_dir, PLUGIN, stored_revision);
+        fs::create_dir_all(&stored_dir).unwrap();
+        fs::write(stored_dir.join(MODEL_FILE), MODEL_BYTES).unwrap();
+        fs::write(stored_dir.join(MMPROJ_FILE), MMPROJ_BYTES).unwrap();
+        ctx.db()
+            .set_plugin_model_state(
+                PLUGIN,
+                ModelState::Ready,
+                Some(stored_revision),
+                11,
+                Some(11),
+                None,
+            )
+            .unwrap();
+
+        ctx.service.delete_model(PLUGIN).unwrap();
+
+        assert!(!stored_dir.exists());
+        assert!(
+            manifest_dir.exists(),
+            "delete_model must follow plugin_state.model_revision"
+        );
+        let state = ctx.db().plugin_state(PLUGIN).unwrap().unwrap();
+        assert_eq!(state.model_state, ModelState::Missing);
+        assert_eq!(state.model_revision.as_deref(), Some(stored_revision));
+    }
+
+    #[test]
+    fn delete_model_works_after_uninstall() {
+        let ctx = TestContext::new();
+        ctx.install_default();
+        ctx.make_model_ready();
+        let directory = model_dir(&ctx.data_dir, PLUGIN, &sample_manifest().model.revision);
+        assert!(directory.exists());
+
+        ctx.service.uninstall(PLUGIN, None, None, false).unwrap();
+        assert!(
+            directory.exists(),
+            "uninstall keeps model files for a later delete"
+        );
+
+        ctx.service.delete_model(PLUGIN).unwrap();
+
+        assert!(!directory.exists());
+        assert_eq!(
+            ctx.db().plugin_state(PLUGIN).unwrap().unwrap().model_state,
+            ModelState::Missing
+        );
+    }
+
+    #[test]
     fn busy_operation_rejects_a_second_install() {
         let ctx = TestContext::new();
         let package = ctx.package(
@@ -1509,6 +1860,45 @@ mod tests {
                 .variant,
             "linux-cpu"
         );
+    }
+
+    #[test]
+    fn lifecycle_and_model_starts_reject_while_an_install_runs() {
+        let ctx = TestContext::new();
+        ctx.set_consent();
+        let package = ctx.package(
+            "linux-cpu",
+            "cpu",
+            &[TestEntry::new("padding.bin", vec![7u8; 8 * 1024 * 1024])],
+        );
+        let zip = ctx.write_zip("busy-lifecycle.zip", &package);
+
+        ctx.service.install_from_zip(&zip).unwrap();
+        let probe_error = ctx.service.probe(PLUGIN).unwrap_err();
+        let model_error = ctx.service.start_model_download(PLUGIN).unwrap_err();
+
+        assert!(
+            matches!(probe_error, PluginError::Busy(_)),
+            "{probe_error:?}"
+        );
+        assert!(
+            matches!(model_error, PluginError::Busy(_)),
+            "{model_error:?}"
+        );
+        ctx.wait_for_install();
+    }
+
+    #[test]
+    fn lifecycle_operations_reject_while_a_model_download_runs() {
+        let ctx = TestContext::new();
+        ctx.install_default();
+        ctx.set_consent();
+
+        ctx.service.start_model_download(PLUGIN).unwrap();
+        let error = ctx.service.probe(PLUGIN).unwrap_err();
+
+        assert!(matches!(error, PluginError::Busy(_)), "{error:?}");
+        ctx.wait_for_model_state(ModelState::Ready);
     }
 
     #[test]

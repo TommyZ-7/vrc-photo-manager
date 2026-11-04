@@ -232,7 +232,22 @@ pub fn import_model_files(
 /// an already-missing directory succeeds.
 pub fn delete_model(manifest: &PluginManifest, data_dir: &Path) -> Result<()> {
     let directory = checked_model_dir(manifest, data_dir)?;
-    match fs::remove_dir_all(&directory) {
+    remove_model_directory(&directory)
+}
+
+/// Deletes one model revision without needing an installed manifest.
+///
+/// Used when only `plugin_state.model_revision` remains, notably after the
+/// plugin itself was uninstalled. Both path components are validated so this
+/// cannot escape `<data_dir>/plugins/<plugin_id>/models/`.
+pub fn delete_model_revision(data_dir: &Path, plugin_id: &str, revision: &str) -> Result<()> {
+    validate_component("plugin_id", plugin_id)?;
+    validate_component("model.revision", revision)?;
+    remove_model_directory(&model_dir(data_dir, plugin_id, revision))
+}
+
+fn remove_model_directory(directory: &Path) -> Result<()> {
+    match fs::remove_dir_all(directory) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error.into()),
@@ -1136,6 +1151,28 @@ mod tests {
 
         let error = delete_model(&manifest, data_dir.path()).unwrap_err();
 
+        assert!(matches!(error, AiHostError::UnsafePath(_)));
+    }
+
+    #[test]
+    fn delete_model_revision_removes_an_explicit_revision_without_a_manifest() {
+        let data_dir = tempdir().unwrap();
+        let revision = "5ebcce3bab1c0521f2cab68742a647c7d038adbe";
+        let directory = model_dir(data_dir.path(), "vrc-photon-autotag", revision);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join(MODEL_PATH), MODEL_BYTES).unwrap();
+
+        let other = model_dir(data_dir.path(), "vrc-photon-autotag", "other-revision");
+        fs::create_dir_all(&other).unwrap();
+
+        delete_model_revision(data_dir.path(), "vrc-photon-autotag", revision).unwrap();
+
+        assert!(!directory.exists());
+        assert!(other.exists());
+        // Deleting an already-missing revision is not an error.
+        delete_model_revision(data_dir.path(), "vrc-photon-autotag", revision).unwrap();
+
+        let error = delete_model_revision(data_dir.path(), "../escape", revision).unwrap_err();
         assert!(matches!(error, AiHostError::UnsafePath(_)));
     }
 

@@ -264,7 +264,7 @@ pub struct Daemon {
     last_errors: HashMap<DaemonOperation, String>,
     /// AI plugin installs, model files, probe cache, and the lazy sidecar.
     plugin: PluginService,
-    #[cfg(test)]
+    /// Root for AI plugin installs, model files, snapshots, and logs.
     ai_data_dir: PathBuf,
     #[cfg(test)]
     ai_plugin_keys: Vec<String>,
@@ -442,7 +442,6 @@ impl Daemon {
             thumbnail_external_bytes: Arc::new(AtomicU64::new(0)),
             last_errors,
             plugin,
-            #[cfg(test)]
             ai_data_dir,
             #[cfg(test)]
             ai_plugin_keys,
@@ -936,6 +935,7 @@ impl Daemon {
         tracing::info!(
             photos = self.settings.photo_roots.len(),
             log_dir = ?self.settings.log_dir,
+            ai_data_dir = %self.ai_data_dir.display(),
             "daemon running"
         );
 
