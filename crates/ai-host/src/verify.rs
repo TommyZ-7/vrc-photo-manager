@@ -8,6 +8,10 @@ use crate::error::{AiHostError, Result};
 #[cfg(debug_assertions)]
 const DEV_KEYS_FILE: &str = include_str!("../../../packaging/ai/dev-keys.txt");
 
+/// Production public key embedded in release builds only.
+#[cfg(not(debug_assertions))]
+const PROD_KEYS_FILE: &str = include_str!("../../../packaging/ai/prod-keys.txt");
+
 /// Overrides the embedded key list in debug builds (tests and local packages).
 pub const PUBLIC_KEY_ENV: &str = "VRC_PHOTON_AI_PLUGIN_PUBLIC_KEY";
 
@@ -42,7 +46,7 @@ pub fn parse_public_keys(text: &str) -> Vec<String> {
 }
 
 /// Keys bundled with this build. Debug builds use the development key file;
-/// release builds carry no plugin key until the production key lands in M3.
+/// release builds use the production key file.
 fn embedded_plugin_keys() -> Vec<String> {
     #[cfg(debug_assertions)]
     {
@@ -50,7 +54,7 @@ fn embedded_plugin_keys() -> Vec<String> {
     }
     #[cfg(not(debug_assertions))]
     {
-        Vec::new()
+        parse_public_keys(PROD_KEYS_FILE)
     }
 }
 
@@ -58,7 +62,7 @@ fn embedded_plugin_keys() -> Vec<String> {
 ///
 /// In debug builds `VRC_PHOTON_AI_PLUGIN_PUBLIC_KEY` replaces the embedded
 /// development keys. Release builds ignore the environment variable and keep
-/// the (currently empty) production key list.
+/// the embedded production key list.
 pub fn effective_plugin_keys() -> Vec<String> {
     let override_value = std::env::var(PUBLIC_KEY_ENV).ok();
     merge_plugin_keys(
@@ -189,7 +193,9 @@ mod tests {
 
     #[cfg(not(debug_assertions))]
     #[test]
-    fn release_builds_embed_no_plugin_key() {
-        assert!(embedded_plugin_keys().is_empty());
+    fn release_builds_embed_the_production_key() {
+        let keys = embedded_plugin_keys();
+        assert_eq!(keys.len(), 1);
+        minisign_verify::PublicKey::from_base64(&keys[0]).unwrap();
     }
 }

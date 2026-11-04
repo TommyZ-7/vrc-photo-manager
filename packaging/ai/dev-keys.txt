@@ -1,7 +1,7 @@
 # Development-only minisign public key for AI plugin packages.
 #
-# This key is embedded in debug builds only. Release builds carry no plugin
-# key until the production key is added in M3.
+# This key is embedded in debug builds only. Release builds embed the
+# production key in prod-keys.txt instead.
 #
 # The matching secret key lives outside the repository at
 # ~/.minisign/vrc-photon-ai-dev.key and must never be committed.
