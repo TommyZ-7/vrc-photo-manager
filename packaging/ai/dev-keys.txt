@@ -1,0 +1,14 @@
+# Development-only minisign public key for AI plugin packages.
+#
+# This key is embedded in debug builds only. Release builds carry no plugin
+# key until the production key is added in M3.
+#
+# The matching secret key lives outside the repository at
+# ~/.minisign/vrc-photon-ai-dev.key and must never be committed.
+#
+# Generate a replacement pair with:
+#   minisign -G -p dev-keys.txt -s ~/.minisign/vrc-photon-ai-dev.key
+#
+# One base64 public key per line; blank lines and lines starting with # are
+# ignored.
+RWRIGn4Ra9/17MVT55tVaiaHvE1EbU1XPbiJDVSfjTR9MBpxNdtJoSp0
