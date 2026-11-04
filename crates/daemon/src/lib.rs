@@ -34,14 +34,16 @@ mod discord_http;
 mod ipc_server;
 pub(crate) mod plugin;
 mod signals;
+pub(crate) mod tagging;
 mod tray;
 mod vrchat_process;
 mod world_name_http;
 mod world_names;
 use discord_http::UreqTransport;
-use ipc_server::{EventBus, IpcControl, IpcServer, status_snapshot};
+use ipc_server::{EventBus, IpcControl, IpcServer, status_snapshot, tagging_status};
 use plugin::PluginService;
 use signals::{JobSignal, WakeSignal};
+use tagging::TaggingControl;
 use tray::{Tray, TrayAction};
 use vrc_photon_ai_host::{ModelHttpClient, UreqModelClient};
 use world_name_http::UreqWorldNameTransport;
@@ -264,6 +266,10 @@ pub struct Daemon {
     last_errors: HashMap<DaemonOperation, String>,
     /// AI plugin installs, model files, probe cache, and the lazy sidecar.
     plugin: PluginService,
+    /// Wakes the AI tagging worker when jobs arrive or settings change.
+    tagging: Arc<JobSignal>,
+    /// In-flight tagging cancel tokens shared with IPC.
+    tagging_control: Arc<TaggingControl>,
     /// Root for AI plugin installs, model files, snapshots, and logs.
     ai_data_dir: PathBuf,
     #[cfg(test)]
@@ -397,6 +403,8 @@ impl Daemon {
         if owns_deletion_executor && let Err(error) = plugin.recover_interrupted_model_state() {
             tracing::warn!(%error, "cannot recover interrupted AI model state");
         }
+        let tagging = Arc::new(JobSignal::default());
+        let tagging_control = Arc::new(TaggingControl::new(tagging.clone()));
 
         Ok(Self {
             db,
@@ -442,6 +450,8 @@ impl Daemon {
             thumbnail_external_bytes: Arc::new(AtomicU64::new(0)),
             last_errors,
             plugin,
+            tagging,
+            tagging_control,
             ai_data_dir,
             #[cfg(test)]
             ai_plugin_keys,
@@ -523,7 +533,12 @@ impl Daemon {
     }
 
     fn publish_status(&self) {
-        let status = status_snapshot(&mut self.status.lock().unwrap());
+        let (pending_tagging_jobs, tagging_ready) = tagging_status(&self.db, &self.plugin);
+        let status = status_snapshot(
+            &mut self.status.lock().unwrap(),
+            pending_tagging_jobs,
+            tagging_ready,
+        );
         self.events.publish(Event::StatusChanged { status });
     }
 
@@ -1015,6 +1030,10 @@ impl Daemon {
             thumbnail_dir: self.thumbnail_dir.clone(),
             thumbnail_cache_epoch: self.thumbnail_cache_epoch.clone(),
             thumbnail_external_bytes: self.thumbnail_external_bytes.clone(),
+            plugin: self.plugin.clone(),
+            tagging: self.tagging.clone(),
+            tagging_control: self.tagging_control.clone(),
+            db: self.db.clone(),
         };
         match IpcServer::start(endpoint, control) {
             Ok(server) => self.ipc = Some(server),
