@@ -426,6 +426,8 @@ CREATE INDEX IF NOT EXISTS idx_tagging_jobs_claim
     ON tagging_jobs(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_tagging_jobs_photo
     ON tagging_jobs(photo_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_tagging_jobs_plugin_status
+    ON tagging_jobs(plugin_id, status);
 CREATE INDEX IF NOT EXISTS idx_tagging_jobs_active_list
     ON tagging_jobs(created_at DESC, id DESC)
     WHERE status IN ('waiting', 'pending', 'processing');
@@ -8022,6 +8024,7 @@ mod tests {
             "idx_tagging_jobs_status",
             "idx_tagging_jobs_claim",
             "idx_tagging_jobs_photo",
+            "idx_tagging_jobs_plugin_status",
             "idx_tagging_jobs_active_list",
             "idx_tagging_jobs_active",
         ] {
@@ -8825,6 +8828,18 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("idx_tagging_jobs_active_list")),
             "active query did not use idx_tagging_jobs_active_list: {active:?}"
+        );
+
+        let counts = query_plan(
+            &db,
+            "SELECT status, COUNT(*) FROM tagging_jobs WHERE plugin_id = 'vrc-photon-autotag' \
+             GROUP BY status",
+        );
+        assert!(
+            counts
+                .iter()
+                .any(|line| line.contains("idx_tagging_jobs_plugin_status")),
+            "status counts did not use idx_tagging_jobs_plugin_status: {counts:?}"
         );
     }
 

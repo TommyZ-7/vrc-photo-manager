@@ -18,7 +18,10 @@ pub mod test_support;
 
 pub use error::{AiHostError, Result};
 pub use http::{ModelHttpClient, UreqModelClient};
-pub use install::{InstallLimits, InstalledPlugin, install_from_zip, install_from_zip_with_limits};
+pub use install::{
+    InstallLimits, InstalledPlugin, install_from_zip, install_from_zip_keeping_backup,
+    install_from_zip_with_limits, restore_installation_backup,
+};
 pub use layout::{plugin_dir, plugins_root};
 pub use manifest::{
     FORMAT_VERSION, ManifestFile, ManifestModel, ManifestModelFile, ManifestPart, ModelFileRole,

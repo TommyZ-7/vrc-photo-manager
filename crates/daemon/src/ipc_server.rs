@@ -521,11 +521,15 @@ fn write_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert_cmd::cargo::cargo_bin;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::time::{Duration, Instant};
+    use vrc_photon_ai_host::ManifestFile;
     use vrc_photon_ai_host::UreqModelClient;
-    use vrc_photon_ai_host::test_support::{TestPackage, sample_manifest};
+    use vrc_photon_ai_host::test_support::{
+        TEST_ENTRYPOINT, TestPackage, sample_manifest, sha256_hex,
+    };
     use vrc_photon_ai_protocol::{ModelState, Probe, TaggingJobStatus};
     use vrc_photon_core::ai::PluginInstallation;
     use vrc_photon_core::db::Db;
@@ -535,6 +539,50 @@ mod tests {
 
     use crate::plugin::{AI_PLUGIN_ID, PluginService};
     use crate::tagging::TaggingControl;
+
+    fn mock_sidecar() -> std::path::PathBuf {
+        static MOCK: OnceLock<std::path::PathBuf> = OnceLock::new();
+        MOCK.get_or_init(|| {
+            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+            let status = std::process::Command::new(cargo)
+                .args(["build", "--package", "vrc-photon-ai-mock-sidecar"])
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .status()
+                .expect("build the mock sidecar");
+            assert!(status.success(), "cargo build failed for the mock sidecar");
+            cargo_bin("mock-sidecar")
+        })
+        .clone()
+    }
+
+    /// Replaces the inert test entrypoint with the mock sidecar so the install
+    /// probe succeeds the same way it does in the daemon's other tests.
+    fn use_mock_sidecar(package: &mut TestPackage) {
+        let entrypoint = std::fs::read(mock_sidecar()).expect("read the mock sidecar binary");
+        let entry = package
+            .entries_mut()
+            .iter_mut()
+            .find(|entry| entry.path == TEST_ENTRYPOINT)
+            .expect("the test package has an entrypoint");
+        entry.data = entrypoint;
+        entry.unix_mode = Some(0o755);
+        let catalog = package
+            .entries_mut()
+            .iter_mut()
+            .find(|entry| entry.path == "catalog.json")
+            .expect("the test package has a catalog");
+        catalog.data = br#"{"version":"2026-11-03.1","outdoor":[],"indoor":[]}"#.to_vec();
+        let files = package
+            .entries()
+            .iter()
+            .map(|entry| ManifestFile {
+                path: entry.path.clone(),
+                size: entry.data.len() as u64,
+                sha256: sha256_hex(&entry.data),
+            })
+            .collect();
+        package.manifest_mut().files = files;
+    }
 
     fn test_control() -> (tempfile::TempDir, Endpoint, IpcControl) {
         test_control_with_keys(Vec::new())
@@ -947,8 +995,10 @@ mod tests {
     }
 
     #[test]
-    fn install_plugin_returns_ok_and_emits_progress() {
-        let package = TestPackage::new();
+    fn install_plugin_returns_ok_and_emits_installed_progress() {
+        let mut package = TestPackage::new();
+        use_mock_sidecar(&mut package);
+        let manifest = package.manifest().clone();
         let (_dir, endpoint, control) = test_control_with_keys(vec![package.public_key()]);
         let _server = IpcServer::start(endpoint.clone(), control.clone()).unwrap();
         let zip = package.temp_zip().unwrap();
@@ -970,13 +1020,30 @@ mod tests {
             let remaining = deadline.saturating_duration_since(Instant::now());
             match events.recv_timeout(remaining) {
                 Ok(Event::PluginInstallProgress {
-                    status: PluginInstallStatus::Installed | PluginInstallStatus::Failed,
+                    status: PluginInstallStatus::Installed,
                     ..
                 }) => break,
+                Ok(Event::PluginInstallProgress {
+                    status: PluginInstallStatus::Failed,
+                    error,
+                    ..
+                }) => panic!("plugin install failed: {error:?}"),
                 Ok(_) => {}
                 Err(error) => panic!("no install progress was published: {error}"),
             }
         }
+
+        let db = control.db.lock().unwrap();
+        let installs = db.list_plugin_installations(AI_PLUGIN_ID).unwrap();
+        assert_eq!(installs.len(), 1);
+        assert!(installs[0].active);
+        assert_eq!(installs[0].variant, manifest.variant);
+        assert_eq!(installs[0].version, manifest.plugin_version);
+        assert!(
+            db.active_plugin_installation(AI_PLUGIN_ID)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

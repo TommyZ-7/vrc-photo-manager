@@ -86,6 +86,51 @@ pub fn install_from_zip(
     )
 }
 
+/// Installs a signed plugin ZIP and keeps the replaced package's files in a
+/// backup directory instead of deleting them.
+///
+/// Returns the previous installation directory when an installation was
+/// replaced. The caller owns that directory and must either pass it to
+/// [`restore_installation_backup`] or remove it once the new package is
+/// committed.
+pub fn install_from_zip_keeping_backup(
+    zip_path: &Path,
+    data_dir: &Path,
+    keys: &[String],
+    host_version: &str,
+) -> Result<(InstalledPlugin, Option<PathBuf>)> {
+    install_from_zip_impl(
+        zip_path,
+        data_dir,
+        keys,
+        host_version,
+        InstallLimits::default(),
+        |from, to| fs::rename(from, to),
+        true,
+    )
+}
+
+/// Restores the package replaced by [`install_from_zip_keeping_backup`].
+///
+/// Removes the newly installed target and renames the retained backup back
+/// into place. The backup's now-empty `.backup-*` parent is removed too.
+pub fn restore_installation_backup(target: &Path, backup: &Path) -> Result<()> {
+    match fs::remove_dir_all(target) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    fs::rename(backup, target)?;
+    if let Some(parent) = backup.parent()
+        && parent
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with(".backup-"))
+    {
+        let _ = fs::remove_dir(parent);
+    }
+    Ok(())
+}
+
 /// Installs a signed plugin ZIP with explicit limits.
 pub fn install_from_zip_with_limits(
     zip_path: &Path,
@@ -94,24 +139,51 @@ pub fn install_from_zip_with_limits(
     host_version: &str,
     limits: InstallLimits,
 ) -> Result<InstalledPlugin> {
-    install_from_zip_with_limits_using(
+    install_from_zip_impl(
         zip_path,
         data_dir,
         keys,
         host_version,
         limits,
         |from, to| fs::rename(from, to),
+        false,
     )
+    .map(|(installed, _)| installed)
 }
 
+#[cfg(test)]
 fn install_from_zip_with_limits_using<R>(
     zip_path: &Path,
     data_dir: &Path,
     keys: &[String],
     host_version: &str,
     limits: InstallLimits,
-    mut rename: R,
+    rename: R,
 ) -> Result<InstalledPlugin>
+where
+    R: FnMut(&Path, &Path) -> std::io::Result<()>,
+{
+    install_from_zip_impl(
+        zip_path,
+        data_dir,
+        keys,
+        host_version,
+        limits,
+        rename,
+        false,
+    )
+    .map(|(installed, _)| installed)
+}
+
+fn install_from_zip_impl<R>(
+    zip_path: &Path,
+    data_dir: &Path,
+    keys: &[String],
+    host_version: &str,
+    limits: InstallLimits,
+    mut rename: R,
+    keep_backup: bool,
+) -> Result<(InstalledPlugin, Option<PathBuf>)>
 where
     R: FnMut(&Path, &Path) -> std::io::Result<()>,
 {
@@ -283,7 +355,8 @@ where
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
     }
-    replace_installation_with(staging.path(), &target, &root, &mut rename)?;
+    let backup =
+        replace_installation_with(staging.path(), &target, &root, &mut rename, keep_backup)?;
 
     tracing::debug!(
         plugin_id = %manifest.plugin_id,
@@ -292,15 +365,18 @@ where
         "installed AI plugin package"
     );
 
-    Ok(InstalledPlugin {
-        plugin_id: manifest.plugin_id.clone(),
-        variant: manifest.variant.clone(),
-        version: manifest.plugin_version.clone(),
-        protocol_version: manifest.protocol_version,
-        path: target,
-        manifest,
-        manifest_json,
-    })
+    Ok((
+        InstalledPlugin {
+            plugin_id: manifest.plugin_id.clone(),
+            variant: manifest.variant.clone(),
+            version: manifest.plugin_version.clone(),
+            protocol_version: manifest.protocol_version,
+            path: target,
+            manifest,
+            manifest_json,
+        },
+        backup,
+    ))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -644,7 +720,8 @@ fn replace_installation_with<R>(
     target: &Path,
     backup_root: &Path,
     mut rename: R,
-) -> Result<()>
+    keep_backup: bool,
+) -> Result<Option<PathBuf>>
 where
     R: FnMut(&Path, &Path) -> std::io::Result<()>,
 {
@@ -680,8 +757,16 @@ where
         return Err(error.into());
     }
 
-    drop(backup);
-    Ok(())
+    match backup {
+        Some((directory, path)) if keep_backup => {
+            // Persist the temporary directory so the caller can restore the
+            // previous package after a later probe or catalog failure.
+            let _kept = directory.keep();
+            Ok(Some(path))
+        }
+        Some(_) => Ok(None),
+        None => Ok(None),
+    }
 }
 
 #[cfg(test)]
@@ -1372,9 +1457,13 @@ mod tests {
             .unwrap();
         fs::write(staging.path().join("new.txt"), b"new").unwrap();
 
-        replace_installation_with(staging.path(), &target, &plugins, |from, to| {
-            fs::rename(from, to)
-        })
+        replace_installation_with(
+            staging.path(),
+            &target,
+            &plugins,
+            |from, to| fs::rename(from, to),
+            false,
+        )
         .unwrap();
 
         assert_eq!(fs::read(target.join("new.txt")).unwrap(), b"new");
@@ -1397,9 +1486,13 @@ mod tests {
         fs::write(target.join("old.txt"), b"old").unwrap();
         let missing_staging = plugins.join(".staging-missing");
 
-        let error = replace_installation_with(&missing_staging, &target, &plugins, |from, to| {
-            fs::rename(from, to)
-        })
+        let error = replace_installation_with(
+            &missing_staging,
+            &target,
+            &plugins,
+            |from, to| fs::rename(from, to),
+            false,
+        )
         .unwrap_err();
 
         assert!(matches!(error, AiHostError::Io(_)));
@@ -1502,6 +1595,52 @@ mod tests {
             .exists()
         );
         assert!(staging_entries(data_dir.path()).is_empty());
+        assert!(backup_entries(data_dir.path()).is_empty());
+    }
+
+    #[test]
+    fn install_keeping_backup_can_restore_the_previous_package() {
+        let data_dir = tempdir().unwrap();
+        let package = TestPackage::new();
+        let installed = install(&package, data_dir.path()).unwrap();
+        fs::write(installed.path.join("stale.txt"), b"stale").unwrap();
+
+        let zip = package.temp_zip().unwrap();
+        let (reinstalled, backup) = crate::install_from_zip_keeping_backup(
+            zip.path(),
+            data_dir.path(),
+            &[package.public_key()],
+            "0.10.1",
+        )
+        .unwrap();
+        let backup = backup.expect("replacing a package must retain its files");
+        assert!(!reinstalled.path.join("stale.txt").exists());
+        assert_eq!(fs::read(backup.join("stale.txt")).unwrap(), b"stale");
+
+        crate::restore_installation_backup(&reinstalled.path, &backup).unwrap();
+        assert_eq!(
+            fs::read(reinstalled.path.join("stale.txt")).unwrap(),
+            b"stale"
+        );
+        assert!(!backup.exists());
+        assert!(backup_entries(data_dir.path()).is_empty());
+    }
+
+    #[test]
+    fn install_keeping_backup_reports_no_backup_on_a_first_install() {
+        let data_dir = tempdir().unwrap();
+        let package = TestPackage::new();
+        let zip = package.temp_zip().unwrap();
+
+        let (_installed, backup) = crate::install_from_zip_keeping_backup(
+            zip.path(),
+            data_dir.path(),
+            &[package.public_key()],
+            "0.10.1",
+        )
+        .unwrap();
+
+        assert!(backup.is_none());
         assert!(backup_entries(data_dir.path()).is_empty());
     }
 }

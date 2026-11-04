@@ -5,8 +5,6 @@
 //! time, snapshots the photo, runs presence → people_count → place_class →
 //! place_tags, and stores the result only while the job is still processing.
 
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -44,13 +42,17 @@ const NOT_READY_DELAY: Duration = Duration::from_secs(2);
 
 /// Tracks one cancel token per running tagging job and wakes the worker.
 pub(crate) struct TaggingControl {
+    #[cfg(test)]
     signal: Arc<JobSignal>,
     tokens: Mutex<HashMap<String, CancelToken>>,
 }
 
 impl TaggingControl {
     pub(crate) fn new(signal: Arc<JobSignal>) -> Self {
+        #[cfg(not(test))]
+        let _ = signal;
         Self {
+            #[cfg(test)]
             signal,
             tokens: Mutex::new(HashMap::new()),
         }
@@ -90,12 +92,8 @@ impl TaggingControl {
         }
     }
 
-    /// The wake signal shared with the tagging worker.
-    pub(crate) fn signal(&self) -> &Arc<JobSignal> {
-        &self.signal
-    }
-
     /// Nudges the tagging worker.
+    #[cfg(test)]
     pub(crate) fn notify(&self) {
         self.signal.notify();
     }
@@ -933,6 +931,15 @@ mod tests {
         .into_bytes()
     }
 
+    /// A probe that stays busy long enough for a concurrent operation test.
+    fn delayed_probe_entrypoint(mock: &Path) -> Vec<u8> {
+        format!(
+            "#!/bin/sh\nsleep 1\nexec {mock} \"$@\"\n",
+            mock = shell_quote(&mock.to_string_lossy()),
+        )
+        .into_bytes()
+    }
+
     fn package_with_entrypoint(key: &TestKey, entrypoint: Vec<u8>) -> TestPackage {
         let entries = vec![
             TestEntry::with_mode(TEST_ENTRYPOINT, entrypoint, 0o755),
@@ -1031,6 +1038,8 @@ mod tests {
         ai_data_dir: PathBuf,
         photos_dir: PathBuf,
         photo_id: i64,
+        key: TestKey,
+        mock: PathBuf,
     }
 
     impl TaggingTestContext {
@@ -1113,6 +1122,8 @@ mod tests {
                 ai_data_dir,
                 photos_dir,
                 photo_id,
+                key,
+                mock,
             }
         }
 
@@ -1315,6 +1326,106 @@ mod tests {
         );
         assert!(ctx.db().photo_ai(ctx.photo_id).unwrap().is_none());
         assert!(!ctx.snapshot_path(&job_id).exists());
+    }
+
+    #[test]
+    fn pending_job_does_not_use_a_package_being_replaced() {
+        let ctx = TaggingTestContext::new("normal", presence_response(false, 0.02));
+        let job_id = ctx.enqueue_one();
+        let install_events = ctx.events.subscribe();
+
+        let package = package_with_entrypoint(&ctx.key, delayed_probe_entrypoint(&ctx.mock));
+        let zip = ctx._dir.path().join("slow-install.zip");
+        package.write_zip(&zip).unwrap();
+        ctx.plugin.install_from_zip(&zip).unwrap();
+
+        assert!(
+            ctx.plugin.operation_active(AI_PLUGIN_ID),
+            "the install key must still be held"
+        );
+        assert!(
+            !ctx.plugin.is_ready(AI_PLUGIN_ID),
+            "readiness must be false while the package is replaced"
+        );
+        assert!(
+            matches!(ctx.plugin.sidecar(), Err(PluginError::NotReady(_))),
+            "a sidecar must not be started for a package being replaced"
+        );
+
+        assert!(ctx.worker.process_once().unwrap());
+        let job = ctx.db().tagging_job(&job_id).unwrap().unwrap();
+        assert_eq!(job.status, TaggingJobStatus::Pending);
+        assert_eq!(job.retry_count, 0);
+        assert_eq!(
+            job.error.as_deref(),
+            Some(TaggingErrorCode::PluginNotReady.as_str())
+        );
+        assert!(ctx.db().photo_ai(ctx.photo_id).unwrap().is_none());
+
+        wait_for_install(&install_events);
+        assert!(ctx.plugin.is_ready(AI_PLUGIN_ID));
+    }
+
+    #[test]
+    fn pending_job_does_not_use_a_package_being_uninstalled() {
+        let ctx = TaggingTestContext::with_scenario(
+            // The mock keeps running until the host hits its shutdown timeout,
+            // so the lifecycle key stays held while the job is processed.
+            "no_shutdown",
+            presence_response(false, 0.02),
+            PeopleResponse::default(),
+            "other",
+            None,
+            true,
+            test_config(),
+        );
+        let client = ctx.plugin.sidecar().unwrap();
+        assert!(client.is_alive());
+        let job_id = ctx.enqueue_one();
+
+        ctx.plugin
+            .uninstall_async(AI_PLUGIN_ID, None, None, false)
+            .unwrap();
+
+        assert!(
+            ctx.db()
+                .active_plugin_installation(AI_PLUGIN_ID)
+                .unwrap()
+                .is_some(),
+            "the uninstall worker must still be running"
+        );
+        assert!(
+            ctx.plugin.operation_active(AI_PLUGIN_ID),
+            "the lifecycle key must still be held"
+        );
+        assert!(
+            !ctx.plugin.is_ready(AI_PLUGIN_ID),
+            "readiness must be false while the package is removed"
+        );
+        assert!(
+            matches!(ctx.plugin.sidecar(), Err(PluginError::NotReady(_))),
+            "a sidecar must not be started for a package being removed"
+        );
+
+        assert!(ctx.worker.process_once().unwrap());
+        let job = ctx.db().tagging_job(&job_id).unwrap().unwrap();
+        assert_eq!(job.status, TaggingJobStatus::Pending);
+        assert_eq!(job.retry_count, 0);
+        assert_eq!(
+            job.error.as_deref(),
+            Some(TaggingErrorCode::PluginNotReady.as_str())
+        );
+        assert!(ctx.db().photo_ai(ctx.photo_id).unwrap().is_none());
+
+        wait_until("the uninstall to finish", || {
+            !ctx.plugin.operation_active(AI_PLUGIN_ID)
+                && ctx
+                    .db()
+                    .active_plugin_installation(AI_PLUGIN_ID)
+                    .unwrap()
+                    .is_none()
+        });
+        assert!(!client.is_alive());
     }
 
     #[test]

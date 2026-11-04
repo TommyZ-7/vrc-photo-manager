@@ -4,8 +4,6 @@
 //! every long-running install / model operation. IPC handlers only delegate to
 //! this module.
 
-#![allow(dead_code)]
-
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
@@ -20,7 +18,8 @@ use vrc_photon_ai_host::{
     AiHostError, ModelCheck, ModelHttpClient, PluginManifest, ProbeExpectations, SidecarClient,
     SidecarConfig, SidecarPaths, check_model, delete_model_revision,
     download_model as download_plugin_model, import_model_files as import_model_files_from_disk,
-    install_from_zip as install_plugin_zip, parse_manifest, plugins_root,
+    install_from_zip_keeping_backup as install_plugin_zip_keeping_backup, parse_manifest,
+    plugins_root, restore_installation_backup,
 };
 use vrc_photon_ai_protocol::{Catalog, Hello, ModelState, Probe};
 use vrc_photon_core::ai::PluginInstallation;
@@ -90,10 +89,29 @@ struct PluginServiceInner {
     events: EventBus,
     keys: Vec<String>,
     http: Arc<dyn ModelHttpClient>,
-    sidecar: Mutex<Option<Arc<SidecarClient>>>,
+    sidecar: Mutex<Option<CachedSidecar>>,
     operations: Arc<Mutex<HashSet<String>>>,
     model_cancel: Mutex<HashMap<String, Arc<AtomicBool>>>,
     host_version: String,
+}
+
+/// Identifies the package and model revision a cached sidecar was started for.
+///
+/// A cached client may only be reused while this identity matches the active
+/// installation and model state; replacing, switching, or deleting a package
+/// makes the fields differ (or the installation disappear) and forces a stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SidecarIdentity {
+    plugin_id: String,
+    variant: String,
+    version: String,
+    catalog_version: String,
+    model_revision: String,
+}
+
+struct CachedSidecar {
+    identity: SidecarIdentity,
+    client: Arc<SidecarClient>,
 }
 
 /// Removes an in-flight operation marker even when the worker panics.
@@ -181,6 +199,7 @@ impl PluginService {
     }
 
     /// Removes one version, one variant, or every installation of a plugin.
+    #[cfg(test)]
     pub(crate) fn uninstall(
         &self,
         plugin_id: &str,
@@ -216,7 +235,10 @@ impl PluginService {
         delete_ai_tags: bool,
     ) -> Result<()> {
         let guard = self.inner.begin_lifecycle(plugin_id)?;
-        self.inner.uninstall_targets(plugin_id, variant, version)?;
+        let (_, removes_active) = self.inner.uninstall_targets(plugin_id, variant, version)?;
+        if removes_active {
+            self.inner.invalidate_readiness(plugin_id)?;
+        }
         let inner = self.inner.clone();
         let plugin_id = plugin_id.to_string();
         let variant = variant.map(str::to_string);
@@ -247,6 +269,7 @@ impl PluginService {
     }
 
     /// Runs `--probe` for the active installation.
+    #[cfg(test)]
     pub(crate) fn probe(&self, plugin_id: &str) -> Result<()> {
         let guard = self.inner.begin_lifecycle(plugin_id)?;
         let install = self.inner.active_install(plugin_id)?;
@@ -289,6 +312,7 @@ impl PluginService {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn set_active_variant(
         &self,
         plugin_id: &str,
@@ -428,9 +452,11 @@ impl PluginService {
     }
 
     /// Stops the sidecar and removes the stored model revision.
+    #[cfg(test)]
     pub(crate) fn delete_model(&self, plugin_id: &str) -> Result<()> {
         let guard = self.inner.begin_lifecycle(plugin_id)?;
         let revision = self.inner.stored_model_revision(plugin_id)?;
+        self.inner.invalidate_readiness(plugin_id)?;
         let result = self.inner.delete_model_files(plugin_id, &revision);
         drop(guard);
         if result.is_ok() {
@@ -446,6 +472,7 @@ impl PluginService {
     pub(crate) fn delete_model_async(&self, plugin_id: &str) -> Result<()> {
         let guard = self.inner.begin_lifecycle(plugin_id)?;
         let revision = self.inner.stored_model_revision(plugin_id)?;
+        self.inner.invalidate_readiness(plugin_id)?;
         let inner = self.inner.clone();
         let plugin_id = plugin_id.to_string();
         thread::Builder::new()
@@ -481,10 +508,6 @@ impl PluginService {
     /// True when an active install, a ready model, and a saved probe exist.
     pub(crate) fn is_ready(&self, plugin_id: &str) -> bool {
         self.inner.is_ready(plugin_id)
-    }
-
-    pub(crate) fn sync_catalog_from_install(&self, install: &PluginInstallation) -> Result<()> {
-        self.inner.sync_catalog_from_install(install)
     }
 
     pub(crate) fn sync_catalog_from_hello(&self, hello: &Hello) -> Result<()> {
@@ -593,12 +616,26 @@ impl PluginServiceInner {
 
     fn install(&self, zip_path: &Path) -> Result<PluginInstallation> {
         self.stop_sidecar();
-        let installed =
-            install_plugin_zip(zip_path, &self.data_dir, &self.keys, &self.host_version)?;
+        let (installed, backup) = install_plugin_zip_keeping_backup(
+            zip_path,
+            &self.data_dir,
+            &self.keys,
+            &self.host_version,
+        )?;
+        // Extraction is complete. Stop any client that raced with the
+        // replacement before the new package is probed or activated.
+        self.stop_sidecar();
         let manifest = installed.manifest.clone();
         let _lifecycle = self.begin_install_lifecycle(&installed.plugin_id)?;
 
-        let previous_active = self.db().active_plugin_installation(&installed.plugin_id)?;
+        let (previous_active, previous_probe) = {
+            let db = self.db();
+            (
+                db.active_plugin_installation(&installed.plugin_id)?,
+                db.plugin_state(&installed.plugin_id)?
+                    .and_then(|state| state.probe_json),
+            )
+        };
         // The package contents are about to change under the plugin. Drop the
         // cached readiness until the new package passes catalog sync + probe.
         self.db()
@@ -632,6 +669,10 @@ impl PluginServiceInner {
         let result = (|| -> Result<()> {
             self.sync_catalog_from_install(&install)?;
             self.probe_install(&install)?;
+            // Re-check the package and stop the sidecar immediately before
+            // activating, so a client started for the previous package cannot
+            // survive the switch.
+            self.stop_sidecar();
             if !self.db().set_active_plugin_installation(
                 &install.plugin_id,
                 &install.variant,
@@ -646,33 +687,83 @@ impl PluginServiceInner {
         })();
 
         if let Err(error) = &result {
-            // Never leave a failed package looking ready.
+            // Never leave a failed package looking ready or keep using it.
+            self.stop_sidecar();
             let _ = self.db().set_plugin_probe_json(&install.plugin_id, None);
-            if let Some(previous) = &previous_active
-                && matches!(
-                    self.db().active_plugin_installation(&install.plugin_id),
-                    Ok(None)
-                )
-                && let Err(restore) = self.db().set_active_plugin_installation(
+
+            let restored_files = match &backup {
+                Some(backup) => match restore_installation_backup(Path::new(&install.path), backup)
+                {
+                    Ok(()) => true,
+                    Err(restore) => {
+                        tracing::error!(
+                            %restore,
+                            plugin_id = %install.plugin_id,
+                            "cannot restore the previous AI plugin files"
+                        );
+                        false
+                    }
+                },
+                None => match fs::remove_dir_all(&install.path) {
+                    Ok(()) => true,
+                    Err(remove) if remove.kind() == io::ErrorKind::NotFound => true,
+                    Err(remove) => {
+                        tracing::error!(
+                            %remove,
+                            plugin_id = %install.plugin_id,
+                            "cannot remove the failed AI plugin package"
+                        );
+                        false
+                    }
+                },
+            };
+
+            let same_as_previous = previous_active.as_ref().is_some_and(|previous| {
+                previous.variant == install.variant && previous.version == install.version
+            });
+            if (restored_files || !same_as_previous)
+                && let Err(remove) = self.db().remove_plugin_installation(
                     &install.plugin_id,
-                    &previous.variant,
-                    Some(&previous.version),
+                    &install.variant,
+                    &install.version,
                 )
             {
                 tracing::warn!(
-                    %restore,
+                    %remove,
                     plugin_id = %install.plugin_id,
-                    "cannot restore the previous AI plugin installation"
+                    "cannot remove the failed AI plugin row"
                 );
             }
-            if let Some(previous) = &previous_active
-                && let Err(error) = self.sync_catalog_from_install(previous)
-            {
-                tracing::warn!(
-                    %error,
-                    plugin_id = %install.plugin_id,
-                    "cannot restore the previous AI plugin catalog"
-                );
+            if restored_files && let Some(previous) = &previous_active {
+                if let Err(restore) = self.db().upsert_plugin_installation(previous) {
+                    tracing::warn!(
+                        %restore,
+                        plugin_id = %install.plugin_id,
+                        "cannot restore the previous AI plugin installation"
+                    );
+                }
+                let catalog_restored = match self.sync_catalog_from_install(previous) {
+                    Ok(()) => true,
+                    Err(restore) => {
+                        tracing::warn!(
+                            %restore,
+                            plugin_id = %install.plugin_id,
+                            "cannot restore the previous AI plugin catalog"
+                        );
+                        false
+                    }
+                };
+                if catalog_restored
+                    && let Err(restore) = self
+                        .db()
+                        .set_plugin_probe_json(&install.plugin_id, previous_probe.as_deref())
+                {
+                    tracing::warn!(
+                        %restore,
+                        plugin_id = %install.plugin_id,
+                        "cannot restore the previous AI plugin probe"
+                    );
+                }
             }
             tracing::warn!(
                 %error,
@@ -727,6 +818,9 @@ impl PluginServiceInner {
         let (targets, removes_active) = self.uninstall_targets(plugin_id, variant, version)?;
 
         if removes_active {
+            self.invalidate_readiness(plugin_id)?;
+            // Stop before removing files: an accepted request must never
+            // leave a client running on a package that is about to disappear.
             self.stop_sidecar();
         }
 
@@ -754,6 +848,15 @@ impl PluginServiceInner {
         Ok(())
     }
 
+    /// Drops cached readiness before an operation that changes the active
+    /// package or model. The probe is restored only by a successful rollback
+    /// or a new probe.
+    fn invalidate_readiness(&self, plugin_id: &str) -> Result<()> {
+        self.db().set_plugin_probe_json(plugin_id, None)?;
+        Ok(())
+    }
+
+    #[cfg(test)]
     fn set_active_variant(
         &self,
         plugin_id: &str,
@@ -839,6 +942,9 @@ impl PluginServiceInner {
     }
 
     fn is_ready(&self, plugin_id: &str) -> bool {
+        if self.operations_block_readiness(plugin_id) {
+            return false;
+        }
         let db = self.db();
         let Ok(Some(install)) = db.active_plugin_installation(plugin_id) else {
             return false;
@@ -866,36 +972,75 @@ impl PluginServiceInner {
             && probe.catalog_version == manifest.catalog_version
     }
 
+    /// True while an install or lifecycle operation owns the plugin. Readiness
+    /// must be false for the whole operation so a tagging worker cannot start
+    /// against a package that is being replaced or deleted.
+    fn operations_block_readiness(&self, plugin_id: &str) -> bool {
+        let operations = lock_unpoisoned(&self.operations);
+        operations.contains(INSTALL_OPERATION)
+            || operations.contains(&lifecycle_operation(plugin_id))
+    }
+
     fn stop_sidecar(&self) {
         let client = lock_unpoisoned(&self.sidecar).take();
-        if let Some(client) = client
-            && let Err(error) = client.shutdown()
-        {
-            tracing::warn!(%error, "AI sidecar shutdown failed; killing it");
-            client.kill();
+        if let Some(client) = client {
+            shutdown_sidecar(&client.client);
         }
     }
 
-    fn sidecar(&self) -> Result<Arc<SidecarClient>> {
-        let mut slot = lock_unpoisoned(&self.sidecar);
-        if let Some(existing) = slot.as_ref()
-            && existing.is_alive()
-        {
-            return Ok(existing.clone());
-        }
-        *slot = None;
+    /// The identity of the active installation and model, or `None` when
+    /// either is missing. Used to decide whether a cached client is still
+    /// valid; the strict readiness checks happen before spawning.
+    fn cached_sidecar_identity(&self, plugin_id: &str) -> Result<Option<SidecarIdentity>> {
+        let db = self.db();
+        let Some(install) = db.active_plugin_installation(plugin_id)? else {
+            return Ok(None);
+        };
+        let Ok(manifest) = parse_manifest(install.manifest_json.as_bytes()) else {
+            return Ok(None);
+        };
+        let Some(state) = db.plugin_state(plugin_id)? else {
+            return Ok(None);
+        };
+        Ok(Some(SidecarIdentity {
+            plugin_id: install.plugin_id,
+            variant: install.variant,
+            version: install.version,
+            catalog_version: manifest.catalog_version,
+            model_revision: state.model_revision.unwrap_or_default(),
+        }))
+    }
 
-        let (install, manifest, model, requested_backend) = {
+    /// Resolves everything needed to start a sidecar for the active package.
+    fn sidecar_target(
+        &self,
+        plugin_id: &str,
+    ) -> Result<(
+        PluginInstallation,
+        PluginManifest,
+        vrc_photon_ai_host::ModelPaths,
+        String,
+        SidecarIdentity,
+    )> {
+        let (install, manifest, model_revision, model, requested_backend) = {
             let db = self.db();
             let install = db
-                .active_plugin_installation(AI_PLUGIN_ID)?
+                .active_plugin_installation(plugin_id)?
                 .ok_or_else(|| PluginError::NotReady("no active AI plugin installation".into()))?;
             let manifest = parse_manifest(install.manifest_json.as_bytes())?;
-            let model_ready = db
-                .plugin_state(AI_PLUGIN_ID)?
-                .is_some_and(|state| state.model_state == ModelState::Ready);
-            if !model_ready {
+            let state = db
+                .plugin_state(plugin_id)?
+                .ok_or_else(|| PluginError::NotReady("no plugin state".to_string()))?;
+            if state.model_state != ModelState::Ready {
                 return Err(PluginError::NotReady("the model is not ready".to_string()));
+            }
+            let model_revision = state.model_revision.ok_or_else(|| {
+                PluginError::NotReady("the model revision is missing".to_string())
+            })?;
+            if model_revision != manifest.model.revision {
+                return Err(PluginError::NotReady(
+                    "the model revision does not match the active plugin".to_string(),
+                ));
             }
             let model = match check_model(&manifest, &self.data_dir) {
                 ModelCheck::Ready(paths) => paths,
@@ -910,11 +1055,52 @@ impl PluginServiceInner {
             (
                 install,
                 manifest,
+                model_revision,
                 model,
                 settings.ai_tagging_backend.clone(),
             )
         };
 
+        let identity = SidecarIdentity {
+            plugin_id: install.plugin_id.clone(),
+            variant: install.variant.clone(),
+            version: install.version.clone(),
+            catalog_version: manifest.catalog_version.clone(),
+            model_revision,
+        };
+        Ok((install, manifest, model, requested_backend, identity))
+    }
+
+    fn sidecar(&self) -> Result<Arc<SidecarClient>> {
+        let plugin_id = AI_PLUGIN_ID;
+        if self.operations_block_readiness(plugin_id) {
+            return Err(PluginError::NotReady(
+                "a plugin operation is running".to_string(),
+            ));
+        }
+
+        let active_identity = self.cached_sidecar_identity(plugin_id)?;
+        let mut slot = lock_unpoisoned(&self.sidecar);
+        if let Some(cached) = slot.as_ref()
+            && cached.client.is_alive()
+            && active_identity.as_ref() == Some(&cached.identity)
+            && !self.operations_block_readiness(plugin_id)
+        {
+            return Ok(cached.client.clone());
+        }
+
+        if let Some(stale) = slot.take() {
+            shutdown_sidecar(&stale.client);
+        }
+
+        if self.operations_block_readiness(plugin_id) {
+            return Err(PluginError::NotReady(
+                "a plugin operation is running".to_string(),
+            ));
+        }
+
+        let (install, manifest, model, requested_backend, identity) =
+            self.sidecar_target(plugin_id)?;
         let paths = sidecar_paths(&install, &manifest);
         let log_path = self.log_path()?;
         let expectations = ProbeExpectations::new(&install.plugin_id, &install.variant)
@@ -933,7 +1119,21 @@ impl PluginServiceInner {
         };
         let client = Arc::new(SidecarClient::spawn(config)?);
         self.sync_catalog_from_hello(client.hello())?;
-        *slot = Some(client.clone());
+
+        // The package can change while the process starts. Never hand out a
+        // client that belongs to a package replaced during startup.
+        if self.operations_block_readiness(plugin_id)
+            || self.cached_sidecar_identity(plugin_id)?.as_ref() != Some(&identity)
+        {
+            shutdown_sidecar(&client);
+            return Err(PluginError::NotReady(
+                "the active AI plugin changed while starting the sidecar".to_string(),
+            ));
+        }
+        *slot = Some(CachedSidecar {
+            identity,
+            client: client.clone(),
+        });
         Ok(client)
     }
 
@@ -1169,6 +1369,58 @@ impl PluginServiceInner {
                     Some("interrupted"),
                 )?;
                 self.events.publish(Event::PluginStateChanged { plugin_id });
+                continue;
+            }
+            if state.model_state != ModelState::Ready {
+                continue;
+            }
+
+            // A `ready` row can outlive the files it describes (external
+            // deletion, a crash before verification, or a crashed installer).
+            // Re-check them so tagging is not reported ready for a missing or
+            // corrupt model.
+            let Some(install) = self.db().active_plugin_installation(&plugin_id)? else {
+                continue;
+            };
+            let manifest = match parse_manifest(install.manifest_json.as_bytes()) {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    self.db().set_plugin_model_state(
+                        &plugin_id,
+                        ModelState::Error,
+                        state.model_revision.as_deref(),
+                        state.model_bytes_downloaded,
+                        state.model_bytes_total,
+                        Some(&error.to_string()),
+                    )?;
+                    self.events.publish(Event::PluginStateChanged { plugin_id });
+                    continue;
+                }
+            };
+            match check_model(&manifest, &self.data_dir) {
+                ModelCheck::Ready(_) => {}
+                ModelCheck::Missing => {
+                    self.db().set_plugin_model_state(
+                        &plugin_id,
+                        ModelState::Missing,
+                        state.model_revision.as_deref(),
+                        0,
+                        state.model_bytes_total,
+                        Some("the model files are missing"),
+                    )?;
+                    self.events.publish(Event::PluginStateChanged { plugin_id });
+                }
+                ModelCheck::Invalid(message) => {
+                    self.db().set_plugin_model_state(
+                        &plugin_id,
+                        ModelState::Error,
+                        state.model_revision.as_deref(),
+                        state.model_bytes_downloaded,
+                        state.model_bytes_total,
+                        Some(&message),
+                    )?;
+                    self.events.publish(Event::PluginStateChanged { plugin_id });
+                }
             }
         }
         Ok(())
@@ -1221,6 +1473,13 @@ impl<'a> ModelProgress<'a> {
 
 fn model_total(manifest: &PluginManifest) -> u64 {
     manifest.model.files.iter().map(|file| file.size).sum()
+}
+
+fn shutdown_sidecar(client: &SidecarClient) {
+    if let Err(error) = client.shutdown() {
+        tracing::warn!(%error, "AI sidecar shutdown failed; killing it");
+        client.kill();
+    }
 }
 
 fn sidecar_paths(install: &PluginInstallation, manifest: &PluginManifest) -> SidecarPaths {
@@ -1278,7 +1537,6 @@ mod tests {
     use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc::{Receiver, RecvTimeoutError};
     use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
     use std::thread;
@@ -1291,7 +1549,7 @@ mod tests {
         sha256_hex,
     };
     use vrc_photon_ai_host::{
-        AiHostError, ManifestFile, ModelCheck, ModelHttpClient, check_model, model_dir,
+        AiHostError, ManifestFile, ModelCheck, ModelHttpClient, check_model, model_dir, plugin_dir,
     };
     use vrc_photon_ai_protocol::{Catalog, ModelState, Probe};
     use vrc_photon_core::db::Db;
@@ -1334,7 +1592,6 @@ mod tests {
         files: HashMap<String, Vec<u8>>,
         chunk_size: usize,
         chunk_delay: Duration,
-        calls: AtomicUsize,
     }
 
     impl MockModelClient {
@@ -1359,12 +1616,7 @@ mod tests {
                 // Keeps cancellation observable without slowing the other
                 // model tests down noticeably.
                 chunk_delay: Duration::from_millis(5),
-                calls: AtomicUsize::new(0),
             }
-        }
-
-        fn calls(&self) -> usize {
-            self.calls.load(Ordering::SeqCst)
         }
     }
 
@@ -1374,7 +1626,6 @@ mod tests {
             url: &str,
             on_chunk: &mut dyn FnMut(&[u8]) -> vrc_photon_ai_host::Result<()>,
         ) -> vrc_photon_ai_host::Result<()> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
             let bytes = self
                 .files
                 .get(url)
@@ -1699,11 +1950,71 @@ mod tests {
     }
 
     #[test]
-    fn failed_install_keeps_the_previous_install_active_and_not_ready() {
+    fn failed_same_version_install_restores_the_previous_package_and_readiness() {
         let ctx = TestContext::new();
         ctx.install_default();
         ctx.make_model_ready();
         assert!(ctx.service.is_ready(PLUGIN));
+
+        let previous = ctx
+            .db()
+            .active_plugin_installation(PLUGIN)
+            .unwrap()
+            .unwrap();
+        let previous_path = PathBuf::from(&previous.path);
+        let previous_entrypoint = fs::read(previous_path.join(TEST_ENTRYPOINT)).unwrap();
+        fs::write(previous_path.join("keep.txt"), b"keep").unwrap();
+
+        let bad = package_from_entrypoint(
+            &ctx.key,
+            b"#!/bin/sh\nexit 1\n".to_vec(),
+            "linux-cpu",
+            "cpu",
+            &[],
+        );
+        // The test package has the same version as the installed one.
+        assert_eq!(bad.manifest().plugin_version, previous.version);
+        let zip = ctx.write_zip("bad-same-version.zip", &bad);
+
+        ctx.service.install_from_zip(&zip).unwrap();
+        let error = ctx.wait_for_install_failure();
+        assert!(!error.is_empty());
+
+        let restored = ctx
+            .db()
+            .active_plugin_installation(PLUGIN)
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.version, previous.version);
+        assert_eq!(restored.variant, previous.variant);
+        assert_eq!(restored.path, previous.path);
+        assert_eq!(
+            fs::read(previous_path.join(TEST_ENTRYPOINT)).unwrap(),
+            previous_entrypoint,
+            "the old entrypoint must be back in place"
+        );
+        assert_eq!(fs::read(previous_path.join("keep.txt")).unwrap(), b"keep");
+        assert!(ctx.service.is_ready(PLUGIN));
+        let client = ctx.service.sidecar().unwrap();
+        assert!(client.is_alive());
+        assert_eq!(client.hello().variant, "linux-cpu");
+    }
+
+    #[test]
+    fn failed_different_version_install_keeps_the_previous_package_usable() {
+        let ctx = TestContext::new();
+        ctx.install_default();
+        ctx.make_model_ready();
+        assert!(ctx.service.is_ready(PLUGIN));
+
+        let previous = ctx
+            .db()
+            .active_plugin_installation(PLUGIN)
+            .unwrap()
+            .unwrap();
+        let previous_path = PathBuf::from(&previous.path);
+        let previous_entrypoint = fs::read(previous_path.join(TEST_ENTRYPOINT)).unwrap();
+        fs::write(previous_path.join("keep.txt"), b"keep").unwrap();
 
         let mut bad = package_from_entrypoint(
             &ctx.key,
@@ -1713,7 +2024,8 @@ mod tests {
             &[],
         );
         bad.manifest_mut().plugin_version = "2.0.0".to_string();
-        let zip = ctx.write_zip("bad-probe.zip", &bad);
+        let zip = ctx.write_zip("bad-new-version.zip", &bad);
+        let failed_path = plugin_dir(&ctx.data_dir, PLUGIN, "linux-cpu", "2.0.0");
 
         ctx.service.install_from_zip(&zip).unwrap();
         let error = ctx.wait_for_install_failure();
@@ -1724,16 +2036,24 @@ mod tests {
             .active_plugin_installation(PLUGIN)
             .unwrap()
             .unwrap();
-        assert_eq!(active.version, "1.0.0");
-        assert!(!ctx.service.is_ready(PLUGIN));
+        assert_eq!(active.version, previous.version);
+        assert_eq!(active.path, previous.path);
+        assert_eq!(
+            fs::read(previous_path.join(TEST_ENTRYPOINT)).unwrap(),
+            previous_entrypoint
+        );
+        assert_eq!(fs::read(previous_path.join("keep.txt")).unwrap(), b"keep");
+        assert!(!failed_path.exists(), "the failed package must be removed");
         assert!(
             ctx.db()
-                .plugin_state(PLUGIN)
+                .list_plugin_installations(PLUGIN)
                 .unwrap()
-                .unwrap()
-                .probe_json
-                .is_none()
+                .iter()
+                .all(|install| install.version != "2.0.0"),
+            "the failed installation row must be removed"
         );
+        assert!(ctx.service.is_ready(PLUGIN));
+        assert!(ctx.service.sidecar().unwrap().is_alive());
     }
 
     #[test]
@@ -2120,6 +2440,41 @@ mod tests {
         assert_eq!(state.model_state, ModelState::Missing);
         assert_eq!(state.model_error.as_deref(), Some("interrupted"));
         assert_eq!(state.model_revision.as_deref(), Some(revision.as_str()));
+    }
+
+    #[test]
+    fn recover_interrupted_model_state_downgrades_a_stale_ready_state() {
+        let ctx = TestContext::new();
+        ctx.install_default();
+        ctx.make_model_ready();
+        assert!(ctx.service.is_ready(PLUGIN));
+        let revision = sample_manifest().model.revision;
+        let directory = model_dir(&ctx.data_dir, PLUGIN, &revision);
+
+        fs::remove_dir_all(&directory).unwrap();
+        ctx.service.recover_interrupted_model_state().unwrap();
+        let state = ctx.db().plugin_state(PLUGIN).unwrap().unwrap();
+        assert_eq!(state.model_state, ModelState::Missing);
+        assert!(!ctx.service.is_ready(PLUGIN));
+
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join(MODEL_FILE), b"bad").unwrap();
+        fs::write(directory.join(MMPROJ_FILE), MMPROJ_BYTES).unwrap();
+        ctx.db()
+            .set_plugin_model_state(
+                PLUGIN,
+                ModelState::Ready,
+                Some(&revision),
+                11,
+                Some(11),
+                None,
+            )
+            .unwrap();
+        ctx.service.recover_interrupted_model_state().unwrap();
+        let state = ctx.db().plugin_state(PLUGIN).unwrap().unwrap();
+        assert_eq!(state.model_state, ModelState::Error);
+        assert!(state.model_error.is_some());
+        assert!(!ctx.service.is_ready(PLUGIN));
     }
 
     #[test]
