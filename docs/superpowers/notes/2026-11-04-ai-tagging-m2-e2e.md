@@ -62,9 +62,16 @@ ctest --test-dir build --output-on-failure
 
 ```bash
 cd /home/tommyz7/work/vrc-photon-autotag-devzip
+MODEL_DIR=/home/tommyz7/work-saeki/d1-spike/models \
 MINISIGN_SECRET_KEY="$HOME/.minisign/vrc-photon-ai-dev.key" \
+MINISIGN_BIN=/path/to/minisign-signer \
   packaging/dev/build_dev_zip.sh --build-dir build --backend cpu
 ```
+
+`MINISIGN_BIN` は `minisign` CLI が無い環境で、秘密鍵と manifest を受け取って
+`.minisig` を stdout に出す署名器を指定する。本 E2E では Rust の `minisign`
+クレートで作った一時署名器を使用した。`MODEL_DIR` / `MINISIGN_BIN` を含む
+完全な手順は `docs/development.md` の「AI タグ付けプラグイン」を参照。
 
 生成物: `dist/vrc-photon-autotag-dev-linux-cpu.zip`
 
@@ -108,8 +115,9 @@ VRC_PHOTON_AUTOTAG_MODEL_DIR=/home/tommyz7/work-saeki/d1-spike/models \
    なるまで待つ。
 4. `ai_tagging_enabled = true`、`ai_tagging_auto = false` にして、
    1280×720 の単色合成 PNG を索引し、`pending` のタグ付けジョブを 1 件積む。
-5. `TaggingWorker::process_once` で presence → people_count → place_class →
-   place_tags → DB 書き込みまで実行し、`photo_ai` と `photo_ai_tags` を読む。
+5. `TaggingWorker::process_once` で presence →（present=false のため人数スキップ）
+   → place_class → place_tags → DB 書き込みまで実行し、`photo_ai` と
+   `photo_ai_tags` を読む。
 
 テストはサイドカーをデーモン内部の `PluginService` 経由で起動する。
 IPC ハンドラや UI は通らない。
@@ -147,8 +155,9 @@ tags=27
 確認できたこと:
 
 - 署名済み開発 ZIP の取込、probe、active variant の確定。
-- 2 GB 超のモデル 2 ファイルのサイズ・SHA-256 検証付きオフライン取込。
-- 実 sidecar の起動、hello、4 段パイプライン、結果の DB 書き込み。
+- 合計 2 GB 超のモデル 2 ファイルのサイズ・SHA-256 検証付きオフライン取込。
+- 実 sidecar の起動、hello、presence →（人数スキップ）→ place_class →
+  place_tags の実行、結果の DB 書き込み。
 - `present=false` のときに人数推論をスキップする分岐。
 - CPU バックエンドでのモデルロードと推論。
 

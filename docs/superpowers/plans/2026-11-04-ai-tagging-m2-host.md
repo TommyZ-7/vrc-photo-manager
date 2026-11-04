@@ -1885,7 +1885,7 @@ PR ラベル `enhancement`。CI 緑でマージし、`main` に戻る。
 - manifest は `host_version_min = "0.0.0"`, `host_version_max = "0.99.99"` の開発用でよい。`catalog_version` は `data/catalog.json` から取る。`files` は ZIP 内の全ファイルの size/sha256 を含める。`model.files` は `role` 付きで `d1-2B-Q8_0.gguf` と `mmproj-d1-2B-Q8_0.gguf` を含める。
 - 署名は `MINISIGN_SECRET_KEY` 環境変数で指定した開発鍵を使い、`packaging/ai/dev-keys.txt` の公開鍵と一致させる。
 
-- [x] **Step 1: sidecar をビルドする**
+- [ ] **Step 1: sidecar をビルドする**
 
 ```bash
 cd /home/tommyz7/work/vrc-photon-autotag
@@ -1895,7 +1895,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
 
-- [x] **Step 2: 開発用署名ZIPを作る**
+- [ ] **Step 2: 開発用署名ZIPを作る**
 
 ```bash
 cd /home/tommyz7/work/vrc-photon-autotag
@@ -1905,7 +1905,7 @@ MINISIGN_SECRET_KEY="$HOME/.minisign/vrc-photon-ai-dev.key" \
   packaging/dev/build_dev_zip.sh --build-dir build --backend cpu
 ```
 
-- [x] **Step 3: 本体をdebugビルドして起動する**
+- [ ] **Step 3: 本体をdebugビルドして起動する**
 
 ```bash
 cd /home/tommyz7/work/vrc-photo-manager
@@ -1915,7 +1915,7 @@ cargo build -p vrc-photon
 
 設定画面で Vulkan ZIP を取り込み、モデルを `/home/tommyz7/work-saeki/d1-spike/models` から取り込む（`d1-2B-Q8_0.gguf` + `mmproj-d1-2B-Q8_0.gguf`）。ライセンス同意を確認し、probe のバックエンドが Vulkan になることを確認する。実データを汚したくない場合は、使い捨てのユーザープロファイルまたは VM で実行する。終了後は設定画面からプラグインをアンインストール（AIタグも削除）し、モデルを削除する。
 
-- [x] **Step 4: タグ付けを実行する**
+- [ ] **Step 4: タグ付けを実行する**
 
 - 連携・自動画面で有効化し、3枚の VRChat 写真を手動実行する。
 - インスペクタで AIタグ・人数・場所・確率を確認する。
@@ -1925,7 +1925,7 @@ cargo build -p vrc-photon
 - 同じ画像を CPU variant でも実行し、結果が許容差内（place 0.05、count ±2、タグ集合の大きな差なし）であることを確認する。
 - GNOME Wayland では `gnome-wayland-visual-qa` スキルで設定画面・連携・自動画面・インスペクタのスクリーンショットを取得し、モックとの差分（余白・文字切れ・状態遷移）を確認する。
 
-- [x] **Step 5: 結果を記録する**
+- [ ] **Step 5: 結果を記録する**
 
 `docs/superpowers/notes/2026-11-04-ai-tagging-m2-e2e.md` に次を書く。
 
@@ -1943,7 +1943,7 @@ cargo build -p vrc-photon
 - `docs/features.md`: AIタグ付けのユーザー向け説明（M2 の範囲）。
 - `docs/development.md`: mock sidecar / 実 sidecar E2E のコマンド、`cargo test` の追加クレート。
 
-- [x] **Step 7: 検証して PR 4 を出す**
+- [ ] **Step 7: 検証して PR 4 を出す**
 
 Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`
 Expected: 成功。
