@@ -95,6 +95,8 @@ pub(crate) fn status_snapshot(status: &mut DaemonStatus) -> StatusSnapshot {
         pending_jobs: status.pending_jobs,
         pending_sends: status.pending_sends,
         version: status.version,
+        pending_tagging_jobs: 0,
+        tagging_ready: false,
     }
 }
 
@@ -302,6 +304,26 @@ fn handle_connection(
                 )?;
                 stream_events(&mut reader, &control, events)?;
                 return Ok(());
+            }
+            // Plugin and AI tagging requests are not wired yet.
+            Request::WakeTagging
+            | Request::InstallPlugin { .. }
+            | Request::UninstallPlugin { .. }
+            | Request::ProbePlugin { .. }
+            | Request::SetActiveVariant { .. }
+            | Request::StartModelDownload { .. }
+            | Request::CancelModelDownload { .. }
+            | Request::ImportModelFiles { .. }
+            | Request::DeleteModel { .. }
+            | Request::CancelTagging { .. } => {
+                write_response(
+                    reader.get_mut(),
+                    id,
+                    Response::Error {
+                        code: ErrorCode::NotReady,
+                        message: "AI tagging is not wired yet".to_string(),
+                    },
+                )?;
             }
         }
     }

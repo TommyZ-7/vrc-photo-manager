@@ -228,6 +228,12 @@ impl App {
                     self.refresh_monitor();
                 }
             }
+            // AI tagging events are not surfaced yet. The daemon already
+            // publishes them for the screens added in a later change.
+            IpcEvent::TaggingProgress { .. }
+            | IpcEvent::PluginInstallProgress { .. }
+            | IpcEvent::PluginStateChanged { .. }
+            | IpcEvent::ModelDownloadProgress { .. } => {}
         }
     }
 
