@@ -1,0 +1,13 @@
+# Production minisign public key for AI plugin packages.
+#
+# This key is embedded in release builds only. Debug builds use the
+# development key in dev-keys.txt instead.
+#
+# The matching secret key lives outside the repository at
+# ~/.minisign/vrc-photon-ai-prod.key and must never be committed.
+# It is also stored as the MINISIGN_SECRET_KEY action secret of the
+# vrc-photon-autotag repository for release packaging.
+#
+# One base64 public key per line; blank lines and lines starting with # are
+# ignored.
+RWRYOOjhAJRG1e++hdY+mCjNDasVcxMEAkhCb5Vx7CnjFKXRPDDmcY0H
