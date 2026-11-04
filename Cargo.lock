@@ -8065,6 +8065,7 @@ dependencies = [
  "tracing",
  "ureq",
  "url",
+ "uuid",
  "vrc-photon-ai-protocol",
  "zip",
 ]

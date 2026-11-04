@@ -6,6 +6,8 @@
 //! Environment variables:
 //! - `MOCK_SIDECAR_MODE`: `normal` (default), `fatal`, `crash`, `slow`,
 //!   `no_cancel`, or `bad_stdout`.
+//! - `MOCK_SIDECAR_DELAY_MS`: overrides the response delay of `slow` and
+//!   `no_cancel`, so timeout and cancel tests can run in milliseconds.
 //! - `MOCK_SIDECAR_CATALOG`: fallback path to a `Catalog` JSON file when
 //!   `--catalog` is absent. A real sidecar always receives `--catalog`, so
 //!   the flag takes precedence. When neither is usable, the built-in two-tag
@@ -58,10 +60,10 @@ impl Mode {
 
     /// Both delay modes keep the request in flight long enough for the host to
     /// exercise cancel handling.
-    fn response_delay(self) -> Option<Duration> {
+    fn response_delay(self, override_delay: Option<Duration>) -> Option<Duration> {
         match self {
-            Self::Slow => Some(SLOW_DELAY),
-            Self::NoCancel => Some(NO_CANCEL_DELAY),
+            Self::Slow => Some(override_delay.unwrap_or(SLOW_DELAY)),
+            Self::NoCancel => Some(override_delay.unwrap_or(NO_CANCEL_DELAY)),
             Self::Normal | Self::Fatal | Self::Crash | Self::BadStdout => None,
         }
     }
@@ -124,6 +126,7 @@ fn main() -> ExitCode {
         }
     };
     let mode = Mode::from_env();
+    let delay = mode.response_delay(configured_delay());
     let catalog = load_catalog(args.catalog.as_deref());
 
     eprintln!(
@@ -153,8 +156,15 @@ fn main() -> ExitCode {
     }
 
     emit(&SidecarMessage::Hello(hello(&args, &catalog)));
-    serve(mode, &catalog);
+    serve(mode, delay, &catalog);
     ExitCode::SUCCESS
+}
+
+fn configured_delay() -> Option<Duration> {
+    std::env::var("MOCK_SIDECAR_DELAY_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
 }
 
 fn load_catalog(explicit: Option<&Path>) -> Catalog {
@@ -283,7 +293,7 @@ fn write_raw_stdout_line(line: &str) {
     let _ = stdout.flush();
 }
 
-fn serve(mode: Mode, catalog: &Catalog) {
+fn serve(mode: Mode, delay: Option<Duration>, catalog: &Catalog) {
     let (sender, receiver) = mpsc::channel();
     spawn_stdin_reader(sender);
 
@@ -310,7 +320,7 @@ fn serve(mode: Mode, catalog: &Catalog) {
                     std::process::exit(1);
                 }
 
-                if let Some(delay) = mode.response_delay()
+                if let Some(delay) = delay
                     && wait_for_cancel(&receiver, &mut queued, &id, delay, mode)
                 {
                     emit(&SidecarMessage::Cancelled { id });

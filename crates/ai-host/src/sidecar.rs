@@ -5,18 +5,27 @@
 //! reader thread with a timeout so a wedged sidecar cannot block the daemon
 //! forever.
 
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, Write, copy};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use vrc_photon_ai_protocol::{Hello, PROTOCOL_VERSION, Probe, SidecarMessage, read_message};
+use uuid::Uuid;
+use vrc_photon_ai_protocol::{
+    Hello, ImageRef, Op, PROTOCOL_VERSION, Probe, ProtocolError, SidecarErrorCode, SidecarMessage,
+    SidecarRequest, SidecarResult, TagBranch, read_message, write_message,
+};
 
 use crate::error::{AiHostError, Result};
+
+/// How often a blocked request re-checks its [`CancelToken`].
+const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[cfg(target_os = "windows")]
 const LIBRARY_PATH_VAR: &str = "PATH";
@@ -55,8 +64,7 @@ pub struct SidecarConfig {
     ///
     /// This is a test seam, not a production configuration surface:
     /// production callers must leave it empty. The integration tests use it
-    /// only to set `MOCK_SIDECAR_MODE` and `MOCK_SIDECAR_CATALOG` on the mock
-    /// sidecar.
+    /// only to configure the mock sidecar through `MOCK_SIDECAR_*` variables.
     pub env: Vec<(String, String)>,
 }
 
@@ -96,21 +104,163 @@ impl std::fmt::Debug for SidecarClient {
     }
 }
 
+/// A cancellation flag shared between the IPC handler and an in-flight request.
+///
+/// The token must be checked by the request loop: the caller can cancel from
+/// another thread while `request` is blocked waiting for the sidecar.
+#[derive(Debug, Clone, Default)]
+pub struct CancelToken(Arc<AtomicBool>);
+
+impl CancelToken {
+    /// Requests cancellation. Idempotent.
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    /// Reports whether cancellation was requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
 struct SidecarInner {
     hello: Hello,
-    /// The child's stdin. Task 4 sends requests through this handle.
-    _stdin: Mutex<ChildStdin>,
+    timeouts: SidecarTimeouts,
+    /// The child's stdin, shared by requests and `cancel_current`.
+    stdin: Mutex<ChildStdin>,
     child: Mutex<Child>,
-    /// Messages produced by the reader thread. Task 4 routes them per request.
-    events: Mutex<Option<Receiver<ReaderEvent>>>,
+    /// The sidecar handles one request at a time; serialise them here.
+    request_lock: Mutex<()>,
+    /// The id of the request currently in flight, used by `cancel_current`.
+    current_id: Mutex<Option<String>>,
+    /// Set by `cancel_current` after it writes a cancel line, so the waiting
+    /// request also arms its cancel-ack deadline.
+    cancel_requested: AtomicBool,
+    /// Per-request response channels keyed by request id.
+    pending: Mutex<HashMap<String, Sender<std::result::Result<SidecarMessage, RequestFailure>>>>,
+    /// The waiter for an outstanding `shutdown`.
+    shutdown: Mutex<Option<Sender<std::result::Result<(), RequestFailure>>>>,
+    /// Cleared as soon as the sidecar can no longer serve requests.
+    alive: AtomicBool,
     reader: Mutex<Option<JoinHandle<()>>>,
     stderr_logger: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl SidecarInner {
+    fn write(&self, request: &SidecarRequest) -> Result<()> {
+        let mut stdin = lock_unpoisoned(&self.stdin);
+        write_message(&mut *stdin, request).map_err(protocol_or_io_error)
+    }
+
+    fn deliver(&self, id: &str, message: SidecarMessage) {
+        let sender = lock_unpoisoned(&self.pending).remove(id);
+        if let Some(sender) = sender {
+            let _ = sender.send(Ok(message));
+        }
+    }
+
+    /// Clears the bookkeeping for a request that just finished.
+    fn finish_request(&self, id: &str) {
+        lock_unpoisoned(&self.pending).remove(id);
+        let mut current = lock_unpoisoned(&self.current_id);
+        if current.as_deref() == Some(id) {
+            *current = None;
+        }
+    }
+
+    fn fail_all(&self, failure: RequestFailure) {
+        let senders: Vec<_> = {
+            let mut pending = lock_unpoisoned(&self.pending);
+            pending.drain().map(|(_, sender)| sender).collect()
+        };
+        for sender in senders {
+            let _ = sender.send(Err(failure.clone()));
+        }
+    }
+
+    fn complete_shutdown(&self, outcome: std::result::Result<(), RequestFailure>) {
+        let waiter = lock_unpoisoned(&self.shutdown).take();
+        if let Some(waiter) = waiter {
+            let _ = waiter.send(outcome);
+        }
+    }
+
+    fn mark_dead(&self) {
+        self.alive.store(false, Ordering::SeqCst);
+    }
+
+    fn kill_child(&self) {
+        let mut child = lock_unpoisoned(&self.child);
+        kill_and_wait(&mut child);
+    }
+
+    /// Reaps an exited child, and kills it if it closed stdout but kept running.
+    fn reap_child(&self) {
+        let mut child = lock_unpoisoned(&self.child);
+        match child.try_wait() {
+            Ok(Some(_)) => {}
+            Ok(None) => kill_and_wait(&mut child),
+            Err(_) => {}
+        }
+    }
+
+    fn wait_for_exit(&self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            {
+                let mut child = lock_unpoisoned(&self.child);
+                match child.try_wait() {
+                    Ok(Some(_)) => return true,
+                    Ok(None) => {}
+                    Err(_) => return false,
+                }
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+/// Why a request could not produce a response.
+#[derive(Debug, Clone)]
+enum RequestFailure {
+    Exited,
+    Protocol(String),
+    Fatal(String),
+}
+
+impl RequestFailure {
+    fn into_error(self) -> AiHostError {
+        match self {
+            Self::Exited => AiHostError::SidecarExited,
+            Self::Protocol(message) => AiHostError::SidecarProtocol(message),
+            Self::Fatal(message) => AiHostError::SidecarFatal(message),
+        }
+    }
 }
 
 enum ReaderEvent {
     Message(Box<SidecarMessage>),
     Failed(String),
     Closed,
+}
+
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn protocol_or_io_error(error: ProtocolError) -> AiHostError {
+    match error {
+        ProtocolError::Io(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {
+            AiHostError::SidecarExited
+        }
+        ProtocolError::Io(error) => AiHostError::Io(error),
+        other => AiHostError::SidecarProtocol(other.to_string()),
+    }
 }
 
 /// Append-only sink for stdout protocol violations.
@@ -219,16 +369,24 @@ impl SidecarClient {
         };
 
         match startup {
-            Ok(hello) => Ok(Self {
-                inner: Arc::new(SidecarInner {
+            Ok(hello) => {
+                let inner = Arc::new(SidecarInner {
                     hello,
-                    _stdin: Mutex::new(stdin),
+                    timeouts,
+                    stdin: Mutex::new(stdin),
                     child: Mutex::new(child),
-                    events: Mutex::new(Some(receiver)),
+                    request_lock: Mutex::new(()),
+                    current_id: Mutex::new(None),
+                    cancel_requested: AtomicBool::new(false),
+                    pending: Mutex::new(HashMap::new()),
+                    shutdown: Mutex::new(None),
+                    alive: AtomicBool::new(true),
                     reader: Mutex::new(Some(reader)),
                     stderr_logger: Mutex::new(Some(stderr_logger)),
-                }),
-            }),
+                });
+                spawn_dispatcher(Arc::downgrade(&inner), receiver);
+                Ok(Self { inner })
+            }
             Err(error) => {
                 kill_and_wait(&mut child);
                 let _ = reader.join();
@@ -238,6 +396,187 @@ impl SidecarClient {
         }
     }
 
+    /// Runs one operation on the sidecar and waits for its response.
+    ///
+    /// Requests are serialised because protocol v1 handles one at a time.
+    /// Cancellation is cooperative: the token is polled while waiting, a
+    /// `cancel` line is sent, and the child is force-stopped if no `cancelled`
+    /// arrives within the cancel-ack timeout. A request that exceeds its own
+    /// timeout is also force-stopped, so a wedged model cannot poison the next
+    /// request.
+    pub fn request(
+        &self,
+        op: Op,
+        image: &ImageRef,
+        branch: Option<TagBranch>,
+        cancel: &CancelToken,
+    ) -> Result<SidecarResult> {
+        let _request = lock_unpoisoned(&self.inner.request_lock);
+
+        if cancel.is_cancelled() {
+            return Err(AiHostError::Cancelled);
+        }
+        if !self.is_alive() {
+            return Err(AiHostError::SidecarExited);
+        }
+
+        self.inner.cancel_requested.store(false, Ordering::SeqCst);
+        let id = Uuid::new_v4().to_string();
+        let (sender, receiver) = mpsc::channel();
+        lock_unpoisoned(&self.inner.pending).insert(id.clone(), sender);
+        *lock_unpoisoned(&self.inner.current_id) = Some(id.clone());
+
+        let request = SidecarRequest::Request {
+            id: id.clone(),
+            op,
+            image: image.clone(),
+            branch,
+        };
+        if let Err(error) = self.inner.write(&request) {
+            self.kill();
+            return Err(error);
+        }
+
+        let request_deadline = Instant::now() + self.inner.timeouts.request;
+        let mut cancel_sent_at: Option<Instant> = None;
+
+        loop {
+            let now = Instant::now();
+
+            let external_cancel = self.inner.cancel_requested.swap(false, Ordering::SeqCst);
+            if cancel_sent_at.is_none() {
+                if cancel.is_cancelled() {
+                    let cancel_line = SidecarRequest::Cancel { id: id.clone() };
+                    match self.inner.write(&cancel_line) {
+                        Ok(()) => cancel_sent_at = Some(Instant::now()),
+                        Err(_) => {
+                            self.kill();
+                            return Err(AiHostError::SidecarExited);
+                        }
+                    }
+                } else if external_cancel {
+                    // `cancel_current` already wrote the line.
+                    cancel_sent_at = Some(Instant::now());
+                }
+            }
+
+            let cancel_deadline = cancel_sent_at.map(|sent| sent + self.inner.timeouts.cancel_ack);
+            let deadline =
+                cancel_deadline.map_or(request_deadline, |ack| ack.min(request_deadline));
+
+            if now >= deadline {
+                let ignored_cancel = cancel_deadline.is_some_and(|ack| now >= ack);
+                self.kill();
+                return if ignored_cancel {
+                    Err(AiHostError::SidecarExited)
+                } else {
+                    Err(AiHostError::SidecarTimeout)
+                };
+            }
+
+            let wait = deadline
+                .saturating_duration_since(now)
+                .min(CANCEL_POLL_INTERVAL);
+            match receiver.recv_timeout(wait) {
+                Ok(Ok(message)) => {
+                    self.inner.finish_request(&id);
+                    return interpret_response(message, cancel_sent_at.is_some());
+                }
+                Ok(Err(failure)) => {
+                    self.inner.finish_request(&id);
+                    return Err(failure.into_error());
+                }
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => {
+                    self.inner.finish_request(&id);
+                    return Err(AiHostError::SidecarExited);
+                }
+            }
+        }
+    }
+
+    /// Sends a `cancel` for the request currently in flight, if any.
+    ///
+    /// Safe to call from another thread (the IPC handler) while `request` is
+    /// blocked. A request that has already finished is simply ignored by the
+    /// sidecar.
+    pub fn cancel_current(&self) {
+        let id = lock_unpoisoned(&self.inner.current_id).clone();
+        let Some(id) = id else {
+            return;
+        };
+        match self.inner.write(&SidecarRequest::Cancel { id }) {
+            Ok(()) => self.inner.cancel_requested.store(true, Ordering::SeqCst),
+            Err(_) => self.kill(),
+        }
+    }
+
+    /// Shuts the sidecar down and waits for the process to exit.
+    ///
+    /// Waits for `shutdown_ack` up to the shutdown timeout, then kills a
+    /// sidecar that does not exit. Calling it again after exit is a no-op.
+    pub fn shutdown(&self) -> Result<()> {
+        let _request = lock_unpoisoned(&self.inner.request_lock);
+
+        if !self.is_alive() {
+            return Ok(());
+        }
+
+        let deadline = Instant::now() + self.inner.timeouts.shutdown;
+        let (sender, receiver) = mpsc::channel();
+        *lock_unpoisoned(&self.inner.shutdown) = Some(sender);
+
+        if let Err(error) = self.inner.write(&SidecarRequest::Shutdown) {
+            *lock_unpoisoned(&self.inner.shutdown) = None;
+            self.inner.mark_dead();
+            self.inner.kill_child();
+            return if matches!(error, AiHostError::SidecarExited) {
+                Ok(())
+            } else {
+                Err(error)
+            };
+        }
+
+        let outcome = receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+        *lock_unpoisoned(&self.inner.shutdown) = None;
+
+        match outcome {
+            Ok(Ok(())) => {
+                self.inner.mark_dead();
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if !self.inner.wait_for_exit(remaining) {
+                    self.inner.kill_child();
+                }
+                Ok(())
+            }
+            Ok(Err(RequestFailure::Exited)) => {
+                self.inner.mark_dead();
+                self.inner.reap_child();
+                Ok(())
+            }
+            Ok(Err(failure)) => {
+                self.inner.mark_dead();
+                self.inner.kill_child();
+                Err(failure.into_error())
+            }
+            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
+                // No ack: force-stop so shutdown always terminates the process.
+                self.inner.mark_dead();
+                self.inner.kill_child();
+                Ok(())
+            }
+        }
+    }
+
+    /// Force-stops the child and fails any request that is still waiting.
+    pub fn kill(&self) {
+        self.inner.mark_dead();
+        self.inner.fail_all(RequestFailure::Exited);
+        self.inner.cancel_requested.store(false, Ordering::SeqCst);
+        *lock_unpoisoned(&self.inner.current_id) = None;
+        self.inner.kill_child();
+    }
+
     /// The `hello` received during a successful spawn.
     pub fn hello(&self) -> &Hello {
         &self.inner.hello
@@ -245,10 +584,11 @@ impl SidecarClient {
 
     /// Reports whether the child process is still running.
     pub fn is_alive(&self) -> bool {
-        match self.inner.child.lock() {
-            Ok(mut child) => matches!(child.try_wait(), Ok(None)),
-            Err(_) => false,
+        if !self.inner.alive.load(Ordering::SeqCst) {
+            return false;
         }
+        let mut child = lock_unpoisoned(&self.inner.child);
+        matches!(child.try_wait(), Ok(None))
     }
 
     /// Runs `--probe` and returns the advertised backends.
@@ -335,11 +675,21 @@ impl SidecarClient {
 
 impl Drop for SidecarInner {
     fn drop(&mut self) {
+        self.mark_dead();
         if let Ok(mut child) = self.child.lock() {
             kill_and_wait(&mut child);
         }
-        if let Ok(mut events) = self.events.lock() {
-            let _ = events.take();
+        // Unblock any waiter that outlives the client (defensive: `request`
+        // borrows the client, so normally there is none).
+        if let Ok(mut pending) = self.pending.lock() {
+            for (_, sender) in pending.drain() {
+                let _ = sender.send(Err(RequestFailure::Exited));
+            }
+        }
+        if let Ok(mut shutdown) = self.shutdown.lock()
+            && let Some(waiter) = shutdown.take()
+        {
+            let _ = waiter.send(Err(RequestFailure::Exited));
         }
         if let Ok(mut reader) = self.reader.lock()
             && let Some(handle) = reader.take()
@@ -427,6 +777,109 @@ fn reader_loop(stdout: ChildStdout, sender: Sender<ReaderEvent>, log: ProtocolLo
                 return;
             }
         }
+    }
+}
+
+/// Routes reader-thread events to the request or shutdown that is waiting.
+///
+/// The dispatcher holds only a weak reference so it never keeps the client
+/// alive after the last `SidecarClient` is dropped.
+fn spawn_dispatcher(inner: Weak<SidecarInner>, receiver: Receiver<ReaderEvent>) {
+    thread::spawn(move || {
+        while let Ok(event) = receiver.recv() {
+            let Some(inner) = inner.upgrade() else {
+                return;
+            };
+            match event {
+                ReaderEvent::Message(message) => route_message(&inner, *message),
+                ReaderEvent::Failed(message) => {
+                    let failure = RequestFailure::Protocol(message);
+                    inner.fail_all(failure.clone());
+                    inner.complete_shutdown(Err(failure));
+                    inner.mark_dead();
+                    inner.kill_child();
+                }
+                ReaderEvent::Closed => {
+                    inner.fail_all(RequestFailure::Exited);
+                    inner.complete_shutdown(Err(RequestFailure::Exited));
+                    inner.mark_dead();
+                    inner.reap_child();
+                }
+            }
+        }
+    });
+}
+
+fn route_message(inner: &SidecarInner, message: SidecarMessage) {
+    match message {
+        SidecarMessage::Response(response) => {
+            let id = response.id.clone();
+            inner.deliver(&id, SidecarMessage::Response(response));
+        }
+        SidecarMessage::Cancelled { id } => {
+            let message = SidecarMessage::Cancelled { id: id.clone() };
+            inner.deliver(&id, message);
+        }
+        SidecarMessage::Fatal { error } => {
+            let message = format!("{}: {}", error.code.as_str(), error.message);
+            let failure = RequestFailure::Fatal(message);
+            inner.fail_all(failure.clone());
+            inner.complete_shutdown(Err(failure));
+            inner.mark_dead();
+            inner.kill_child();
+        }
+        SidecarMessage::ShutdownAck => inner.complete_shutdown(Ok(())),
+        other => {
+            let message = format!("unexpected {} after hello", message_kind(&other));
+            let failure = RequestFailure::Protocol(message);
+            inner.fail_all(failure.clone());
+            inner.complete_shutdown(Err(failure));
+            inner.mark_dead();
+            inner.kill_child();
+        }
+    }
+}
+
+fn interpret_response(message: SidecarMessage, cancel_sent: bool) -> Result<SidecarResult> {
+    match message {
+        SidecarMessage::Response(response) => {
+            if cancel_sent {
+                // The user asked to cancel; never hand a late result to the
+                // database as if the inference had completed.
+                return Err(AiHostError::Cancelled);
+            }
+            if response.ok {
+                response.result.ok_or_else(|| {
+                    AiHostError::SidecarProtocol(
+                        "successful response carried no result".to_string(),
+                    )
+                })
+            } else if let Some(error) = response.error {
+                if error.code == SidecarErrorCode::Cancelled {
+                    Err(AiHostError::Cancelled)
+                } else {
+                    Err(AiHostError::SidecarFatal(format!(
+                        "{}: {}",
+                        error.code.as_str(),
+                        error.message
+                    )))
+                }
+            } else {
+                Err(AiHostError::SidecarProtocol(
+                    "failed response carried no error".to_string(),
+                ))
+            }
+        }
+        SidecarMessage::Cancelled { .. } => Err(AiHostError::Cancelled),
+        SidecarMessage::Fatal { error } => Err(AiHostError::SidecarFatal(format!(
+            "{}: {}",
+            error.code.as_str(),
+            error.message
+        ))),
+        other => Err(AiHostError::SidecarProtocol(format!(
+            "unexpected {} during a request",
+            message_kind(&other)
+        ))),
     }
 }
 

@@ -22,7 +22,7 @@ pub use manifest::{
     PluginManifest, model_file_role, parse_manifest, validate_manifest,
 };
 pub use sidecar::{
-    ModelPaths, SidecarClient, SidecarConfig, SidecarPaths, SidecarTimeouts, probe_command,
-    sidecar_command,
+    CancelToken, ModelPaths, SidecarClient, SidecarConfig, SidecarPaths, SidecarTimeouts,
+    probe_command, sidecar_command,
 };
 pub use verify::{effective_plugin_keys, parse_public_keys, verify_manifest_bytes};
