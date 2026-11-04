@@ -111,6 +111,27 @@ pub struct AppSettings {
     /// Whether the daemon resolves world names through the VRChat API.
     #[serde(default)]
     pub world_name_resolution_enabled: bool,
+    /// Whether AI tagging is enabled.
+    #[serde(default)]
+    pub ai_tagging_enabled: bool,
+    /// Whether newly imported photos are tagged automatically.
+    #[serde(default)]
+    pub ai_tagging_auto: bool,
+    /// Whether the existing photo backlog is tagged when AI tagging starts.
+    #[serde(default)]
+    pub ai_tagging_backlog: bool,
+    /// Character presence threshold (0.0–1.0). `None` uses the sidecar default.
+    #[serde(default)]
+    pub ai_presence_threshold: Option<f32>,
+    /// Inference backend: `auto`, `vulkan`, `cuda`, `roc`, or `cpu`.
+    #[serde(default = "default_ai_backend")]
+    pub ai_tagging_backend: String,
+    /// Seconds of inactivity before the sidecar stops (30–3600).
+    #[serde(default = "default_ai_idle_timeout")]
+    pub ai_tagging_idle_timeout_sec: u64,
+    /// Unix timestamp when the user accepted the model licence.
+    #[serde(default)]
+    pub ai_model_license_consent_at: Option<i64>,
 }
 
 fn default_true() -> bool {
@@ -143,6 +164,14 @@ fn default_ui_theme_accent() -> String {
 
 fn default_discord_destination() -> String {
     "Discord".to_string()
+}
+
+fn default_ai_backend() -> String {
+    "auto".to_string()
+}
+
+fn default_ai_idle_timeout() -> u64 {
+    600
 }
 
 fn deserialize_card_size<'de, D>(deserializer: D) -> std::result::Result<CardSize, D::Error>
@@ -198,6 +227,13 @@ impl Default for AppSettings {
             discord_auto_since: None,
             discord_consent_at: None,
             world_name_resolution_enabled: false,
+            ai_tagging_enabled: false,
+            ai_tagging_auto: false,
+            ai_tagging_backlog: false,
+            ai_presence_threshold: None,
+            ai_tagging_backend: default_ai_backend(),
+            ai_tagging_idle_timeout_sec: default_ai_idle_timeout(),
+            ai_model_license_consent_at: None,
         }
     }
 }
@@ -208,6 +244,7 @@ impl AppSettings {
             Some(json) => {
                 let mut settings: Self = serde_json::from_str(&json).unwrap_or_default();
                 settings.normalize_discord_destination();
+                settings.normalize_ai_settings();
                 Ok(settings)
             }
             None => {
@@ -229,6 +266,7 @@ impl AppSettings {
     pub fn save(&self, db: &Db) -> Result<()> {
         let mut settings = self.clone();
         settings.normalize_discord_destination();
+        settings.normalize_ai_settings();
         let json = serde_json::to_string_pretty(&settings)?;
         db.set_setting(SETTINGS_KEY, &json)
     }
@@ -241,6 +279,22 @@ impl AppSettings {
         } else {
             trimmed.to_string()
         };
+    }
+
+    /// Clamps AI settings to the ranges accepted by the service and sidecar.
+    fn normalize_ai_settings(&mut self) {
+        self.ai_presence_threshold = self
+            .ai_presence_threshold
+            .filter(|threshold| threshold.is_finite())
+            .map(|threshold| threshold.clamp(0.0, 1.0));
+        let backend = self.ai_tagging_backend.trim().to_ascii_lowercase();
+        self.ai_tagging_backend =
+            if matches!(backend.as_str(), "auto" | "vulkan" | "cuda" | "roc" | "cpu") {
+                backend
+            } else {
+                default_ai_backend()
+            };
+        self.ai_tagging_idle_timeout_sec = self.ai_tagging_idle_timeout_sec.clamp(30, 3600);
     }
 
     pub fn photo_roots(&self) -> Vec<PathBuf> {
@@ -782,6 +836,69 @@ mod tests {
         assert!(!json.contains(url));
         clear_discord_webhook(&db).unwrap();
         assert_eq!(load_discord_webhook(&db).unwrap(), None);
+    }
+
+    #[test]
+    fn ai_settings_default_off_and_survive_old_json() {
+        let settings = AppSettings::default();
+        assert!(!settings.ai_tagging_enabled);
+        assert!(!settings.ai_tagging_auto);
+        assert!(!settings.ai_tagging_backlog);
+        assert_eq!(settings.ai_tagging_backend, "auto");
+        assert_eq!(settings.ai_tagging_idle_timeout_sec, 600);
+        assert!(settings.ai_presence_threshold.is_none());
+        assert!(settings.ai_model_license_consent_at.is_none());
+
+        let old: AppSettings = serde_json::from_str(r#"{"photo_roots":[],"log_dir":null,"managed_dir":null,"language":"ja","autostart":true,"tray":true,"auto_compress":true,"auto_compress_backlog":false,"estimated_link":true,"thumbnail_cache_mb":2048,"compression_workers":1}"#).unwrap();
+        assert!(!old.ai_tagging_enabled);
+    }
+
+    #[test]
+    fn ai_settings_are_normalized() {
+        let db = Db::open_in_memory().unwrap();
+        let mut value = serde_json::to_value(AppSettings::default()).unwrap();
+
+        value["ai_tagging_backend"] = "metal".into();
+        value["ai_presence_threshold"] = serde_json::json!(1.7);
+        value["ai_tagging_idle_timeout_sec"] = serde_json::json!(5);
+        db.set_setting("app_settings", &value.to_string()).unwrap();
+        let loaded = AppSettings::load(&db).unwrap();
+        assert_eq!(loaded.ai_tagging_backend, "auto");
+        assert_eq!(loaded.ai_presence_threshold, Some(1.0));
+        assert_eq!(loaded.ai_tagging_idle_timeout_sec, 30);
+
+        value["ai_tagging_backend"] = "cuda".into();
+        value["ai_presence_threshold"] = serde_json::json!(-0.25);
+        value["ai_tagging_idle_timeout_sec"] = serde_json::json!(99_999);
+        db.set_setting("app_settings", &value.to_string()).unwrap();
+        let loaded = AppSettings::load(&db).unwrap();
+        assert_eq!(loaded.ai_tagging_backend, "cuda");
+        assert_eq!(loaded.ai_presence_threshold, Some(0.0));
+        assert_eq!(loaded.ai_tagging_idle_timeout_sec, 3600);
+    }
+
+    #[test]
+    fn ai_settings_roundtrip() {
+        let db = Db::open_in_memory().unwrap();
+        let settings = AppSettings {
+            ai_tagging_enabled: true,
+            ai_tagging_auto: true,
+            ai_tagging_backlog: true,
+            ai_presence_threshold: Some(0.85),
+            ai_tagging_backend: "vulkan".to_string(),
+            ai_tagging_idle_timeout_sec: 120,
+            ai_model_license_consent_at: Some(1_700_000_000),
+            ..Default::default()
+        };
+        settings.save(&db).unwrap();
+        let loaded = AppSettings::load(&db).unwrap();
+        assert!(loaded.ai_tagging_enabled);
+        assert!(loaded.ai_tagging_auto);
+        assert!(loaded.ai_tagging_backlog);
+        assert_eq!(loaded.ai_presence_threshold, Some(0.85));
+        assert_eq!(loaded.ai_tagging_backend, "vulkan");
+        assert_eq!(loaded.ai_tagging_idle_timeout_sec, 120);
+        assert_eq!(loaded.ai_model_license_consent_at, Some(1_700_000_000));
     }
 
     #[test]
