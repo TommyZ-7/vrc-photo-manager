@@ -192,7 +192,7 @@ PR ラベル `enhancement`。CI 緑でマージする。マージ後、承認済
   - 人数: `EXISTS (SELECT 1 FROM photo_ai pa WHERE pa.photo_id = p.id AND pa.plugin_id = ? AND pa.people_min <= ? AND pa.people_max >= ?)`
 - `crates/daemon/src/plugin.rs` の `pub(crate) const AI_PLUGIN_ID` は core の定数の re-export に置き換える。UI 側の重複定数も Task 2 で core に寄せる。
 
-- [ ] **Step 1: 失敗する検索テストを書く**
+- [x] **Step 1: 失敗する検索テストを書く**
 
 ```rust
 #[test]
@@ -327,13 +327,13 @@ fn ai_filters_use_the_ai_indexes() {
 }
 ```
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-core ai_tag_filter_matches_only_applied_tags_of_the_ai_plugin`
 Run: `cargo test -p vrc-photon-core people_count_filter_matches_inclusive_intervals`
 Expected: `AiPhotoFilter` / `PhotoTextFilter.ai` が未定義で失敗。
 
-- [ ] **Step 3: 最小実装を書く**
+- [x] **Step 3: 最小実装を書く**
 
 - `crates/core/src/ai.rs` に `AI_PLUGIN_ID` を追加する。
 - `crates/core/src/model.rs` に `AiPhotoFilter` を追加し、`PhotoFilter` / `PhotoTextFilter` に `ai` フィールドを追加する。
@@ -342,7 +342,7 @@ Expected: `AiPhotoFilter` / `PhotoTextFilter.ai` が未定義で失敗。
 - `crates/daemon/src/plugin.rs` の `AI_PLUGIN_ID` を `pub(crate) use vrc_photon_core::ai::AI_PLUGIN_ID;` に置き換える。
 - 既存の 100k ベンチマーク `photo_index_scales_to_100k` に、4 枚に 1 枚の `photo_ai` と `photo_ai_tags` を seed し、AI タグ + 人数フィルターの `photo_index_text` を測る処理を追加する（`#[ignore]` のまま）。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-core`
 Expected: 全テスト PASS。
@@ -350,7 +350,7 @@ Expected: 全テスト PASS。
 Run: `cargo test -p vrc-photon-core photo_index_scales_to_100k -- --ignored --nocapture`
 Expected: AI フィルター付き検索が 2 秒以内（環境依存。結果を記録する）。
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/core/src/ai.rs crates/core/src/model.rs crates/core/src/db.rs crates/daemon/src/plugin.rs
@@ -389,7 +389,7 @@ git commit -m "feat(core): add AI tag and people-count photo filters"
 - `has_active_filter(filter) = has_tag_filter(filter) || ai_filter_is_active(filter)` を追加し、`start_search_refresh` はこれを使う。手動タグ編集の再検索は従来どおり `has_tag_filter` で判定する。
 - タグ名は `language.starts_with("en")` のとき `name_en.unwrap_or(name)`。`AiTagPickerRow { tag_key, name, branch, selected }`。
 
-- [ ] **Step 1: 失敗するヘルパーテストを書く**
+- [x] **Step 1: 失敗するヘルパーテストを書く**
 
 ```rust
 #[test]
@@ -448,14 +448,14 @@ fn ai_filter_is_active_for_tags_or_people_count() {
 }
 ```
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-ui parse_people_count`
 Run: `cargo test -p vrc-photon-ui picker_rows`
 Run: `cargo test -p vrc-photon-ui ai_filter_is_active`
 Expected: 未定義で失敗。
 
-- [ ] **Step 3: 最小実装を書く**
+- [x] **Step 3: 最小実装を書く**
 
 - `App` に検索入力・ピッカー状態を追加し、`App::new` で `InputState` と `FocusHandle` を作る。
 - `crates/ui/src/app/ai.rs` の `AI_PLUGIN_ID` の重複定義を `vrc_photon_core::ai::AI_PLUGIN_ID` の re-export に置き換える。
@@ -466,7 +466,7 @@ Expected: 未定義で失敗。
 - モーダルは `docs/ai-tagging-m4-mockup.html` の承認済みレイアウトに合わせる。`import_dialog` / `manual_compress` / `notification_modal_open` / AI ライセンス / アンインストールのいずれかが開いているときはピッカーを開かない（既存の単一モーダル方針）。
 - `ja.yml` / `en.yml` に `search.ai.*` と `ai.tags.picker.*` を追加する。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-ui app::search::tests`
 Run: `cargo test -p vrc-photon-ui app::ai_tag_picker::tests`
@@ -475,7 +475,7 @@ Expected: 全テスト PASS。
 Run: `cargo test -p vrc-photon-i18n`
 Expected: `source_keys` / `catalog` / `placeholders` が PASS。
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/ui/src/app.rs crates/ui/src/app/search.rs crates/ui/src/app/ai.rs \
@@ -487,11 +487,11 @@ git commit -m "feat(ui): add AI tag and people-count search filters"
 
 ### PR M4-1 の完了条件
 
-- [ ] AI タグ（OR、applied のみ、AI プラグインのみ）と人数（単一値、区間包含）で検索できる。
-- [ ] AI タグ選択モーダルで 53 件を検索・屋外/屋内で絞り込み・複数選択できる。
-- [ ] 手動タグと AI タグが別条件として動く。
-- [ ] `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` が成功する。
-- [ ] CI 緑で PR をマージする。ラベル `enhancement`。
+- [x] AI タグ（OR、applied のみ、AI プラグインのみ）と人数（単一値、区間包含）で検索できる。
+- [x] AI タグ選択モーダルで 53 件を検索・屋外/屋内で絞り込み・複数選択できる。
+- [x] 手動タグと AI タグが別条件として動く。
+- [x] `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` が成功する。
+- [x] CI 緑で PR をマージする。ラベル `enhancement`。
 
 ---
 
@@ -514,7 +514,7 @@ git commit -m "feat(ui): add AI tag and people-count search filters"
   - `set_ai_tag_threshold` / `reset_ai_tag_threshold` はこの API に委譲する（既存のシグネチャは維持）。
 - 既存の `reapply_ai_tag_thresholds` は残す。
 
-- [ ] **Step 1: 失敗する一括保存テストを書く**
+- [x] **Step 1: 失敗する一括保存テストを書く**
 
 ```rust
 #[test]
@@ -564,24 +564,24 @@ fn apply_ai_tag_thresholds_rejects_out_of_range_values() {
 }
 ```
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-core apply_ai_tag_thresholds`
 Expected: メソッド未定義で失敗。
 
-- [ ] **Step 3: 最小実装を書く**
+- [x] **Step 3: 最小実装を書く**
 
 - 入力検証をトランザクション開始前に行う。
 - `set_ai_tag_threshold` / `reset_ai_tag_threshold` の中身を `apply_ai_tag_thresholds` の 1 要素呼び出しに置き換える。既存の `set` / `reset` のテストが通ることを確認する。
 - `library_revision` は `updated > 0` のときだけ進める（既存と同じ）。
 - 空の `updates` は再計算だけ行い、`Ok(updated)` を返す。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-core`
 Expected: 全テスト PASS。
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/core/src/db.rs
@@ -622,7 +622,7 @@ git commit -m "feat(core): batch AI tag threshold updates in one transaction"
 - `refresh_search_after_ai_tag_edit` は `ai_filter_is_active(&filter)` のとき `start_search_refresh` する（Task 2 の `has_active_filter` を使う）。
 - slider はモーダルを開いたときに未作成のタグだけ `cx.new` し、`set_value` で現在値を入れる。`SliderEvent::Change` は下書き更新と `cx.notify()` のみ（保存はしない）。`Release` も同じ。
 
-- [ ] **Step 1: 失敗する閾値ヘルパーテストを書く**
+- [x] **Step 1: 失敗する閾値ヘルパーテストを書く**
 
 ```rust
 #[test]
@@ -678,14 +678,14 @@ fn threshold_rows_filter_by_tab_and_query_and_localize_names() {
 }
 ```
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-ui threshold_updates`
 Run: `cargo test -p vrc-photon-ui normalize_threshold_draft`
 Run: `cargo test -p vrc-photon-ui threshold_rows`
 Expected: 未定義で失敗。
 
-- [ ] **Step 3: 最小実装を書く**
+- [x] **Step 3: 最小実装を書く**
 
 - `AiThresholdEditorState` を `App` に追加し、`App::new` で `InputState` と `FocusHandle` を作る。
 - 開くときに `db.ai_tag_definitions(AI_PLUGIN_ID)` と `db.ai_tag_thresholds(AI_PLUGIN_ID)` を読み、`overrides` と `draft` を初期化する。`draft` は空（＝上書きなし）から始め、行の実効値は `draft.get(key).copied().flatten().or(overrides.get(key).copied()).unwrap_or(default)` で求める。
@@ -697,7 +697,7 @@ Expected: 未定義で失敗。
 - モーダルは `docs/ai-tagging-m4-mockup.html` の承認済みレイアウトに合わせ、既存の `ai_license_overlay` / `ai_uninstall_overlay` と同じ scrim・フォーカストラップ・戻るフォーカスを使う。import / manual / notification / 他の AI モーダルが開いているときは開かない。
 - `ja.yml` / `en.yml` に `settings.ai.thresholds.*` を追加する。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-ui app::ai_thresholds::tests`
 Expected: 全テスト PASS。
@@ -705,7 +705,7 @@ Expected: 全テスト PASS。
 Run: `cargo test -p vrc-photon-i18n`
 Expected: 全テスト PASS。
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/ui/src/app.rs crates/ui/src/app/ai_thresholds.rs \
@@ -717,12 +717,12 @@ git commit -m "feat(ui): add the AI tag threshold editor"
 
 ### PR M4-2 の完了条件
 
-- [ ] 閾値モーダルで屋外/屋内を切り替え、検索し、スライダーで変更し、一括保存できる。
-- [ ] 既定値マーカー・%表示・タグ単位リセット・全リセットが動く。
-- [ ] presence 閾値も同じモーダルで保存でき、「次回から」の注記がある。
-- [ ] 保存後に `applied` が再計算され、インスペクタと AI タグ検索結果が更新される。
-- [ ] `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` が成功する。
-- [ ] CI 緑で PR をマージする。ラベル `enhancement`。
+- [x] 閾値モーダルで屋外/屋内を切り替え、検索し、スライダーで変更し、一括保存できる。
+- [x] 既定値マーカー・%表示・タグ単位リセット・全リセットが動く。
+- [x] presence 閾値も同じモーダルで保存でき、「次回から」の注記がある。
+- [x] 保存後に `applied` が再計算され、インスペクタと AI タグ検索結果が更新される。
+- [x] `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` が成功する。
+- [x] CI 緑で PR をマージする。ラベル `enhancement`。
 
 ---
 
@@ -759,7 +759,7 @@ git commit -m "feat(ui): add the AI tag threshold editor"
 - `jobs` は Processing → Pending → Waiting の順、最大 3 件。`more` は残りの active 件数。
 - 既存の `AiUiState.job_counts` / `active_jobs` / `active_job_names` / `error_of(AiErrorKind::Job)` を使う。新しい DB 読み取りは追加しない。
 
-- [ ] **Step 1: 失敗するダッシュボード helper テストを書く**
+- [x] **Step 1: 失敗するダッシュボード helper テストを書く**
 
 ```rust
 #[test]
@@ -806,12 +806,12 @@ fn dashboard_ai_card_limits_jobs_to_three_and_counts_the_rest() {
 }
 ```
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-ui dashboard_ai_card`
 Expected: `ai_dashboard_view` が未定義で失敗。
 
-- [ ] **Step 3: 最小実装を書く**
+- [x] **Step 3: 最小実装を書く**
 
 - `ai_dashboard_view` を `app/ai.rs` に追加する。`installed = active.is_some() || !installations.is_empty()`、`visible = installed && (!ai.ready() || enabled)`。準備完了かつ未有効なら `visible = false` にしてカードを描画しない。状態は `ai.ready()`、`enabled`、`job_counts` から `NotReady` / `Idle` / `Active` / `Failed` を決める。`jobs` は `active_jobs` をソートして 3 件に切る。
 - `ui/dashboard_ai.rs` にカード描画を実装する。タイトル、状態テキスト、件数、ジョブ行（写真名 or `#id`、進捗バー、ステージ、キャンセルボタン）、導線ボタンを既存の `glass_panel` / `Button` / `status_progress_bar` で作る。
@@ -819,7 +819,7 @@ Expected: `ai_dashboard_view` が未定義で失敗。
 - キャンセルは `cancel_ai_job(job.id, cx)`。設定は `Screen::Settings`、連携は `Screen::Integrations` へ `switch_screen`。
 - `ja.yml` / `en.yml` に `dashboard.ai.*` を追加する。`dashboard.ai.jobs_more` は `count` を取るので `placeholders.rs` の `CALL_SITES` にも追加する。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-ui app::ai::tests`
 Expected: 全テスト PASS。
@@ -827,7 +827,7 @@ Expected: 全テスト PASS。
 Run: `cargo test -p vrc-photon-i18n`
 Expected: 全テスト PASS。
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/ui/src/app/ai.rs crates/ui/src/ui/dashboard_ai.rs \
@@ -865,7 +865,7 @@ git commit -m "feat(ui): add the AI tagging dashboard card"
   - `out_of_memory`
 - 同じエラーコードは `AiErrorKind::Job` の `set_error` 重複判定で 1 回だけ通知する。成功したジョブで Job エラーがクリアされた後は、次のクラッシュを再通知してよい。
 
-- [ ] **Step 1: 失敗する通知 helper テストを書く**
+- [x] **Step 1: 失敗する通知 helper テストを書く**
 
 ```rust
 #[test]
@@ -914,14 +914,14 @@ fn repeated_sidecar_crash_is_recorded_only_once() {
 }
 ```
 
-- [ ] **Step 2: テストが失敗することを確認**
+- [x] **Step 2: テストが失敗することを確認**
 
 Run: `cargo test -p vrc-photon-ui model_ready_toast`
 Run: `cargo test -p vrc-photon-ui notifiable_job_errors`
 Run: `cargo test -p vrc-photon-ui repeated_sidecar_crash`
 Expected: 未定義または戻り値不一致で失敗。
 
-- [ ] **Step 3: 最小実装を書く**
+- [x] **Step 3: 最小実装を書く**
 
 - `apply_tagging_progress` の失敗分岐で `set_error` の戻り値を返す。それ以外は `false`。成功時は Job エラーをクリアする既存挙動を維持する。
 - `handle_ai_event` の `TaggingProgress` で戻り値を使い、対象コードだけトーストする。トースト本文は `ai_error_toast_in(&vrc_photon_i18n::current_locale(), &AiErrorInfo::new(AiErrorKind::Job, code, None))`。
@@ -929,7 +929,7 @@ Expected: 未定義または戻り値不一致で失敗。
 - `ja.yml` / `en.yml` に `notifications.ai.model_ready` を追加する。
 - 通知センターのコードには触れない。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-ui app::ai::tests`
 Expected: 全テスト PASS。
@@ -937,7 +937,7 @@ Expected: 全テスト PASS。
 Run: `cargo test -p vrc-photon-i18n`
 Expected: 全テスト PASS。
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/ui/src/app/ai.rs crates/i18n/locales/ja.yml crates/i18n/locales/en.yml
@@ -960,7 +960,7 @@ git commit -m "feat(ui): toast AI model and sidecar failures once"
   - `photo_ai` / `photo_ai_tags` などのテーブル名を利用者向け文言に出さない（既存の `settings.ai.uninstall.delete_tags_hint` は必要なら「AI タグの履歴も削除します」に直す）。
 - タグ名の英語 fallback: `name_en` が無い場合は `name` を表示する。日本語ロケールでは `name`。
 
-- [ ] **Step 1: 新規キーの不足をテストで検出する**
+- [x] **Step 1: 新規キーの不足をテストで検出する**
 
 `cargo test -p vrc-photon-i18n` を実行し、`source_keys` / `catalog` / `placeholders` の失敗を確認する。新規 `tr_args!` がある場合は `crates/i18n/tests/placeholders.rs` の `CALL_SITES` に以下を追加する。
 
@@ -971,16 +971,16 @@ git commit -m "feat(ui): toast AI model and sidecar failures once"
 
 実際に追加した `tr_args!` キーに合わせて過不足なく登録する。
 
-- [ ] **Step 2: ハードコード文言を監査する**
+- [x] **Step 2: ハードコード文言を監査する**
 
 Run: `grep -rn "[ぁ-んァ-ン一-龥]" crates/ui/src/app/ai_tag_picker.rs crates/ui/src/app/ai_thresholds.rs crates/ui/src/ui/ai_tag_picker.rs crates/ui/src/ui/ai_thresholds.rs crates/ui/src/ui/dashboard_ai.rs crates/ui/src/ui/search.rs`
 Expected: コメント・テストデータ以外に日本語の UI 文字列が無い。あれば `tr!` / `tr_args!` に置き換える。
 
-- [ ] **Step 3: ja/en の文言を揃える**
+- [x] **Step 3: ja/en の文言を揃える**
 
 `ja.yml` と `en.yml` の M4 キーを見比べ、同じ意味・同じプレースホルダーにする。英語は直訳ではなく、UI の短いラベルとして自然な表現にする（例: `AI tags`, `Tag thresholds`, `People (AI)`, `Any of`）。`catalog` テストで en の欠落を検出する。
 
-- [ ] **Step 4: テストが通ることを確認**
+- [x] **Step 4: テストが通ることを確認**
 
 Run: `cargo test -p vrc-photon-i18n`
 Expected: 全テスト PASS。
@@ -988,7 +988,7 @@ Expected: 全テスト PASS。
 Run: `cargo test -p vrc-photon-ui`
 Expected: 全テスト PASS。
 
-- [ ] **Step 5: コミット**
+- [x] **Step 5: コミット**
 
 ```bash
 git add crates/i18n/locales/ja.yml crates/i18n/locales/en.yml \
@@ -998,12 +998,12 @@ git commit -m "chore(i18n): audit the AI tagging UI strings"
 
 ### PR M4-3 の完了条件
 
-- [ ] ダッシュボード右サイドに AI カードが出て、準備不足/待機/実行中/失敗が区別できる。準備完了かつ未有効（not_enabled）のときはカードが表示されない。
-- [ ] 最大 3 件のジョブ進捗とキャンセル、残件数、設定/連携への導線が動く。
-- [ ] モデル DL 完了、sidecar クラッシュ、プラグイン不整合がトーストで出て、同じエラーを連発しない。
-- [ ] 通知センターには AI セクションが追加されていない。
-- [ ] `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` が成功する。
-- [ ] CI 緑で PR をマージする。ラベル `enhancement`。
+- [x] ダッシュボード右サイドに AI カードが出て、準備不足/待機/実行中/失敗が区別できる。準備完了かつ未有効（not_enabled）のときはカードが表示されない。
+- [x] 最大 3 件のジョブ進捗とキャンセル、残件数、設定/連携への導線が動く。
+- [x] モデル DL 完了、sidecar クラッシュ、プラグイン不整合がトーストで出て、同じエラーを連発しない。
+- [x] 通知センターには AI セクションが追加されていない。
+- [x] `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace` が成功する。
+- [x] CI 緑で PR をマージする。ラベル `enhancement`。
 
 ---
 
@@ -1038,11 +1038,11 @@ git commit -m "chore(i18n): audit the AI tagging UI strings"
 - `docs/security-privacy.md`: 7.3 の AI タグ付け節から `docs/ai-tagging/privacy.md` へリンクする。内容の重複は最小限にする。
 - `docs/ui.md`: 検索画面の AI タググループ/人数入力、AI タグ選択モーダル、閾値モーダル、ダッシュボード AI カード、トーストの仕様を追記する。
 
-- [ ] **Step 1: 5 つのドキュメントを書く**
+- [x] **Step 1: 5 つのドキュメントを書く**
 
 上記の構成で作成する。コマンド・パス・設定名は実装と一致させる。存在しない機能や未検証のバックエンドを「対応済み」と書かない。
 
-- [ ] **Step 2: 実装と突き合わせる**
+- [x] **Step 2: 実装と突き合わせる**
 
 次の項目をコード/実測記録と照合する。
 
@@ -1054,11 +1054,11 @@ git commit -m "chore(i18n): audit the AI tagging UI strings"
 - トーストの対象イベント。
 - 実測値の出典（M1 validation / M2 E2E 記録）。
 
-- [ ] **Step 3: 索引と既存ドキュメントを更新する**
+- [x] **Step 3: 索引と既存ドキュメントを更新する**
 
 `docs/README.md`、`README.md`、`docs/features.md`、`docs/security-privacy.md`、`docs/ui.md` を更新する。docs とコードを同じ PR に混ぜない。
 
-- [ ] **Step 4: リンクと表記を確認する**
+- [x] **Step 4: リンクと表記を確認する**
 
 Run: `grep -rn "ai-tagging" README.md docs/README.md docs/features.md docs/security-privacy.md docs/ui.md`
 Expected: すべてのリンクが実在するファイルを指す。
@@ -1066,7 +1066,7 @@ Expected: すべてのリンクが実在するファイルを指す。
 Run: `git diff --check`
 Expected: 空白エラーなし。
 
-- [ ] **Step 5: コミットして PR M4-4 を出す**
+- [x] **Step 5: コミットして PR M4-4 を出す**
 
 ```bash
 git add docs/ai-tagging README.md docs/README.md docs/features.md \
@@ -1078,31 +1078,31 @@ PR ラベル `enhancement`。docs-only の CI fast-pass を確認してマージ
 
 ### PR M4-4 の完了条件
 
-- [ ] 導入・GPU 要件・プライバシー・トラブルシューティングが日本語で揃っている。
-- [ ] 購入（BOOTH）の本文は含まれず、M5 で追記する前提が計画に残っている。
-- [ ] 既存ドキュメントの索引・機能仕様・プライバシー・UI 仕様からリンクされている。
-- [ ] docs-only CI が緑でマージされる。
+- [x] 導入・GPU 要件・プライバシー・トラブルシューティングが日本語で揃っている。
+- [x] 購入（BOOTH）の本文は含まれず、M5 で追記する前提が計画に残っている。
+- [x] 既存ドキュメントの索引・機能仕様・プライバシー・UI 仕様からリンクされている。
+- [x] docs-only CI が緑でマージされる。
 
 ---
 
 ## 最終確認（全 PR マージ後）
 
-- [ ] **モック承認の記録**: Issue #198 に武田様の承認日・承認内容・変更点が残っている。承認前の UI コードが無い。
-- [ ] **#313 の完了**: AI 関連のバッジが残っていない。M4 で新しい AI バッジを追加していない。
-- [ ] **検索**: AI タグ OR、人数単一値、手動タグとの分離、applied のみ、他プラグイン除外。
-- [ ] **閾値**: 一括保存、リセット、再計算 1 回、presence 次回適用、失敗時の下書き保持。
-- [ ] **ダッシュボード**: 右サイド、インストール済みで準備不足または有効なときだけ表示、準備完了かつ未有効は非表示、4 状態、最大 3 件、キャンセル、設定/連携導線。
-- [ ] **通知**: トーストのみ、DL 完了 1 回、クラッシュ/不整合の重複抑制、通知センター変更なし。
-- [ ] **i18n**: ja/en のキー parity、プレースホルダー、タグ名 fallback、ハードコード日本語なし。
-- [ ] **ドキュメント**: 5 ファイル、索引、既存仕様との整合、BOOTH 購入本文なし。
-- [ ] **手動 UI QA**: 実 sidecar と開発用 ZIP/モデルを使い、検索 → AI タグ選択 → 人数検索 → 閾値変更 → ダッシュボード → トーストを確認する。スクリーンショットは `gnome-wayland-visual-qa` スキルの手順で取得する。
-- [ ] **最終検証**:
+- [x] **モック承認の記録**: Issue #198 に武田様の承認日・承認内容・変更点が残っている。承認前の UI コードが無い。
+- [x] **#313 の完了**: AI 関連のバッジが残っていない。M4 で新しい AI バッジを追加していない。
+- [x] **検索**: AI タグ OR、人数単一値、手動タグとの分離、applied のみ、他プラグイン除外。
+- [x] **閾値**: 一括保存、リセット、再計算 1 回、presence 次回適用、失敗時の下書き保持。
+- [x] **ダッシュボード**: 右サイド、インストール済みで準備不足または有効なときだけ表示、準備完了かつ未有効は非表示、4 状態、最大 3 件、キャンセル、設定/連携導線。
+- [x] **通知**: トーストのみ、DL 完了 1 回、クラッシュ/不整合の重複抑制、通知センター変更なし。
+- [x] **i18n**: ja/en のキー parity、プレースホルダー、タグ名 fallback、ハードコード日本語なし。
+- [x] **ドキュメント**: 5 ファイル、索引、既存仕様との整合、BOOTH 購入本文なし。
+- [ ] **手動 UI QA**: 実 sidecar と開発用 ZIP/モデルを使い、検索 → AI タグ選択 → 人数検索 → 閾値変更 → ダッシュボード → トーストを確認する。スクリーンショットは `gnome-wayland-visual-qa` スキルの手順で取得する。（実画面の AI 画面操作は XWayland の XTest 合成入力が届かず未実施。起動スモーク・単体テスト・承認済みモックで代替）
+- [x] **最終検証**:
 
 ```bash
 cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
 ```
 
-- [ ] **M5 への引き継ぎ**: Windows Vulkan/CPU E2E、購入フロー（BOOTH）のリハーサル、購入ドキュメントの追記、CUDA/ROCm の実機検証（M6）を Issue #198 に記録する。
+- [x] **M5 への引き継ぎ**: Windows Vulkan/CPU E2E、購入フロー（BOOTH）のリハーサル、購入ドキュメントの追記、CUDA/ROCm の実機検証（M6）を Issue #198 に記録する。
 
 ---
 
