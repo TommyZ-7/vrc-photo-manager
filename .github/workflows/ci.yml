@@ -114,6 +114,13 @@ jobs:
           components: clippy
       - name: Cache Rust
         uses: Swatinem/rust-cache@v2
+      # windows-latest ships MSVC, CMake, and Ninja, so the vendored libjxl
+      # build (`jpegxl-rs`) and bundled SQLite (`rusqlite`) need no extra
+      # setup. `--all-targets` compiles tests/benches too, which makes a
+      # Linux-only `cfg` in the UI, daemon, core, ai-host, or updater fail
+      # here instead of only on release packaging runs.
+      - name: Check the whole workspace on Windows
+        run: cargo check --workspace --all-targets --locked
       - name: Test IPC transport on Windows
         run: cargo test -p vrc-photon-ipc
       - name: Clippy IPC transport on Windows
@@ -125,3 +132,26 @@ jobs:
       - name: Test thumbnail cache on Windows
         if: needs.changes.outputs.thumbnails == 'true'
         run: cargo test -p vrc-photon-core thumbnail::tests
+
+  audit:
+    needs: changes
+    if: needs.changes.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Blocking gate: any vulnerability or unsound advisory fails the job.
+      # Unmaintained advisories are informational and are reported by the
+      # next step instead. See deny.toml for the current follow-up list.
+      - name: Check advisories (blocking)
+        uses: EmbarkStudios/cargo-deny-action@v2.1.1
+        with:
+          command: check advisories
+          command-arguments: "-A unmaintained"
+      # Non-blocking visibility for unmaintained/yanked dependencies. The
+      # advisory set currently has known informational findings, so this step
+      # is allowed to fail until they are resolved or explicitly triaged.
+      - name: Report unmaintained dependencies (non-blocking)
+        continue-on-error: true
+        uses: EmbarkStudios/cargo-deny-action@v2.1.1
+        with:
+          command: check advisories

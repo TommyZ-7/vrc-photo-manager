@@ -1,0 +1,21 @@
+# cargo-deny configuration for the dependency audit CI job.
+# Documentation: https://embarkstudios.github.io/cargo-deny/
+#
+# CI runs `cargo deny check advisories -A unmaintained` as a blocking gate:
+# known vulnerabilities and unsound advisories fail the build, while
+# informational "unmaintained" advisories do not. A second, non-blocking CI
+# step runs the same check without `-A unmaintained` so the full list stays
+# visible in the job log.
+#
+# Known follow-up (2026-11-05): the full check reports these unmaintained
+# transitive crates from the advisory database:
+#   instant, paste, rustls-pemfile, rustybuzz, ttf-parser, zbus_names,
+#   zvariant, zvariant_derive
+# plus one yanked crate (async-executor 1.14.0, a warning rather than an
+# error). None of them is a vulnerability. Track upstream replacements before
+# making the full check a required gate; adding a blanket ignore would also
+# hide future vulnerability advisories for those crates.
+[advisories]
+# Default RustSec database. Kept explicit so the source of the audit is clear.
+db-urls = ["https://github.com/rustsec/advisory-db"]
+ignore = []

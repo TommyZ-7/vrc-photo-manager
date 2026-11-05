@@ -1,5 +1,8 @@
 [workspace]
 resolver = "2"
+# `fuzz/` is a standalone cargo-fuzz workspace. It needs nightly and is kept
+# out of the stable workspace so `cargo check/test --workspace` stay fast.
+exclude = ["fuzz"]
 members = [
     "crates/ai-host",
     "crates/ai-mock-sidecar",

@@ -30,6 +30,11 @@ vrc-photon-i18n = { path = "../i18n" }
 vrc-photon-ipc = { path = "../ipc" }
 vrc-photon-update = { path = "../update" }
 
+[dev-dependencies]
+# The test modules use `tempfile` on every platform. Linux also needs it at
+# runtime for the clipboard bridge, hence the target dependency below.
+tempfile = "3"
+
 [target.'cfg(target_os = "linux")'.dependencies]
 tempfile = "3"
 
