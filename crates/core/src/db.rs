@@ -29,6 +29,10 @@ use crate::world_name::{
     WorldNameLookupCounts, WorldNameLookupStatus, backoff_seconds,
 };
 
+/// Highest schema version this build understands. A database with a newer
+/// `user_version` was written by a future release and must not be opened.
+const SCHEMA_VERSION: i64 = 14;
+
 const SCHEMA_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
@@ -436,6 +440,25 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_tagging_jobs_active
     WHERE status IN ('waiting', 'pending', 'processing');
 "#;
 
+const SCHEMA_V14_INDEXES: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_jobs_claim ON compression_jobs(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_jobs_created ON compression_jobs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
+CREATE INDEX IF NOT EXISTS idx_sessions_ended ON sessions(ended_at) WHERE ended_at IS NOT NULL;
+"#;
+
+/// Sessions that end or start within an inclusive window around a capture.
+/// `UNION` (not `UNION ALL`) collapses a zero-length session that matches both
+/// ranges; the final ordering matches the caller's "at most two" contract.
+const SESSIONS_NEAR_SQL: &str = "SELECT id, log_file, started_at, ended_at, world_id, instance_id \
+     FROM sessions \
+     WHERE started_at BETWEEN ?1 AND ?1 + ?2 \
+     UNION \
+     SELECT id, log_file, started_at, ended_at, world_id, instance_id \
+     FROM sessions \
+     WHERE ended_at IS NOT NULL AND ended_at BETWEEN ?1 - ?2 AND ?1 \
+     ORDER BY started_at LIMIT 2";
+
 const PHOTO_SELECT: &str = "p.id, p.root_id, p.rel_path, p.abs_path, p.file_name, \
     p.captured_at_utc, p.captured_at_local, p.tz_offset_sec, p.width, p.height, \
     p.file_size, p.mtime, p.blake3, p.status, p.is_favorite, p.note, \
@@ -506,6 +529,8 @@ impl Db {
         let path = path.as_ref();
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         Self::configure(&conn)?;
+        let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        check_schema_version(version)?;
         Ok(Self {
             conn,
             path: Some(path.to_path_buf()),
@@ -538,6 +563,7 @@ impl Db {
         let version: i64 = self
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))?;
+        check_schema_version(version)?;
         if version < 1 {
             self.migrate_v1()?;
         }
@@ -576,6 +602,9 @@ impl Db {
         }
         if version < 13 {
             self.migrate_v13()?;
+        }
+        if version < 14 {
+            self.migrate_v14()?;
         }
         Ok(())
     }
@@ -913,6 +942,27 @@ impl Db {
         Ok(())
     }
 
+    /// Adds the claim/sort indexes for compression jobs and session time
+    /// lookups. `IF NOT EXISTS` makes the step safe to retry after a crash
+    /// between the DDL and `user_version`.
+    fn migrate_v14(&self) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version >= 14 {
+            tx.commit()?;
+            return Ok(());
+        }
+
+        tx.execute_batch(SCHEMA_V14_INDEXES)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (14, ?1)",
+            params![now_string()],
+        )?;
+        tx.pragma_update(None, "user_version", 14)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn connection(&self) -> &Connection {
         &self.conn
     }
@@ -965,7 +1015,8 @@ impl Db {
                     SELECT 1 FROM deletion_requests dr \
                     WHERE dr.photo_id = photos.id \
                       AND dr.status IN ('pending', 'blocked', 'running') \
-                ) THEN photos.status ELSE 'present' END, \
+                ) OR photos.status NOT IN ('present', 'replaced', 'missing', 'deleting') \
+                THEN photos.status ELSE 'present' END, \
                 display_derivative_id = CASE WHEN EXISTS ( \
                     SELECT 1 FROM deletion_requests dr \
                     WHERE dr.photo_id = photos.id \
@@ -1339,7 +1390,9 @@ impl Db {
         }
         let changed = tx.execute(
             "UPDATE photos SET root_id = ?1, rel_path = ?2, abs_path = ?3, file_name = ?4, \
-                file_size = ?5, mtime = ?6, blake3 = COALESCE(?7, blake3), status = 'present', \
+                file_size = ?5, mtime = ?6, blake3 = COALESCE(?7, blake3), \
+                status = CASE WHEN status IN ('present', 'replaced', 'missing', 'deleting') \
+                    THEN 'present' ELSE status END, \
                 display_derivative_id = NULL, updated_at = ?8 \
              WHERE id = ?9 AND NOT EXISTS (SELECT 1 FROM deletion_requests dr \
                  WHERE dr.photo_id = photos.id \
@@ -1871,13 +1924,7 @@ impl Db {
     /// `window_seconds` of it. At most two are returned: callers only need
     /// to distinguish none, exactly one, and ambiguous.
     pub fn sessions_near(&self, timestamp: i64, window_seconds: i64) -> Result<Vec<Session>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, log_file, started_at, ended_at, world_id, instance_id \
-             FROM sessions \
-             WHERE (ended_at IS NOT NULL AND ?1 - ended_at BETWEEN 0 AND ?2) \
-                OR (started_at - ?1 BETWEEN 0 AND ?2) \
-             ORDER BY started_at LIMIT 2",
-        )?;
+        let mut stmt = self.conn.prepare(SESSIONS_NEAR_SQL)?;
         let rows = stmt.query_map(params![timestamp, window_seconds], |row| {
             Ok(Session {
                 id: row.get(0)?,
@@ -2542,11 +2589,11 @@ impl Db {
     }
 
     /// Counts compression, send, and tagging work per status for the warning
-    /// modal. Unknown compression statuses count as pending in the body.
-    /// Unknown send and tagging statuses also count as pending: a status
-    /// written by a newer version is never terminal. `affected_photos` is the
-    /// union of distinct selected photos with non-terminal jobs, so a photo
-    /// with several kinds of work counts once.
+    /// modal. Unknown compression statuses are reported as `unknown` and keep
+    /// the photo affected: a status written by a newer version is never
+    /// terminal. Unknown send and tagging statuses also count as pending.
+    /// `affected_photos` is the union of distinct selected photos with
+    /// non-terminal jobs, so a photo with several kinds of work counts once.
     pub fn deletion_job_summary(&self, photo_ids: &[i64]) -> Result<DeletionJobSummary> {
         let mut compression = JobStatusCounts::default();
         let mut send = JobStatusCounts::default();
@@ -2572,6 +2619,7 @@ impl Db {
                     QueueStatus::Pending => compression.pending += count,
                     QueueStatus::Processing => compression.processing += count,
                     QueueStatus::Failed => compression.failed += count,
+                    QueueStatus::Unknown => compression.unknown += count,
                     QueueStatus::Completed | QueueStatus::Cancelled => {}
                 }
             }
@@ -5389,6 +5437,16 @@ fn row_to_deletion_request(row: &Row<'_>) -> rusqlite::Result<DeletionRequest> {
     })
 }
 
+fn check_schema_version(version: i64) -> Result<()> {
+    if version > SCHEMA_VERSION {
+        return Err(CoreError::Invalid(format!(
+            "database schema version {version} is newer than this build supports \
+             (maximum {SCHEMA_VERSION}); update VRC PhotoN before opening it"
+        )));
+    }
+    Ok(())
+}
+
 fn now_string() -> String {
     chrono::Utc::now().to_rfc3339()
 }
@@ -5628,7 +5686,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
     }
 
     #[test]
@@ -5674,7 +5732,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
         let author_columns: i64 = db
             .conn
             .query_row(
@@ -5726,7 +5784,7 @@ mod tests {
             }
             for handle in handles {
                 let opened = handle.join().unwrap();
-                assert_eq!(opened.unwrap().unwrap(), 13);
+                assert_eq!(opened.unwrap().unwrap(), 14);
             }
         }
     }
@@ -5738,7 +5796,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
         let has_output_dir: bool = db
             .conn
             .query_row(
@@ -5758,7 +5816,7 @@ mod tests {
             .connection()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
         let table: i64 = db
             .connection()
             .query_row(
@@ -5995,7 +6053,7 @@ mod tests {
     }
 
     #[test]
-    fn deletion_job_summary_counts_a_unknown_status_as_affected() {
+    fn deletion_job_summary_keeps_unknown_status_distinct() {
         let db = Db::open_in_memory().unwrap();
         let id = seed_photo(&db);
         db.save_profile(&profile("p", "P")).unwrap();
@@ -6009,8 +6067,12 @@ mod tests {
 
         let summary = db.deletion_job_summary(&[id]).unwrap();
         assert_eq!(
-            summary.compression.pending, 1,
-            "unknown statuses parse as pending in the body"
+            summary.compression.pending, 0,
+            "unknown statuses must not be treated as pending"
+        );
+        assert_eq!(
+            summary.compression.unknown, 1,
+            "unknown statuses keep their own count"
         );
         assert_eq!(
             summary.affected_photos, 1,
@@ -6830,7 +6892,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
 
         let recorded: i64 = db
             .conn
@@ -6873,7 +6935,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
         let retry_column: i64 = db
             .conn
             .query_row(
@@ -6940,7 +7002,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
 
         let jobs = db.list_jobs(10).unwrap();
         assert_eq!(jobs.len(), 1);
@@ -6973,7 +7035,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
         assert_eq!(db.list_jobs(10).unwrap()[0].retry_count, 2);
 
         let tables: i64 = db
@@ -7526,6 +7588,64 @@ mod tests {
     }
 
     #[test]
+    fn sessions_near_uses_inclusive_start_and_end_boundaries() {
+        let cases = [
+            ("ends at the timestamp", 900, Some(1000), true),
+            ("ends at the lower bound", 900, Some(970), true),
+            ("ends before the lower bound", 900, Some(969), false),
+            ("starts at the timestamp", 1000, None, true),
+            ("starts at the upper bound", 1030, None, true),
+            ("starts after the upper bound", 1031, None, false),
+            ("contains the timestamp", 900, Some(1100), false),
+            ("is open before the timestamp", 900, None, false),
+        ];
+
+        for (label, started_at, ended_at, expected) in cases {
+            let db = Db::open_in_memory().unwrap();
+            let world = db.upsert_world("wrld_test", None, None).unwrap();
+            let session = db
+                .create_session("log.txt", started_at, world, None)
+                .unwrap();
+            if let Some(ended_at) = ended_at {
+                db.close_session(session, ended_at).unwrap();
+            }
+
+            let near = db.sessions_near(1000, 30).unwrap().len() == 1;
+            assert_eq!(near, expected, "{label}");
+        }
+    }
+
+    #[test]
+    fn sessions_near_deduplicates_a_zero_length_session_at_the_timestamp() {
+        let db = Db::open_in_memory().unwrap();
+        let world = db.upsert_world("wrld_test", None, None).unwrap();
+        let session = db.create_session("log.txt", 1000, world, None).unwrap();
+        db.close_session(session, 1000).unwrap();
+
+        let near = db.sessions_near(1000, 30).unwrap();
+        assert_eq!(near.len(), 1, "UNION must collapse both range matches");
+        assert_eq!(near[0].id, session);
+    }
+
+    #[test]
+    fn sessions_near_orders_by_start_and_returns_at_most_two() {
+        let db = Db::open_in_memory().unwrap();
+        let world = db.upsert_world("wrld_test", None, None).unwrap();
+        for started_at in [1003, 1001, 1002, 1004] {
+            db.create_session("log.txt", started_at, world, None)
+                .unwrap();
+        }
+
+        let near = db.sessions_near(1000, 30).unwrap();
+        assert_eq!(
+            near.iter()
+                .map(|session| session.started_at)
+                .collect::<Vec<_>>(),
+            vec![1001, 1002]
+        );
+    }
+
+    #[test]
     fn log_mtime_reads_the_last_ingested_mtime() {
         let db = Db::open_in_memory().unwrap();
         assert_eq!(db.log_mtime("output_log.txt").unwrap(), None);
@@ -8055,7 +8175,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
         let exists: bool = db
             .conn
             .query_row(
@@ -8087,7 +8207,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
         let table: i64 = db
             .conn
             .query_row(
@@ -8126,6 +8246,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("library.db");
         let db = Db::open(&path).unwrap();
+        db.connection()
+            .pragma_update(None, "user_version", 12)
+            .unwrap();
         assert!(db.migrate_v13().is_ok());
         assert!(db.migrate_v13().is_ok());
         let version: i64 = db
@@ -8186,6 +8309,10 @@ mod tests {
             conn.execute_batch(
                 "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);\
                  CREATE TABLE photos (id INTEGER PRIMARY KEY, abs_path TEXT NOT NULL);\
+                 CREATE TABLE sessions (\
+                     id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, ended_at INTEGER);\
+                 CREATE TABLE compression_jobs (\
+                     id TEXT PRIMARY KEY, status TEXT NOT NULL, created_at TEXT NOT NULL);\
                  INSERT INTO photos(id, abs_path) VALUES (42, '/photos/keep.png');\
                  PRAGMA user_version = 12;",
             )
@@ -8197,7 +8324,7 @@ mod tests {
             .connection()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 13);
+        assert_eq!(version, 14);
         let abs_path: String = db
             .connection()
             .query_row("SELECT abs_path FROM photos WHERE id = 42", [], |row| {
@@ -8245,6 +8372,174 @@ mod tests {
             )
             .unwrap();
         assert!(exists);
+    }
+
+    #[test]
+    fn fresh_database_is_v14_and_has_the_claim_indexes() {
+        let db = Db::open_in_memory().unwrap();
+        let version: i64 = db
+            .connection()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 14);
+        for index in [
+            "idx_jobs_claim",
+            "idx_jobs_created",
+            "idx_sessions_started",
+            "idx_sessions_ended",
+        ] {
+            let exists: bool = db
+                .connection()
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master \
+                     WHERE type = 'index' AND name = ?1)",
+                    params![index],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "missing index {index}");
+        }
+    }
+
+    #[test]
+    fn migration_v14_upgrades_a_v13_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_migrations (\
+                     version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);\
+                 CREATE TABLE sessions (\
+                     id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, ended_at INTEGER);\
+                 CREATE TABLE compression_jobs (\
+                     id TEXT PRIMARY KEY, status TEXT NOT NULL, created_at TEXT NOT NULL);\
+                 PRAGMA user_version = 13;",
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        let version: i64 = db
+            .connection()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 14);
+        for index in [
+            "idx_jobs_claim",
+            "idx_jobs_created",
+            "idx_sessions_started",
+            "idx_sessions_ended",
+        ] {
+            let exists: bool = db
+                .connection()
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master \
+                     WHERE type = 'index' AND name = ?1)",
+                    params![index],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "missing index {index}");
+        }
+        let recorded: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 14",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(recorded, 1);
+    }
+
+    #[test]
+    fn migration_v14_is_retryable() {
+        let db = Db::open_in_memory().unwrap();
+        db.connection()
+            .execute_batch(
+                "DROP INDEX idx_jobs_claim;\
+                 DROP INDEX idx_jobs_created;\
+                 DROP INDEX idx_sessions_started;\
+                 DROP INDEX idx_sessions_ended;",
+            )
+            .unwrap();
+        db.connection()
+            .pragma_update(None, "user_version", 13)
+            .unwrap();
+
+        db.migrate_v14().unwrap();
+        db.migrate_v14().unwrap();
+
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 14);
+    }
+
+    #[test]
+    fn open_rejects_a_database_from_a_newer_schema_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.db");
+        let db = Db::open(&path).unwrap();
+        db.connection()
+            .pragma_update(None, "user_version", 15)
+            .unwrap();
+        drop(db);
+
+        match Db::open(&path) {
+            Err(CoreError::Invalid(message)) => {
+                assert!(message.contains("15"), "{message}");
+                assert!(message.contains("14"), "{message}");
+            }
+            Err(error) => panic!("expected a typed future-version error, got {error}"),
+            Ok(_) => panic!("expected Db::open to reject schema version 15"),
+        }
+        match Db::open_read_only(&path) {
+            Err(CoreError::Invalid(message)) => {
+                assert!(message.contains("15"), "{message}");
+                assert!(message.contains("14"), "{message}");
+            }
+            Err(error) => panic!("expected a typed future-version error, got {error}"),
+            Ok(_) => panic!("expected Db::open_read_only to reject schema version 15"),
+        }
+    }
+
+    #[test]
+    fn next_pending_job_query_uses_the_claim_index() {
+        let db = Db::open_in_memory().unwrap();
+        let mut stmt = db
+            .conn
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT id FROM compression_jobs \
+                 WHERE status = 'pending' ORDER BY created_at, rowid LIMIT 1",
+            )
+            .unwrap();
+        let plan = stmt
+            .query_map([], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join("\n");
+        assert!(plan.contains("idx_jobs_claim"), "{plan}");
+    }
+
+    #[test]
+    fn sessions_near_query_uses_the_session_indexes() {
+        let db = Db::open_in_memory().unwrap();
+        let mut stmt = db
+            .conn
+            .prepare(&format!("EXPLAIN QUERY PLAN {SESSIONS_NEAR_SQL}"))
+            .unwrap();
+        let plan = stmt
+            .query_map(params![1000, 30], |row| row.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join("\n");
+        assert!(plan.contains("idx_sessions_started"), "{plan}");
+        assert!(plan.contains("idx_sessions_ended"), "{plan}");
     }
 
     #[test]
@@ -11454,6 +11749,41 @@ mod tests {
         assert!(photo.display_path.is_none());
         assert_eq!(photo.effective_path(), "/photos/a.png");
         assert_eq!(db.stats().unwrap().total_bytes, 12_400_000);
+    }
+
+    #[test]
+    fn upsert_preserves_a_photo_status_written_by_a_newer_version() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        db.connection()
+            .execute(
+                "UPDATE photos SET status = 'future_status' WHERE id = ?1",
+                params![photo],
+            )
+            .unwrap();
+
+        db.upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+
+        let status: String = db
+            .connection()
+            .query_row(
+                "SELECT status FROM photos WHERE id = ?1",
+                params![photo],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            status, "future_status",
+            "an older scan must not rewrite a future status to present"
+        );
+        assert_eq!(
+            db.photo_by_id(photo).unwrap().unwrap().status,
+            PhotoStatus::Unknown
+        );
     }
 
     #[test]

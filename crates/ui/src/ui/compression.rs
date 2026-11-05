@@ -44,6 +44,7 @@ fn queue_status_badge(status: &QueueStatus, p: &Palette) -> (String, u32, u32) {
         QueueStatus::Completed => (tr!("compression.status.completed"), p.green, p.green_soft),
         QueueStatus::Failed => (tr!("compression.status.failed"), p.red, p.red_soft),
         QueueStatus::Cancelled => (tr!("compression.status.cancelled"), p.muted, p.panel_2),
+        QueueStatus::Unknown => (tr!("compression.status.unknown"), p.muted, p.panel_2),
     }
 }
 
@@ -1259,5 +1260,6 @@ mod tests {
         assert_eq!(queue_status_badge(&QueueStatus::Completed, &p).0, "完了");
         assert_eq!(queue_status_badge(&QueueStatus::Failed, &p).0, "失敗");
         assert_eq!(queue_status_badge(&QueueStatus::Cancelled, &p).0, "取消");
+        assert_eq!(queue_status_badge(&QueueStatus::Unknown, &p).0, "不明");
     }
 }

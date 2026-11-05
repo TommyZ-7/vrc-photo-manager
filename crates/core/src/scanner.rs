@@ -331,7 +331,9 @@ where
         let existing = states.get(&path);
         // A row that still matches the file on disk needs no write and no
         // re-hash. `missing`, `replaced`, and `deleting` rows always fall
-        // through so their state is restored or preserved.
+        // through so their state is restored or preserved. Unknown statuses
+        // written by a newer version also fall through, and `upsert_photo`
+        // preserves the stored status instead of rewriting it to present.
         let unchanged = existing.is_some_and(|state| {
             state.status == PhotoStatus::Present
                 && state.display_derivative_id.is_none()
@@ -555,6 +557,40 @@ mod tests {
         assert_eq!(photo.status, PhotoStatus::Present);
         assert_eq!(db.photo_tags(photo_id).unwrap(), vec!["night".to_string()]);
         assert_eq!(db.count_photos().unwrap(), 1);
+    }
+
+    #[test]
+    fn rescanning_preserves_a_photo_status_written_by_a_newer_version() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let path = root.join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        write_png(&path);
+        let db = Db::open_in_memory().unwrap();
+        let root_id = db.add_root(root.to_str().unwrap(), "reference").unwrap();
+        let report = scan_and_index(&db, root_id, root).unwrap();
+        let photo_id = report.new_ids[0];
+        db.connection()
+            .execute(
+                "UPDATE photos SET status = 'future_status' WHERE id = ?1",
+                [photo_id],
+            )
+            .unwrap();
+
+        scan_and_index(&db, root_id, root).unwrap();
+
+        let status: String = db
+            .connection()
+            .query_row(
+                "SELECT status FROM photos WHERE id = ?1",
+                [photo_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "future_status");
+        assert_eq!(
+            db.photo_by_id(photo_id).unwrap().unwrap().status,
+            PhotoStatus::Unknown
+        );
     }
 
     #[test]
