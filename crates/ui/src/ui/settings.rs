@@ -1057,37 +1057,6 @@ impl App {
         let view = AiPluginCardView::from(&self.ai);
         let state = view.state;
         let has_active = self.ai.active.is_some();
-        let (status, status_fg, status_bg) = match state {
-            AiPluginCardState::Installing => (
-                tr!("settings.ai.status.installing"),
-                p.accent,
-                p.accent_soft,
-            ),
-            AiPluginCardState::NotInstalled => (
-                tr!("settings.ai.status.not_installed"),
-                p.accent,
-                p.accent_soft,
-            ),
-            AiPluginCardState::Downloading => (
-                tr!("settings.ai.status.downloading"),
-                p.accent,
-                p.accent_soft,
-            ),
-            AiPluginCardState::Verifying => {
-                (tr!("settings.ai.status.verifying"), p.accent, p.accent_soft)
-            }
-            AiPluginCardState::Ready => (tr!("settings.ai.status.ready"), p.green, p.green_soft),
-            AiPluginCardState::NeedsProbe => {
-                (tr!("settings.ai.status.needs_probe"), p.amber, p.amber_soft)
-            }
-            AiPluginCardState::Error => (tr!("settings.ai.status.error"), p.red, p.red_soft),
-            AiPluginCardState::ModelMissing => (
-                tr!("settings.ai.status.model_missing"),
-                p.amber,
-                p.amber_soft,
-            ),
-        };
-
         let mut card = glass_panel(&self.palette)
             .flex()
             .flex_col()
@@ -1095,29 +1064,25 @@ impl App {
             .gap(px(12.))
             .rounded(px(17.))
             .child(
-                h_flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap(px(2.))
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .font_semibold()
-                                    .text_color(rgb(p.text))
-                                    .child(tr!("settings.ai.title")),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(p.muted_2))
-                                    .child(tr!("settings.ai.hint")),
-                            ),
-                    )
-                    .child(self.badge(status, status_fg, status_bg)),
+                h_flex().items_center().gap(px(10.)).child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .font_semibold()
+                                .text_color(rgb(p.text))
+                                .child(tr!("settings.ai.title")),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(p.muted_2))
+                                .child(tr!("settings.ai.hint")),
+                        ),
+                ),
             );
 
         if self.ai.install_busy {
@@ -1405,39 +1370,39 @@ impl App {
                                         ),
                                     ),
                             )
-                            .child(if active {
-                                self.badge(tr!("settings.ai.variant.active"), p.green, p.green_soft)
-                                    .into_any_element()
-                            } else {
-                                h_flex()
-                                    .items_center()
-                                    .gap(px(4.))
-                                    .child(
-                                        Button::new(SharedString::from(row_id))
-                                            .label(tr!("settings.ai.variant.switch"))
-                                            .small()
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.set_ai_active_variant(
-                                                    &switch_variant,
-                                                    Some(&version),
-                                                    cx,
-                                                );
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new(SharedString::from(remove_id))
-                                            .label(tr!("settings.ai.variant.remove"))
-                                            .small()
-                                            .danger()
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.open_ai_uninstall_modal(
-                                                    remove_target.clone(),
-                                                    window,
-                                                    cx,
-                                                );
-                                            })),
-                                    )
-                                    .into_any_element()
+                            .when(!active, |this| {
+                                this.child(
+                                    h_flex()
+                                        .items_center()
+                                        .gap(px(4.))
+                                        .child(
+                                            Button::new(SharedString::from(row_id))
+                                                .label(tr!("settings.ai.variant.switch"))
+                                                .small()
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.set_ai_active_variant(
+                                                        &switch_variant,
+                                                        Some(&version),
+                                                        cx,
+                                                    );
+                                                })),
+                                        )
+                                        .child(
+                                            Button::new(SharedString::from(remove_id))
+                                                .label(tr!("settings.ai.variant.remove"))
+                                                .small()
+                                                .danger()
+                                                .on_click(cx.listener(
+                                                    move |this, _, window, cx| {
+                                                        this.open_ai_uninstall_modal(
+                                                            remove_target.clone(),
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    },
+                                                )),
+                                        ),
+                                )
                             })
                     })),
             )

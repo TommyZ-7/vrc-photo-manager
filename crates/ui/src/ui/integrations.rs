@@ -221,21 +221,6 @@ impl App {
         let ready = self.ai.ready();
         let enabled = self.settings.ai_tagging_enabled;
         let motion = self.integrations_ai_motion;
-        let (status, status_fg, status_bg) = if !ready {
-            (
-                tr!("integrations.ai.status.not_ready"),
-                p.amber,
-                p.amber_soft,
-            )
-        } else if enabled {
-            (tr!("integrations.ai.status.enabled"), p.green, p.green_soft)
-        } else {
-            (
-                tr!("integrations.ai.status.not_enabled"),
-                p.muted,
-                p.panel_2,
-            )
-        };
 
         let card = glass_panel(&self.palette)
             .flex()
@@ -243,29 +228,25 @@ impl App {
             .p(px(14.))
             .rounded(px(17.))
             .child(
-                h_flex()
-                    .items_center()
-                    .gap(px(12.))
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
-                            .gap(px(2.))
-                            .child(
-                                div()
-                                    .text_size(px(13.))
-                                    .font_semibold()
-                                    .text_color(rgb(p.text))
-                                    .child(tr!("integrations.ai.title")),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(p.muted_2))
-                                    .child(tr!("integrations.ai.hint")),
-                            ),
-                    )
-                    .child(self.badge(status, status_fg, status_bg)),
+                h_flex().items_center().gap(px(12.)).child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .font_semibold()
+                                .text_color(rgb(p.text))
+                                .child(tr!("integrations.ai.title")),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(p.muted_2))
+                                .child(tr!("integrations.ai.hint")),
+                        ),
+                ),
             );
 
         if !ready {
@@ -326,24 +307,21 @@ impl App {
                 .gap(px(10.))
                 .child(
                     h_flex()
-                        .gap(px(6.))
+                        .gap(px(14.))
                         .child(ai_job_stat(
                             &p,
                             tr!("integrations.ai.jobs.waiting"),
                             counts.waiting,
-                            p.amber,
                         ))
                         .child(ai_job_stat(
                             &p,
                             tr!("integrations.ai.jobs.processing"),
                             counts.pending + counts.processing,
-                            p.accent,
                         ))
                         .child(ai_job_stat(
                             &p,
                             tr!("integrations.ai.jobs.failed"),
                             counts.failed,
-                            p.red,
                         )),
                 )
                 .when_some(job_error, |this, error| {
@@ -834,26 +812,21 @@ impl App {
 }
 
 /// One queue counter in the AI runtime card.
-fn ai_job_stat(p: &Palette, label: String, value: i64, color: u32) -> Div {
-    v_flex()
-        .flex_1()
-        .min_w_0()
-        .gap(px(2.))
-        .p(px(10.))
-        .rounded(px(10.))
-        .bg(rgb(p.panel_2))
+fn ai_job_stat(p: &Palette, label: String, value: i64) -> Div {
+    h_flex()
+        .items_baseline()
+        .gap(px(5.))
         .child(
             div()
-                .text_size(px(10.))
+                .text_size(px(9.5))
                 .text_color(rgb(p.muted_2))
-                .truncate()
                 .child(label),
         )
         .child(
             div()
-                .text_size(px(18.))
+                .text_size(px(12.))
                 .font_semibold()
-                .text_color(rgb(color))
+                .text_color(rgb(p.text))
                 .child(value.to_string()),
         )
 }

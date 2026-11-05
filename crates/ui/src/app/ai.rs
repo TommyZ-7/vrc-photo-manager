@@ -887,11 +887,10 @@ pub(crate) struct AiTagView {
     pub(crate) label: String,
     pub(crate) tooltip: String,
     pub(crate) probability_label: String,
-    pub(crate) ai_badge: bool,
 }
 
 /// Chooses the catalog name for the active language and formats the
-/// probability tooltip. AI tags are read-only history, hence the badge.
+/// probability tooltip. AI tags are read-only history.
 /// Test-only the UI always calls `ai_tag_view_with_context`.
 #[cfg(test)]
 pub(crate) fn ai_tag_view(tag: &PhotoAiTagView, language: &str) -> AiTagView {
@@ -932,7 +931,6 @@ pub(crate) fn ai_tag_view_with_context(
         label,
         tooltip,
         probability_label: format!("{:.1}%", tag.probability * 100.0),
-        ai_badge: true,
     }
 }
 
@@ -2545,7 +2543,7 @@ mod tests {
     }
 
     #[test]
-    fn ai_tag_chip_shows_probability_and_ai_badge() {
+    fn ai_tag_chip_shows_probability() {
         let tag = PhotoAiTagView {
             tag_key: "sea".to_string(),
             name: "海".to_string(),
@@ -2556,7 +2554,6 @@ mod tests {
         let ja = ai_tag_view(&tag, "ja");
         assert_eq!(ja.label, "海");
         assert!(ja.tooltip.contains("0.969"));
-        assert!(ja.ai_badge);
         assert_eq!(ja.probability_label, "96.9%");
 
         let en = ai_tag_view(&tag, "en");

@@ -835,7 +835,6 @@ impl App {
                     .text_color(rgb(p.green))
                     .child(tr!("photos.section.ai_tags")),
             )
-            .child(self.badge(tr!("photos.ai.badge"), p.green, p.green_soft))
             .child(
                 div()
                     .text_size(px(9.))
