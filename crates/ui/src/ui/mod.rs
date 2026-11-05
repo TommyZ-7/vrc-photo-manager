@@ -6,6 +6,7 @@ pub(crate) mod components;
 pub(crate) mod compression;
 pub(crate) mod daemon_error;
 pub(crate) mod dashboard;
+pub(crate) mod dashboard_ai;
 pub(crate) mod dialogs;
 pub(crate) mod discord;
 pub(crate) mod gallery;

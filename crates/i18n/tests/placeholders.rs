@@ -64,6 +64,7 @@ const CALL_SITES: &[(&str, &[&str])] = &[
     ("daemon.scan_failed", &["count"]),
     ("daemon.sync.age", &["age"]),
     ("daemon.sync.age_systemd", &["age"]),
+    ("dashboard.ai.jobs_more", &["count"]),
     ("dashboard.deletion.blocked", &["count"]),
     ("dashboard.deletion.pending", &["count"]),
     ("dashboard.deletion.running", &["count"]),

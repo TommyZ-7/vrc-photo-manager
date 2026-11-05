@@ -12,6 +12,7 @@ use vrc_photon_core::model::DeletionStatus;
 use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::App;
+use crate::app::ai::ai_dashboard_view;
 use crate::app::daemon::{
     daemon_operation_label, daemon_state_label, daemon_sync_label, format_timestamp,
     ipc_status_label, open_path,
@@ -27,6 +28,7 @@ use crate::ui::theme::*;
 impl App {
     pub(crate) fn dashboard_screen(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let p = self.palette;
+        let show_ai_card = ai_dashboard_view(&self.ai, self.settings.ai_tagging_enabled).visible;
         let stats = h_flex()
             .flex_shrink_0()
             .gap(px(CARD_GAP))
@@ -94,6 +96,7 @@ impl App {
                             .gap(px(CARD_GAP))
                             .overflow_y_scrollbar()
                             .child(self.daemon_card(cx))
+                            .when(show_ai_card, |this| this.child(self.ai_dashboard_card(cx)))
                             .when(!self.deletion_requests.is_empty(), |this| {
                                 this.child(self.deletion_card(cx))
                             })

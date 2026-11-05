@@ -115,7 +115,7 @@ pub(crate) fn uninstall_request_args(
 
 /// Everything the AI tagging cards render. Populated from the database and
 /// kept current by daemon events.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct AiUiState {
     pub(crate) installations: Vec<PluginInstallation>,
     pub(crate) active: Option<PluginInstallation>,
@@ -279,7 +279,7 @@ impl AiUiState {
         progress: f64,
         stage: Option<TaggingStage>,
         error: Option<&str>,
-    ) {
+    ) -> bool {
         let terminal = matches!(
             status,
             TaggingJobStatus::Completed | TaggingJobStatus::Failed | TaggingJobStatus::Cancelled
@@ -335,15 +335,18 @@ impl AiUiState {
             None => {}
         }
 
-        if status == TaggingJobStatus::Failed
+        let new_failure = if status == TaggingJobStatus::Failed
             && let Some(error) = error
         {
-            self.set_error(AiErrorInfo::new(AiErrorKind::Job, error, None));
-        } else if status == TaggingJobStatus::Completed {
-            // A successful tag clears the previous job failure. Install/model
-            // failures are owned by their own flows and stay put.
-            self.clear_error(AiErrorKind::Job);
-        }
+            self.set_error(AiErrorInfo::new(AiErrorKind::Job, error, None))
+        } else {
+            if status == TaggingJobStatus::Completed {
+                // A successful tag clears the previous job failure. Install/model
+                // failures are owned by their own flows and stay put.
+                self.clear_error(AiErrorKind::Job);
+            }
+            false
+        };
 
         // The card shows the first three rows, so a newly pending row must not
         // push a processing job out of view.
@@ -356,6 +359,7 @@ impl AiUiState {
             | TaggingJobStatus::Cancelled => 3,
         });
         self.active_jobs.truncate(20);
+        new_failure
     }
 
     /// Applies an install event. Returns the failure message when it warrants
@@ -488,6 +492,80 @@ pub(crate) fn ai_plugin_card_state(ai: &AiUiState) -> AiPluginCardState {
         Some(ModelState::Ready) => AiPluginCardState::NeedsProbe,
         Some(ModelState::Error) => AiPluginCardState::Error,
         Some(ModelState::Missing) | None => AiPluginCardState::ModelMissing,
+    }
+}
+
+/// The dashboard card's visible state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AiDashboardState {
+    NotReady,
+    Idle,
+    Active,
+    Failed,
+}
+
+/// Presentation model for the dashboard AI card.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AiDashboardView {
+    pub(crate) visible: bool,
+    pub(crate) state: AiDashboardState,
+    pub(crate) jobs: Vec<TaggingJob>,
+    pub(crate) more: usize,
+}
+
+/// Builds the dashboard view. The card is hidden for an uninstalled plugin and
+/// for a ready plugin that the user has not enabled; a not-ready plugin stays
+/// visible so the card can point at setup.
+pub(crate) fn ai_dashboard_view(ai: &AiUiState, enabled: bool) -> AiDashboardView {
+    let installed = ai.active.is_some() || !ai.installations.is_empty();
+    let ready = ai.ready();
+    let visible = installed && (!ready || enabled);
+    if !visible {
+        return AiDashboardView {
+            visible: false,
+            state: AiDashboardState::NotReady,
+            jobs: Vec::new(),
+            more: 0,
+        };
+    }
+
+    let state = if !ready {
+        AiDashboardState::NotReady
+    } else if ai.job_counts.failed > 0 {
+        AiDashboardState::Failed
+    } else if ai.job_counts.waiting + ai.job_counts.pending + ai.job_counts.processing > 0 {
+        AiDashboardState::Active
+    } else {
+        AiDashboardState::Idle
+    };
+
+    let mut jobs: Vec<TaggingJob> = ai
+        .active_jobs
+        .iter()
+        .filter(|job| {
+            matches!(
+                job.status,
+                TaggingJobStatus::Processing
+                    | TaggingJobStatus::Pending
+                    | TaggingJobStatus::Waiting
+            )
+        })
+        .cloned()
+        .collect();
+    jobs.sort_by_key(|job| match job.status {
+        TaggingJobStatus::Processing => 0,
+        TaggingJobStatus::Pending => 1,
+        TaggingJobStatus::Waiting => 2,
+        TaggingJobStatus::Failed | TaggingJobStatus::Completed | TaggingJobStatus::Cancelled => 3,
+    });
+    let more = jobs.len().saturating_sub(3);
+    jobs.truncate(3);
+
+    AiDashboardView {
+        visible,
+        state,
+        jobs,
+        more,
     }
 }
 
@@ -1085,6 +1163,27 @@ pub(crate) fn ai_error_toast_in(language: &str, error: &AiErrorInfo) -> String {
     }
 }
 
+/// Failures worth a toast even when they arrive through a job progress event.
+/// Image-by-image failures stay in the cards; sidecar and resource failures
+/// need the user's attention.
+pub(crate) fn ai_job_error_is_notifiable(code: &str) -> bool {
+    matches!(
+        code,
+        "sidecar_exited"
+            | "sidecar_timeout"
+            | "sidecar_protocol"
+            | "protocol_error"
+            | "model_load_failed"
+            | "backend_unavailable"
+            | "out_of_memory"
+    )
+}
+
+/// A successful model download is announced once when it transitions to Ready.
+pub(crate) fn model_ready_toast_pending(previous_download: bool, status: ModelState) -> bool {
+    previous_download && status == ModelState::Ready
+}
+
 /// The terminal state event after a Recheck/variant switch carries no probe.
 /// That is a failed plugin operation, not an install failure.
 pub(crate) fn probe_failure_info() -> AiErrorInfo {
@@ -1630,7 +1729,7 @@ impl App {
                 stage,
                 error,
             } => {
-                self.ai.apply_tagging_progress(
+                let new_failure = self.ai.apply_tagging_progress(
                     &job_id,
                     photo_id,
                     status,
@@ -1638,6 +1737,16 @@ impl App {
                     stage,
                     error.as_deref(),
                 );
+                if new_failure
+                    && let Some(code) = error.as_deref()
+                    && ai_job_error_is_notifiable(code)
+                {
+                    let info = AiErrorInfo::new(AiErrorKind::Job, code, None);
+                    self.toast_error(
+                        ai_error_toast_in(&vrc_photon_i18n::current_locale(), &info),
+                        cx,
+                    );
+                }
                 let terminal = matches!(
                     status,
                     TaggingJobStatus::Completed
@@ -1703,6 +1812,13 @@ impl App {
                 if plugin_id != AI_PLUGIN_ID {
                     return false;
                 }
+                let was_downloading = self.ai.download.is_some()
+                    || self.ai.state.as_ref().is_some_and(|state| {
+                        matches!(
+                            state.model_state,
+                            ModelState::Downloading | ModelState::Verifying
+                        )
+                    });
                 if let Some(code) =
                     self.ai
                         .apply_model_download(status, bytes, total, error.as_deref())
@@ -1712,6 +1828,9 @@ impl App {
                         ai_error_toast_in(&vrc_photon_i18n::current_locale(), &info),
                         cx,
                     );
+                }
+                if model_ready_toast_pending(was_downloading, status) {
+                    self.toast_success(tr!("notifications.ai.model_ready"), cx);
                 }
                 self.refresh_ai_state(cx);
                 true
@@ -1765,18 +1884,19 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{
-        AI_PLUGIN_ID, AiErrorInfo, AiErrorKind, AiPluginAction, AiPluginCardState,
-        AiPluginCardView, AiResponseOutcome, AiUiState, ManualRetagOutcome, ModelDownloadView,
-        UninstallTarget, active_job_photo_label, ai_empty_state_labels, ai_error_code_is_stable,
-        ai_error_detail_in, ai_error_label_in, ai_error_summary_in, ai_error_toast_in,
-        ai_manifest_view, ai_plugin_card_state, ai_response_outcome, ai_tag_view,
-        ai_tag_view_with_context, ai_tag_views, apply_install_event, backend_options,
+        AI_PLUGIN_ID, AiDashboardState, AiErrorInfo, AiErrorKind, AiPluginAction,
+        AiPluginCardState, AiPluginCardView, AiResponseOutcome, AiUiState, ManualRetagOutcome,
+        ModelDownloadView, UninstallTarget, active_job_photo_label, ai_dashboard_view,
+        ai_empty_state_labels, ai_error_code_is_stable, ai_error_detail_in, ai_error_label_in,
+        ai_error_summary_in, ai_error_toast_in, ai_job_error_is_notifiable, ai_manifest_view,
+        ai_plugin_card_state, ai_response_outcome, ai_tag_view, ai_tag_view_with_context,
+        ai_tag_views, apply_install_event, backend_options,
         backend_selection_is_disabled_when_not_ready, collect_ai_snapshot,
         download_progress_bar_ratio, enqueue_manual_retag, format_tagged_at,
         install_event_applies_to_ai, installation_row_id, is_active_installation, load_photo_ai,
-        model_progress_ratio, needs_license_consent, people_label, people_label_in, place_label,
-        place_label_with_confidence, probe_failure_info, request_error_kind,
-        uninstall_request_args, variant_backend_label,
+        model_progress_ratio, model_ready_toast_pending, needs_license_consent, people_label,
+        people_label_in, place_label, place_label_with_confidence, probe_failure_info,
+        request_error_kind, uninstall_request_args, variant_backend_label,
     };
     use vrc_photon_ai_protocol::{
         BackendInfo, Catalog, ModelState, PluginInstallStatus, Probe, TagDefinition,
@@ -2743,5 +2863,104 @@ mod tests {
         assert_eq!(ai.probe, Some(probe));
         assert_eq!(ai.job_counts, JobStatusCounts::default());
         assert!(ai.active_jobs.is_empty());
+    }
+
+    #[test]
+    fn model_ready_toast_only_fires_after_a_download() {
+        assert!(model_ready_toast_pending(true, ModelState::Ready));
+        assert!(!model_ready_toast_pending(false, ModelState::Ready));
+        assert!(!model_ready_toast_pending(true, ModelState::Downloading));
+    }
+
+    #[test]
+    fn notifiable_job_errors_cover_sidecar_and_resource_failures() {
+        for code in [
+            "sidecar_exited",
+            "sidecar_timeout",
+            "sidecar_protocol",
+            "protocol_error",
+            "model_load_failed",
+            "backend_unavailable",
+            "out_of_memory",
+        ] {
+            assert!(ai_job_error_is_notifiable(code), "{code}");
+        }
+        assert!(!ai_job_error_is_notifiable("image_missing"));
+        assert!(!ai_job_error_is_notifiable("cancelled"));
+    }
+
+    #[test]
+    fn repeated_sidecar_crash_is_recorded_only_once() {
+        let mut ai = ready_state();
+        assert!(ai.apply_tagging_progress(
+            "job-1",
+            1,
+            TaggingJobStatus::Failed,
+            0.0,
+            None,
+            Some("sidecar_exited"),
+        ));
+        assert!(!ai.apply_tagging_progress(
+            "job-2",
+            2,
+            TaggingJobStatus::Failed,
+            0.0,
+            None,
+            Some("sidecar_exited"),
+        ));
+    }
+
+    #[test]
+    fn dashboard_ai_card_is_hidden_without_an_installation() {
+        assert!(!ai_dashboard_view(&AiUiState::default(), true).visible);
+
+        let mut installed = AiUiState::default();
+        installed.installations.push(sample_install());
+        let view = ai_dashboard_view(&installed, false);
+        assert!(view.visible);
+        assert_eq!(view.state, AiDashboardState::NotReady);
+    }
+
+    #[test]
+    fn dashboard_ai_card_is_hidden_when_ready_but_not_enabled() {
+        let ai = ready_state();
+        let hidden = ai_dashboard_view(&ai, false);
+        assert!(!hidden.visible);
+        assert!(hidden.jobs.is_empty());
+
+        assert_eq!(ai_dashboard_view(&ai, true).state, AiDashboardState::Idle);
+
+        let mut active = ai.clone();
+        active.job_counts.processing = 1;
+        assert_eq!(
+            ai_dashboard_view(&active, true).state,
+            AiDashboardState::Active
+        );
+
+        let mut failed = active.clone();
+        failed.job_counts.failed = 2;
+        assert_eq!(
+            ai_dashboard_view(&failed, true).state,
+            AiDashboardState::Failed
+        );
+
+        let mut not_ready = failed.clone();
+        not_ready.state = Some(sample_state(ModelState::Missing));
+        assert_eq!(
+            ai_dashboard_view(&not_ready, true).state,
+            AiDashboardState::NotReady
+        );
+    }
+
+    #[test]
+    fn dashboard_ai_card_limits_jobs_to_three_and_counts_the_rest() {
+        let mut ai = ready_state();
+        ai.active_jobs = (0..5)
+            .map(|index| sample_job(&format!("job-{index}"), TaggingJobStatus::Processing))
+            .collect();
+        let view = ai_dashboard_view(&ai, true);
+        assert_eq!(view.jobs.len(), 3);
+        assert_eq!(view.more, 2);
+        assert_eq!(view.jobs[0].status, TaggingJobStatus::Processing);
     }
 }
