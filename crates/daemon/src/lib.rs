@@ -816,10 +816,12 @@ impl Daemon {
     ) -> Result<()> {
         match command {
             DaemonCommand::Rescan => {
+                self.make_unlinked_photos_due()?;
                 self.scan_photos_with_initial(initial_scan)?;
                 self.link_unlinked()?;
             }
             DaemonCommand::Relog => {
+                self.make_unlinked_photos_due()?;
                 self.ingest_logs()?;
                 self.link_unlinked()?;
             }
@@ -891,6 +893,9 @@ impl Daemon {
             &self.thumbnail_dir,
             self.thumbnail_cache_limit.load(Ordering::Relaxed),
         );
+        // The scan above ran before this first log pass; clear the backoff it
+        // recorded so the sessions just ingested can link those photos.
+        self.make_unlinked_photos_due()?;
         self.ingest_logs()?;
         self.poll_vrchat_presence()?;
         self.link_unlinked()?;
@@ -980,6 +985,11 @@ impl Daemon {
             self.shutdown();
             return Ok(());
         }
+        // The startup scan runs before logs are ingested, so its link pass can
+        // record a retry before the sessions needed to link are available.
+        // Clear that schedule once at startup; the periodic loop keeps the
+        // backoff and only retries due photos.
+        self.make_unlinked_photos_due()?;
         self.ingest_logs()?;
         self.poll_vrchat_presence()?;
         self.link_unlinked()?;
@@ -1881,6 +1891,23 @@ impl Daemon {
         self.refresh_status()?;
         self.link_unlinked()?;
         Ok(pass)
+    }
+
+    /// Clears the link retry schedule for still-unlinked photos. Explicit
+    /// Relog/Rescan commands retry everything immediately; the periodic log
+    /// ingestion and watcher paths keep honoring the backoff.
+    fn make_unlinked_photos_due(&self) -> Result<usize> {
+        let changed = {
+            let db = self.db.lock().unwrap();
+            db.make_unlinked_photos_due()?
+        };
+        if changed > 0 {
+            tracing::debug!(
+                photos = changed,
+                "cleared link retry backoff for an explicit retry"
+            );
+        }
+        Ok(changed)
     }
 
     fn link_unlinked(&mut self) -> Result<()> {
@@ -4337,6 +4364,79 @@ mod tests {
     }
 
     #[test]
+    fn rescan_command_retries_a_photo_in_link_backoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let db_path = dir.path().join("library.db");
+        let captured_at = vrc_photon_core::log_parser::parse_line(
+            "2026.10.21 21:24:00 Debug      -  [Behaviour] Unloading scenes",
+        )
+        .unwrap()
+        .timestamp_utc();
+
+        let photo_id = {
+            let db = Db::open(&db_path).unwrap();
+            let mut ingestor = LogIngestor::new("output_log_2026-10-21_21-00-00.txt");
+            for line in [
+                "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)",
+                "2026.10.21 21:23:13 Debug      -  [Behaviour] Joining or Creating Room: Test World",
+            ] {
+                ingestor.ingest_line(&db, line).unwrap();
+            }
+            let photo_id = seed_photo_with_link_backoff(&db, &photo_dir, captured_at);
+            assert!(db.photo_context(photo_id).unwrap().is_none());
+            assert!(db.request_daemon_command(DaemonCommand::Rescan).unwrap());
+            photo_id
+        };
+
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        daemon.poll_commands().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        assert!(db.photo_context(photo_id).unwrap().is_some());
+    }
+
+    #[test]
+    fn relog_command_retries_a_photo_in_link_backoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let db_path = dir.path().join("library.db");
+        let captured_at = vrc_photon_core::log_parser::parse_line(
+            "2026.10.21 21:24:00 Debug      -  [Behaviour] Unloading scenes",
+        )
+        .unwrap()
+        .timestamp_utc();
+
+        let photo_id = {
+            let db = Db::open(&db_path).unwrap();
+            let photo_id = seed_photo_with_link_backoff(&db, &photo_dir, captured_at);
+            assert!(db.photo_context(photo_id).unwrap().is_none());
+            assert!(db.request_daemon_command(DaemonCommand::Relog).unwrap());
+            photo_id
+        };
+        std::fs::write(
+            log_dir.join("output_log_2026-10-21_21-00-00.txt"),
+            concat!(
+                "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)\n",
+                "2026.10.21 21:23:13 Debug      -  [Behaviour] Joining or Creating Room: Test World\n",
+            ),
+        )
+        .unwrap();
+
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        daemon.poll_commands().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        assert!(db.photo_context(photo_id).unwrap().is_some());
+    }
+
+    #[test]
     fn run_once_consumes_queued_commands() {
         let dir = tempfile::tempdir().unwrap();
         let photo_dir = dir.path().join("photos");
@@ -4962,6 +5062,40 @@ mod tests {
         image::RgbaImage::from_pixel(16, 10, image::Rgba([10, 20, 30, 255]))
             .save(path)
             .unwrap();
+    }
+
+    /// Stores a photo that is on disk but has a future link retry time, as if
+    /// a previous batch failed to find its session.
+    fn seed_photo_with_link_backoff(db: &Db, photo_dir: &Path, captured_at: i64) -> i64 {
+        let photo_path = photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&photo_path);
+        let root = db
+            .add_root(photo_dir.to_str().unwrap(), "reference")
+            .unwrap();
+        let file_name = photo_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let photo_id = db
+            .upsert_photo(&NewPhoto {
+                root_id: root,
+                rel_path: file_name.clone(),
+                abs_path: photo_path.to_string_lossy().to_string(),
+                file_name,
+                captured_at_utc: captured_at,
+                captured_at_local: "2026-10-21 21:24:00.000".to_string(),
+                tz_offset_sec: 9 * 3600,
+                width: 16,
+                height: 10,
+                file_size: 1,
+                mtime: captured_at,
+                blake3: None,
+            })
+            .unwrap();
+        db.record_link_attempt(photo_id, chrono::Utc::now().timestamp())
+            .unwrap();
+        photo_id
     }
 
     fn test_daemon(dir: &tempfile::TempDir) -> Daemon {

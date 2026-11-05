@@ -31,7 +31,7 @@ use crate::world_name::{
 
 /// Highest schema version this build understands. A database with a newer
 /// `user_version` was written by a future release and must not be opened.
-const SCHEMA_VERSION: i64 = 14;
+const SCHEMA_VERSION: i64 = 15;
 
 const SCHEMA_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -447,6 +447,21 @@ CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at);
 CREATE INDEX IF NOT EXISTS idx_sessions_ended ON sessions(ended_at) WHERE ended_at IS NOT NULL;
 "#;
 
+const SCHEMA_V15_LINK_ATTEMPTS: &str =
+    "ALTER TABLE photos ADD COLUMN link_attempts INTEGER NOT NULL DEFAULT 0;";
+
+const SCHEMA_V15_LINK_NEXT_RETRY_AT: &str =
+    "ALTER TABLE photos ADD COLUMN link_next_retry_at INTEGER;";
+
+const SCHEMA_V15_LINK_RETRY_INDEX: &str = r#"
+CREATE INDEX IF NOT EXISTS idx_photos_link_retry ON photos(link_next_retry_at)
+    WHERE status IN ('present', 'replaced');
+"#;
+
+/// Backoff applied after consecutive failed link attempts: one hour, six
+/// hours, one day, then weekly. Later attempts keep the weekly interval.
+const LINK_RETRY_BACKOFF_SECONDS: [i64; 4] = [3_600, 21_600, 86_400, 604_800];
+
 /// Sessions that end or start within an inclusive window around a capture.
 /// `UNION` (not `UNION ALL`) collapses a zero-length session that matches both
 /// ranges; the final ordering matches the caller's "at most two" contract.
@@ -611,6 +626,9 @@ impl Db {
         }
         if version < 14 {
             self.migrate_v14()?;
+        }
+        if version < 15 {
+            self.migrate_v15()?;
         }
         Ok(())
     }
@@ -969,6 +987,40 @@ impl Db {
         Ok(())
     }
 
+    /// Adds the link retry backoff columns and their due index. Each `ALTER`
+    /// is guarded by a column check so the step is safe to retry after a
+    /// crash between the DDL and `user_version`.
+    fn migrate_v15(&self) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version >= 15 {
+            tx.commit()?;
+            return Ok(());
+        }
+
+        for (column, sql) in [
+            ("link_attempts", SCHEMA_V15_LINK_ATTEMPTS),
+            ("link_next_retry_at", SCHEMA_V15_LINK_NEXT_RETRY_AT),
+        ] {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('photos') WHERE name = ?1)",
+                params![column],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                tx.execute_batch(sql)?;
+            }
+        }
+        tx.execute_batch(SCHEMA_V15_LINK_RETRY_INDEX)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (15, ?1)",
+            params![now_string()],
+        )?;
+        tx.pragma_update(None, "user_version", 15)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn connection(&self) -> &Connection {
         &self.conn
     }
@@ -1202,6 +1254,49 @@ impl Db {
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params![limit.max(1)], row_to_photo)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Unlinked photos that are due for a link attempt, least-attempted and
+    /// oldest first so a large backlog cannot starve photos behind the limit.
+    /// `now` is a Unix timestamp in seconds.
+    pub fn unlinked_photos_due(&self, limit: i64, now: i64) -> Result<Vec<Photo>> {
+        let sql = format!(
+            "SELECT {PHOTO_SELECT}{PHOTO_FROM} WHERE c.photo_id IS NULL \
+             AND {VISIBLE_STATUS} \
+             AND (p.link_next_retry_at IS NULL OR p.link_next_retry_at <= ?1) \
+             ORDER BY p.link_attempts ASC, p.captured_at_utc ASC LIMIT ?2"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![now, limit.max(1)], row_to_photo)?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    /// Records a failed link attempt and schedules the next one. The first
+    /// three failures retry after an hour, six hours, and a day; later
+    /// failures wait a week. `now` is a Unix timestamp in seconds.
+    pub fn record_link_attempt(&self, photo_id: i64, now: i64) -> Result<()> {
+        let [first, second, third, later] = LINK_RETRY_BACKOFF_SECONDS;
+        self.conn.execute(
+            "UPDATE photos SET link_attempts = link_attempts + 1, \
+                link_next_retry_at = ?2 + CASE link_attempts + 1 \
+                    WHEN 1 THEN ?3 WHEN 2 THEN ?4 WHEN 3 THEN ?5 ELSE ?6 END \
+             WHERE id = ?1",
+            params![photo_id, now, first, second, third, later],
+        )?;
+        Ok(())
+    }
+
+    /// Clears the retry schedule of every photo that still has no context, so
+    /// an explicit Relog/Rescan retries all of them immediately. Attempt
+    /// counts are kept for ordering and for the next failure's backoff.
+    pub fn make_unlinked_photos_due(&self) -> Result<usize> {
+        let changed = self.conn.execute(
+            "UPDATE photos SET link_next_retry_at = NULL \
+             WHERE link_next_retry_at IS NOT NULL \
+               AND NOT EXISTS (SELECT 1 FROM photo_context c WHERE c.photo_id = photos.id)",
+            [],
+        )?;
+        Ok(changed)
     }
 
     pub fn photos_for_root(&self, root_id: i64) -> Result<Vec<(i64, String)>> {
@@ -2025,6 +2120,12 @@ impl Db {
                 context.author,
                 context.linked_at,
             ],
+        )?;
+        // A successful link ends the retry cycle; the photo is no longer a
+        // candidate for `unlinked_photos_due`.
+        self.conn.execute(
+            "UPDATE photos SET link_attempts = 0, link_next_retry_at = NULL WHERE id = ?1",
+            params![context.photo_id],
         )?;
         Ok(())
     }
@@ -5743,7 +5844,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
     }
 
     #[test]
@@ -5789,7 +5890,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
         let author_columns: i64 = db
             .conn
             .query_row(
@@ -5841,7 +5942,7 @@ mod tests {
             }
             for handle in handles {
                 let opened = handle.join().unwrap();
-                assert_eq!(opened.unwrap().unwrap(), 14);
+                assert_eq!(opened.unwrap().unwrap(), 15);
             }
         }
     }
@@ -5853,7 +5954,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
         let has_output_dir: bool = db
             .conn
             .query_row(
@@ -5873,7 +5974,7 @@ mod tests {
             .connection()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
         let table: i64 = db
             .connection()
             .query_row(
@@ -6949,7 +7050,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
 
         let recorded: i64 = db
             .conn
@@ -6992,7 +7093,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
         let retry_column: i64 = db
             .conn
             .query_row(
@@ -7059,7 +7160,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
 
         let jobs = db.list_jobs(10).unwrap();
         assert_eq!(jobs.len(), 1);
@@ -7092,7 +7193,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
         assert_eq!(db.list_jobs(10).unwrap()[0].retry_count, 2);
 
         let tables: i64 = db
@@ -8321,7 +8422,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
         let exists: bool = db
             .conn
             .query_row(
@@ -8353,7 +8454,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
         let table: i64 = db
             .conn
             .query_row(
@@ -8454,7 +8555,8 @@ mod tests {
             let conn = Connection::open(&path).unwrap();
             conn.execute_batch(
                 "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);\
-                 CREATE TABLE photos (id INTEGER PRIMARY KEY, abs_path TEXT NOT NULL);\
+                 CREATE TABLE photos (id INTEGER PRIMARY KEY, abs_path TEXT NOT NULL, \
+                     status TEXT NOT NULL DEFAULT 'present');\
                  CREATE TABLE sessions (\
                      id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, ended_at INTEGER);\
                  CREATE TABLE compression_jobs (\
@@ -8470,7 +8572,7 @@ mod tests {
             .connection()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
         let abs_path: String = db
             .connection()
             .query_row("SELECT abs_path FROM photos WHERE id = 42", [], |row| {
@@ -8521,18 +8623,19 @@ mod tests {
     }
 
     #[test]
-    fn fresh_database_is_v14_and_has_the_claim_indexes() {
+    fn fresh_database_is_v15_and_has_the_link_retry_columns() {
         let db = Db::open_in_memory().unwrap();
         let version: i64 = db
             .connection()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
         for index in [
             "idx_jobs_claim",
             "idx_jobs_created",
             "idx_sessions_started",
             "idx_sessions_ended",
+            "idx_photos_link_retry",
         ] {
             let exists: bool = db
                 .connection()
@@ -8545,6 +8648,336 @@ mod tests {
                 .unwrap();
             assert!(exists, "missing index {index}");
         }
+        for column in ["link_attempts", "link_next_retry_at"] {
+            let exists: bool = db
+                .connection()
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('photos') WHERE name = ?1)",
+                    params![column],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "missing column {column}");
+        }
+    }
+
+    #[test]
+    fn migration_v15_upgrades_a_v14_database_and_preserves_photos() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_migrations (\
+                     version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);\
+                 CREATE TABLE photos (\
+                     id INTEGER PRIMARY KEY, abs_path TEXT NOT NULL, \
+                     status TEXT NOT NULL DEFAULT 'present');\
+                 INSERT INTO photos(id, abs_path) VALUES (42, '/photos/keep.png');\
+                 PRAGMA user_version = 14;",
+            )
+            .unwrap();
+        }
+
+        let db = Db::open(&path).unwrap();
+        let version: i64 = db
+            .connection()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 15);
+        let (attempts, next_retry, status): (i64, Option<i64>, String) = db
+            .connection()
+            .query_row(
+                "SELECT link_attempts, link_next_retry_at, status FROM photos WHERE id = 42",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(attempts, 0);
+        assert_eq!(next_retry, None);
+        assert_eq!(status, "present");
+        let exists: bool = db
+            .connection()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_photos_link_retry')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(exists);
+        let recorded: i64 = db
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM schema_migrations WHERE version = 15",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(recorded, 1);
+    }
+
+    #[test]
+    fn migration_v15_is_retryable() {
+        let db = Db::open_in_memory().unwrap();
+        db.connection()
+            .execute_batch("DROP INDEX idx_photos_link_retry;")
+            .unwrap();
+        db.connection()
+            .pragma_update(None, "user_version", 14)
+            .unwrap();
+
+        // The columns already exist, so both runs take the column-check path;
+        // the missing index is recreated either way.
+        db.migrate_v15().unwrap();
+        db.migrate_v15().unwrap();
+
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 15);
+        let exists: bool = db
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_photos_link_retry')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(exists);
+    }
+
+    #[test]
+    fn migration_v15_completes_a_partial_upgrade() {
+        let db = Db::open_in_memory().unwrap();
+        db.connection()
+            .execute_batch(
+                "DROP INDEX idx_photos_link_retry;\
+                 ALTER TABLE photos DROP COLUMN link_next_retry_at;",
+            )
+            .unwrap();
+        db.connection()
+            .pragma_update(None, "user_version", 14)
+            .unwrap();
+
+        db.migrate_v15().unwrap();
+
+        let column_exists: bool = db
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('photos') \
+                 WHERE name = 'link_next_retry_at')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(column_exists);
+        let index_exists: bool = db
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master \
+                 WHERE type = 'index' AND name = 'idx_photos_link_retry')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(index_exists);
+    }
+
+    #[test]
+    fn record_link_attempt_follows_the_backoff_schedule() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        for (attempt, expected) in [
+            (1, 1_000 + 3_600),
+            (2, 1_000 + 6 * 3_600),
+            (3, 1_000 + 24 * 3_600),
+            (4, 1_000 + 7 * 24 * 3_600),
+            (5, 1_000 + 7 * 24 * 3_600),
+        ] {
+            db.record_link_attempt(photo, 1_000).unwrap();
+            let (attempts, next_retry): (i64, Option<i64>) = db
+                .conn
+                .query_row(
+                    "SELECT link_attempts, link_next_retry_at FROM photos WHERE id = ?1",
+                    params![photo],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(attempts, attempt);
+            assert_eq!(next_retry, Some(expected));
+        }
+    }
+
+    #[test]
+    fn set_photo_context_clears_link_retry_state() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        db.record_link_attempt(photo, 1_000).unwrap();
+
+        db.set_photo_context(&PhotoContext {
+            photo_id: photo,
+            session_id: None,
+            world_id: None,
+            world_name: Some("Linked World".to_string()),
+            instance_id: None,
+            link_method: "log".to_string(),
+            confidence: 0.9,
+            author: None,
+            linked_at: "2026-11-06T00:00:00+00:00".to_string(),
+        })
+        .unwrap();
+
+        let (attempts, next_retry): (i64, Option<i64>) = db
+            .conn
+            .query_row(
+                "SELECT link_attempts, link_next_retry_at FROM photos WHERE id = ?1",
+                params![photo],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(attempts, 0);
+        assert_eq!(next_retry, None);
+    }
+
+    #[test]
+    fn unlinked_photos_due_respects_schedule_and_visibility() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let due = db
+            .upsert_photo(&sample_photo(root, "/photos/due.png", 300))
+            .unwrap();
+        let future = db
+            .upsert_photo(&sample_photo(root, "/photos/future.png", 200))
+            .unwrap();
+        let linked = db
+            .upsert_photo(&sample_photo(root, "/photos/linked.png", 100))
+            .unwrap();
+        let missing = db
+            .upsert_photo(&sample_photo(root, "/photos/missing.png", 50))
+            .unwrap();
+        db.record_link_attempt(future, 1_000).unwrap();
+        db.set_photo_context(&PhotoContext {
+            photo_id: linked,
+            session_id: None,
+            world_id: None,
+            world_name: None,
+            instance_id: None,
+            link_method: "log".to_string(),
+            confidence: 0.9,
+            author: None,
+            linked_at: "2026-11-06T00:00:00+00:00".to_string(),
+        })
+        .unwrap();
+        db.mark_missing(missing).unwrap();
+
+        let ids = |photos: Vec<Photo>| photos.into_iter().map(|photo| photo.id).collect::<Vec<_>>();
+        assert_eq!(ids(db.unlinked_photos_due(10, 1_000).unwrap()), vec![due]);
+        assert_eq!(
+            ids(db.unlinked_photos_due(10, 1_000 + 3_600).unwrap()),
+            vec![due, future]
+        );
+    }
+
+    #[test]
+    fn unlinked_photos_due_orders_least_attempted_then_oldest() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let newest = db
+            .upsert_photo(&sample_photo(root, "/photos/newest.png", 400))
+            .unwrap();
+        let middle = db
+            .upsert_photo(&sample_photo(root, "/photos/middle.png", 300))
+            .unwrap();
+        let older = db
+            .upsert_photo(&sample_photo(root, "/photos/older.png", 200))
+            .unwrap();
+        let oldest = db
+            .upsert_photo(&sample_photo(root, "/photos/oldest.png", 100))
+            .unwrap();
+        db.record_link_attempt(older, 0).unwrap();
+        db.record_link_attempt(oldest, 0).unwrap();
+        db.record_link_attempt(oldest, 0).unwrap();
+
+        let now = 1_000_000;
+        let ids = |photos: Vec<Photo>| photos.into_iter().map(|photo| photo.id).collect::<Vec<_>>();
+        // Attempts first, then capture time; the two zero-attempt photos are
+        // oldest-first so the oldest unlinked photo is not starved.
+        assert_eq!(
+            ids(db.unlinked_photos_due(10, now).unwrap()),
+            vec![middle, newest, older, oldest]
+        );
+        assert_eq!(
+            ids(db.unlinked_photos_due(2, now).unwrap()),
+            vec![middle, newest]
+        );
+
+        // The first page is now back in backoff, so the next batch reaches the
+        // older photos instead of returning the same two rows forever.
+        db.record_link_attempt(middle, now).unwrap();
+        db.record_link_attempt(newest, now).unwrap();
+        assert_eq!(
+            ids(db.unlinked_photos_due(2, now).unwrap()),
+            vec![older, oldest]
+        );
+    }
+
+    #[test]
+    fn make_unlinked_photos_due_clears_only_unlinked_photos() {
+        let db = Db::open_in_memory().unwrap();
+        let unlinked = seed_photo(&db);
+        let linked = seed_other_photo(&db);
+        db.record_link_attempt(unlinked, 1_000).unwrap();
+        db.set_photo_context(&PhotoContext {
+            photo_id: linked,
+            session_id: None,
+            world_id: None,
+            world_name: None,
+            instance_id: None,
+            link_method: "log".to_string(),
+            confidence: 0.9,
+            author: None,
+            linked_at: "2026-11-06T00:00:00+00:00".to_string(),
+        })
+        .unwrap();
+        db.conn
+            .execute(
+                "UPDATE photos SET link_next_retry_at = 99_999 WHERE id = ?1",
+                params![linked],
+            )
+            .unwrap();
+
+        assert_eq!(db.make_unlinked_photos_due().unwrap(), 1);
+
+        let next_retry: Option<i64> = db
+            .conn
+            .query_row(
+                "SELECT link_next_retry_at FROM photos WHERE id = ?1",
+                params![unlinked],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(next_retry, None);
+        let attempts: i64 = db
+            .conn
+            .query_row(
+                "SELECT link_attempts FROM photos WHERE id = ?1",
+                params![unlinked],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(attempts, 1);
+        let linked_retry: Option<i64> = db
+            .conn
+            .query_row(
+                "SELECT link_next_retry_at FROM photos WHERE id = ?1",
+                params![linked],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(linked_retry, Some(99_999));
     }
 
     #[test]
@@ -8560,6 +8993,9 @@ mod tests {
                      id INTEGER PRIMARY KEY, started_at INTEGER NOT NULL, ended_at INTEGER);\
                  CREATE TABLE compression_jobs (\
                      id TEXT PRIMARY KEY, status TEXT NOT NULL, created_at TEXT NOT NULL);\
+                 CREATE TABLE photos (\
+                     id INTEGER PRIMARY KEY, abs_path TEXT NOT NULL, \
+                     status TEXT NOT NULL DEFAULT 'present');\
                  PRAGMA user_version = 13;",
             )
             .unwrap();
@@ -8570,7 +9006,7 @@ mod tests {
             .connection()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 14);
+        assert_eq!(version, 15);
         for index in [
             "idx_jobs_claim",
             "idx_jobs_created",
@@ -8630,25 +9066,25 @@ mod tests {
         let path = dir.path().join("library.db");
         let db = Db::open(&path).unwrap();
         db.connection()
-            .pragma_update(None, "user_version", 15)
+            .pragma_update(None, "user_version", 16)
             .unwrap();
         drop(db);
 
         match Db::open(&path) {
             Err(CoreError::Invalid(message)) => {
+                assert!(message.contains("16"), "{message}");
                 assert!(message.contains("15"), "{message}");
-                assert!(message.contains("14"), "{message}");
             }
             Err(error) => panic!("expected a typed future-version error, got {error}"),
-            Ok(_) => panic!("expected Db::open to reject schema version 15"),
+            Ok(_) => panic!("expected Db::open to reject schema version 16"),
         }
         match Db::open_read_only(&path) {
             Err(CoreError::Invalid(message)) => {
+                assert!(message.contains("16"), "{message}");
                 assert!(message.contains("15"), "{message}");
-                assert!(message.contains("14"), "{message}");
             }
             Err(error) => panic!("expected a typed future-version error, got {error}"),
-            Ok(_) => panic!("expected Db::open_read_only to reject schema version 15"),
+            Ok(_) => panic!("expected Db::open_read_only to reject schema version 16"),
         }
     }
 
