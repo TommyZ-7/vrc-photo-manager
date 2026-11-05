@@ -402,9 +402,7 @@ impl App {
         self.ai_thresholds.draft.clear();
         self.refresh_ai_state(cx);
         self.refresh_selected_ai(cx);
-        if self.search_active {
-            self.refresh_search_after_ai_tag_edit(cx);
-        }
+        self.refresh_search_after_ai_tag_edit(cx);
         self.toast_success(tr!("settings.ai.thresholds.saved"), cx);
         self.close_ai_thresholds(window, cx);
     }

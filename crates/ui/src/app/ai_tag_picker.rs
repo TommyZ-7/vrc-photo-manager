@@ -170,9 +170,6 @@ impl App {
             }
         }
         self.search_ai_tags = ordered;
-        if self.searching {
-            self.search_refresh_pending = true;
-        }
         self.close_ai_tag_picker(window, cx);
         self.run_search(cx);
     }
@@ -181,10 +178,7 @@ impl App {
     /// immediately; otherwise only the draft filter changes.
     pub(crate) fn remove_search_ai_tag(&mut self, key: &str, cx: &mut Context<Self>) {
         self.search_ai_tags.retain(|tag| tag != key);
-        if self.search_active {
-            if self.searching {
-                self.search_refresh_pending = true;
-            }
+        if self.applied_search.is_some() {
             self.run_search(cx);
         } else {
             cx.notify();

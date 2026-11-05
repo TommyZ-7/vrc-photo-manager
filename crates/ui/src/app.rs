@@ -356,6 +356,9 @@ pub struct App {
     pub(crate) applied_search: Option<PhotoTextFilter>,
     pub(crate) pending_search_anchor: Option<i64>,
     pub(crate) search_refresh_pending: bool,
+    /// A tag/AI edit changed the applied search while the Search screen was
+    /// hidden. Refresh once when the user returns to Search.
+    pub(crate) search_refresh_dirty: bool,
     pub(crate) search_favorite: bool,
     pub(crate) search_days: Option<i64>,
     pub(crate) search_ai_tags: Vec<String>,
@@ -1117,6 +1120,7 @@ impl App {
             applied_search: None,
             pending_search_anchor: None,
             search_refresh_pending: false,
+            search_refresh_dirty: false,
             search_favorite: false,
             search_days: Some(7),
             search_ai_tags: Vec::new(),

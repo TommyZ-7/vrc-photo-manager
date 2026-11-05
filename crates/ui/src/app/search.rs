@@ -14,8 +14,8 @@ use vrc_photon_core::db::Db;
 use vrc_photon_core::model::{AiPhotoFilter, PhotoIndexEntry, PhotoTextFilter};
 use vrc_photon_i18n::tr_args;
 
-use crate::app::App;
 use crate::app::cli::log_timing;
+use crate::app::{App, Screen};
 use crate::state::photo_browser::{
     PhotoIndex, anchor_photo_id, list_scroll_top, search_anchor_after_result,
 };
@@ -34,9 +34,31 @@ pub(crate) fn ai_filter_is_active(filter: &PhotoTextFilter) -> bool {
     !filter.ai.tags.is_empty() || filter.ai.people_count.is_some()
 }
 
-/// Whether any filter that can be refreshed after a tag write is active.
-pub(crate) fn has_active_filter(filter: &PhotoTextFilter) -> bool {
-    has_tag_filter(filter) || ai_filter_is_active(filter)
+/// When a tag or AI-tag edit should refresh the applied search.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FilterRefreshAction {
+    /// The Search screen is mounted and nothing else is running.
+    Now,
+    /// A query is in flight; run one refresh with the latest filter after it.
+    AfterQuery,
+    /// The Search screen is hidden; refresh when the user returns to it.
+    OnVisible,
+}
+
+/// A tag edit must not start a hidden query; only Search may refresh now.
+fn filter_refresh_action(screen: Screen, searching: bool) -> FilterRefreshAction {
+    match (screen, searching) {
+        (Screen::Search, false) => FilterRefreshAction::Now,
+        (Screen::Search, true) => FilterRefreshAction::AfterQuery,
+        _ => FilterRefreshAction::OnVisible,
+    }
+}
+
+/// Takes the anchor requested for a finished query. The result path must read
+/// it before clearing any search state, otherwise a refresh loses the scroll
+/// position.
+fn take_requested_search_anchor(pending: &mut Option<i64>) -> Option<i64> {
+    pending.take()
 }
 
 /// Parses the single people-count input. Empty or invalid input means "no
@@ -59,15 +81,8 @@ pub(crate) fn build_ai_filter(tags: Vec<String>, people_input: &str) -> AiPhotoF
 
 impl App {
     pub(crate) fn run_search(&mut self, cx: &mut Context<Self>) {
-        // One 100k text query at a time; the Search button is disabled while a
-        // request is in flight, but the favorite switch and presets also call
-        // this method.
-        if self.searching {
-            return;
-        }
-        if !self.selected_ids.is_empty() {
-            self.clear_selection(cx);
-        }
+        // Build the filter before the in-flight guard: favorite/date/AI edits
+        // made while a query runs must replace the draft immediately.
         let world = self.world_input.read(cx).value().to_string();
         let player = self.player_input.read(cx).value().to_string();
         let tag = self.tag_input.read(cx).value().to_string();
@@ -85,6 +100,16 @@ impl App {
             ai: build_ai_filter(self.search_ai_tags.clone(), &people),
         };
         self.applied_search = Some(filter.clone());
+        self.search_refresh_dirty = false;
+        // One 100k text query at a time. Keep this filter and let the result
+        // path start a single refresh with it once the running query lands.
+        if self.searching {
+            self.search_refresh_pending = true;
+            return;
+        }
+        if !self.selected_ids.is_empty() {
+            self.clear_selection(cx);
+        }
         self.pending_search_anchor = None;
         self.search_view.borrow_mut().pending_anchor = None;
         self.search_refresh_pending = false;
@@ -92,6 +117,9 @@ impl App {
     }
 
     pub(crate) fn start_search(&mut self, filter: PhotoTextFilter, cx: &mut Context<Self>) {
+        // A new query already carries the latest filter, so it supersedes any
+        // refresh that was queued behind an older in-flight result.
+        self.search_refresh_pending = false;
         self.search_view.borrow_mut().pending_anchor = None;
         self.search_request = self.search_request.wrapping_add(1);
         let generation = self.search_request;
@@ -148,10 +176,9 @@ impl App {
         if generation != self.search_request {
             return;
         }
-        self.pending_search_anchor = None;
+        let requested_anchor = take_requested_search_anchor(&mut self.pending_search_anchor);
         match result {
             Ok(entries) => {
-                let requested_anchor = self.pending_search_anchor.take();
                 let anchor = {
                     let mut view = self.search_view.borrow_mut();
                     view.replace_index(Arc::new(PhotoIndex::new(entries)));
@@ -171,19 +198,39 @@ impl App {
                 };
                 self.search_active = true;
                 self.searching = false;
-                if self.search_refresh_pending {
-                    self.search_refresh_pending = false;
-                    self.start_search_refresh(anchor, cx);
-                }
+                self.finish_pending_search_refresh(anchor, cx);
             }
             Err(error) => {
-                self.pending_search_anchor = None;
-                self.search_refresh_pending = false;
                 self.searching = false;
-                self.toast_error(tr_args!("search.error", error = error), cx);
+                if self.search_refresh_pending {
+                    // A filter change or tag edit is queued. Retry with the
+                    // latest filter before surfacing the error; a failed retry
+                    // reports its own error.
+                    let anchor = self.current_search_anchor();
+                    self.finish_pending_search_refresh(anchor, cx);
+                } else {
+                    self.toast_error(tr_args!("search.error", error = error), cx);
+                }
             }
         }
         cx.notify();
+    }
+
+    /// Starts the single refresh queued while a query was running, or keeps the
+    /// search dirty until it is visible again.
+    fn finish_pending_search_refresh(&mut self, anchor: Option<i64>, cx: &mut Context<Self>) {
+        if !self.search_refresh_pending {
+            return;
+        }
+        self.search_refresh_pending = false;
+        if self.screen == Screen::Search {
+            self.start_search_refresh(anchor, cx);
+        } else {
+            // The edit was scheduled while Search was visible, but the user
+            // left before the query finished. Do not run a hidden query;
+            // refresh when Search is shown again.
+            self.search_refresh_dirty = true;
+        }
     }
 
     pub(crate) fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -196,6 +243,7 @@ impl App {
         self.pending_search_anchor = None;
         self.search_view.borrow_mut().pending_anchor = None;
         self.search_refresh_pending = false;
+        self.search_refresh_dirty = false;
         self.search_ai_tags.clear();
         self.search_people_input
             .update(cx, |input, cx| input.set_value("", window, cx));
@@ -222,40 +270,51 @@ impl App {
         predicate: fn(&PhotoTextFilter) -> bool,
         cx: &mut Context<Self>,
     ) {
-        if !self.search_active {
-            return;
-        }
         let Some(filter) = self.applied_search.clone() else {
             return;
         };
         if !predicate(&filter) {
             return;
         }
-        if self.searching {
-            // The in-flight query may have started before the tag write.
-            // Apply its result first, then refresh from the new state.
-            self.search_refresh_pending = true;
-            return;
+        match filter_refresh_action(self.screen, self.searching) {
+            FilterRefreshAction::Now => {
+                let anchor = self.current_search_anchor();
+                self.start_search_refresh(anchor, cx);
+            }
+            FilterRefreshAction::AfterQuery => {
+                // The in-flight query may have started before the tag write.
+                // Apply its result first, then refresh from the new state.
+                self.search_refresh_pending = true;
+            }
+            FilterRefreshAction::OnVisible => {
+                // Search is hidden. Re-query when the screen is mounted again
+                // instead of running a query the user cannot see.
+                self.search_refresh_dirty = true;
+            }
         }
-        let anchor = {
-            let view = self.search_view.borrow();
-            anchor_photo_id(
-                &view.index,
-                list_scroll_top(&view.scroll),
-                view.columns,
-                view.row_height,
-            )
-        };
+    }
+
+    /// Re-runs the applied search without losing the current grid position.
+    pub(crate) fn refresh_search_keeping_anchor(&mut self, cx: &mut Context<Self>) {
+        let anchor = self.current_search_anchor();
         self.start_search_refresh(anchor, cx);
+    }
+
+    /// Top photo of the visible search grid, used as the refresh anchor.
+    fn current_search_anchor(&self) -> Option<i64> {
+        let view = self.search_view.borrow();
+        anchor_photo_id(
+            &view.index,
+            list_scroll_top(&view.scroll),
+            view.columns,
+            view.row_height,
+        )
     }
 
     fn start_search_refresh(&mut self, anchor: Option<i64>, cx: &mut Context<Self>) {
         let Some(filter) = self.applied_search.clone() else {
             return;
         };
-        if !has_active_filter(&filter) {
-            return;
-        }
         self.pending_search_anchor = anchor;
         self.start_search(filter, cx);
     }
@@ -264,8 +323,10 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{
-        ai_filter_is_active, build_ai_filter, has_active_filter, has_tag_filter, parse_people_count,
+        FilterRefreshAction, ai_filter_is_active, build_ai_filter, filter_refresh_action,
+        has_tag_filter, parse_people_count, take_requested_search_anchor,
     };
+    use crate::app::Screen;
     use vrc_photon_core::model::{AiPhotoFilter, PhotoTextFilter};
 
     #[test]
@@ -312,19 +373,39 @@ mod tests {
     }
 
     #[test]
-    fn active_filter_includes_ai_conditions() {
-        assert!(!has_active_filter(&PhotoTextFilter::default()));
-        assert!(has_active_filter(&PhotoTextFilter {
-            ai: AiPhotoFilter {
-                tags: vec!["sea".into()],
-                people_count: None,
-            },
-            ..Default::default()
-        }));
-        assert!(has_active_filter(&PhotoTextFilter {
-            tag: Some("manual".into()),
-            ..Default::default()
-        }));
+    fn filter_refreshes_defer_until_search_is_visible_and_idle() {
+        assert_eq!(
+            filter_refresh_action(Screen::Search, false),
+            FilterRefreshAction::Now
+        );
+        assert_eq!(
+            filter_refresh_action(Screen::Search, true),
+            FilterRefreshAction::AfterQuery
+        );
+        for screen in [
+            Screen::Photos,
+            Screen::Compression,
+            Screen::Dashboard,
+            Screen::Integrations,
+            Screen::Settings,
+        ] {
+            assert_eq!(
+                filter_refresh_action(screen, false),
+                FilterRefreshAction::OnVisible
+            );
+            assert_eq!(
+                filter_refresh_action(screen, true),
+                FilterRefreshAction::OnVisible
+            );
+        }
+    }
+
+    #[test]
+    fn requested_search_anchor_is_taken_before_search_state_is_cleared() {
+        let mut pending = Some(42);
+        assert_eq!(take_requested_search_anchor(&mut pending), Some(42));
+        assert_eq!(pending, None);
+        assert_eq!(take_requested_search_anchor(&mut pending), None);
     }
 
     #[test]
