@@ -175,6 +175,8 @@ const CALL_SITES: &[(&str, &[&str])] = &[
     ("settings.language.save_failed", &["error"]),
     ("settings.save_failed", &["error"]),
     ("settings.ai.error_code", &["code"]),
+    ("settings.ai.thresholds.default", &["value"]),
+    ("settings.ai.thresholds.save_failed", &["error"]),
     ("settings.thumbnail.cleared", &["files", "size"]),
     ("settings.thumbnail.usage", &["files", "size"]),
     ("sidebar.import.done.headline", &["count"]),

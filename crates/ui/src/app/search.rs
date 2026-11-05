@@ -213,6 +213,10 @@ impl App {
         self.refresh_search_after_filter(has_tag_filter, cx);
     }
 
+    pub(crate) fn refresh_search_after_ai_tag_edit(&mut self, cx: &mut Context<Self>) {
+        self.refresh_search_after_filter(ai_filter_is_active, cx);
+    }
+
     fn refresh_search_after_filter(
         &mut self,
         predicate: fn(&PhotoTextFilter) -> bool,

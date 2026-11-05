@@ -1174,6 +1174,16 @@ impl App {
                     .items_center()
                     .gap(px(8.))
                     .child(self.ai_primary_action_button(view.primary_action, false, cx))
+                    .when(state == AiPluginCardState::Ready, |this| {
+                        this.child(
+                            Button::new("ai-thresholds-open")
+                                .label(tr!("settings.ai.thresholds.open"))
+                                .small()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_ai_thresholds(window, cx)
+                                })),
+                        )
+                    })
                     .child(self.ai_action_button(
                         "ai-import-zip",
                         AiPluginAction::InstallZip,
