@@ -4211,46 +4211,68 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Applies a batch of tag-threshold overrides in one transaction.
+    ///
+    /// `Some(threshold)` upserts an override; `None` removes it so the
+    /// catalog default applies again. After writing, `photo_ai_tags.applied`
+    /// is recomputed once. Returns the number of re-evaluated tag rows.
+    pub fn apply_ai_tag_thresholds(
+        &self,
+        plugin_id: &str,
+        updates: &[(String, Option<f32>)],
+    ) -> Result<usize> {
+        for (_, threshold) in updates {
+            if let Some(threshold) = threshold
+                && (!threshold.is_finite() || !(0.0..=1.0).contains(threshold))
+            {
+                return Err(CoreError::Invalid(format!(
+                    "AI tag threshold {threshold} is outside 0.0..=1.0"
+                )));
+            }
+        }
+
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        for (tag_key, threshold) in updates {
+            match threshold {
+                Some(threshold) => {
+                    tx.execute(
+                        "INSERT INTO ai_tag_thresholds(plugin_id, tag_key, threshold, updated_at) \
+                         VALUES (?1, ?2, ?3, ?4) \
+                         ON CONFLICT(plugin_id, tag_key) DO UPDATE SET \
+                            threshold = excluded.threshold, \
+                            updated_at = excluded.updated_at",
+                        params![plugin_id, tag_key, *threshold, now_string()],
+                    )?;
+                }
+                None => {
+                    tx.execute(
+                        "DELETE FROM ai_tag_thresholds WHERE plugin_id = ?1 AND tag_key = ?2",
+                        params![plugin_id, tag_key],
+                    )?;
+                }
+            }
+        }
+        let updated = reapply_thresholds(&tx, plugin_id)?;
+        tx.commit()?;
+        if updated > 0 {
+            self.bump_library_revision()?;
+        }
+        Ok(updated)
+    }
+
     pub fn set_ai_tag_threshold(
         &self,
         plugin_id: &str,
         tag_key: &str,
         threshold: f32,
     ) -> Result<()> {
-        if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
-            return Err(CoreError::Invalid(format!(
-                "AI tag threshold {threshold} is outside 0.0..=1.0"
-            )));
-        }
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        tx.execute(
-            "INSERT INTO ai_tag_thresholds(plugin_id, tag_key, threshold, updated_at) \
-             VALUES (?1, ?2, ?3, ?4) \
-             ON CONFLICT(plugin_id, tag_key) DO UPDATE SET \
-                threshold = excluded.threshold, \
-                updated_at = excluded.updated_at",
-            params![plugin_id, tag_key, threshold, now_string()],
-        )?;
-        let updated = reapply_thresholds(&tx, plugin_id)?;
-        tx.commit()?;
-        if updated > 0 {
-            self.bump_library_revision()?;
-        }
-        Ok(())
+        self.apply_ai_tag_thresholds(plugin_id, &[(tag_key.to_string(), Some(threshold))])
+            .map(|_| ())
     }
 
     pub fn reset_ai_tag_threshold(&self, plugin_id: &str, tag_key: &str) -> Result<()> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        tx.execute(
-            "DELETE FROM ai_tag_thresholds WHERE plugin_id = ?1 AND tag_key = ?2",
-            params![plugin_id, tag_key],
-        )?;
-        let updated = reapply_thresholds(&tx, plugin_id)?;
-        tx.commit()?;
-        if updated > 0 {
-            self.bump_library_revision()?;
-        }
-        Ok(())
+        self.apply_ai_tag_thresholds(plugin_id, &[(tag_key.to_string(), None)])
+            .map(|_| ())
     }
 
     pub fn ai_tag_thresholds(&self, plugin_id: &str) -> Result<Vec<AiTagThreshold>> {
@@ -8550,6 +8572,60 @@ mod tests {
             db.set_ai_tag_threshold(AI_PLUGIN, "sea", f32::NAN),
             Err(CoreError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn apply_ai_tag_thresholds_updates_resets_and_reapplies_once() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        install_test_catalog(&db);
+        db.save_photo_ai(
+            photo,
+            AI_PLUGIN,
+            &test_ai_result(&[("sea", 0.75), ("park", 0.75)]),
+        )
+        .unwrap();
+        let revision = db.library_revision().unwrap();
+
+        let updated = db
+            .apply_ai_tag_thresholds(
+                AI_PLUGIN,
+                &[("sea".to_string(), Some(0.8)), ("park".to_string(), None)],
+            )
+            .unwrap();
+
+        assert!(updated >= 2);
+        let overrides = db.ai_tag_thresholds(AI_PLUGIN).unwrap();
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides[0].tag_key, "sea");
+        let tags = db.photo_ai_tags(photo, false).unwrap();
+        assert!(
+            !tags
+                .iter()
+                .find(|tag| tag.tag_key == "sea")
+                .unwrap()
+                .applied
+        );
+        assert!(
+            tags.iter()
+                .find(|tag| tag.tag_key == "park")
+                .unwrap()
+                .applied
+        );
+        assert!(db.library_revision().unwrap() > revision);
+    }
+
+    #[test]
+    fn apply_ai_tag_thresholds_rejects_out_of_range_values() {
+        let db = Db::open_in_memory().unwrap();
+        assert!(
+            db.apply_ai_tag_thresholds(AI_PLUGIN, &[("sea".to_string(), Some(1.1))])
+                .is_err()
+        );
+        assert!(
+            db.apply_ai_tag_thresholds(AI_PLUGIN, &[("sea".to_string(), Some(f32::NAN))])
+                .is_err()
+        );
     }
 
     #[test]

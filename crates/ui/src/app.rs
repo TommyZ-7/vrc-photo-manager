@@ -1,5 +1,6 @@
 pub(crate) mod ai;
 pub(crate) mod ai_tag_picker;
+pub(crate) mod ai_thresholds;
 pub(crate) mod cli;
 pub(crate) mod compression;
 pub(crate) mod daemon;
@@ -277,6 +278,9 @@ pub struct App {
     /// Search AI-tag picker state and its query subscription.
     pub(crate) ai_tag_picker: ai_tag_picker::AiTagPickerState,
     pub(crate) _ai_tag_picker_query_subscription: Subscription,
+    /// Tag-threshold editor state.
+    pub(crate) ai_thresholds: ai_thresholds::AiThresholdEditorState,
+    pub(crate) _ai_threshold_query_subscription: Subscription,
     /// 0 = body expanded, 1 = collapsed to the card header.
     pub(crate) integrations_auto_motion: ToggleMotion,
     /// 0 = runtime details expanded, 1 = collapsed while AI is disabled.
@@ -591,6 +595,19 @@ impl App {
         let ai_tag_picker_focus = cx.focus_handle();
         let ai_tag_picker =
             ai_tag_picker::AiTagPickerState::new(ai_tag_picker_query, ai_tag_picker_focus);
+        let ai_threshold_query = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(tr!("settings.ai.thresholds.search_placeholder"))
+        });
+        let ai_threshold_query_subscription =
+            cx.subscribe(&ai_threshold_query, |_, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            });
+        let ai_threshold_focus = cx.focus_handle();
+        let ai_thresholds =
+            ai_thresholds::AiThresholdEditorState::new(ai_threshold_query, ai_threshold_focus);
         let tag_edit_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(tr!("input.tag_add")));
         let note_edit_input = cx.new(|cx| {
@@ -1001,6 +1018,8 @@ impl App {
             ai_modal_focus_pending: false,
             ai_tag_picker,
             _ai_tag_picker_query_subscription: ai_tag_picker_query_subscription,
+            ai_thresholds,
+            _ai_threshold_query_subscription: ai_threshold_query_subscription,
             integrations_auto_motion: ToggleMotion::settled(if initial_settings.auto_compress {
                 0.0
             } else {
@@ -1301,6 +1320,9 @@ impl Render for App {
             }
             if self.ai_tag_picker.open {
                 root = root.child(self.ai_tag_picker_overlay(window, cx));
+            }
+            if self.ai_thresholds.open {
+                root = root.child(self.ai_thresholds_overlay(window, cx));
             }
         } else {
             root = root.child(self.quick_look(window, cx));
