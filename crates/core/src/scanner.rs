@@ -1,9 +1,12 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::db::Db;
+use crate::db::{Db, PhotoScanState};
 use crate::error::{CoreError, Result};
 use crate::hashing;
-use crate::model::{NewPhoto, PhotoStatus};
+use crate::model::{NewPhoto, Photo, PhotoStatus};
 use crate::photo_filename::{
     from_modified_time, image_dimensions, is_source_photo, parse_photo_filename,
 };
@@ -69,6 +72,9 @@ pub struct ScanReport {
     pub rebound_ids: Vec<i64>,
     pub seen_paths: Vec<String>,
     pub failures: Vec<ScanFailure>,
+    /// True when the walk or indexing stopped because the caller asked to
+    /// cancel. A cancelled scan must not be used to mark unseen photos missing.
+    pub cancelled: bool,
 }
 
 /// The phase a scan is currently in.
@@ -106,8 +112,21 @@ pub fn scan_root_report(root: &Path) -> Result<(Vec<ScannedPhoto>, Vec<ScanFailu
 
 fn scan_root_report_with_progress<F>(
     root: &Path,
-    mut observe: F,
+    observe: F,
 ) -> Result<(Vec<ScannedPhoto>, Vec<ScanFailure>)>
+where
+    F: FnMut(usize),
+{
+    let (photos, failures, _cancelled) =
+        scan_root_report_with_progress_running(root, None, observe)?;
+    Ok((photos, failures))
+}
+
+fn scan_root_report_with_progress_running<F>(
+    root: &Path,
+    running: Option<&AtomicBool>,
+    mut observe: F,
+) -> Result<(Vec<ScannedPhoto>, Vec<ScanFailure>, bool)>
 where
     F: FnMut(usize),
 {
@@ -119,9 +138,16 @@ where
     }
     let mut photos = Vec::new();
     let mut failures = Vec::new();
-    walk(root, root, &mut photos, &mut failures, &mut observe);
+    let cancelled = walk(
+        root,
+        root,
+        running,
+        &mut photos,
+        &mut failures,
+        &mut observe,
+    );
     photos.sort_by_key(|photo| photo.captured_at_utc);
-    Ok((photos, failures))
+    Ok((photos, failures, cancelled))
 }
 
 /// Scans one file. Used for incremental notify events so a new photo does not
@@ -213,12 +239,17 @@ fn read_photo(root: &Path, path: &Path) -> std::result::Result<ScannedPhoto, Sca
 fn walk<F>(
     root: &Path,
     dir: &Path,
+    running: Option<&AtomicBool>,
     photos: &mut Vec<ScannedPhoto>,
     failures: &mut Vec<ScanFailure>,
     observe: &mut F,
-) where
+) -> bool
+where
     F: FnMut(usize),
 {
+    if stopped(running) {
+        return true;
+    }
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) => {
@@ -227,11 +258,14 @@ fn walk<F>(
                 dir,
                 format!("ディレクトリを読み取れませんでした: {error}"),
             ));
-            return;
+            return false;
         }
     };
 
     for entry in entries {
+        if stopped(running) {
+            return true;
+        }
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
@@ -262,7 +296,9 @@ fn walk<F>(
             if entry.file_name() == "compressed" {
                 continue;
             }
-            walk(root, &path, photos, failures, observe);
+            if walk(root, &path, running, photos, failures, observe) {
+                return true;
+            }
             continue;
         }
         match scan_one_detailed(root, &path) {
@@ -274,6 +310,11 @@ fn walk<F>(
             None => {}
         }
     }
+    false
+}
+
+fn stopped(running: Option<&AtomicBool>) -> bool {
+    running.is_some_and(|flag| !flag.load(Ordering::Relaxed))
 }
 
 /// Scans and upserts all source photos under `root` into the library.
@@ -286,6 +327,57 @@ pub fn scan_and_index(db: &Db, root_id: i64, root: &Path) -> Result<ScanReport> 
     scan_and_index_observed(db, root_id, root, |_| {})
 }
 
+/// The database operations a scan needs. Implemented for a plain `Db` (the
+/// synchronous callers and tests) and for `Mutex<Db>` (the daemon, which must
+/// not hold the lock while walking or hashing files).
+trait ScanStore {
+    fn photo_scan_states(&self, paths: &[String]) -> Result<HashMap<String, PhotoScanState>>;
+    fn find_rebind_candidate(&self, photo: &NewPhoto) -> Result<Option<Photo>>;
+    fn rebind_photo(&self, photo_id: i64, photo: &NewPhoto) -> Result<bool>;
+    fn upsert_photo(&self, photo: &NewPhoto) -> Result<i64>;
+}
+
+impl ScanStore for Db {
+    fn photo_scan_states(&self, paths: &[String]) -> Result<HashMap<String, PhotoScanState>> {
+        Db::photo_scan_states(self, paths)
+    }
+
+    fn find_rebind_candidate(&self, photo: &NewPhoto) -> Result<Option<Photo>> {
+        Db::find_rebind_candidate(self, photo)
+    }
+
+    fn rebind_photo(&self, photo_id: i64, photo: &NewPhoto) -> Result<bool> {
+        Db::rebind_photo(self, photo_id, photo)
+    }
+
+    fn upsert_photo(&self, photo: &NewPhoto) -> Result<i64> {
+        Db::upsert_photo(self, photo)
+    }
+}
+
+impl ScanStore for Mutex<Db> {
+    fn photo_scan_states(&self, paths: &[String]) -> Result<HashMap<String, PhotoScanState>> {
+        with_db(self, |db| db.photo_scan_states(paths))
+    }
+
+    fn find_rebind_candidate(&self, photo: &NewPhoto) -> Result<Option<Photo>> {
+        with_db(self, |db| db.find_rebind_candidate(photo))
+    }
+
+    fn rebind_photo(&self, photo_id: i64, photo: &NewPhoto) -> Result<bool> {
+        with_db(self, |db| db.rebind_photo(photo_id, photo))
+    }
+
+    fn upsert_photo(&self, photo: &NewPhoto) -> Result<i64> {
+        with_db(self, |db| db.upsert_photo(photo))
+    }
+}
+
+fn with_db<T>(db: &Mutex<Db>, operation: impl FnOnce(&Db) -> Result<T>) -> Result<T> {
+    let guard = db.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    operation(&guard)
+}
+
 /// Scans and indexes one root, reporting walking and indexing progress.
 ///
 /// The observer is called once per candidate photo during the walk and once
@@ -294,25 +386,59 @@ pub fn scan_and_index_observed<F>(
     db: &Db,
     root_id: i64,
     root: &Path,
-    mut observe: F,
+    observe: F,
 ) -> Result<ScanReport>
 where
     F: FnMut(ScanProgress),
 {
-    let (photos, failures) = scan_root_report_with_progress(root, |found| {
-        observe(ScanProgress {
-            phase: ScanPhase::Walking,
-            processed: found,
-            total: None,
-            indexed: 0,
-        });
-    })?;
+    scan_and_index_with_store(db, root_id, root, None, observe)
+}
+
+/// Scans and indexes one root while taking the database mutex only for short
+/// per-photo operations. The caller must not hold the mutex.
+pub fn scan_and_index_shared<F>(
+    db: &Mutex<Db>,
+    root_id: i64,
+    root: &Path,
+    running: Option<&AtomicBool>,
+    observe: F,
+) -> Result<ScanReport>
+where
+    F: FnMut(ScanProgress),
+{
+    scan_and_index_with_store(db, root_id, root, running, observe)
+}
+
+fn scan_and_index_with_store<S, F>(
+    db: &S,
+    root_id: i64,
+    root: &Path,
+    running: Option<&AtomicBool>,
+    mut observe: F,
+) -> Result<ScanReport>
+where
+    S: ScanStore + ?Sized,
+    F: FnMut(ScanProgress),
+{
+    let (photos, failures, walk_cancelled) =
+        scan_root_report_with_progress_running(root, running, |found| {
+            observe(ScanProgress {
+                phase: ScanPhase::Walking,
+                processed: found,
+                total: None,
+                indexed: 0,
+            });
+        })?;
     let total = photos.len();
     let mut report = ScanReport {
         found: total,
         failures,
+        cancelled: walk_cancelled,
         ..Default::default()
     };
+    if walk_cancelled {
+        return Ok(report);
+    }
     let paths: Vec<String> = photos
         .iter()
         .map(|photo| photo.path.to_string_lossy().to_string())
@@ -326,6 +452,10 @@ where
         indexed: 0,
     });
     for photo in photos {
+        if stopped(running) {
+            report.cancelled = true;
+            break;
+        }
         let path = photo.path.to_string_lossy().to_string();
         report.seen_paths.push(path.clone());
         let existing = states.get(&path);
@@ -366,6 +496,10 @@ where
                 .ok()
                 .flatten(),
         };
+        if stopped(running) {
+            report.cancelled = true;
+            break;
+        }
 
         if !existed {
             // A database error while checking for a move is a per-photo
@@ -437,7 +571,7 @@ where
 /// gone, which distinguishes a move from a duplicate copy. Returns the
 /// rebound row id, or `None` when there is no move candidate, the
 /// candidate's old file still exists, or the rebind did not apply.
-fn rebind_moved_photo(db: &Db, new_photo: &NewPhoto) -> Result<Option<i64>> {
+fn rebind_moved_photo<S: ScanStore + ?Sized>(db: &S, new_photo: &NewPhoto) -> Result<Option<i64>> {
     let Some(candidate) = db.find_rebind_candidate(new_photo)? else {
         return Ok(None);
     };
@@ -456,6 +590,7 @@ mod tests {
     use super::*;
     use crate::model::PhotoStatus;
     use image::{Rgba, RgbaImage};
+    use std::sync::Arc;
     use tempfile::tempdir;
 
     fn write_png(path: &Path) {
@@ -492,6 +627,45 @@ mod tests {
         assert_eq!(last.total, Some(2));
         assert_eq!(last.processed, 2);
         assert_eq!(last.indexed, 2);
+    }
+
+    #[test]
+    fn shared_scan_releases_the_db_lock_around_callbacks() {
+        let dir = tempdir().unwrap();
+        write_png(&dir.path().join("VRChat_2026-10-21_21-14-03.221_4x3.png"));
+        let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+        let root_id = {
+            let db = db.lock().unwrap();
+            db.add_root(&dir.path().to_string_lossy(), "reference")
+                .unwrap()
+        };
+        let probe = db.clone();
+        let report = scan_and_index_shared(&db, root_id, dir.path(), None, |_| {
+            assert!(
+                probe.try_lock().is_ok(),
+                "the scan called back while holding the database lock"
+            );
+        })
+        .unwrap();
+        assert_eq!(report.indexed, 1);
+    }
+
+    #[test]
+    fn shared_scan_can_cancel_before_indexing() {
+        let dir = tempdir().unwrap();
+        write_png(&dir.path().join("VRChat_2026-10-21_21-14-03.221_4x3.png"));
+        let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+        let root_id = {
+            let db = db.lock().unwrap();
+            db.add_root(&dir.path().to_string_lossy(), "reference")
+                .unwrap()
+        };
+        let running = AtomicBool::new(false);
+        let report =
+            scan_and_index_shared(&db, root_id, dir.path(), Some(&running), |_| {}).unwrap();
+        assert!(report.cancelled);
+        assert_eq!(report.indexed, 0);
+        assert_eq!(db.lock().unwrap().count_photos().unwrap(), 0);
     }
 
     #[test]
