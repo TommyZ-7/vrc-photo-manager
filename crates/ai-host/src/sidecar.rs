@@ -6,10 +6,9 @@
 //! forever.
 
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
-use std::io::{BufReader, Write, copy};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -21,6 +20,7 @@ use vrc_photon_ai_protocol::{
     Hello, ImageRef, Op, PROTOCOL_VERSION, Probe, ProtocolError, SidecarError, SidecarErrorCode,
     SidecarMessage, SidecarRequest, SidecarResult, TagBranch, read_message, write_message,
 };
+use vrc_photon_core::logging::{MAX_LOG_BYTES, RotatingLog};
 
 use crate::error::{AiHostError, Result};
 
@@ -353,39 +353,41 @@ fn protocol_or_io_error(error: ProtocolError) -> AiHostError {
     }
 }
 
-/// Append-only sink for stdout protocol violations.
+/// Shared append-only sink for the sidecar log.
 ///
 /// The sidecar writes protocol messages to stdout and free-form logs to
 /// stderr. When stdout contains something that is not a protocol message, the
 /// daemon must both fail the operation and leave the evidence in the same
 /// `sidecar.log` that receives stderr.
-struct ProtocolLog {
-    file: Mutex<File>,
+///
+/// Both writers clone this handle instead of opening their own file so a
+/// rotation moves them together; a private handle would keep appending to
+/// `<name>.1` after the live file was rotated away.
+type SharedLog = Arc<Mutex<RotatingLog>>;
+
+fn open_shared_log(path: &Path, max_bytes: u64) -> Result<SharedLog> {
+    Ok(Arc::new(Mutex::new(RotatingLog::open(path, max_bytes)?)))
 }
 
-impl ProtocolLog {
-    fn open(path: &Path) -> Result<Self> {
-        let file = OpenOptions::new().create(true).append(true).open(path)?;
-        Ok(Self {
-            file: Mutex::new(file),
-        })
-    }
-
-    fn record(&self, message: &str) {
-        if let Ok(mut file) = self.file.lock() {
-            let _ = writeln!(file, "{message}");
-            let _ = file.flush();
-        }
+fn record_line(log: &SharedLog, message: &str) {
+    if let Ok(mut log) = log.lock() {
+        let _ = log.write_line(message);
     }
 }
 
 impl SidecarClient {
     /// Starts the sidecar and waits for its `hello` message.
+    ///
+    /// On Linux this must be called from a long-lived thread: the resident
+    /// sidecar is tied to the spawning thread with `PR_SET_PDEATHSIG` (see
+    /// [`sidecar_command`]).
     pub fn spawn(config: SidecarConfig) -> Result<Self> {
         Self::spawn_with_timeouts(config, SidecarTimeouts::default())
     }
 
     /// Starts the sidecar with explicit timeouts (tests and diagnostics).
+    ///
+    /// The Linux parent-death caveat from [`Self::spawn`] applies here too.
     pub fn spawn_with_timeouts(config: SidecarConfig, timeouts: SidecarTimeouts) -> Result<Self> {
         let mut command = sidecar_command(&config);
         command
@@ -393,7 +395,7 @@ impl SidecarClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let protocol_log = ProtocolLog::open(&config.log_path)?;
+        let log = open_shared_log(&config.log_path, MAX_LOG_BYTES)?;
         let mut child = command.spawn()?;
         let stdin = match child.stdin.take() {
             Some(stdin) => stdin,
@@ -422,16 +424,10 @@ impl SidecarClient {
                 ));
             }
         };
-        let stderr_logger = match spawn_stderr_logger(stderr, &config.log_path) {
-            Ok(logger) => logger,
-            Err(error) => {
-                kill_and_wait(&mut child);
-                return Err(error);
-            }
-        };
+        let stderr_logger = spawn_stderr_logger(stderr, Arc::clone(&log));
 
         let (sender, receiver) = mpsc::channel();
-        let reader = thread::spawn(move || reader_loop(stdout, sender, protocol_log));
+        let reader = thread::spawn(move || reader_loop(stdout, sender, log));
 
         let startup = match receiver.recv_timeout(timeouts.hello) {
             Ok(ReaderEvent::Message(message)) => match *message {
@@ -711,7 +707,7 @@ impl SidecarClient {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let protocol_log = ProtocolLog::open(log_path)?;
+        let log = open_shared_log(log_path, MAX_LOG_BYTES)?;
         let mut child = command.spawn()?;
         let stdout = match child.stdout.take() {
             Some(stdout) => stdout,
@@ -731,16 +727,10 @@ impl SidecarClient {
                 ));
             }
         };
-        let stderr_logger = match spawn_stderr_logger(stderr, log_path) {
-            Ok(logger) => logger,
-            Err(error) => {
-                kill_and_wait(&mut child);
-                return Err(error);
-            }
-        };
+        let stderr_logger = spawn_stderr_logger(stderr, Arc::clone(&log));
 
         let (sender, receiver) = mpsc::channel();
-        let reader = thread::spawn(move || reader_loop(stdout, sender, protocol_log));
+        let reader = thread::spawn(move || reader_loop(stdout, sender, log));
 
         let probe = match receiver.recv_timeout(timeout) {
             Ok(ReaderEvent::Message(message)) => match *message {
@@ -802,6 +792,16 @@ impl Drop for SidecarInner {
 }
 
 /// Builds the command that launches the resident sidecar process.
+///
+/// On Linux the child is configured with `PR_SET_PDEATHSIG(SIGKILL)` so a
+/// SIGKILLed daemon cannot leave the sidecar (and its GPU memory) orphaned.
+/// The kernel ties the signal to the thread that spawns the child, not only to
+/// the process: callers must keep spawning the resident sidecar from a
+/// long-lived thread. The daemon's tagging worker is such a thread. If that
+/// ever changes, the sidecar would be killed when its spawning thread exits
+/// while the daemon keeps running. macOS and Windows keep the previous
+/// behaviour for now: the sidecar is stopped explicitly on a clean shutdown,
+/// but a SIGKILLed daemon is not covered yet.
 pub fn sidecar_command(config: &SidecarConfig) -> Command {
     let mut command = Command::new(&config.paths.executable);
     command
@@ -822,7 +822,37 @@ pub fn sidecar_command(config: &SidecarConfig) -> Command {
         command.env(key, value);
     }
     prepend_library_path(&mut command, &config.paths.install_dir);
+    #[cfg(target_os = "linux")]
+    configure_parent_death_signal(&mut command);
     command
+}
+
+/// Ties the resident sidecar's lifetime to the thread that spawns it.
+///
+/// Without this a SIGKILLed daemon leaves the sidecar running, holding its
+/// model and GPU memory. The post-`prctl` `getppid` check closes the fork
+/// race: if the parent already died before `prctl` ran, no future parent-death
+/// event will fire, so the child exits immediately.
+#[cfg(target_os = "linux")]
+fn configure_parent_death_signal(command: &mut Command) {
+    use std::os::unix::process::CommandExt;
+
+    // SAFETY: the closure runs in the forked child before `exec` and only
+    // calls async-signal-safe syscalls (`prctl`, `getppid`, `_exit`) plus
+    // std's errno helper, as required by `CommandExt::pre_exec`.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() == 1 {
+                // The daemon died between fork and prctl. There is no parent
+                // left to stop this process, so leave before `exec`.
+                libc::_exit(1);
+            }
+            Ok(())
+        });
+    }
 }
 
 /// Builds the command that asks the sidecar to advertise its backends.
@@ -852,7 +882,7 @@ fn prepend_library_path(command: &mut Command, install_dir: &Path) {
     }
 }
 
-fn reader_loop(stdout: ChildStdout, sender: Sender<ReaderEvent>, log: ProtocolLog) {
+fn reader_loop(stdout: ChildStdout, sender: Sender<ReaderEvent>, log: SharedLog) {
     let mut reader = BufReader::new(stdout);
     loop {
         match read_message(&mut reader) {
@@ -869,7 +899,7 @@ fn reader_loop(stdout: ChildStdout, sender: Sender<ReaderEvent>, log: ProtocolLo
                 return;
             }
             Err(error) => {
-                log.record(&format!("stdout protocol violation: {error}"));
+                record_line(&log, &format!("stdout protocol violation: {error}"));
                 let _ = sender.send(ReaderEvent::Failed(error.to_string()));
                 return;
             }
@@ -1077,15 +1107,32 @@ fn validate_result(
     Ok(())
 }
 
-fn spawn_stderr_logger(stderr: ChildStderr, log_path: &Path) -> Result<JoinHandle<()>> {
-    let mut log = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)?;
-    Ok(thread::spawn(move || {
-        let mut reader = BufReader::new(stderr);
-        let _ = copy(&mut reader, &mut log);
-    }))
+fn spawn_stderr_logger<R>(stderr: R, log: SharedLog) -> JoinHandle<()>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || forward_stderr(stderr, log))
+}
+
+/// Copies stderr into the shared sink one line at a time.
+///
+/// Reading whole lines keeps rotation on line boundaries; the shared sink
+/// makes protocol records and stderr records rotate together.
+fn forward_stderr<R: Read>(stderr: R, log: SharedLog) {
+    let mut reader = BufReader::new(stderr);
+    let mut record = Vec::new();
+    loop {
+        record.clear();
+        match reader.read_until(b'\n', &mut record) {
+            Ok(0) => return,
+            Ok(_) => {
+                if let Ok(mut sink) = log.lock() {
+                    let _ = sink.write_record(&record);
+                }
+            }
+            Err(_) => return,
+        }
+    }
 }
 
 fn message_kind(message: &SidecarMessage) -> &'static str {
@@ -1328,5 +1375,130 @@ mod tests {
         current.finish("a");
         assert!(!current.take_cancel("a"));
         assert!(current.id.is_none());
+    }
+
+    #[test]
+    fn protocol_and_stderr_writers_share_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sidecar.log");
+        let rotated = dir.path().join("sidecar.log.1");
+        // "stderr-1\n" is 9 bytes and "protocol-1\n" is 11, so every second
+        // record rotates at this limit.
+        let log = open_shared_log(&path, 12).unwrap();
+
+        spawn_stderr_logger(
+            std::io::Cursor::new(b"stderr-1\n".to_vec()),
+            Arc::clone(&log),
+        )
+        .join()
+        .unwrap();
+        record_line(&log, "protocol-1");
+        assert_eq!(std::fs::read(&rotated).unwrap(), b"stderr-1\n");
+        assert_eq!(std::fs::read(&path).unwrap(), b"protocol-1\n");
+
+        spawn_stderr_logger(
+            std::io::Cursor::new(b"stderr-2\n".to_vec()),
+            Arc::clone(&log),
+        )
+        .join()
+        .unwrap();
+        record_line(&log, "protocol-2");
+
+        // Both writers followed the rotation: the previous live file became
+        // `.1`, and only the last records are in the live file.
+        assert_eq!(std::fs::read(&rotated).unwrap(), b"stderr-2\n");
+        assert_eq!(std::fs::read(&path).unwrap(), b"protocol-2\n");
+        let live = std::fs::read_to_string(&path).unwrap();
+        assert!(!live.contains("stderr-1"), "{live:?}");
+        assert!(!live.contains("protocol-1"), "{live:?}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parent_death_signal_kills_the_child_when_its_spawning_thread_exits() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let (sender, receiver) = mpsc::channel();
+        let spawning_thread = thread::spawn(move || {
+            let mut command = Command::new("/bin/sleep");
+            command.arg("30");
+            configure_parent_death_signal(&mut command);
+            let child = command.spawn().expect("spawn the stand-in sidecar");
+            sender
+                .send(child)
+                .expect("hand the child to the test thread");
+        });
+
+        let mut child = receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the spawning thread must report its child");
+        spawning_thread
+            .join()
+            .expect("the spawning thread must exit cleanly");
+
+        // `PR_SET_PDEATHSIG` fires when the spawning thread exits, so the
+        // child must be killed without anyone calling `kill`.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            match child.try_wait().expect("check the child") {
+                Some(status) => break status,
+                None if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+                None => {
+                    kill_and_wait(&mut child);
+                    panic!("the child survived its spawning thread");
+                }
+            }
+        };
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sidecar_command_applies_the_parent_death_signal() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::process::ExitStatusExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let executable = dir.path().join("sidecar.sh");
+        // `exec` keeps the direct child (and its parent-death signal) intact
+        // instead of forking a grandchild whose signal would be cleared.
+        std::fs::write(&executable, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let mut config = sample_config();
+        config.paths.install_dir = dir.path().to_path_buf();
+        config.paths.executable = executable;
+        config.paths.catalog = dir.path().join("catalog.json");
+        config.paths.calibration = dir.path().join("calibration.json");
+
+        let (sender, receiver) = mpsc::channel();
+        let spawning_thread = thread::spawn(move || {
+            let child = sidecar_command(&config)
+                .spawn()
+                .expect("spawn the stand-in sidecar");
+            sender
+                .send(child)
+                .expect("hand the child to the test thread");
+        });
+
+        let mut child = receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the spawning thread must report its child");
+        spawning_thread
+            .join()
+            .expect("the spawning thread must exit cleanly");
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            match child.try_wait().expect("check the child") {
+                Some(status) => break status,
+                None if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+                None => {
+                    kill_and_wait(&mut child);
+                    panic!("the resident sidecar command must set PR_SET_PDEATHSIG");
+                }
+            }
+        };
+        assert_eq!(status.signal(), Some(libc::SIGKILL));
     }
 }

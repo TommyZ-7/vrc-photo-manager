@@ -8150,6 +8150,7 @@ version = "0.11.2"
 dependencies = [
  "assert_cmd",
  "hex",
+ "libc",
  "minisign",
  "minisign-verify",
  "semver",
@@ -8163,6 +8164,7 @@ dependencies = [
  "url",
  "uuid",
  "vrc-photon-ai-protocol",
+ "vrc-photon-core",
  "zip",
 ]
 
