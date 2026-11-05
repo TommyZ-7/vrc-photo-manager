@@ -11,7 +11,7 @@ use std::time::Instant;
 use chrono::Utc;
 use gpui_kit::*;
 use vrc_photon_core::db::Db;
-use vrc_photon_core::model::{PhotoIndexEntry, PhotoTextFilter};
+use vrc_photon_core::model::{AiPhotoFilter, PhotoIndexEntry, PhotoTextFilter};
 use vrc_photon_i18n::tr_args;
 
 use crate::app::App;
@@ -29,6 +29,34 @@ pub(crate) fn has_tag_filter(filter: &PhotoTextFilter) -> bool {
         .is_some_and(|tag| !tag.is_empty())
 }
 
+/// Whether the AI tag or people-count condition narrows the result.
+pub(crate) fn ai_filter_is_active(filter: &PhotoTextFilter) -> bool {
+    !filter.ai.tags.is_empty() || filter.ai.people_count.is_some()
+}
+
+/// Whether any filter that can be refreshed after a tag write is active.
+pub(crate) fn has_active_filter(filter: &PhotoTextFilter) -> bool {
+    has_tag_filter(filter) || ai_filter_is_active(filter)
+}
+
+/// Parses the single people-count input. Empty or invalid input means "no
+/// filter"; values above the model's 0–10 range are clamped.
+pub(crate) fn parse_people_count(input: &str) -> Option<u32> {
+    let input = input.trim();
+    if input.is_empty() {
+        return None;
+    }
+    input.parse::<u32>().ok().map(|count| count.min(10))
+}
+
+/// Builds the AI part of the text filter from the current UI inputs.
+pub(crate) fn build_ai_filter(tags: Vec<String>, people_input: &str) -> AiPhotoFilter {
+    AiPhotoFilter {
+        tags,
+        people_count: parse_people_count(people_input),
+    }
+}
+
 impl App {
     pub(crate) fn run_search(&mut self, cx: &mut Context<Self>) {
         // One 100k text query at a time; the Search button is disabled while a
@@ -43,6 +71,7 @@ impl App {
         let world = self.world_input.read(cx).value().to_string();
         let player = self.player_input.read(cx).value().to_string();
         let tag = self.tag_input.read(cx).value().to_string();
+        let people = self.search_people_input.read(cx).value().to_string();
         let from_utc = self
             .search_days
             .map(|days| Utc::now().timestamp() - days * 86_400);
@@ -53,6 +82,7 @@ impl App {
             favorite: self.search_favorite,
             from_utc,
             to_utc: None,
+            ai: build_ai_filter(self.search_ai_tags.clone(), &people),
         };
         self.applied_search = Some(filter.clone());
         self.pending_search_anchor = None;
@@ -156,7 +186,7 @@ impl App {
         cx.notify();
     }
 
-    pub(crate) fn clear_search(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.selected_ids.is_empty() {
             self.clear_selection(cx);
         }
@@ -166,6 +196,9 @@ impl App {
         self.pending_search_anchor = None;
         self.search_view.borrow_mut().pending_anchor = None;
         self.search_refresh_pending = false;
+        self.search_ai_tags.clear();
+        self.search_people_input
+            .update(cx, |input, cx| input.set_value("", window, cx));
         // Invalidate an in-flight request so it cannot revive the cleared view.
         self.search_request = self.search_request.wrapping_add(1);
         let index = self.library.borrow().index.clone();
@@ -177,13 +210,21 @@ impl App {
     }
 
     pub(crate) fn refresh_search_after_tag_edit(&mut self, cx: &mut Context<Self>) {
+        self.refresh_search_after_filter(has_tag_filter, cx);
+    }
+
+    fn refresh_search_after_filter(
+        &mut self,
+        predicate: fn(&PhotoTextFilter) -> bool,
+        cx: &mut Context<Self>,
+    ) {
         if !self.search_active {
             return;
         }
         let Some(filter) = self.applied_search.clone() else {
             return;
         };
-        if !has_tag_filter(&filter) {
+        if !predicate(&filter) {
             return;
         }
         if self.searching {
@@ -208,7 +249,7 @@ impl App {
         let Some(filter) = self.applied_search.clone() else {
             return;
         };
-        if !has_tag_filter(&filter) {
+        if !has_active_filter(&filter) {
             return;
         }
         self.pending_search_anchor = anchor;
@@ -218,8 +259,10 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::has_tag_filter;
-    use vrc_photon_core::model::PhotoTextFilter;
+    use super::{
+        ai_filter_is_active, build_ai_filter, has_active_filter, has_tag_filter, parse_people_count,
+    };
+    use vrc_photon_core::model::{AiPhotoFilter, PhotoTextFilter};
 
     #[test]
     fn search_refresh_requires_a_non_empty_tag_filter() {
@@ -232,5 +275,69 @@ mod tests {
             tag: Some("vrc".to_string()),
             ..Default::default()
         }));
+    }
+
+    #[test]
+    fn parse_people_count_accepts_zero_to_ten_and_rejects_invalid() {
+        assert_eq!(parse_people_count(""), None);
+        assert_eq!(parse_people_count("  "), None);
+        assert_eq!(parse_people_count("abc"), None);
+        assert_eq!(parse_people_count("0"), Some(0));
+        assert_eq!(parse_people_count(" 3 "), Some(3));
+        assert_eq!(parse_people_count("10"), Some(10));
+        assert_eq!(parse_people_count("11"), Some(10));
+    }
+
+    #[test]
+    fn ai_filter_is_active_for_tags_or_people_count() {
+        assert!(!ai_filter_is_active(&PhotoTextFilter::default()));
+        assert!(ai_filter_is_active(&PhotoTextFilter {
+            ai: AiPhotoFilter {
+                tags: vec!["sea".into()],
+                people_count: None,
+            },
+            ..Default::default()
+        }));
+        assert!(ai_filter_is_active(&PhotoTextFilter {
+            ai: AiPhotoFilter {
+                tags: Vec::new(),
+                people_count: Some(0),
+            },
+            ..Default::default()
+        }));
+    }
+
+    #[test]
+    fn active_filter_includes_ai_conditions() {
+        assert!(!has_active_filter(&PhotoTextFilter::default()));
+        assert!(has_active_filter(&PhotoTextFilter {
+            ai: AiPhotoFilter {
+                tags: vec!["sea".into()],
+                people_count: None,
+            },
+            ..Default::default()
+        }));
+        assert!(has_active_filter(&PhotoTextFilter {
+            tag: Some("manual".into()),
+            ..Default::default()
+        }));
+    }
+
+    #[test]
+    fn ai_filter_builds_from_tags_and_people_input() {
+        assert_eq!(
+            build_ai_filter(vec!["sea".into()], "3"),
+            AiPhotoFilter {
+                tags: vec!["sea".into()],
+                people_count: Some(3),
+            }
+        );
+        assert_eq!(
+            build_ai_filter(vec!["sea".into()], ""),
+            AiPhotoFilter {
+                tags: vec!["sea".into()],
+                people_count: None,
+            }
+        );
     }
 }

@@ -30,8 +30,8 @@ use vrc_photon_ipc::{Event, PluginInstallStatus};
 
 use crate::ipc_server::EventBus;
 
-/// The only AI plugin the daemon knows about in M2.
-pub(crate) const AI_PLUGIN_ID: &str = "vrc-photon-autotag";
+/// The only AI plugin the daemon knows about.
+pub(crate) use vrc_photon_core::ai::AI_PLUGIN_ID;
 
 /// How often model progress is written to the database and event bus.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
