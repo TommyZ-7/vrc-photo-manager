@@ -14,7 +14,8 @@ VRChatの写真を、撮影時のワールド・同接プレイヤー・日時�
 - 設定（起動、トレイ、自動圧縮、即時/待機、自動圧縮の元画像の保持/置換）
 - 手動圧縮（プロファイル選択、指定フォルダ／プロファイルフォルダ／クリップボード出力、実行ごとの元画像の保持/置換）
 - ライブラリ／検索の複数選択と一括圧縮
-- 検索（ワールド、プレイヤー、タグ、日時、お気に入り）
+- 検索（ワールド、プレイヤー、タグ、日時、お気に入り、AI タグ、人数）
+- AI タグ付け（有償プラグイン、ローカル推論。人物の有無・人数・場所・シーンタグ）
 - VRChatログ監視（ワールド参加、プレイヤー入退室、セッション）
 - XMPメタデータ読取（撮影者、ワールド名/ID）とログが無い場合の補完
 - サムネイル生成（256px WebP、バックグラウンド）
@@ -33,6 +34,7 @@ VRChatの写真を、撮影時のワールド・同接プレイヤー・日時�
 - [docs/architecture.md](docs/architecture.md) — 全体構成
 - [docs/development.md](docs/development.md) — 環境構築・実行
 - [docs/release.md](docs/release.md) — リリースとパッケージ
+- [docs/ai-tagging/README.md](docs/ai-tagging/README.md) — AI タグ付けプラグインの導入・GPU 要件・プライバシー
 - [docs/roadmap.md](docs/roadmap.md) — 残作業と優先度
 - [CONTRIBUTING.md](CONTRIBUTING.md) — 開発フロー
 
