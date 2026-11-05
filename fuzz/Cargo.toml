@@ -1,0 +1,42 @@
+[package]
+name = "vrc-photon-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+zip = { version = "9", default-features = false, features = ["deflate"] }
+vrc-photon-ai-host = { path = "../crates/ai-host", features = ["fuzz-support"] }
+vrc-photon-ai-protocol = { path = "../crates/ai-protocol" }
+vrc-photon-ipc = { path = "../crates/ipc" }
+
+[[bin]]
+name = "ipc_jsonl"
+path = "fuzz_targets/ipc_jsonl.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ai_protocol_jsonl"
+path = "fuzz_targets/ai_protocol_jsonl.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "zip_eocd"
+path = "fuzz_targets/zip_eocd.rs"
+test = false
+doc = false
+bench = false
+
+# Standalone workspace: fuzzers need nightly and must not be built by the
+# stable `cargo check --workspace` used in CI. The root workspace excludes
+# this directory for the same reason.
+[workspace]
+members = ["."]

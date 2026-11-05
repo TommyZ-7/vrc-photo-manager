@@ -15,4 +15,5 @@ tracing.workspace = true
 vrc-photon-ai-protocol = { path = "../ai-protocol" }
 
 [dev-dependencies]
+proptest = "1"
 tempfile = "3"

@@ -422,7 +422,11 @@ struct ZipEntryInfo {
 /// describe a readable central directory. To cover that, every plausible
 /// EOCD candidate in the tail is considered and the maximum declared count
 /// wins.
-fn check_zip_entry_count(file: &mut File, file_len: u64, max_entries: usize) -> Result<()> {
+fn check_zip_entry_count<R: Read + Seek>(
+    file: &mut R,
+    file_len: u64,
+    max_entries: usize,
+) -> Result<()> {
     let tail_len = file_len.min(EOCD_SEARCH_BYTES);
     if tail_len < EOCD_MIN_BYTES {
         return Err(invalid_zip("file is too small to be a ZIP archive"));
@@ -482,8 +486,20 @@ fn check_zip_entry_count(file: &mut File, file_len: u64, max_entries: usize) -> 
     Ok(())
 }
 
-fn zip64_locator_counts(
-    file: &mut File,
+/// Validates the EOCD record(s) of an in-memory ZIP image.
+///
+/// This mirrors the entry-count gate that runs before `ZipArchive::new`, but
+/// accepts a byte slice so the standalone fuzz targets can exercise the
+/// parser without filesystem setup. It is only compiled for `fuzz-support`.
+#[cfg(feature = "fuzz-support")]
+#[doc(hidden)]
+pub fn scan_zip_entry_count(bytes: &[u8], max_entries: usize) -> Result<()> {
+    let mut cursor = std::io::Cursor::new(bytes);
+    check_zip_entry_count(&mut cursor, bytes.len() as u64, max_entries)
+}
+
+fn zip64_locator_counts<R: Read + Seek>(
+    file: &mut R,
     file_len: u64,
     tail_start: u64,
     tail: &[u8],
@@ -513,8 +529,8 @@ fn zip64_locator_counts(
     Ok(Some(counts))
 }
 
-fn read_zip64_entry_count(
-    file: &mut File,
+fn read_zip64_entry_count<R: Read + Seek>(
+    file: &mut R,
     file_len: u64,
     offset: u64,
     locator_offset: u64,
