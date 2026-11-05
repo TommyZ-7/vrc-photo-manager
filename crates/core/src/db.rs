@@ -11,12 +11,12 @@ use vrc_photon_ai_protocol::{
 };
 
 use crate::ai::{
-    AiTagDefinition, AiTagThreshold, MAX_TAGGING_RETRIES, NewPhotoAi, PhotoAi, PhotoAiTag,
-    PhotoAiTagView, PluginInstallation, PluginState, TaggingJob,
+    AI_PLUGIN_ID, AiTagDefinition, AiTagThreshold, MAX_TAGGING_RETRIES, NewPhotoAi, PhotoAi,
+    PhotoAiTag, PhotoAiTagView, PluginInstallation, PluginState, TaggingJob,
 };
 use crate::error::{CoreError, Result};
 use crate::model::{
-    CompressionJob, CompressionProfile, DaemonCommand, DaemonError, DaemonOperation,
+    AiPhotoFilter, CompressionJob, CompressionProfile, DaemonCommand, DaemonError, DaemonOperation,
     DeletionBlockers, DeletionCounts, DeletionJobSummary, DeletionReason, DeletionRequest,
     DeletionStatus, Derivative, JobStatusCounts, LibraryRoot, LibraryStats, MAX_JOB_RETRIES,
     MAX_PROFILE_NAME_CHARS, NewPhoto, Photo, PhotoContext, PhotoFilter, PhotoIndexEntry,
@@ -1023,14 +1023,7 @@ impl Db {
 
     /// Returns an ordered index snapshot matching the text filters.
     pub fn photo_index_text(&self, filter: &PhotoTextFilter) -> Result<Vec<PhotoIndexEntry>> {
-        let (where_sql, values) = build_text_filter(
-            filter.world.as_deref(),
-            filter.player.as_deref(),
-            filter.tag.as_deref(),
-            filter.favorite,
-            filter.from_utc,
-            filter.to_utc,
-        );
+        let (where_sql, values) = build_text_filter(filter);
         let sql = format!(
             "SELECT p.id, p.captured_at_utc, {PHOTO_MONTH}{PHOTO_FROM} WHERE {where_sql} \
              ORDER BY p.captured_at_utc DESC, p.id DESC"
@@ -1110,8 +1103,16 @@ impl Db {
         to_utc: Option<i64>,
         limit: i64,
     ) -> Result<Vec<Photo>> {
-        let (where_sql, mut values) =
-            build_text_filter(world, player, tag, favorite, from_utc, to_utc);
+        let filter = PhotoTextFilter {
+            world: world.map(str::to_string),
+            player: player.map(str::to_string),
+            tag: tag.map(str::to_string),
+            favorite,
+            from_utc,
+            to_utc,
+            ai: AiPhotoFilter::default(),
+        };
+        let (where_sql, mut values) = build_text_filter(&filter);
 
         let sql = format!(
             "SELECT {PHOTO_SELECT}{PHOTO_FROM} WHERE {where_sql} \
@@ -5034,6 +5035,30 @@ fn photo_order(sort: PhotoSort) -> &'static str {
     }
 }
 
+fn push_ai_filter(clauses: &mut Vec<String>, values: &mut Vec<Value>, ai: &AiPhotoFilter) {
+    if !ai.tags.is_empty() {
+        let placeholders = vec!["?"; ai.tags.len()].join(",");
+        clauses.push(format!(
+            "EXISTS (SELECT 1 FROM photo_ai_tags at \
+             WHERE at.photo_id = p.id AND at.plugin_id = ? AND at.applied = 1 \
+             AND at.tag_key IN ({placeholders}))"
+        ));
+        values.push(Value::Text(AI_PLUGIN_ID.to_string()));
+        values.extend(ai.tags.iter().map(|tag| Value::Text(tag.clone())));
+    }
+
+    if let Some(count) = ai.people_count {
+        clauses.push(
+            "EXISTS (SELECT 1 FROM photo_ai pa WHERE pa.photo_id = p.id \
+             AND pa.plugin_id = ? AND pa.people_min <= ? AND pa.people_max >= ?)"
+                .to_string(),
+        );
+        values.push(Value::Text(AI_PLUGIN_ID.to_string()));
+        values.push(Value::Integer(i64::from(count)));
+        values.push(Value::Integer(i64::from(count)));
+    }
+}
+
 fn build_photo_filter(filter: &PhotoFilter) -> (String, Vec<Value>) {
     let mut clauses = vec![VISIBLE_STATUS.to_string()];
     let mut values = Vec::new();
@@ -5067,6 +5092,8 @@ fn build_photo_filter(filter: &PhotoFilter) -> (String, Vec<Value>) {
         values.extend(filter.tags.iter().map(|tag| Value::Text(tag.clone())));
     }
 
+    push_ai_filter(&mut clauses, &mut values, &filter.ai);
+
     if let Some(from) = filter.from_utc {
         clauses.push("p.captured_at_utc >= ?".to_string());
         values.push(Value::Integer(from));
@@ -5085,18 +5112,16 @@ fn build_photo_filter(filter: &PhotoFilter) -> (String, Vec<Value>) {
     (clauses.join(" AND "), values)
 }
 
-fn build_text_filter(
-    world: Option<&str>,
-    player: Option<&str>,
-    tag: Option<&str>,
-    favorite: bool,
-    from_utc: Option<i64>,
-    to_utc: Option<i64>,
-) -> (String, Vec<Value>) {
+fn build_text_filter(filter: &PhotoTextFilter) -> (String, Vec<Value>) {
     let mut clauses = vec![VISIBLE_STATUS.to_string()];
     let mut values: Vec<Value> = Vec::new();
 
-    if let Some(query) = world.map(str::trim).filter(|query| !query.is_empty()) {
+    if let Some(query) = filter
+        .world
+        .as_deref()
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+    {
         let like = format!("%{query}%");
         clauses.push(
             "(c.world_name LIKE ? OR c.instance_id LIKE ? OR EXISTS (\
@@ -5107,7 +5132,12 @@ fn build_text_filter(
         values.push(Value::Text(like.clone()));
         values.push(Value::Text(like));
     }
-    if let Some(query) = player.map(str::trim).filter(|query| !query.is_empty()) {
+    if let Some(query) = filter
+        .player
+        .as_deref()
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+    {
         let like = format!("%{query}%");
         clauses.push(
             "EXISTS (SELECT 1 FROM photo_players pp WHERE pp.photo_id = p.id \
@@ -5117,7 +5147,12 @@ fn build_text_filter(
         values.push(Value::Text(like.clone()));
         values.push(Value::Text(like));
     }
-    if let Some(query) = tag.map(str::trim).filter(|query| !query.is_empty()) {
+    if let Some(query) = filter
+        .tag
+        .as_deref()
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+    {
         let like = format!("%{query}%");
         clauses.push(
             "EXISTS (SELECT 1 FROM photo_tags pt JOIN tags t ON t.id = pt.tag_id \
@@ -5126,14 +5161,17 @@ fn build_text_filter(
         );
         values.push(Value::Text(like));
     }
-    if favorite {
+
+    push_ai_filter(&mut clauses, &mut values, &filter.ai);
+
+    if filter.favorite {
         clauses.push("p.is_favorite = 1".to_string());
     }
-    if let Some(from) = from_utc {
+    if let Some(from) = filter.from_utc {
         clauses.push("p.captured_at_utc >= ?".to_string());
         values.push(Value::Integer(from));
     }
-    if let Some(to) = to_utc {
+    if let Some(to) = filter.to_utc {
         clauses.push("p.captured_at_utc <= ?".to_string());
         values.push(Value::Integer(to));
     }
@@ -7280,6 +7318,28 @@ mod tests {
                 [],
             )
             .unwrap();
+            tx.execute(
+                "INSERT INTO photo_ai(photo_id, plugin_id, variant, sidecar_version, \
+                    model_version, model_revision, catalog_version, source, \
+                    presence_threshold, character_present, presence_probability, \
+                    people_min, people_max, people_median, place_branch, \
+                    place_probabilities_json, tagged_at) \
+                 SELECT id, ?1, 'bench', '1.0.0', 'd1-2B', 'rev', '2026-11-03.1', \
+                    'original', 0.9, 1, 0.99, 2, 4, 3, 'outdoor', '{}', \
+                    '2026-11-04T00:00:00+00:00' \
+                 FROM photos WHERE id % 4 = 0",
+                params![AI_PLUGIN_ID],
+            )
+            .unwrap();
+            tx.execute(
+                "INSERT INTO photo_ai_tags(photo_id, plugin_id, tag_key, probability, \
+                    applied, model_version, catalog_version, tagged_at) \
+                 SELECT photo_id, ?1, 'sea', 0.9, 1, 'd1-2B', '2026-11-03.1', \
+                    '2026-11-04T00:00:00+00:00' \
+                 FROM photo_ai WHERE plugin_id = ?1",
+                params![AI_PLUGIN_ID],
+            )
+            .unwrap();
             tx.commit().unwrap();
         }
         eprintln!("seed 100k: {:?}", seed_start.elapsed());
@@ -7319,6 +7379,23 @@ mod tests {
         let matches = db.photo_index_text(&PhotoTextFilter::default()).unwrap();
         eprintln!("photo_index_text 100k: {:?}", start.elapsed());
         assert_eq!(matches.len(), 100_000);
+
+        let ai_filter = PhotoTextFilter {
+            ai: AiPhotoFilter {
+                tags: vec!["sea".into()],
+                people_count: Some(3),
+            },
+            ..Default::default()
+        };
+        let start = Instant::now();
+        let ai_matches = db.photo_index_text(&ai_filter).unwrap();
+        let ai_elapsed = start.elapsed();
+        eprintln!("photo_index_text AI 100k: {ai_elapsed:?}");
+        assert_eq!(ai_matches.len(), 25_000);
+        assert!(
+            ai_elapsed < Duration::from_secs(2),
+            "photo_index_text AI took {ai_elapsed:?}"
+        );
     }
 
     #[test]
@@ -8563,11 +8640,17 @@ mod tests {
     }
 
     fn query_plan(db: &Db, sql: &str) -> Vec<String> {
+        query_plan_with_values(db, sql, Vec::new())
+    }
+
+    fn query_plan_with_values(db: &Db, sql: &str, values: Vec<Value>) -> Vec<String> {
         let mut stmt = db
             .connection()
             .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
             .unwrap();
-        let rows = stmt.query_map([], |row| row.get::<_, String>(3)).unwrap();
+        let rows = stmt
+            .query_map(params_from_iter(values), |row| row.get::<_, String>(3))
+            .unwrap();
         rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
     }
 
@@ -8614,6 +8697,171 @@ mod tests {
                 .find(|tag| tag.tag_key == "park")
                 .unwrap()
                 .applied
+        );
+    }
+
+    #[test]
+    fn ai_tag_filter_matches_only_applied_tags_of_the_ai_plugin() {
+        let db = Db::open_in_memory().unwrap();
+        let sea = seed_photo(&db);
+        install_test_catalog(&db);
+        db.save_photo_ai(
+            sea,
+            AI_PLUGIN,
+            &test_ai_result(&[("sea", 0.97), ("park", 0.42)]),
+        )
+        .unwrap();
+        let other = seed_other_photo(&db);
+        seed_ai_tag(&db, other, "other-plugin", "sea", 0.99, true);
+
+        let sea_filter = PhotoTextFilter {
+            ai: AiPhotoFilter {
+                tags: vec!["sea".into()],
+                people_count: None,
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            db.photo_index_text(&sea_filter)
+                .unwrap()
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec![sea]
+        );
+
+        let unapplied = PhotoTextFilter {
+            ai: AiPhotoFilter {
+                tags: vec!["park".into()],
+                people_count: None,
+            },
+            ..Default::default()
+        };
+        assert!(db.photo_index_text(&unapplied).unwrap().is_empty());
+    }
+
+    #[test]
+    fn people_count_filter_matches_inclusive_intervals() {
+        let db = Db::open_in_memory().unwrap();
+        let range = seed_photo(&db);
+        install_test_catalog(&db);
+        let mut range_result = test_ai_result(&[]);
+        range_result.people_min = Some(2);
+        range_result.people_max = Some(4);
+        db.save_photo_ai(range, AI_PLUGIN, &range_result).unwrap();
+
+        let zero = seed_other_photo(&db);
+        let mut zero_result = test_ai_result(&[]);
+        zero_result.people_min = Some(0);
+        zero_result.people_max = Some(0);
+        db.save_photo_ai(zero, AI_PLUGIN, &zero_result).unwrap();
+
+        let no_ai = seed_photos(&db, 1)[0];
+        for (count, expected) in [
+            (0, vec![zero]),
+            (2, vec![range]),
+            (3, vec![range]),
+            (4, vec![range]),
+            (5, vec![]),
+        ] {
+            let filter = PhotoTextFilter {
+                ai: AiPhotoFilter {
+                    tags: Vec::new(),
+                    people_count: Some(count),
+                },
+                ..Default::default()
+            };
+            let mut ids = db
+                .photo_index_text(&filter)
+                .unwrap()
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>();
+            ids.sort_unstable();
+            assert_eq!(ids, expected, "count={count}");
+        }
+
+        let zero_filter = PhotoTextFilter {
+            ai: AiPhotoFilter {
+                tags: Vec::new(),
+                people_count: Some(0),
+            },
+            ..Default::default()
+        };
+        assert!(
+            db.photo_index_text(&zero_filter)
+                .unwrap()
+                .iter()
+                .all(|entry| entry.id != no_ai)
+        );
+    }
+
+    #[test]
+    fn photo_filter_ai_conditions_apply_to_search_photos_and_count() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        install_test_catalog(&db);
+        db.save_photo_ai(photo, AI_PLUGIN, &test_ai_result(&[("sea", 0.9)]))
+            .unwrap();
+        seed_other_photo(&db);
+
+        let filter = PhotoFilter {
+            ai: AiPhotoFilter {
+                tags: vec!["sea".into()],
+                people_count: Some(3),
+            },
+            ..Default::default()
+        };
+        assert_eq!(db.count_search(&filter).unwrap(), 1);
+        assert_eq!(
+            db.search_photos(&filter)
+                .unwrap()
+                .iter()
+                .map(|photo| photo.id)
+                .collect::<Vec<_>>(),
+            vec![photo]
+        );
+    }
+
+    #[test]
+    fn ai_filters_use_the_ai_indexes() {
+        let db = Db::open_in_memory().unwrap();
+        install_test_catalog(&db);
+        let photos = seed_photos(&db, 500);
+        for (index, photo_id) in photos.iter().enumerate() {
+            // sea は 10 枚に 1 枚だけにして、インデックスが選択されるようにする。
+            let tag = if index % 10 == 0 { "sea" } else { "park" };
+            let mut result = test_ai_result(&[(tag, 0.9)]);
+            result.people_min = Some((index % 5) as u32);
+            result.people_max = Some(((index % 5) + 2) as u32);
+            db.save_photo_ai(*photo_id, AI_PLUGIN, &result).unwrap();
+        }
+        db.connection().execute("ANALYZE", []).unwrap();
+
+        let filter = PhotoTextFilter {
+            ai: AiPhotoFilter {
+                tags: vec!["sea".into()],
+                people_count: Some(3),
+            },
+            ..Default::default()
+        };
+        let (where_sql, values) = build_text_filter(&filter);
+        let plan = query_plan_with_values(
+            &db,
+            &format!("SELECT p.id {PHOTO_FROM} WHERE {where_sql}"),
+            values,
+        );
+        assert!(
+            plan.iter()
+                .any(|line| line.contains("idx_photo_ai_tags_applied")),
+            "plan: {plan:#?}"
+        );
+        // `photo_ai` is looked up by its INTEGER PRIMARY KEY (photo_id) for the
+        // correlated EXISTS, so SQLite does not need idx_photo_ai_people here.
+        assert!(
+            plan.iter()
+                .any(|line| line.contains("SEARCH pa") && line.contains("INTEGER PRIMARY KEY")),
+            "plan: {plan:#?}"
         );
     }
 

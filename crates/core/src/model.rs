@@ -850,6 +850,15 @@ pub struct PhotoIndexEntry {
     pub captured_month: i32,
 }
 
+/// AI tagging conditions shared by the text and typed photo filters.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AiPhotoFilter {
+    /// Tag keys matched with OR. Only applied tags of the AI plugin match.
+    pub tags: Vec<String>,
+    /// A single people count contained in the stored estimate interval.
+    pub people_count: Option<u32>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PhotoTextFilter {
     pub world: Option<String>,
@@ -858,6 +867,7 @@ pub struct PhotoTextFilter {
     pub favorite: bool,
     pub from_utc: Option<i64>,
     pub to_utc: Option<i64>,
+    pub ai: AiPhotoFilter,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -872,6 +882,7 @@ pub struct PhotoFilter {
     pub limit: i64,
     pub offset: i64,
     pub sort: Option<PhotoSort>,
+    pub ai: AiPhotoFilter,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

@@ -3,6 +3,9 @@
 pub use vrc_photon_ai_protocol::ModelState;
 use vrc_photon_ai_protocol::{TaggingJobStatus, TaggingStage};
 
+/// The only AI tagging plugin supported by the host.
+pub const AI_PLUGIN_ID: &str = "vrc-photon-autotag";
+
 /// One installed plugin package: a plugin version for a platform variant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PluginInstallation {
