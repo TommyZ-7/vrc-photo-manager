@@ -4,6 +4,7 @@
 //! daemon and the gpui application can share it.
 
 pub mod ai;
+mod cache_metadata;
 pub mod compressor;
 pub mod db;
 pub mod discord;

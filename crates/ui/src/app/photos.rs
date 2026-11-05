@@ -73,13 +73,12 @@ impl App {
     /// Starts a background decode for a grid thumbnail when the cache has a
     /// free slot. Cached, pending, and previously failed photos are skipped.
     pub(crate) fn request_thumbnail(&mut self, photo: &Photo, cx: &mut Context<Self>) {
-        if !self.thumbnails.borrow_mut().begin(photo.id) {
+        let Some(ticket) = self.thumbnails.borrow_mut().begin_ticket(photo.id) else {
             return;
-        }
+        };
         let id = photo.id;
         let source = PathBuf::from(photo.effective_path());
         let spec = self.settings.thumbnail_spec();
-        let generation = self.thumbnails.borrow().generation();
         let cache_path = match &self.demo_assets {
             Some(assets) => demo_thumb_path(assets, id),
             None => thumbnail::thumbnail_path(id, spec).unwrap_or_default(),
@@ -103,8 +102,8 @@ impl App {
             this.update(cx, |this, cx| {
                 match decoded {
                     Some(decoded) => {
-                        let inserted = this.thumbnails.borrow_mut().insert_if_generation(
-                            generation,
+                        let inserted = this.thumbnails.borrow_mut().insert_if_ticket(
+                            ticket,
                             id,
                             make_render_image(decoded.image),
                             decoded.color,
@@ -113,10 +112,7 @@ impl App {
                             this.note_generated_thumbnail(bytes, cx);
                         }
                     }
-                    None => this
-                        .thumbnails
-                        .borrow_mut()
-                        .fail_if_generation(generation, id),
+                    None => this.thumbnails.borrow_mut().fail_if_ticket(ticket, id),
                 }
                 // The selected photo may have been refused earlier because
                 // every in-flight slot was busy; a freed slot is its retry.
@@ -244,6 +240,9 @@ impl App {
     /// list. Multi-selection toggles call this when the primary changes.
     fn set_primary_photo(&mut self, id: i64, cx: &mut Context<Self>) {
         let changed = self.selected != Some(id) || self.selected_photo.is_none();
+        // Selecting the photo is an explicit reload request: clear a recent
+        // thumbnail failure so it is not hidden until the retry TTL.
+        self.thumbnails.borrow_mut().retry(id);
         if changed {
             let previous_color = self
                 .selected_photo
@@ -458,6 +457,23 @@ impl App {
         self.zoom_drag = None;
         self.previous_preview = None;
         self.previous_color = None;
+    }
+
+    /// Drops the in-memory thumbnail and preview for a photo whose display
+    /// source changed (a completed `replace` compression). The next display
+    /// request regenerates both from the derivative.
+    pub(crate) fn invalidate_photo_media(&mut self, id: i64, cx: &mut Context<Self>) {
+        self.thumbnails.borrow_mut().invalidate(id);
+        if self.selected == Some(id) {
+            self.preview = None;
+            self.preview_key = None;
+            self.preview_attempt = None;
+            self.previous_preview = None;
+            self.previous_color = None;
+            self.reset_full_preview();
+            self.preview_queue.cancel_wanted();
+            cx.notify();
+        }
     }
 
     pub(crate) fn clear_selection(&mut self, cx: &mut Context<Self>) {

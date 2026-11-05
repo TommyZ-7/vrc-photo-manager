@@ -913,7 +913,7 @@ impl Daemon {
             if jobs.is_empty() {
                 break;
             }
-            process_photo_batch(&self.db, &jobs);
+            process_photo_batch(&self.db, &jobs, Some(&self.thumbnail_dir));
         }
         self.process_deletions()?;
         Ok(())
@@ -2383,9 +2383,10 @@ impl Daemon {
             let running = self.running.clone();
             let jobs = self.jobs.clone();
             let events = self.events.clone();
+            let thumbnail_dir = self.thumbnail_dir.clone();
             let handle = thread::Builder::new()
                 .name(format!("compress-{index}"))
-                .spawn(move || worker_loop(db, running, jobs, events))
+                .spawn(move || worker_loop(db, running, jobs, events, thumbnail_dir))
                 .expect("cannot spawn compression worker");
             self.workers.push(handle);
         }
@@ -3137,6 +3138,7 @@ fn worker_loop(
     running: Arc<AtomicBool>,
     jobs: Arc<JobSignal>,
     events: EventBus,
+    thumbnail_dir: PathBuf,
 ) {
     let mut seen_generation = 0;
     let mut last_poll_error: Option<String> = None;
@@ -3169,7 +3171,7 @@ fn worker_loop(
         for job in &batch {
             publish_compression(&events, job, JobStatus::Processing, 0.05, None);
         }
-        for outcome in process_photo_batch(&db, &batch) {
+        for outcome in process_photo_batch(&db, &batch, Some(&thumbnail_dir)) {
             match outcome.status {
                 QueueStatus::Completed => {
                     publish_compression(&events, &outcome.job, JobStatus::Completed, 1.0, None)
@@ -3218,8 +3220,12 @@ struct JobOutcome {
 /// failures are recorded and do not stop the remaining jobs. A batch-level
 /// failure only marks jobs that are still pending/processing as failed, so
 /// completed and cancelled rows are never rewritten.
-fn process_photo_batch(db: &Arc<Mutex<Db>>, jobs: &[CompressionJob]) -> Vec<JobOutcome> {
-    match process_photo_batch_inner(db, jobs) {
+fn process_photo_batch(
+    db: &Arc<Mutex<Db>>,
+    jobs: &[CompressionJob],
+    thumbnail_dir: Option<&Path>,
+) -> Vec<JobOutcome> {
+    match process_photo_batch_inner(db, jobs, thumbnail_dir) {
         Ok(outcomes) => outcomes,
         Err(error) => {
             let message = error.to_string();
@@ -3259,6 +3265,7 @@ fn fail_claimed_jobs(
 fn process_photo_batch_inner(
     db: &Arc<Mutex<Db>>,
     jobs: &[CompressionJob],
+    thumbnail_dir: Option<&Path>,
 ) -> Result<Vec<JobOutcome>> {
     let Some(first) = jobs.first() else {
         return Ok(Vec::new());
@@ -3314,7 +3321,7 @@ fn process_photo_batch_inner(
         db.lock()
             .unwrap()
             .update_job(&job.id, QueueStatus::Processing, 0.05, None, None)?;
-        match process_decoded_job(db, &photo, &source_path, &image, job) {
+        match process_decoded_job(db, &photo, &source_path, &image, job, thumbnail_dir) {
             Ok(()) => outcomes.push(JobOutcome {
                 job: job.clone(),
                 status: QueueStatus::Completed,
@@ -3373,6 +3380,7 @@ fn process_decoded_job(
     source_path: &Path,
     image: &DynamicImage,
     job: &CompressionJob,
+    thumbnail_dir: Option<&Path>,
 ) -> Result<()> {
     let mut profile = {
         let db = db.lock().unwrap();
@@ -3414,6 +3422,22 @@ fn process_decoded_job(
         let profiles = db.list_profiles()?;
         let preferred = preferred_display_derivative(&derivatives, &profiles)
             .context("no displayable derivative after compression")?;
+        // The displayed file is about to change. Drop every cached thumbnail
+        // and preview for this photo before publishing `replaced`, so the next
+        // display request regenerates from the derivative instead of showing
+        // the old original. Failures are non-fatal: the source stamp still
+        // invalidates a stale entry on the next read.
+        if let Some(cache_dir) = thumbnail_dir
+            && let Err(error) = thumbnail::remove_thumbnail_files_in(cache_dir, photo.id)
+        {
+            tracing::warn!(photo_id = photo.id, %error, "cannot invalidate thumbnail cache");
+        }
+        if let Some(cache_dir) = vrc_photon_core::preview::previews_dir()
+            && let Err(error) =
+                vrc_photon_core::preview::remove_preview_files_in(&cache_dir, photo.id)
+        {
+            tracing::warn!(photo_id = photo.id, %error, "cannot invalidate preview cache");
+        }
         if !db.set_replaced(photo.id, preferred.id)? {
             anyhow::bail!("derivative was not attached to the photo");
         }
@@ -3441,7 +3465,16 @@ fn process_decoded_job(
 
 #[cfg(test)]
 fn process_job(db: &Arc<Mutex<Db>>, job: &CompressionJob) -> Result<()> {
-    let mut outcomes = process_photo_batch(db, std::slice::from_ref(job));
+    process_job_with_thumbnail_dir(db, job, None)
+}
+
+#[cfg(test)]
+fn process_job_with_thumbnail_dir(
+    db: &Arc<Mutex<Db>>,
+    job: &CompressionJob,
+    thumbnail_dir: Option<&Path>,
+) -> Result<()> {
+    let mut outcomes = process_photo_batch(db, std::slice::from_ref(job), thumbnail_dir);
     let outcome = outcomes.pop().context("compression produced no outcome")?;
     match outcome.status {
         QueueStatus::Completed => Ok(()),
@@ -7183,7 +7216,7 @@ mod tests {
             .unwrap()[0];
         assert!(db.force_deletion(request).unwrap());
 
-        let outcomes = process_photo_batch(&daemon.db, &jobs);
+        let outcomes = process_photo_batch(&daemon.db, &jobs, Some(&daemon.thumbnail_dir));
 
         assert_eq!(outcomes[0].status, QueueStatus::Completed);
         assert_eq!(outcomes[1].status, QueueStatus::Cancelled);

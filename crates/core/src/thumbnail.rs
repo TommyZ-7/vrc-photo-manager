@@ -2,6 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use crate::cache_metadata;
 use crate::error::{CoreError, Result};
 
 pub const THUMBNAIL_QUALITY_MIN: u8 = 10;
@@ -107,6 +108,10 @@ pub fn thumbnail_cache_usage() -> Result<ThumbnailCacheUsage> {
 }
 
 /// Total size of the thumbnail cache, counting old and new cache keys.
+///
+/// `.meta` sidecars are excluded from the count (their bytes are negligible);
+/// they are still deleted together with their WebP by pruning, clearing, and
+/// per-photo invalidation so they cannot accumulate as orphans.
 pub fn thumbnail_cache_usage_in(cache_dir: &Path) -> Result<ThumbnailCacheUsage> {
     let entries = match collect_thumbnail_entries(cache_dir) {
         Ok(entries) => entries,
@@ -177,6 +182,9 @@ where
                 report.removed_files += 1;
                 report.removed_bytes = report.removed_bytes.saturating_add(entry.bytes);
                 remaining = remaining.saturating_sub(entry.bytes);
+                // Sidecars are tiny and deliberately excluded from the byte
+                // accounting, but they must never outlive their thumbnail.
+                cache_metadata::remove_stamp(&entry.path);
             }
             Err(error) => tracing::debug!(
                 %error,
@@ -190,11 +198,13 @@ where
     Ok(report)
 }
 
-/// Removes every regular file in the thumbnail cache, including old cache
-/// keys and temporary files, then reports the remaining thumbnail usage.
+/// Removes every known thumbnail artifact in the cache: WebP entries (old and
+/// current keys), their `.meta` sidecars, and temp files left by interrupted
+/// writers.
 ///
-/// Subdirectories and unrelated entries are left alone; the cache is written
-/// as a flat directory.
+/// Unrelated regular files and subdirectories are left alone, so clearing the
+/// thumbnail cache can never delete a user file that happens to live beside
+/// it.
 pub fn clear_thumbnail_cache_in(cache_dir: &Path) -> Result<ThumbnailCacheClearReport> {
     let mut report = ThumbnailCacheClearReport::default();
     let entries = match fs::read_dir(cache_dir) {
@@ -214,6 +224,12 @@ pub fn clear_thumbnail_cache_in(cache_dir: &Path) -> Result<ThumbnailCacheClearR
                 continue;
             }
         };
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !is_thumbnail_artifact_name(&name) {
+            continue;
+        }
         let path = entry.path();
         let Ok(metadata) = entry.metadata() else {
             continue;
@@ -237,6 +253,117 @@ pub fn clear_thumbnail_cache_in(cache_dir: &Path) -> Result<ThumbnailCacheClearR
     report.remaining_files = remaining.files;
     report.remaining_bytes = remaining.bytes;
     Ok(report)
+}
+
+/// Removes every cached thumbnail and sidecar for one photo, regardless of
+/// quality/size variant or temp files left by a failed writer.
+///
+/// Returns how many files were removed. Used after a `replace` compression so
+/// the next display regenerates from the new derivative instead of reusing a
+/// thumbnail of the original.
+pub fn remove_thumbnail_files(photo_id: i64) -> Result<usize> {
+    match thumbnails_dir() {
+        Some(dir) => remove_thumbnail_files_in(&dir, photo_id),
+        None => Ok(0),
+    }
+}
+
+/// Same as [`remove_thumbnail_files`] with an explicit cache directory.
+pub fn remove_thumbnail_files_in(cache_dir: &Path, photo_id: i64) -> Result<usize> {
+    let entries = match fs::read_dir(cache_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(CoreError::Io(error)),
+    };
+    let mut removed = 0;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    dir = %cache_dir.display(),
+                    "cannot read thumbnail cache entry while removing a photo"
+                );
+                continue;
+            }
+        };
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !thumbnail_artifact_belongs_to(&name, photo_id) {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => removed += 1,
+            Err(error) => tracing::debug!(
+                %error,
+                path = %path.display(),
+                "cannot remove thumbnail for photo"
+            ),
+        }
+    }
+    Ok(removed)
+}
+
+/// Whether `name` is a thumbnail WebP, sidecar, or temp file. The stem must be
+/// the old `<id>` key or the current `<id>-q<quality>-s<size>` key.
+fn is_thumbnail_artifact_name(name: &str) -> bool {
+    thumbnail_artifact_stem(name).is_some_and(is_thumbnail_stem)
+}
+
+fn thumbnail_artifact_belongs_to(name: &str, photo_id: i64) -> bool {
+    let Some(stem) = thumbnail_artifact_stem(name) else {
+        return false;
+    };
+    stem.split('-').next().and_then(|id| id.parse::<i64>().ok()) == Some(photo_id)
+        && is_thumbnail_stem(stem)
+}
+
+/// Returns the cache key stem before a known thumbnail suffix.
+///
+/// Recognised forms:
+/// - `<stem>.webp` (published thumbnail)
+/// - `<stem>.webp.meta` (source stamp sidecar)
+/// - `<stem>.webp.tmp` (legacy shared temp)
+/// - `<stem>.webp.tmp-<pid>-<sequence>` (current unique temp)
+/// - `<stem>.webp.meta.tmp-<pid>-<sequence>` (unique sidecar temp)
+fn thumbnail_artifact_stem(name: &str) -> Option<&str> {
+    if let Some(stem) = name.strip_suffix(".webp") {
+        return Some(stem);
+    }
+    if let Some(stem) = name.strip_suffix(".webp.meta") {
+        return Some(stem);
+    }
+    if let Some((stem, suffix)) = name.split_once(".webp.meta.tmp") {
+        return is_temp_suffix(suffix).then_some(stem);
+    }
+    if let Some((stem, suffix)) = name.split_once(".webp.tmp") {
+        return is_temp_suffix(suffix).then_some(stem);
+    }
+    None
+}
+
+/// A temp suffix is empty (legacy shared name) or `-<pid>-<sequence>`.
+fn is_temp_suffix(suffix: &str) -> bool {
+    let Some(rest) = suffix.strip_prefix('-') else {
+        return suffix.is_empty();
+    };
+    let mut parts = rest.split('-');
+    let Some(pid) = parts.next() else {
+        return false;
+    };
+    let Some(sequence) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none() && pid.parse::<u32>().is_ok() && sequence.parse::<u64>().is_ok()
 }
 
 /// Accepts the current `<id>-q<quality>-s<size>` key and the old `<id>` key.
@@ -384,7 +511,9 @@ pub fn ensure_thumbnail_in_with_status(
         .filter(|metadata| metadata.is_file())
         .map(|metadata| metadata.len())
         .filter(|bytes| *bytes > 0);
-    if let Some(bytes) = existing_bytes {
+    if let Some(bytes) = existing_bytes
+        && cache_metadata::cache_is_fresh(&output, source)
+    {
         return Ok(Some(EnsuredThumbnail {
             path: output,
             created: false,
@@ -394,6 +523,10 @@ pub fn ensure_thumbnail_in_with_status(
     if !source.is_file() {
         return Ok(None);
     }
+    let Some(stamp) = cache_metadata::source_stamp(source) else {
+        tracing::warn!(path = %source.display(), "cannot read thumbnail source metadata");
+        return Ok(None);
+    };
     let image = match crate::image_decode::decode_image(source) {
         Some(image) => image.thumbnail(spec.size, spec.size).to_rgba8(),
         None => {
@@ -406,8 +539,11 @@ pub fn ensure_thumbnail_in_with_status(
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)?;
     }
-    let temp = output.with_extension("webp.tmp");
-    fs::write(&temp, &*encoded)?;
+    let temp = cache_metadata::unique_temp_path(&output);
+    if let Err(error) = fs::write(&temp, &*encoded) {
+        let _ = fs::remove_file(&temp);
+        return Err(CoreError::Io(error));
+    }
     if let Err(error) = fs::rename(&temp, &output) {
         if let Err(cleanup) = fs::remove_file(&temp) {
             tracing::debug!(
@@ -418,6 +554,16 @@ pub fn ensure_thumbnail_in_with_status(
             );
         }
         return Err(CoreError::Io(error));
+    }
+    if let Err(error) = cache_metadata::write_stamp(&output, stamp) {
+        // The thumbnail itself is valid; a missing stamp only forces one
+        // regeneration on the next request.
+        tracing::warn!(
+            %error,
+            photo_id,
+            path = %output.display(),
+            "cannot write thumbnail metadata"
+        );
     }
     Ok(Some(EnsuredThumbnail {
         path: output,
@@ -435,6 +581,15 @@ mod tests {
 
     fn write_cache_entry(path: &Path, bytes: usize, modified: SystemTime) {
         fs::write(path, vec![0u8; bytes]).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+    }
+
+    fn set_mtime(path: &Path, modified: SystemTime) {
         fs::File::options()
             .write(true)
             .open(path)
@@ -515,21 +670,41 @@ mod tests {
     fn clear_thumbnail_cache_removes_old_new_and_temporary_files() {
         let dir = tempdir().unwrap();
         write_cache_entry(&dir.path().join("1.webp"), 1000, SystemTime::now());
+        write_cache_entry(&dir.path().join("1.webp.meta"), 10, SystemTime::now());
         write_cache_entry(&dir.path().join("2-q80-s384.webp"), 2000, SystemTime::now());
+        write_cache_entry(
+            &dir.path().join("2-q80-s384.webp.meta"),
+            10,
+            SystemTime::now(),
+        );
         write_cache_entry(
             &dir.path().join("3-q80-s384.webp.tmp"),
             3000,
             SystemTime::now(),
         );
+        write_cache_entry(
+            &dir.path().join("3-q80-s384.webp.tmp-42-7"),
+            3000,
+            SystemTime::now(),
+        );
+        write_cache_entry(
+            &dir.path().join("3-q80-s384.webp.meta.tmp-42-8"),
+            10,
+            SystemTime::now(),
+        );
+        write_cache_entry(&dir.path().join("notes.txt"), 4000, SystemTime::now());
+        write_cache_entry(&dir.path().join("keep.webp"), 5000, SystemTime::now());
         fs::create_dir(dir.path().join("sub")).unwrap();
 
         let report = clear_thumbnail_cache_in(dir.path()).unwrap();
 
-        assert_eq!(report.removed_files, 3);
-        assert_eq!(report.removed_bytes, 6000);
+        assert_eq!(report.removed_files, 7);
+        assert_eq!(report.removed_bytes, 9_030);
         assert_eq!(report.remaining_files, 0);
         assert_eq!(report.remaining_bytes, 0);
         assert!(dir.path().join("sub").is_dir());
+        assert!(dir.path().join("notes.txt").is_file());
+        assert!(dir.path().join("keep.webp").is_file());
     }
 
     #[test]
@@ -885,6 +1060,208 @@ mod tests {
         assert!(!second.created);
         assert_eq!(second.bytes, first.bytes);
         assert_eq!(second.path, first.path);
+    }
+
+    #[test]
+    fn unchanged_source_reuses_the_thumbnail() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.png");
+        RgbaImage::from_pixel(640, 360, Rgba([10, 20, 30, 255]))
+            .save(&source)
+            .unwrap();
+        let spec = ThumbnailSpec::default();
+
+        let first = ensure_thumbnail_in_with_status(999_995, &source, dir.path(), spec)
+            .unwrap()
+            .expect("thumbnail");
+        assert!(first.created);
+        assert!(cache_metadata::metadata_path(&first.path).is_file());
+
+        let second = ensure_thumbnail_in_with_status(999_995, &source, dir.path(), spec)
+            .unwrap()
+            .expect("cached");
+        assert!(!second.created);
+    }
+
+    #[test]
+    fn source_mtime_change_regenerates_the_thumbnail() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.png");
+        RgbaImage::from_pixel(640, 360, Rgba([10, 20, 30, 255]))
+            .save(&source)
+            .unwrap();
+        let spec = ThumbnailSpec::default();
+        ensure_thumbnail_in_with_status(999_994, &source, dir.path(), spec)
+            .unwrap()
+            .expect("thumbnail");
+
+        set_mtime(&source, SystemTime::now() + Duration::from_secs(5));
+        let refreshed = ensure_thumbnail_in_with_status(999_994, &source, dir.path(), spec)
+            .unwrap()
+            .expect("regenerated");
+
+        assert!(refreshed.created);
+    }
+
+    #[test]
+    fn source_size_change_regenerates_even_with_the_same_mtime() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.png");
+        RgbaImage::from_pixel(640, 360, Rgba([10, 20, 30, 255]))
+            .save(&source)
+            .unwrap();
+        let spec = ThumbnailSpec::default();
+        ensure_thumbnail_in_with_status(999_993, &source, dir.path(), spec)
+            .unwrap()
+            .expect("thumbnail");
+        let modified = fs::metadata(&source).unwrap().modified().unwrap();
+
+        RgbaImage::from_pixel(800, 450, Rgba([200, 100, 50, 255]))
+            .save(&source)
+            .unwrap();
+        set_mtime(&source, modified);
+        let refreshed = ensure_thumbnail_in_with_status(999_993, &source, dir.path(), spec)
+            .unwrap()
+            .expect("regenerated");
+
+        assert!(refreshed.created);
+    }
+
+    #[test]
+    fn missing_sidecar_regenerates_an_old_cache_entry_once() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.png");
+        RgbaImage::from_pixel(320, 200, Rgba([10, 20, 30, 255]))
+            .save(&source)
+            .unwrap();
+        let spec = ThumbnailSpec::default();
+        let ensured = ensure_thumbnail_in_with_status(999_992, &source, dir.path(), spec)
+            .unwrap()
+            .expect("thumbnail");
+        fs::remove_file(cache_metadata::metadata_path(&ensured.path)).unwrap();
+
+        let regenerated = ensure_thumbnail_in_with_status(999_992, &source, dir.path(), spec)
+            .unwrap()
+            .expect("regenerated");
+        assert!(regenerated.created);
+
+        let cached = ensure_thumbnail_in_with_status(999_992, &source, dir.path(), spec)
+            .unwrap()
+            .expect("cached");
+        assert!(!cached.created);
+    }
+
+    #[test]
+    fn concurrent_generation_leaves_one_decodable_thumbnail_and_no_temps() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.png");
+        RgbaImage::from_pixel(640, 360, Rgba([10, 20, 30, 255]))
+            .save(&source)
+            .unwrap();
+        let spec = ThumbnailSpec::default();
+
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let source = &source;
+                let cache = dir.path();
+                scope.spawn(move || {
+                    let ensured = ensure_thumbnail_in_with_status(999_991, source, cache, spec)
+                        .unwrap()
+                        .expect("thumbnail");
+                    assert!(ensured.path.is_file());
+                });
+            }
+        });
+
+        let output = thumbnail_path_in(dir.path(), 999_991, spec);
+        let image = crate::image_decode::decode_image(&output).expect("decodable thumbnail");
+        assert!(image.width() <= spec.size && image.height() <= spec.size);
+        assert!(cache_metadata::cache_is_fresh(&output, &source));
+        for entry in fs::read_dir(dir.path()).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().to_string();
+            assert!(!name.contains(".tmp"), "leftover temp file: {name}");
+        }
+    }
+
+    #[test]
+    fn remove_thumbnail_files_removes_every_variant_and_sidecar() {
+        let dir = tempdir().unwrap();
+        for name in [
+            "7.webp",
+            "7.webp.meta",
+            "7-q80-s256.webp",
+            "7-q80-s256.webp.meta",
+            "7-q95-s512.webp.tmp-42-1",
+            "8-q80-s256.webp",
+            "8-q80-s256.webp.meta",
+            "17.webp",
+            "notes.txt",
+        ] {
+            fs::write(dir.path().join(name), b"data").unwrap();
+        }
+
+        let removed = remove_thumbnail_files_in(dir.path(), 7).unwrap();
+
+        assert_eq!(removed, 5);
+        for name in [
+            "7.webp",
+            "7.webp.meta",
+            "7-q80-s256.webp",
+            "7-q80-s256.webp.meta",
+            "7-q95-s512.webp.tmp-42-1",
+        ] {
+            assert!(!dir.path().join(name).exists(), "still present: {name}");
+        }
+        assert!(dir.path().join("8-q80-s256.webp").exists());
+        assert!(dir.path().join("8-q80-s256.webp.meta").exists());
+        assert!(dir.path().join("17.webp").exists());
+        assert!(dir.path().join("notes.txt").exists());
+    }
+
+    #[test]
+    fn pruning_a_thumbnail_also_removes_its_sidecar() {
+        let dir = tempdir().unwrap();
+        let now = SystemTime::now();
+        write_cache_entry(
+            &dir.path().join("1.webp"),
+            1000,
+            now - Duration::from_secs(20),
+        );
+        write_cache_entry(
+            &dir.path().join("1.webp.meta"),
+            10,
+            now - Duration::from_secs(20),
+        );
+        write_cache_entry(&dir.path().join("2.webp"), 1000, now);
+
+        let report = prune_thumbnails_in(dir.path(), 1500).unwrap();
+
+        assert_eq!(report.removed_files, 1);
+        assert_eq!(report.removed_bytes, 1000);
+        assert!(!dir.path().join("1.webp").exists());
+        assert!(!dir.path().join("1.webp.meta").exists());
+        assert!(dir.path().join("2.webp").exists());
+    }
+
+    #[test]
+    fn failed_rename_removes_the_unique_temp_file() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.png");
+        RgbaImage::from_pixel(640, 360, Rgba([10, 20, 30, 255]))
+            .save(&source)
+            .unwrap();
+        let spec = ThumbnailSpec::default();
+        // A directory at the output path makes the atomic rename fail after
+        // the temp file has been written.
+        fs::create_dir(thumbnail_path_in(dir.path(), 999_990, spec)).unwrap();
+
+        let result = ensure_thumbnail_in_with_status(999_990, &source, dir.path(), spec);
+
+        assert!(result.is_err());
+        for entry in fs::read_dir(dir.path()).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().to_string();
+            assert!(!name.contains(".tmp"), "leftover temp file: {name}");
+        }
     }
 
     #[test]

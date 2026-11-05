@@ -423,6 +423,10 @@ impl App {
         self.reset_full_preview();
         self.zoom = ViewerZoom::default();
         self.zoom_drag = None;
+        // The closing morph owns its image clones; the crossfade frame must
+        // not keep a decoded preview alive after the viewer is gone.
+        self.previous_preview = None;
+        self.previous_color = None;
         self.quick_look_open = false;
         self.note_edit_id = None;
         let focus = self
