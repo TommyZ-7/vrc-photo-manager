@@ -756,7 +756,8 @@ fn update_error_message(error: &UpdateError) -> UpdateText {
         UpdateError::PackageManagerFailed { .. } => UpdateText::key("update.error.package_failed"),
         UpdateError::NotPrivileged
         | UpdateError::StagingRejected(_)
-        | UpdateError::PackageManagerUnavailable => {
+        | UpdateError::PackageManagerUnavailable
+        | UpdateError::CommandTimeout { .. } => {
             UpdateText::key("update.error.other").arg("message", error.to_string())
         }
     }

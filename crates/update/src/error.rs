@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -81,6 +82,12 @@ pub enum UpdateError {
     PackageManagerFailed {
         family: PackageFamily,
         status: String,
+        output: String,
+    },
+    #[error("{program} did not finish within {timeout:?}: {output}")]
+    CommandTimeout {
+        program: String,
+        timeout: Duration,
         output: String,
     },
     #[error("{0}")]
@@ -172,6 +179,15 @@ mod tests {
             15
         );
         assert_eq!(UpdateError::SystemHelperMissing.helper_exit_code(), 16);
+        assert_eq!(
+            UpdateError::CommandTimeout {
+                program: "pkexec".into(),
+                timeout: std::time::Duration::from_secs(600),
+                output: String::new(),
+            }
+            .helper_exit_code(),
+            16
+        );
         assert_eq!(UpdateError::Other("x".into()).helper_exit_code(), 16);
     }
 

@@ -156,6 +156,11 @@ pub fn install_kind() -> InstallKind {
     #[cfg(not(windows))]
     {
         let appimage = std::env::var_os("APPIMAGE").map(PathBuf::from);
+        if let Some(path) = appimage.as_deref() {
+            // An interrupted replacement may have left the target missing and
+            // the previous AppImage next to it. Restore it before classifying.
+            let _ = crate::helper::recover_appimage(path);
+        }
         let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
         match std::env::current_exe() {
             Ok(exe) => classify_linux(&exe, appimage.as_deref(), &os_release),

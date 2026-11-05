@@ -16,6 +16,11 @@ use crate::manifest::{Manifest, PlatformAsset};
 use crate::native::NativeString;
 use crate::verify::{decode_signature_base64, effective_public_keys, verify_bytes, verify_file};
 
+/// Time allowed for the polkit authentication prompt and helper launch.
+const AUTH_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// Time allowed for package metadata reads and package installation.
+const PACKAGE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
 /// Timeouts for the helper. Tests may skip the signature check to exercise
 /// launch/rollback with generated scripts.
 #[derive(Debug, Clone)]
@@ -141,6 +146,20 @@ pub fn run_helper_with_options(job_path: &Path, options: HelperOptions) -> Resul
             return Err(error);
         }
     };
+
+    if matches!(job.kind, ApplyKind::AppImage) {
+        match recover_appimage(&job.target) {
+            Ok(true) => log(
+                &paths,
+                &format!(
+                    "restored the previous AppImage at {} after an interrupted replacement",
+                    job.target.display()
+                ),
+            ),
+            Ok(false) => {}
+            Err(error) => log(&paths, &format!("cannot recover the AppImage: {error}")),
+        }
+    }
 
     if !wait_for_process_exit(job.ui_pid, options.exit_timeout) {
         return abort_before_apply(
@@ -744,19 +763,18 @@ fn read_package_metadata(
         ),
         PackageFamily::Unknown => return Err(UpdateError::PackageManagerUnavailable),
     };
-    let output = Command::new(&program)
-        .args(&args)
-        .env("LC_ALL", "C")
-        .output()
-        .map_err(|error| UpdateError::io(&program, error))?;
-    if !output.status.success() {
+    let mut command = Command::new(&program);
+    command.args(&args).env("LC_ALL", "C");
+    let output = crate::command::run_bounded(&mut command, PACKAGE_TIMEOUT)
+        .map_err(|error| error.with_io_operation(IoOperation::Apply))?;
+    if !output.success() {
         return Err(UpdateError::PackageManagerFailed {
             family,
             status: output.status.to_string(),
-            output: command_output(&output),
+            output: output.combined(),
         });
     }
-    let text = String::from_utf8_lossy(&output.stdout);
+    let text = output.stdout.text();
     let name_key = if family == PackageFamily::Pacman {
         "Name"
     } else {
@@ -791,16 +809,6 @@ fn truncate_output(bytes: &[u8]) -> String {
     }
 }
 
-/// The combined stdout and stderr of a failed command, keeping the tail.
-fn command_output(output: &std::process::Output) -> String {
-    let mut bytes = output.stdout.clone();
-    if !bytes.is_empty() && !output.stderr.is_empty() {
-        bytes.push(b'\n');
-    }
-    bytes.extend_from_slice(&output.stderr);
-    truncate_output(&bytes)
-}
-
 fn install_package(family: PackageFamily, path: &Path, options: &HelperOptions) -> Result<()> {
     let (program, args) = match family {
         PackageFamily::Pacman => (
@@ -822,20 +830,19 @@ fn install_package(family: PackageFamily, path: &Path, options: &HelperOptions) 
     if family == PackageFamily::Deb {
         command.env("DEBIAN_FRONTEND", "noninteractive");
     }
-    let output = command
-        .output()
-        .map_err(|error| UpdateError::io(&program, error))?;
-    if output.status.success() {
+    let output = crate::command::run_bounded(&mut command, PACKAGE_TIMEOUT)
+        .map_err(|error| error.with_io_operation(IoOperation::Apply))?;
+    if output.success() {
         return Ok(());
     }
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = output.stderr.text();
     if is_lock_error(family, &stderr) {
         return Err(UpdateError::PackageManagerLocked);
     }
     Err(UpdateError::PackageManagerFailed {
         family,
         status: output.status.to_string(),
-        output: command_output(&output),
+        output: output.combined(),
     })
 }
 
@@ -1013,15 +1020,27 @@ fn run_system_package_apply(
             job_path.display()
         ),
     );
-    let output = Command::new("pkexec")
+    let mut command = Command::new("pkexec");
+    command
         .arg("--disable-internal-agent")
         .arg(crate::install::SYSTEM_HELPER_PATH)
         .arg("--apply-system-package")
         .arg(job_path)
-        .env("LC_ALL", "C")
-        .output();
-    let output = match output {
+        .env("LC_ALL", "C");
+    let output = match crate::command::run_bounded(&mut command, AUTH_TIMEOUT) {
         Ok(output) => output,
+        Err(error @ UpdateError::CommandTimeout { .. }) => {
+            // The privileged helper may already have started installing, so
+            // the system state is unknown and the job must be kept.
+            return fail_system_package(
+                paths,
+                job,
+                job_path,
+                LastErrorCode::InstallOutcomeUnknown,
+                error.to_string(),
+                false,
+            );
+        }
         Err(error) => {
             return fail_system_package(
                 paths,
@@ -1038,18 +1057,12 @@ fn run_system_package_apply(
         &format!(
             "system package helper exit: {:?}\nstdout:\n{}\nstderr:\n{}",
             output.status.code(),
-            truncate_output(&output.stdout),
-            truncate_output(&output.stderr)
+            output.stdout.text(),
+            output.stderr.text()
         ),
     );
-    if !output.status.success() {
-        return handle_system_package_exit(
-            paths,
-            job,
-            job_path,
-            output.status,
-            &command_output(&output),
-        );
+    if !output.success() {
+        return handle_system_package_exit(paths, job, job_path, output.status, &output.combined());
     }
 
     let mut child = match launch(
@@ -1435,21 +1448,49 @@ struct LockGuard {
 
 impl Drop for LockGuard {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        // Only remove our own lock. Another helper may have reclaimed a stale
+        // lock and installed its own between our acquisition and this drop.
+        let own_pid = std::process::id().to_string();
+        let matches = std::fs::read_to_string(&self.path)
+            .ok()
+            .is_some_and(|text| text.trim() == own_pid);
+        if matches {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
+}
+
+/// Creates the lock file with its PID already written.
+///
+/// The PID is written to a unique sibling file first and then hard-linked into
+/// place, so the lock path never becomes visible while it is empty. `hard_link`
+/// fails with `AlreadyExists` instead of replacing another helper's lock.
+fn create_lock_file(path: &Path) -> std::io::Result<()> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let temp = parent.join(format!(".apply.lock-{}", uuid::Uuid::new_v4()));
+    let result = (|| -> std::io::Result<()> {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temp)?;
+        write!(file, "{}", std::process::id())?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::hard_link(&temp, path)
+    })();
+    let _ = std::fs::remove_file(&temp);
+    result
 }
 
 fn acquire_lock(paths: &UpdatePaths) -> Result<LockGuard> {
     let path = paths.lock_file();
     for attempt in 0..2 {
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut file) => {
-                write!(file, "{}", std::process::id())
-                    .map_err(|error| UpdateError::io(&path, error))?;
-                file.sync_all()
-                    .map_err(|error| UpdateError::io(&path, error))?;
-                return Ok(LockGuard { path });
-            }
+        match create_lock_file(&path) {
+            Ok(()) => return Ok(LockGuard { path }),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempt == 0 => {
                 if apply_in_progress(paths) {
                     return Err(UpdateError::Other(
@@ -1579,6 +1620,87 @@ pub fn replace_appimage(target: &Path, staged: &Path) -> Result<PathBuf> {
     replace_appimage_impl(target, staged, &sync_parent_directory)
 }
 
+fn appimage_backup_path(target: &Path) -> Result<PathBuf> {
+    let file_name = target
+        .file_name()
+        .ok_or_else(|| UpdateError::InvalidJob("target has no file name".to_string()))?;
+    Ok(target.with_file_name(format!("{}.previous", file_name.to_string_lossy())))
+}
+
+fn unique_sibling(path: &Path, label: &str) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    path.with_file_name(format!(".{file_name}.{label}-{}", uuid::Uuid::new_v4()))
+}
+
+/// Publishes a fully written sibling file at `target`.
+///
+/// On Unix `rename` replaces the target atomically. Windows has no equivalent
+/// for an existing file in `std`; AppImage updates are Unix-only, so the
+/// non-Unix fallback exists to keep the shared helper and its tests portable,
+/// not to provide an atomic Windows AppImage path.
+fn publish_appimage(temp: &Path, target: &Path) -> Result<()> {
+    #[cfg(not(unix))]
+    if target.exists() {
+        std::fs::remove_file(target)
+            .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))?;
+    }
+    std::fs::rename(temp, target)
+        .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))
+}
+
+/// Copies `staged` to a unique temp file next to `target`, sets the target's
+/// executable permissions, and makes the bytes durable before the switch.
+fn stage_replacement(staged: &Path, temp: &Path, mode: Option<u32>) -> Result<()> {
+    std::fs::copy(staged, temp)
+        .map_err(|error| UpdateError::io_at(IoOperation::Apply, temp, error))?;
+    #[cfg(unix)]
+    if let Some(mode) = mode {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(temp, std::fs::Permissions::from_mode(mode))
+            .map_err(|error| UpdateError::io_at(IoOperation::Apply, temp, error))?;
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    // Windows requires write access for FlushFileBuffers (sync_all).
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(temp)
+        .map_err(|error| UpdateError::io_at(IoOperation::Apply, temp, error))?;
+    file.sync_all()
+        .map_err(|error| UpdateError::io_at(IoOperation::Apply, temp, error))
+}
+
+/// Keeps the old target as `<target>.previous` without touching `target`.
+///
+/// A hard link is atomic and avoids copying a large AppImage. Filesystems
+/// without hard-link support fall back to a synced copy.
+fn backup_appimage(target: &Path, backup: &Path) -> Result<()> {
+    let link = std::fs::hard_link(target, backup);
+    if link.is_ok() {
+        return Ok(());
+    }
+    let temp = unique_sibling(backup, "tmp");
+    let result = (|| -> Result<()> {
+        std::fs::copy(target, &temp)
+            .map_err(|error| UpdateError::io_at(IoOperation::Apply, &temp, error))?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&temp)
+            .map_err(|error| UpdateError::io_at(IoOperation::Apply, &temp, error))?;
+        file.sync_all()
+            .map_err(|error| UpdateError::io_at(IoOperation::Apply, &temp, error))?;
+        std::fs::rename(&temp, backup)
+            .map_err(|error| UpdateError::io_at(IoOperation::Apply, backup, error))
+    })();
+    let _ = std::fs::remove_file(&temp);
+    result
+}
+
 fn replace_appimage_impl(
     target: &Path,
     staged: &Path,
@@ -1598,50 +1720,51 @@ fn replace_appimage_impl(
             std::io::ErrorKind::NotFound.into(),
         ));
     }
-    let file_name = target
-        .file_name()
-        .ok_or_else(|| UpdateError::InvalidJob("target has no file name".to_string()))?;
-    let backup = target.with_file_name(format!("{}.previous", file_name.to_string_lossy()));
+    let parent = target
+        .parent()
+        .ok_or_else(|| UpdateError::InvalidJob("target has no parent".to_string()))?;
+    let backup = appimage_backup_path(target)?;
     #[cfg(unix)]
-    let metadata = std::fs::metadata(target)
-        .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))?;
+    let mode = {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = std::fs::metadata(target)
+            .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))?;
+        Some((metadata.permissions().mode() & 0o777) | 0o111)
+    };
+    #[cfg(not(unix))]
+    let mode = None;
 
     if backup.exists() {
         std::fs::remove_file(&backup)
             .map_err(|error| UpdateError::io_at(IoOperation::Apply, &backup, error))?;
     }
-    std::fs::rename(target, &backup)
-        .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))?;
+    backup_appimage(target, &backup)?;
 
+    let temp = unique_sibling(target, "new");
+    let mut committed = false;
     let result = (|| -> Result<()> {
-        std::fs::copy(staged, target)
-            .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = metadata.permissions();
-            permissions.set_mode((permissions.mode() & 0o777) | 0o111);
-            std::fs::set_permissions(target, permissions)
-                .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))?;
-        }
-        // Windows requires write access for FlushFileBuffers (sync_all).
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(target)
-            .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))?;
-        file.sync_all()
-            .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))?;
-        let parent = target
-            .parent()
-            .ok_or_else(|| UpdateError::InvalidJob("target has no parent".to_string()))?;
+        stage_replacement(staged, &temp, mode)?;
+        // The old target is already preserved and the temp file is complete,
+        // so this rename is the only visible switch. A crash before it leaves
+        // the old target intact; a crash after it leaves the new target and
+        // the backup.
+        publish_appimage(&temp, target)?;
+        committed = true;
         sync_parent(parent)?;
         Ok(())
     })();
 
     if let Err(error) = result {
-        let _ = std::fs::remove_file(target);
-        let _ = std::fs::rename(&backup, target);
+        let _ = std::fs::remove_file(&temp);
+        if committed {
+            // The new file is in place but durability failed. Put the old
+            // target back atomically and consume the backup.
+            let _ = std::fs::rename(&backup, target);
+            let _ = sync_parent(parent);
+        } else {
+            // The target was never touched; remove the duplicate backup.
+            let _ = std::fs::remove_file(&backup);
+        }
         return Err(error);
     }
     Ok(backup)
@@ -1660,6 +1783,32 @@ fn sync_parent_directory(_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Restores `<target>.previous` when an interrupted replacement left the
+/// target missing.
+///
+/// Returns `true` when a backup was restored. A present target always wins so
+/// startup never overwrites a working installation.
+pub fn recover_appimage(target: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(target) {
+        Ok(_) => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(UpdateError::io_at(IoOperation::Apply, target, error)),
+    }
+    let backup = appimage_backup_path(target)?;
+    match std::fs::symlink_metadata(&backup) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(UpdateError::io_at(IoOperation::Apply, &backup, error)),
+    }
+    std::fs::rename(&backup, target)
+        .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))?;
+    if let Some(parent) = target.parent() {
+        sync_parent_directory(parent)?;
+    }
+    Ok(true)
+}
+
 pub fn restore_appimage(target: &Path, backup: &Path) -> Result<()> {
     if !backup.is_file() {
         return Err(UpdateError::io_at(
@@ -1668,28 +1817,55 @@ pub fn restore_appimage(target: &Path, backup: &Path) -> Result<()> {
             std::io::ErrorKind::NotFound.into(),
         ));
     }
-    if target.exists() {
-        std::fs::remove_file(target)
-            .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))?;
+    // Rename over the target so there is no window in which it is missing on
+    // Unix. The non-Unix fallback is only for portability/tests.
+    publish_appimage(backup, target)?;
+    if let Some(parent) = target.parent() {
+        sync_parent_directory(parent)?;
     }
-    std::fs::rename(backup, target)
-        .map_err(|error| UpdateError::io_at(IoOperation::Apply, target, error))
+    Ok(())
 }
 
-/// Whether a live helper holds the apply lock. A stale lock is removed.
+/// Removes the lock only when it still contains the bytes that were read.
+///
+/// This narrows the window where a stale-lock check could delete a lock a
+/// different helper installed in the meantime.
+fn remove_lock_if_unchanged(path: &Path, expected: &[u8]) {
+    if std::fs::read(path).is_ok_and(|current| current == expected) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Whether a live helper holds the apply lock.
+///
+/// A lock that cannot be parsed may be a lock file that another helper has
+/// created but not finished writing yet. It is treated as live for a short
+/// grace period; only older unparsable locks are reclaimed. Stale PID locks
+/// are removed once the process is gone.
 pub fn apply_in_progress(paths: &UpdatePaths) -> bool {
+    const GRACE: Duration = Duration::from_secs(5);
+
     let lock = paths.lock_file();
-    let Ok(text) = std::fs::read_to_string(&lock) else {
+    let Ok(bytes) = std::fs::read(&lock) else {
         return false;
     };
+    let text = String::from_utf8_lossy(&bytes);
     let Ok(pid) = text.trim().parse::<u32>() else {
-        let _ = std::fs::remove_file(&lock);
+        let recent = std::fs::metadata(&lock)
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| std::time::SystemTime::now().duration_since(modified).ok())
+            .is_none_or(|age| age < GRACE);
+        if recent {
+            return true;
+        }
+        remove_lock_if_unchanged(&lock, &bytes);
         return false;
     };
     if process_alive(pid) {
         true
     } else {
-        let _ = std::fs::remove_file(&lock);
+        remove_lock_if_unchanged(&lock, &bytes);
         false
     }
 }
@@ -1848,6 +2024,40 @@ mod tests {
     }
 
     #[test]
+    fn recovery_restores_a_missing_target_from_the_previous_appimage() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("app.AppImage");
+        let backup = dir.path().join("app.AppImage.previous");
+        std::fs::write(&backup, b"old").unwrap();
+
+        assert!(recover_appimage(&target).unwrap());
+        assert_eq!(std::fs::read(&target).unwrap(), b"old");
+        assert!(!backup.exists());
+    }
+
+    #[test]
+    fn recovery_keeps_a_present_target_and_the_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("app.AppImage");
+        let backup = dir.path().join("app.AppImage.previous");
+        std::fs::write(&target, b"new").unwrap();
+        std::fs::write(&backup, b"old").unwrap();
+
+        assert!(!recover_appimage(&target).unwrap());
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert_eq!(std::fs::read(&backup).unwrap(), b"old");
+    }
+
+    #[test]
+    fn recovery_without_a_backup_is_a_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("app.AppImage");
+
+        assert!(!recover_appimage(&target).unwrap());
+        assert!(!target.exists());
+    }
+
+    #[test]
     fn last_result_round_trips_and_is_consumed_once() {
         let dir = tempfile::tempdir().unwrap();
         let paths = paths(dir.path());
@@ -1908,19 +2118,6 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn command_output_keeps_stdout_and_stderr() {
-        let mut output = std::process::Command::new("true").output().unwrap();
-        output.stdout = b"stdout message".to_vec();
-        output.stderr = b"stderr message".to_vec();
-
-        let text = command_output(&output);
-
-        assert!(text.contains("stdout message"));
-        assert!(text.contains("stderr message"));
-    }
-
-    #[cfg(unix)]
-    #[test]
     fn updater_log_is_private() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -1963,6 +2160,85 @@ mod tests {
         child.wait().unwrap();
         std::fs::write(paths.lock_file(), dead_pid.to_string()).unwrap();
         assert!(!apply_in_progress(&paths));
+        assert!(!paths.lock_file().exists());
+    }
+
+    fn set_lock_age(lock: &Path, age: Duration) {
+        let file = OpenOptions::new().write(true).open(lock).unwrap();
+        file.set_modified(std::time::SystemTime::now() - age)
+            .unwrap();
+    }
+
+    #[test]
+    fn a_recent_empty_apply_lock_is_still_in_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        std::fs::write(paths.lock_file(), b"").unwrap();
+
+        assert!(apply_in_progress(&paths));
+        assert!(paths.lock_file().exists());
+    }
+
+    #[test]
+    fn an_old_empty_apply_lock_is_reclaimed() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        std::fs::write(paths.lock_file(), b"").unwrap();
+        set_lock_age(&paths.lock_file(), Duration::from_secs(10));
+
+        assert!(!apply_in_progress(&paths));
+        assert!(!paths.lock_file().exists());
+    }
+
+    #[test]
+    fn an_old_unparsable_apply_lock_is_reclaimed() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        std::fs::write(paths.lock_file(), b"not a pid").unwrap();
+        set_lock_age(&paths.lock_file(), Duration::from_secs(10));
+
+        assert!(!apply_in_progress(&paths));
+        assert!(!paths.lock_file().exists());
+    }
+
+    #[test]
+    fn acquiring_a_lock_does_not_steal_a_recent_empty_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        std::fs::write(paths.lock_file(), b"").unwrap();
+
+        assert!(acquire_lock(&paths).is_err());
+        assert!(paths.lock_file().exists());
+    }
+
+    #[test]
+    fn a_lock_guard_does_not_remove_another_helpers_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        let other_pid = std::process::id().wrapping_add(1);
+        std::fs::write(paths.lock_file(), other_pid.to_string()).unwrap();
+
+        drop(LockGuard {
+            path: paths.lock_file(),
+        });
+
+        assert!(paths.lock_file().exists());
+        assert_eq!(
+            std::fs::read_to_string(paths.lock_file()).unwrap(),
+            other_pid.to_string()
+        );
+    }
+
+    #[test]
+    fn a_lock_guard_removes_its_own_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = paths(dir.path());
+        std::fs::write(paths.lock_file(), std::process::id().to_string()).unwrap();
+
+        drop(LockGuard {
+            path: paths.lock_file(),
+        });
+
         assert!(!paths.lock_file().exists());
     }
 
