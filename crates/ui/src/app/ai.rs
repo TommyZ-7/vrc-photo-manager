@@ -279,7 +279,7 @@ impl AiUiState {
         progress: f64,
         stage: Option<TaggingStage>,
         error: Option<&str>,
-    ) {
+    ) -> bool {
         let terminal = matches!(
             status,
             TaggingJobStatus::Completed | TaggingJobStatus::Failed | TaggingJobStatus::Cancelled
@@ -335,15 +335,18 @@ impl AiUiState {
             None => {}
         }
 
-        if status == TaggingJobStatus::Failed
+        let new_failure = if status == TaggingJobStatus::Failed
             && let Some(error) = error
         {
-            self.set_error(AiErrorInfo::new(AiErrorKind::Job, error, None));
-        } else if status == TaggingJobStatus::Completed {
-            // A successful tag clears the previous job failure. Install/model
-            // failures are owned by their own flows and stay put.
-            self.clear_error(AiErrorKind::Job);
-        }
+            self.set_error(AiErrorInfo::new(AiErrorKind::Job, error, None))
+        } else {
+            if status == TaggingJobStatus::Completed {
+                // A successful tag clears the previous job failure. Install/model
+                // failures are owned by their own flows and stay put.
+                self.clear_error(AiErrorKind::Job);
+            }
+            false
+        };
 
         // The card shows the first three rows, so a newly pending row must not
         // push a processing job out of view.
@@ -356,6 +359,7 @@ impl AiUiState {
             | TaggingJobStatus::Cancelled => 3,
         });
         self.active_jobs.truncate(20);
+        new_failure
     }
 
     /// Applies an install event. Returns the failure message when it warrants
@@ -1159,6 +1163,27 @@ pub(crate) fn ai_error_toast_in(language: &str, error: &AiErrorInfo) -> String {
     }
 }
 
+/// Failures worth a toast even when they arrive through a job progress event.
+/// Image-by-image failures stay in the cards; sidecar and resource failures
+/// need the user's attention.
+pub(crate) fn ai_job_error_is_notifiable(code: &str) -> bool {
+    matches!(
+        code,
+        "sidecar_exited"
+            | "sidecar_timeout"
+            | "sidecar_protocol"
+            | "protocol_error"
+            | "model_load_failed"
+            | "backend_unavailable"
+            | "out_of_memory"
+    )
+}
+
+/// A successful model download is announced once when it transitions to Ready.
+pub(crate) fn model_ready_toast_pending(previous_download: bool, status: ModelState) -> bool {
+    previous_download && status == ModelState::Ready
+}
+
 /// The terminal state event after a Recheck/variant switch carries no probe.
 /// That is a failed plugin operation, not an install failure.
 pub(crate) fn probe_failure_info() -> AiErrorInfo {
@@ -1704,7 +1729,7 @@ impl App {
                 stage,
                 error,
             } => {
-                self.ai.apply_tagging_progress(
+                let new_failure = self.ai.apply_tagging_progress(
                     &job_id,
                     photo_id,
                     status,
@@ -1712,6 +1737,16 @@ impl App {
                     stage,
                     error.as_deref(),
                 );
+                if new_failure
+                    && let Some(code) = error.as_deref()
+                    && ai_job_error_is_notifiable(code)
+                {
+                    let info = AiErrorInfo::new(AiErrorKind::Job, code, None);
+                    self.toast_error(
+                        ai_error_toast_in(&vrc_photon_i18n::current_locale(), &info),
+                        cx,
+                    );
+                }
                 let terminal = matches!(
                     status,
                     TaggingJobStatus::Completed
@@ -1777,6 +1812,13 @@ impl App {
                 if plugin_id != AI_PLUGIN_ID {
                     return false;
                 }
+                let was_downloading = self.ai.download.is_some()
+                    || self.ai.state.as_ref().is_some_and(|state| {
+                        matches!(
+                            state.model_state,
+                            ModelState::Downloading | ModelState::Verifying
+                        )
+                    });
                 if let Some(code) =
                     self.ai
                         .apply_model_download(status, bytes, total, error.as_deref())
@@ -1786,6 +1828,9 @@ impl App {
                         ai_error_toast_in(&vrc_photon_i18n::current_locale(), &info),
                         cx,
                     );
+                }
+                if model_ready_toast_pending(was_downloading, status) {
+                    self.toast_success(tr!("notifications.ai.model_ready"), cx);
                 }
                 self.refresh_ai_state(cx);
                 true
@@ -1843,14 +1888,15 @@ mod tests {
         AiPluginCardState, AiPluginCardView, AiResponseOutcome, AiUiState, ManualRetagOutcome,
         ModelDownloadView, UninstallTarget, active_job_photo_label, ai_dashboard_view,
         ai_empty_state_labels, ai_error_code_is_stable, ai_error_detail_in, ai_error_label_in,
-        ai_error_summary_in, ai_error_toast_in, ai_manifest_view, ai_plugin_card_state,
-        ai_response_outcome, ai_tag_view, ai_tag_view_with_context, ai_tag_views,
-        apply_install_event, backend_options, backend_selection_is_disabled_when_not_ready,
-        collect_ai_snapshot, download_progress_bar_ratio, enqueue_manual_retag, format_tagged_at,
+        ai_error_summary_in, ai_error_toast_in, ai_job_error_is_notifiable, ai_manifest_view,
+        ai_plugin_card_state, ai_response_outcome, ai_tag_view, ai_tag_view_with_context,
+        ai_tag_views, apply_install_event, backend_options,
+        backend_selection_is_disabled_when_not_ready, collect_ai_snapshot,
+        download_progress_bar_ratio, enqueue_manual_retag, format_tagged_at,
         install_event_applies_to_ai, installation_row_id, is_active_installation, load_photo_ai,
-        model_progress_ratio, needs_license_consent, people_label, people_label_in, place_label,
-        place_label_with_confidence, probe_failure_info, request_error_kind,
-        uninstall_request_args, variant_backend_label,
+        model_progress_ratio, model_ready_toast_pending, needs_license_consent, people_label,
+        people_label_in, place_label, place_label_with_confidence, probe_failure_info,
+        request_error_kind, uninstall_request_args, variant_backend_label,
     };
     use vrc_photon_ai_protocol::{
         BackendInfo, Catalog, ModelState, PluginInstallStatus, Probe, TagDefinition,
@@ -2817,6 +2863,51 @@ mod tests {
         assert_eq!(ai.probe, Some(probe));
         assert_eq!(ai.job_counts, JobStatusCounts::default());
         assert!(ai.active_jobs.is_empty());
+    }
+
+    #[test]
+    fn model_ready_toast_only_fires_after_a_download() {
+        assert!(model_ready_toast_pending(true, ModelState::Ready));
+        assert!(!model_ready_toast_pending(false, ModelState::Ready));
+        assert!(!model_ready_toast_pending(true, ModelState::Downloading));
+    }
+
+    #[test]
+    fn notifiable_job_errors_cover_sidecar_and_resource_failures() {
+        for code in [
+            "sidecar_exited",
+            "sidecar_timeout",
+            "sidecar_protocol",
+            "protocol_error",
+            "model_load_failed",
+            "backend_unavailable",
+            "out_of_memory",
+        ] {
+            assert!(ai_job_error_is_notifiable(code), "{code}");
+        }
+        assert!(!ai_job_error_is_notifiable("image_missing"));
+        assert!(!ai_job_error_is_notifiable("cancelled"));
+    }
+
+    #[test]
+    fn repeated_sidecar_crash_is_recorded_only_once() {
+        let mut ai = ready_state();
+        assert!(ai.apply_tagging_progress(
+            "job-1",
+            1,
+            TaggingJobStatus::Failed,
+            0.0,
+            None,
+            Some("sidecar_exited"),
+        ));
+        assert!(!ai.apply_tagging_progress(
+            "job-2",
+            2,
+            TaggingJobStatus::Failed,
+            0.0,
+            None,
+            Some("sidecar_exited"),
+        ));
     }
 
     #[test]
