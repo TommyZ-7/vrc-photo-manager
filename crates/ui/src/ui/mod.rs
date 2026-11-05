@@ -1,4 +1,5 @@
 pub(crate) mod actions;
+pub(crate) mod ai_tag_picker;
 pub(crate) mod chrome;
 pub(crate) mod components;
 pub(crate) mod compression;

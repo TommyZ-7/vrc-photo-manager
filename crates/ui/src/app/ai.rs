@@ -13,7 +13,9 @@ use gpui_kit::*;
 use vrc_photon_ai_protocol::{
     ModelState, PluginInstallStatus, Probe, TaggingJobStatus, TaggingStage,
 };
-use vrc_photon_core::ai::{PhotoAi, PhotoAiTagView, PluginInstallation, PluginState, TaggingJob};
+use vrc_photon_core::ai::{
+    AiTagDefinition, PhotoAi, PhotoAiTagView, PluginInstallation, PluginState, TaggingJob,
+};
 use vrc_photon_core::db::Db;
 use vrc_photon_core::model::JobStatusCounts;
 use vrc_photon_core::settings::AppSettings;
@@ -27,7 +29,7 @@ use crate::app::file_picker::{self, DialogOptions};
 use crate::ipc_bridge;
 
 /// Plugin id of the bundled AI tagging sidecar package.
-pub(crate) const AI_PLUGIN_ID: &str = "vrc-photon-autotag";
+pub(crate) use vrc_photon_core::ai::AI_PLUGIN_ID;
 
 /// Delay before an event burst triggers a state or inspector refresh.
 const AI_REFRESH_DEBOUNCE: Duration = Duration::from_millis(250);
@@ -119,6 +121,7 @@ pub(crate) struct AiUiState {
     pub(crate) active: Option<PluginInstallation>,
     pub(crate) state: Option<PluginState>,
     pub(crate) probe: Option<Probe>,
+    pub(crate) tag_definitions: Vec<AiTagDefinition>,
     pub(crate) download: Option<ModelDownloadView>,
     pub(crate) install_busy: bool,
     /// A Recheck or variant switch is waiting for the next state event.
@@ -167,6 +170,7 @@ pub(crate) struct AiSnapshot {
     pub(crate) active: Option<PluginInstallation>,
     pub(crate) state: Option<PluginState>,
     pub(crate) probe: Option<Probe>,
+    pub(crate) tag_definitions: Vec<AiTagDefinition>,
     pub(crate) job_counts: JobStatusCounts,
     pub(crate) active_jobs: Vec<TaggingJob>,
     pub(crate) active_job_names: HashMap<i64, String>,
@@ -198,6 +202,7 @@ impl AiUiState {
         self.active = snapshot.active;
         self.state = snapshot.state;
         self.probe = snapshot.probe;
+        self.tag_definitions = snapshot.tag_definitions;
         self.download = self.state.as_ref().and_then(ModelDownloadView::from_state);
         self.job_counts = snapshot.job_counts;
         self.active_jobs = snapshot.active_jobs;
@@ -620,6 +625,19 @@ pub(crate) fn variant_backend_label(variant: &str) -> String {
     }
 }
 
+/// Catalog name for the active language, falling back to the Japanese name
+/// when an English name is not available.
+pub(crate) fn ai_tag_display_name(definition: &AiTagDefinition, language: &str) -> String {
+    if language.starts_with("en") {
+        definition
+            .name_en
+            .clone()
+            .unwrap_or_else(|| definition.name.clone())
+    } else {
+        definition.name.clone()
+    }
+}
+
 fn adjust_job_count(counts: &mut JobStatusCounts, status: TaggingJobStatus, delta: i64) {
     let slot = match status {
         TaggingJobStatus::Waiting => &mut counts.waiting,
@@ -684,6 +702,10 @@ pub(crate) fn collect_ai_snapshot(db: &Db) -> AiSnapshot {
             }),
         probe: state.as_ref().and_then(probe_from_state),
         state,
+        tag_definitions: db.ai_tag_definitions(AI_PLUGIN_ID).unwrap_or_else(|error| {
+            tracing::warn!(%error, "cannot load AI tag definitions");
+            Vec::new()
+        }),
         job_counts: db.tagging_job_counts(AI_PLUGIN_ID).unwrap_or_else(|error| {
             tracing::warn!(%error, "cannot count AI tagging jobs");
             JobStatusCounts::default()

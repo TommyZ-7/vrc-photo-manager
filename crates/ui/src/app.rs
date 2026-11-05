@@ -1,4 +1,5 @@
 pub(crate) mod ai;
+pub(crate) mod ai_tag_picker;
 pub(crate) mod cli;
 pub(crate) mod compression;
 pub(crate) mod daemon;
@@ -273,6 +274,9 @@ pub struct App {
     pub(crate) ai_modal_return_focus: Option<FocusHandle>,
     /// The next render should move focus into the open AI dialog.
     pub(crate) ai_modal_focus_pending: bool,
+    /// Search AI-tag picker state and its query subscription.
+    pub(crate) ai_tag_picker: ai_tag_picker::AiTagPickerState,
+    pub(crate) _ai_tag_picker_query_subscription: Subscription,
     /// 0 = body expanded, 1 = collapsed to the card header.
     pub(crate) integrations_auto_motion: ToggleMotion,
     /// 0 = runtime details expanded, 1 = collapsed while AI is disabled.
@@ -350,6 +354,8 @@ pub struct App {
     pub(crate) search_refresh_pending: bool,
     pub(crate) search_favorite: bool,
     pub(crate) search_days: Option<i64>,
+    pub(crate) search_ai_tags: Vec<String>,
+    pub(crate) search_people_input: Entity<InputState>,
     pub(crate) daemon_shutdown_armed: bool,
     pub(crate) pending_toasts: Vec<ToastSpec>,
     pub(crate) toast_flush_scheduled: bool,
@@ -571,6 +577,20 @@ impl App {
         let player_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(tr!("input.player")));
         let tag_input = cx.new(|cx| InputState::new(window, cx).placeholder(tr!("input.tag")));
+        let search_people_input = cx
+            .new(|cx| InputState::new(window, cx).placeholder(tr!("search.ai.people_placeholder")));
+        let ai_tag_picker_query = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(tr!("ai.tags.picker.search_placeholder"))
+        });
+        let ai_tag_picker_query_subscription =
+            cx.subscribe(&ai_tag_picker_query, |_, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            });
+        let ai_tag_picker_focus = cx.focus_handle();
+        let ai_tag_picker =
+            ai_tag_picker::AiTagPickerState::new(ai_tag_picker_query, ai_tag_picker_focus);
         let tag_edit_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(tr!("input.tag_add")));
         let note_edit_input = cx.new(|cx| {
@@ -979,6 +999,8 @@ impl App {
             ai_uninstall_focus,
             ai_modal_return_focus: None,
             ai_modal_focus_pending: false,
+            ai_tag_picker,
+            _ai_tag_picker_query_subscription: ai_tag_picker_query_subscription,
             integrations_auto_motion: ToggleMotion::settled(if initial_settings.auto_compress {
                 0.0
             } else {
@@ -1054,6 +1076,8 @@ impl App {
             search_refresh_pending: false,
             search_favorite: false,
             search_days: Some(7),
+            search_ai_tags: Vec::new(),
+            search_people_input,
             daemon_shutdown_armed: false,
             pending_toasts: Vec::new(),
             toast_flush_scheduled: false,
@@ -1274,6 +1298,9 @@ impl Render for App {
             }
             if self.ai.uninstall_modal_open {
                 root = root.child(self.ai_uninstall_overlay(window, cx));
+            }
+            if self.ai_tag_picker.open {
+                root = root.child(self.ai_tag_picker_overlay(window, cx));
             }
         } else {
             root = root.child(self.quick_look(window, cx));

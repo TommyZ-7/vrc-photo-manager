@@ -11,9 +11,11 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use vrc_photon_core::ai::AiTagDefinition;
 use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::App;
+use crate::app::ai::ai_tag_display_name;
 use crate::ui::components::{card_header, glass_panel};
 use crate::ui::theme::*;
 
@@ -97,6 +99,21 @@ impl App {
 
     fn search_filter_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let p = self.palette;
+        let ai_filter = self.ai_tag_filter_group(cx);
+        let ai_people = self.has_ai_search().then(|| {
+            v_flex()
+                .gap(px(4.))
+                .child(self.filter_field(
+                    tr!("search.ai.people"),
+                    Input::new(&self.search_people_input),
+                ))
+                .child(
+                    div()
+                        .text_size(px(9.))
+                        .text_color(rgb(p.muted_2))
+                        .child(tr!("search.ai.people_hint")),
+                )
+        });
         glass_panel(&self.palette)
             .flex()
             .flex_col()
@@ -124,6 +141,8 @@ impl App {
             .child(self.filter_field(tr!("search.world"), Input::new(&self.world_input)))
             .child(self.filter_field(tr!("search.player"), Input::new(&self.player_input)))
             .child(self.filter_field(tr!("search.tag"), Input::new(&self.tag_input)))
+            .child(ai_filter)
+            .when_some(ai_people, |this, people| this.child(people))
             .child(
                 v_flex()
                     .gap(px(6.))
@@ -182,9 +201,97 @@ impl App {
                             .label(tr!("search.clear"))
                             .small()
                             .secondary()
-                            .on_click(cx.listener(|this, _, _, cx| this.clear_search(cx))),
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.clear_search(window, cx)),
+                            ),
                     ),
             )
             .into_any_element()
     }
+
+    fn has_ai_search(&self) -> bool {
+        !self.ai.tag_definitions.is_empty() || !self.search_ai_tags.is_empty()
+    }
+
+    fn ai_tag_filter_group(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        if !self.has_ai_search() {
+            return div().into_any_element();
+        }
+        let p = self.palette;
+        let language = vrc_photon_i18n::current_locale();
+        let definitions = self.ai.tag_definitions.clone();
+        let selected = self.search_ai_tags.clone();
+        let selected_count = selected.len();
+        let mut chips = Vec::with_capacity(selected.len());
+        for key in selected {
+            let name = ai_tag_name(&definitions, &key, &language);
+            let chip_key = key.clone();
+            chips.push(
+                div()
+                    .id(SharedString::from(format!("search-ai-chip-{key}")))
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .px(px(7.))
+                    .py(px(3.))
+                    .rounded_full()
+                    .bg(rgb(p.accent_soft))
+                    .text_size(px(10.))
+                    .text_color(rgb(p.accent))
+                    .cursor_pointer()
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.remove_search_ai_tag(&chip_key, cx)),
+                    )
+                    .child(format!("{name} ×")),
+            );
+        }
+
+        v_flex()
+            .gap(px(6.))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(rgb(p.muted_2))
+                            .child(tr!("search.ai.title")),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(rgb(p.muted_2))
+                            .child(tr_args!("search.ai.selected_count", count = selected_count)),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Button::new("search-ai-pick")
+                            .label(tr!("search.ai.pick"))
+                            .small()
+                            .secondary()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_ai_tag_picker(window, cx)
+                            })),
+                    ),
+            )
+            .when(!chips.is_empty(), |this| {
+                this.child(h_flex().flex_wrap().gap(px(4.)).children(chips))
+            })
+            .child(
+                div()
+                    .text_size(px(9.))
+                    .text_color(rgb(p.muted_2))
+                    .child(tr!("search.ai.any")),
+            )
+            .into_any_element()
+    }
+}
+
+fn ai_tag_name(definitions: &[AiTagDefinition], key: &str, language: &str) -> String {
+    definitions
+        .iter()
+        .find(|definition| definition.tag_key == key)
+        .map(|definition| ai_tag_display_name(definition, language))
+        .unwrap_or_else(|| key.to_string())
 }
