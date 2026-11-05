@@ -230,11 +230,27 @@ impl App {
                 self.refresh_live(cx);
                 self.refresh_library_after_scan(cx);
             }
-            IpcEvent::CompressionProgress { status, .. } => {
-                let library_changed = matches!(
-                    status,
-                    JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
-                );
+            IpcEvent::CompressionProgress {
+                photo_id, status, ..
+            } => {
+                let completed = matches!(&status, JobStatus::Completed);
+                let library_changed =
+                    completed || matches!(&status, JobStatus::Failed | JobStatus::Cancelled);
+                if completed {
+                    // A `replace` job changed the displayed file. Only that
+                    // terminal state can publish a new derivative; failed and
+                    // cancelled jobs leave every cache entry valid. Check the
+                    // database because `keep` jobs also complete.
+                    let replaced = self
+                        .db
+                        .photo_by_id(photo_id)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|photo| photo.status.is_replaced());
+                    if replaced {
+                        self.invalidate_photo_media(photo_id, cx);
+                    }
+                }
                 self.schedule_compression_refresh(library_changed, cx);
             }
             IpcEvent::DaemonErrorChanged { .. } => {
@@ -402,6 +418,11 @@ impl App {
         if let Some(id) = self.selected {
             self.load_selected_meta(id);
             self.refresh_stale_preview(cx);
+            if let Some(photo) = self.selected_photo.clone() {
+                // A replace invalidation drops the pinned thumbnail; request
+                // it again now that the display derivative is known.
+                self.request_thumbnail(&photo, cx);
+            }
         }
     }
 

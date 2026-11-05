@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui_kit::RenderImage;
 use smallvec::SmallVec;
@@ -12,8 +12,15 @@ use vrc_photon_core::thumbnail::{self, ThumbnailSpec};
 
 use crate::ui::theme::average_bgra;
 
+/// Decoded RGBA bytes the in-memory thumbnail cache may retain. The count cap
+/// below only bounds bookkeeping overhead; the byte budget is what keeps the
+/// cache from growing with a large thumbnail size.
+const THUMB_CACHE_BYTES: usize = 96 * 1024 * 1024;
 const THUMB_CACHE_ENTRIES: usize = 192;
 const THUMB_IN_FLIGHT: usize = 4;
+/// A failed decode is retried after this delay, so a transient source or IO
+/// error does not hide the thumbnail until the next cache clear.
+const FAILED_RETRY_AFTER: Duration = Duration::from_secs(30);
 
 /// A flush is due once a batch reaches either bound. Small batches are flushed
 /// by a timer instead so a quiet gallery still reports its generated files.
@@ -49,11 +56,22 @@ impl ThumbnailNoticeBatch {
     }
 }
 
+/// A decode request token. `generation` is bumped when the whole cache is
+/// cleared; `photo_generation` is bumped when one photo is invalidated (for
+/// example after a `replace` compression). A decode that finishes under an
+/// old token is dropped instead of repopulating the cache with a stale image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DecodeTicket {
+    generation: u64,
+    photo_generation: u64,
+}
+
 /// Bounded LRU cache for grid thumbnails.
 ///
 /// Decoding runs on the background executor; the UI thread only turns the
-/// decoded RGBA buffer into a `RenderImage`. `pending` and `failed` keep a
-/// photo from being requested more than once while it is on screen.
+/// decoded RGBA buffer into a `RenderImage`. Eviction uses a decoded-byte
+/// budget plus a small count cap, and `pending` / `failed` keep a photo from
+/// being requested more than once while it is on screen.
 #[derive(Default)]
 pub(crate) struct ThumbnailCache {
     images: HashMap<i64, Arc<RenderImage>>,
@@ -62,19 +80,22 @@ pub(crate) struct ThumbnailCache {
     /// instead of scanning an order list for every visible card.
     recency: HashMap<i64, u64>,
     clock: u64,
+    image_bytes: HashMap<i64, usize>,
+    total_bytes: usize,
     /// Last time a disk access refresh was queued for a cached id. Throttles
     /// the mtime update to once per `ACCESS_REFRESH_AFTER`.
     last_disk_refresh: HashMap<i64, Instant>,
     /// Ids whose disk access time should be refreshed in the background.
     disk_refresh_due: HashSet<i64>,
-    pending: HashSet<i64>,
-    failed: HashSet<i64>,
+    pending: HashMap<i64, DecodeTicket>,
+    failed: HashMap<i64, Instant>,
     pub(crate) pinned: Option<i64>,
     in_flight: usize,
     /// Bumped when every entry is discarded (thumbnail settings changed or the
-    /// daemon cleared the cache). Decodes started under an older generation
-    /// are dropped instead of repopulating the cache with stale images.
+    /// daemon cleared the cache).
     generation: u64,
+    /// Per-photo invalidation epochs used by replace compression.
+    photo_generations: HashMap<i64, u64>,
 }
 
 impl ThumbnailCache {
@@ -104,6 +125,7 @@ impl ThumbnailCache {
         self.disk_refresh_due.drain().collect()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn generation(&self) -> u64 {
         self.generation
     }
@@ -115,35 +137,102 @@ impl ThumbnailCache {
         self.images.clear();
         self.colors.clear();
         self.recency.clear();
+        self.image_bytes.clear();
+        self.total_bytes = 0;
         self.last_disk_refresh.clear();
         self.disk_refresh_due.clear();
         self.pending.clear();
         self.failed.clear();
+        self.photo_generations.clear();
         self.in_flight = 0;
     }
 
+    #[allow(dead_code)]
     pub(crate) fn begin(&mut self, id: i64) -> bool {
+        self.begin_ticket(id).is_some()
+    }
+
+    /// Reserves an in-flight slot and returns the token the decode must present
+    /// when it finishes.
+    pub(crate) fn begin_ticket(&mut self, id: i64) -> Option<DecodeTicket> {
+        let retry_ready = self
+            .failed
+            .get(&id)
+            .is_some_and(|failed_at| failed_at.elapsed() >= FAILED_RETRY_AFTER);
+        if retry_ready {
+            self.failed.remove(&id);
+        }
         if self.images.contains_key(&id)
-            || self.pending.contains(&id)
-            || self.failed.contains(&id)
+            || self.pending.contains_key(&id)
+            || self.failed.contains_key(&id)
             || self.in_flight >= THUMB_IN_FLIGHT
         {
-            return false;
+            return None;
         }
-        self.pending.insert(id);
+        let ticket = DecodeTicket {
+            generation: self.generation,
+            photo_generation: self.photo_generation(id),
+        };
+        self.pending.insert(id, ticket);
         self.in_flight += 1;
-        true
+        Some(ticket)
+    }
+
+    /// Clears an explicit retry marker, for example when the user clicks the
+    /// photo again.
+    pub(crate) fn retry(&mut self, id: i64) {
+        self.failed.remove(&id);
+    }
+
+    /// Drops one photo's decoded image and failed marker after its display
+    /// source changed. The pin is kept so the selected card is re-requested.
+    pub(crate) fn invalidate(&mut self, id: i64) {
+        let generation = self.photo_generation(id).wrapping_add(1);
+        self.photo_generations.insert(id, generation);
+        self.remove_entry(id);
+        self.last_disk_refresh.remove(&id);
+        self.disk_refresh_due.remove(&id);
+        if self.pending.remove(&id).is_some() {
+            self.in_flight = self.in_flight.saturating_sub(1);
+        }
+        self.failed.remove(&id);
+    }
+
+    fn photo_generation(&self, id: i64) -> u64 {
+        self.photo_generations.get(&id).copied().unwrap_or(0)
     }
 
     #[cfg(test)]
     pub(crate) fn insert(&mut self, id: i64, image: Arc<RenderImage>, color: u32) {
         let generation = self.generation;
-        self.insert_if_generation(generation, id, image, color);
+        let photo_generation = self.photo_generation(id);
+        self.insert_if_generations(generation, photo_generation, id, image, color);
     }
 
-    /// Inserts a decode only if the cache has not been cleared since it
-    /// started. A stale decode releases its in-flight slot so the new spec
-    /// can be requested on the next frame.
+    /// Inserts a decode only if its ticket is still the current request.
+    pub(crate) fn insert_if_ticket(
+        &mut self,
+        ticket: DecodeTicket,
+        id: i64,
+        image: Arc<RenderImage>,
+        color: u32,
+    ) -> bool {
+        if self.pending.get(&id) != Some(&ticket) {
+            return false;
+        }
+        let bytes = estimate_render_image_bytes(&image);
+        self.insert_if_generations_with_bytes(
+            ticket.generation,
+            ticket.photo_generation,
+            id,
+            image,
+            color,
+            bytes,
+        )
+    }
+
+    /// Legacy generation check used by tests and callers without a ticket.
+    #[allow(dead_code)]
     pub(crate) fn insert_if_generation(
         &mut self,
         generation: u64,
@@ -151,20 +240,75 @@ impl ThumbnailCache {
         image: Arc<RenderImage>,
         color: u32,
     ) -> bool {
-        if generation != self.generation {
-            self.cancel(id);
+        let photo_generation = self.photo_generation(id);
+        self.insert_if_generations(generation, photo_generation, id, image, color)
+    }
+
+    fn insert_if_generations(
+        &mut self,
+        generation: u64,
+        photo_generation: u64,
+        id: i64,
+        image: Arc<RenderImage>,
+        color: u32,
+    ) -> bool {
+        let bytes = estimate_render_image_bytes(&image);
+        self.insert_if_generations_with_bytes(generation, photo_generation, id, image, color, bytes)
+    }
+
+    fn insert_if_generations_with_bytes(
+        &mut self,
+        generation: u64,
+        photo_generation: u64,
+        id: i64,
+        image: Arc<RenderImage>,
+        color: u32,
+        bytes: usize,
+    ) -> bool {
+        if generation != self.generation || photo_generation != self.photo_generation(id) {
+            if self.pending.get(&id).is_some_and(|ticket| {
+                ticket.generation == generation && ticket.photo_generation == photo_generation
+            }) {
+                self.pending.remove(&id);
+                self.in_flight = self.in_flight.saturating_sub(1);
+            }
             return false;
         }
-        if self.pending.remove(&id) {
+        if self.pending.remove(&id).is_some() {
             self.in_flight = self.in_flight.saturating_sub(1);
         }
+        self.remove_entry(id);
         self.images.insert(id, image);
         self.colors.insert(id, color);
+        self.image_bytes.insert(id, bytes);
+        self.total_bytes = self.total_bytes.saturating_add(bytes);
         self.touch(id);
         self.last_disk_refresh.insert(id, Instant::now());
         self.disk_refresh_due.remove(&id);
         self.evict();
         true
+    }
+
+    /// Test seam: inserts with an explicit decoded byte count so the budget
+    /// can be exercised without allocating a real 512 px image.
+    #[cfg(test)]
+    pub(crate) fn insert_with_bytes(
+        &mut self,
+        id: i64,
+        image: Arc<RenderImage>,
+        color: u32,
+        bytes: usize,
+    ) {
+        let generation = self.generation;
+        let photo_generation = self.photo_generation(id);
+        self.insert_if_generations_with_bytes(
+            generation,
+            photo_generation,
+            id,
+            image,
+            color,
+            bytes,
+        );
     }
 
     #[cfg(test)]
@@ -173,21 +317,35 @@ impl ThumbnailCache {
         self.fail_if_generation(generation, id);
     }
 
-    pub(crate) fn fail_if_generation(&mut self, generation: u64, id: i64) {
-        if generation != self.generation {
-            self.cancel(id);
+    /// Marks a decode as failed only while its ticket is current. A stale
+    /// failure cannot hide a newer request for the same photo.
+    pub(crate) fn fail_if_ticket(&mut self, ticket: DecodeTicket, id: i64) {
+        if self.pending.get(&id) != Some(&ticket) {
             return;
         }
-        if self.pending.remove(&id) {
-            self.in_flight = self.in_flight.saturating_sub(1);
-        }
-        self.failed.insert(id);
+        self.fail_if_generations(ticket.generation, ticket.photo_generation, id);
     }
 
-    fn cancel(&mut self, id: i64) {
-        if self.pending.remove(&id) {
+    #[allow(dead_code)]
+    pub(crate) fn fail_if_generation(&mut self, generation: u64, id: i64) {
+        let photo_generation = self.photo_generation(id);
+        self.fail_if_generations(generation, photo_generation, id);
+    }
+
+    fn fail_if_generations(&mut self, generation: u64, photo_generation: u64, id: i64) {
+        if generation != self.generation || photo_generation != self.photo_generation(id) {
+            if self.pending.get(&id).is_some_and(|ticket| {
+                ticket.generation == generation && ticket.photo_generation == photo_generation
+            }) {
+                self.pending.remove(&id);
+                self.in_flight = self.in_flight.saturating_sub(1);
+            }
+            return;
+        }
+        if self.pending.remove(&id).is_some() {
             self.in_flight = self.in_flight.saturating_sub(1);
         }
+        self.failed.insert(id, Instant::now());
     }
 
     pub(crate) fn pin(&mut self, id: i64) {
@@ -206,23 +364,45 @@ impl ThumbnailCache {
         self.recency.insert(id, self.clock);
     }
 
+    fn remove_entry(&mut self, id: i64) {
+        if let Some(bytes) = self.image_bytes.remove(&id) {
+            self.total_bytes = self.total_bytes.saturating_sub(bytes);
+        }
+        self.images.remove(&id);
+        self.colors.remove(&id);
+        self.recency.remove(&id);
+    }
+
     fn evict(&mut self) {
-        while self.images.len() > THUMB_CACHE_ENTRIES {
+        while self.images.len() > THUMB_CACHE_ENTRIES || self.total_bytes > THUMB_CACHE_BYTES {
             let Some((&victim, _)) = self
                 .recency
                 .iter()
                 .filter(|(id, _)| Some(**id) != self.pinned)
                 .min_by_key(|(_, tick)| **tick)
             else {
+                // Only the pinned selected thumbnail remains; keep it even
+                // when its single image exceeds the budget.
                 break;
             };
-            self.images.remove(&victim);
-            self.colors.remove(&victim);
-            self.recency.remove(&victim);
+            self.remove_entry(victim);
             self.last_disk_refresh.remove(&victim);
             self.disk_refresh_due.remove(&victim);
         }
     }
+}
+
+/// Decoded RGBA bytes a rendered thumbnail occupies. `RenderImage` stores
+/// BGRA frames, so four bytes per pixel per frame is the exact estimate.
+pub(crate) fn estimate_render_image_bytes(image: &RenderImage) -> usize {
+    let frames = image.frame_count().max(1);
+    let size = image.size(0);
+    let width = size.width.0.max(0) as usize;
+    let height = size.height.0.max(0) as usize;
+    width
+        .saturating_mul(height)
+        .saturating_mul(4)
+        .saturating_mul(frames)
 }
 
 /// A thumbnail decoded on a background thread.
@@ -339,12 +519,22 @@ where
             );
         }
         None => {
+            // A corrupt or partially written cache entry must not hide the
+            // photo forever. Drop every variant for this photo and regenerate
+            // exactly once; a source that still produces a bad WebP fails
+            // below without looping.
             tracing::warn!(
                 photo_id = id,
                 path = %path.display(),
-                "cannot decode thumbnail"
+                "cannot decode thumbnail cache; repairing once"
             );
-            return None;
+            if let Err(error) = thumbnail::remove_thumbnail_files_in(cache_dir, id) {
+                tracing::debug!(
+                    %error,
+                    photo_id = id,
+                    "cannot remove corrupt thumbnail cache"
+                );
+            }
         }
     }
 
@@ -485,6 +675,81 @@ mod tests {
     }
 
     #[test]
+    fn thumbnail_cache_evicts_by_byte_budget() {
+        let mut cache = ThumbnailCache::default();
+        cache.insert_with_bytes(1, test_render_image(), 0, THUMB_CACHE_BYTES / 2);
+        cache.insert_with_bytes(2, test_render_image(), 0, THUMB_CACHE_BYTES / 2);
+        assert!(cache.total_bytes <= THUMB_CACHE_BYTES);
+
+        cache.insert_with_bytes(3, test_render_image(), 0, THUMB_CACHE_BYTES / 2);
+
+        assert!(cache.get(1).is_none());
+        assert!(cache.get(2).is_some());
+        assert!(cache.get(3).is_some());
+        assert!(cache.total_bytes <= THUMB_CACHE_BYTES);
+    }
+
+    #[test]
+    fn thumbnail_cache_keeps_the_pinned_image_over_the_byte_budget() {
+        let mut cache = ThumbnailCache::default();
+        cache.pin(1);
+        cache.insert_with_bytes(1, test_render_image(), 0, THUMB_CACHE_BYTES);
+        cache.insert_with_bytes(2, test_render_image(), 0, THUMB_CACHE_BYTES);
+
+        assert!(cache.get(1).is_some());
+        assert!(cache.get(2).is_none());
+        assert_eq!(cache.total_bytes, THUMB_CACHE_BYTES);
+    }
+
+    #[test]
+    fn failed_thumbnails_are_retried_after_the_ttl() {
+        let mut cache = ThumbnailCache::default();
+        assert!(cache.begin(1));
+        cache.fail(1);
+        assert!(!cache.begin(1));
+
+        cache.failed.insert(
+            1,
+            Instant::now() - FAILED_RETRY_AFTER - Duration::from_secs(1),
+        );
+        assert!(cache.begin(1));
+    }
+
+    #[test]
+    fn explicit_retry_clears_a_recent_failure() {
+        let mut cache = ThumbnailCache::default();
+        assert!(cache.begin(1));
+        cache.fail(1);
+        cache.retry(1);
+        assert!(cache.begin(1));
+    }
+
+    #[test]
+    fn invalidation_drops_one_photo_and_rejects_its_old_decode() {
+        let mut cache = ThumbnailCache::default();
+        cache.pin(7);
+        let old_ticket = cache.begin_ticket(7).expect("first decode");
+        assert!(cache.insert_if_ticket(old_ticket, 7, test_render_image(), 0));
+        assert!(cache.get(7).is_some());
+
+        cache.invalidate(7);
+        assert!(cache.get(7).is_none());
+        assert_eq!(cache.pinned, Some(7));
+
+        let new_ticket = cache.begin_ticket(7).expect("retry after invalidation");
+        // The old decode finishing late must not overwrite the new request.
+        assert!(!cache.insert_if_ticket(old_ticket, 7, test_render_image(), 0));
+        assert!(cache.insert_if_ticket(new_ticket, 7, test_render_image(), 0));
+        assert!(cache.get(7).is_some());
+    }
+
+    #[test]
+    fn render_image_byte_estimate_uses_dimensions_and_frames() {
+        let image = make_render_image(image::RgbaImage::new(10, 5));
+        assert_eq!(estimate_render_image_bytes(&image), 10 * 5 * 4);
+    }
+
+    #[test]
     fn thumbnail_cache_frees_a_slot_for_a_pinned_retry() {
         let mut cache = ThumbnailCache::default();
         for id in 0..THUMB_IN_FLIGHT as i64 {
@@ -565,6 +830,27 @@ mod tests {
     }
 
     #[test]
+    fn decode_thumbnail_repairs_a_corrupt_cache_file_with_real_io() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("thumbnails");
+        let source = dir.path().join("source.png");
+        image::RgbaImage::from_pixel(128, 80, image::Rgba([200, 100, 50, 255]))
+            .save(&source)
+            .unwrap();
+        let spec = ThumbnailSpec::default();
+        let cache_path = thumbnail::thumbnail_path_in(&cache, 6, spec);
+        decode_thumbnail(6, &cache_path, &source, Some(&cache), spec).expect("generated");
+
+        std::fs::write(&cache_path, b"corrupt").unwrap();
+        let repaired = decode_thumbnail(6, &cache_path, &source, Some(&cache), spec)
+            .expect("repaired thumbnail");
+
+        assert_eq!(repaired.image.dimensions(), (256, 160));
+        assert!(cache_path.is_file());
+        assert!(vrc_photon_core::image_decode::decode_image(&cache_path).is_some());
+    }
+
+    #[test]
     fn decode_thumbnail_refreshes_cached_access_time() {
         let dir = tempfile::tempdir().unwrap();
         let cache = dir.path().join("thumbnails");
@@ -637,20 +923,39 @@ mod tests {
     }
 
     #[test]
-    fn decode_thumbnail_does_not_regenerate_an_undecodable_existing_file() {
+    fn decode_thumbnail_repairs_an_undecodable_cache_file_once() {
         let dir = tempfile::tempdir().unwrap();
-        let cache_path = dir.path().join("corrupt.webp");
+        let cache_path = dir.path().join("2.webp");
         std::fs::write(&cache_path, b"not an image").unwrap();
+        std::fs::write(dir.path().join("2.webp.meta"), b"v1 0 0 1").unwrap();
         let calls = std::cell::Cell::new(0);
         let ensure = |_id: i64, _source: &Path, _cache: &Path, _spec: ThumbnailSpec| {
             calls.set(calls.get() + 1);
-            Ok(Some(thumbnail::EnsuredThumbnail {
-                path: cache_path.clone(),
-                created: false,
-                bytes: 10,
-            }))
+            if calls.get() == 1 {
+                Ok(Some(thumbnail::EnsuredThumbnail {
+                    path: cache_path.clone(),
+                    created: false,
+                    bytes: 10,
+                }))
+            } else {
+                // The repair removed the corrupt entry; a second generation
+                // produces a decodable file for this test seam.
+                let repaired = dir.path().join("repaired.webp");
+                std::fs::write(&repaired, b"decoded by the fake decoder").unwrap();
+                Ok(Some(thumbnail::EnsuredThumbnail {
+                    path: repaired,
+                    created: true,
+                    bytes: 10,
+                }))
+            }
         };
-        let decode = |_id: i64, _path: &Path| None;
+        let decode = |_id: i64, path: &Path| {
+            if path == cache_path {
+                None
+            } else {
+                Some((0x112233, image::RgbaImage::new(1, 1)))
+            }
+        };
 
         let decoded = decode_thumbnail_with(
             2,
@@ -660,10 +965,13 @@ mod tests {
             ThumbnailSpec::default(),
             ensure,
             decode,
-        );
+        )
+        .expect("repaired thumbnail");
 
-        assert!(decoded.is_none());
-        assert_eq!(calls.get(), 1);
+        assert_eq!(decoded.color, 0x112233);
+        assert_eq!(calls.get(), 2);
+        assert!(!cache_path.exists());
+        assert!(!dir.path().join("2.webp.meta").exists());
     }
 
     #[test]

@@ -5,6 +5,8 @@ use std::time::SystemTime;
 
 use image::RgbaImage;
 
+use crate::cache_metadata;
+
 /// Longest edge of a cached preview, matching the inspector and viewer.
 pub const PREVIEW_MAX: u32 = 1200;
 /// Longest edge kept for the Quick Look full-resolution image.
@@ -18,23 +20,119 @@ const PRUNE_EVERY: usize = 32;
 const TEMP_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
 static WRITES: AtomicUsize = AtomicUsize::new(0);
-static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 /// A temp file path unique to this writer (process + sequence), so two
 /// writers racing the same cache entry never share a temp file: the last
 /// rename publishes a complete file, and a failed writer only ever removes
 /// its own temp.
 fn temp_path_for(cache: &Path) -> PathBuf {
-    let sequence = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let name = cache
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "preview".to_string());
-    cache.with_file_name(format!("{name}.tmp-{}-{sequence}", std::process::id()))
+    cache_metadata::unique_temp_path(cache)
 }
 
 pub fn previews_dir() -> Option<PathBuf> {
     crate::data_dir().map(|dir| dir.join("previews"))
+}
+
+/// Removes every cached preview and sidecar for one photo, regardless of
+/// derivative variant or temp files left by a failed writer.
+///
+/// Returns how many files were removed. A `replace` compression calls this so
+/// the old display derivative's preview cannot be shown again.
+pub fn remove_preview_files(photo_id: i64) -> std::io::Result<usize> {
+    match previews_dir() {
+        Some(dir) => remove_preview_files_in(&dir, photo_id),
+        None => Ok(0),
+    }
+}
+
+/// Same as [`remove_preview_files`] with an explicit cache directory.
+pub fn remove_preview_files_in(cache_dir: &Path, photo_id: i64) -> std::io::Result<usize> {
+    let entries = match fs::read_dir(cache_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let mut removed = 0;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    dir = %cache_dir.display(),
+                    "cannot read preview cache entry while removing a photo"
+                );
+                continue;
+            }
+        };
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if !preview_artifact_belongs_to(&name, photo_id) {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => removed += 1,
+            Err(error) => tracing::debug!(
+                %error,
+                path = %path.display(),
+                "cannot remove preview for photo"
+            ),
+        }
+    }
+    Ok(removed)
+}
+
+fn preview_artifact_belongs_to(name: &str, photo_id: i64) -> bool {
+    let Some(stem) = preview_artifact_stem(name) else {
+        return false;
+    };
+    let mut parts = stem.split('-');
+    let Some(id) = parts.next().and_then(|id| id.parse::<i64>().ok()) else {
+        return false;
+    };
+    let Some(variant) = parts.next().and_then(|variant| variant.parse::<i64>().ok()) else {
+        return false;
+    };
+    parts.next().is_none() && id == photo_id && variant >= 0
+}
+
+/// Returns the `<photo>-<variant>` stem before a known preview suffix.
+fn preview_artifact_stem(name: &str) -> Option<&str> {
+    if let Some(stem) = name.strip_suffix(".webp") {
+        return Some(stem);
+    }
+    if let Some(stem) = name.strip_suffix(".webp.meta") {
+        return Some(stem);
+    }
+    if let Some((stem, suffix)) = name.split_once(".webp.meta.tmp") {
+        return is_preview_temp_suffix(suffix).then_some(stem);
+    }
+    if let Some((stem, suffix)) = name.split_once(".webp.tmp") {
+        return is_preview_temp_suffix(suffix).then_some(stem);
+    }
+    None
+}
+
+fn is_preview_temp_suffix(suffix: &str) -> bool {
+    let Some(rest) = suffix.strip_prefix('-') else {
+        return suffix.is_empty();
+    };
+    let mut parts = rest.split('-');
+    let Some(pid) = parts.next() else {
+        return false;
+    };
+    let Some(sequence) = parts.next() else {
+        return false;
+    };
+    parts.next().is_none() && pid.parse::<u32>().is_ok() && sequence.parse::<u64>().is_ok()
 }
 
 pub fn decode_preview(source: &Path) -> Option<RgbaImage> {
@@ -80,7 +178,7 @@ pub fn ensure_preview_in(
         if let Some(image) = read_cache(&cache) {
             return Some(image);
         }
-        if let Err(error) = fs::remove_file(&cache) {
+        if let Err(error) = remove_cache_entry(&cache) {
             tracing::debug!(
                 %error,
                 photo_id = photo_id,
@@ -89,6 +187,7 @@ pub fn ensure_preview_in(
             );
         }
     }
+    let stamp = cache_metadata::source_stamp(source);
     let image = match decode_preview(source) {
         Some(image) => image,
         None => {
@@ -100,27 +199,24 @@ pub fn ensure_preview_in(
             return None;
         }
     };
-    if write_cache(&cache, &image) {
+    if write_cache(&cache, &image, stamp) {
         maybe_prune(cache_dir);
     }
     Some(image)
 }
 
 fn cache_is_fresh(cache: &Path, source: &Path) -> bool {
-    let Ok(cache_meta) = fs::metadata(cache) else {
-        return false;
+    cache_metadata::cache_is_fresh(cache, source)
+}
+
+fn remove_cache_entry(cache: &Path) -> std::io::Result<()> {
+    let result = match fs::remove_file(cache) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
     };
-    if cache_meta.len() == 0 {
-        return false;
-    }
-    let Ok(source_meta) = fs::metadata(source) else {
-        // A missing source is not a reason to discard a usable preview.
-        return true;
-    };
-    let (Ok(cache_time), Ok(source_time)) = (cache_meta.modified(), source_meta.modified()) else {
-        return true;
-    };
-    source_time <= cache_time
+    cache_metadata::remove_stamp(cache);
+    result
 }
 
 fn read_cache(cache: &Path) -> Option<RgbaImage> {
@@ -128,7 +224,11 @@ fn read_cache(cache: &Path) -> Option<RgbaImage> {
     Some(image.to_rgba8())
 }
 
-fn write_cache(cache: &Path, image: &RgbaImage) -> bool {
+fn write_cache(
+    cache: &Path,
+    image: &RgbaImage,
+    stamp: Option<cache_metadata::SourceStamp>,
+) -> bool {
     let Some(parent) = cache.parent() else {
         return false;
     };
@@ -149,6 +249,7 @@ fn write_cache(cache: &Path, image: &RgbaImage) -> bool {
             path = %temp.display(),
             "cannot write preview cache"
         );
+        let _ = fs::remove_file(&temp);
         return false;
     }
     if let Err(error) = fs::rename(&temp, cache) {
@@ -165,6 +266,17 @@ fn write_cache(cache: &Path, image: &RgbaImage) -> bool {
             );
         }
         return false;
+    }
+    if let Some(stamp) = stamp
+        && let Err(error) = cache_metadata::write_stamp(cache, stamp)
+    {
+        // The image is usable for this request; a missing stamp only forces a
+        // regeneration next time.
+        tracing::warn!(
+            %error,
+            path = %cache.display(),
+            "cannot write preview cache metadata"
+        );
     }
     true
 }
@@ -246,7 +358,10 @@ fn prune_previews_in(
     let remove_count = entries.len().saturating_sub(prune_to);
     for (_, path) in entries.into_iter().take(remove_count) {
         match fs::remove_file(&path) {
-            Ok(()) => removed += 1,
+            Ok(()) => {
+                removed += 1;
+                cache_metadata::remove_stamp(&path);
+            }
             Err(error) => {
                 tracing::debug!(
                     %error,
@@ -355,10 +470,66 @@ mod tests {
         let older = fs::metadata(&cache_path).unwrap().modified().unwrap() - Duration::from_secs(2);
         set_mtime(&cache_path, older);
         write_png(&source, 320, 200, [0, 0, 255, 255]);
+        set_mtime(&source, older + Duration::from_secs(1));
 
         let refreshed = ensure_preview_in(10, 0, &source, &cache).expect("regenerated");
         let pixel = refreshed.get_pixel(0, 0).0;
         assert!(pixel[2] > 240 && pixel[0] < 16 && pixel[1] < 16);
+    }
+
+    #[test]
+    fn source_size_change_regenerates_a_preview_with_the_same_variant() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.png");
+        let cache = dir.path().join("previews");
+        write_png(&source, 320, 200, [255, 0, 0, 255]);
+        assert!(ensure_preview_in(10, 7, &source, &cache).is_some());
+        let modified = fs::metadata(&source).unwrap().modified().unwrap();
+
+        write_png(&source, 640, 400, [0, 255, 0, 255]);
+        set_mtime(&source, modified);
+
+        let refreshed = ensure_preview_in(10, 7, &source, &cache).expect("regenerated");
+        let pixel = refreshed.get_pixel(0, 0).0;
+        assert!(
+            pixel[1] > 240 && pixel[0] < 16 && pixel[2] < 16,
+            "preview still shows the old source: {pixel:?}"
+        );
+    }
+
+    #[test]
+    fn remove_preview_files_removes_every_variant_and_sidecar() {
+        let dir = tempdir().unwrap();
+        for name in [
+            "7-0.webp",
+            "7-0.webp.meta",
+            "7-42.webp",
+            "7-42.webp.meta",
+            "7-43.webp.tmp-42-1",
+            "8-0.webp",
+            "8-0.webp.meta",
+            "17-0.webp",
+            "notes.txt",
+        ] {
+            fs::write(dir.path().join(name), b"data").unwrap();
+        }
+
+        let removed = remove_preview_files_in(dir.path(), 7).unwrap();
+
+        assert_eq!(removed, 5);
+        for name in [
+            "7-0.webp",
+            "7-0.webp.meta",
+            "7-42.webp",
+            "7-42.webp.meta",
+            "7-43.webp.tmp-42-1",
+        ] {
+            assert!(!dir.path().join(name).exists(), "still present: {name}");
+        }
+        assert!(dir.path().join("8-0.webp").exists());
+        assert!(dir.path().join("8-0.webp.meta").exists());
+        assert!(dir.path().join("17-0.webp").exists());
+        assert!(dir.path().join("notes.txt").exists());
     }
 
     #[test]
@@ -513,6 +684,7 @@ mod tests {
         for index in 0..6 {
             let path = cache.join(format!("{index}-0.webp"));
             fs::write(&path, b"preview").unwrap();
+            fs::write(cache.join(format!("{index}-0.webp.meta")), b"v1 0 0 1").unwrap();
             set_mtime(
                 &path,
                 SystemTime::UNIX_EPOCH + Duration::from_secs(index as u64 + 1),
@@ -522,6 +694,7 @@ mod tests {
         let removed = prune_previews_in(&cache, 4, 2).unwrap();
         assert_eq!(removed, 4);
         assert!(!cache.join("0-0.webp").exists());
+        assert!(!cache.join("0-0.webp.meta").exists());
         assert!(!cache.join("3-0.webp").exists());
         assert!(cache.join("4-0.webp").exists());
         assert!(cache.join("5-0.webp").exists());
