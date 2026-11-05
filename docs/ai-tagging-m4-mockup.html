@@ -1,0 +1,3483 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>VRC PhotoN — AIタグ付け M4 UI モックアップ</title>
+<style>
+  /* ==========================================================================
+     Tokens — same palette as docs/ui-glass-ribbon-mockup.html
+     ========================================================================== */
+  :root {
+    color-scheme: dark;
+    --font: "Inter", "Noto Sans JP", "Hiragino Sans", "Yu Gothic UI", system-ui, -apple-system, sans-serif;
+    --mono: "SFMono-Regular", "Cascadia Code", "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+
+    --text: #eef4ff;
+    --muted: #a8b4ca;
+    --dim: #7f8ba3;
+    --faint: #5e6a81;
+
+    --accent: #8bcbff;
+    --accent-2: #7f92ff;
+    --accent-3: #70e4d2;
+    --amber: #f4c878;
+    --rose: #ff94a8;
+    --green: #7ee2b8;
+
+    --line: rgba(255, 255, 255, 0.105);
+    --line-strong: rgba(255, 255, 255, 0.17);
+    --line-soft: rgba(255, 255, 255, 0.065);
+
+    --glass-window: rgba(10, 16, 28, 0.40);
+    --panel-sidebar: #0b111b;
+    --panel-sidebar-deep: #080d15;
+    --panel-header: #101725;
+    --panel-card: #0d1420;
+    --panel-inner: #111927;
+    --panel-inner-deep: #0c1320;
+    --panel-deep: #0a1019;
+    --panel-raised: #172132;
+    --blur-window: 42px;
+
+    --r-window: 28px;
+    --r-card: 22px;
+    --r-inner: 17px;
+    --ease: cubic-bezier(0.22, 0.8, 0.24, 1);
+
+    --ai: #70e4d2;
+    --ai-ink: #c9fff3;
+    --ai-soft: rgba(112, 228, 210, 0.075);
+    --ai-border: rgba(112, 228, 210, 0.23);
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    min-width: 320px;
+    overflow-x: hidden;
+    background: #05070d;
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 13px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  button, input { font: inherit; color: inherit; }
+  button { cursor: default; }
+  a { color: inherit; }
+  ::selection { background: rgba(139, 203, 255, 0.28); }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .icon {
+    width: 18px;
+    height: 18px;
+    flex: 0 0 auto;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .icon-sm { width: 14px; height: 14px; }
+  .icon-xs { width: 11px; height: 11px; }
+
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    border: 3px solid transparent;
+    border-radius: 99px;
+    background: rgba(255, 255, 255, 0.16);
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.26); background-clip: padding-box; }
+  :focus-visible { outline: 2px solid rgba(139, 203, 255, 0.75); outline-offset: 2px; }
+
+  /* ==========================================================================
+     Backdrop
+     ========================================================================== */
+  .wallpaper {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    overflow: hidden;
+    background:
+      radial-gradient(ellipse 62% 58% at 12% 8%, rgba(54, 107, 255, 0.30), transparent 64%),
+      radial-gradient(ellipse 48% 58% at 90% 12%, rgba(255, 86, 181, 0.13), transparent 66%),
+      radial-gradient(ellipse 56% 54% at 62% 108%, rgba(30, 202, 178, 0.14), transparent 66%),
+      linear-gradient(140deg, #04060c 0%, #0a0f1e 44%, #060811 100%);
+  }
+  .wallpaper::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    opacity: 0.032;
+    pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.55'/%3E%3C/svg%3E");
+    mix-blend-mode: overlay;
+  }
+  .wall-orb {
+    position: absolute;
+    display: block;
+    border-radius: 999px;
+    filter: blur(80px);
+    opacity: 0.5;
+    pointer-events: none;
+  }
+  .orb-a { width: 640px; height: 640px; left: -180px; top: -220px; background: radial-gradient(circle, rgba(83, 140, 255, 0.55), transparent 70%); }
+  .orb-b { width: 520px; height: 520px; right: -160px; top: 120px; background: radial-gradient(circle, rgba(255, 99, 196, 0.34), transparent 70%); }
+  .orb-c { width: 720px; height: 720px; right: 8%; bottom: -420px; background: radial-gradient(circle, rgba(38, 220, 194, 0.26), transparent 70%); }
+  .orb-d { width: 300px; height: 300px; left: 46%; top: 38%; background: radial-gradient(circle, rgba(255, 184, 102, 0.12), transparent 70%); }
+
+  /* ==========================================================================
+     Page frame
+     ========================================================================== */
+  .page {
+    position: relative;
+    z-index: 1;
+    width: min(1480px, calc(100% - 56px));
+    margin: 0 auto;
+    padding: 40px 0 88px;
+  }
+
+  .masthead {
+    position: relative;
+    overflow: hidden;
+    padding: 30px 34px 26px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: var(--r-window);
+    background:
+      linear-gradient(145deg, rgba(255, 255, 255, 0.10), rgba(255, 255, 255, 0.032) 38%, rgba(255, 255, 255, 0.015)),
+      var(--glass-window);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.20),
+      inset 0 -1px 0 rgba(0, 0, 0, 0.26),
+      0 36px 100px rgba(0, 0, 0, 0.52);
+    backdrop-filter: blur(var(--blur-window)) saturate(150%);
+    -webkit-backdrop-filter: blur(var(--blur-window)) saturate(150%);
+  }
+  .masthead::before {
+    content: "";
+    position: absolute;
+    inset: -1px -1px auto;
+    height: 60%;
+    background: radial-gradient(ellipse 70% 120% at 18% -20%, rgba(139, 203, 255, 0.16), transparent 66%);
+    pointer-events: none;
+  }
+  .masthead-top {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  .brand-mark {
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    border: 1px solid rgba(139, 203, 255, 0.22);
+    border-radius: 13px;
+    background: linear-gradient(145deg, rgba(139, 203, 255, 0.18), rgba(127, 146, 255, 0.07));
+    color: #c9eaff;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.13);
+  }
+  .brand-mark .icon { width: 21px; height: 21px; }
+  .eyebrow {
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+  }
+  .eyebrow b { color: var(--accent); font-weight: 500; }
+  .masthead h1 {
+    position: relative;
+    margin: 0;
+    font-size: clamp(28px, 3.4vw, 42px);
+    font-weight: 650;
+    letter-spacing: -0.035em;
+    line-height: 1.12;
+  }
+  .masthead h1 span {
+    background: linear-gradient(110deg, #cfeaff 12%, #8bcbff 48%, #9f9dff 88%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .masthead .lead {
+    position: relative;
+    max-width: 900px;
+    margin: 13px 0 0;
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.75;
+  }
+  .masthead .lead b { color: var(--text); font-weight: 550; }
+  .meta-row {
+    position: relative;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+    margin-top: 18px;
+  }
+  .meta-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 9px;
+    border: 1px solid var(--line-soft);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.028);
+    color: var(--dim);
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.02em;
+  }
+  .meta-chip b { color: var(--muted); font-weight: 500; }
+  .meta-chip .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px rgba(126, 226, 184, 0.7); }
+
+  .mock-note {
+    position: relative;
+    display: flex;
+    gap: 12px;
+    margin-top: 20px;
+    padding: 12px 14px;
+    border: 1px solid rgba(244, 200, 120, 0.18);
+    border-radius: 12px;
+    background: rgba(244, 200, 120, 0.045);
+    color: #e9d6af;
+    font-size: 12px;
+    line-height: 1.65;
+  }
+  .mock-note .icon { width: 17px; height: 17px; margin-top: 1px; color: var(--amber); }
+  .mock-note b { color: #f9e4b9; font-weight: 600; }
+  .mock-note code {
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.07);
+    color: #ffe9bb;
+    font-family: var(--mono);
+    font-size: 10.5px;
+  }
+
+  .nav-strip {
+    position: relative;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-top: 20px;
+    padding-top: 18px;
+    border-top: 1px solid var(--line-soft);
+  }
+  .nav-strip a {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 11px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    color: var(--dim);
+    font-size: 12px;
+    text-decoration: none;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  }
+  .nav-strip a:hover { border-color: var(--line-soft); background: rgba(255, 255, 255, 0.045); color: var(--text); }
+  .nav-strip .num { color: var(--faint); font-family: var(--mono); font-size: 9.5px; }
+  .nav-strip .key-toggle {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 11px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.035);
+    color: var(--muted);
+    font-size: 11.5px;
+    user-select: none;
+  }
+  .nav-strip .key-toggle:hover { border-color: var(--line-strong); background: rgba(255, 255, 255, 0.065); color: var(--text); }
+  .key-toggle .toggle-box {
+    position: relative;
+    width: 26px;
+    height: 15px;
+    border: 1px solid var(--line);
+    border-radius: 99px;
+    background: rgba(255, 255, 255, 0.05);
+  }
+  .key-toggle .toggle-box::after {
+    content: "";
+    position: absolute;
+    top: 1px;
+    left: 1px;
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background: var(--dim);
+    transition: transform 0.18s var(--ease), background 0.18s ease;
+  }
+  #showKeys:checked ~ .page .key-toggle .toggle-box { border-color: rgba(139, 203, 255, 0.3); background: rgba(139, 203, 255, 0.22); }
+  #showKeys:checked ~ .page .key-toggle .toggle-box::after { background: #e9f7ff; transform: translateX(11px); }
+  #showKeys:focus-visible ~ .page .key-toggle { outline: 2px solid rgba(139, 203, 255, 0.75); outline-offset: 2px; }
+  #showKeys:checked ~ .page .keyed::after {
+    content: attr(data-key);
+    display: inline-block;
+    margin-left: 7px;
+    padding: 1px 5px;
+    border: 1px solid rgba(139, 203, 255, 0.16);
+    border-radius: 4px;
+    background: rgba(139, 203, 255, 0.07);
+    color: #9ed8ff;
+    font-family: var(--mono);
+    font-size: 9px;
+    font-weight: 400;
+    letter-spacing: 0;
+    line-height: 1.5;
+    vertical-align: 1px;
+    white-space: nowrap;
+  }
+  #showKeys:checked ~ .page .btn.primary.keyed::after {
+    border-color: rgba(255, 255, 255, 0.24);
+    background: rgba(3, 7, 14, 0.20);
+    color: #eaf6ff;
+  }
+  #showKeys:checked ~ .page .modal-foot { flex-wrap: wrap; row-gap: 7px; }
+  #showKeys:checked ~ .page .modal-foot .foot-note { flex: 1 1 100%; }
+
+  /* ==========================================================================
+     Section headings
+     ========================================================================== */
+  .showcase { margin-top: 48px; scroll-margin-top: 24px; }
+  .showcase-head {
+    display: flex;
+    align-items: flex-end;
+    gap: 16px;
+    margin-bottom: 16px;
+    padding-bottom: 13px;
+    border-bottom: 1px solid var(--line);
+  }
+  .section-index {
+    display: grid;
+    place-items: center;
+    width: 38px;
+    height: 38px;
+    flex: 0 0 38px;
+    border: 1px solid rgba(139, 203, 255, 0.19);
+    border-radius: 11px;
+    background: rgba(139, 203, 255, 0.075);
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.04em;
+  }
+  .showcase-head h2 {
+    margin: 0;
+    font-size: 21px;
+    font-weight: 620;
+    letter-spacing: -0.025em;
+  }
+  .showcase-head p {
+    margin: 4px 0 0;
+    max-width: 900px;
+    color: var(--dim);
+    font-size: 12.5px;
+    line-height: 1.65;
+  }
+  .screen-chip {
+    margin-left: auto;
+    flex: 0 0 auto;
+    padding: 4px 9px;
+    border: 1px solid var(--line-soft);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.028);
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 9.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  /* ==========================================================================
+     State grid + captions
+     ========================================================================== */
+  .state-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
+    align-items: start;
+  }
+  .state-grid .wide { grid-column: 1 / -1; }
+  .state {
+    min-width: 0;
+  }
+  .state-caption {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 4px 8px;
+  }
+  .state-caption .pin {
+    width: 7px;
+    height: 7px;
+    flex: 0 0 7px;
+    border-radius: 50%;
+    background: var(--dim);
+    box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.035);
+  }
+  .state-caption .pin.blue { background: var(--accent); box-shadow: 0 0 0 3px rgba(139, 203, 255, 0.10); }
+  .state-caption .pin.amber { background: var(--amber); box-shadow: 0 0 0 3px rgba(244, 200, 120, 0.10); }
+  .state-caption .pin.green { background: var(--green); box-shadow: 0 0 0 3px rgba(126, 226, 184, 0.10); }
+  .state-caption .pin.red { background: var(--rose); box-shadow: 0 0 0 3px rgba(255, 148, 168, 0.10); }
+  .state-caption b {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .state-caption .state-code {
+    margin-left: auto;
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 9.5px;
+    letter-spacing: 0.02em;
+  }
+
+  /* ==========================================================================
+     Panels / cards
+     ========================================================================== */
+  .panel {
+    position: relative;
+    min-width: 0;
+    padding: 18px;
+    border: 1px solid var(--line);
+    border-radius: var(--r-card);
+    background:
+      linear-gradient(155deg, rgba(31, 44, 66, 0.55), rgba(10, 16, 25, 0.25) 38%, rgba(8, 13, 21, 0.55)),
+      linear-gradient(180deg, var(--panel-card), #0a111b);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.065),
+      0 20px 46px rgba(0, 0, 0, 0.26);
+  }
+  .panel::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: radial-gradient(ellipse 70% 55% at 22% -10%, rgba(139, 203, 255, 0.075), transparent 70%);
+    pointer-events: none;
+  }
+  .panel > * { position: relative; }
+
+  .card-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+  }
+  .card-icon {
+    display: grid;
+    place-items: center;
+    width: 38px;
+    height: 38px;
+    flex: 0 0 38px;
+    border: 1px solid rgba(139, 203, 255, 0.16);
+    border-radius: 12px;
+    background: linear-gradient(145deg, rgba(139, 203, 255, 0.17), rgba(127, 146, 255, 0.065));
+    color: #c9eaff;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.10);
+  }
+  .card-icon .icon { width: 19px; height: 19px; }
+  .card-icon.ai {
+    border-color: var(--ai-border);
+    background: linear-gradient(145deg, rgba(112, 228, 210, 0.16), rgba(127, 146, 255, 0.075));
+    color: var(--ai-ink);
+  }
+  .card-icon.danger {
+    border-color: rgba(255, 148, 168, 0.2);
+    background: linear-gradient(145deg, rgba(255, 148, 168, 0.16), rgba(255, 120, 148, 0.06));
+    color: #ffd0d9;
+  }
+  .card-title { flex: 1; min-width: 0; }
+  .card-title h3 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 620;
+    letter-spacing: -0.015em;
+  }
+  .card-title p {
+    margin: 3px 0 0;
+    color: var(--dim);
+    font-size: 11px;
+    line-height: 1.55;
+  }
+  .card-head > .badge { margin-left: auto; flex: 0 0 auto; }
+
+  .card-copy {
+    margin: 14px 0 0;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.7;
+  }
+  .card-copy b { color: var(--text); font-weight: 550; }
+
+  .feature-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 13px;
+  }
+  .feature-row {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 8px 10px;
+    border: 1px solid var(--line-soft);
+    border-radius: 9px;
+    background: rgba(3, 7, 14, 0.20);
+    color: var(--dim);
+    font-size: 11px;
+  }
+  .feature-row .icon { width: 14px; height: 14px; color: var(--accent); opacity: 0.85; }
+  .feature-row b { margin-left: auto; color: var(--muted); font-weight: 500; text-align: right; }
+
+  .meta-list {
+    margin-top: 14px;
+    overflow: hidden;
+    border: 1px solid var(--line-soft);
+    border-radius: 12px;
+    background: rgba(3, 7, 14, 0.20);
+  }
+  .meta-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 8px 12px;
+    border-top: 1px solid var(--line-soft);
+    font-size: 11.5px;
+  }
+  .meta-row:first-child { border-top: 0; }
+  .meta-row dt { flex: 0 0 auto; color: var(--dim); }
+  .meta-row dd {
+    min-width: 0;
+    margin: 0;
+    overflow: hidden;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 10.5px;
+    text-align: right;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .meta-row dd b { color: var(--text); font-weight: 550; }
+
+  .subhead {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 15px;
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 9.5px;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+  }
+  .subhead .count { margin-left: auto; color: var(--faint); letter-spacing: 0; text-transform: none; }
+
+  .model-box {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    margin-top: 14px;
+    padding: 11px 12px;
+    border: 1px solid rgba(139, 203, 255, 0.14);
+    border-radius: 11px;
+    background: rgba(139, 203, 255, 0.035);
+  }
+  .model-box .model-icon {
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    flex: 0 0 30px;
+    border-radius: 8px;
+    background: rgba(139, 203, 255, 0.09);
+    color: var(--accent);
+  }
+  .model-box .model-icon .icon { width: 15px; height: 15px; }
+  .model-box .model-name { min-width: 0; }
+  .model-box .model-name b { display: block; font-family: var(--mono); font-size: 10.5px; font-weight: 500; color: var(--text); }
+  .model-box .model-name span { display: block; margin-top: 2px; color: var(--dim); font-family: var(--mono); font-size: 9.5px; }
+  .model-box > .badge { margin-left: auto; flex: 0 0 auto; }
+
+  .download-box {
+    margin-top: 14px;
+    padding: 12px;
+    border: 1px solid rgba(139, 203, 255, 0.14);
+    border-radius: 12px;
+    background: rgba(3, 7, 14, 0.22);
+  }
+  .download-top {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 9px;
+    font-size: 11px;
+  }
+  .download-top b { font-family: var(--mono); font-size: 10.5px; font-weight: 500; color: var(--text); }
+  .download-top span { color: var(--accent); font-family: var(--mono); font-size: 11px; }
+  .progress {
+    height: 7px;
+    margin: 0;
+    overflow: hidden;
+    border-radius: 99px;
+    background: rgba(255, 255, 255, 0.07);
+  }
+  .progress > i {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, #6ec8ff, #7b8dff);
+    box-shadow: 0 0 14px rgba(110, 200, 255, 0.45);
+  }
+  .progress.green > i { background: linear-gradient(90deg, #5fd8bd, #7ee2b8); box-shadow: 0 0 14px rgba(126, 226, 184, 0.35); }
+  .progress.rose > i { background: linear-gradient(90deg, #ff9eb0, #d97cff); box-shadow: 0 0 14px rgba(255, 148, 168, 0.32); }
+  .download-meta {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 6px 12px;
+    margin-top: 8px;
+    color: var(--dim);
+    font-family: var(--mono);
+    font-size: 9.5px;
+  }
+  .download-meta .stage { color: var(--accent); }
+
+  .file-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 10px;
+  }
+  .file-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 7px;
+    background: rgba(255, 255, 255, 0.025);
+    color: var(--dim);
+    font-family: var(--mono);
+    font-size: 9.5px;
+  }
+  .file-row .icon { width: 12px; height: 12px; color: var(--faint); }
+  .file-row .state { margin-left: auto; color: var(--amber); }
+  .file-row.done .state { color: var(--green); }
+
+  .error-box {
+    margin-top: 14px;
+    padding: 12px 13px;
+    border: 1px solid rgba(255, 148, 168, 0.24);
+    border-radius: 12px;
+    background: linear-gradient(160deg, rgba(255, 148, 168, 0.085), rgba(255, 120, 148, 0.035));
+  }
+  .error-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: #ffd0d9;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .error-title .icon { width: 15px; height: 15px; color: var(--rose); }
+  .error-box p {
+    margin: 7px 0 0;
+    color: #e8b9c3;
+    font-size: 11px;
+    line-height: 1.65;
+  }
+  .error-code {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    margin-top: 9px;
+    padding: 3px 7px;
+    border: 1px solid rgba(255, 148, 168, 0.2);
+    border-radius: 5px;
+    background: rgba(2, 5, 10, 0.26);
+    color: #ffb5c2;
+    font-family: var(--mono);
+    font-size: 9.5px;
+  }
+
+  .active-variant {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 14px;
+    padding: 10px 12px;
+    border: 1px solid rgba(126, 226, 184, 0.18);
+    border-radius: 11px;
+    background: rgba(126, 226, 184, 0.05);
+  }
+  .active-variant .check-dot {
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    flex: 0 0 24px;
+    border-radius: 50%;
+    background: rgba(126, 226, 184, 0.14);
+    color: var(--green);
+  }
+  .active-variant .check-dot .icon { width: 13px; height: 13px; }
+  .active-variant .variant-copy { min-width: 0; }
+  .active-variant .variant-copy b {
+    display: block;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 500;
+  }
+  .active-variant .variant-copy span { display: block; margin-top: 1px; color: var(--dim); font-size: 10px; }
+  .active-variant > .badge { margin-left: auto; }
+
+  .variant-list {
+    margin-top: 10px;
+    overflow: hidden;
+    border: 1px solid var(--line-soft);
+    border-radius: 10px;
+    background: rgba(3, 7, 14, 0.18);
+  }
+  .variant-row {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 8px 11px;
+    border-top: 1px solid var(--line-soft);
+  }
+  .variant-row:first-child { border-top: 0; }
+  .variant-row.active { background: rgba(126, 226, 184, 0.035); }
+  .variant-row .v-name {
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 10.5px;
+  }
+  .variant-row .v-meta {
+    color: var(--dim);
+    font-family: var(--mono);
+    font-size: 9.5px;
+  }
+  .variant-row .badge, .variant-row .btn { margin-left: auto; }
+  .variant-note {
+    margin: 7px 0 0;
+    color: var(--faint);
+    font-size: 10px;
+    line-height: 1.55;
+  }
+  .path-line {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-top: 8px;
+    padding: 7px 9px;
+    border: 1px solid var(--line-soft);
+    border-radius: 8px;
+    background: rgba(3, 7, 14, 0.24);
+    color: var(--dim);
+    font-family: var(--mono);
+    font-size: 9.5px;
+  }
+  .path-line .icon { width: 12px; height: 12px; color: var(--faint); }
+  .path-line span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .flow {
+    margin-top: 14px;
+    overflow: hidden;
+    border: 1px solid var(--line-soft);
+    border-radius: 12px;
+    background: rgba(3, 7, 14, 0.20);
+  }
+  .flow-step {
+    display: grid;
+    grid-template-columns: 82px 14px minmax(0, 1fr);
+    align-items: center;
+    gap: 8px;
+    padding: 9px 11px;
+    border-top: 1px solid var(--line-soft);
+  }
+  .flow-step:first-child { border-top: 0; }
+  .flow-state {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 9px;
+    white-space: nowrap;
+  }
+  .flow-state .flow-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--faint); }
+  .flow-state .flow-dot.blue { background: var(--accent); }
+  .flow-state .flow-dot.amber { background: var(--amber); }
+  .flow-state .flow-dot.green { background: var(--green); }
+  .flow-state .flow-dot.red { background: var(--rose); }
+  .flow-arrow { color: var(--faint); font-family: var(--mono); font-size: 10px; text-align: center; }
+  .flow-desc { color: var(--dim); font-size: 9.5px; line-height: 1.45; }
+  .flow-desc b { color: var(--muted); font-weight: 500; }
+
+  /* ==========================================================================
+     Buttons / badges / switches
+     ========================================================================== */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    height: 33px;
+    padding: 0 12px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.042);
+    color: var(--muted);
+    font-size: 11.5px;
+    font-weight: 520;
+    white-space: nowrap;
+  }
+  .btn:hover { border-color: var(--line-strong); background: rgba(255, 255, 255, 0.07); color: var(--text); }
+  .btn .icon { width: 14px; height: 14px; }
+  .btn.primary {
+    border-color: rgba(158, 214, 255, 0.33);
+    background: linear-gradient(180deg, #7dc3ff, #5b83ff);
+    color: #fff;
+    box-shadow: 0 5px 16px rgba(78, 124, 255, 0.22), inset 0 1px 0 rgba(255, 255, 255, 0.32);
+  }
+  .btn.primary:hover { background: linear-gradient(180deg, #8ccdff, #688eff); }
+  .btn.danger {
+    border-color: rgba(255, 148, 168, 0.26);
+    background: rgba(255, 148, 168, 0.10);
+    color: #ffc2cd;
+  }
+  .btn.danger:hover { border-color: rgba(255, 148, 168, 0.42); background: rgba(255, 148, 168, 0.16); color: #ffe0e6; }
+  .btn.ghost { border-color: transparent; background: transparent; color: var(--dim); }
+  .btn.ghost:hover { border-color: var(--line-soft); background: rgba(255, 255, 255, 0.045); color: var(--text); }
+  .btn.sm { height: 27px; padding: 0 9px; font-size: 10px; }
+  .btn.xs { height: 23px; padding: 0 7px; font-size: 9.5px; }
+  .btn.w-full { width: 100%; }
+
+  .icon-btn {
+    display: inline-grid;
+    place-items: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--dim);
+  }
+  .icon-btn:hover { border-color: var(--line-soft); background: rgba(255, 255, 255, 0.05); color: var(--text); }
+  .icon-btn .icon { width: 14px; height: 14px; }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 8px;
+    border: 1px solid var(--line-soft);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.035);
+    color: var(--muted);
+    font-size: 9.5px;
+    font-weight: 520;
+    white-space: nowrap;
+  }
+  .badge .dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+  .badge.blue { border-color: rgba(139, 203, 255, 0.20); background: rgba(139, 203, 255, 0.08); color: #b9e4ff; }
+  .badge.green { border-color: rgba(126, 226, 184, 0.18); background: rgba(126, 226, 184, 0.075); color: #a9f2d8; }
+  .badge.amber { border-color: rgba(244, 200, 120, 0.18); background: rgba(244, 200, 120, 0.075); color: #f9dfab; }
+  .badge.red { border-color: rgba(255, 148, 168, 0.20); background: rgba(255, 148, 168, 0.08); color: #ffc2cd; }
+  .badge.ai { border-color: var(--ai-border); background: var(--ai-soft); color: var(--ai-ink); }
+  .badge.sm { padding: 2px 6px; font-size: 8.5px; }
+
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-top: 15px;
+  }
+  .actions .spacer { flex: 1; }
+  .action-note {
+    margin: 10px 0 0;
+    color: var(--faint);
+    font-size: 10px;
+    line-height: 1.6;
+  }
+
+  .switch-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 9px 0;
+    border-top: 1px solid var(--line-soft);
+  }
+  .switch-row:first-child { border-top: 0; padding-top: 0; }
+  .switch-copy { min-width: 0; }
+  .switch-copy label {
+    display: block;
+    color: var(--text);
+    font-size: 11.5px;
+  }
+  .switch-copy p {
+    margin: 2px 0 0;
+    color: var(--dim);
+    font-size: 10px;
+    line-height: 1.5;
+  }
+  .switch {
+    position: relative;
+    width: 34px;
+    height: 19px;
+    flex: 0 0 34px;
+    padding: 0;
+    border: 1px solid var(--line);
+    border-radius: 99px;
+    background: rgba(255, 255, 255, 0.055);
+  }
+  .switch::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    background: var(--dim);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  }
+  .switch.on { border-color: rgba(139, 203, 255, 0.3); background: rgba(139, 203, 255, 0.22); }
+  .switch.on::after { background: #e9f7ff; transform: translateX(15px); }
+  .switch.disabled { opacity: 0.55; }
+
+  .backend-row {
+    margin-top: 13px;
+    padding-top: 13px;
+    border-top: 1px solid var(--line-soft);
+  }
+  .backend-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+  .backend-head label { color: var(--text); font-size: 11.5px; }
+  .backend-head span { color: var(--faint); font-family: var(--mono); font-size: 9.5px; }
+  .segmented {
+    display: inline-flex;
+    gap: 2px;
+    padding: 2px;
+    border: 1px solid var(--line-soft);
+    border-radius: 8px;
+    background: rgba(3, 7, 14, 0.22);
+  }
+  .segmented button {
+    height: 25px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--faint);
+    font-size: 10px;
+  }
+  .segmented button.active {
+    background: rgba(255, 255, 255, 0.10);
+    color: var(--text);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 2px 8px rgba(0, 0, 0, 0.15);
+  }
+  .segmented button:disabled { color: var(--faint); opacity: 0.5; }
+  .backend-hint { margin: 7px 0 0; color: var(--faint); font-size: 9.5px; line-height: 1.55; }
+
+  /* ==========================================================================
+     Integration card
+     ========================================================================== */
+  .state-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 13px;
+  }
+  .state-row {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 8px 10px;
+    border: 1px solid var(--line-soft);
+    border-radius: 9px;
+    background: rgba(3, 7, 14, 0.20);
+    color: var(--muted);
+    font-size: 11px;
+  }
+  .state-row .icon { width: 13px; height: 13px; }
+  .state-row .icon.ok { color: var(--green); }
+  .state-row .icon.ng { color: var(--rose); }
+  .state-row .icon.wait { color: var(--amber); }
+  .state-row .state-value { margin-left: auto; font-family: var(--mono); font-size: 9.5px; }
+  .state-row .state-value.ok { color: #a9f2d8; }
+  .state-row .state-value.ng { color: #ffc2cd; }
+  .state-row .state-value.wait { color: #f9dfab; }
+
+  .steps {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    margin-top: 14px;
+    padding-top: 13px;
+    border-top: 1px solid var(--line-soft);
+  }
+  .step {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    color: var(--dim);
+    font-size: 10px;
+    line-height: 1.5;
+  }
+  .step .n {
+    display: grid;
+    place-items: center;
+    width: 16px;
+    height: 16px;
+    flex: 0 0 16px;
+    border: 1px solid var(--line-soft);
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.035);
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 8px;
+  }
+  .step b { color: var(--muted); font-weight: 500; }
+
+  .run-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
+    gap: 20px;
+    margin-top: 14px;
+    padding-top: 15px;
+    border-top: 1px solid var(--line-soft);
+  }
+  .run-col { min-width: 0; }
+  .run-col + .run-col { border-left: 1px solid var(--line-soft); padding-left: 20px; }
+
+  .stat-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 7px;
+  }
+  .stat {
+    padding: 9px 10px;
+    border: 1px solid var(--line-soft);
+    border-radius: 10px;
+    background: rgba(3, 7, 14, 0.22);
+  }
+  .stat label {
+    display: block;
+    color: var(--faint);
+    font-size: 9.5px;
+  }
+  .stat b {
+    display: block;
+    margin-top: 2px;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 17px;
+    font-weight: 550;
+    line-height: 1.2;
+  }
+  .stat.waiting b { color: #f9dfab; }
+  .stat.processing b { color: #b9e4ff; }
+  .stat.failed b { color: #ffc2cd; }
+
+  .jobs {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    margin-top: 12px;
+  }
+  .job {
+    padding: 9px 10px;
+    border: 1px solid var(--line-soft);
+    border-radius: 10px;
+    background: rgba(3, 7, 14, 0.20);
+  }
+  .job-top {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-bottom: 7px;
+    font-size: 10px;
+  }
+  .job-top b {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 9.5px;
+    font-weight: 500;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .job-top .stage {
+    flex: 0 0 auto;
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 8.5px;
+  }
+  .job-top .pct {
+    margin-left: auto;
+    flex: 0 0 auto;
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 9.5px;
+  }
+  .job-foot {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+  }
+  .job-foot span { color: var(--faint); font-size: 9.5px; }
+  .job-foot .btn { margin-left: auto; }
+
+  .backlog-box {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 12px;
+    padding: 10px;
+    border: 1px solid rgba(139, 203, 255, 0.16);
+    border-radius: 10px;
+    background: rgba(139, 203, 255, 0.045);
+  }
+  .backlog-box .model-icon {
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    flex: 0 0 30px;
+    border-radius: 8px;
+    background: rgba(139, 203, 255, 0.09);
+    color: var(--accent);
+  }
+  .backlog-box .model-icon .icon { width: 15px; height: 15px; }
+  .backlog-box .backlog-copy { min-width: 0; }
+  .backlog-box .backlog-copy b { display: block; color: var(--text); font-size: 11px; font-weight: 550; }
+  .backlog-box .backlog-copy span { display: block; margin-top: 1px; color: var(--dim); font-size: 9.5px; }
+  .backlog-box .btn { margin-left: auto; }
+
+  .empty-jobs {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    margin-top: 12px;
+    padding: 18px 12px;
+    border: 1px dashed var(--line);
+    border-radius: 10px;
+    background: rgba(3, 7, 14, 0.16);
+    text-align: center;
+  }
+  .empty-jobs .icon { width: 22px; height: 22px; color: var(--faint); opacity: 0.75; }
+  .empty-jobs b { color: var(--muted); font-size: 11px; font-weight: 550; }
+  .empty-jobs span { color: var(--faint); font-size: 9.5px; line-height: 1.5; }
+
+  /* ==========================================================================
+     Inspector
+     ========================================================================== */
+  .inspector-layout {
+    display: grid;
+    grid-template-columns: 390px minmax(0, 1fr);
+    gap: 22px;
+    align-items: start;
+  }
+  .delete-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 500px) minmax(0, 1fr);
+    gap: 22px;
+    align-items: start;
+  }
+  .selection-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: rgba(13, 20, 32, 0.75);
+  }
+  .selection-bar .check-mark {
+    display: grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 5px;
+    background: rgba(139, 203, 255, 0.16);
+    color: var(--accent);
+    font-size: 10px;
+  }
+  .selection-bar b { font-size: 11px; font-weight: 550; }
+  .selection-bar .sep { width: 1px; height: 18px; background: var(--line-soft); }
+  .selection-bar .btn { margin-left: auto; }
+  .selection-bar .btn + .btn { margin-left: 0; }
+
+  .inspector-card {
+    position: relative;
+    padding: 13px;
+    border: 1px solid rgba(255, 255, 255, 0.13);
+    border-radius: 20px;
+    background: linear-gradient(160deg, #1a2a3f, #0b1320 55%, #090f18);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.075), 0 24px 60px rgba(0, 0, 0, 0.34);
+  }
+  .inspector-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 9px;
+    color: var(--dim);
+    font-size: 9.5px;
+  }
+  .inspector-top .mono { font-family: var(--mono); font-size: 9px; }
+  .preview-scene {
+    position: relative;
+    aspect-ratio: 16 / 10;
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 12px;
+    background:
+      radial-gradient(circle at 74% 25%, rgba(255, 248, 220, 0.98) 0 2.6%, rgba(255, 244, 205, 0.30) 3.4% 8%, transparent 21%),
+      radial-gradient(ellipse 70% 32% at 50% 103%, rgba(112, 228, 210, 0.16), transparent 70%),
+      linear-gradient(180deg, #081226 0%, #102445 42%, #0a2034 56%, #061018 100%);
+    box-shadow: inset 0 0 60px rgba(4, 8, 16, 0.55);
+  }
+  .scene-star {
+    position: absolute;
+    width: 2px;
+    height: 2px;
+    border-radius: 50%;
+    background: rgba(230, 244, 255, 0.85);
+    box-shadow: 0 0 7px rgba(230, 244, 255, 0.65);
+  }
+  .star-a { left: 18%; top: 18%; }
+  .star-b { left: 36%; top: 10%; opacity: 0.6; }
+  .star-c { left: 54%; top: 22%; opacity: 0.5; }
+  .star-d { left: 88%; top: 14%; opacity: 0.7; }
+  .scene-horizon {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 58%;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(177, 216, 255, 0.34), transparent);
+  }
+  .scene-glow {
+    position: absolute;
+    left: 48%;
+    top: 57%;
+    width: 54%;
+    height: 28%;
+    background: radial-gradient(ellipse at 50% 0%, rgba(255, 244, 205, 0.18), transparent 68%);
+    filter: blur(5px);
+  }
+  .scene-shore {
+    position: absolute;
+    left: -5%;
+    right: -5%;
+    bottom: -12%;
+    height: 32%;
+    border-radius: 50% 50% 0 0 / 70% 70% 0 0;
+    background: linear-gradient(180deg, rgba(7, 17, 27, 0.35), rgba(3, 8, 14, 0.92));
+  }
+  .scene-caption {
+    position: absolute;
+    left: 10px;
+    bottom: 9px;
+    padding: 3px 7px;
+    border: 1px solid rgba(255, 255, 255, 0.13);
+    border-radius: 5px;
+    background: rgba(2, 6, 12, 0.46);
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 8.5px;
+    backdrop-filter: blur(8px);
+  }
+  .inspector-title { margin-top: 11px; }
+  .inspector-title h4 {
+    margin: 0;
+    overflow: hidden;
+    color: var(--text);
+    font-size: 16px;
+    font-weight: 620;
+    letter-spacing: -0.02em;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .inspector-title .date {
+    display: block;
+    margin-top: 2px;
+    color: var(--dim);
+    font-family: var(--mono);
+    font-size: 9px;
+  }
+  .badge-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-top: 9px;
+  }
+  .meta-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 7px 10px;
+    margin-top: 11px;
+    padding: 9px;
+    border: 1px solid var(--line-soft);
+    border-radius: 9px;
+    background: rgba(3, 7, 14, 0.22);
+  }
+  .meta-grid label {
+    display: block;
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 8px;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+  }
+  .meta-grid b {
+    display: block;
+    overflow: hidden;
+    margin-top: 1px;
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 500;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .section-label {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-top: 13px;
+    color: var(--dim);
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 0.10em;
+    text-transform: uppercase;
+  }
+  .section-label .hint {
+    margin-left: auto;
+    color: var(--faint);
+    font-family: var(--font);
+    font-size: 9px;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+  .section-label .icon{ width: 12px; height: 12px; color: var(--accent); }
+  .tag-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-top: 8px;
+  }
+  .tag-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 8px;
+    border: 1px solid rgba(255, 255, 255, 0.11);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.045);
+    color: var(--muted);
+    font-size: 10.5px;
+  }
+  .tag-chip .hash { color: var(--faint); }
+  .tag-chip .plus { color: var(--faint); }
+
+  .ai-panel {
+    position: relative;
+    margin-top: 13px;
+    padding: 11px 11px 12px;
+    border: 1px solid var(--ai-border);
+    border-radius: 14px;
+    background:
+      linear-gradient(160deg, rgba(112, 228, 210, 0.075), rgba(139, 203, 255, 0.035) 58%, rgba(127, 146, 255, 0.025)),
+      rgba(5, 13, 20, 0.32);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  }
+  .ai-panel::before {
+    content: "";
+    position: absolute;
+    left: -1px;
+    top: 14px;
+    bottom: 14px;
+    width: 2px;
+    border-radius: 99px;
+    background: linear-gradient(180deg, var(--ai), rgba(127, 146, 255, 0.2));
+    box-shadow: 0 0 10px rgba(112, 228, 210, 0.35);
+  }
+  .ai-panel .section-label { margin-top: 0; color: #a6f3e6; }
+  .ai-panel .section-label .icon { color: var(--ai); }
+  .ai-panel .tag-row { margin-top: 9px; }
+  .ai-chip {
+    border-color: rgba(112, 228, 210, 0.18);
+    background: rgba(112, 228, 210, 0.065);
+    color: #d8fff8;
+  }
+  .ai-chip .spark { color: var(--ai); font-size: 8.5px; }
+  .ai-chip .prob {
+    color: #8edfd2;
+    font-family: var(--mono);
+    font-size: 8.5px;
+  }
+  .read-only {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--faint);
+    font-size: 9px;
+  }
+  .read-only .icon { width: 10px; height: 10px; }
+
+  .ai-facts {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 7px;
+    margin-top: 10px;
+  }
+  .ai-fact {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 9px;
+    border: 1px solid rgba(112, 228, 210, 0.13);
+    border-radius: 9px;
+    background: rgba(3, 7, 14, 0.22);
+  }
+  .ai-fact .fact-icon {
+    display: grid;
+    place-items: center;
+    width: 25px;
+    height: 25px;
+    flex: 0 0 25px;
+    border-radius: 7px;
+    background: rgba(112, 228, 210, 0.09);
+    color: var(--ai);
+  }
+  .ai-fact .fact-icon .icon { width: 13px; height: 13px; }
+  .ai-fact label {
+    display: block;
+    color: var(--dim);
+    font-size: 8.5px;
+  }
+  .ai-fact b {
+    display: block;
+    margin-top: 1px;
+    color: var(--text);
+    font-size: 11px;
+    font-weight: 550;
+  }
+  .ai-fact b .prob { margin-left: 4px; color: #8edfd2; font-family: var(--mono); font-size: 8.5px; }
+  .ai-foot {
+    margin: 9px 0 0;
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 8.5px;
+    line-height: 1.55;
+  }
+  .inspector-actions { margin-top: 10px; }
+
+  /* CSS tooltip */
+  .tip { position: relative; }
+  .tip::after {
+    content: attr(data-tip);
+    position: absolute;
+    left: 50%;
+    bottom: calc(100% + 8px);
+    z-index: 40;
+    max-width: 280px;
+    padding: 6px 9px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 6px;
+    background: #101725;
+    color: var(--muted);
+    font-family: var(--font);
+    font-size: 10px;
+    font-weight: 400;
+    line-height: 1.5;
+    text-align: left;
+    white-space: nowrap;
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.42);
+    opacity: 0;
+    pointer-events: none;
+    transform: translate(-50%, 4px);
+    transition: opacity 0.14s ease, transform 0.16s var(--ease);
+  }
+  .tip:hover::after, .tip:focus-visible::after { opacity: 1; transform: translate(-50%, 0); }
+  .tip.tip-left::after { left: 0; transform: translate(0, 4px); }
+  .tip.tip-left:hover::after, .tip.tip-left:focus-visible::after { transform: translate(0, 0); }
+  .tip.tip-right::after { left: auto; right: 0; transform: translate(0, 4px); }
+  .tip.tip-right:hover::after, .tip.tip-right:focus-visible::after { transform: translate(0, 0); }
+
+  .review-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    min-width: 0;
+  }
+  .review-panel {
+    position: relative;
+    min-width: 0;
+    padding: 18px;
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    background: linear-gradient(160deg, rgba(17, 25, 39, 0.86), rgba(10, 16, 25, 0.9));
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.055), 0 18px 40px rgba(0, 0, 0, 0.22);
+  }
+  .review-panel h3 { margin: 0; font-size: 15px; font-weight: 620; letter-spacing: -0.015em; }
+  .review-panel > p { margin: 4px 0 0; color: var(--dim); font-size: 11.5px; line-height: 1.65; }
+  .checklist {
+    display: grid;
+    gap: 10px;
+    margin: 15px 0 0;
+    padding: 0;
+    list-style: none;
+  }
+  .checklist li {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    color: var(--muted);
+    font-size: 11.5px;
+    line-height: 1.6;
+  }
+  .checklist li .check {
+    display: grid;
+    place-items: center;
+    width: 18px;
+    height: 18px;
+    flex: 0 0 18px;
+    margin-top: 1px;
+    border-radius: 5px;
+    background: rgba(126, 226, 184, 0.09);
+    color: var(--green);
+    font-size: 10px;
+  }
+  .checklist li b { color: var(--text); font-weight: 550; }
+  .review-note {
+    margin-top: 16px;
+    padding: 10px 11px;
+    border: 1px solid var(--line-soft);
+    border-radius: 9px;
+    background: rgba(3, 7, 14, 0.22);
+    color: var(--faint);
+    font-size: 10px;
+    line-height: 1.65;
+  }
+  .review-note code {
+    color: #9ed8ff;
+    font-family: var(--mono);
+    font-size: 9.5px;
+  }
+  .pattern-block { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line-soft); }
+  .pattern-block h4 {
+    margin: 0;
+    color: var(--dim);
+    font-family: var(--mono);
+    font-size: 9px;
+    font-weight: 500;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+  }
+  .pattern-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 7px;
+    margin-top: 9px;
+  }
+  .pattern {
+    padding: 9px;
+    border: 1px solid var(--line-soft);
+    border-radius: 9px;
+    background: rgba(3, 7, 14, 0.22);
+  }
+  .pattern label { display: block; color: var(--faint); font-size: 8.5px; }
+  .pattern b { display: block; margin-top: 3px; color: var(--text); font-size: 11px; font-weight: 550; }
+  .pattern span { display: block; margin-top: 2px; color: var(--faint); font-size: 8.5px; line-height: 1.4; }
+
+  .tooltip-demo {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--line-soft);
+  }
+  .demo-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 8px;
+    border: 1px solid rgba(112, 228, 210, 0.18);
+    border-radius: 999px;
+    background: rgba(112, 228, 210, 0.065);
+    color: #d8fff8;
+    font-size: 10.5px;
+  }
+  .demo-chip .spark { color: var(--ai); font-size: 8.5px; }
+  .demo-chip .prob { color: #8edfd2; font-family: var(--mono); font-size: 8.5px; }
+  .demo-tip {
+    position: relative;
+    padding: 7px 10px;
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-radius: 6px;
+    background: #101725;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 9px;
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.34);
+  }
+  .demo-tip::before {
+    content: "";
+    position: absolute;
+    left: 16px;
+    top: -5px;
+    width: 8px;
+    height: 8px;
+    transform: rotate(45deg);
+    background: #101725;
+    border-left: 1px solid rgba(255, 255, 255, 0.16);
+    border-top: 1px solid rgba(255, 255, 255, 0.16);
+  }
+  .split-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    margin-top: 14px;
+  }
+  .split-card {
+    padding: 10px;
+    border: 1px solid var(--line-soft);
+    border-radius: 9px;
+    background: rgba(3, 7, 14, 0.22);
+  }
+  .split-card.manual { border-left: 2px solid var(--line-strong); }
+  .split-card.ai { border-left: 2px solid var(--ai); background: rgba(112, 228, 210, 0.045); }
+  .split-card .split-head { display: flex; align-items: center; gap: 5px; color: var(--faint); font-size: 8.5px; }
+  .split-card b { display: block; margin-top: 4px; color: var(--muted); font-family: var(--mono); font-size: 9.5px; font-weight: 500; }
+  .split-card span { display: block; margin-top: 2px; color: var(--faint); font-size: 8.5px; line-height: 1.4; }
+
+  /* ==========================================================================
+     Modal stages
+     ========================================================================== */
+  .modal-stage {
+    position: relative;
+    display: grid;
+    place-items: center;
+    min-height: 420px;
+    padding: 26px;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: var(--r-card);
+    background:
+      radial-gradient(ellipse 70% 60% at 20% 0%, rgba(139, 203, 255, 0.10), transparent 68%),
+      radial-gradient(ellipse 60% 55% at 92% 90%, rgba(255, 148, 168, 0.075), transparent 70%),
+      rgba(4, 8, 15, 0.62);
+  }
+  .modal-stage::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    opacity: 0.18;
+    background-image: linear-gradient(rgba(255, 255, 255, 0.07) 1px, transparent 1px), linear-gradient(90deg, rgba(255, 255, 255, 0.07) 1px, transparent 1px);
+    background-size: 34px 34px;
+    mask-image: radial-gradient(ellipse at center, black, transparent 78%);
+    pointer-events: none;
+  }
+  .modal {
+    position: relative;
+    width: min(520px, 100%);
+    overflow: hidden;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 19px;
+    background: linear-gradient(180deg, var(--panel-header), var(--panel-card));
+    box-shadow: 0 34px 100px rgba(0, 0, 0, 0.58), inset 0 1px 0 rgba(255, 255, 255, 0.10);
+  }
+  .modal-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 11px;
+    padding: 17px 18px 13px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .modal-icon {
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    flex: 0 0 36px;
+    border: 1px solid rgba(139, 203, 255, 0.16);
+    border-radius: 10px;
+    background: linear-gradient(145deg, rgba(139, 203, 255, 0.20), rgba(127, 146, 255, 0.08));
+    color: #c9eaff;
+  }
+  .modal-icon .icon { width: 17px; height: 17px; }
+  .modal-icon.ai { border-color: var(--ai-border); background: linear-gradient(145deg, rgba(112, 228, 210, 0.18), rgba(139, 203, 255, 0.06)); color: var(--ai-ink); }
+  .modal-icon.danger { border-color: rgba(255, 148, 168, 0.22); background: linear-gradient(145deg, rgba(255, 148, 168, 0.18), rgba(255, 120, 148, 0.06)); color: #ffd0d9; }
+  .modal-head > div { min-width: 0; }
+  .modal-head h2 { margin: 0; font-size: 15px; font-weight: 620; letter-spacing: -0.02em; }
+  .modal-head p { margin: 3px 0 0; color: var(--dim); font-size: 10px; line-height: 1.55; }
+  .modal-head .icon-btn { margin-left: auto; flex: 0 0 auto; }
+  .modal-body { display: flex; flex-direction: column; gap: 12px; padding: 15px 18px; }
+  .modal-lede { margin: 0; color: var(--muted); font-size: 11.5px; line-height: 1.65; }
+  .modal-lede b { color: var(--text); font-weight: 550; }
+  .modal-foot {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 12px 18px 15px;
+    border-top: 1px solid var(--line-soft);
+  }
+  .modal-foot .foot-note { color: var(--faint); font-size: 9.5px; }
+  .modal-foot .btn { margin-left: auto; }
+  .modal-foot .btn + .btn { margin-left: 0; }
+
+  .license-summary {
+    padding: 11px 12px;
+    border: 1px solid var(--line-soft);
+    border-radius: 10px;
+    background: rgba(3, 7, 14, 0.22);
+  }
+  .license-summary ul {
+    display: grid;
+    gap: 6px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .license-summary li {
+    display: flex;
+    align-items: flex-start;
+    gap: 7px;
+    color: var(--muted);
+    font-size: 10.5px;
+    line-height: 1.55;
+  }
+  .license-summary li .icon { width: 12px; height: 12px; margin-top: 1px; color: var(--accent); opacity: 0.85; }
+  .license-open {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 8px;
+    margin-top: 11px;
+    padding-top: 10px;
+    border-top: 1px solid var(--line-soft);
+  }
+  .license-open span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 9px;
+  }
+  .license-open .btn { margin-left: auto; }
+
+  .check-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    padding: 10px;
+    border: 1px solid var(--line-soft);
+    border-radius: 9px;
+    background: rgba(3, 7, 14, 0.20);
+  }
+  .check-box {
+    width: 16px;
+    height: 16px;
+    flex: 0 0 16px;
+    margin: 1px 0 0;
+    accent-color: #8bcbff;
+  }
+  .check-row .check-copy .check-label { display: block; color: var(--text); font-size: 11px; }
+  .check-row .check-copy .check-desc { display: block; margin-top: 2px; color: var(--faint); font-size: 9.5px; line-height: 1.5; }
+  .check-row .badge { margin-left: auto; flex: 0 0 auto; }
+
+  .job-warning-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    border: 1px solid var(--line-soft);
+    border-radius: 10px;
+    background: rgba(3, 7, 14, 0.22);
+    list-style: none;
+  }
+  .job-warning-list li {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 11px;
+    border-top: 1px solid var(--line-soft);
+    color: var(--muted);
+    font-size: 11px;
+  }
+  .job-warning-list li:first-child { border-top: 0; }
+  .job-warning-list li.ai-line { background: rgba(112, 228, 210, 0.035); }
+  .job-warning-list .job-label { display: inline-flex; align-items: center; gap: 6px; min-width: 90px; }
+  .job-warning-list .job-counts { margin-left: auto; color: var(--dim); font-family: var(--mono); font-size: 10px; text-align: right; }
+  .job-warning-list .ai-line .job-counts { color: #b9f7ee; }
+  .warning-notes {
+    margin: 0;
+    padding: 0 0 0 2px;
+    list-style: none;
+    color: var(--faint);
+    font-size: 10px;
+    line-height: 1.7;
+  }
+  .warning-notes li::before { content: "・"; }
+
+  .annotation {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 14px;
+    padding: 13px;
+    border: 1px solid var(--line-soft);
+    border-radius: 12px;
+    background: rgba(3, 7, 14, 0.22);
+  }
+  .annotation h4 {
+    margin: 0;
+    color: var(--dim);
+    font-family: var(--mono);
+    font-size: 9px;
+    font-weight: 500;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+  }
+  .annotation p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.65; }
+  .annotation code, .key-chip {
+    display: inline-block;
+    padding: 1px 5px;
+    border: 1px solid rgba(139, 203, 255, 0.14);
+    border-radius: 4px;
+    background: rgba(139, 203, 255, 0.06);
+    color: #9ed8ff;
+    font-family: var(--mono);
+    font-size: 9.5px;
+  }
+  .annotation ul { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+  .annotation li { display: flex; gap: 8px; color: var(--muted); font-size: 10.5px; line-height: 1.6; }
+  .annotation li .bullet { color: var(--accent); }
+
+  /* ==========================================================================
+     Key reference
+     ========================================================================== */
+  .key-groups {
+    display: grid;
+    gap: 9px;
+  }
+  .key-group {
+    overflow: hidden;
+    border: 1px solid var(--line-soft);
+    border-radius: 12px;
+    background: rgba(3, 7, 14, 0.22);
+  }
+  .key-group summary {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 11px 13px;
+    color: var(--muted);
+    font-size: 12px;
+    cursor: pointer;
+    list-style: none;
+  }
+  .key-group summary::-webkit-details-marker { display: none; }
+  .key-group summary .chev { margin-left: auto; color: var(--faint); transition: transform 0.16s ease; }
+  .key-group[open] summary .chev { transform: rotate(180deg); }
+  .key-group summary .prefix {
+    color: #9ed8ff;
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+  .key-group summary .count {
+    padding: 1px 6px;
+    border: 1px solid var(--line-soft);
+    border-radius: 99px;
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 8.5px;
+  }
+  .key-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 10.5px;
+  }
+  .key-table th {
+    padding: 7px 13px;
+    border-top: 1px solid var(--line-soft);
+    background: rgba(255, 255, 255, 0.022);
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 8.5px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-align: left;
+    text-transform: uppercase;
+  }
+  .key-table td {
+    padding: 7px 13px;
+    border-top: 1px solid var(--line-soft);
+    vertical-align: top;
+  }
+  .key-table td.key {
+    width: 42%;
+    color: #9ed8ff;
+    font-family: var(--mono);
+    font-size: 9.5px;
+    white-space: nowrap;
+  }
+  .key-table td.ja { color: var(--muted); }
+  .key-table td.use { color: var(--faint); font-size: 9.5px; }
+  .key-table tr:hover td { background: rgba(255, 255, 255, 0.018); }
+
+  .page-foot {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 48px;
+    padding-top: 18px;
+    border-top: 1px solid var(--line-soft);
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 9.5px;
+  }
+  .page-foot .sep { width: 1px; height: 12px; background: var(--line); }
+  .page-foot .right { margin-left: auto; }
+
+  /* ==========================================================================
+     Responsive
+     ========================================================================== */
+  @media (max-width: 1120px) {
+    .state-grid { grid-template-columns: 1fr; }
+    .state-grid .wide { grid-column: auto; }
+    .inspector-layout { grid-template-columns: 360px minmax(0, 1fr); }
+    .delete-layout { grid-template-columns: minmax(0, 1fr); }
+    .run-layout { grid-template-columns: 1fr; }
+    .run-col + .run-col { border-left: 0; padding-left: 0; border-top: 1px solid var(--line-soft); padding-top: 14px; }
+  }
+  @media (max-width: 860px) {
+    .page { width: calc(100% - 28px); padding-top: 24px; }
+    .masthead { padding: 22px 20px 20px; }
+    .showcase-head { display: block; }
+    .section-index { margin-bottom: 10px; }
+    .screen-chip { display: inline-block; margin: 10px 0 0; }
+    .inspector-layout { grid-template-columns: 1fr; }
+    .inspector-card { max-width: 440px; }
+    .state-caption .state-code { display: none; }
+  }
+  @media (max-width: 560px) {
+    body { font-size: 12px; }
+    .masthead h1 { font-size: 24px; }
+    .masthead .lead { font-size: 12.5px; }
+    .nav-strip .key-toggle { display: none; }
+    #showKeys:checked ~ .page .keyed::after { display: none; }
+    .meta-chip { max-width: 100%; white-space: normal; }
+    .actions .btn { flex: 1; }
+    .modal-stage { padding: 14px; }
+    .modal-foot { flex-wrap: wrap; }
+    .modal-foot .foot-note { width: 100%; }
+    .ai-facts { grid-template-columns: 1fr; }
+    .meta-row { align-items: flex-start; flex-direction: column; gap: 2px; }
+    .meta-row dd { text-align: left; white-space: normal; }
+    .stat b { font-size: 15px; }
+    .selection-bar { flex-wrap: wrap; }
+    .selection-bar .btn { margin-left: 0; }
+    .job-foot { flex-wrap: wrap; }
+    .job-foot .btn { margin-left: auto; }
+    .backlog-box { flex-wrap: wrap; }
+    .backlog-box .btn { margin-left: auto; }
+    .variant-row { flex-wrap: wrap; }
+    .active-variant { flex-wrap: wrap; }
+    .model-box { flex-wrap: wrap; }
+    .check-row { flex-wrap: wrap; }
+    .check-row .badge { margin-left: 25px; }
+    .job-warning-list li { flex-wrap: wrap; }
+    .job-warning-list .job-counts { width: 100%; margin-left: 0; text-align: left; }
+    .page-foot { flex-wrap: wrap; }
+    .page-foot .right { margin-left: 0; }
+    .key-table { table-layout: fixed; }
+    .key-table th:nth-child(3), .key-table td:nth-child(3) { display: none; }
+    .key-table td { overflow-wrap: anywhere; }
+    .key-table td.key { width: 50%; white-space: normal; }
+    .key-table th, .key-table td { padding: 6px 8px; }
+  }
+
+  /* ==========================================================================
+     M4 additions — search, picker, thresholds, dashboard, toasts
+     ========================================================================== */
+  .search-layout {
+    display: grid;
+    grid-template-columns: 290px minmax(0, 1fr);
+    gap: 20px;
+    align-items: stretch;
+  }
+  .search-filter {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 16px;
+    border: 1px solid var(--line);
+    border-radius: var(--r-inner);
+    background: linear-gradient(165deg, var(--panel-inner), var(--panel-card));
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+  }
+  .search-filter h3 { margin: 0; font-size: 13px; font-weight: 620; letter-spacing: -0.01em; }
+  .search-filter .filter-hint { margin: -8px 0 0; color: var(--faint); font-size: 9.5px; line-height: 1.5; }
+  .field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+  .field > label { color: var(--dim); font-size: 10px; }
+  .field input {
+    width: 100%;
+    height: 30px;
+    padding: 0 9px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: rgba(3, 7, 14, 0.28);
+    color: var(--text);
+    font-size: 11px;
+    outline: none;
+  }
+  .field input::placeholder { color: var(--faint); }
+  .field input:focus { border-color: rgba(139, 203, 255, 0.45); box-shadow: 0 0 0 2px rgba(139, 203, 255, 0.08); }
+  .field-row { display: grid; grid-template-columns: minmax(0, 1fr) 74px; gap: 8px; }
+  .field-row .field:last-child input { text-align: center; }
+  .field-suffix { position: relative; }
+  .field-suffix input { padding-right: 22px; }
+  .field-suffix span { position: absolute; right: 9px; top: 50%; transform: translateY(-50%); color: var(--faint); font-size: 10px; pointer-events: none; }
+  .ai-filter {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 2px;
+    padding-top: 12px;
+    border-top: 1px solid var(--line-soft);
+  }
+  .ai-filter-head { display: flex; align-items: center; gap: 7px; }
+  .ai-filter-head h4 { margin: 0; color: var(--text); font-size: 11px; font-weight: 570; }
+  .ai-filter-head .count {
+    display: inline-grid;
+    place-items: center;
+    min-width: 17px;
+    height: 17px;
+    padding: 0 5px;
+    border: 1px solid var(--ai-border);
+    border-radius: 99px;
+    background: var(--ai-soft);
+    color: var(--ai-ink);
+    font-family: var(--mono);
+    font-size: 9px;
+  }
+  .ai-filter-head .btn { margin-left: auto; }
+  .ai-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+  .ai-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 3px 7px;
+    border: 1px solid var(--ai-border);
+    border-radius: 999px;
+    background: var(--ai-soft);
+    color: var(--ai-ink);
+    font-size: 10px;
+    white-space: nowrap;
+  }
+  .ai-chip button {
+    display: grid;
+    place-items: center;
+    width: 12px;
+    height: 12px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: rgba(112, 228, 210, 0.12);
+    color: inherit;
+    font-size: 9px;
+    line-height: 1;
+  }
+  .ai-chip button:hover { background: rgba(112, 228, 210, 0.22); }
+  .ai-filter-note { margin: 0; color: var(--faint); font-size: 9.5px; line-height: 1.55; }
+  .ai-filter-note b { color: var(--muted); font-weight: 500; }
+  .filter-actions { display: flex; gap: 7px; margin-top: 2px; }
+  .filter-actions .btn:first-child { flex: 1; }
+  .search-results {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: var(--r-inner);
+    background: linear-gradient(165deg, var(--panel-inner), var(--panel-card));
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+  }
+  .results-head {
+    display: flex;
+    align-items: baseline;
+    gap: 7px;
+    padding: 13px 16px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .results-head b { color: var(--text); font-size: 12px; font-weight: 600; }
+  .results-head span { color: var(--faint); font-size: 10px; }
+  .results-head .right { margin-left: auto; color: var(--dim); font-family: var(--mono); font-size: 9.5px; }
+  .result-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    padding: 14px;
+  }
+  .result-card {
+    overflow: hidden;
+    border: 1px solid var(--line-soft);
+    border-radius: 13px;
+    background: rgba(3, 7, 14, 0.22);
+  }
+  .result-thumb {
+    position: relative;
+    aspect-ratio: 3 / 2;
+    background:
+      radial-gradient(ellipse 68% 70% at 28% 24%, rgba(139, 203, 255, 0.55), transparent 64%),
+      radial-gradient(ellipse 54% 64% at 78% 68%, rgba(112, 228, 210, 0.38), transparent 62%),
+      linear-gradient(145deg, #1a2d46, #101a2b 55%, #0a111c);
+  }
+  .result-card:nth-child(2n) .result-thumb {
+    background:
+      radial-gradient(ellipse 58% 64% at 72% 22%, rgba(255, 148, 168, 0.38), transparent 62%),
+      radial-gradient(ellipse 66% 62% at 22% 76%, rgba(127, 146, 255, 0.42), transparent 64%),
+      linear-gradient(145deg, #24192c, #141223 55%, #0b0d16);
+  }
+  .result-card:nth-child(3n) .result-thumb {
+    background:
+      radial-gradient(ellipse 74% 66% at 44% 20%, rgba(244, 200, 120, 0.34), transparent 60%),
+      radial-gradient(ellipse 48% 54% at 82% 80%, rgba(112, 228, 210, 0.24), transparent 64%),
+      linear-gradient(145deg, #25251a, #171a18 55%, #0b100e);
+  }
+  .result-thumb::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(180deg, transparent 48%, rgba(3, 7, 14, 0.58));
+  }
+  .result-meta { padding: 8px 9px 9px; }
+  .result-meta b { display: block; overflow: hidden; color: var(--text); font-size: 10.5px; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
+  .result-meta span { display: block; margin-top: 2px; color: var(--faint); font-family: var(--mono); font-size: 9px; }
+  .result-foot { display: flex; align-items: center; gap: 8px; padding: 0 14px 12px; color: var(--faint); font-size: 9.5px; }
+  .result-foot .right { margin-left: auto; }
+
+  /* Picker modal */
+  .picker-modal { width: min(760px, 100%); }
+  .picker-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .picker-search {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    flex: 1 1 220px;
+    min-width: 180px;
+    height: 31px;
+    padding: 0 9px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: rgba(3, 7, 14, 0.28);
+  }
+  .picker-search .icon { width: 13px; height: 13px; color: var(--faint); }
+  .picker-search input { flex: 1; min-width: 0; border: 0; background: transparent; color: var(--text); font-size: 11px; outline: none; }
+  .picker-search input::placeholder { color: var(--faint); }
+  .picker-search:focus-within { border-color: rgba(139, 203, 255, 0.45); box-shadow: 0 0 0 2px rgba(139, 203, 255, 0.08); }
+  .picker-list {
+    max-height: 330px;
+    overflow: auto;
+    border: 1px solid var(--line-soft);
+    border-radius: 10px;
+    background: rgba(3, 7, 14, 0.18);
+  }
+  .picker-row {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 8px 10px;
+    border-top: 1px solid var(--line-soft);
+    color: var(--muted);
+    font-size: 11px;
+  }
+  .picker-row:first-child { border-top: 0; }
+  .picker-row:hover { background: rgba(255, 255, 255, 0.025); }
+  .picker-row.selected { background: rgba(112, 228, 210, 0.045); }
+  .picker-row input { width: 15px; height: 15px; flex: 0 0 15px; margin: 0; accent-color: #70e4d2; }
+  .picker-row .name { min-width: 0; color: var(--text); }
+  .picker-row .name span { display: block; margin-top: 1px; color: var(--faint); font-family: var(--mono); font-size: 8.5px; }
+  .picker-row .branch {
+    margin-left: auto;
+    flex: 0 0 auto;
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 8.5px;
+  }
+  .picker-summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 5px;
+    min-height: 28px;
+    padding: 7px 9px;
+    border: 1px solid var(--line-soft);
+    border-radius: 9px;
+    background: rgba(3, 7, 14, 0.20);
+  }
+  .picker-summary .label { color: var(--faint); font-size: 9.5px; }
+  .picker-summary .empty { color: var(--faint); font-size: 10px; }
+  .picker-empty { padding: 26px 14px; color: var(--faint); font-size: 11px; text-align: center; }
+
+  /* Threshold modal */
+  .threshold-modal { width: min(800px, 100%); }
+  .presence-box {
+    padding: 12px;
+    border: 1px solid var(--ai-border);
+    border-radius: 10px;
+    background: linear-gradient(160deg, rgba(112, 228, 210, 0.06), rgba(3, 7, 14, 0.20));
+  }
+  .presence-head { display: flex; align-items: flex-start; gap: 9px; }
+  .presence-head .icon { width: 16px; height: 16px; margin-top: 1px; color: var(--ai); }
+  .presence-copy { min-width: 0; }
+  .presence-copy b { display: block; color: var(--text); font-size: 11.5px; font-weight: 570; }
+  .presence-copy span { display: block; margin-top: 2px; color: var(--faint); font-size: 9.5px; line-height: 1.5; }
+  .presence-value { margin-left: auto; color: var(--ai-ink); font-family: var(--mono); font-size: 13px; }
+  .presence-slider { margin-top: 10px; }
+  .threshold-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .threshold-toolbar .picker-search { flex: 1 1 200px; }
+  .threshold-list {
+    max-height: 365px;
+    overflow: auto;
+    border: 1px solid var(--line-soft);
+    border-radius: 10px;
+    background: rgba(3, 7, 14, 0.18);
+  }
+  .threshold-row {
+    display: grid;
+    grid-template-columns: 196px minmax(120px, 1fr) 54px 48px;
+    gap: 12px;
+    align-items: center;
+    padding: 10px 12px;
+    border-top: 1px solid var(--line-soft);
+  }
+  .threshold-row:first-child { border-top: 0; }
+  .threshold-row:hover { background: rgba(255, 255, 255, 0.022); }
+  .threshold-name { min-width: 0; }
+  .threshold-name b { display: block; color: var(--text); font-size: 11px; font-weight: 550; }
+  .threshold-name span { display: block; margin-top: 2px; color: var(--faint); font-family: var(--mono); font-size: 8.5px; }
+  .threshold-name span.override { color: var(--amber); }
+  .threshold-slider {
+    position: relative;
+    height: 24px;
+    display: flex;
+    align-items: center;
+  }
+  .threshold-slider .track {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 4px;
+    border-radius: 99px;
+    background: rgba(255, 255, 255, 0.09);
+  }
+  .threshold-slider .fill {
+    position: absolute;
+    left: 0;
+    height: 4px;
+    border-radius: 99px;
+    background: linear-gradient(90deg, rgba(112, 228, 210, 0.45), var(--ai));
+    box-shadow: 0 0 10px rgba(112, 228, 210, 0.25);
+  }
+  .threshold-slider .default-mark {
+    position: absolute;
+    top: 2px;
+    bottom: 2px;
+    width: 2px;
+    border-radius: 99px;
+    background: var(--amber);
+    box-shadow: 0 0 0 2px rgba(244, 200, 120, 0.12);
+  }
+  .threshold-slider .thumb {
+    position: absolute;
+    width: 13px;
+    height: 13px;
+    border: 1px solid rgba(255, 255, 255, 0.55);
+    border-radius: 50%;
+    background: #eaf6ff;
+    box-shadow: 0 1px 5px rgba(0, 0, 0, 0.45);
+    transform: translateX(-50%);
+  }
+  .threshold-value { color: var(--ai-ink); font-family: var(--mono); font-size: 11px; text-align: right; }
+  .threshold-reset { justify-self: end; }
+  .threshold-reset .btn { width: 100%; }
+  .threshold-legend {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 14px;
+    color: var(--faint);
+    font-size: 9.5px;
+  }
+  .threshold-legend i {
+    display: inline-block;
+    width: 2px;
+    height: 12px;
+    margin-right: 5px;
+    border-radius: 99px;
+    background: var(--amber);
+    vertical-align: -2px;
+  }
+  .threshold-legend .ai-line { width: 16px; height: 4px; border-radius: 99px; background: var(--ai); }
+
+  /* Dashboard */
+  .dashboard-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 340px;
+    gap: 20px;
+    align-items: start;
+  }
+  .dashboard-main {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    min-height: 360px;
+    padding: 16px;
+    border: 1px solid var(--line);
+    border-radius: var(--r-inner);
+    background: linear-gradient(165deg, var(--panel-inner), var(--panel-card));
+  }
+  .dashboard-main .skeleton-head { display: flex; align-items: center; gap: 8px; }
+  .dashboard-main .skeleton-head b { color: var(--muted); font-size: 12px; font-weight: 570; }
+  .dashboard-main .skeleton-head span { margin-left: auto; color: var(--faint); font-family: var(--mono); font-size: 9px; }
+  .skeleton-row {
+    height: 38px;
+    border: 1px solid var(--line-soft);
+    border-radius: 9px;
+    background: linear-gradient(90deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.025));
+    background-size: 200% 100%;
+  }
+  .dash-rail { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+  .daemon-mini {
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    border-radius: var(--r-inner);
+    background: linear-gradient(165deg, var(--panel-inner), var(--panel-card));
+  }
+  .daemon-mini .daemon-head { display: flex; align-items: center; gap: 8px; }
+  .daemon-mini .daemon-head b { color: var(--text); font-size: 12px; font-weight: 570; }
+  .daemon-mini .daemon-head span { margin-left: auto; color: var(--green); font-size: 10px; }
+  .daemon-mini .daemon-meta { display: flex; gap: 12px; margin-top: 8px; color: var(--faint); font-size: 9.5px; }
+  .daemon-mini .daemon-meta b { color: var(--muted); font-family: var(--mono); font-weight: 500; }
+  .ai-dash {
+    padding: 14px;
+    border: 1px solid var(--ai-border);
+    border-radius: var(--r-inner);
+    background: linear-gradient(165deg, rgba(112, 228, 210, 0.045), var(--panel-card) 55%);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+  }
+  .ai-dash-head { display: flex; align-items: flex-start; gap: 9px; }
+  .ai-dash-head .card-icon { flex: 0 0 32px; width: 32px; height: 32px; border-radius: 9px; }
+  .ai-dash-title { min-width: 0; flex: 1; }
+  .ai-dash-title b { display: block; color: var(--text); font-size: 12px; font-weight: 600; }
+  .ai-dash-title span { display: block; margin-top: 1px; color: var(--faint); font-size: 9.5px; }
+  .ai-dash-state { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; color: var(--dim); font-size: 9.5px; }
+  .ai-dash-state .dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; box-shadow: 0 0 7px currentColor; }
+  .ai-dash-state.not-ready { color: var(--amber); }
+  .ai-dash-state.disabled { color: var(--faint); }
+  .ai-dash-state.idle { color: var(--green); }
+  .ai-dash-state.active { color: var(--accent); }
+  .ai-dash-state.failed { color: var(--rose); }
+  .ai-dash-copy { margin: 9px 0 0; color: var(--muted); font-size: 10px; line-height: 1.55; }
+  .ai-dash-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 10px; }
+  .ai-dash-stat { padding: 7px 8px; border: 1px solid var(--line-soft); border-radius: 8px; background: rgba(3, 7, 14, 0.18); }
+  .ai-dash-stat label { display: block; color: var(--faint); font-size: 8.5px; }
+  .ai-dash-stat b { display: block; margin-top: 1px; color: var(--text); font-family: var(--mono); font-size: 14px; font-weight: 550; }
+  .ai-dash-stat.waiting b { color: #f9dfab; }
+  .ai-dash-stat.processing b { color: #b9e4ff; }
+  .ai-dash-stat.failed b { color: #ffc2cd; }
+  .ai-dash-jobs { display: flex; flex-direction: column; gap: 7px; margin-top: 10px; }
+  .ai-dash-job { padding: 8px 9px; border: 1px solid var(--line-soft); border-radius: 9px; background: rgba(3, 7, 14, 0.18); }
+  .ai-dash-job .job-top { margin-bottom: 5px; }
+  .ai-dash-job .job-top b { font-size: 9px; }
+  .ai-dash-job .job-foot { margin-top: 4px; }
+  .ai-dash-more { display: flex; align-items: center; gap: 8px; margin-top: 8px; color: var(--faint); font-size: 9.5px; }
+  .ai-dash-more .btn { margin-left: auto; }
+  .ai-dash-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-top: 11px; padding-top: 10px; border-top: 1px solid var(--line-soft); }
+  .ai-dash-foot .btn { margin-left: auto; }
+  .dash-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-top: 18px; }
+  .dash-sample { min-width: 0; }
+  .dash-sample .ai-dash { height: 100%; }
+  .hidden-sample {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    min-height: 190px;
+    height: 100%;
+    padding: 20px;
+    border: 1px dashed var(--line);
+    border-radius: var(--r-inner);
+    background: rgba(3, 7, 14, 0.16);
+    text-align: center;
+  }
+  .hidden-sample .icon { width: 24px; height: 24px; color: var(--faint); opacity: 0.8; }
+  .hidden-sample b { color: var(--muted); font-size: 11.5px; font-weight: 550; }
+  .hidden-sample p { max-width: 290px; margin: 0; color: var(--faint); font-size: 10px; line-height: 1.6; }
+
+  /* Toasts */
+  .toast-stage {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+    width: min(560px, 100%);
+    margin-left: auto;
+    padding: 16px;
+    border: 1px solid var(--line);
+    border-radius: var(--r-inner);
+    background:
+      radial-gradient(ellipse 70% 60% at 82% 10%, rgba(112, 228, 210, 0.08), transparent 66%),
+      rgba(4, 8, 15, 0.55);
+  }
+  .toast {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    width: 100%;
+    padding: 10px 11px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: linear-gradient(165deg, var(--panel-raised), var(--panel-inner));
+    box-shadow: 0 14px 34px rgba(0, 0, 0, 0.36), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    font-size: 10.5px;
+  }
+  .toast .icon { width: 15px; height: 15px; margin-top: 1px; flex: 0 0 15px; }
+  .toast b { display: block; color: var(--text); font-size: 10.5px; font-weight: 600; }
+  .toast p { margin: 2px 0 0; color: var(--muted); font-size: 9.5px; line-height: 1.5; }
+  .toast .close { margin-left: auto; flex: 0 0 auto; color: var(--faint); }
+  .toast.success { border-color: rgba(126, 226, 184, 0.28); }
+  .toast.success .icon { color: var(--green); }
+  .toast.error { border-color: rgba(255, 148, 168, 0.28); }
+  .toast.error .icon { color: var(--rose); }
+  .toast.warning { border-color: rgba(244, 200, 120, 0.24); }
+  .toast.warning .icon { color: var(--amber); }
+  .toast-note { display: flex; align-items: flex-start; gap: 9px; margin-top: 14px; color: var(--faint); font-size: 10px; line-height: 1.6; }
+  .toast-note .icon { width: 14px; height: 14px; margin-top: 1px; color: var(--amber); }
+
+  /* Small copy helpers */
+  .section-lede { max-width: 920px; margin: 0 0 16px; color: var(--dim); font-size: 12px; line-height: 1.7; }
+  .section-lede b { color: var(--text); font-weight: 550; }
+  .source-note { margin-top: 10px; color: var(--faint); font-family: var(--mono); font-size: 9px; }
+  .keyed-legend { display: inline-flex; align-items: center; gap: 5px; color: var(--faint); font-size: 9.5px; }
+  .keyed-legend code { color: #9ed8ff; font-family: var(--mono); font-size: 9px; }
+
+  @media (max-width: 1180px) {
+    .search-layout { grid-template-columns: 260px minmax(0, 1fr); }
+    .dashboard-layout { grid-template-columns: minmax(0, 1fr) 320px; }
+    .dash-grid { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 980px) {
+    .search-layout { grid-template-columns: 1fr; }
+    .search-filter { order: 2; }
+    .search-results { order: 1; }
+    .dashboard-layout { grid-template-columns: 1fr; }
+    .dash-rail { max-width: 420px; }
+    .threshold-row { grid-template-columns: 150px minmax(100px, 1fr) 48px 44px; gap: 8px; }
+  }
+  @media (max-width: 720px) {
+    .result-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .threshold-row { grid-template-columns: 1fr 1fr; }
+    .threshold-slider { grid-column: 1 / -1; }
+    .threshold-reset { justify-self: start; }
+    .picker-toolbar .segmented { flex: 1 1 100%; }
+    .picker-toolbar .segmented button { flex: 1; }
+    .toast-stage { padding: 14px; }
+  }
+  @media (max-width: 560px) {
+    .result-grid { grid-template-columns: 1fr; }
+    .field-row { grid-template-columns: 1fr; }
+    .threshold-row { grid-template-columns: 1fr; }
+    .threshold-value { text-align: left; }
+    .threshold-reset { justify-self: start; }
+    .ai-dash-foot .btn { margin-left: 0; }
+  }
+</style>
+</head>
+<body>
+<input type="checkbox" id="showKeys" class="sr-only">
+
+<!-- Icon sprite (same line style as the glass-ribbon mockup) -->
+<svg aria-hidden="true" style="position:absolute;width:0;height:0;overflow:hidden">
+  <defs>
+    <symbol id="i-wand" viewBox="0 0 24 24"><path d="m15 4 5 5M13 6l5 5M4 20 17 7M5 4v3M3.5 5.5h3M19 16v3M17.5 17.5h3"/></symbol>
+    <symbol id="i-sparkles" viewBox="0 0 24 24"><path d="m12 3 1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8Z"/><path d="m19 15 .8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8Z"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M4 20h16"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4M7 9l5-5 5 5M4 20h16"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.6 9A7.5 7.5 0 0 1 19 7l1 5M4 12l1 5a7.5 7.5 0 0 0 13.4-2"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M6 6l1 15h10l1-15M10 11v6M14 11v6"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.3 4.2 2.6 18a2 2 0 0 0 1.8 3h15.2a2 2 0 0 0 1.8-3L13.7 4.2a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4M12 17h.01"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-folder-open" viewBox="0 0 24 24"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.6-.8L9.2 3.5A2 2 0 0 0 7.6 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/><path d="m3 12 2.4-3.2A2 2 0 0 1 7 8h14l-3 8H4Z"/></symbol>
+    <symbol id="i-tag" viewBox="0 0 24 24"><path d="M20.6 13.4 11 3H4v7l9.6 9.6a2 2 0 0 0 2.8 0l4.2-4.2a2 2 0 0 0 0-2Z"/><circle cx="7.5" cy="6.5" r="1"/></symbol>
+    <symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></symbol>
+    <symbol id="i-hard-drive" viewBox="0 0 24 24"><path d="M4 4h16l2 10v4a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-4Z"/><path d="M2 14h20M7 17h.01M11 17h.01"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9Z"/><path d="M14 3v6h6M8 13h8M8 17h6"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 4.5 6v6c0 4.5 3 7.3 7.5 9 4.5-1.7 7.5-4.5 7.5-9V6Z"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5v15l13-7.5Z"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></symbol>
+    <symbol id="i-queue" viewBox="0 0 24 24"><path d="M4 6h16M4 12h11M4 18h7"/><path d="m17 16 3 2-3 2Z"/></symbol>
+    <symbol id="i-server" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M11 6.5h5M11 17.5h5"/></symbol>
+    <symbol id="i-activity" viewBox="0 0 24 24"><path d="M3 12h4l2.5-7 5 14 2.5-7h4"/></symbol>
+    <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5"/></symbol>
+    <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></symbol>
+    <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2.5"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-5-5L5 21"/></symbol>
+    <symbol id="i-zap" viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7Z"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></symbol>
+    <symbol id="i-filter" viewBox="0 0 24 24"><path d="M3 5h18l-7 8v5l-4 2v-7Z"/></symbol>
+  </defs>
+</svg>
+
+<div class="wallpaper" aria-hidden="true">
+  <span class="wall-orb orb-a"></span>
+  <span class="wall-orb orb-b"></span>
+  <span class="wall-orb orb-c"></span>
+  <span class="wall-orb orb-d"></span>
+</div>
+
+<div class="page">
+  <header class="masthead">
+    <div class="masthead-top">
+      <span class="brand-mark"><svg class="icon"><use href="#i-sparkles"/></svg></span>
+      <div>
+        <div class="eyebrow">VRC PhotoN · <b>AI tagging M4</b> · UI mockup</div>
+        <div class="eyebrow" style="margin-top:2px;letter-spacing:0.08em;text-transform:none">Task 0 / design approval</div>
+      </div>
+    </div>
+
+    <h1>AIタグ付け — <span>M4 UI モックアップ</span></h1>
+    <p class="lead">
+      AIタグ検索、AIタグ選択、タグ別閾値、ダッシュボード、トースト通知。
+      M4 で仕上げる UI を 1 ページで確認するための静的モックです。
+      デザインは <code style="font-family:var(--mono);font-size:11px;color:#b9e4ff">docs/ui-glass-ribbon-mockup.html</code>
+      の Glass Ribbon トーンに合わせ、<b>#313 後のバッジなし状態</b>を前提にしています。
+    </p>
+
+    <div class="meta-row">
+      <span class="meta-chip"><span class="dot"></span><b>docs only</b></span>
+      <span class="meta-chip">2026-11-05</span>
+      <span class="meta-chip">Glass Ribbon</span>
+      <span class="meta-chip">static HTML / no JS</span>
+      <span class="meta-chip">1 search layout · 1 picker · 1 threshold · 4 visible dashboard states + hidden not_enabled · 3 toasts</span>
+    </div>
+
+    <div class="mock-note">
+      <svg class="icon"><use href="#i-info"/></svg>
+      <div>
+        <b>これは実装前のモックアップです。</b>
+        ボタン・スイッチ・スライダーは操作できません。レイアウト、文言、状態遷移、操作のレビュー用です。
+        <b>武田様の承認を得るまで、M4-1〜M4-3 の UI コードは書きません。</b>
+        日本語ラベルは <code>ja.yml</code> に入れる予定のキー案に対応しています。
+        右上の「i18nキーを表示」でキー名を重ねて確認できます。
+      </div>
+    </div>
+
+    <nav class="nav-strip" aria-label="モックアップ内のセクション">
+      <a href="#search"><span class="num">01</span>検索フィルター</a>
+      <a href="#picker"><span class="num">02</span>AIタグ選択</a>
+      <a href="#thresholds"><span class="num">03</span>タグ別閾値</a>
+      <a href="#dashboard"><span class="num">04</span>ダッシュボード</a>
+      <a href="#toasts"><span class="num">05</span>トースト</a>
+      <a href="#keys"><span class="num">06</span>i18nキー</a>
+      <a href="#review"><span class="num">07</span>レビュー観点</a>
+      <label class="key-toggle" for="showKeys">
+        <span class="toggle-box" aria-hidden="true"></span>
+        i18nキーを表示
+      </label>
+    </nav>
+  </header>
+
+  <main>
+    <!-- ======================================================================
+         01 — Search
+         ====================================================================== -->
+    <section class="showcase" id="search">
+      <div class="showcase-head">
+        <span class="section-index">01</span>
+        <div>
+          <h2>検索画面 — AIタグと人数</h2>
+          <p>
+            AIタグは手動タグとは別グループ。選択したタグの<b>いずれか</b>に一致する写真を返します。
+            人数は単一の値で検索し、保存済みの推定区間 <code>people_min〜people_max</code> に含まれる写真を返します。
+          </p>
+        </div>
+        <span class="screen-chip">Search</span>
+      </div>
+
+      <p class="section-lede">
+        左のフィルターは 290px 幅。AIタグの選択は一覧を開かず、<b>「AIタグを選ぶ」モーダル</b>で行います。
+        選択済みのタグはフィルター内にチップで残し、検索条件を一目で確認できるようにします。
+      </p>
+
+      <div class="search-layout">
+        <aside class="search-filter" aria-label="検索フィルター">
+          <h3 class="keyed" data-key="search.filters">絞り込み</h3>
+          <p class="filter-hint keyed" data-key="search.filter_logic">カテゴリ間はAND、カテゴリ内はOR</p>
+
+          <div class="field">
+            <label class="keyed" data-key="search.world">ワールド</label>
+            <input type="text" value="VRChat" aria-label="ワールド">
+          </div>
+          <div class="field">
+            <label class="keyed" data-key="search.player">プレイヤー</label>
+            <input type="text" placeholder="プレイヤー名" aria-label="プレイヤー">
+          </div>
+          <div class="field">
+            <label class="keyed" data-key="search.tag">手動タグ</label>
+            <input type="text" placeholder="手動タグ" aria-label="手動タグ">
+          </div>
+
+          <div class="ai-filter">
+            <div class="ai-filter-head">
+              <h4 class="keyed" data-key="search.ai.title">AIタグ</h4>
+              <span class="count">3</span>
+              <button type="button" class="btn xs keyed" data-key="search.ai.pick">
+                <svg class="icon icon-xs"><use href="#i-tag"/></svg>
+                AIタグを選ぶ
+              </button>
+            </div>
+            <div class="ai-chips" aria-label="選択中のAIタグ">
+              <span class="ai-chip">海<button type="button" aria-label="海を外す">×</button></span>
+              <span class="ai-chip">夜景<button type="button" aria-label="夜景を外す">×</button></span>
+              <span class="ai-chip">桜<button type="button" aria-label="桜を外す">×</button></span>
+            </div>
+            <p class="ai-filter-note keyed" data-key="search.ai.any">
+              選択したタグの<b>いずれか</b>に一致（OR）。手動タグとは別条件です。
+            </p>
+          </div>
+
+          <div class="field-row">
+            <div class="field">
+              <label class="keyed" data-key="search.ai.people">人数（AI）</label>
+              <div class="field-suffix">
+                <input type="text" value="3" inputmode="numeric" aria-label="人数">
+                <span class="keyed" data-key="search.ai.people_suffix">人</span>
+              </div>
+            </div>
+            <div class="field">
+              <label class="keyed" data-key="search.date">日時</label>
+              <button type="button" class="btn sm" aria-label="日時を選択">
+                30日
+                <svg class="icon icon-xs"><use href="#i-chevron-down"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <p class="ai-filter-note" style="margin-top:-6px">0〜10 の整数。空欄は指定なし。保存区間に含まれる写真を検索します。</p>
+
+          <div class="switch-row" style="padding-top:0;border-top:0">
+            <div class="switch-copy">
+              <label class="keyed" data-key="search.favorites_only">お気に入りのみ</label>
+            </div>
+            <span class="switch" role="switch" aria-checked="false" aria-label="お気に入りのみ"></span>
+          </div>
+
+          <div class="filter-actions">
+            <button type="button" class="btn primary keyed" data-key="search.action">
+              <svg class="icon"><use href="#i-search"/></svg>
+              検索
+            </button>
+            <button type="button" class="btn keyed" data-key="search.clear">クリア</button>
+          </div>
+        </aside>
+
+        <section class="search-results" aria-label="検索結果">
+          <div class="results-head">
+            <b>128 枚</b>
+            <span class="keyed" data-key="search.results">検索結果</span>
+            <span class="right">AIタグ 3件 · 人数 3人</span>
+          </div>
+          <div class="result-grid">
+            <article class="result-card">
+              <div class="result-thumb" role="img" aria-label="夜の海辺の写真"></div>
+              <div class="result-meta">
+                <b>夜の海辺</b>
+                <span>2026-10-31 · 3840×2160</span>
+              </div>
+            </article>
+            <article class="result-card">
+              <div class="result-thumb" role="img" aria-label="桜並木の写真"></div>
+              <div class="result-meta">
+                <b>桜並木</b>
+                <span>2026-10-30 · 3840×2160</span>
+              </div>
+            </article>
+            <article class="result-card">
+              <div class="result-thumb" role="img" aria-label="屋上の夜景の写真"></div>
+              <div class="result-meta">
+                <b>屋上の夜景</b>
+                <span>2026-10-29 · 2560×1440</span>
+              </div>
+            </article>
+            <article class="result-card">
+              <div class="result-thumb" role="img" aria-label="カフェの窓辺の写真"></div>
+              <div class="result-meta">
+                <b>カフェの窓辺</b>
+                <span>2026-10-28 · 3840×2160</span>
+              </div>
+            </article>
+            <article class="result-card">
+              <div class="result-thumb" role="img" aria-label="神社の参道の写真"></div>
+              <div class="result-meta">
+                <b>神社の参道</b>
+                <span>2026-10-27 · 3840×2160</span>
+              </div>
+            </article>
+            <article class="result-card">
+              <div class="result-thumb" role="img" aria-label="星空の草原の写真"></div>
+              <div class="result-meta">
+                <b>星空の草原</b>
+                <span>2026-10-26 · 3840×2160</span>
+              </div>
+            </article>
+          </div>
+          <div class="result-foot">
+            <span>海 / 夜景 / 桜 のいずれか · 推定区間に 3 人を含む</span>
+            <span class="right">選択なし</span>
+          </div>
+        </section>
+      </div>
+
+      <div class="review-note">
+        <b>条件の組み立て:</b>
+        AIタグは <code>photo_ai_tags.applied = 1</code> の EXISTS（複数タグは OR）、人数は
+        <code>people_min &lt;= 3 AND people_max &gt;= 3</code>。手動タグの
+        <code>photo_tags</code> 条件とは独立して AND で組み合わさいます。
+      </div>
+    </section>
+
+    <!-- ======================================================================
+         02 — Picker
+         ====================================================================== -->
+    <section class="showcase" id="picker">
+      <div class="showcase-head">
+        <span class="section-index">02</span>
+        <div>
+          <h2>AIタグ選択モーダル</h2>
+          <p>
+            53 件（屋外 27 / 屋内 26）を検索・絞り込みして複数選択します。
+            選択済みのタグはモーダル下部と検索フィルターの両方に残します。
+          </p>
+        </div>
+        <span class="screen-chip">Picker</span>
+      </div>
+
+      <p class="section-lede">
+        フィルター内に 53 件を並べると縦に長くなるため、選択はモーダルに分離します。
+        屋外/屋内のタブは「すべて」を含む 3 状態。検索語は日本語名・英語名・タグキーのいずれでも一致させます。
+      </p>
+
+      <div class="modal-stage">
+        <div class="modal picker-modal" role="dialog" aria-modal="true" aria-labelledby="pickerTitle">
+          <div class="modal-head">
+            <span class="modal-icon ai"><svg class="icon"><use href="#i-tag"/></svg></span>
+            <div>
+              <h2 id="pickerTitle" class="keyed" data-key="ai.tags.picker.title">AIタグを選択</h2>
+              <p class="keyed" data-key="ai.tags.picker.hint">検索フィルターに追加するタグを選びます。複数選択は「いずれか」で検索します。</p>
+            </div>
+            <button type="button" class="icon-btn" aria-label="閉じる"><svg class="icon"><use href="#i-close"/></svg></button>
+          </div>
+
+          <div class="modal-body">
+            <div class="picker-toolbar">
+              <div class="picker-search">
+                <svg class="icon"><use href="#i-search"/></svg>
+                <input type="text" placeholder="名前で検索（例: 海、Sea、sea）" aria-label="AIタグを検索">
+              </div>
+              <div class="segmented" role="tablist" aria-label="タグの分岐">
+                <button type="button" class="active" role="tab" aria-selected="true">すべて <span style="color:var(--faint)">53</span></button>
+                <button type="button" role="tab" aria-selected="false">屋外 <span style="color:var(--faint)">27</span></button>
+                <button type="button" role="tab" aria-selected="false">屋内 <span style="color:var(--faint)">26</span></button>
+              </div>
+            </div>
+
+            <div class="picker-list" role="listbox" aria-label="AIタグ一覧" aria-multiselectable="true">
+              <label class="picker-row selected">
+                <input type="checkbox" checked>
+                <span class="name">海<span>Sea · sea</span></span>
+                <span class="branch">屋外</span>
+              </label>
+              <label class="picker-row">
+                <input type="checkbox">
+                <span class="name">湖<span>Lake · lake</span></span>
+                <span class="branch">屋外</span>
+              </label>
+              <label class="picker-row">
+                <input type="checkbox">
+                <span class="name">川<span>River · river</span></span>
+                <span class="branch">屋外</span>
+              </label>
+              <label class="picker-row">
+                <input type="checkbox">
+                <span class="name">滝<span>Waterfall · waterfall</span></span>
+                <span class="branch">屋外</span>
+              </label>
+              <label class="picker-row">
+                <input type="checkbox">
+                <span class="name">プール<span>Pool · pool</span></span>
+                <span class="branch">屋外</span>
+              </label>
+              <label class="picker-row">
+                <input type="checkbox">
+                <span class="name">露天風呂・温泉<span>Open-air bath / onsen · open_air_bath_onsen</span></span>
+                <span class="branch">屋外</span>
+              </label>
+              <label class="picker-row">
+                <input type="checkbox">
+                <span class="name">山<span>Mountain · mountain</span></span>
+                <span class="branch">屋外</span>
+              </label>
+              <label class="picker-row">
+                <input type="checkbox">
+                <span class="name">草原<span>Grassland · grassland</span></span>
+                <span class="branch">屋外</span>
+              </label>
+              <label class="picker-row">
+                <input type="checkbox">
+                <span class="name">花畑<span>Flower field · flower_field</span></span>
+                <span class="branch">屋外</span>
+              </label>
+              <label class="picker-row">
+                <input type="checkbox">
+                <span class="name">森<span>Forest · forest</span></span>
+                <span class="branch">屋外</span>
+              </label>
+              <label class="picker-row selected">
+                <input type="checkbox" checked>
+                <span class="name">夜景<span>Night view · night_view</span></span>
+                <span class="branch">屋外</span>
+              </label>
+              <label class="picker-row selected">
+                <input type="checkbox" checked>
+                <span class="name">桜<span>Cherry blossoms · cherry_blossoms</span></span>
+                <span class="branch">屋外</span>
+              </label>
+              <label class="picker-row">
+                <input type="checkbox">
+                <span class="name">星空<span>Starry sky · starry_sky</span></span>
+                <span class="branch">屋外</span>
+              </label>
+              <label class="picker-row">
+                <input type="checkbox">
+                <span class="name">夕景<span>Sunset · sunset</span></span>
+                <span class="branch">屋外</span>
+              </label>
+            </div>
+
+            <div class="picker-summary">
+              <span class="label keyed" data-key="ai.tags.picker.selected">選択中 3件</span>
+              <span class="ai-chip">海<button type="button" aria-label="海を外す">×</button></span>
+              <span class="ai-chip">夜景<button type="button" aria-label="夜景を外す">×</button></span>
+              <span class="ai-chip">桜<button type="button" aria-label="桜を外す">×</button></span>
+            </div>
+          </div>
+
+          <div class="modal-foot">
+            <span class="foot-note keyed" data-key="ai.tags.picker.or_note">選択したタグは「いずれか」で検索します。</span>
+            <button type="button" class="btn ghost keyed" data-key="ai.tags.picker.clear">クリア</button>
+            <button type="button" class="btn keyed" data-key="ai.tags.picker.cancel">キャンセル</button>
+            <button type="button" class="btn primary keyed" data-key="ai.tags.picker.apply">適用</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="review-note">
+        <b>操作:</b>
+        タブで屋外/屋内を絞り、検索語で名前・英語名・キーを絞り、チェックで複数選択。
+        「適用」で検索フィルターに反映し、検索を実行します。「クリア」は選択だけを空にします。
+        モーダルは import / manual / notification / license / uninstall と重ねません。
+      </div>
+    </section>
+
+    <!-- ======================================================================
+         03 — Thresholds
+         ====================================================================== -->
+    <section class="showcase" id="thresholds">
+      <div class="showcase-head">
+        <span class="section-index">03</span>
+        <div>
+          <h2>タグ別閾値モーダル</h2>
+          <p>
+            屋外/屋内のタグ別閾値と、人物の有無（presence）の閾値を 1 つのモーダルで編集します。
+            変更は下書きし、「保存」でまとめて反映します。
+          </p>
+        </div>
+        <span class="screen-chip">Settings → Thresholds</span>
+      </div>
+
+      <p class="section-lede">
+        タグの閾値は保存後すぐに既存の <code>photo_ai_tags.applied</code> へ再適用されます。
+        presence は人数判定の有無が変わるため、<b>次回のタグ付けから</b>適用します。
+        既定値マーカー（アンバー）と現在値（ティール）を並べ、上書き状態を色と文言で示します。
+      </p>
+
+      <div class="modal-stage">
+        <div class="modal threshold-modal" role="dialog" aria-modal="true" aria-labelledby="thresholdTitle">
+          <div class="modal-head">
+            <span class="modal-icon ai"><svg class="icon"><use href="#i-wand"/></svg></span>
+            <div>
+              <h2 id="thresholdTitle" class="keyed" data-key="settings.ai.thresholds.title">タグ別閾値</h2>
+              <p class="keyed" data-key="settings.ai.thresholds.hint">タグごとに「付ける / 付けない」の確率しきい値を調整します。</p>
+            </div>
+            <button type="button" class="icon-btn" aria-label="閉じる"><svg class="icon"><use href="#i-close"/></svg></button>
+          </div>
+
+          <div class="modal-body">
+            <div class="presence-box">
+              <div class="presence-head">
+                <svg class="icon"><use href="#i-users"/></svg>
+                <div class="presence-copy">
+                  <b class="keyed" data-key="settings.ai.thresholds.presence">人物の有無（presence）</b>
+                  <span class="keyed" data-key="settings.ai.thresholds.presence_hint">キャラクターが写っているかの判定に使います。変更は次回のタグ付けから適用されます。</span>
+                </div>
+                <span class="presence-value">90%</span>
+              </div>
+              <div class="presence-slider">
+                <div class="threshold-slider">
+                  <span class="track"></span>
+                  <span class="fill" style="width:90%"></span>
+                  <span class="default-mark" style="left:90%"></span>
+                  <span class="thumb" style="left:90%"></span>
+                </div>
+              </div>
+            </div>
+
+            <div class="threshold-toolbar">
+              <div class="picker-search">
+                <svg class="icon"><use href="#i-search"/></svg>
+                <input type="text" placeholder="タグ名で検索" aria-label="タグを検索">
+              </div>
+              <div class="segmented" role="tablist" aria-label="タグの分岐">
+                <button type="button" class="active" role="tab" aria-selected="true">屋外 <span style="color:var(--faint)">27</span></button>
+                <button type="button" role="tab" aria-selected="false">屋内 <span style="color:var(--faint)">26</span></button>
+              </div>
+            </div>
+
+            <div class="threshold-legend">
+              <span><i></i>カタログの既定値</span>
+              <span><span class="ai-line"></span>現在の閾値</span>
+              <span>上書きしたタグはリセットで既定に戻ります。</span>
+            </div>
+
+            <div class="threshold-list" aria-label="タグ別閾値の一覧">
+              <div class="threshold-row">
+                <div class="threshold-name">
+                  <b>海</b>
+                  <span class="override">sea · 既定 50% · 上書き中</span>
+                </div>
+                <div class="threshold-slider">
+                  <span class="track"></span>
+                  <span class="fill" style="width:70%"></span>
+                  <span class="default-mark" style="left:50%"></span>
+                  <span class="thumb" style="left:70%"></span>
+                </div>
+                <div class="threshold-value">70%</div>
+                <div class="threshold-reset"><button type="button" class="btn xs" aria-label="海を既定に戻す">リセット</button></div>
+              </div>
+
+              <div class="threshold-row">
+                <div class="threshold-name">
+                  <b>湖</b>
+                  <span>lake · 既定 50%</span>
+                </div>
+                <div class="threshold-slider">
+                  <span class="track"></span>
+                  <span class="fill" style="width:50%"></span>
+                  <span class="default-mark" style="left:50%"></span>
+                  <span class="thumb" style="left:50%"></span>
+                </div>
+                <div class="threshold-value">50%</div>
+                <div class="threshold-reset"><button type="button" class="btn xs" aria-label="湖を既定に戻す">リセット</button></div>
+              </div>
+
+              <div class="threshold-row">
+                <div class="threshold-name">
+                  <b>滝</b>
+                  <span class="override">waterfall · 既定 50% · 上書き中</span>
+                </div>
+                <div class="threshold-slider">
+                  <span class="track"></span>
+                  <span class="fill" style="width:62%"></span>
+                  <span class="default-mark" style="left:50%"></span>
+                  <span class="thumb" style="left:62%"></span>
+                </div>
+                <div class="threshold-value">62%</div>
+                <div class="threshold-reset"><button type="button" class="btn xs" aria-label="滝を既定に戻す">リセット</button></div>
+              </div>
+
+              <div class="threshold-row">
+                <div class="threshold-name">
+                  <b>露天風呂・温泉</b>
+                  <span class="override">open_air_bath_onsen · 既定 50% · 上書き中</span>
+                </div>
+                <div class="threshold-slider">
+                  <span class="track"></span>
+                  <span class="fill" style="width:80%"></span>
+                  <span class="default-mark" style="left:50%"></span>
+                  <span class="thumb" style="left:80%"></span>
+                </div>
+                <div class="threshold-value">80%</div>
+                <div class="threshold-reset"><button type="button" class="btn xs" aria-label="露天風呂・温泉を既定に戻す">リセット</button></div>
+              </div>
+
+              <div class="threshold-row">
+                <div class="threshold-name">
+                  <b>山</b>
+                  <span>mountain · 既定 50%</span>
+                </div>
+                <div class="threshold-slider">
+                  <span class="track"></span>
+                  <span class="fill" style="width:50%"></span>
+                  <span class="default-mark" style="left:50%"></span>
+                  <span class="thumb" style="left:50%"></span>
+                </div>
+                <div class="threshold-value">50%</div>
+                <div class="threshold-reset"><button type="button" class="btn xs" aria-label="山を既定に戻す">リセット</button></div>
+              </div>
+
+              <div class="threshold-row">
+                <div class="threshold-name">
+                  <b>花畑</b>
+                  <span class="override">flower_field · 既定 50% · 上書き中</span>
+                </div>
+                <div class="threshold-slider">
+                  <span class="track"></span>
+                  <span class="fill" style="width:55%"></span>
+                  <span class="default-mark" style="left:50%"></span>
+                  <span class="thumb" style="left:55%"></span>
+                </div>
+                <div class="threshold-value">55%</div>
+                <div class="threshold-reset"><button type="button" class="btn xs" aria-label="花畑を既定に戻す">リセット</button></div>
+              </div>
+
+              <div class="threshold-row">
+                <div class="threshold-name">
+                  <b>夜景</b>
+                  <span class="override">night_view · 既定 50% · 上書き中</span>
+                </div>
+                <div class="threshold-slider">
+                  <span class="track"></span>
+                  <span class="fill" style="width:75%"></span>
+                  <span class="default-mark" style="left:50%"></span>
+                  <span class="thumb" style="left:75%"></span>
+                </div>
+                <div class="threshold-value">75%</div>
+                <div class="threshold-reset"><button type="button" class="btn xs" aria-label="夜景を既定に戻す">リセット</button></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="modal-foot">
+            <span class="foot-note keyed" data-key="settings.ai.thresholds.apply_note">タグは保存後すぐ適用 / presence は次回のタグ付けから</span>
+            <button type="button" class="btn ghost keyed" data-key="settings.ai.thresholds.reset_all">すべて既定に戻す</button>
+            <button type="button" class="btn keyed" data-key="settings.ai.thresholds.cancel">キャンセル</button>
+            <button type="button" class="btn primary keyed" data-key="settings.ai.thresholds.save">保存</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="review-note">
+        <b>保存の動き:</b>
+        変更したタグだけを 1 トランザクションで保存し、<code>applied</code> を 1 回だけ再計算します。
+        検索画面で AIタグ条件が有効なら、保存後に同じ条件で検索し直します。失敗時はモーダルを閉じず、下書きを保持します。
+      </div>
+    </section>
+
+    <!-- ======================================================================
+         04 — Dashboard
+         ====================================================================== -->
+    <section class="showcase" id="dashboard">
+      <div class="showcase-head">
+        <span class="section-index">04</span>
+        <div>
+          <h2>ダッシュボード — AIタグ付けカード</h2>
+          <p>
+            右サイドのデーモンカード直下に置きます。インストール済みで、<b>準備不足または有効</b>なときだけ表示します。
+            準備完了でも未有効（not_enabled）ならカードを出しません。未導入も非表示です。
+            AI関連のバッジは使わず、状態はテキストと色で示します。
+          </p>
+        </div>
+        <span class="screen-chip">Dashboard</span>
+      </div>
+
+      <p class="section-lede">
+        処理中は最大 3 件のジョブ進捗とキャンセルを出し、残りは件数で示します。
+        準備不足なら設定へ、有効なら連携・自動へ導きます。準備完了かつ未有効のときはカード自体を表示しません。
+        カードは新しい DB 読み取りをせず、既存の 3 秒ポーリングのスナップショットを使います。
+      </p>
+
+      <div class="dashboard-layout">
+        <div class="dashboard-main" aria-label="左カラムの既存コンテンツ（イメージ）">
+          <div class="skeleton-head">
+            <svg class="icon" style="color:var(--faint)"><use href="#i-queue"/></svg>
+            <b>圧縮キュー</b>
+            <span>既存の左カラム</span>
+          </div>
+          <div class="skeleton-row"></div>
+          <div class="skeleton-row" style="width:92%"></div>
+          <div class="skeleton-row" style="width:76%"></div>
+          <div class="skeleton-row" style="width:84%"></div>
+          <div class="source-note">左カラムは既存の圧縮キュー。AIカードは右サイドに追加します。</div>
+        </div>
+
+        <aside class="dash-rail" aria-label="ダッシュボード右サイド">
+          <div class="daemon-mini">
+            <div class="daemon-head">
+              <svg class="icon" style="color:var(--accent)"><use href="#i-server"/></svg>
+              <b class="keyed" data-key="dashboard.daemon.title">デーモン</b>
+              <span>監視中</span>
+            </div>
+            <div class="daemon-meta">
+              <span>IPC <b>接続</b></span>
+              <span>最終同期 <b>12秒前</b></span>
+            </div>
+          </div>
+
+          <div class="ai-dash">
+            <div class="ai-dash-head">
+              <span class="card-icon ai"><svg class="icon"><use href="#i-wand"/></svg></span>
+              <div class="ai-dash-title">
+                <b class="keyed" data-key="dashboard.ai.title">AIタグ付け</b>
+                <span>ローカル推論 · 実行中</span>
+              </div>
+              <span class="ai-dash-state active"><span class="dot"></span>実行中</span>
+            </div>
+
+            <div class="ai-dash-stats">
+              <div class="ai-dash-stat waiting"><label>待機</label><b>2</b></div>
+              <div class="ai-dash-stat processing"><label>処理中</label><b>2</b></div>
+              <div class="ai-dash-stat failed"><label>失敗</label><b>0</b></div>
+            </div>
+
+            <div class="ai-dash-jobs">
+              <div class="ai-dash-job">
+                <div class="job-top">
+                  <b>VRChat_2026-10-31_21-14-03.png</b>
+                  <span class="stage">シーンタグ</span>
+                  <span class="pct">68%</span>
+                </div>
+                <div class="progress"><i style="width:68%"></i></div>
+                <div class="job-foot">
+                  <span>残り推定 12秒</span>
+                  <button type="button" class="btn xs">キャンセル</button>
+                </div>
+              </div>
+              <div class="ai-dash-job">
+                <div class="job-top">
+                  <b>VRChat_2026-10-31_21-12-48.png</b>
+                  <span class="stage">人数の推定</span>
+                  <span class="pct">24%</span>
+                </div>
+                <div class="progress"><i style="width:24%"></i></div>
+                <div class="job-foot">
+                  <span>残り推定 28秒</span>
+                  <button type="button" class="btn xs">キャンセル</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="ai-dash-more">
+              <span>他 1 件の待機ジョブ</span>
+              <button type="button" class="btn xs ghost">連携・自動へ</button>
+            </div>
+
+            <div class="ai-dash-foot">
+              <span class="keyed" data-key="dashboard.ai.auto_on">自動タグ付け: ON</span>
+              <button type="button" class="btn xs keyed" data-key="dashboard.ai.open_integrations">連携・自動を開く</button>
+            </div>
+          </div>
+        </aside>
+      </div>
+      <div class="source-note">配置: 右サイド 340px / デーモンカードの直下 / 削除カードより上。準備完了かつ未有効（not_enabled）のときはカードを描画しない。</div>
+
+      <div class="dash-grid">
+        <div class="dash-sample">
+          <div class="state-caption"><span class="pin amber"></span><b>準備不足</b><span class="state-code">not_ready</span></div>
+          <div class="ai-dash">
+            <div class="ai-dash-head">
+              <span class="card-icon ai"><svg class="icon"><use href="#i-wand"/></svg></span>
+              <div class="ai-dash-title">
+                <b>AIタグ付け</b>
+                <span>モデルがありません</span>
+              </div>
+              <span class="ai-dash-state not-ready"><span class="dot"></span>準備不足</span>
+            </div>
+            <p class="ai-dash-copy">設定からモデルをダウンロードするか、ファイルから取り込んでください。</p>
+            <div class="ai-dash-foot">
+              <button type="button" class="btn xs primary keyed" data-key="dashboard.ai.open_settings">設定を開く</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="dash-sample">
+          <div class="state-caption"><span class="pin blue"></span><b>未有効（非表示）</b><span class="state-code">not_enabled</span></div>
+          <div class="hidden-sample">
+            <svg class="icon"><use href="#i-info"/></svg>
+            <b>AIカードは表示しません</b>
+            <p>プラグインが準備完了でも、AIタグ付けが未有効のときはダッシュボードに出しません。有効化は連携・自動画面で行います。</p>
+          </div>
+        </div>
+
+        <div class="dash-sample">
+          <div class="state-caption"><span class="pin green"></span><b>待機中</b><span class="state-code">idle</span></div>
+          <div class="ai-dash">
+            <div class="ai-dash-head">
+              <span class="card-icon ai"><svg class="icon"><use href="#i-wand"/></svg></span>
+              <div class="ai-dash-title">
+                <b>AIタグ付け</b>
+                <span>新しい写真を待っています</span>
+              </div>
+              <span class="ai-dash-state idle"><span class="dot"></span>待機中</span>
+            </div>
+            <div class="ai-dash-stats">
+              <div class="ai-dash-stat waiting"><label>待機</label><b>0</b></div>
+              <div class="ai-dash-stat processing"><label>処理中</label><b>0</b></div>
+              <div class="ai-dash-stat failed"><label>失敗</label><b>0</b></div>
+            </div>
+            <div class="ai-dash-foot">
+              <button type="button" class="btn xs keyed" data-key="dashboard.ai.open_integrations">連携・自動を開く</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="dash-sample">
+          <div class="state-caption"><span class="pin red"></span><b>失敗</b><span class="state-code">failed</span></div>
+          <div class="ai-dash">
+            <div class="ai-dash-head">
+              <span class="card-icon ai"><svg class="icon"><use href="#i-wand"/></svg></span>
+              <div class="ai-dash-title">
+                <b>AIタグ付け</b>
+                <span>直近の失敗: 推論プラグインが終了しました</span>
+              </div>
+              <span class="ai-dash-state failed"><span class="dot"></span>失敗</span>
+            </div>
+            <div class="ai-dash-stats">
+              <div class="ai-dash-stat waiting"><label>待機</label><b>0</b></div>
+              <div class="ai-dash-stat processing"><label>処理中</label><b>0</b></div>
+              <div class="ai-dash-stat failed"><label>失敗</label><b>3</b></div>
+            </div>
+            <div class="ai-dash-foot">
+              <button type="button" class="btn xs keyed" data-key="dashboard.ai.open_integrations">連携・自動を開く</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======================================================================
+         05 — Toasts
+         ====================================================================== -->
+    <section class="showcase" id="toasts">
+      <div class="showcase-head">
+        <span class="section-index">05</span>
+        <div>
+          <h2>通知 — トーストのみ</h2>
+          <p>
+            モデルDL完了、sidecarクラッシュ、プラグイン不整合をトーストで知らせます。
+            通知センターには AI セクションを追加しません。
+          </p>
+        </div>
+        <span class="screen-chip">Toasts</span>
+      </div>
+
+      <p class="section-lede">
+        同じエラーコードは 1 セッション 1 回だけ。処理中ジョブの失敗が連続しても、クラッシュやリソース不足の通知で
+        画面を埋めません。成功トーストはダウンロード後の Ready 遷移で 1 回だけ出します。
+      </p>
+
+      <div class="toast-stage" aria-label="トーストの例">
+        <div class="toast success" role="status">
+          <svg class="icon"><use href="#i-check"/></svg>
+          <div>
+            <b class="keyed" data-key="notifications.ai.model_ready">モデルの準備が完了しました</b>
+            <p>AIタグ付けを有効にして、写真のタグ付けを開始できます。</p>
+          </div>
+          <button type="button" class="icon-btn close" aria-label="閉じる"><svg class="icon icon-sm"><use href="#i-close"/></svg></button>
+        </div>
+
+        <div class="toast error" role="alert">
+          <svg class="icon"><use href="#i-alert"/></svg>
+          <div>
+            <b>AIタグ付けに失敗しました</b>
+            <p>推論プラグインが終了しました。ジョブは自動で再試行されます。</p>
+          </div>
+          <button type="button" class="icon-btn close" aria-label="閉じる"><svg class="icon icon-sm"><use href="#i-close"/></svg></button>
+        </div>
+
+        <div class="toast warning" role="alert">
+          <svg class="icon"><use href="#i-info"/></svg>
+          <div>
+            <b>プラグインの状態を確認してください</b>
+            <p>モデルのハッシュが manifest と一致しません。設定画面で再確認してください。</p>
+          </div>
+          <button type="button" class="icon-btn close" aria-label="閉じる"><svg class="icon icon-sm"><use href="#i-close"/></svg></button>
+        </div>
+      </div>
+
+      <div class="toast-note">
+        <svg class="icon"><use href="#i-info"/></svg>
+        <span>
+          通知ベルと通知モーダルの対象は、既存の取り込み・ライブラリ・圧縮・デーモンのまま。
+          AI はトーストだけで完結させます。同じ sidecar クラッシュは成功ジョブで状態がクリアされるまで再通知しません。
+        </span>
+      </div>
+    </section>
+
+    <!-- ======================================================================
+         06 — i18n keys
+         ====================================================================== -->
+    <section class="showcase" id="keys">
+      <div class="showcase-head">
+        <span class="section-index">06</span>
+        <div>
+          <h2>i18n キー対応表（案）</h2>
+          <p>
+            M4 で追加する主なキー。実装時に <code>ja.yml</code> と <code>en.yml</code> の両方へ追加し、
+            プレースホルダーは <code>placeholders.rs</code> の CALL_SITES と一致させます。
+          </p>
+        </div>
+        <span class="screen-chip">i18n</span>
+      </div>
+
+      <div class="panel" style="padding:0;overflow:hidden">
+        <table class="key-table">
+          <thead>
+            <tr><th>キー</th><th>日本語</th><th>用途</th></tr>
+          </thead>
+          <tbody>
+            <tr><td class="key">search.ai.title</td><td class="ja">AIタグ</td><td class="use">検索フィルターのグループ見出し</td></tr>
+            <tr><td class="key">search.ai.pick</td><td class="ja">AIタグを選ぶ</td><td class="use">選択モーダルを開く</td></tr>
+            <tr><td class="key">search.ai.any</td><td class="ja">選択したタグのいずれかに一致（OR）</td><td class="use">条件の説明</td></tr>
+            <tr><td class="key">search.ai.people</td><td class="ja">人数（AI）</td><td class="use">単一値の入力ラベル</td></tr>
+            <tr><td class="key">search.ai.people_suffix</td><td class="ja">人</td><td class="use">入力の単位</td></tr>
+            <tr><td class="key">ai.tags.picker.title</td><td class="ja">AIタグを選択</td><td class="use">モーダル見出し</td></tr>
+            <tr><td class="key">ai.tags.picker.all</td><td class="ja">すべて</td><td class="use">分岐タブ</td></tr>
+            <tr><td class="key">ai.tags.picker.outdoor</td><td class="ja">屋外</td><td class="use">分岐タブ</td></tr>
+            <tr><td class="key">ai.tags.picker.indoor</td><td class="ja">屋内</td><td class="use">分岐タブ</td></tr>
+            <tr><td class="key">ai.tags.picker.selected</td><td class="ja">選択中 %{count}件</td><td class="use">選択件数</td></tr>
+            <tr><td class="key">ai.tags.picker.apply</td><td class="ja">適用</td><td class="use">検索条件へ反映</td></tr>
+            <tr><td class="key">settings.ai.thresholds.title</td><td class="ja">タグ別閾値</td><td class="use">モーダル見出し</td></tr>
+            <tr><td class="key">settings.ai.thresholds.presence</td><td class="ja">人物の有無（presence）</td><td class="use">presence 節</td></tr>
+            <tr><td class="key">settings.ai.thresholds.next_run</td><td class="ja">次回のタグ付けから適用</td><td class="use">presence の注記</td></tr>
+            <tr><td class="key">settings.ai.thresholds.applies_now</td><td class="ja">保存後すぐ適用</td><td class="use">タグ閾値の注記</td></tr>
+            <tr><td class="key">settings.ai.thresholds.default</td><td class="ja">既定 %{value}%</td><td class="use">既定値マーカー</td></tr>
+            <tr><td class="key">settings.ai.thresholds.reset</td><td class="ja">リセット</td><td class="use">タグ単位</td></tr>
+            <tr><td class="key">settings.ai.thresholds.reset_all</td><td class="ja">すべて既定に戻す</td><td class="use">一括リセット</td></tr>
+            <tr><td class="key">settings.ai.thresholds.save</td><td class="ja">保存</td><td class="use">一括保存</td></tr>
+            <tr><td class="key">dashboard.ai.title</td><td class="ja">AIタグ付け</td><td class="use">カード見出し</td></tr>
+            <tr><td class="key">dashboard.ai.state.not_ready</td><td class="ja">準備不足</td><td class="use">状態表示</td></tr>
+            <tr><td class="key">dashboard.ai.state.active</td><td class="ja">実行中</td><td class="use">状態表示</td></tr>
+            <tr><td class="key">dashboard.ai.open_settings</td><td class="ja">設定を開く</td><td class="use">準備不足の導線</td></tr>
+            <tr><td class="key">dashboard.ai.open_integrations</td><td class="ja">連携・自動を開く</td><td class="use">有効化・実行の導線</td></tr>
+            <tr><td class="key">dashboard.ai.jobs_more</td><td class="ja">他 %{count} 件</td><td class="use">4件目以降</td></tr>
+            <tr><td class="key">notifications.ai.model_ready</td><td class="ja">モデルの準備が完了しました</td><td class="use">成功トースト</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="source-note">キー名は実装時の最終形ではない。ja/en の parity とプレースホルダーは i18n テストで固定する。</div>
+    </section>
+
+    <!-- ======================================================================
+         07 — Review
+         ====================================================================== -->
+    <section class="showcase" id="review">
+      <div class="showcase-head">
+        <span class="section-index">07</span>
+        <div>
+          <h2>レビュー観点</h2>
+          <p>武田様に承認していただきたい点。ここが固まってから Task 1 以降の実装に進みます。</p>
+        </div>
+        <span class="screen-chip">Approval</span>
+      </div>
+
+      <div class="review-stack">
+        <div class="review-panel">
+          <h3>承認をお願いしたいこと</h3>
+          <ul class="checklist">
+            <li><span class="check">1</span><span><b>検索フィルター:</b> AIタグは手動タグと別グループ。複数選択は「いずれか（OR）」、人数は単一入力（0〜10）で保存区間に含まれる写真を検索。</span></li>
+            <li><span class="check">2</span><span><b>AIタグ選択:</b> 屋外/屋内/すべてのタブ、検索、複数選択、選択チップ、適用。53件でもフィルターを縦に伸ばさない。</span></li>
+            <li><span class="check">3</span><span><b>タグ別閾値:</b> presence も同じモーダル。既定値マーカー、%表示、タグ単位リセット、すべて既定に戻す、一括保存。タグは即時 / presence は次回から。</span></li>
+            <li><span class="check">4</span><span><b>ダッシュボード:</b> 右サイド・デーモンカード直下。インストール済みで準備不足または有効なときだけ表示。準備完了かつ未有効（not_enabled）なら非表示。準備不足 / 待機 / 実行中 / 失敗。最大3件の進捗とキャンセル。</span></li>
+            <li><span class="check">5</span><span><b>通知:</b> トーストのみ。モデルDL完了/失敗、sidecarクラッシュ、プラグイン不整合。同じエラーコードは1セッション1回。通知センターには追加しない。</span></li>
+            <li><span class="check">6</span><span><b>#313:</b> AI関連の状態バッジ・AIバッジ・variant の「使用中」バッジ・ジョブ状態バッジは無い。検索チップは選択状態の表示として残す。</span></li>
+          </ul>
+
+          <div class="review-note">
+            このモックは <code>docs only</code> です。承認後、PR M4-0 としてコミットし、
+            Issue #198 に承認日・承認内容・修正点を記録します。
+            <b>承認前に M4-1〜M4-3 の UI コードは書きません。</b>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="page-foot">
+    <span>VRC PhotoN</span>
+    <span class="sep"></span>
+    <span>AI tagging M4 UI mockup</span>
+    <span class="sep"></span>
+    <span>2026-11-05</span>
+    <span class="sep"></span>
+    <span>docs/ai-tagging-m4-mockup.html</span>
+    <span class="right">static HTML · no JS · Glass Ribbon</span>
+  </footer>
+</div>
+
+</body>
+</html>
