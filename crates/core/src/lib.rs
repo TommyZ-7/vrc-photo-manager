@@ -13,6 +13,7 @@ pub mod fs_safe;
 pub mod hashing;
 pub mod image_decode;
 pub mod importer;
+pub mod instance;
 pub mod linker;
 pub mod log_parser;
 pub mod logging;

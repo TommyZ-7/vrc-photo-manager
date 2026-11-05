@@ -104,8 +104,16 @@ fn remove_demo_root(root: &Path) -> Result<(), String> {
 }
 
 fn prepare_demo(reset: bool) -> Result<(Db, DemoAssets), String> {
-    let root = std::env::temp_dir().join("vrc-photon-demo");
-    prepare_demo_at(&root, reset, Local::now())
+    prepare_demo_at(&demo_root(), reset, Local::now())
+}
+
+/// Root of the throwaway demo library.
+fn demo_root() -> PathBuf {
+    std::env::temp_dir().join("vrc-photon-demo")
+}
+
+fn demo_db_path() -> PathBuf {
+    demo_root().join("library.db")
 }
 
 fn prepare_demo_at(
@@ -165,6 +173,31 @@ fn empty_database() -> Db {
     Db::open_in_memory().expect("fallback in-memory database")
 }
 
+/// Resolves the database the UI will open, before any window exists, so the
+/// single-instance lock can be scoped to the same library. Demo mode uses the
+/// generated fixture database; otherwise `VRC_PHOTON_DB`, the per-user default,
+/// and finally a relative path in the working directory are tried in order.
+pub(crate) fn resolve_db_path(options: &LaunchOptions) -> PathBuf {
+    resolve_db_path_from(
+        options.demo,
+        std::env::var("VRC_PHOTON_DB").ok().map(PathBuf::from),
+        vrc_photon_core::default_db_path(),
+    )
+}
+
+fn resolve_db_path_from(
+    demo: bool,
+    env_db: Option<PathBuf>,
+    default_db: Option<PathBuf>,
+) -> PathBuf {
+    if demo {
+        return demo_db_path();
+    }
+    env_db
+        .or(default_db)
+        .unwrap_or_else(|| PathBuf::from("vrc-photon.db"))
+}
+
 pub(crate) fn open_database(
     options: &LaunchOptions,
 ) -> (Db, bool, bool, Option<String>, Option<DemoAssets>) {
@@ -180,11 +213,7 @@ pub(crate) fn open_database(
             ),
         };
     }
-    let path = std::env::var("VRC_PHOTON_DB")
-        .ok()
-        .map(PathBuf::from)
-        .or_else(vrc_photon_core::default_db_path)
-        .unwrap_or_else(|| PathBuf::from("vrc-photon.db"));
+    let path = resolve_db_path(options);
     match Db::open(&path) {
         Ok(db) => (db, false, true, None, None),
         Err(error) => {
@@ -381,6 +410,38 @@ mod tests {
     use vrc_photon_core::time;
 
     use crate::state::year_rail::build_year_buckets;
+
+    #[test]
+    fn resolve_db_path_uses_demo_database_in_demo_mode() {
+        let options = LaunchOptions {
+            demo: true,
+            ..LaunchOptions::default()
+        };
+        assert_eq!(resolve_db_path(&options), demo_db_path());
+    }
+
+    #[test]
+    fn resolve_db_path_prefers_demo_then_env_then_default() {
+        let env_path = PathBuf::from("/tmp/env/library.db");
+        let default_path = PathBuf::from("/tmp/default/library.db");
+
+        assert_eq!(
+            resolve_db_path_from(true, Some(env_path.clone()), Some(default_path.clone())),
+            demo_db_path()
+        );
+        assert_eq!(
+            resolve_db_path_from(false, Some(env_path.clone()), Some(default_path.clone())),
+            env_path
+        );
+        assert_eq!(
+            resolve_db_path_from(false, None, Some(default_path.clone())),
+            default_path
+        );
+        assert_eq!(
+            resolve_db_path_from(false, None, None),
+            PathBuf::from("vrc-photon.db")
+        );
+    }
 
     #[test]
     fn demo_thumb_path_uses_png_in_demo_dir() {

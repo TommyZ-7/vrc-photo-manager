@@ -1,3 +1,9 @@
+//! VRC PhotoN desktop entry point.
+//!
+//! At most one UI process may run per OS user and database path. A second
+//! process logs the conflict and exits; activating or focusing the existing
+//! window is intentionally out of scope.
+
 use std::borrow::Cow;
 
 use gpui_kit::component::TitleBar;
@@ -44,6 +50,28 @@ fn main() {
         }
         return;
     }
+    let db_path = crate::app::demo::resolve_db_path(&options);
+    let instance_name = vrc_photon_core::instance::instance_name("ui", &db_path);
+    // The guard intentionally means "the second process exits": focusing or
+    // activating the existing window is out of scope. The `--background`
+    // supervisor returned above and never opens a window, so it does not take
+    // this lock.
+    let _instance = match single_instance::SingleInstance::new(&instance_name) {
+        Ok(instance) if instance.is_single() => instance,
+        Ok(_) => {
+            tracing::error!(
+                db = %db_path.display(),
+                "another VRC PhotoN UI owns the single-instance lock"
+            );
+            eprintln!("VRC PhotoN is already running");
+            return;
+        }
+        Err(error) => {
+            tracing::error!(%error, "cannot acquire the UI single-instance lock");
+            eprintln!("cannot acquire the single-instance lock: {error}");
+            return;
+        }
+    };
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
@@ -105,4 +133,23 @@ fn main() {
             .expect("open window");
             register_global_actions(cx, app);
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn ui_single_instance_is_exclusive() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let name = format!("vrc-photon-test-ui-{}-{unique}", std::process::id());
+
+        let first = single_instance::SingleInstance::new(&name).unwrap();
+        assert!(first.is_single());
+        let second = single_instance::SingleInstance::new(&name).unwrap();
+        assert!(!second.is_single());
+    }
 }
