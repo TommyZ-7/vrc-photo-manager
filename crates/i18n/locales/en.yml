@@ -951,6 +951,7 @@ demo.db_error: "Could not open the database (%{error}). Starting with demo data.
 demo.db_and_prepare_error: "Could not open the database (%{error}) or prepare demo data (%{demo_error}). Starting with an empty library."
 ipc.error.protocol: "The daemon must be updated (protocol %{daemon} / %{client})"
 ipc.error.timeout: "The daemon response timed out"
+ipc.error.busy: "The daemon is busy. Try again shortly."
 ipc.error.disconnected: "The daemon connection closed"
 ipc.error.connect: "Cannot connect to the daemon: %{error}"
 compression.job.photo: "Photo #%{id}"

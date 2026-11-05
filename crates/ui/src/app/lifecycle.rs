@@ -125,7 +125,7 @@ impl App {
             }
         };
         self.ipc_endpoint = Some(endpoint.clone());
-        let (tx, rx) = async_channel::unbounded();
+        let (tx, rx) = async_channel::bounded(ipc_bridge::INCOMING_QUEUE_CAPACITY);
         ipc_bridge::start(endpoint, tx);
         cx.spawn(async move |this, cx| {
             while let Ok(incoming) = rx.recv().await {
