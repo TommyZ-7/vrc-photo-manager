@@ -30,7 +30,9 @@ PRAGMA busy_timeout = 5000;
 ```
 
 - `user_version` でスキーマバージョンを管理する。
-- 現在のバージョンは **13**。
+- 現在のバージョンは **14**。このビルドが理解できる最大値でもあり、
+  `user_version` が 15 以上の DB は `Db::open` / `Db::open_read_only` の
+  どちらでも型付きエラーで拒否する（古いアプリで新スキーマを書き換えない）。
 - マイグレーションは `Db::migrate` で起動時に自動実行する。
 
 ## 3. テーブル
@@ -71,7 +73,7 @@ PRAGMA busy_timeout = 5000;
 | file_size | INTEGER | バイト |
 | mtime | INTEGER | ファイル更新時刻（epoch秒） |
 | blake3 | TEXT | 元画像のBLAKE3。移動・改名・重複判定に使う。未計算はNULL |
-| status | TEXT | `present` / `replaced` / `missing` / `deleting` |
+| status | TEXT | `present` / `replaced` / `missing` / `deleting`。未知の値は読み込み時に `unknown` として扱う |
 | is_favorite | INTEGER | 0/1 |
 | note | TEXT | メモ |
 | display_derivative_id | INTEGER FK | `replaced` のとき表示に使う `derivatives.id` |
@@ -93,6 +95,10 @@ idx_photos_move_match(status, file_size, captured_at_utc)
 ```
 
 `deleting` は手動削除の要求済みで、デーモンの実行待ち。`status IN ('present', 'replaced')` の可視クエリから外れ、行とメタデータは削除完了後も `missing` として残る。
+
+未知の status は `present` に丸めず `unknown` として読む。可視クエリにも含めない。
+スキャン再取り込み（`upsert_photo`）と移動時の rebind は、既存の未知 status を
+`present` へ書き換えずそのまま保持する。
 
 ### `worlds`
 
@@ -158,6 +164,17 @@ VRChatの1滞在。
 | ended_at | INTEGER | 退出時刻。NULLは継続中 |
 | world_id | INTEGER FK | `worlds.id` |
 | instance_id | TEXT | `12345~region(jp)` など |
+
+インデックス:
+
+```sql
+idx_sessions_started(started_at)
+idx_sessions_ended(ended_at) WHERE ended_at IS NOT NULL
+```
+
+`sessions_near` は撮影時刻の前後に開始/終了したセッションを、この2つの
+範囲インデックスを使う `UNION` で引く。同じセッションが両方に一致しても
+`UNION` で1行に畳まれ、`started_at` 順に最大2件を返す。
 
 ### `session_players`
 
@@ -446,7 +463,7 @@ CREATE UNIQUE INDEX idx_tagging_jobs_active
 | id | TEXT PK | UUID |
 | photo_id | INTEGER FK | |
 | profile_id | TEXT | |
-| status | TEXT | `waiting` / `pending` / `processing` / `completed` / `failed` / `cancelled` |
+| status | TEXT | `waiting` / `pending` / `processing` / `completed` / `failed` / `cancelled`。未知の値は読み込み時に `unknown` として扱う |
 | progress | REAL | 0.0〜1.0 |
 | error | TEXT | |
 | output_path | TEXT | |
@@ -454,6 +471,20 @@ CREATE UNIQUE INDEX idx_tagging_jobs_active
 | output_dir | TEXT | 手動圧縮の出力先上書き。`NULL` はプロファイルの `output_dir` を使う |
 | retry_count | INTEGER | ユーザーが実行済みの再試行回数。既定0、上限3 |
 | created_at / started_at / finished_at | TEXT | |
+
+インデックス:
+
+```sql
+idx_jobs_claim(status, created_at)
+idx_jobs_created(created_at DESC)
+```
+
+`idx_jobs_claim` は `pending` の取得（`status` 等値 + `created_at` 順）、
+`idx_jobs_created` は新しい順の一覧に使う。既存の `idx_jobs_status` と
+`idx_jobs_photo_profile` は残す。
+
+未知の status は `pending` に丸めない。取得対象にも含めず、削除警告では
+`unknown` 件数として未完了扱いに数える。
 
 `retry_count` は自動リトライの回数ではない。再試行は `status='failed'` かつ `retry_count < 3` の行だけを対象に、進捗・エラー・開始/終了時刻をリセットし、`retry_count` を1増やして `pending` に戻す。上限到達後は更新しない。写真・プロファイル・方針は変えない。
 
@@ -733,13 +764,18 @@ Discord 関連の既定値:
 | 11 | `send_outbox` と active / due / photo インデックス追加（Discord 送信 outbox） |
 | 12 | `world_name_lookups` と due インデックス追加（VRChat API ワールド名解決） |
 | 13 | AI プラグイン・カタログ・AI 結果・タグ付けジョブのテーブル追加（`plugin_installations`、`plugin_state`、`ai_tag_definitions`、`ai_tag_thresholds`、`photo_ai`、`photo_ai_tags`、`tagging_jobs`） |
+| 14 | 取得・一覧用インデックス追加（`idx_jobs_claim`、`idx_jobs_created`、`idx_sessions_started`、`idx_sessions_ended`） |
 
 V4以降は `IMMEDIATE` トランザクションで適用する。UIとデーモンが同時に起動しても、書き込みロックで直列化し、`user_version` と列・テーブルの存在を再確認してから進めるため、中断後の再実行でも安全。
 
 v11 の `send_outbox`、v12 の `world_name_lookups`、v13 の AI テーブルは
 `CREATE TABLE IF NOT EXISTS` とインデックス追加だけで、既存データを変更しない。
 v13 は `plugin_state.probe_json` を含めて新規テーブルとして作成する。
-ロールバック時はテーブルを残しても既存機能は動く。
+v14 はインデックス追加だけで、テーブル・行・既存インデックスを変更しない。
+ロールバック時はテーブルやインデックスを残しても既存機能は動く。
+
+`user_version` がこのビルドの最大値（14）より大きい DB は、書き込みを始める前に
+`CoreError::Invalid` で拒否する。読み取り専用の `open_read_only` も同じ検査を行う。
 
 追加手順:
 
@@ -754,6 +790,8 @@ v13 は `plugin_state.probe_json` を含めて新規テーブルとして作成�
 - 検索は `photo_context` / `photo_players` / `photo_tags` のEXISTS句。
 - UIは `photo_index` / `photo_index_text` で一致する写真の軽量索引（`id`, `captured_at_utc`, `captured_month`）を全件読み、表示範囲の写真だけを `photos_by_ids` で256枚ページ取得する。件数上限はない。
 - `idx_photos_captured_id` はV5で `status IN ('present', 'replaced')` の部分インデックスへ更新した。100k合成DB（`photo_context` 5万行を含む）のrelease測定は索引61.5 ms、ページ0.72 ms。
+- 圧縮キューの取得は `idx_jobs_claim`、新しい順の一覧は `idx_jobs_created` を使う。
+- 推定リンクの `sessions_near` は `idx_sessions_started` と `idx_sessions_ended` の範囲検索を `UNION` する。写真×セッションの総当たりを避ける。
 - UIは3秒ごとに `library_revision`、`daemon_errors`、失敗ジョブを読む。`library_revision` が変わるとページキャッシュを捨てて一覧を再構築する。
 - 未検証の追加インデックス候補:
   - `photo_players(display_name COLLATE NOCASE)`

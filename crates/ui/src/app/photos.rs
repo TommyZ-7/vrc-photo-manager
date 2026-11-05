@@ -1074,6 +1074,9 @@ fn job_status_line(
     if counts.failed > 0 {
         parts.push(tr_args!("photos.jobs.failed", count = counts.failed));
     }
+    if counts.unknown > 0 {
+        parts.push(tr_args!("photos.jobs.unknown", count = counts.unknown));
+    }
     format!("{label}: {}", parts.join(" / "))
 }
 
@@ -1182,6 +1185,7 @@ mod tests {
                 pending: 1,
                 processing: 1,
                 failed: 1,
+                unknown: 0,
             },
             send: JobStatusCounts::default(),
             tagging: JobStatusCounts::default(),
@@ -1208,6 +1212,26 @@ mod tests {
     }
 
     #[test]
+    fn deletion_warning_lines_include_unknown_compression_statuses() {
+        let summary = DeletionJobSummary {
+            compression: JobStatusCounts {
+                unknown: 2,
+                ..JobStatusCounts::default()
+            },
+            send: JobStatusCounts::default(),
+            tagging: JobStatusCounts::default(),
+            affected_photos: 1,
+        };
+        let lines = deletion_warning_lines(&summary);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("圧縮") && line.contains("不明 2")),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
     fn deletion_warning_lines_list_send_counts() {
         let summary = DeletionJobSummary {
             compression: JobStatusCounts::default(),
@@ -1216,6 +1240,7 @@ mod tests {
                 pending: 2,
                 processing: 0,
                 failed: 1,
+                unknown: 0,
             },
             tagging: JobStatusCounts::default(),
             affected_photos: 3,
@@ -1238,6 +1263,7 @@ mod tests {
                 pending: 1,
                 processing: 1,
                 failed: 0,
+                unknown: 0,
             },
             affected_photos: 1,
         };

@@ -6,6 +6,9 @@ pub enum PhotoStatus {
     Replaced,
     Missing,
     Deleting,
+    /// A status written by a newer version. It is never treated as `Present`
+    /// or exposed as a normal library photo.
+    Unknown,
 }
 
 impl PhotoStatus {
@@ -15,16 +18,22 @@ impl PhotoStatus {
             Self::Replaced => "replaced",
             Self::Missing => "missing",
             Self::Deleting => "deleting",
+            Self::Unknown => "unknown",
         }
     }
 
     pub fn parse(value: &str) -> Self {
         match value {
+            "present" => Self::Present,
             "replaced" => Self::Replaced,
             "missing" => Self::Missing,
             "deleting" => Self::Deleting,
-            _ => Self::Present,
+            _ => Self::Unknown,
         }
+    }
+
+    pub fn is_replaced(&self) -> bool {
+        matches!(self, Self::Replaced)
     }
 }
 
@@ -205,6 +214,9 @@ pub enum QueueStatus {
     Completed,
     Failed,
     Cancelled,
+    /// A status written by a newer version. It is never treated as pending or
+    /// active, so an older worker does not claim it.
+    Unknown,
 }
 
 impl QueueStatus {
@@ -216,17 +228,19 @@ impl QueueStatus {
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
+            Self::Unknown => "unknown",
         }
     }
 
     pub fn parse(value: &str) -> Self {
         match value {
             "waiting" => Self::Waiting,
+            "pending" => Self::Pending,
             "processing" => Self::Processing,
             "completed" => Self::Completed,
             "failed" => Self::Failed,
             "cancelled" => Self::Cancelled,
-            _ => Self::Pending,
+            _ => Self::Unknown,
         }
     }
 
@@ -522,7 +536,7 @@ impl Photo {
     }
 
     pub fn is_replaced(&self) -> bool {
-        self.status == PhotoStatus::Replaced
+        self.status.is_replaced()
     }
 
     pub fn effective_file_size(&self) -> u64 {
@@ -710,11 +724,14 @@ pub struct JobStatusCounts {
     pub pending: i64,
     pub processing: i64,
     pub failed: i64,
+    /// Jobs whose status was written by a newer version. They are unfinished
+    /// because an older version cannot prove they are terminal.
+    pub unknown: i64,
 }
 
 impl JobStatusCounts {
     pub fn unfinished(self) -> i64 {
-        self.waiting + self.pending + self.processing
+        self.waiting + self.pending + self.processing + self.unknown
     }
 
     pub fn total(self) -> i64 {
@@ -907,6 +924,22 @@ mod tests {
         assert!(!QueueStatus::Completed.is_active());
         assert!(!QueueStatus::Failed.is_active());
         assert!(!QueueStatus::Cancelled.is_active());
+    }
+
+    #[test]
+    fn queue_status_parse_keeps_unknown_values_distinct() {
+        assert_eq!(QueueStatus::parse("future_state"), QueueStatus::Unknown);
+        assert_eq!(QueueStatus::Unknown.as_str(), "unknown");
+        assert!(!QueueStatus::Unknown.is_active());
+        assert_eq!(QueueStatus::parse("pending"), QueueStatus::Pending);
+    }
+
+    #[test]
+    fn photo_status_parse_does_not_promote_unknown_values_to_present() {
+        assert_eq!(PhotoStatus::parse("future_state"), PhotoStatus::Unknown);
+        assert_eq!(PhotoStatus::Unknown.as_str(), "unknown");
+        assert_eq!(PhotoStatus::parse("present"), PhotoStatus::Present);
+        assert!(!PhotoStatus::Unknown.is_replaced());
     }
 
     #[test]

@@ -154,6 +154,7 @@ const CALL_SITES: &[(&str, &[&str])] = &[
     ("photos.jobs.affected", &["selected"]),
     ("photos.jobs.affected_selected", &["affected", "selected"]),
     ("photos.jobs.failed", &["count"]),
+    ("photos.jobs.unknown", &["count"]),
     ("photos.jobs.none", &["label"]),
     ("photos.jobs.pending", &["count"]),
     ("photos.jobs.processing", &["count"]),
