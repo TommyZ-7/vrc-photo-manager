@@ -19,6 +19,9 @@
 - Releases are tag pushes only. Example: `git tag v0.2.0 && git push origin v0.2.0`
 - AI must not perform release operations (tag create/push, manual Release run,
   `gh release` publish) without the user's explicit instruction.
+- UI changes require a mock before implementation: for any work that adds
+  or alters UI, present a mock first (as a docs PR) and obtain the user's
+  approval before starting implementation.
 - Creating/switching branches in the same workdir (`checkout -b` / `switch`)
   is forbidden. Always start new work with `git worktree`
   (enforced by `opencode.json` permissions):
