@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
@@ -56,6 +56,15 @@ const PARSER_VERSION: &str = "1";
 const MAX_SKIPPED_DETAILS: usize = 5;
 const SCAN_INTERVAL: Duration = Duration::from_millis(500);
 const LOG_INTERVAL: Duration = Duration::from_millis(750);
+/// Complete log lines one poll may return. The next poll continues from the
+/// last committed offset.
+const LOG_READ_MAX_LINES: usize = 5_000;
+/// Bytes of log data one poll may consume. A line that crosses this budget is
+/// left partial for the next poll instead of growing memory without bound.
+const LOG_READ_MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// Complete lines applied per database transaction. This bounds how long log
+/// ingestion holds the shared database mutex.
+const LOG_INGEST_CHUNK_LINES: usize = 500;
 /// Consecutive log-poll misses required before a missing VRChat process closes
 /// the active session. This tolerates one-off process-table read failures and
 /// short restart gaps.
@@ -145,24 +154,26 @@ struct LogTail {
     failed_attempts: u8,
 }
 
-impl LogTail {
-    /// Remembers a failed line at `offset`. The caller retries the line until it
-    /// has failed three times, then this returns `true` so the poison line can
-    /// be skipped.
-    fn note_line_failure(&mut self, offset: i64) -> bool {
-        if self.failed_offset != Some(offset) {
-            self.failed_offset = Some(offset);
-            self.failed_attempts = 1;
-            return false;
-        }
-        self.failed_attempts = self.failed_attempts.saturating_add(1);
-        if self.failed_attempts >= 3 {
-            self.failed_offset = None;
-            self.failed_attempts = 0;
-            return true;
-        }
-        false
+/// Remembers a failed line at `offset`. The caller retries the line until it
+/// has failed three times, then this returns `true` so the poison line can be
+/// skipped.
+fn record_line_failure(
+    failed_offset: &mut Option<i64>,
+    failed_attempts: &mut u8,
+    offset: i64,
+) -> bool {
+    if *failed_offset != Some(offset) {
+        *failed_offset = Some(offset);
+        *failed_attempts = 1;
+        return false;
     }
+    *failed_attempts = failed_attempts.saturating_add(1);
+    if *failed_attempts >= 3 {
+        *failed_offset = None;
+        *failed_attempts = 0;
+        return true;
+    }
+    false
 }
 
 #[derive(Debug, Default)]
@@ -1784,39 +1795,89 @@ impl Daemon {
                 return Ok(pass);
             }
         };
-        if lines.is_empty() {
-            return Ok(pass);
-        }
-
-        let db = self.db.lock().unwrap();
-        let mut line_start = tail.offset;
-        for (line, line_end) in lines {
-            match tail.ingestor.ingest_line(&db, &line) {
-                Ok(_) => {
-                    db.set_log_offset(&path_string, size, mtime, line_end, PARSER_VERSION)?;
-                    tail.offset = line_end;
-                    line_start = line_end;
-                    pass.processed += 1;
-                }
-                Err(error) => {
-                    tracing::debug!(%error, "cannot parse log line");
-                    pass.failure
-                        .get_or_insert_with(|| format!("{}: {error}", path.display()));
-                    if !tail.note_line_failure(line_start) {
-                        break;
+        let mut next = 0;
+        while next < lines.len() {
+            let chunk_end = (next + LOG_INGEST_CHUNK_LINES).min(lines.len());
+            let chunk = &lines[next..chunk_end];
+            let chunk_start = tail.offset;
+            // Work on a copy so a failed transaction leaves both the database
+            // and the in-memory session state at the last committed offset.
+            let mut ingestor = tail.ingestor.clone();
+            let mut line_start = chunk_start;
+            let mut committed_offset = chunk_start;
+            let mut failed_offset = tail.failed_offset;
+            let mut failed_attempts = tail.failed_attempts;
+            let mut processed = 0;
+            let mut skipped = Vec::new();
+            let mut failure = None;
+            let mut stop = false;
+            let result = {
+                let db = self.db.lock().unwrap();
+                db.in_transaction(|db| {
+                    for (line, line_end) in chunk {
+                        match ingestor.ingest_line(db, line) {
+                            Ok(_) => {
+                                committed_offset = *line_end;
+                                line_start = *line_end;
+                                processed += 1;
+                            }
+                            Err(error) => {
+                                tracing::debug!(%error, "cannot parse log line");
+                                failure
+                                    .get_or_insert_with(|| format!("{}: {error}", path.display()));
+                                if !record_line_failure(
+                                    &mut failed_offset,
+                                    &mut failed_attempts,
+                                    line_start,
+                                ) {
+                                    stop = true;
+                                    break;
+                                }
+                                skipped.push((line_start, *line_end));
+                                committed_offset = *line_end;
+                                line_start = *line_end;
+                            }
+                        }
                     }
-                    pass.record_skip(path, line_start, line_end);
-                    db.set_log_offset(&path_string, size, mtime, line_end, PARSER_VERSION)?;
-                    tail.offset = line_end;
-                    line_start = line_end;
-                }
+                    // The ingest and its offset commit atomically. A crash
+                    // between chunks re-reads only lines that were rolled back.
+                    if committed_offset != chunk_start {
+                        db.set_log_offset(
+                            &path_string,
+                            size,
+                            mtime,
+                            committed_offset,
+                            PARSER_VERSION,
+                        )?;
+                    }
+                    Ok(())
+                })
+            };
+            if let Err(error) = result {
+                return Err(error.into());
             }
+            tail.ingestor = ingestor;
+            tail.offset = committed_offset;
+            tail.failed_offset = failed_offset;
+            tail.failed_attempts = failed_attempts;
+            pass.processed += processed;
+            if let Some(failure) = failure {
+                pass.failure.get_or_insert(failure);
+            }
+            for (start, end) in skipped {
+                pass.record_skip(path, start, end);
+            }
+            if stop {
+                break;
+            }
+            next = chunk_end;
         }
         if pass.failure.is_none() && tail.offset != new_offset {
+            let db = self.db.lock().unwrap();
             db.set_log_offset(&path_string, size, mtime, new_offset, PARSER_VERSION)?;
+            drop(db);
             tail.offset = new_offset;
         }
-        drop(db);
         self.refresh_status()?;
         self.link_unlinked()?;
         Ok(pass)
@@ -1854,26 +1915,26 @@ impl Daemon {
     /// deleted or moved away. The notify watcher intentionally ignores the
     /// `compressed` directory, so the daemon checks these paths periodically.
     fn verify_replaced_assets(&mut self) -> Result<()> {
+        let rows = {
+            let db = self.db.lock().unwrap();
+            db.display_derivative_paths(100_000)?
+        };
+        // Stat every asset without the database lock so a slow or disconnected
+        // volume cannot block scans, IPC, or the heartbeat.
+        let missing =
+            missing_display_derivatives(rows, |path| path.is_dir(), |path| path.is_file());
+        if missing.is_empty() {
+            return Ok(());
+        }
         let db = self.db.lock().unwrap();
-        let mut changed = false;
-        for (photo_id, path, root) in db.display_derivative_paths(100_000)? {
-            // A disconnected external drive must not mark every replaced photo
-            // missing. Only validate assets whose root is currently available.
-            if !Path::new(&root).is_dir() {
-                continue;
-            }
-            let valid = path
-                .as_deref()
-                .is_some_and(|path| Path::new(path).is_file());
-            if !valid {
+        db.in_transaction(|db| {
+            for photo_id in missing {
                 db.mark_missing(photo_id)?;
                 db.clear_display_derivative(photo_id)?;
-                changed = true;
             }
-        }
-        if changed {
             db.bump_library_revision()?;
-        }
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -3410,28 +3471,71 @@ fn latest_log_file(dir: &Path) -> Result<Option<PathBuf>> {
     Ok(files.pop())
 }
 
+/// Returns the ids of replaced photos whose display derivative is missing.
+/// Roots that are not currently directories are skipped entirely so a
+/// disconnected drive never marks its photos missing. Root checks are cached
+/// per root, and both predicates run without the database lock held.
+fn missing_display_derivatives(
+    rows: Vec<(i64, Option<String>, String)>,
+    mut root_is_dir: impl FnMut(&Path) -> bool,
+    mut file_is_file: impl FnMut(&Path) -> bool,
+) -> Vec<i64> {
+    let mut roots: HashMap<String, bool> = HashMap::new();
+    let mut missing = Vec::new();
+    for (photo_id, path, root) in rows {
+        let available = *roots
+            .entry(root.clone())
+            .or_insert_with(|| root_is_dir(Path::new(&root)));
+        if !available {
+            continue;
+        }
+        let valid = path
+            .as_deref()
+            .is_some_and(|path| file_is_file(Path::new(path)));
+        if !valid {
+            missing.push(photo_id);
+        }
+    }
+    missing
+}
+
 /// Reads complete lines from `offset`, leaving a trailing partial line for the
 /// next poll. Each line is returned with its end byte offset.
 fn read_new_lines(path: &Path, offset: i64) -> Result<(Vec<(String, i64)>, i64)> {
+    read_new_lines_bounded(path, offset, LOG_READ_MAX_LINES, LOG_READ_MAX_BYTES)
+}
+
+/// Bounded variant used by tests and [`read_new_lines`]. It never reads past
+/// the byte budget, so a partial line at the budget boundary is retried on the
+/// next poll instead of being treated as complete.
+fn read_new_lines_bounded(
+    path: &Path,
+    offset: i64,
+    max_lines: usize,
+    max_bytes: u64,
+) -> Result<(Vec<(String, i64)>, i64)> {
     let mut file = File::open(path)?;
     file.seek(SeekFrom::Start(offset.max(0) as u64))?;
+    let mut reader = BufReader::new(file).take(max_bytes);
     let mut buffer = Vec::new();
-    file.read_to_end(&mut buffer)?;
     let mut lines = Vec::new();
-    let mut line_start = 0;
-    for (index, byte) in buffer.iter().enumerate() {
-        if *byte != b'\n' {
-            continue;
+    let mut complete_lines = 0usize;
+    let mut consumed = 0u64;
+    while complete_lines < max_lines {
+        buffer.clear();
+        let read = reader.read_until(b'\n', &mut buffer)?;
+        if read == 0 || buffer.last() != Some(&b'\n') {
+            break;
         }
-        let line_end = index + 1;
-        let text = String::from_utf8_lossy(&buffer[line_start..index]);
+        complete_lines += 1;
+        consumed += read as u64;
+        let text = String::from_utf8_lossy(&buffer[..buffer.len() - 1]);
         let line = text.trim_end_matches('\r');
         if !line.is_empty() {
-            lines.push((line.to_string(), offset + line_end as i64));
+            lines.push((line.to_string(), offset + consumed as i64));
         }
-        line_start = line_end;
     }
-    Ok((lines, offset + line_start as i64))
+    Ok((lines, offset + consumed as i64))
 }
 
 #[cfg(test)]
@@ -3472,19 +3576,60 @@ mod tests {
     }
 
     #[test]
+    fn read_new_lines_stops_at_the_line_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("output_log_test.txt");
+        std::fs::write(&path, "one\ntwo\nthree\nfour").unwrap();
+
+        let (lines, offset) = read_new_lines_bounded(&path, 0, 2, 1024).unwrap();
+        assert_eq!(lines, vec![("one".to_string(), 4), ("two".to_string(), 8)]);
+        assert_eq!(offset, 8);
+
+        let (lines, offset) = read_new_lines_bounded(&path, offset, 2, 1024).unwrap();
+        assert_eq!(lines, vec![("three".to_string(), 14)]);
+        assert_eq!(offset, 14, "the partial last line is left for next time");
+    }
+
+    #[test]
+    fn read_new_lines_stops_at_the_byte_budget_without_consuming_a_partial_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("output_log_test.txt");
+        std::fs::write(&path, "line1\nline2\n").unwrap();
+
+        let (lines, offset) = read_new_lines_bounded(&path, 0, 100, 8).unwrap();
+        assert_eq!(lines, vec![("line1".to_string(), 6)]);
+        assert_eq!(offset, 6);
+
+        let (lines, offset) = read_new_lines_bounded(&path, offset, 100, 8).unwrap();
+        assert_eq!(lines, vec![("line2".to_string(), 12)]);
+        assert_eq!(offset, 12);
+    }
+
+    #[test]
     fn poison_line_is_skipped_only_after_three_attempts() {
-        let mut tail = LogTail {
-            path: PathBuf::new(),
-            ingestor: LogIngestor::new("log"),
-            offset: 0,
-            failed_offset: None,
-            failed_attempts: 0,
-        };
-        assert!(!tail.note_line_failure(0));
-        assert!(!tail.note_line_failure(0));
-        assert!(tail.note_line_failure(0));
-        assert_eq!(tail.failed_attempts, 0);
-        assert!(!tail.note_line_failure(10));
+        let mut failed_offset = None;
+        let mut failed_attempts = 0;
+        assert!(!record_line_failure(
+            &mut failed_offset,
+            &mut failed_attempts,
+            0
+        ));
+        assert!(!record_line_failure(
+            &mut failed_offset,
+            &mut failed_attempts,
+            0
+        ));
+        assert!(record_line_failure(
+            &mut failed_offset,
+            &mut failed_attempts,
+            0
+        ));
+        assert_eq!(failed_attempts, 0);
+        assert!(!record_line_failure(
+            &mut failed_offset,
+            &mut failed_attempts,
+            10
+        ));
     }
 
     #[test]
@@ -3674,6 +3819,132 @@ mod tests {
         let db = Db::open(&db_path).unwrap();
         assert!(db.daemon_errors().unwrap().is_empty());
         assert_eq!(db.count_photos().unwrap(), 1);
+    }
+
+    #[test]
+    fn large_appended_log_is_ingested_in_bounded_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let log_path = dir.path().join("logs/output_log_2026-10-21_21-00-00.txt");
+        let join =
+            "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)";
+        let name =
+            "2026.10.21 21:23:13 Debug      -  [Behaviour] Joining or Creating Room: Test World";
+        let player_one = "2026.10.21 21:23:20 Debug      -  [Behaviour] OnPlayerJoined Mio (usr_a)";
+        let player_two =
+            "2026.10.21 21:24:20 Debug      -  [Behaviour] OnPlayerJoined Kenta (usr_b)";
+        let filler = "not a vrchat log line";
+        let mut head_lines = vec![join.to_string(), name.to_string()];
+        for _ in 2..510 {
+            head_lines.push(filler.to_string());
+        }
+        // This player is past the 500-line transaction boundary but still in
+        // the first read budget, so session state must carry between chunks.
+        head_lines.push(player_one.to_string());
+        while head_lines.len() < LOG_READ_MAX_LINES {
+            head_lines.push(filler.to_string());
+        }
+        let head = format!("{}\n", head_lines.join("\n"));
+        let tail = format!("{player_two}\n");
+        std::fs::write(&log_path, format!("{head}{tail}")).unwrap();
+
+        let log_file = log_path.to_str().unwrap();
+        daemon.ingest_logs().unwrap();
+        let first_offset = {
+            let db = daemon.db.lock().unwrap();
+            db.log_offset(log_file).unwrap().unwrap()
+        };
+        assert_eq!(
+            first_offset,
+            head.len() as i64,
+            "one poll stops at the line budget"
+        );
+        let joined_at = vrc_photon_core::log_parser::parse_line(join)
+            .unwrap()
+            .timestamp_utc();
+        let player_one_at = vrc_photon_core::log_parser::parse_line(player_one)
+            .unwrap()
+            .timestamp_utc();
+        let player_two_at = vrc_photon_core::log_parser::parse_line(player_two)
+            .unwrap()
+            .timestamp_utc();
+        {
+            let db = daemon.db.lock().unwrap();
+            let session = db.session_at(joined_at + 1).unwrap().unwrap();
+            let players = db.players_at(session.id, player_one_at + 1).unwrap();
+            assert_eq!(players.len(), 1);
+            assert_eq!(players[0].display_name, "Mio");
+            assert_eq!(
+                db.players_at(session.id, player_two_at + 1).unwrap().len(),
+                1
+            );
+        }
+
+        daemon.ingest_logs().unwrap();
+        {
+            let db = daemon.db.lock().unwrap();
+            assert_eq!(
+                db.log_offset(log_file).unwrap(),
+                Some((head.len() + tail.len()) as i64)
+            );
+            let session = db.session_at(joined_at + 1).unwrap().unwrap();
+            let players = db.players_at(session.id, player_two_at + 1).unwrap();
+            assert_eq!(players.len(), 2);
+            assert_eq!(players[1].display_name, "Kenta");
+            assert_eq!(db.open_sessions().unwrap().len(), 1);
+        }
+
+        // The next poll has nothing new to ingest and must not create a
+        // second session for the same world join.
+        daemon.ingest_logs().unwrap();
+        let db = daemon.db.lock().unwrap();
+        assert_eq!(db.open_sessions().unwrap().len(), 1);
+        assert_eq!(
+            db.log_offset(log_file).unwrap(),
+            Some((head.len() + tail.len()) as i64)
+        );
+    }
+
+    #[test]
+    fn trailing_partial_log_line_is_ingested_after_it_completes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let log_path = dir.path().join("logs/output_log_2026-10-21_21-00-00.txt");
+        let join =
+            "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)";
+        let player = "2026.10.21 21:23:20 Debug      -  [Behaviour] OnPlayerJoined Mio (usr_a)";
+        std::fs::write(&log_path, format!("{join}\n{player}")).unwrap();
+        let log_file = log_path.to_str().unwrap();
+        daemon.ingest_logs().unwrap();
+
+        let join_offset = format!("{join}\n").len() as i64;
+        let joined_at = vrc_photon_core::log_parser::parse_line(join)
+            .unwrap()
+            .timestamp_utc();
+        let player_at = vrc_photon_core::log_parser::parse_line(player)
+            .unwrap()
+            .timestamp_utc();
+        {
+            let db = daemon.db.lock().unwrap();
+            assert_eq!(db.log_offset(log_file).unwrap(), Some(join_offset));
+            let session = db.session_at(joined_at + 1).unwrap().unwrap();
+            assert!(db.players_at(session.id, player_at).unwrap().is_empty());
+        }
+
+        let mut file = File::options().append(true).open(&log_path).unwrap();
+        writeln!(file).unwrap();
+        drop(file);
+        daemon.ingest_logs().unwrap();
+
+        let db = daemon.db.lock().unwrap();
+        assert_eq!(
+            db.log_offset(log_file).unwrap(),
+            Some(join_offset + player.len() as i64 + 1)
+        );
+        let session = db.session_at(joined_at + 1).unwrap().unwrap();
+        let players = db.players_at(session.id, player_at + 1).unwrap();
+        assert_eq!(players.len(), 1);
+        assert_eq!(players[0].display_name, "Mio");
     }
 
     #[test]
@@ -4702,6 +4973,42 @@ mod tests {
         let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
         daemon.set_ipc_endpoint(None);
         daemon
+    }
+
+    /// Adds a replaced photo whose display asset lives at `derivative`. The
+    /// original and derivative files do not have to exist; callers decide what
+    /// the verification pass should see on disk.
+    fn add_replaced_photo(daemon: &Daemon, photo: &Path, derivative: &Path) -> i64 {
+        let db = daemon.db.lock().unwrap();
+        let root = db
+            .add_root(
+                photo.parent().unwrap().to_string_lossy().as_ref(),
+                "reference",
+            )
+            .unwrap();
+        let file_name = photo.file_name().unwrap().to_string_lossy().to_string();
+        let id = db
+            .upsert_photo(&NewPhoto {
+                root_id: root,
+                rel_path: file_name.clone(),
+                abs_path: photo.to_string_lossy().to_string(),
+                file_name,
+                captured_at_utc: 100,
+                captured_at_local: "2026-10-21 21:24:00.000".to_string(),
+                tz_offset_sec: 9 * 3600,
+                width: 16,
+                height: 10,
+                file_size: 1,
+                mtime: 100,
+                blake3: None,
+            })
+            .unwrap();
+        let derivative = derivative.to_string_lossy().to_string();
+        let derivative_id = db
+            .add_derivative(id, &derivative, "webp", 16, 10, 1, "test", "replace")
+            .unwrap();
+        assert!(db.set_replaced(id, derivative_id).unwrap());
+        id
     }
 
     #[test]
@@ -7849,6 +8156,125 @@ mod tests {
         assert_eq!(photo.status, vrc_photon_core::model::PhotoStatus::Missing);
         assert!(photo.display_derivative_id.is_none());
         assert_eq!(db.count_photos().unwrap(), 0);
+    }
+
+    #[test]
+    fn verify_replaced_assets_keeps_live_files_and_marks_deleted_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let photo_dir = dir.path().join("photos");
+        let compressed = photo_dir.join("compressed");
+        std::fs::create_dir_all(&compressed).unwrap();
+
+        let live_derivative = compressed.join("live.webp");
+        std::fs::write(&live_derivative, b"live").unwrap();
+        let live_id = add_replaced_photo(
+            &daemon,
+            &photo_dir.join("VRChat_live.png"),
+            &live_derivative,
+        );
+        let missing_id = add_replaced_photo(
+            &daemon,
+            &photo_dir.join("VRChat_missing.png"),
+            &compressed.join("missing.webp"),
+        );
+        let no_display_id = add_replaced_photo(
+            &daemon,
+            &photo_dir.join("VRChat_no_display.png"),
+            &compressed.join("no_display.webp"),
+        );
+        {
+            let db = daemon.db.lock().unwrap();
+            db.clear_display_derivative(no_display_id).unwrap();
+        }
+        let revision = {
+            let db = daemon.db.lock().unwrap();
+            db.library_revision().unwrap()
+        };
+
+        daemon.verify_replaced_assets().unwrap();
+
+        let db = daemon.db.lock().unwrap();
+        let live = db.photo_by_id(live_id).unwrap().unwrap();
+        assert_eq!(live.status, vrc_photon_core::model::PhotoStatus::Replaced);
+        assert!(live.display_derivative_id.is_some());
+        for id in [missing_id, no_display_id] {
+            let photo = db.photo_by_id(id).unwrap().unwrap();
+            assert_eq!(photo.status, vrc_photon_core::model::PhotoStatus::Missing);
+            assert!(photo.display_derivative_id.is_none());
+            assert!(photo.display_path.is_none());
+        }
+        assert_eq!(db.library_revision().unwrap(), revision + 1);
+        assert_eq!(db.count_photos().unwrap(), 1);
+    }
+
+    #[test]
+    fn verify_replaced_assets_skips_photos_when_the_root_is_offline() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let offline = dir.path().join("offline-drive");
+        let id = add_replaced_photo(
+            &daemon,
+            &offline.join("VRChat_offline.png"),
+            &offline.join("compressed/offline.webp"),
+        );
+        let (revision, derivative_id) = {
+            let db = daemon.db.lock().unwrap();
+            (
+                db.library_revision().unwrap(),
+                db.photo_by_id(id).unwrap().unwrap().display_derivative_id,
+            )
+        };
+        assert!(!offline.is_dir());
+
+        daemon.verify_replaced_assets().unwrap();
+
+        let db = daemon.db.lock().unwrap();
+        let photo = db.photo_by_id(id).unwrap().unwrap();
+        assert_eq!(photo.status, vrc_photon_core::model::PhotoStatus::Replaced);
+        assert_eq!(photo.display_derivative_id, derivative_id);
+        assert_eq!(db.library_revision().unwrap(), revision);
+    }
+
+    #[test]
+    fn verify_replaced_assets_releases_the_db_lock_while_checking_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = test_daemon(&dir);
+        let root = dir.path().join("photos");
+        let rows = vec![
+            (
+                1,
+                Some(root.join("a.webp").to_string_lossy().to_string()),
+                root.to_string_lossy().to_string(),
+            ),
+            (
+                2,
+                Some(root.join("b.webp").to_string_lossy().to_string()),
+                root.to_string_lossy().to_string(),
+            ),
+        ];
+        let db = Arc::clone(&daemon.db);
+        let root_checks = std::cell::Cell::new(0);
+        let missing = missing_display_derivatives(
+            rows,
+            |path| {
+                assert!(
+                    db.try_lock().is_ok(),
+                    "root check must not hold the DB lock"
+                );
+                root_checks.set(root_checks.get() + 1);
+                path.is_dir()
+            },
+            |path| {
+                assert!(
+                    db.try_lock().is_ok(),
+                    "file check must not hold the DB lock"
+                );
+                path.is_file()
+            },
+        );
+        assert_eq!(root_checks.get(), 1, "root checks are deduplicated");
+        assert_eq!(missing, vec![1, 2]);
     }
 
     #[test]

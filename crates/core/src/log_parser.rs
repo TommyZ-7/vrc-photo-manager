@@ -131,7 +131,7 @@ fn parse_player(message: &str, prefix: &str) -> Option<(String, String)> {
 }
 
 /// Maintains the current world/session while consuming one log file.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct LogIngestor {
     log_file: String,
     session_id: Option<i64>,
