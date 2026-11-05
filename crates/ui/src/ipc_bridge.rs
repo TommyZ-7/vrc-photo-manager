@@ -1,9 +1,19 @@
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use vrc_photon_i18n::{tr, tr_args};
 use vrc_photon_ipc::client::{self, IpcError, Subscription};
 use vrc_photon_ipc::{Endpoint, Event, Request, Response, StatusSnapshot};
+
+/// Bound for the bridge-to-UI queue. The bridge applies backpressure once
+/// the UI falls this far behind instead of growing without limit.
+pub const INCOMING_QUEUE_CAPACITY: usize = 256;
+
+/// First reconnection delay and the cap after exponential growth.
+const BACKOFF_INITIAL: Duration = Duration::from_secs(2);
+const BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// Jitter applied around the nominal delay (±20%).
+const BACKOFF_JITTER_PERCENT: u64 = 20;
 
 /// Messages sent from the IPC subscription thread to the GPUI task.
 #[derive(Clone, Debug, PartialEq)]
@@ -39,15 +49,50 @@ pub fn error_message(error: &IpcError) -> String {
             tr_args!("ipc.error.protocol", daemon = daemon, client = client)
         }
         IpcError::Timeout => tr!("ipc.error.timeout"),
+        IpcError::Busy => tr!("ipc.error.busy"),
         IpcError::Disconnected => tr!("ipc.error.disconnected"),
         other => tr_args!("ipc.error.connect", error = other),
     }
 }
 
+/// Nominal reconnection delay before jitter: 2s, 4s, 8s, 16s, then 30s.
+fn backoff_base(attempt: u32) -> Duration {
+    let factor = 1u64 << attempt.min(5);
+    BACKOFF_INITIAL
+        .saturating_mul(factor as u32)
+        .min(BACKOFF_MAX)
+}
+
+/// Exponential backoff with ±20% jitter. `jitter_sample` is mapped onto
+/// 0..=1000, where 500 is the un-jittered nominal delay. The result never
+/// exceeds `BACKOFF_MAX`.
+fn backoff_delay(attempt: u32, jitter_sample: u64) -> Duration {
+    let base = backoff_base(attempt);
+    let spread_ms = (base.as_millis() as u64 * BACKOFF_JITTER_PERCENT / 100) as i64;
+    let offset = if spread_ms == 0 {
+        0
+    } else {
+        (jitter_sample % 1001) as i64 * 2 * spread_ms / 1000 - spread_ms
+    };
+    let millis = (base.as_millis() as i64 + offset).max(0) as u64;
+    Duration::from_millis(millis).min(BACKOFF_MAX)
+}
+
+fn jitter_sample() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos() as u64)
+        .unwrap_or(0)
+}
+
 fn bridge_loop(endpoint: Endpoint, tx: async_channel::Sender<Incoming>) {
+    let mut attempt: u32 = 0;
+    let mut announced_disconnect = false;
     loop {
         match Subscription::open(&endpoint, Duration::from_millis(500)) {
             Ok((mut subscription, info)) => {
+                // A successful connection resets the backoff sequence.
+                attempt = 0;
                 if tx
                     .send_blocking(Incoming::Connected {
                         status: info.status,
@@ -57,46 +102,42 @@ fn bridge_loop(endpoint: Endpoint, tx: async_channel::Sender<Incoming>) {
                 {
                     return;
                 }
-                loop {
+                let message = loop {
                     match subscription.next_event() {
                         Ok(Some(event)) => {
                             if tx.send_blocking(Incoming::Event(event)).is_err() {
                                 return;
                             }
                         }
-                        Ok(None) => {
-                            if tx
-                                .send_blocking(Incoming::Disconnected(tr!(
-                                    "ipc.error.disconnected"
-                                )))
-                                .is_err()
-                            {
-                                return;
-                            }
-                            break;
-                        }
-                        Err(error) => {
-                            if tx
-                                .send_blocking(Incoming::Disconnected(error_message(&error)))
-                                .is_err()
-                            {
-                                return;
-                            }
-                            break;
-                        }
+                        Ok(None) => break tr!("ipc.error.disconnected"),
+                        Err(error) => break error_message(&error),
                     }
-                }
-            }
-            Err(error) => {
-                if tx
-                    .send_blocking(Incoming::Disconnected(error_message(&error)))
-                    .is_err()
-                {
+                };
+                if tx.send_blocking(Incoming::Disconnected(message)).is_err() {
                     return;
                 }
+                announced_disconnect = true;
+                // Retry an established-then-lost link at the initial delay;
+                // repeated open failures grow the delay.
+                thread::sleep(backoff_delay(attempt, jitter_sample()));
+                attempt = attempt.saturating_add(1);
+            }
+            Err(error) => {
+                // Notify only on the transition into a disconnected state,
+                // not on every failed retry.
+                if !announced_disconnect {
+                    if tx
+                        .send_blocking(Incoming::Disconnected(error_message(&error)))
+                        .is_err()
+                    {
+                        return;
+                    }
+                    announced_disconnect = true;
+                }
+                thread::sleep(backoff_delay(attempt, jitter_sample()));
+                attempt = attempt.saturating_add(1);
             }
         }
-        thread::sleep(Duration::from_secs(2));
     }
 }
 
@@ -260,6 +301,33 @@ mod tests {
         match rx.recv_blocking().unwrap() {
             Incoming::Disconnected(error) => assert!(!error.is_empty()),
             other => panic!("expected disconnected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reconnect_backoff_grows_caps_and_jitters_around_the_nominal_delay() {
+        let nominal: Vec<u64> = (0..6)
+            .map(|attempt| backoff_base(attempt).as_secs())
+            .collect();
+        assert_eq!(nominal, vec![2, 4, 8, 16, 30, 30]);
+
+        for attempt in 0..10 {
+            let base = backoff_base(attempt);
+            let spread =
+                Duration::from_millis(base.as_millis() as u64 * BACKOFF_JITTER_PERCENT / 100);
+            assert_eq!(backoff_delay(attempt, 500), base);
+            for sample in [0, 1, 250, 750, 999, 1000, u64::MAX] {
+                let delay = backoff_delay(attempt, sample);
+                assert!(delay <= BACKOFF_MAX, "{attempt}/{sample}: {delay:?}");
+                assert!(
+                    delay + spread >= base,
+                    "{attempt}/{sample}: {delay:?} is below {base:?} - {spread:?}"
+                );
+                assert!(
+                    delay <= (base + spread).min(BACKOFF_MAX),
+                    "{attempt}/{sample}: {delay:?} is above {base:?} + {spread:?}"
+                );
+            }
         }
     }
 }

@@ -951,6 +951,7 @@ demo.db_error: "DBを開けませんでした（%{error}）。デモデータで
 demo.db_and_prepare_error: "DBを開けませんでした（%{error}）。デモデータも準備できませんでした（%{demo_error}）。空のライブラリで起動します。"
 ipc.error.protocol: "デーモンの更新が必要です（プロトコル %{daemon} / %{client}）"
 ipc.error.timeout: "デーモンの応答がタイムアウトしました"
+ipc.error.busy: "デーモンが混雑しています。しばらくしてから再試行してください"
 ipc.error.disconnected: "デーモンとの接続が終了しました"
 ipc.error.connect: "デーモンに接続できません: %{error}"
 compression.job.photo: "写真 #%{id}"

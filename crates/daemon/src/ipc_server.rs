@@ -1,10 +1,10 @@
 use std::io::{self, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use interprocess::TryClone as _;
 #[cfg(unix)]
@@ -22,22 +22,92 @@ use crate::plugin::{AI_PLUGIN_ID, PluginError, PluginService};
 use crate::signals::{JobSignal, WakeSignal};
 use crate::tagging::TaggingControl;
 
-/// Fan-out for daemon events. Dead subscribers are pruned on publish.
-#[derive(Clone, Default)]
+/// Maximum events queued per subscriber. Publishing never blocks: a slow
+/// subscriber drops new events (and stays subscribed), while a disconnected
+/// one is pruned. Status events are best-effort and latest-wins through
+/// `StatusSnapshot::version`.
+const EVENT_QUEUE_CAPACITY: usize = 256;
+
+/// Maximum concurrent IPC connections. Request connections are short-lived,
+/// but the UI also keeps one long-lived subscription, so this stays above the
+/// client's eight in-flight request slots to avoid rejecting a busy UI's own
+/// requests.
+const MAX_IPC_CONNECTIONS: usize = 16;
+
+/// How often an idle subscription receives a `StatusChanged` heartbeat. The
+/// client treats 30 seconds without any event as a disconnect, so two missed
+/// heartbeats are tolerated.
+#[cfg(test)]
+const SUBSCRIPTION_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(200);
+#[cfg(not(test))]
+const SUBSCRIPTION_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Fan-out for daemon events. Dead subscribers are pruned on publish and
+/// each live subscriber has a bounded queue.
+#[derive(Clone)]
 pub(crate) struct EventBus {
-    subscribers: Arc<Mutex<Vec<Sender<vrc_photon_ipc::Event>>>>,
+    subscribers: Arc<Mutex<Vec<SyncSender<vrc_photon_ipc::Event>>>>,
+}
+
+impl Default for EventBus {
+    fn default() -> Self {
+        Self {
+            subscribers: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
 }
 
 impl EventBus {
     pub(crate) fn publish(&self, event: vrc_photon_ipc::Event) {
         let mut subscribers = self.subscribers.lock().unwrap();
-        subscribers.retain(|sender| sender.send(event.clone()).is_ok());
+        subscribers.retain(|sender| match sender.try_send(event.clone()) {
+            Ok(()) => true,
+            // The subscriber is behind: drop this event for it, but keep the
+            // subscription so it can catch up from the database later.
+            Err(TrySendError::Full(_)) => true,
+            Err(TrySendError::Disconnected(_)) => false,
+        });
     }
 
     pub(crate) fn subscribe(&self) -> Receiver<vrc_photon_ipc::Event> {
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
         self.subscribers.lock().unwrap().push(sender);
         receiver
+    }
+}
+
+/// Bounded connection slots for the accept loop.
+struct ConnectionSlots {
+    in_use: AtomicUsize,
+    limit: usize,
+}
+
+impl ConnectionSlots {
+    const fn new(limit: usize) -> Self {
+        Self {
+            in_use: AtomicUsize::new(0),
+            limit,
+        }
+    }
+
+    fn try_acquire(self: &Arc<Self>) -> Option<ConnectionSlot> {
+        if self.in_use.fetch_add(1, Ordering::AcqRel) >= self.limit {
+            self.in_use.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
+        Some(ConnectionSlot {
+            slots: self.clone(),
+        })
+    }
+}
+
+struct ConnectionSlot {
+    slots: Arc<ConnectionSlots>,
+}
+
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        self.slots.in_use.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -131,13 +201,21 @@ pub(crate) struct IpcServer {
 
 impl IpcServer {
     pub(crate) fn start(endpoint: Endpoint, control: IpcControl) -> io::Result<Self> {
+        Self::start_with_limit(endpoint, control, MAX_IPC_CONNECTIONS)
+    }
+
+    fn start_with_limit(
+        endpoint: Endpoint,
+        control: IpcControl,
+        connection_limit: usize,
+    ) -> io::Result<Self> {
         let listener = Listener::bind(endpoint)?;
         listener.set_nonblocking_accept(true)?;
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
         let accept = thread::Builder::new()
             .name("ipc-server".to_string())
-            .spawn(move || accept_loop(listener, control, thread_stop))?;
+            .spawn(move || accept_loop(listener, control, thread_stop, connection_limit))?;
         Ok(Self {
             stop,
             accept: Some(accept),
@@ -154,14 +232,28 @@ impl Drop for IpcServer {
     }
 }
 
-fn accept_loop(listener: Listener, control: IpcControl, stop: Arc<AtomicBool>) {
+fn accept_loop(
+    listener: Listener,
+    control: IpcControl,
+    stop: Arc<AtomicBool>,
+    connection_limit: usize,
+) {
+    let slots = Arc::new(ConnectionSlots::new(connection_limit));
     while !stop.load(Ordering::Relaxed) && control.running.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok(stream) => {
+                let Some(slot) = slots.try_acquire() else {
+                    tracing::debug!("rejecting IPC connection: all slots are in use");
+                    // Dropping the stream closes the connection immediately.
+                    // The client sees a disconnect and retries with backoff.
+                    drop(stream);
+                    continue;
+                };
                 let control = control.clone();
                 if let Err(error) = thread::Builder::new()
                     .name("ipc-connection".to_string())
                     .spawn(move || {
+                        let _slot = slot;
                         if let Err(error) = handle_connection(stream, control) {
                             tracing::debug!(%error, "IPC connection ended");
                         }
@@ -457,6 +549,7 @@ fn stream_events(
         }
     }
     let mut result = Ok(());
+    let mut last_write = Instant::now();
     while control.running.load(Ordering::Relaxed) && !disconnected.load(Ordering::Relaxed) {
         match events.recv_timeout(Duration::from_millis(100)) {
             Ok(event) => {
@@ -466,8 +559,24 @@ fn stream_events(
                     result = Err(error);
                     break;
                 }
+                last_write = Instant::now();
             }
-            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Timeout) => {
+                // An idle but healthy subscription gets a status heartbeat so
+                // the client's read timeout only fires for a hung daemon.
+                if last_write.elapsed() >= SUBSCRIPTION_HEARTBEAT_INTERVAL {
+                    let event = Event::StatusChanged {
+                        status: control.snapshot(),
+                    };
+                    if let Err(error) =
+                        framing::write_message(reader.get_mut(), &ServerMessage::Event { event })
+                    {
+                        result = Err(error);
+                        break;
+                    }
+                    last_write = Instant::now();
+                }
+            }
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
@@ -534,7 +643,7 @@ mod tests {
     use vrc_photon_core::ai::PluginInstallation;
     use vrc_photon_core::db::Db;
     use vrc_photon_core::model::NewPhoto;
-    use vrc_photon_ipc::client::{Subscription, request};
+    use vrc_photon_ipc::client::{IpcError, Subscription, request};
     use vrc_photon_ipc::{Endpoint, Event, PluginInstallStatus, Request, Response};
 
     use crate::plugin::{AI_PLUGIN_ID, PluginService};
@@ -884,6 +993,69 @@ mod tests {
             status: control.snapshot(),
         });
         assert_eq!(control.events.subscribers.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn idle_subscription_receives_a_heartbeat() {
+        let (_dir, endpoint, control) = test_control();
+        let _server = IpcServer::start(endpoint.clone(), control.clone()).unwrap();
+        let (mut subscription, _) = Subscription::open(&endpoint, Duration::from_secs(1)).unwrap();
+
+        let event = subscription
+            .next_event()
+            .unwrap()
+            .expect("the daemon still runs");
+        assert!(
+            matches!(event, Event::StatusChanged { .. }),
+            "unexpected heartbeat: {event:?}"
+        );
+    }
+
+    #[test]
+    fn event_bus_bounds_slow_subscribers_and_prunes_dead_ones() {
+        let bus = EventBus::default();
+        let slow = bus.subscribe();
+        let healthy = bus.subscribe();
+
+        for roots in 0..(EVENT_QUEUE_CAPACITY + 32) {
+            bus.publish(Event::ScanStarted {
+                roots,
+                target: None,
+            });
+        }
+
+        // Publishing never blocks and never grows a subscriber's queue past
+        // its capacity; the slow subscriber stays registered.
+        assert_eq!(bus.subscribers.lock().unwrap().len(), 2);
+        let mut drained = 0;
+        while slow.try_recv().is_ok() {
+            drained += 1;
+        }
+        assert_eq!(drained, EVENT_QUEUE_CAPACITY);
+        while healthy.try_recv().is_ok() {}
+
+        drop(slow);
+        bus.publish(Event::StatusChanged {
+            status: StatusSnapshot::default(),
+        });
+        assert_eq!(bus.subscribers.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn connection_limit_rejects_excess_connections() {
+        let (_dir, endpoint, control) = test_control();
+        let _server = IpcServer::start_with_limit(endpoint.clone(), control, 2).unwrap();
+        let (first, _) = Subscription::open(&endpoint, Duration::from_secs(1)).unwrap();
+        let (second, _) = Subscription::open(&endpoint, Duration::from_secs(1)).unwrap();
+
+        let error = request(&endpoint, Request::Status, Duration::from_secs(2)).unwrap_err();
+        assert!(
+            matches!(error, IpcError::Disconnected | IpcError::Io(_)),
+            "unexpected excess-connection error: {error}"
+        );
+
+        drop(first);
+        drop(second);
     }
 
     #[test]
