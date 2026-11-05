@@ -7,6 +7,11 @@ use crate::error::Result;
 
 const SETTINGS_KEY: &str = "app_settings";
 
+/// Keeps the last JSON that failed to parse so a later save cannot destroy
+/// the only copy of the user's settings. The value is overwritten on the next
+/// parse failure.
+pub const CORRUPT_SETTINGS_KEY: &str = "app_settings_corrupt";
+
 /// Presentation size for photo cards. Pixel metrics live in the UI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -29,6 +34,7 @@ pub enum DiscordAutoMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppSettings {
     /// Photo roots to index. The first entry is the primary VRChat folder.
     pub photo_roots: Vec<String>,
@@ -239,14 +245,27 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
+    /// Loads the settings row.
+    ///
+    /// A missing row means a fresh install and gets the detected VRChat
+    /// paths. An existing row that does not parse is never replaced with
+    /// defaults: its raw JSON is copied to [`CORRUPT_SETTINGS_KEY`] and the
+    /// parse error is returned so callers can keep their in-memory settings.
     pub fn load(db: &Db) -> Result<Self> {
         match db.get_setting(SETTINGS_KEY)? {
-            Some(json) => {
-                let mut settings: Self = serde_json::from_str(&json).unwrap_or_default();
-                settings.normalize_discord_destination();
-                settings.normalize_ai_settings();
-                Ok(settings)
-            }
+            Some(json) => match serde_json::from_str::<Self>(&json) {
+                Ok(mut settings) => {
+                    settings.normalize_discord_destination();
+                    settings.normalize_ai_settings();
+                    Ok(settings)
+                }
+                Err(error) => {
+                    if let Err(backup_error) = backup_corrupt_settings(db, &json) {
+                        tracing::warn!(%backup_error, "cannot back up malformed app settings");
+                    }
+                    Err(error.into())
+                }
+            },
             None => {
                 let mut settings = Self::default();
                 let detected = detect_vrchat_paths();
@@ -318,6 +337,14 @@ impl AppSettings {
             .or_else(|| crate::data_dir().map(|dir| dir.join("imported")))
             .unwrap_or_else(|| PathBuf::from("imported"))
     }
+}
+
+/// Copies malformed `app_settings` JSON to [`CORRUPT_SETTINGS_KEY`].
+///
+/// The settings row itself is left untouched; the backup is a separate row so
+/// a later [`AppSettings::save`] cannot erase the raw value.
+pub fn backup_corrupt_settings(db: &Db, raw: &str) -> Result<()> {
+    db.set_setting(CORRUPT_SETTINGS_KEY, raw)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -602,6 +629,74 @@ mod tests {
                 "input: {invalid}"
             );
         }
+    }
+
+    #[test]
+    fn incomplete_settings_json_uses_field_defaults() {
+        let settings: AppSettings = serde_json::from_str("{}").unwrap();
+        let defaults = AppSettings::default();
+        assert_eq!(settings.language, defaults.language);
+        assert_eq!(settings.autostart, defaults.autostart);
+        assert_eq!(settings.thumbnail_quality, defaults.thumbnail_quality);
+        assert_eq!(settings.photo_roots, defaults.photo_roots);
+        assert_eq!(settings.ai_tagging_backend, defaults.ai_tagging_backend);
+
+        let partial: AppSettings =
+            serde_json::from_str(r#"{"language":"en","photo_roots":["/tmp/photos"]}"#).unwrap();
+        assert_eq!(partial.language, "en");
+        assert_eq!(partial.photo_roots, vec!["/tmp/photos".to_string()]);
+        assert!(partial.ui_ribbon_collapsed);
+        assert!(partial.autostart);
+    }
+
+    #[test]
+    fn malformed_settings_json_returns_an_error_and_backs_up_the_raw_row() {
+        let db = Db::open_in_memory().unwrap();
+        let raw = r#"{"photo_roots":["/tmp/photos"],"language":"#;
+        db.set_setting(SETTINGS_KEY, raw).unwrap();
+
+        let error =
+            AppSettings::load(&db).expect_err("malformed settings must not fall back to defaults");
+        assert!(
+            matches!(&error, crate::error::CoreError::Json(_)),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            db.get_setting(SETTINGS_KEY).unwrap().as_deref(),
+            Some(raw),
+            "load must not overwrite the settings row"
+        );
+        assert_eq!(
+            db.get_setting(CORRUPT_SETTINGS_KEY).unwrap().as_deref(),
+            Some(raw)
+        );
+    }
+
+    #[test]
+    fn wrong_typed_settings_value_is_an_error_not_a_silent_reset() {
+        let db = Db::open_in_memory().unwrap();
+        let raw = r#"{"compression_workers":"two"}"#;
+        db.set_setting(SETTINGS_KEY, raw).unwrap();
+
+        assert!(AppSettings::load(&db).is_err());
+        assert_eq!(db.get_setting(SETTINGS_KEY).unwrap().as_deref(), Some(raw));
+        assert_eq!(
+            db.get_setting(CORRUPT_SETTINGS_KEY).unwrap().as_deref(),
+            Some(raw)
+        );
+    }
+
+    #[test]
+    fn corrupt_settings_backup_is_overwritten_by_the_latest_failure() {
+        let db = Db::open_in_memory().unwrap();
+        db.set_setting(CORRUPT_SETTINGS_KEY, "older").unwrap();
+
+        backup_corrupt_settings(&db, "newer").unwrap();
+
+        assert_eq!(
+            db.get_setting(CORRUPT_SETTINGS_KEY).unwrap().as_deref(),
+            Some("newer")
+        );
     }
 
     #[test]

@@ -93,6 +93,25 @@ fn scan_refresh_action(
     }
 }
 
+/// Keeps the live settings when a reload fails.
+///
+/// `AppSettings::load` already copied the malformed JSON to
+/// `app_settings_corrupt`. Replacing the in-memory settings with defaults
+/// here would reset every switch in the UI and make the next save persist
+/// those defaults.
+fn settings_after_reload(
+    current: &AppSettings,
+    loaded: vrc_photon_core::Result<AppSettings>,
+) -> AppSettings {
+    match loaded {
+        Ok(settings) => settings,
+        Err(error) => {
+            tracing::warn!(%error, "cannot load app settings; keeping the current settings");
+            current.clone()
+        }
+    }
+}
+
 impl App {
     pub(crate) fn start_ipc(&mut self, cx: &mut Context<Self>) {
         let Some(data_dir) = vrc_photon_core::data_dir() else {
@@ -703,10 +722,7 @@ impl App {
         let previous_clipboard_enabled = self.settings.clipboard_enabled;
         let previous_discord_enabled = self.settings.discord_enabled;
         let previous_thumbnail_spec = self.settings.thumbnail_spec();
-        let mut settings = AppSettings::load(&self.db).unwrap_or_else(|error| {
-            tracing::warn!(%error, "cannot load app settings");
-            AppSettings::default()
-        });
+        let mut settings = settings_after_reload(&self.settings, AppSettings::load(&self.db));
         settings.language = vrc_photon_i18n::set_locale(&settings.language);
         let language_changed = settings.language != previous_language;
         self.settings = settings;
@@ -961,8 +977,40 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{ScanRefresh, import_scan_enqueued_count, is_stale_revision, scan_refresh_action};
+    use super::{
+        ScanRefresh, import_scan_enqueued_count, is_stale_revision, scan_refresh_action,
+        settings_after_reload,
+    };
     use crate::app::Screen;
+    use vrc_photon_core::settings::AppSettings;
+
+    #[test]
+    fn settings_reload_keeps_the_live_values_when_the_row_is_malformed() {
+        let current = AppSettings {
+            language: "en".to_string(),
+            auto_compress: false,
+            ..Default::default()
+        };
+        let error = serde_json::from_str::<AppSettings>("{").unwrap_err().into();
+
+        let kept = settings_after_reload(&current, Err(error));
+
+        assert_eq!(kept.language, "en");
+        assert!(!kept.auto_compress);
+    }
+
+    #[test]
+    fn settings_reload_uses_the_loaded_values_when_the_row_is_valid() {
+        let current = AppSettings::default();
+        let loaded = AppSettings {
+            language: "en".to_string(),
+            ..Default::default()
+        };
+
+        let applied = settings_after_reload(&current, Ok(loaded));
+
+        assert_eq!(applied.language, "en");
+    }
 
     #[test]
     fn import_auto_compress_count_only_accepts_the_requested_target() {

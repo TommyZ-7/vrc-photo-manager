@@ -594,7 +594,9 @@ impl App {
         let health_token = std::env::var("VRC_PHOTON_HEALTH_TOKEN").ok();
         let updating = health_token.is_some();
         let mut initial_settings = AppSettings::load(&db).unwrap_or_else(|error| {
-            tracing::warn!(%error, "cannot load app settings; using defaults");
+            // `AppSettings::load` backs up malformed JSON before returning, so
+            // defaults only fill this first frame.
+            tracing::warn!(%error, "cannot load app settings; using defaults for this frame");
             AppSettings::default()
         });
         initial_settings.language = vrc_photon_i18n::set_locale(&initial_settings.language);
@@ -1034,7 +1036,7 @@ impl App {
             manual_compress: None,
             stats: LibraryStats::default(),
             stats_revision: -1,
-            settings: AppSettings::default(),
+            settings: initial_settings.clone(),
             ai: ai::AiUiState::default(),
             ai_refresh_scheduled: false,
             ai_selected_refresh_pending: false,

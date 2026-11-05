@@ -7620,6 +7620,61 @@ mod tests {
     }
 
     #[test]
+    fn malformed_settings_abort_open_without_overwriting_the_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("library.db");
+        let raw = r#"{"photo_roots":["/tmp/photos"],"language":"#;
+        {
+            let db = Db::open(&db_path).unwrap();
+            db.set_setting("app_settings", raw).unwrap();
+        }
+
+        let error = match Daemon::open(&db_path, None, None) {
+            Ok(_) => panic!("the daemon must not start with malformed settings"),
+            Err(error) => error,
+        };
+        let message = format!("{error:#}");
+        assert!(message.contains("cannot load settings"), "{message}");
+        assert!(message.contains("json error"), "{message}");
+
+        let db = Db::open(&db_path).unwrap();
+        assert_eq!(
+            db.get_setting("app_settings").unwrap().as_deref(),
+            Some(raw),
+            "open must not save defaults over the malformed row"
+        );
+        assert_eq!(
+            db.get_setting("app_settings_corrupt").unwrap().as_deref(),
+            Some(raw)
+        );
+    }
+
+    #[test]
+    fn periodic_settings_refresh_keeps_in_memory_values_when_the_row_is_malformed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        daemon.settings.auto_compress = false;
+        daemon.settings.autostart = false;
+        {
+            let db = daemon.db.lock().unwrap();
+            db.set_setting("app_settings", "{not json").unwrap();
+        }
+        daemon.last_settings_check = Instant::now() - Duration::from_secs(5);
+        daemon.last_autostart_check = Instant::now() - Duration::from_secs(11);
+
+        daemon.refresh_periodic_settings();
+
+        assert!(!daemon.settings.auto_compress);
+        assert!(!daemon.settings.autostart);
+        let db = daemon.db.lock().unwrap();
+        assert_eq!(
+            db.get_setting("app_settings").unwrap().as_deref(),
+            Some("{not json"),
+            "refresh must not save settings"
+        );
+    }
+
+    #[test]
     fn refresh_compression_settings_applies_live_policy_and_waiting_mode() {
         let dir = tempfile::tempdir().unwrap();
         let photo_dir = dir.path().join("photos");
