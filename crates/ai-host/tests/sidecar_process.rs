@@ -328,3 +328,23 @@ fn stdout_protocol_violations_are_written_to_the_log() {
         "the protocol violation must reach the log: {contents:?}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn spawn_creates_a_private_log_file() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mock = mock_sidecar();
+    let fixture = test_config(&mock, "normal");
+    let log_path = fixture.config.log_path.clone();
+
+    let client = SidecarClient::spawn(fixture.config).expect("spawn the mock sidecar");
+
+    let mode = fs::metadata(&log_path)
+        .expect("the sidecar must create the log")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "the sidecar log must be private");
+    assert!(client.is_alive());
+}
