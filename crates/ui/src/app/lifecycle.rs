@@ -453,8 +453,8 @@ impl App {
                     } else {
                         self.last_library_revision = revision;
                         self.revision_debounce.reset();
-                        if let Some(filter) = self.applied_search.clone() {
-                            self.start_search(filter, cx);
+                        if self.applied_search.is_some() {
+                            self.refresh_search_keeping_anchor(cx);
                             changed = true;
                         }
                     }
@@ -548,9 +548,7 @@ impl App {
                 }
                 self.revision_debounce.reset();
                 self.count_debounce.reset();
-                if let Some(filter) = self.applied_search.clone() {
-                    self.start_search(filter, cx);
-                }
+                self.refresh_search_keeping_anchor(cx);
             }
             ScanRefresh::Dirty => {
                 if let Some(revision) = revision {
@@ -862,7 +860,12 @@ impl App {
         if screen == Screen::Settings {
             self.refresh_thumbnail_cache_usage(cx);
         }
-        if screen == Screen::Photos && self.library_dirty {
+        if screen == Screen::Search && self.search_refresh_dirty {
+            // Tag edits made while another screen was mounted are applied with
+            // one query when Search becomes visible again.
+            self.search_refresh_dirty = false;
+            self.refresh_search_keeping_anchor(cx);
+        } else if screen == Screen::Photos && self.library_dirty {
             let revision = self.db.library_revision().ok();
             self.apply_library_snapshot(revision, cx);
         } else if screen == Screen::Search && !self.search_active {
