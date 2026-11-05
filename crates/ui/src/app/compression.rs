@@ -15,6 +15,7 @@ use vrc_photon_core::model::{CompressionProfile, MAX_JOB_RETRIES, MAX_PROFILE_NA
 use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::App;
+use crate::app::file_picker::{self, DialogOptions};
 use crate::ui::components::release_confirmation;
 use crate::ui::compression::job_retry_available;
 use crate::ui::theme::{compression_policy, moved_profile_order, step_index};
@@ -208,26 +209,33 @@ impl App {
         cx.notify();
     }
 
-    pub(crate) fn compress_selection_to_folder(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn compress_selection_to_folder(&mut self, window: &Window, cx: &mut Context<Self>) {
         let ids = self.selected_action_ids();
         if ids.is_empty() {
             self.toast_error(tr!("compression.select_photos"), cx);
             cx.notify();
             return;
         }
-        let mut picker = rfd::FileDialog::new();
-        if let Some(dir) = self.settings.import_dir().to_str() {
-            picker = picker.set_directory(dir);
-        }
-        let Some(folder) = picker.pick_folder() else {
-            return;
+        let options = DialogOptions {
+            directory: Some(self.settings.import_dir()),
+            ..DialogOptions::default()
         };
-        self.open_manual_compression_with_target(
-            ids,
-            ManualOutputTarget::Folder,
-            Some(folder.to_string_lossy().to_string()),
-            cx,
-        );
+        let dialog = options.dialog(Some(window));
+        cx.spawn(async move |this, cx| {
+            let Some(folder) = file_picker::pick_folder(dialog).await else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                this.open_manual_compression_with_target(
+                    ids,
+                    ManualOutputTarget::Folder,
+                    Some(folder.to_string_lossy().to_string()),
+                    cx,
+                );
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(crate) fn compress_selection_to_profile_folder(&mut self, cx: &mut Context<Self>) {
@@ -322,22 +330,30 @@ impl App {
         cx.notify();
     }
 
-    pub(crate) fn choose_manual_folder(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn choose_manual_folder(&mut self, window: &Window, cx: &mut Context<Self>) {
         let current = self
             .manual_compress
             .as_ref()
             .and_then(|dialog| dialog.folder.clone());
-        let mut picker = rfd::FileDialog::new();
-        if let Some(dir) = current {
-            picker = picker.set_directory(dir);
-        }
-        if let Some(dir) = picker.pick_folder()
-            && let Some(dialog) = &mut self.manual_compress
-        {
-            dialog.folder = Some(dir.to_string_lossy().to_string());
-            dialog.output = ManualOutputTarget::Folder;
-        }
-        cx.notify();
+        let options = DialogOptions {
+            directory: current.map(PathBuf::from),
+            ..DialogOptions::default()
+        };
+        let dialog = options.dialog(Some(window));
+        cx.spawn(async move |this, cx| {
+            let Some(dir) = file_picker::pick_folder(dialog).await else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                if let Some(dialog) = &mut this.manual_compress {
+                    dialog.folder = Some(dir.to_string_lossy().to_string());
+                    dialog.output = ManualOutputTarget::Folder;
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(crate) fn confirm_manual_compression(&mut self, cx: &mut Context<Self>) {

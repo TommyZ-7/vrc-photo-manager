@@ -1698,9 +1698,9 @@ impl App {
         }
         button
             .on_click(cx.listener(move |this, _, window, cx| match action {
-                AiPluginAction::InstallZip => this.install_ai_plugin(cx),
+                AiPluginAction::InstallZip => this.install_ai_plugin(window, cx),
                 AiPluginAction::DownloadModel => this.request_ai_model_download(window, cx),
-                AiPluginAction::ImportModel => this.import_ai_model_files(cx),
+                AiPluginAction::ImportModel => this.import_ai_model_files(window, cx),
                 AiPluginAction::Recheck => this.probe_ai_plugin(cx),
                 AiPluginAction::DeleteModel => this.delete_ai_model(cx),
                 AiPluginAction::Uninstall => {

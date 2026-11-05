@@ -83,17 +83,17 @@ impl App {
                                 Button::new("import-pick-files")
                                     .label(tr!("import.choose_files"))
                                     .small()
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.pick_import_files(cx)),
-                                    ),
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.pick_import_files(window, cx)
+                                    })),
                             )
                             .child(
                                 Button::new("import-pick-folder")
                                     .label(tr!("import.choose_folder"))
                                     .small()
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.pick_import_folder(cx)),
-                                    ),
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.pick_import_folder(window, cx)
+                                    })),
                             ),
                     )
                     .child(

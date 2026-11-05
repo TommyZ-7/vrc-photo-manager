@@ -23,6 +23,7 @@ use vrc_photon_core::settings::AppSettings;
 use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::App;
+use crate::app::file_picker::{self, DialogOptions};
 use crate::ui::import::retryable_sources;
 
 #[derive(Clone)]
@@ -205,51 +206,70 @@ impl App {
         cx.notify();
     }
 
-    pub(crate) fn pick_import_files(&mut self, cx: &mut Context<Self>) {
-        let Some(files) = rfd::FileDialog::new()
-            .add_filter(tr!("import.dialog.filter.images"), &["png", "jpg", "jpeg"])
-            .pick_files()
-        else {
-            return;
+    pub(crate) fn pick_import_files(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let options = DialogOptions {
+            filters: vec![(
+                tr!("import.dialog.filter.images"),
+                vec!["png".to_string(), "jpg".to_string(), "jpeg".to_string()],
+            )],
+            ..DialogOptions::default()
         };
-        if let Some(dialog) = &mut self.import_dialog {
-            dialog.error = None;
-            dialog.source = Some(ImportSource::Files(files));
-        }
-        cx.notify();
-    }
-
-    pub(crate) fn pick_import_folder(&mut self, cx: &mut Context<Self>) {
-        let Some(folder) = rfd::FileDialog::new().pick_folder() else {
-            return;
-        };
-        let dest = self
-            .import_dialog
-            .as_ref()
-            .map(|dialog| dialog.dest.clone());
-        let scan = match importer::collect_folder_sources(&folder, dest.as_deref()) {
-            Ok(scan) => scan,
-            Err(error) => {
-                tracing::warn!(%error, path = %folder.display(), "cannot scan import folder");
-                if let Some(dialog) = &mut self.import_dialog {
-                    dialog.error = Some(ImportDialogError::FolderRead(error.to_string()));
+        let dialog = options.dialog(Some(window));
+        cx.spawn(async move |this, cx| {
+            let Some(files) = file_picker::pick_files(dialog).await else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                if let Some(dialog) = &mut this.import_dialog {
+                    dialog.error = None;
+                    dialog.source = Some(ImportSource::Files(files));
                 }
                 cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    pub(crate) fn pick_import_folder(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let dialog = DialogOptions::default().dialog(Some(window));
+        cx.spawn(async move |this, cx| {
+            let Some(folder) = file_picker::pick_folder(dialog).await else {
                 return;
-            }
-        };
-        if let Some(dialog) = &mut self.import_dialog {
-            dialog.error = scan
-                .files
-                .is_empty()
-                .then_some(ImportDialogError::NoTargetImages);
-            dialog.source = Some(ImportSource::Folder {
-                folder,
-                files: scan.files,
-                issues: scan.issues,
-            });
-        }
-        cx.notify();
+            };
+            this.update(cx, |this, cx| {
+                let dest = this
+                    .import_dialog
+                    .as_ref()
+                    .map(|dialog| dialog.dest.clone());
+                let scan = match importer::collect_folder_sources(&folder, dest.as_deref()) {
+                    Ok(scan) => scan,
+                    Err(error) => {
+                        tracing::warn!(%error, path = %folder.display(), "cannot scan import folder");
+                        if let Some(dialog) = &mut this.import_dialog {
+                            dialog.error =
+                                Some(ImportDialogError::FolderRead(error.to_string()));
+                        }
+                        cx.notify();
+                        return;
+                    }
+                };
+                if let Some(dialog) = &mut this.import_dialog {
+                    dialog.error = scan
+                        .files
+                        .is_empty()
+                        .then_some(ImportDialogError::NoTargetImages);
+                    dialog.source = Some(ImportSource::Folder {
+                        folder,
+                        files: scan.files,
+                        issues: scan.issues,
+                    });
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(crate) fn start_import_from_source(&mut self, cx: &mut Context<Self>) {
