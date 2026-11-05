@@ -569,7 +569,7 @@ impl App {
                     self.ribbon_compress_folder_focus.clone(),
                     focusable,
                     cx,
-                    |this, _, cx| this.compress_selection_to_folder(cx),
+                    |this, window, cx| this.compress_selection_to_folder(window, cx),
                 ),
                 large_button(
                     &self.palette,

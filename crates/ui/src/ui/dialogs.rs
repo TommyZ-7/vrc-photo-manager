@@ -241,8 +241,8 @@ impl App {
                                             .label(tr!("dialog.choose_folder"))
                                             .small()
                                             .ghost()
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.choose_manual_folder(cx)
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.choose_manual_folder(window, cx)
                                             })),
                                     ),
                             )

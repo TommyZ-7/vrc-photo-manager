@@ -3,7 +3,7 @@
 //! Profile and manual-compression state lives in `app::compression`; screen
 //! dispatch lives in `ui::shell`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
@@ -19,6 +19,7 @@ use vrc_photon_core::model::{
 use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::App;
+use crate::app::file_picker::{self, DialogOptions};
 use crate::ui::components::{card_header, glass_panel};
 use crate::ui::theme::*;
 
@@ -811,33 +812,60 @@ impl App {
                                                                 .and_then(|profile| {
                                                                     profile.output_dir.clone()
                                                                 });
-                                                            let mut picker = rfd::FileDialog::new();
-                                                            if let Some(dir) = current {
-                                                                picker = picker.set_directory(dir);
-                                                            }
-                                                            if let Some(dir) = picker.pick_folder()
-                                                            {
-                                                                let path = dir
-                                                                    .to_string_lossy()
-                                                                    .to_string();
-                                                                this.profile_output_input.update(
-                                                                    cx,
-                                                                    |input, cx| {
-                                                                        input.set_value(
-                                                                            path.clone(),
-                                                                            window,
-                                                                            cx,
-                                                                        )
-                                                                    },
-                                                                );
-                                                                this.edit_profile(
-                                                                    move |profile| {
-                                                                        profile.output_dir =
-                                                                            Some(path.clone())
-                                                                    },
-                                                                    cx,
-                                                                );
-                                                            }
+                                                            let options = DialogOptions {
+                                                                directory: current
+                                                                    .map(PathBuf::from),
+                                                                ..DialogOptions::default()
+                                                            };
+                                                            let dialog =
+                                                                options.dialog(Some(&*window));
+                                                            cx.spawn_in(
+                                                                window,
+                                                                async move |this, cx| {
+                                                                    let Some(dir) = file_picker::pick_folder(
+                                                                        dialog,
+                                                                    )
+                                                                    .await
+                                                                    else {
+                                                                        return;
+                                                                    };
+                                                                    let path = dir
+                                                                        .to_string_lossy()
+                                                                        .to_string();
+                                                                    let output_path =
+                                                                        path.clone();
+                                                                    cx.update(
+                                                                        |window, cx| {
+                                                                            this.update(
+                                                                                cx,
+                                                                                |this, cx| {
+                                                                                    this.profile_output_input
+                                                                                        .update(
+                                                                                            cx,
+                                                                                            |input, cx| {
+                                                                                                input.set_value(
+                                                                                                    path,
+                                                                                                    window,
+                                                                                                    cx,
+                                                                                                )
+                                                                                            },
+                                                                                        );
+                                                                                    this.edit_profile(
+                                                                                        move |profile| {
+                                                                                            profile.output_dir =
+                                                                                                Some(output_path)
+                                                                                        },
+                                                                                        cx,
+                                                                                    );
+                                                                                },
+                                                                            )
+                                                                            .ok();
+                                                                        },
+                                                                    )
+                                                                    .ok();
+                                                                },
+                                                            )
+                                                            .detach();
                                                         },
                                                     )),
                                             ),

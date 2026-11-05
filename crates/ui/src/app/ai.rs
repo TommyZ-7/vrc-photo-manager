@@ -23,6 +23,7 @@ use vrc_photon_ipc::{
 };
 
 use crate::app::App;
+use crate::app::file_picker::{self, DialogOptions};
 use crate::ipc_bridge;
 
 /// Plugin id of the bundled AI tagging sidecar package.
@@ -1265,47 +1266,63 @@ impl App {
         .detach();
     }
 
-    pub(crate) fn install_ai_plugin(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("ZIP", &["zip"])
-            .pick_file()
-        else {
-            return;
+    pub(crate) fn install_ai_plugin(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let options = DialogOptions {
+            filters: vec![("ZIP".to_string(), vec!["zip".to_string()])],
+            ..DialogOptions::default()
         };
-        self.ai.install_busy = true;
-        self.ai.clear_error(AiErrorKind::Install);
-        self.send_ai_request(
-            IpcRequest::InstallPlugin {
-                zip_path: path.to_string_lossy().into_owned(),
-            },
-            None,
-            cx,
-        );
+        let dialog = options.dialog(Some(window));
+        cx.spawn(async move |this, cx| {
+            let Some(path) = file_picker::pick_file(dialog).await else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                this.ai.install_busy = true;
+                this.ai.clear_error(AiErrorKind::Install);
+                this.send_ai_request(
+                    IpcRequest::InstallPlugin {
+                        zip_path: path.to_string_lossy().into_owned(),
+                    },
+                    None,
+                    cx,
+                );
+            })
+            .ok();
+        })
+        .detach();
     }
 
-    pub(crate) fn import_ai_model_files(&mut self, cx: &mut Context<Self>) {
-        let Some(paths) = rfd::FileDialog::new()
-            .add_filter("Model", &["gguf"])
-            .pick_files()
-        else {
-            return;
+    pub(crate) fn import_ai_model_files(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let options = DialogOptions {
+            filters: vec![("Model".to_string(), vec!["gguf".to_string()])],
+            ..DialogOptions::default()
         };
-        if paths.is_empty() {
-            return;
-        }
-        self.ai.clear_error(AiErrorKind::Model);
-        let paths = paths
-            .into_iter()
-            .map(|path| path.to_string_lossy().into_owned())
-            .collect();
-        self.send_ai_request(
-            IpcRequest::ImportModelFiles {
-                plugin_id: AI_PLUGIN_ID.to_string(),
-                paths,
-            },
-            None,
-            cx,
-        );
+        let dialog = options.dialog(Some(window));
+        cx.spawn(async move |this, cx| {
+            let Some(paths) = file_picker::pick_files(dialog).await else {
+                return;
+            };
+            if paths.is_empty() {
+                return;
+            }
+            this.update(cx, |this, cx| {
+                this.ai.clear_error(AiErrorKind::Model);
+                let paths = paths
+                    .into_iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect();
+                this.send_ai_request(
+                    IpcRequest::ImportModelFiles {
+                        plugin_id: AI_PLUGIN_ID.to_string(),
+                        paths,
+                    },
+                    None,
+                    cx,
+                );
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Starts a model download. The first request opens the license modal;

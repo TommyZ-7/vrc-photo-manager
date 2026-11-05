@@ -6,6 +6,7 @@ pub(crate) mod deletion;
 pub(crate) mod demo;
 pub(crate) mod demo_fixture;
 pub(crate) mod discord;
+pub(crate) mod file_picker;
 pub(crate) mod import;
 pub(crate) mod lifecycle;
 pub(crate) mod live;
