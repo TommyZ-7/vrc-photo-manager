@@ -23,7 +23,7 @@ use vrc_photon_core::model::{
 };
 use vrc_photon_core::photo_filename::is_source_photo;
 use vrc_photon_core::scanner::{
-    ScanFailure, ScanPhase as CoreScanPhase, ScanProgress, ScanReport, scan_and_index_observed,
+    ScanFailure, ScanPhase as CoreScanPhase, ScanProgress, ScanReport, scan_and_index_shared,
     scan_one,
 };
 use vrc_photon_core::settings::{AppSettings, detect_vrchat_paths};
@@ -951,6 +951,10 @@ impl Daemon {
             return Ok(());
         }
         self.record_supervisor();
+        // Start workers before the initial scan so a long scan does not delay
+        // already queued compression, tagging, or deletion work. The scan now
+        // takes the database mutex only for short per-photo operations.
+        self.start_workers();
         self.startup_scan()?;
         if self.stopping() {
             self.shutdown();
@@ -967,7 +971,6 @@ impl Daemon {
         self.restart_watchers();
         self.apply_autostart(self.settings.autostart);
         self.ensure_tray();
-        self.start_workers();
 
         tracing::info!(
             photos = self.settings.photo_roots.len(),
@@ -1097,71 +1100,100 @@ impl Daemon {
         }
         self.refresh_compression_settings();
         let tagging_ready = self.plugin.is_ready(AI_PLUGIN_ID);
-        paths.sort_by_key(|path| !path.is_file());
+        paths.sort_by_cached_key(|path| !path.is_file());
         paths.dedup();
         let roots = self.settings.photo_roots();
         let mut new_ids = Vec::new();
         let mut thumbnail_ids = Vec::new();
         let mut missing_ids = Vec::new();
         let mut changed = false;
-        {
-            let db = self.db.lock().unwrap();
-            for path in paths {
-                let Some(root) = roots.iter().find(|root| path.starts_with(root)) else {
+        for path in paths {
+            let Some(root) = roots.iter().find(|root| path.starts_with(root)) else {
+                continue;
+            };
+            let root_id = {
+                let db = self.db.lock().unwrap();
+                db.add_root(&root.to_string_lossy(), "reference")?
+            };
+            if path.is_file() {
+                let Some(scanned) = scan_one(root, &path) else {
                     continue;
                 };
-                let root_id = db.add_root(&root.to_string_lossy(), "reference")?;
-                if path.is_file() {
-                    let Some(scanned) = scan_one(root, &path) else {
-                        continue;
-                    };
-                    let mut new_photo = scanned.into_new_photo(root_id);
-                    let abs_path = new_photo.abs_path.clone();
-                    let existing = db.photo_by_path(&abs_path)?;
-                    let existed = existing.is_some();
-                    new_photo.blake3 = match existing.as_ref() {
-                        Some(existing)
-                            if existing.blake3.is_some()
-                                && existing.file_size == new_photo.file_size
-                                && existing.mtime == new_photo.mtime =>
-                        {
-                            existing.blake3.clone()
-                        }
-                        _ => hashing::file_blake3(Path::new(&new_photo.abs_path))
-                            .ok()
-                            .flatten(),
-                    };
+                let mut new_photo = scanned.into_new_photo(root_id);
+                let abs_path = new_photo.abs_path.clone();
+                let existing = {
+                    let db = self.db.lock().unwrap();
+                    db.photo_by_path(&abs_path)?
+                };
+                let existed = existing.is_some();
+                new_photo.blake3 = match existing.as_ref() {
+                    Some(existing)
+                        if existing.blake3.is_some()
+                            && existing.file_size == new_photo.file_size
+                            && existing.mtime == new_photo.mtime =>
+                    {
+                        existing.blake3.clone()
+                    }
+                    _ => hashing::file_blake3(Path::new(&new_photo.abs_path))
+                        .ok()
+                        .flatten(),
+                };
 
-                    if !existed && let Some(candidate) = db.find_rebind_candidate(&new_photo)? {
+                if !existed {
+                    let candidate = {
+                        let db = self.db.lock().unwrap();
+                        db.find_rebind_candidate(&new_photo)?
+                    };
+                    if let Some(candidate) = candidate {
                         let old_path_exists = Path::new(&candidate.abs_path).exists();
-                        if !old_path_exists && db.rebind_photo(candidate.id, &new_photo)? {
+                        let rebound = if old_path_exists {
+                            false
+                        } else {
+                            let db = self.db.lock().unwrap();
+                            db.rebind_photo(candidate.id, &new_photo)?
+                        };
+                        if rebound {
                             thumbnail_ids.push(candidate.id);
                             changed = true;
                             continue;
                         }
                     }
+                }
 
-                    let id = db.upsert_photo(&new_photo)?;
-                    changed = true;
-                    if !existed {
-                        new_ids.push(id);
-                        thumbnail_ids.push(id);
-                    }
-                } else {
-                    let Some(photo) = db.photo_by_path(&path.to_string_lossy())? else {
-                        continue;
+                let id = {
+                    let db = self.db.lock().unwrap();
+                    db.upsert_photo(&new_photo)?
+                };
+                changed = true;
+                if !existed {
+                    new_ids.push(id);
+                    thumbnail_ids.push(id);
+                }
+            } else {
+                let photo = {
+                    let db = self.db.lock().unwrap();
+                    db.photo_by_path(&path.to_string_lossy())?
+                };
+                let Some(photo) = photo else {
+                    continue;
+                };
+                if photo.status == PhotoStatus::Present {
+                    let marked = {
+                        let db = self.db.lock().unwrap();
+                        db.mark_missing_if_path(photo.id, &photo.abs_path)?
                     };
-                    if photo.status == PhotoStatus::Present
-                        && db.mark_missing_if_path(photo.id, &photo.abs_path)?
-                    {
+                    if marked {
                         missing_ids.push(photo.id);
                         changed = true;
                     }
                 }
             }
-            // A remove event and its matching create event can arrive in one
-            // batch. Only after every addition has had a chance to rebind do
-            // we promote a derivative for rows that are still missing.
+        }
+        // A remove event and its matching create event can arrive in one
+        // batch. Only after every addition has had a chance to rebind do we
+        // promote a derivative for rows that are still missing.
+        {
+            let db = self.db.lock().unwrap();
             for photo_id in missing_ids {
                 if let Some(photo) = db.photo_by_id(photo_id)?
                     && photo.status == PhotoStatus::Missing
@@ -1173,21 +1205,26 @@ impl Daemon {
             if changed {
                 db.bump_library_revision()?;
             }
-            if self.settings.auto_compress && !new_ids.is_empty() {
+        }
+        if self.settings.auto_compress && !new_ids.is_empty() {
+            {
+                let db = self.db.lock().unwrap();
                 enqueue_auto_jobs(
                     &db,
                     &new_ids,
                     self.settings.auto_compress_keep_original,
                     self.settings.auto_compress_immediate,
                 )?;
-                self.jobs.notify();
             }
-            if !new_ids.is_empty() {
-                let tagging_enqueued =
-                    enqueue_auto_tagging(&db, &new_ids, &self.settings, tagging_ready)?;
-                if tagging_enqueued > 0 {
-                    self.tagging.notify();
-                }
+            self.jobs.notify();
+        }
+        if !new_ids.is_empty() {
+            let tagging_enqueued = {
+                let db = self.db.lock().unwrap();
+                enqueue_auto_tagging(&db, &new_ids, &self.settings, tagging_ready)?
+            };
+            if tagging_enqueued > 0 {
+                self.tagging.notify();
             }
         }
         if let Some(tx) = &self.thumbnail_tx {
@@ -1315,13 +1352,15 @@ impl Daemon {
         let mut auto_enqueued = 0;
         let root_count = roots.len();
         if !roots.is_empty() {
-            let db = self.db.lock().unwrap();
-            let initial_scan =
-                initial_scan_override.unwrap_or(full_scan && db.count_photos()? == 0);
+            let initial_scan = {
+                let db = self.db.lock().unwrap();
+                initial_scan_override.unwrap_or(full_scan && db.count_photos()? == 0)
+            };
             let mut changed = false;
             let mut missing_ids = Vec::new();
             for (index, root) in roots.into_iter().enumerate() {
                 if self.stopping() {
+                    report.cancelled = true;
                     break;
                 }
                 let root_number = index + 1;
@@ -1341,8 +1380,14 @@ impl Daemon {
                     });
                     continue;
                 }
-                let root_id = db.add_root(&root.to_string_lossy(), "reference")?;
-                let existing = db.photos_for_root(root_id)?;
+                let root_id = {
+                    let db = self.db.lock().unwrap();
+                    db.add_root(&root.to_string_lossy(), "reference")?
+                };
+                let existing = {
+                    let db = self.db.lock().unwrap();
+                    db.photos_for_root(root_id)?
+                };
                 let indexed_before = report.indexed;
                 let mut observer = ScanObserver::new(
                     self.events.clone(),
@@ -1351,9 +1396,13 @@ impl Daemon {
                     root_number,
                     root_count,
                 );
-                let root_report = match scan_and_index_observed(&db, root_id, &root, |progress| {
-                    observer.observe(progress);
-                }) {
+                let root_report = match scan_and_index_shared(
+                    &self.db,
+                    root_id,
+                    &root,
+                    Some(self.running.as_ref()),
+                    |progress| observer.observe(progress),
+                ) {
                     Ok(root_report) => root_report,
                     Err(error) => {
                         tracing::error!(path = %root.display(), %error, "photo scan failed");
@@ -1364,21 +1413,30 @@ impl Daemon {
                         continue;
                     }
                 };
-                if root_report.failures.is_empty() {
+                if root_report.failures.is_empty() && !root_report.cancelled {
                     let seen: std::collections::HashSet<&str> =
                         root_report.seen_paths.iter().map(String::as_str).collect();
                     let rebound: std::collections::HashSet<i64> =
                         root_report.rebound_ids.iter().copied().collect();
-                    for (id, path) in existing {
-                        if !seen.contains(path.as_str()) && !rebound.contains(&id) {
-                            match db.mark_missing_if_path(id, &path) {
-                                Ok(true) => {
-                                    changed = true;
-                                    missing_ids.push(id);
-                                }
-                                Ok(false) => {}
-                                Err(error) => {
-                                    tracing::warn!(%error, photo_id = id, "cannot mark missing photo")
+                    // Keep the write lock bounded even when a large library
+                    // contains many deleted photos.
+                    for chunk in existing.chunks(500) {
+                        let db = self.db.lock().unwrap();
+                        for (id, path) in chunk {
+                            if !seen.contains(path.as_str()) && !rebound.contains(id) {
+                                match db.mark_missing_if_path(*id, path) {
+                                    Ok(true) => {
+                                        changed = true;
+                                        missing_ids.push(*id);
+                                    }
+                                    Ok(false) => {}
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            %error,
+                                            photo_id = id,
+                                            "cannot mark missing photo"
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -1392,35 +1450,49 @@ impl Daemon {
                 report.new_ids.extend(root_report.new_ids);
                 report.rebound_ids.extend(root_report.rebound_ids);
                 report.failures.extend(root_report.failures);
+                if root_report.cancelled {
+                    report.cancelled = true;
+                    break;
+                }
             }
             // Give every root a chance to rebind a moved file before falling
             // back to a compressed derivative for a missing original.
-            for photo_id in missing_ids {
-                if let Some(photo) = db.photo_by_id(photo_id)?
-                    && photo.status == PhotoStatus::Missing
-                    && promote_display_derivative(&db, &photo)?
-                {
-                    changed = true;
+            for chunk in missing_ids.chunks(500) {
+                let db = self.db.lock().unwrap();
+                for photo_id in chunk {
+                    if let Some(photo) = db.photo_by_id(*photo_id)?
+                        && photo.status == PhotoStatus::Missing
+                        && promote_display_derivative(&db, &photo)?
+                    {
+                        changed = true;
+                    }
                 }
             }
             if changed {
+                let db = self.db.lock().unwrap();
                 db.bump_library_revision()?;
             }
             if self.settings.auto_compress
                 && !report.new_ids.is_empty()
                 && (!initial_scan || self.settings.auto_compress_backlog)
             {
-                auto_enqueued = enqueue_auto_jobs(
-                    &db,
-                    &report.new_ids,
-                    self.settings.auto_compress_keep_original,
-                    self.settings.auto_compress_immediate,
-                )?;
+                let enqueued = {
+                    let db = self.db.lock().unwrap();
+                    enqueue_auto_jobs(
+                        &db,
+                        &report.new_ids,
+                        self.settings.auto_compress_keep_original,
+                        self.settings.auto_compress_immediate,
+                    )?
+                };
+                auto_enqueued = enqueued;
                 self.jobs.notify();
             }
             if !report.new_ids.is_empty() {
-                let tagging_enqueued =
-                    enqueue_auto_tagging(&db, &report.new_ids, &self.settings, tagging_ready)?;
+                let tagging_enqueued = {
+                    let db = self.db.lock().unwrap();
+                    enqueue_auto_tagging(&db, &report.new_ids, &self.settings, tagging_ready)?
+                };
                 if tagging_enqueued > 0 {
                     self.tagging.notify();
                 }
@@ -1476,6 +1548,9 @@ impl Daemon {
     /// failure: a clean scan keeps it visible (or restores it after clearing
     /// a scan failure) until the watchers start successfully.
     fn report_scan_outcome(&mut self, report: &ScanReport, full_scan: bool) -> Result<()> {
+        if report.cancelled {
+            return Ok(());
+        }
         if report.failures.is_empty() {
             if full_scan {
                 if let Some((localized, detail)) = self.watcher_error.clone() {
@@ -4090,6 +4165,36 @@ mod tests {
         std::fs::remove_file(&photo_path).unwrap();
         daemon.run_once().unwrap();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        let photo = db.photo_by_id(photo.id).unwrap().unwrap();
+        assert_eq!(photo.status, vrc_photon_core::model::PhotoStatus::Present);
+    }
+
+    #[test]
+    fn cancelled_scan_does_not_mark_unseen_photos_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let photo_dir = dir.path().join("photos");
+        let log_dir = dir.path().join("logs");
+        std::fs::create_dir_all(&photo_dir).unwrap();
+        std::fs::create_dir_all(&log_dir).unwrap();
+        let photo_path = photo_dir.join("VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&photo_path);
+        let db_path = dir.path().join("library.db");
+        let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
+        daemon.set_thumbnail_dir(dir.path().join("thumbnails"));
+        daemon.run_once().unwrap();
+
+        let db = Db::open(&db_path).unwrap();
+        let photo = db
+            .photo_by_path(photo_path.to_str().unwrap())
+            .unwrap()
+            .unwrap();
+        drop(db);
+
+        std::fs::remove_file(&photo_path).unwrap();
+        daemon.running.store(false, Ordering::Relaxed);
+        daemon.run_once().unwrap();
 
         let db = Db::open(&db_path).unwrap();
         let photo = db.photo_by_id(photo.id).unwrap().unwrap();
