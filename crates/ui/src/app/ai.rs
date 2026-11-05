@@ -558,7 +558,10 @@ pub(crate) fn ai_dashboard_view(ai: &AiUiState, enabled: bool) -> AiDashboardVie
         TaggingJobStatus::Waiting => 2,
         TaggingJobStatus::Failed | TaggingJobStatus::Completed | TaggingJobStatus::Cancelled => 3,
     });
-    let more = jobs.len().saturating_sub(3);
+    let active_total =
+        (ai.job_counts.waiting + ai.job_counts.pending + ai.job_counts.processing).max(0) as usize;
+    let displayed = jobs.len().min(3);
+    let more = active_total.saturating_sub(displayed);
     jobs.truncate(3);
 
     AiDashboardView {
@@ -2958,9 +2961,20 @@ mod tests {
         ai.active_jobs = (0..5)
             .map(|index| sample_job(&format!("job-{index}"), TaggingJobStatus::Processing))
             .collect();
+        ai.job_counts.processing = 5;
         let view = ai_dashboard_view(&ai, true);
         assert_eq!(view.jobs.len(), 3);
         assert_eq!(view.more, 2);
         assert_eq!(view.jobs[0].status, TaggingJobStatus::Processing);
+    }
+
+    #[test]
+    fn dashboard_ai_card_counts_waiting_jobs_without_a_job_row() {
+        let mut ai = ready_state();
+        ai.job_counts.waiting = 4;
+        let view = ai_dashboard_view(&ai, true);
+        assert_eq!(view.state, AiDashboardState::Active);
+        assert!(view.jobs.is_empty());
+        assert_eq!(view.more, 4);
     }
 }
