@@ -196,13 +196,17 @@ pub fn link_photo_by_id(db: &Db, photo_id: i64) -> Result<bool> {
     link_photo(db, &photo)
 }
 
-/// Re-links photos that have no context yet. Returns the number linked.
+/// Re-links photos that have no context yet and are due for another attempt.
+/// Returns the number linked.
 pub fn relink_unlinked(db: &Db, limit: i64) -> Result<usize> {
     let estimated_enabled = estimated_link_enabled(db);
+    let now = chrono::Utc::now().timestamp();
     let mut linked = 0;
-    for photo in db.unlinked_photos(limit)? {
+    for photo in db.unlinked_photos_due(limit, now)? {
         if link_photo_with(db, &photo, estimated_enabled)? {
             linked += 1;
+        } else {
+            db.record_link_attempt(photo.id, now)?;
         }
     }
     Ok(linked)
@@ -220,11 +224,16 @@ mod tests {
 
     fn insert_photo_at(db: &Db, ts: i64, path: &Path) -> i64 {
         let root = db.add_root("/photos", "reference").unwrap();
+        let file_name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         db.upsert_photo(&NewPhoto {
             root_id: root,
-            rel_path: "a.png".to_string(),
+            rel_path: file_name.clone(),
             abs_path: path.to_string_lossy().to_string(),
-            file_name: "a.png".to_string(),
+            file_name,
             captured_at_utc: ts,
             captured_at_local: "2026-10-21 21:24:00.000".to_string(),
             tz_offset_sec: 9 * 3600,
@@ -482,5 +491,96 @@ mod tests {
         let players = db.photo_players(photo_id).unwrap();
         assert_eq!(players.len(), 1);
         assert_eq!(players[0].display_name, "Mio");
+    }
+
+    fn link_state(db: &Db, photo_id: i64) -> (i64, Option<i64>) {
+        db.connection()
+            .query_row(
+                "SELECT link_attempts, link_next_retry_at FROM photos WHERE id = ?1",
+                [photo_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn failed_link_waits_for_its_retry_time() {
+        let db = Db::open_in_memory().unwrap();
+        let photo_id = insert_photo(&db, 100);
+
+        assert_eq!(relink_unlinked(&db, 10).unwrap(), 0);
+        let (attempts, next_retry) = link_state(&db, photo_id);
+        assert_eq!(attempts, 1);
+        assert!(next_retry.is_some_and(|next| next > chrono::Utc::now().timestamp()));
+
+        // A second batch before the retry time must not touch the file again.
+        assert_eq!(relink_unlinked(&db, 10).unwrap(), 0);
+        assert_eq!(link_state(&db, photo_id).0, 1);
+
+        // Once the scheduled time has passed, the photo is attempted again.
+        db.connection()
+            .execute(
+                "UPDATE photos SET link_next_retry_at = 0 WHERE id = ?1",
+                [photo_id],
+            )
+            .unwrap();
+        assert_eq!(relink_unlinked(&db, 10).unwrap(), 0);
+        assert_eq!(link_state(&db, photo_id).0, 2);
+    }
+
+    #[test]
+    fn make_unlinked_photos_due_retries_immediately() {
+        let db = Db::open_in_memory().unwrap();
+        let photo_id = insert_photo(&db, 100);
+        assert_eq!(relink_unlinked(&db, 10).unwrap(), 0);
+
+        // A session appears after the failure (for example because the log
+        // was restored). The normal batch keeps waiting for the backoff.
+        let world = db.upsert_world("wrld_test", None, None).unwrap();
+        db.create_session("log.txt", 90, world, None).unwrap();
+        assert_eq!(relink_unlinked(&db, 10).unwrap(), 0);
+        assert_eq!(link_state(&db, photo_id).0, 1);
+
+        // An explicit Relog/Rescan clears the schedule and retries right away.
+        assert_eq!(db.make_unlinked_photos_due().unwrap(), 1);
+        assert_eq!(relink_unlinked(&db, 10).unwrap(), 1);
+        assert!(db.photo_context(photo_id).unwrap().is_some());
+    }
+
+    #[test]
+    fn successful_link_clears_the_attempt_count() {
+        let db = Db::open_in_memory().unwrap();
+        let photo_id = insert_photo(&db, 100);
+        db.record_link_attempt(photo_id, 0).unwrap();
+        assert_eq!(link_state(&db, photo_id).0, 1);
+
+        let world = db.upsert_world("wrld_test", None, None).unwrap();
+        db.create_session("log.txt", 90, world, None).unwrap();
+        db.make_unlinked_photos_due().unwrap();
+
+        assert_eq!(relink_unlinked(&db, 10).unwrap(), 1);
+        assert_eq!(link_state(&db, photo_id), (0, None));
+    }
+
+    #[test]
+    fn limit_does_not_starve_the_remaining_photos() {
+        let db = Db::open_in_memory().unwrap();
+        let first = insert_photo_at(&db, 100, Path::new("/photos/first.png"));
+        let second = insert_photo_at(&db, 200, Path::new("/photos/second.png"));
+        let third = insert_photo_at(&db, 300, Path::new("/photos/third.png"));
+
+        // The limit only fits two photos; the two oldest fail and go into
+        // backoff while the third stays untouched.
+        assert_eq!(relink_unlinked(&db, 2).unwrap(), 0);
+        assert_eq!(link_state(&db, first).0, 1);
+        assert_eq!(link_state(&db, second).0, 1);
+        assert_eq!(link_state(&db, third).0, 0);
+
+        // The next batch reaches the third instead of re-reading the first
+        // two, so a backlog cannot starve it forever.
+        assert_eq!(relink_unlinked(&db, 2).unwrap(), 0);
+        assert_eq!(link_state(&db, first).0, 1);
+        assert_eq!(link_state(&db, second).0, 1);
+        assert_eq!(link_state(&db, third).0, 1);
     }
 }
