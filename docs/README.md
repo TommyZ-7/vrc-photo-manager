@@ -17,6 +17,7 @@
 | [licenses.md](licenses.md) | 同梱アセットのライセンスとパッケージ内の配置 | 全員 |
 | [troubleshooting.md](troubleshooting.md) | よくある不具合と調査手順 | サポート・開発者 |
 | [security-privacy.md](security-privacy.md) | ローカルデータ、ログ、個人情報の扱い | 全員 |
+| [ai-tagging/README.md](ai-tagging/README.md) | AI タグ付けプラグインの導入・GPU 要件・プライバシー・トラブルシューティング | 利用者・サポート |
 | [roadmap.md](roadmap.md) | 残作業、優先度、受け入れ条件 | 企画・開発者 |
 | [adr/README.md](adr/README.md) | 設計判断の記録（ADR） | 全員 |
 
