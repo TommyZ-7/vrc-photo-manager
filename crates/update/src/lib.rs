@@ -4,6 +4,7 @@
 //! The UI drives checks and downloads; the helper binary applies them.
 
 pub mod check;
+mod command;
 pub mod download;
 pub mod error;
 pub mod fetch;
