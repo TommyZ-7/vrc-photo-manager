@@ -474,6 +474,12 @@ const PHOTO_FROM: &str = " FROM photos p \
 /// so tags and context survive a restore, but they are not displayed.
 const VISIBLE_STATUS: &str = "p.status IN ('present', 'replaced')";
 
+/// Safety cap for the UI's text-search index. The product target is 100k
+/// photos; this bound prevents a pathological filter from building an
+/// unbounded result vector. `photo_index_text_limited` exists for tests and
+/// callers that need a smaller page.
+const MAX_TEXT_INDEX_ROWS: i64 = 200_000;
+
 /// Local capture month as YYYYMM, falling back to the UTC capture time and
 /// finally to 0 when neither can be parsed.
 const PHOTO_MONTH: &str = "COALESCE(\
@@ -1073,12 +1079,25 @@ impl Db {
     }
 
     /// Returns an ordered index snapshot matching the text filters.
+    ///
+    /// The result is capped at [`MAX_TEXT_INDEX_ROWS`] so a broad filter cannot
+    /// allocate without bound.
     pub fn photo_index_text(&self, filter: &PhotoTextFilter) -> Result<Vec<PhotoIndexEntry>> {
-        let (where_sql, values) = build_text_filter(filter);
+        self.photo_index_text_limited(filter, MAX_TEXT_INDEX_ROWS)
+    }
+
+    /// Same as [`Self::photo_index_text`] with an explicit row limit.
+    pub fn photo_index_text_limited(
+        &self,
+        filter: &PhotoTextFilter,
+        limit: i64,
+    ) -> Result<Vec<PhotoIndexEntry>> {
+        let (where_sql, mut values) = build_text_filter(filter);
         let sql = format!(
             "SELECT p.id, p.captured_at_utc, {PHOTO_MONTH}{PHOTO_FROM} WHERE {where_sql} \
-             ORDER BY p.captured_at_utc DESC, p.id DESC"
+             ORDER BY p.captured_at_utc DESC, p.id DESC LIMIT ?"
         );
+        values.push(Value::Integer(limit.max(1)));
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(values), row_to_photo_index)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -1647,7 +1666,7 @@ impl Db {
     /// Fills NULL `photo_context.world_name` rows from the stored world name,
     /// preferring the user alias. Returns the number of updated contexts.
     pub fn backfill_photo_context_world_names(&self) -> Result<usize> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let updated = tx.execute(
             "UPDATE photo_context SET world_name = ( \
                  SELECT COALESCE(w.alias, w.name) FROM worlds w \
@@ -2153,7 +2172,7 @@ impl Db {
     // ---------- compression profiles ----------
 
     pub fn save_profile(&self, profile: &CompressionProfile) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let sort_order = Self::next_sort_order(&tx)?;
         Self::write_profile(&tx, profile, sort_order)?;
         tx.commit()?;
@@ -2263,7 +2282,7 @@ impl Db {
     }
 
     pub fn reorder_profiles(&self, ids: &[String]) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let stored: i64 = tx.query_row("SELECT COUNT(*) FROM compression_profiles", [], |row| {
             row.get(0)
         })?;
@@ -2310,7 +2329,7 @@ impl Db {
     }
 
     pub fn duplicate_profile(&self, id: &str) -> Result<CompressionProfile> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let ordered = {
             let mut stmt = tx.prepare(
                 "SELECT id, json FROM compression_profiles \
@@ -2380,7 +2399,7 @@ impl Db {
         if !existing.is_empty() {
             return Ok(existing);
         }
-        let transaction = self.conn.unchecked_transaction()?;
+        let transaction = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         for (index, profile) in CompressionProfile::defaults().into_iter().enumerate() {
             Self::write_profile(&transaction, &profile, index as i64)?;
         }
@@ -2398,7 +2417,7 @@ impl Db {
     }
 
     pub fn delete_profile(&self, id: &str) -> Result<()> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let exists: i64 = tx.query_row(
             "SELECT COUNT(*) FROM compression_profiles WHERE id = ?1",
             params![id],
@@ -3938,24 +3957,35 @@ impl Db {
         profile_id: &str,
         policy: &str,
     ) -> Result<i64> {
-        let id = self.conn.query_row(
-            "INSERT INTO derivatives(photo_id, path, format, width, height, file_size, profile_id, policy, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
-             ON CONFLICT(path) DO UPDATE SET file_size = excluded.file_size, \
-                width = excluded.width, height = excluded.height RETURNING id",
-            params![
-                photo_id,
-                path,
-                format,
-                width as i64,
-                height as i64,
-                file_size as i64,
-                profile_id,
-                policy,
-                now_string(),
-            ],
-            |row| row.get(0),
-        )?;
+        let id = self
+            .conn
+            .query_row(
+                "INSERT INTO derivatives(photo_id, path, format, width, height, file_size, profile_id, policy, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+                 ON CONFLICT(path) DO UPDATE SET photo_id = excluded.photo_id, \
+                    format = excluded.format, width = excluded.width, height = excluded.height, \
+                    file_size = excluded.file_size, profile_id = excluded.profile_id, \
+                    policy = excluded.policy, created_at = excluded.created_at \
+                 WHERE derivatives.photo_id = excluded.photo_id RETURNING id",
+                params![
+                    photo_id,
+                    path,
+                    format,
+                    width as i64,
+                    height as i64,
+                    file_size as i64,
+                    profile_id,
+                    policy,
+                    now_string(),
+                ],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                CoreError::Invalid(format!(
+                    "derivative path {path} belongs to a different photo"
+                ))
+            })?;
         Ok(id)
     }
 
@@ -4892,7 +4922,10 @@ impl Db {
     /// rolls back when it fails, so bulk writers never leave a
     /// half-written library behind.
     pub fn in_transaction<T>(&self, f: impl FnOnce(&Db) -> Result<T>) -> Result<T> {
-        let tx = self.conn.unchecked_transaction()?;
+        // Bulk writers (log-ingest chunks, deletion batches) read and write
+        // through this helper. Take the write lock up front so a concurrent
+        // UI write cannot turn the first write into SQLITE_BUSY_SNAPSHOT.
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let value = f(self)?;
         tx.commit()?;
         Ok(value)
@@ -5195,6 +5228,17 @@ fn build_photo_filter(filter: &PhotoFilter) -> (String, Vec<Value>) {
     (clauses.join(" AND "), values)
 }
 
+fn escape_like(query: &str) -> String {
+    let mut escaped = String::with_capacity(query.len());
+    for character in query.chars() {
+        if matches!(character, '\\' | '%' | '_') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
+}
+
 fn build_text_filter(filter: &PhotoTextFilter) -> (String, Vec<Value>) {
     let mut clauses = vec![VISIBLE_STATUS.to_string()];
     let mut values: Vec<Value> = Vec::new();
@@ -5205,10 +5249,10 @@ fn build_text_filter(filter: &PhotoTextFilter) -> (String, Vec<Value>) {
         .map(str::trim)
         .filter(|query| !query.is_empty())
     {
-        let like = format!("%{query}%");
+        let like = format!("%{}%", escape_like(query));
         clauses.push(
-            "(c.world_name LIKE ? OR c.instance_id LIKE ? OR EXISTS (\
-                SELECT 1 FROM worlds w WHERE w.id = c.world_id AND w.world_id LIKE ?))"
+            "(c.world_name LIKE ? ESCAPE '\\' OR c.instance_id LIKE ? ESCAPE '\\' OR EXISTS (\
+                SELECT 1 FROM worlds w WHERE w.id = c.world_id AND w.world_id LIKE ? ESCAPE '\\'))"
                 .to_string(),
         );
         values.push(Value::Text(like.clone()));
@@ -5221,10 +5265,10 @@ fn build_text_filter(filter: &PhotoTextFilter) -> (String, Vec<Value>) {
         .map(str::trim)
         .filter(|query| !query.is_empty())
     {
-        let like = format!("%{query}%");
+        let like = format!("%{}%", escape_like(query));
         clauses.push(
             "EXISTS (SELECT 1 FROM photo_players pp WHERE pp.photo_id = p.id \
-             AND (pp.display_name LIKE ? OR pp.user_id LIKE ?))"
+             AND (pp.display_name LIKE ? ESCAPE '\\' OR pp.user_id LIKE ? ESCAPE '\\'))"
                 .to_string(),
         );
         values.push(Value::Text(like.clone()));
@@ -5236,10 +5280,10 @@ fn build_text_filter(filter: &PhotoTextFilter) -> (String, Vec<Value>) {
         .map(str::trim)
         .filter(|query| !query.is_empty())
     {
-        let like = format!("%{query}%");
+        let like = format!("%{}%", escape_like(query));
         clauses.push(
             "EXISTS (SELECT 1 FROM photo_tags pt JOIN tags t ON t.id = pt.tag_id \
-             WHERE pt.photo_id = p.id AND t.name LIKE ?)"
+             WHERE pt.photo_id = p.id AND t.name LIKE ? ESCAPE '\\')"
                 .to_string(),
         );
         values.push(Value::Text(like));
@@ -7170,6 +7214,70 @@ mod tests {
         }
         let entries = db.photo_index_text(&PhotoTextFilter::default()).unwrap();
         assert_eq!(entries.len(), 305);
+    }
+
+    #[test]
+    fn photo_index_text_treats_like_metacharacters_literally() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let percent = db
+            .upsert_photo(&sample_photo(root, "/photos/percent.png", 100))
+            .unwrap();
+        let underscore = db
+            .upsert_photo(&sample_photo(root, "/photos/underscore.png", 200))
+            .unwrap();
+        let plain = db
+            .upsert_photo(&sample_photo(root, "/photos/plain.png", 300))
+            .unwrap();
+        db.set_photo_tags(percent, &["%".to_string()]).unwrap();
+        db.set_photo_tags(underscore, &["_".to_string()]).unwrap();
+        db.set_photo_tags(plain, &["plain".to_string()]).unwrap();
+
+        let percent_matches = db
+            .photo_index_text(&PhotoTextFilter {
+                tag: Some("%".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            percent_matches
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec![percent]
+        );
+
+        let underscore_matches = db
+            .photo_index_text(&PhotoTextFilter {
+                tag: Some("_".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            underscore_matches
+                .iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>(),
+            vec![underscore]
+        );
+    }
+
+    #[test]
+    fn photo_index_text_limited_stops_at_the_requested_row_count() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        for index in 0..3 {
+            db.upsert_photo(&sample_photo(
+                root,
+                &format!("/photos/{index}.png"),
+                100 + index,
+            ))
+            .unwrap();
+        }
+        let entries = db
+            .photo_index_text_limited(&PhotoTextFilter::default(), 2)
+            .unwrap();
+        assert_eq!(entries.len(), 2);
     }
 
     #[test]
@@ -11708,6 +11816,31 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(db.count_jobs(QueueStatus::Pending).unwrap(), 1);
+    }
+
+    #[test]
+    fn add_derivative_rejects_a_path_owned_by_another_photo() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let first = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        let second = db
+            .upsert_photo(&sample_photo(root, "/photos/b.png", 200))
+            .unwrap();
+        let path = "/photos/compressed/shared.webp";
+
+        let id = db
+            .add_derivative(first, path, "webp", 10, 20, 30, "p", "keep")
+            .unwrap();
+        assert!(matches!(
+            db.add_derivative(second, path, "webp", 10, 20, 30, "p", "keep"),
+            Err(CoreError::Invalid(_))
+        ));
+        let first_rows = db.derivatives_for_photo(first).unwrap();
+        assert_eq!(first_rows.len(), 1);
+        assert_eq!(first_rows[0].id, id);
+        assert!(db.derivatives_for_photo(second).unwrap().is_empty());
     }
 
     #[test]
