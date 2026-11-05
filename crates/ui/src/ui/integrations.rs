@@ -832,7 +832,7 @@ fn ai_job_stat(p: &Palette, label: String, value: i64) -> Div {
 }
 
 /// The localized stage description shown under one job's progress bar.
-fn ai_stage_label(stage: Option<TaggingStage>) -> String {
+pub(crate) fn ai_stage_label(stage: Option<TaggingStage>) -> String {
     match stage {
         Some(TaggingStage::Presence) => tr!("integrations.ai.jobs.stage.presence"),
         Some(TaggingStage::PeopleCount) => tr!("integrations.ai.jobs.stage.people_count"),
