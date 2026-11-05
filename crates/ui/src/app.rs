@@ -417,6 +417,16 @@ pub(crate) fn any_overlay_open(
         || notification_modal_open
 }
 
+/// AI surfaces that must all block global shortcuts and each other.
+pub(crate) fn ai_overlay_open(
+    license_open: bool,
+    uninstall_open: bool,
+    picker_open: bool,
+    thresholds_open: bool,
+) -> bool {
+    license_open || uninstall_open || picker_open || thresholds_open
+}
+
 /// Whether a global shortcut (sidebar / inspector / search / quick look)
 /// must stay inert. Alert dialogs from `open_alert_dialog` live in the
 /// component dialog layer, outside `any_overlay_open`, so action handlers
@@ -480,7 +490,12 @@ impl App {
             self.quick_look_open,
             self.manual_compress.is_some(),
             self.import_dialog.is_some(),
-            self.ai.license_modal_open || self.ai.uninstall_modal_open,
+            ai_overlay_open(
+                self.ai.license_modal_open,
+                self.ai.uninstall_modal_open,
+                self.ai_tag_picker.open,
+                self.ai_thresholds.open,
+            ),
             self.notification_modal_open,
         )
     }
@@ -538,6 +553,15 @@ impl App {
             (&self.profile_name_input, "input.profile_name"),
             (&self.profile_suffix_input, "input.profile_suffix"),
             (&self.profile_output_input, "input.profile_output"),
+            (&self.search_people_input, "search.ai.people_placeholder"),
+            (
+                &self.ai_tag_picker.query,
+                "ai.tags.picker.search_placeholder",
+            ),
+            (
+                &self.ai_thresholds.query,
+                "settings.ai.thresholds.search_placeholder",
+            ),
             (
                 &self.discord_url_input,
                 "integrations.discord.webhook.placeholder",
@@ -1339,7 +1363,7 @@ impl Render for App {
 #[cfg(test)]
 mod tests {
     use super::{
-        Screen, any_overlay_open, effective_motion_fps, global_shortcut_blocked,
+        Screen, ai_overlay_open, any_overlay_open, effective_motion_fps, global_shortcut_blocked,
         retain_recent_bounds, should_notify_library_error, should_render_shell,
     };
     use crate::ui::notifications::{FailureNotice, failure_transition};
@@ -1433,6 +1457,15 @@ mod tests {
         assert!(any_overlay_open(false, false, true, false, false));
         assert!(any_overlay_open(false, false, false, true, false));
         assert!(any_overlay_open(false, false, false, false, true));
+    }
+
+    #[test]
+    fn ai_overlay_guard_covers_picker_and_thresholds() {
+        assert!(!ai_overlay_open(false, false, false, false));
+        assert!(ai_overlay_open(true, false, false, false));
+        assert!(ai_overlay_open(false, true, false, false));
+        assert!(ai_overlay_open(false, false, true, false));
+        assert!(ai_overlay_open(false, false, false, true));
     }
 
     #[test]

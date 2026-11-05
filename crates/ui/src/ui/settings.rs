@@ -1458,7 +1458,6 @@ impl App {
                             )),
                     ),
             )
-            .child(self.badge(tr!("settings.ai.not_downloaded"), p.amber, p.amber_soft))
     }
 
     fn ai_model_path_box(

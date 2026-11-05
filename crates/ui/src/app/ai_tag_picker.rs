@@ -13,7 +13,7 @@ use vrc_photon_core::ai::AiTagDefinition;
 use vrc_photon_i18n::tr;
 
 use crate::app::App;
-use crate::app::ai::ai_tag_display_name;
+use crate::app::ai::{AI_PLUGIN_ID, ai_tag_display_name};
 
 /// Draft state of the AI-tag picker modal.
 pub(crate) struct AiTagPickerState {
@@ -99,6 +99,13 @@ impl App {
         if self.ai_tag_picker.open || !self.ai_tag_picker_allowed() {
             return;
         }
+        self.ai.tag_definitions =
+            self.db
+                .ai_tag_definitions(AI_PLUGIN_ID)
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "cannot refresh AI tag definitions");
+                    Vec::new()
+                });
         self.ai_tag_picker.selected = self.search_ai_tags.iter().cloned().collect();
         self.ai_tag_picker.branch = None;
         self.ai_tag_picker
@@ -163,6 +170,9 @@ impl App {
             }
         }
         self.search_ai_tags = ordered;
+        if self.searching {
+            self.search_refresh_pending = true;
+        }
         self.close_ai_tag_picker(window, cx);
         self.run_search(cx);
     }
@@ -172,6 +182,9 @@ impl App {
     pub(crate) fn remove_search_ai_tag(&mut self, key: &str, cx: &mut Context<Self>) {
         self.search_ai_tags.retain(|tag| tag != key);
         if self.search_active {
+            if self.searching {
+                self.search_refresh_pending = true;
+            }
             self.run_search(cx);
         } else {
             cx.notify();
@@ -186,6 +199,7 @@ impl App {
             && !self.quick_look_open
             && !self.ai.license_modal_open
             && !self.ai.uninstall_modal_open
+            && !self.ai_thresholds.open
     }
 }
 

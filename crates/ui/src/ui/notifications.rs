@@ -214,6 +214,8 @@ impl App {
             return;
         }
         if !notification_modal_allowed(self.import_dialog.is_some(), self.manual_compress.is_some())
+            || self.ai_tag_picker.open
+            || self.ai_thresholds.open
         {
             // Actionable toasts are painted above the import dialog. Do not
             // stack a second modal over it; keep focus in the import trap.

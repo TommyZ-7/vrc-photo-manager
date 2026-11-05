@@ -360,7 +360,8 @@ impl App {
             &self.ai_thresholds.overrides,
             &self.ai_thresholds.draft,
         );
-        let presence_changed = self.ai_thresholds.presence_draft != self.ai_thresholds.presence;
+        let presence_changed =
+            self.ai_thresholds.presence_draft != self.settings.ai_presence_threshold;
         if presence_changed {
             let previous = self.settings.ai_presence_threshold;
             self.settings.ai_presence_threshold = self.ai_thresholds.presence_draft;
@@ -373,13 +374,20 @@ impl App {
                 cx.notify();
                 return;
             }
+            self.ai_thresholds.presence = self.ai_thresholds.presence_draft;
         }
 
-        if let Err(error) = self.db.apply_ai_tag_thresholds(AI_PLUGIN_ID, &updates) {
-            self.ai_thresholds.error = Some(tr_args!(
-                "settings.ai.thresholds.save_failed",
-                error = error
-            ));
+        if !updates.is_empty()
+            && let Err(error) = self.db.apply_ai_tag_thresholds(AI_PLUGIN_ID, &updates)
+        {
+            self.ai_thresholds.error = Some(if presence_changed {
+                tr_args!(
+                    "settings.ai.thresholds.presence_saved_tag_failed",
+                    error = error
+                )
+            } else {
+                tr_args!("settings.ai.thresholds.save_failed", error = error)
+            });
             cx.notify();
             return;
         }
