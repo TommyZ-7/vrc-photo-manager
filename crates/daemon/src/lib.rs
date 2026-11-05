@@ -327,6 +327,15 @@ impl Daemon {
             if resumed > 0 {
                 tracing::info!(jobs = resumed, "resumed interrupted tagging jobs");
             }
+            let resumed_compression = db
+                .resume_interrupted_compression_jobs()
+                .context("cannot recover interrupted compression jobs")?;
+            if resumed_compression > 0 {
+                tracing::info!(
+                    jobs = resumed_compression,
+                    "resumed interrupted compression jobs"
+                );
+            }
         } else {
             tracing::debug!(
                 "preserving running deletions and tagging jobs because this process does not own the executor lock"
@@ -5763,6 +5772,46 @@ mod tests {
         assert_eq!(photo.status, PhotoStatus::Missing);
         assert!(db.derivatives_for_photo(photo.id).unwrap().is_empty());
         assert_eq!(db.count_photos().unwrap(), 0);
+    }
+
+    #[test]
+    fn daemon_open_resumes_interrupted_compression_jobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = manual_test_daemon(&dir);
+        daemon.run_once().unwrap();
+        drop(daemon);
+
+        let db_path = dir.path().join("library.db");
+        let job_id = {
+            let db = Db::open(&db_path).unwrap();
+            let photo = db
+                .photo_by_path(original_path(&dir).to_str().unwrap())
+                .unwrap()
+                .unwrap();
+            let job = db.enqueue_job(photo.id, "p", "keep").unwrap();
+            let claimed = db.next_pending_job().unwrap().unwrap();
+            assert_eq!(claimed.id, job);
+            job
+        };
+
+        let reopened = Daemon::open(
+            &db_path,
+            Some(dir.path().join("photos")),
+            Some(dir.path().join("logs")),
+        )
+        .unwrap();
+        drop(reopened);
+
+        let db = Db::open(&db_path).unwrap();
+        let resumed = db
+            .list_jobs(10)
+            .unwrap()
+            .into_iter()
+            .find(|job| job.id == job_id)
+            .expect("compression job");
+        assert_eq!(resumed.status, QueueStatus::Pending);
+        assert_eq!(resumed.retry_count, 0);
+        assert!(resumed.started_at.is_none());
     }
 
     #[test]

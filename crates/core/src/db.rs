@@ -3375,6 +3375,19 @@ impl Db {
     /// Returns a failed job to the queue once, incrementing its retry count.
     /// Returns false when the job is missing, not failed, or already at the
     /// retry cap.
+    /// Returns jobs left `processing` by a crash to the queue without
+    /// consuming a retry. A daemon restart must not strand a compression job:
+    /// a stranded row also blocks deletion of its photo forever.
+    pub fn resume_interrupted_compression_jobs(&self) -> Result<usize> {
+        let changed = self.conn.execute(
+            "UPDATE compression_jobs SET status = 'pending', progress = 0, error = NULL, \
+                started_at = NULL, finished_at = NULL \
+             WHERE status = 'processing'",
+            [],
+        )?;
+        Ok(changed)
+    }
+
     pub fn retry_job(&self, id: &str) -> Result<bool> {
         let sql = format!(
             "UPDATE compression_jobs SET {} WHERE id = ?1 AND status = 'failed' \
@@ -7931,6 +7944,31 @@ mod tests {
         assert_eq!(row.status, QueueStatus::Pending);
         assert_eq!(row.progress, 0.0);
         assert!(row.error.is_none());
+    }
+
+    #[test]
+    fn resume_interrupted_compression_jobs_requeues_processing_without_retry() {
+        let db = Db::open_in_memory().unwrap();
+        let root = db.add_root("/photos", "reference").unwrap();
+        let photo = db
+            .upsert_photo(&sample_photo(root, "/photos/a.png", 100))
+            .unwrap();
+        let job = db.enqueue_job(photo, "p", "keep").unwrap();
+        let claimed = db.next_pending_job().unwrap().unwrap();
+        assert_eq!(claimed.id, job);
+        assert_eq!(claimed.status, QueueStatus::Processing);
+
+        assert_eq!(db.resume_interrupted_compression_jobs().unwrap(), 1);
+        let resumed = &db.list_jobs(1).unwrap()[0];
+        assert_eq!(resumed.status, QueueStatus::Pending);
+        assert_eq!(resumed.retry_count, 0);
+        assert_eq!(resumed.progress, 0.0);
+        assert!(resumed.error.is_none());
+        assert!(resumed.started_at.is_none());
+        assert!(resumed.finished_at.is_none());
+
+        // A second call is a no-op.
+        assert_eq!(db.resume_interrupted_compression_jobs().unwrap(), 0);
     }
 
     #[test]
