@@ -8,6 +8,7 @@ pub mod compressor;
 pub mod db;
 pub mod discord;
 pub mod error;
+pub mod fs_safe;
 pub mod hashing;
 pub mod image_decode;
 pub mod importer;

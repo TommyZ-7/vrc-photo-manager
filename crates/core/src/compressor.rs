@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use image::DynamicImage;
 
 use crate::error::{CoreError, Result};
+use crate::fs_safe::{self, PlaceOutcome};
 use crate::model::{CompressionFormat, CompressionProfile, ResizeMode};
 
 #[derive(Debug, Clone)]
@@ -30,8 +31,10 @@ pub struct EncodedImage {
 
 /// Compresses one source image according to a profile.
 ///
-/// The output is written to a temporary file and renamed only after a complete
-/// encode. Existing files are never overwritten; a numeric suffix is added.
+/// The output is written to a unique temporary file and published only after a
+/// complete encode. The final name is claimed atomically through
+/// [`crate::fs_safe`], so existing files are never overwritten; a numeric
+/// suffix is added when the name is taken.
 pub fn compress_image(source: &Path, profile: &CompressionProfile) -> Result<CompressionResult> {
     let image = crate::image_decode::decode_image(source)
         .ok_or_else(|| CoreError::Invalid(format!("cannot decode {}", source.display())))?;
@@ -43,14 +46,24 @@ pub fn compress_decoded(
     source: &Path,
     profile: &CompressionProfile,
 ) -> Result<CompressionResult> {
-    let output_path = determine_output_path(source, profile)?;
+    let (output_dir, base, extension) = output_layout(source, profile)?;
     let (bytes, width, height) = encode_image_bytes(image, profile)?;
     if bytes.is_empty() {
         return Err(CoreError::Invalid(
             "encoder produced an empty file".to_string(),
         ));
     }
-    write_atomic(&output_path, &bytes)?;
+    // Do not trust a precomputed free name: claim each candidate atomically
+    // and move to the next suffix when another writer won the race.
+    let mut number = 0;
+    let output_path = loop {
+        let candidate = output_candidate(&output_dir, &base, &extension, source, number);
+        match fs_safe::write_bytes_no_clobber(&candidate, &bytes) {
+            Ok(PlaceOutcome::Placed) => break candidate,
+            Ok(PlaceOutcome::DestinationExists) => number += 1,
+            Err(error) => return Err(CoreError::Io(error)),
+        }
+    };
     let compressed_size = fs::metadata(&output_path).map_err(CoreError::Io)?.len();
     Ok(CompressionResult {
         output_path,
@@ -160,12 +173,30 @@ fn sanitize_suffix(suffix: &str) -> String {
 }
 
 /// Chooses a non-conflicting output path.
+///
+/// This is a convenience for callers that only need a name. The compression
+/// path does not rely on the `exists()` result; it re-checks atomically while
+/// publishing.
 pub fn determine_output_path(source: &Path, profile: &CompressionProfile) -> Result<PathBuf> {
+    let (output_dir, base, extension) = output_layout(source, profile)?;
+    let mut number = 0;
+    loop {
+        let candidate = output_candidate(&output_dir, &base, &extension, source, number);
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+        number += 1;
+    }
+}
+
+/// Returns the output directory, file stem, and extension used by the suffix
+/// sequence. The directory is created if needed.
+fn output_layout(source: &Path, profile: &CompressionProfile) -> Result<(PathBuf, String, String)> {
     let stem = source
         .file_stem()
         .and_then(|stem| stem.to_str())
         .ok_or_else(|| CoreError::Invalid("source has no file stem".to_string()))?;
-    let extension = profile.format.extension();
+    let extension = profile.format.extension().to_string();
     let suffix = sanitize_suffix(&profile.suffix);
     let output_dir = match profile
         .output_dir
@@ -183,18 +214,30 @@ pub fn determine_output_path(source: &Path, profile: &CompressionProfile) -> Res
             .join("compressed"),
     };
     fs::create_dir_all(&output_dir)?;
+    Ok((output_dir, format!("{stem}{suffix}"), extension))
+}
 
-    let base = format!("{stem}{suffix}");
-    let mut candidate = output_dir.join(format!("{base}.{extension}"));
-    if candidate == source {
-        candidate = output_dir.join(format!("{base}_compressed.{extension}"));
+/// The suffix sequence is `base.ext`, `base-1.ext`, ... When the first
+/// candidate is the source itself, the first name becomes `base_compressed.ext`
+/// and the numeric suffixes continue from there, matching the historical
+/// names.
+fn output_candidate(
+    output_dir: &Path,
+    base: &str,
+    extension: &str,
+    source: &Path,
+    number: u64,
+) -> PathBuf {
+    if number == 0 {
+        let candidate = output_dir.join(format!("{base}.{extension}"));
+        if candidate == source {
+            output_dir.join(format!("{base}_compressed.{extension}"))
+        } else {
+            candidate
+        }
+    } else {
+        output_dir.join(format!("{base}-{number}.{extension}"))
     }
-    let mut number = 1;
-    while candidate.exists() {
-        candidate = output_dir.join(format!("{base}-{number}.{extension}"));
-        number += 1;
-    }
-    Ok(candidate)
 }
 
 fn encode(image: &DynamicImage, profile: &CompressionProfile) -> Result<Vec<u8>> {
@@ -301,32 +344,6 @@ fn encode_jxl(image: &DynamicImage, quality: u8, lossless: bool, speed: u8) -> R
     encoder
         .encode(rgb.as_ref(), width, height)
         .map_err(|error| CoreError::Invalid(format!("JXL encode failed: {error}")))
-}
-
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| CoreError::Invalid("output has no parent directory".to_string()))?;
-    fs::create_dir_all(parent)?;
-    let temp = parent.join(format!(
-        ".{}.{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("image"),
-        uuid::Uuid::new_v4()
-    ));
-    fs::write(&temp, bytes)?;
-    if let Err(error) = fs::rename(&temp, path) {
-        if let Err(cleanup) = fs::remove_file(&temp) {
-            tracing::debug!(
-                %cleanup,
-                path = %temp.display(),
-                "cannot remove temporary compressed file after rename failure"
-            );
-        }
-        return Err(CoreError::Io(error));
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -515,6 +532,60 @@ mod tests {
 
         let second = compress_image(&source, &profile(CompressionFormat::Webp)).unwrap();
         assert_ne!(second.output_path, result.output_path);
+    }
+
+    #[test]
+    fn an_existing_derivative_is_never_truncated() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("VRChat_2026-10-21_21-14-03.221_16x10.png");
+        sample(&source);
+        let expected = dir
+            .path()
+            .join("compressed")
+            .join("VRChat_2026-10-21_21-14-03.221_16x10_out.webp");
+        fs::create_dir_all(expected.parent().unwrap()).unwrap();
+        let sentinel = b"existing derivative bytes";
+        fs::write(&expected, sentinel).unwrap();
+
+        let result = compress_image(&source, &profile(CompressionFormat::Webp)).unwrap();
+
+        assert_ne!(result.output_path, expected);
+        assert!(result.output_path.is_file());
+        assert_eq!(fs::read(&expected).unwrap(), sentinel);
+    }
+
+    #[test]
+    fn concurrent_compressions_get_distinct_outputs() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("VRChat_2026-10-21_21-14-03.221_16x10.png");
+        sample(&source);
+        let profile = profile(CompressionFormat::Webp);
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let source = source.clone();
+                let profile = profile.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    compress_image(&source, &profile).unwrap()
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+
+        assert_ne!(results[0].output_path, results[1].output_path);
+        for result in &results {
+            assert!(result.output_path.is_file());
+            assert_eq!(
+                image::image_dimensions(&result.output_path).unwrap(),
+                (16, 10)
+            );
+        }
     }
 
     #[test]

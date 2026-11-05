@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -169,6 +169,23 @@ pub fn scan_one_detailed(
     if !is_source_photo(path) {
         return None;
     }
+    let rel_path = match contained_rel_path(root, path) {
+        Ok(rel_path) => rel_path,
+        // A path outside the configured root is not a photo for this root.
+        Err(ContainmentError::Outside) => return None,
+        // A symlink that resolves outside the root is a real anomaly, not a
+        // normal "not a candidate" event; report it so the incremental indexer
+        // can surface it.
+        Err(ContainmentError::EscapesRoot) => {
+            return Some(Err(ScanFailure::new(
+                path,
+                "撮影ルートの外を指すパスのため読み込みません".to_string(),
+            )));
+        }
+        Err(ContainmentError::Unverifiable(message)) => {
+            return Some(Err(ScanFailure::new(path, message)));
+        }
+    };
     let metadata = match std::fs::metadata(path) {
         Ok(metadata) => metadata,
         // A candidate that vanished between read_dir and stat is genuinely
@@ -186,10 +203,113 @@ pub fn scan_one_detailed(
     if !metadata.is_file() {
         return None;
     }
-    Some(read_photo(root, path))
+    Some(read_photo(path, rel_path))
 }
 
-fn read_photo(root: &Path, path: &Path) -> std::result::Result<ScannedPhoto, ScanFailure> {
+enum ContainmentError {
+    /// The path is lexically outside the root; it is simply not a candidate.
+    Outside,
+    /// The path is lexically inside, but symlink resolution leaves the root.
+    EscapesRoot,
+    /// Containment could not be verified (permissions, I/O, unresolvable
+    /// root). Fail closed and surface the reason.
+    Unverifiable(String),
+}
+
+/// Verifies that `path` is inside `root` and returns a relative path suitable
+/// for the database.
+///
+/// The check has two parts:
+///
+/// 1. Lexical normalization removes `.` and `..` without touching the
+///    filesystem, so a path that traverses out of the root is rejected before
+///    any file is opened.
+/// 2. Symlink resolution compares canonical paths, so a link (or a link in a
+///    parent directory) that points outside the root is rejected.
+///
+/// The returned path is always a non-empty relative component. It can never
+/// be absolute, unlike the previous `strip_prefix(...).unwrap_or(path)`.
+fn contained_rel_path(root: &Path, path: &Path) -> std::result::Result<String, ContainmentError> {
+    let cwd = std::env::current_dir().map_err(|error| {
+        ContainmentError::Unverifiable(format!("現在のディレクトリを取得できませんでした: {error}"))
+    })?;
+    let root_abs = absolute_lexical(root, &cwd);
+    let path_abs = absolute_lexical(path, &cwd);
+
+    let relative = match path_abs.strip_prefix(&root_abs) {
+        Ok(relative) if !relative.as_os_str().is_empty() => relative.to_path_buf(),
+        _ => return Err(ContainmentError::Outside),
+    };
+
+    let canonical_root = std::fs::canonicalize(&root_abs).map_err(|error| {
+        ContainmentError::Unverifiable(format!("撮影ルートを解決できませんでした: {error}"))
+    })?;
+    match std::fs::canonicalize(&path_abs) {
+        Ok(canonical_path) => {
+            if !canonical_path.starts_with(&canonical_root) {
+                return Err(ContainmentError::EscapesRoot);
+            }
+        }
+        // The candidate vanished. Its lexical location is already inside the
+        // root, but verify the parent in case a symlinked directory points
+        // outside while the target itself is gone.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(parent) = path_abs.parent() {
+                match std::fs::canonicalize(parent) {
+                    Ok(canonical_parent) if canonical_parent.starts_with(&canonical_root) => {}
+                    Ok(_) => return Err(ContainmentError::EscapesRoot),
+                    Err(parent_error) if parent_error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(parent_error) => {
+                        return Err(ContainmentError::Unverifiable(format!(
+                            "ファイルの親ディレクトリを解決できませんでした: {parent_error}"
+                        )));
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            return Err(ContainmentError::Unverifiable(format!(
+                "ファイルパスを解決できませんでした: {error}"
+            )));
+        }
+    }
+
+    Ok(relative.to_string_lossy().replace('\\', "/"))
+}
+
+fn absolute_lexical(path: &Path, cwd: &Path) -> PathBuf {
+    let path = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    lexical_normalize(&path)
+}
+
+/// Resolves `.` and `..` using path components only. Leading `..` components
+/// of a relative path are preserved; for an absolute path they stop at the
+/// root, as the kernel would.
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(Component::RootDir.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => match normalized.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    normalized.pop();
+                }
+                Some(Component::RootDir) | Some(Component::Prefix(_)) => {}
+                _ => normalized.push(".."),
+            },
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
+}
+
+fn read_photo(path: &Path, rel_path: String) -> std::result::Result<ScannedPhoto, ScanFailure> {
     let failure = |message: String| ScanFailure::new(path, message);
     let file_name = path
         .file_name()
@@ -215,12 +335,6 @@ fn read_photo(root: &Path, path: &Path) -> std::result::Result<ScannedPhoto, Sca
         }
         _ => return Err(failure("画像の寸法を読み取れませんでした".to_string())),
     }
-
-    let rel_path = path
-        .strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/");
 
     Ok(ScannedPhoto {
         path: path.to_path_buf(),
@@ -705,6 +819,87 @@ mod tests {
     }
 
     #[test]
+    fn scan_one_accepts_a_normal_nested_file() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("photos");
+        let nested = root.join("2026").join("10");
+        std::fs::create_dir_all(&nested).unwrap();
+        let path = nested.join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        write_png(&path);
+
+        let photo = scan_one(&root, &path).expect("nested photo");
+
+        assert_eq!(
+            photo.rel_path,
+            "2026/10/VRChat_2026-10-21_21-14-03.221_4x3.png"
+        );
+        assert!(!Path::new(&photo.rel_path).is_absolute());
+    }
+
+    #[test]
+    fn scan_one_normalizes_dot_dot_inside_the_root() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("photos");
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        let path = root.join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        write_png(&path);
+        let traversal = nested.join("..").join(path.file_name().unwrap());
+
+        let photo = scan_one(&root, &traversal).expect("photo inside the root");
+
+        assert_eq!(photo.rel_path, "VRChat_2026-10-21_21-14-03.221_4x3.png");
+    }
+
+    #[test]
+    fn scan_one_rejects_parent_traversal_out_of_the_root() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("photos");
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = dir.path().join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        write_png(&outside);
+        let traversal = root.join("..").join(outside.file_name().unwrap());
+
+        assert!(scan_one(&root, &traversal).is_none());
+    }
+
+    #[test]
+    fn scan_one_rejects_an_absolute_path_outside_the_root() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("photos");
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        let outside = other.join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        write_png(&outside);
+
+        assert!(scan_one(&root, &outside).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_one_rejects_a_symlink_that_escapes_the_root() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("photos");
+        let outside_dir = dir.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        let outside = outside_dir.join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        write_png(&outside);
+        let link = root.join("linked.png");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        let result = scan_one_detailed(&root, &link).expect("candidate path");
+        let failure = result.expect_err("an escaping symlink must be rejected");
+        assert!(
+            failure.message.contains("撮影ルートの外"),
+            "unexpected message: {}",
+            failure.message
+        );
+        assert!(scan_one(&root, &link).is_none());
+    }
+
+    #[test]
     fn a_moved_photo_keeps_its_id_and_tags() {
         let dir = tempdir().unwrap();
         let root = dir.path();
@@ -1088,8 +1283,9 @@ mod tests {
         assert_eq!(failures.len(), 1, "failures: {failures:?}");
         assert_eq!(failures[0].path, photo);
         assert!(
-            failures[0].message.contains("読み取れませんでした"),
-            "message should describe the stat failure: {}",
+            failures[0].message.contains("読み取れませんでした")
+                || failures[0].message.contains("解決できませんでした"),
+            "message should describe the stat/resolution failure: {}",
             failures[0].message
         );
     }

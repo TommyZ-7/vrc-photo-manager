@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::{CoreError, Result};
+use crate::fs_safe::{self, MoveOutcome, PlaceOutcome};
 use crate::photo_filename::is_source_photo;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,12 +70,13 @@ pub struct ImportProgress {
 
 /// Copies or moves source photos into a managed library folder.
 ///
-/// Files are written to a temporary name and renamed into place. Name
-/// collisions get a numeric suffix; an existing file is never overwritten.
-/// Every source is handled independently: a per-file problem is recorded in
-/// [`ImportResult::issues`] (or counted as skipped) without aborting the batch.
-/// Only a destination-level failure, such as creating the destination folder,
-/// returns a hard error.
+/// Files are published through [`crate::fs_safe`], which claims the final name
+/// atomically and falls back to an exclusive reservation when hard links are
+/// unavailable. Name collisions get a numeric suffix; an existing file is
+/// never overwritten. Every source is handled independently: a per-file
+/// problem is recorded in [`ImportResult::issues`] (or counted as skipped)
+/// without aborting the batch. Only a destination-level failure, such as
+/// creating the destination folder, returns a hard error.
 ///
 /// Use [`import_files_observed`] for progress and cancellation.
 pub fn import_files(files: &[PathBuf], dest: &Path, mode: ImportMode) -> Result<ImportResult> {
@@ -166,16 +168,34 @@ pub fn collect_folder_sources(folder: &Path, exclude: Option<&Path>) -> Result<F
     if let Err(error) = fs::read_dir(&root) {
         return Err(CoreError::Io(error));
     }
+    // An exclusion that genuinely does not exist cannot contain any
+    // candidate, so it is safe to continue without it. This also keeps the
+    // first import working when the destination folder has not been created
+    // yet. Every other resolution failure is ambiguous: the path might be a
+    // managed destination reached through an unavailable mount or an
+    // unresolvable symlink. Refuse the scan (fail closed) instead of walking
+    // the source without the exclusion and re-importing managed photos.
     let exclude = match exclude {
         Some(path) => match fs::canonicalize(path) {
             Ok(path) => Some(path),
-            Err(error) => {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 tracing::warn!(
                     path = %path.display(),
                     %error,
-                    "cannot resolve import exclusion; continuing without it"
+                    "import exclusion does not exist; continuing without it"
                 );
                 None
+            }
+            Err(error) => {
+                tracing::error!(
+                    path = %path.display(),
+                    %error,
+                    "cannot resolve import exclusion; refusing to import"
+                );
+                return Err(CoreError::Invalid(format!(
+                    "取り込み除外パスを解決できませんでした（安全のため取り込みを中止します）: {}: {error}",
+                    path.display()
+                )));
             }
         },
         None => None,
@@ -290,22 +310,41 @@ fn import_one(source: &Path, dest: &Path, mode: ImportMode, result: &mut ImportR
         result.skipped += 1;
         return;
     }
-    let target = unique_target(dest, source);
-    if source == target.as_path() {
-        result.skipped += 1;
-        return;
-    }
     match mode {
-        ImportMode::Copy => match copy_atomic(source, &target) {
-            Ok(()) => record_imported(source, target, result),
-            Err(error) => result.issues.push(failed_issue(
-                source,
-                Some(target),
-                format!("コピーに失敗しました: {error}"),
-                true,
-            )),
-        },
-        ImportMode::Move => move_file(source, target, result),
+        ImportMode::Copy => copy_file(source, dest, result),
+        ImportMode::Move => move_file(source, dest, result),
+    }
+}
+
+/// Copies `source` to the first destination name that can be claimed
+/// atomically. The suffix sequence stays `name.ext`, `name-1.ext`, ... but no
+/// `exists()` check decides the winner: a collision reported by the publish
+/// helper simply advances to the next name.
+fn copy_file(source: &Path, dest: &Path, result: &mut ImportResult) {
+    let mut number = 0;
+    loop {
+        let target = target_candidate(dest, source, number);
+        if source == target.as_path() {
+            result.skipped += 1;
+            return;
+        }
+        clear_legacy_temp(&target);
+        match copy_atomic(source, &target) {
+            Ok(PlaceOutcome::Placed) => {
+                record_imported(source, target, result);
+                return;
+            }
+            Ok(PlaceOutcome::DestinationExists) => number += 1,
+            Err(error) => {
+                result.issues.push(failed_issue(
+                    source,
+                    Some(target),
+                    format!("コピーに失敗しました: {error}"),
+                    true,
+                ));
+                return;
+            }
+        }
     }
 }
 
@@ -319,60 +358,57 @@ fn record_imported(source: &Path, target: PathBuf, result: &mut ImportResult) {
     result.imported.push(target);
 }
 
-fn move_file(source: &Path, target: PathBuf, result: &mut ImportResult) {
-    fn rename(from: &Path, to: &Path) -> std::io::Result<()> {
-        fs::rename(from, to)
-    }
-    fn remove(path: &Path) -> std::io::Result<()> {
-        fs::remove_file(path)
-    }
-    move_file_with(source, target, result, rename, remove);
+fn move_file(source: &Path, dest: &Path, result: &mut ImportResult) {
+    move_file_with(source, dest, result, fs_safe::move_no_clobber);
 }
 
-/// Moves a file, reporting a partial move when the copy succeeds but the source
-/// removal fails. The filesystem operations are parameters so tests can inject
+/// Moves a file to the first destination name that can be claimed atomically,
+/// reporting a partial move when the destination is complete but the source
+/// removal fails. The move operation is a parameter so tests can inject
 /// failures deterministically.
 fn move_file_with(
     source: &Path,
-    target: PathBuf,
+    dest: &Path,
     result: &mut ImportResult,
-    rename: fn(&Path, &Path) -> std::io::Result<()>,
-    remove_source: fn(&Path) -> std::io::Result<()>,
+    place: fn(&Path, &Path) -> std::io::Result<MoveOutcome>,
 ) {
-    let rename_error = match rename(source, &target) {
-        Ok(()) => {
-            record_imported(source, target, result);
+    let mut number = 0;
+    loop {
+        let target = target_candidate(dest, source, number);
+        if source == target.as_path() {
+            result.skipped += 1;
             return;
         }
-        Err(error) => error,
-    };
-    // Cross-device moves cannot be renamed, so fall back to copy + delete.
-    // Keep the rename failure in the message: it is usually the reason the
-    // fallback was needed at all.
-    if let Err(error) = copy_atomic(source, &target) {
-        result.issues.push(failed_issue(
-            source,
-            Some(target),
-            format!("移動に失敗しました（リネーム: {rename_error}、コピー: {error}）"),
-            true,
-        ));
-        return;
-    }
-    match remove_source(source) {
-        Ok(()) => record_imported(source, target, result),
-        Err(error) => {
-            result.issues.push(ImportIssue {
-                source: source.to_path_buf(),
-                target: Some(target.clone()),
-                message: format!(
-                    "移動先へのコピーは成功しましたが、元ファイルを削除できませんでした: {error}"
-                ),
-                kind: ImportIssueKind::PartialMove,
-                retryable: false,
-            });
-            // The copy exists in the destination, so the destination scan can
-            // index it even though the original remains behind.
-            record_imported(source, target, result);
+        match place(source, &target) {
+            Ok(MoveOutcome::Moved) => {
+                record_imported(source, target, result);
+                return;
+            }
+            Ok(MoveOutcome::SourceNotRemoved(error)) => {
+                result.issues.push(ImportIssue {
+                    source: source.to_path_buf(),
+                    target: Some(target.clone()),
+                    message: format!(
+                        "移動先へのコピーは成功しましたが、元ファイルを削除できませんでした: {error}"
+                    ),
+                    kind: ImportIssueKind::PartialMove,
+                    retryable: false,
+                });
+                // The copy exists in the destination, so the destination scan
+                // can index it even though the original remains behind.
+                record_imported(source, target, result);
+                return;
+            }
+            Ok(MoveOutcome::DestinationExists) => number += 1,
+            Err(error) => {
+                result.issues.push(failed_issue(
+                    source,
+                    Some(target),
+                    format!("移動に失敗しました: {error}"),
+                    true,
+                ));
+                return;
+            }
         }
     }
 }
@@ -392,7 +428,7 @@ fn failed_issue(
     }
 }
 
-fn unique_target(dest: &Path, source: &Path) -> PathBuf {
+fn target_candidate(dest: &Path, source: &Path, number: u64) -> PathBuf {
     let stem = source
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -401,73 +437,45 @@ fn unique_target(dest: &Path, source: &Path) -> PathBuf {
         .extension()
         .and_then(|extension| extension.to_str())
         .unwrap_or("png");
-    let mut candidate = dest.join(format!("{stem}.{extension}"));
-    let mut number = 1;
-    while candidate.exists() {
-        candidate = dest.join(format!("{stem}-{number}.{extension}"));
-        number += 1;
+    if number == 0 {
+        dest.join(format!("{stem}.{extension}"))
+    } else {
+        dest.join(format!("{stem}-{number}.{extension}"))
     }
-    candidate
 }
 
-fn copy_atomic(source: &Path, target: &Path) -> Result<()> {
-    copy_atomic_with(source, target, |from, to| fs::copy(from, to))
+fn copy_atomic(source: &Path, target: &Path) -> Result<PlaceOutcome> {
+    fs_safe::copy_no_clobber(source, target).map_err(CoreError::Io)
 }
 
-/// Copies `source` to a temporary file next to `target` and renames it into
-/// place. The copy operation is a parameter so tests can inject failures.
+/// Copies `source` to a uniquely named temporary file next to `target` and
+/// publishes it without clobbering. The copy operation is a parameter so tests
+/// can inject failures.
+#[cfg(test)]
 fn copy_atomic_with(
     source: &Path,
     target: &Path,
     copy: fn(&Path, &Path) -> std::io::Result<u64>,
-) -> Result<()> {
-    let temp = target.with_extension(format!(
-        "{}.tmp",
-        target
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .unwrap_or("png")
-    ));
-    clear_stale_temp(&temp);
-    if let Err(error) = copy(source, &temp) {
-        remove_temp(&temp, "copy failure");
-        return Err(CoreError::Io(error));
-    }
-    let source_len = fs::metadata(source)?.len();
-    let copied_len = fs::metadata(&temp)?.len();
-    if source_len != copied_len {
-        remove_temp(&temp, "size mismatch");
-        return Err(CoreError::Invalid(format!(
-            "copy size mismatch: {} != {}",
-            source_len, copied_len
-        )));
-    }
-    if let Err(error) = fs::rename(&temp, target) {
-        remove_temp(&temp, "rename failure");
-        return Err(CoreError::Io(error));
-    }
-    Ok(())
+) -> Result<PlaceOutcome> {
+    fs_safe::copy_no_clobber_with(source, target, copy).map_err(CoreError::Io)
 }
 
-/// Removes a temp file left at `temp` by an interrupted import so it cannot
-/// block this file name on every later attempt. A directory at the temp path
-/// was not created by an import; it stays in place and the copy reports the
-/// failure instead.
-fn clear_stale_temp(temp: &Path) {
-    if temp.is_file() {
-        remove_temp(temp, "stale leftover");
-    }
-}
-
-fn remove_temp(temp: &Path, context: &str) {
-    if let Err(error) = fs::remove_file(temp)
-        && error.kind() != std::io::ErrorKind::NotFound
+/// Removes the deterministic temporary name used by versions before the
+/// no-clobber helper. New copies use unique temp names, which never block a
+/// destination, but an upgrade may still find one of these stale files.
+fn clear_legacy_temp(target: &Path) {
+    let extension = target
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("png");
+    let legacy = target.with_extension(format!("{extension}.tmp"));
+    if legacy.is_file()
+        && let Err(error) = fs::remove_file(&legacy)
     {
         tracing::debug!(
             %error,
-            path = %temp.display(),
-            context,
-            "cannot remove temporary copy"
+            path = %legacy.display(),
+            "cannot remove stale import temp"
         );
     }
 }
@@ -480,9 +488,11 @@ mod tests {
     use tempfile::tempdir;
 
     fn write_png(path: &Path) {
-        RgbaImage::from_pixel(4, 3, Rgba([10, 20, 30, 255]))
-            .save(path)
-            .unwrap();
+        write_png_color(path, [10, 20, 30, 255]);
+    }
+
+    fn write_png_color(path: &Path, color: [u8; 4]) {
+        RgbaImage::from_pixel(4, 3, Rgba(color)).save(path).unwrap();
     }
 
     #[test]
@@ -544,31 +554,24 @@ mod tests {
     }
 
     #[test]
-    fn copy_failure_is_retryable_and_does_not_abort_the_batch() {
+    fn copy_failure_is_retryable_and_reports_the_target() {
         let dir = tempdir().unwrap();
         let dest = dir.path().join("dest");
         fs::create_dir_all(&dest).unwrap();
-        let bad = dir.path().join("VRChat_2026-10-21_21-14-03.221_4x3.png");
-        write_png(&bad);
-        // copy_atomic writes to "<name>.png.tmp" first; an existing directory
-        // there makes fs::copy fail deterministically, even when privileged.
-        let blocked_temp = dest.join("VRChat_2026-10-21_21-14-03.221_4x3.png.tmp");
-        fs::create_dir_all(&blocked_temp).unwrap();
-        let good = dir.path().join("VRChat_2026-10-22_10-00-00.000_4x3.png");
-        write_png(&good);
+        let missing = dir.path().join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        let mut result = ImportResult::default();
 
-        let result = import_files(&[bad.clone(), good.clone()], &dest, ImportMode::Copy).unwrap();
+        copy_file(&missing, &dest, &mut result);
 
-        assert_eq!(result.imported, vec![dest.join(good.file_name().unwrap())]);
-        assert_eq!(result.skipped, 0);
+        assert!(result.imported.is_empty());
         assert_eq!(result.issues.len(), 1);
         let issue = &result.issues[0];
         assert_eq!(issue.kind, ImportIssueKind::Failed);
         assert!(issue.retryable);
-        assert_eq!(issue.source, bad);
+        assert_eq!(issue.source, missing);
         assert_eq!(
             issue.target.as_deref(),
-            Some(dest.join(bad.file_name().unwrap()).as_path())
+            Some(dest.join(missing.file_name().unwrap()).as_path())
         );
         assert!(
             issue.message.contains("コピーに失敗しました"),
@@ -605,7 +608,6 @@ mod tests {
         let source = dir.path().join("photo.png");
         write_png(&source);
         let target = dir.path().join("dest.png");
-        let temp = dir.path().join("dest.png.tmp");
 
         let result = copy_atomic_with(&source, &target, |_from, to| {
             fs::write(to, b"partial")?;
@@ -613,11 +615,10 @@ mod tests {
         });
 
         assert!(result.is_err());
-        assert!(
-            !temp.exists(),
-            "a failed copy must not leave its temp behind"
-        );
         assert!(!target.exists());
+        let entries: Vec<_> = fs::read_dir(dir.path()).unwrap().collect();
+        assert_eq!(entries.len(), 1, "only the source must remain");
+        assert_eq!(entries[0].as_ref().unwrap().path(), source);
     }
 
     #[test]
@@ -641,61 +642,57 @@ mod tests {
     }
 
     #[test]
-    fn move_fallback_failure_keeps_the_rename_reason() {
+    fn move_failure_is_reported_with_the_underlying_reason() {
         let dir = tempdir().unwrap();
         let dest = dir.path().join("dest");
         fs::create_dir_all(&dest).unwrap();
         let source = dir.path().join("VRChat_2026-10-21_21-14-03.221_4x3.png");
         write_png(&source);
         let target = dest.join(source.file_name().unwrap());
-        // Block the fallback copy at its temp path so it fails too.
-        fs::create_dir_all(dest.join("VRChat_2026-10-21_21-14-03.221_4x3.png.tmp")).unwrap();
 
         let mut result = ImportResult::default();
-        move_file_with(
-            &source,
-            target,
-            &mut result,
-            |_, _| Err(std::io::Error::other("injected rename failure")),
-            |_| Ok(()),
-        );
+        move_file_with(&source, &dest, &mut result, |_, _| {
+            Err(std::io::Error::other("injected move failure"))
+        });
 
         assert!(result.imported.is_empty());
         assert_eq!(result.issues.len(), 1);
         let issue = &result.issues[0];
         assert_eq!(issue.kind, ImportIssueKind::Failed);
         assert!(issue.retryable);
+        assert_eq!(issue.target.as_deref(), Some(target.as_path()));
         assert!(
             issue.message.contains("移動に失敗しました"),
             "unexpected message: {}",
             issue.message
         );
         assert!(
-            issue.message.contains("injected rename failure"),
-            "message must keep the rename reason: {}",
+            issue.message.contains("injected move failure"),
+            "message must keep the move reason: {}",
             issue.message
         );
     }
 
     #[test]
-    fn move_fallback_reports_partial_move_with_paths_and_error() {
+    fn move_reports_partial_move_with_paths_and_error() {
         let dir = tempdir().unwrap();
         let dest = dir.path().join("dest");
         fs::create_dir_all(&dest).unwrap();
         let source = dir.path().join("VRChat_2026-10-21_21-14-03.221_4x3.png");
         write_png(&source);
         let target = dest.join(source.file_name().unwrap());
+        // The destination is already complete when only removing the source
+        // fails.
+        fs::copy(&source, &target).unwrap();
 
         let mut result = ImportResult::default();
-        move_file_with(
-            &source,
-            target.clone(),
-            &mut result,
-            |_, _| Err(std::io::Error::other("injected rename failure")),
-            |_| Err(std::io::Error::other("injected removal failure")),
-        );
+        move_file_with(&source, &dest, &mut result, |_, _| {
+            Ok(MoveOutcome::SourceNotRemoved(std::io::Error::other(
+                "injected removal failure",
+            )))
+        });
 
-        assert!(target.is_file(), "the fallback copy must exist");
+        assert!(target.is_file(), "the destination must exist");
         assert!(source.is_file(), "the failed removal keeps the source");
         assert_eq!(result.imported, vec![target.clone()]);
         assert_eq!(result.skipped, 0);
@@ -897,6 +894,145 @@ mod tests {
     }
 
     #[test]
+    fn two_moves_to_the_same_destination_keep_both_files() {
+        let dir = tempdir().unwrap();
+        let first_dir = dir.path().join("first");
+        let second_dir = dir.path().join("second");
+        fs::create_dir_all(&first_dir).unwrap();
+        fs::create_dir_all(&second_dir).unwrap();
+        let file_name = "VRChat_2026-10-21_21-14-03.221_4x3.png";
+        let first = first_dir.join(file_name);
+        let second = second_dir.join(file_name);
+        write_png_color(&first, [255, 0, 0, 255]);
+        write_png_color(&second, [0, 0, 255, 255]);
+        let first_bytes = fs::read(&first).unwrap();
+        let second_bytes = fs::read(&second).unwrap();
+        let dest = dir.path().join("dest");
+
+        let result =
+            import_files(&[first.clone(), second.clone()], &dest, ImportMode::Move).unwrap();
+
+        assert!(result.issues.is_empty());
+        assert_eq!(result.imported.len(), 2);
+        assert_ne!(result.imported[0], result.imported[1]);
+        assert!(!first.exists());
+        assert!(!second.exists());
+        let mut contents = vec![
+            fs::read(&result.imported[0]).unwrap(),
+            fs::read(&result.imported[1]).unwrap(),
+        ];
+        contents.sort();
+        let mut expected = vec![first_bytes, second_bytes];
+        expected.sort();
+        assert_eq!(contents, expected, "both source files must be preserved");
+    }
+
+    #[test]
+    fn concurrent_moves_to_the_same_destination_keep_both_files() {
+        let dir = tempdir().unwrap();
+        let first_dir = dir.path().join("first");
+        let second_dir = dir.path().join("second");
+        fs::create_dir_all(&first_dir).unwrap();
+        fs::create_dir_all(&second_dir).unwrap();
+        let file_name = "VRChat_2026-10-21_21-14-03.221_4x3.png";
+        let first = first_dir.join(file_name);
+        let second = second_dir.join(file_name);
+        write_png_color(&first, [255, 0, 0, 255]);
+        write_png_color(&second, [0, 0, 255, 255]);
+        let first_bytes = fs::read(&first).unwrap();
+        let second_bytes = fs::read(&second).unwrap();
+        let dest = dir.path().join("dest");
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+
+        let handles: Vec<_> = [first, second]
+            .into_iter()
+            .map(|source| {
+                let dest = dest.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    import_files(&[source], &dest, ImportMode::Move).unwrap()
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+
+        assert!(results.iter().all(|result| result.issues.is_empty()));
+        let mut paths: Vec<_> = results
+            .iter()
+            .flat_map(|result| result.imported.clone())
+            .collect();
+        paths.sort();
+        paths.dedup();
+        assert_eq!(paths.len(), 2, "each move must keep its own file");
+        let mut contents: Vec<_> = paths.iter().map(|path| fs::read(path).unwrap()).collect();
+        contents.sort();
+        let mut expected = vec![first_bytes, second_bytes];
+        expected.sort();
+        assert_eq!(contents, expected);
+    }
+
+    #[test]
+    fn an_existing_destination_is_never_truncated() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        write_png(&source);
+        let dest = dir.path().join("dest");
+        fs::create_dir_all(&dest).unwrap();
+        let existing = dest.join(source.file_name().unwrap());
+        let sentinel = b"do not overwrite this file";
+        fs::write(&existing, sentinel).unwrap();
+
+        let copy = import_files(std::slice::from_ref(&source), &dest, ImportMode::Copy).unwrap();
+        assert!(copy.issues.is_empty());
+        assert_ne!(copy.imported[0], existing);
+        assert_eq!(fs::read(&existing).unwrap(), sentinel);
+
+        let moved = import_files(std::slice::from_ref(&source), &dest, ImportMode::Move).unwrap();
+        assert!(moved.issues.is_empty());
+        assert_ne!(moved.imported[0], existing);
+        assert!(!source.exists());
+        assert_eq!(fs::read(&existing).unwrap(), sentinel);
+    }
+
+    #[test]
+    fn missing_import_exclusion_is_non_fatal() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("photos");
+        fs::create_dir_all(&root).unwrap();
+        let photo = root.join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        write_png(&photo);
+
+        let scan =
+            collect_folder_sources(&root, Some(&dir.path().join("not-created-yet"))).unwrap();
+
+        assert_eq!(scan.files, vec![photo]);
+        assert!(scan.issues.is_empty());
+    }
+
+    #[test]
+    fn unresolvable_import_exclusion_fails_closed() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("photos");
+        fs::create_dir_all(&root).unwrap();
+        write_png(&root.join("VRChat_2026-10-21_21-14-03.221_4x3.png"));
+        // A regular file used as a path component makes canonicalize fail with
+        // something other than NotFound, even when the tests run as root.
+        let blocker = root.join("not-a-directory");
+        fs::write(&blocker, b"blocker").unwrap();
+
+        let result = collect_folder_sources(&root, Some(&blocker.join("child")));
+
+        assert!(
+            result.is_err(),
+            "an ambiguous exclusion must refuse the scan (fail closed)"
+        );
+    }
+
+    #[test]
     fn folder_scan_is_recursive_and_filters_compressed_symlinks_and_destination() {
         let dir = tempdir().unwrap();
         let raw_root = dir.path().join("photos");
@@ -991,21 +1127,15 @@ mod tests {
         let dir = tempdir().unwrap();
         let source_dir = dir.path().join("source");
         fs::create_dir_all(&source_dir).unwrap();
-        let blocked = source_dir.join("VRChat_2026-10-21_21-14-03.221_4x3.png");
+        // Never created on disk, but still a candidate source photo.
+        let missing = source_dir.join("VRChat_2026-10-21_21-14-03.221_4x3.png");
         let good = source_dir.join("VRChat_2026-10-21_21-14-04.221_4x3.png");
-        write_png(&blocked);
         write_png(&good);
         let dest = dir.path().join("dest");
-        fs::create_dir_all(&dest).unwrap();
-        fs::create_dir_all(dest.join(format!(
-            "{}.tmp",
-            blocked.file_name().unwrap().to_string_lossy()
-        )))
-        .unwrap();
 
         let mut events = Vec::new();
         let result = import_files_observed(
-            &[blocked, good],
+            &[missing, good],
             &dest,
             ImportMode::Copy,
             None,
