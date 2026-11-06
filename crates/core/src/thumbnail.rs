@@ -528,7 +528,7 @@ pub fn ensure_thumbnail_in_with_status(
         return Ok(None);
     };
     let image = match crate::image_decode::decode_image(source) {
-        Some(image) => image.thumbnail(spec.size, spec.size).to_rgba8(),
+        Some(image) => image.thumbnail(spec.size, spec.size).into_rgba8(),
         None => {
             tracing::warn!(path = %source.display(), "cannot decode thumbnail source");
             return Ok(None);

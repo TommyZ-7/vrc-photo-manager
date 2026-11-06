@@ -819,6 +819,30 @@ mod tests {
     }
 
     #[test]
+    fn scan_one_reports_orientation_aware_dimensions() {
+        let dir = tempdir().unwrap();
+        let source = RgbaImage::from_pixel(200, 100, Rgba([10, 20, 30, 255]));
+        for (orientation, minute) in [(6, "03"), (8, "04")] {
+            let path = dir
+                .path()
+                .join(format!("VRChat_2026-10-21_21-14-{minute}.221_200x100.jpg"));
+            crate::image_decode::test_support::write_jpeg_with_orientation(
+                &path,
+                &source,
+                orientation,
+            );
+
+            let photo = scan_one(dir.path(), &path).expect("photo");
+
+            assert_eq!(
+                (photo.width, photo.height),
+                (100, 200),
+                "orientation {orientation}"
+            );
+        }
+    }
+
+    #[test]
     fn scan_one_accepts_a_normal_nested_file() {
         let dir = tempdir().unwrap();
         let root = dir.path().join("photos");

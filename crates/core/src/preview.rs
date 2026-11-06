@@ -137,7 +137,7 @@ fn is_preview_temp_suffix(suffix: &str) -> bool {
 
 pub fn decode_preview(source: &Path) -> Option<RgbaImage> {
     let image = crate::image_decode::decode_image(source)?;
-    Some(image.thumbnail(PREVIEW_MAX, PREVIEW_MAX).to_rgba8())
+    Some(image.thumbnail(PREVIEW_MAX, PREVIEW_MAX).into_rgba8())
 }
 
 /// Decodes the display file for Quick Look without the 1200 px preview cap.
@@ -151,9 +151,9 @@ fn decode_limited(source: &Path, max_edge: u32) -> Option<RgbaImage> {
     let image = crate::image_decode::decode_image(source)?;
     let (width, height) = (image.width(), image.height());
     if width.max(height) <= max_edge {
-        Some(image.to_rgba8())
+        Some(image.into_rgba8())
     } else {
-        Some(image.thumbnail(max_edge, max_edge).to_rgba8())
+        Some(image.thumbnail(max_edge, max_edge).into_rgba8())
     }
 }
 
@@ -221,7 +221,7 @@ fn remove_cache_entry(cache: &Path) -> std::io::Result<()> {
 
 fn read_cache(cache: &Path) -> Option<RgbaImage> {
     let image = crate::image_decode::decode_image(cache)?;
-    Some(image.to_rgba8())
+    Some(image.into_rgba8())
 }
 
 fn write_cache(
