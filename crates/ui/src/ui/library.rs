@@ -25,7 +25,7 @@ use crate::app::ai::{
 };
 use crate::app::cli::log_timing;
 use crate::app::daemon::open_path;
-use crate::state::photo_browser::{PAGE_SIZE, PhotoIndex};
+use crate::state::photo_browser::{PAGE_SIZE, PageFailure, PhotoIndex};
 use crate::state::preview::preview_placeholder_label;
 use crate::state::viewer::ViewerOpenSource;
 use crate::ui::components::{ButtonState, ButtonTone, glass_panel, photo_world_label};
@@ -156,6 +156,18 @@ impl App {
         if requests.is_empty() {
             return;
         }
+        {
+            // `plan_pages` already marks discovered pages. An explicit retry
+            // calls this method directly with the failed page, so mark it here
+            // too; otherwise the next render could request it twice.
+            let mut browser = self.browser_mut(search);
+            if browser.generation != generation {
+                return;
+            }
+            for (page, _, _) in &requests {
+                browser.mark_page_pending(*page);
+            }
+        }
 
         let Some(path) = self.db.path().map(std::path::Path::to_path_buf) else {
             match self.db.photos_by_ids(&ids) {
@@ -233,7 +245,7 @@ impl App {
                         "photos_by_ids returned a short page"
                     );
                     short_page = true;
-                    browser.fail_page(page, generation);
+                    browser.fail_page(page, PageFailure::ReadError, generation);
                 }
             }
         }
@@ -255,10 +267,11 @@ impl App {
         if self.browser_mut(search).generation != generation {
             return;
         }
+        let reason = PageFailure::from_core_error(&error);
         {
             let mut browser = self.browser_mut(search);
             for (page, _, _) in &requests {
-                browser.fail_page(*page, generation);
+                browser.fail_page(*page, reason, generation);
             }
         }
         self.note_library_error("photos.partial_load_error", cx);

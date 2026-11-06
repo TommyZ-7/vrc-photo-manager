@@ -11,6 +11,7 @@
 //! scrolling never does).
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -24,8 +25,8 @@ use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::{App, CardBoundsMap, Screen, retain_recent_bounds};
 use crate::state::photo_browser::{
-    PhotoBrowser, anchor_photo_id, first_visible_photo, list_scroll_top, row_for_photo,
-    visible_month,
+    FailedPage, PAGE_SIZE, PageFailure, PhotoBrowser, anchor_photo_id, first_visible_photo,
+    list_scroll_top, row_for_photo, visible_month,
 };
 use crate::state::thumbnail::ThumbnailCache;
 use crate::state::viewer::ViewerOpenSource;
@@ -233,6 +234,72 @@ fn filter_popover(palette: &Palette) -> AnyElement {
         .into_any_element()
 }
 
+/// One inline error panel and the grid cell it starts at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PageErrorPanel {
+    pub(crate) photo_index: usize,
+    pub(crate) page: usize,
+    pub(crate) span: usize,
+    pub(crate) failure: PageFailure,
+    pub(crate) retrying: bool,
+}
+
+/// Column span of an inline page-error panel.
+///
+/// Two columns when the row has a second cell to consume, one otherwise. The
+/// caller skips `span` cells so every later card keeps its original column.
+pub(crate) fn error_span(columns: usize, column: usize) -> usize {
+    if columns >= 2 && column + 1 < columns {
+        2
+    } else {
+        1
+    }
+}
+
+/// Places at most one error panel per failed page inside a rendered photo
+/// range. The panel sits at the page's first cell, or at the first visible
+/// cell when the page starts above the viewport. Its span never crosses a page
+/// boundary or a row end, so it cannot hide a loaded card from the next page.
+pub(crate) fn page_error_panels(
+    photo_start: usize,
+    photo_end: usize,
+    total: usize,
+    columns: usize,
+    failed_pages: &[FailedPage],
+) -> Vec<PageErrorPanel> {
+    let columns = columns.max(1);
+    let photo_end = photo_end.min(total);
+    if photo_end <= photo_start {
+        return Vec::new();
+    }
+    let mut panels = Vec::new();
+    for failed in failed_pages {
+        let page = failed.page;
+        let page_start = page * PAGE_SIZE;
+        if page_start >= total {
+            continue;
+        }
+        let page_end = (page_start + PAGE_SIZE).min(total);
+        let anchor = page_start.max(photo_start);
+        if anchor >= page_end || anchor >= photo_end {
+            continue;
+        }
+        let remaining_in_page = page_end - anchor;
+        let span = error_span(columns, anchor % columns)
+            .min(remaining_in_page)
+            .max(1);
+        panels.push(PageErrorPanel {
+            photo_index: anchor,
+            page,
+            span,
+            failure: failed.failure,
+            retrying: failed.retrying,
+        });
+    }
+    panels.sort_unstable_by_key(|panel| panel.photo_index);
+    panels
+}
+
 fn render_grid(
     app: &App,
     shared: &Rc<GalleryShared>,
@@ -399,6 +466,17 @@ fn render_grid(
                 let photo_start = range.start * columns;
                 let photo_end = (range.end * columns).min(list_index.total);
                 let missing = browser.plan_pages(photo_start, photo_end, 2);
+                let failed_pages = browser.pages.failed_pages_in_range(photo_start, photo_end);
+                let error_panels: HashMap<usize, PageErrorPanel> = page_error_panels(
+                    photo_start,
+                    photo_end,
+                    list_index.total,
+                    columns,
+                    &failed_pages,
+                )
+                .into_iter()
+                .map(|panel| (panel.photo_index, panel))
+                .collect();
                 let mut missing_thumbnails = Vec::new();
                 let mut rendered = Vec::with_capacity(range.len());
                 for row in range {
@@ -412,10 +490,12 @@ fn render_grid(
                         // itself stays full width so wheel events over the
                         // gutter still reach its scroll handle.
                         .pr(px(RAIL_WIDTH));
-                    for column in 0..columns {
+                    let mut column = 0;
+                    while column < columns {
                         let photo_index = row * columns + column;
                         if photo_index >= list_index.total {
                             line = line.child(div().flex_1());
+                            column += 1;
                             continue;
                         }
                         match browser.photo_at(photo_index) {
@@ -429,9 +509,27 @@ fn render_grid(
                                     card_width,
                                     &mut missing_thumbnails,
                                 ));
+                                column += 1;
                             }
                             None => {
-                                line = line.child(grid_placeholder(&p, image_height, card_width));
+                                if let Some(panel) = error_panels.get(&photo_index) {
+                                    line = line.child(render_page_error(
+                                        app,
+                                        list_shared.as_ref(),
+                                        *panel,
+                                        generation,
+                                        list_index.total,
+                                        &metrics,
+                                        grid_gap,
+                                    ));
+                                    // The panel owns the consumed columns, so
+                                    // later cards do not shift into them.
+                                    column += panel.span;
+                                } else {
+                                    line =
+                                        line.child(grid_placeholder(&p, image_height, card_width));
+                                    column += 1;
+                                }
                             }
                         }
                     }
@@ -539,6 +637,167 @@ fn render_grid(
         .pb(px(GALLERY_PAD_BOTTOM))
         .child(grid)
         .into_any_element()
+}
+
+/// Inline error panel for one failed grid page.
+///
+/// It keeps the card's total height so the uniform list row does not resize:
+/// the image area plus the metadata area is exactly the panel box. The panel
+/// replaces only the failed page's first visible cell (and the neighbour it
+/// spans) and leaves every loaded card where it was.
+fn render_page_error(
+    app: &App,
+    shared: &GalleryShared,
+    panel: PageErrorPanel,
+    generation: u64,
+    total: usize,
+    metrics: &GridMetrics,
+    grid_gap: f32,
+) -> AnyElement {
+    let p = app.palette;
+    let search = shared.search;
+    let page = panel.page;
+    let page_start = page * PAGE_SIZE;
+    let page_end = (page_start + PAGE_SIZE).min(total);
+    let count = page_end.saturating_sub(page_start);
+    let reason = match panel.failure {
+        PageFailure::Timeout => tr!("photos.page_load_failed_timeout"),
+        PageFailure::ReadError => tr!("photos.page_load_failed_error"),
+    };
+    let panel_height = (metrics.row_height - CARD_ROW_GAP).max(metrics.image_height);
+    // Small card presets with hidden metadata cannot fit the full mock copy.
+    // Drop the explanation line first so the range, reason, and actions never
+    // spill out of the fixed row.
+    let compact = panel_height < 120.0;
+
+    let retry_app = shared.app.clone();
+    let retry_button = Button::new(SharedString::from(format!(
+        "page-error-retry-{search}-{page}"
+    )))
+    .label(if panel.retrying {
+        tr!("photos.page_load_retrying")
+    } else {
+        tr!("common.retry")
+    })
+    .small()
+    .primary()
+    .loading(panel.retrying)
+    .on_click(move |_, _, cx| {
+        if let Some(app_entity) = retry_app.upgrade() {
+            app_entity.update(cx, |app, cx| {
+                app.retry_failed_page(search, page, generation, cx);
+            });
+        }
+    });
+
+    let first_app = shared.app.clone();
+    let first_page_button = Button::new(SharedString::from(format!(
+        "page-error-first-{search}-{page}"
+    )))
+    .label(tr!("photos.first_page"))
+    .small()
+    .ghost()
+    .on_click(move |_, _, cx| {
+        if let Some(app_entity) = first_app.upgrade() {
+            app_entity.update(cx, |app, cx| app.scroll_grid_to_first_page(search, cx));
+        }
+    });
+
+    let header = h_flex()
+        .w_full()
+        .min_w_0()
+        .items_center()
+        .gap(px(6.))
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_size(px(11.))
+                .text_color(rgb(p.red))
+                .child("⚠"),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_size(px(10.))
+                .font_semibold()
+                .text_color(rgb(p.red))
+                .child(tr!("photos.page_load_failed_title")),
+        );
+
+    let body = div()
+        .w_full()
+        .min_w_0()
+        .truncate()
+        .text_size(px(10.))
+        .text_color(rgb(p.muted))
+        .child(tr!("photos.page_load_failed_body"));
+
+    let mut panel_el = v_flex()
+        .id(SharedString::from(format!("page-error-{search}-{page}")))
+        .justify_center()
+        .gap(px(if compact { 3. } else { 4. }))
+        .h(px(panel_height))
+        .min_w_0()
+        .overflow_hidden()
+        .px(px(if compact { 10. } else { 14. }))
+        .py(px(if compact { 5. } else { 9. }))
+        .rounded(px(13.))
+        .border_1()
+        .border_color(rgba(with_alpha(p.red, 0x59)))
+        .bg(linear_gradient(
+            135.,
+            linear_color_stop(rgba(with_alpha(p.red, 0x12)), 0.),
+            linear_color_stop(rgb(p.panel_deep), 1.),
+        ))
+        .child(header)
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .truncate()
+                .text_size(px(13.))
+                .font_semibold()
+                .text_color(rgb(p.text))
+                .child(tr_args!(
+                    "photos.page_load_failed_range",
+                    start = page_start + 1,
+                    end = page_end
+                )),
+        )
+        .when(!compact, |this| this.child(body))
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .truncate()
+                .text_size(px(10.))
+                .text_color(rgb(p.muted_2))
+                .child(tr_args!(
+                    "photos.page_load_failed_detail",
+                    page = page + 1,
+                    count = count,
+                    reason = reason
+                )),
+        )
+        .child(
+            h_flex()
+                .w_full()
+                .flex_wrap()
+                .items_center()
+                .gap(px(6.))
+                .child(retry_button)
+                .child(first_page_button),
+        );
+
+    let span = panel.span.max(1);
+    if metrics.card_width > 0.0 {
+        let width = metrics.card_width * span as f32 + grid_gap * span.saturating_sub(1) as f32;
+        panel_el = panel_el.w(px(width)).flex_shrink_0();
+    } else {
+        panel_el = panel_el.flex_grow(span as f32);
+    }
+    panel_el.into_any_element()
 }
 
 fn render_card(
@@ -826,8 +1085,87 @@ fn grid_placeholder(palette: &Palette, image_height: f32, card_width: Option<f32
 
 #[cfg(test)]
 mod tests {
-    use super::filter_chips;
+    use super::{FailedPage, PAGE_SIZE, PageFailure, error_span, filter_chips, page_error_panels};
     use vrc_photon_i18n::MISSING;
+
+    fn failed_page(page: usize, failure: PageFailure) -> FailedPage {
+        FailedPage {
+            page,
+            failure,
+            retrying: false,
+        }
+    }
+
+    #[test]
+    fn error_span_uses_two_columns_only_when_the_row_has_room() {
+        assert_eq!(error_span(4, 0), 2);
+        assert_eq!(error_span(4, 2), 2);
+        assert_eq!(error_span(4, 3), 1);
+        assert_eq!(error_span(2, 0), 2);
+        assert_eq!(error_span(2, 1), 1);
+        assert_eq!(error_span(1, 0), 1);
+        assert_eq!(error_span(0, 0), 1);
+    }
+
+    #[test]
+    fn page_error_panel_sits_at_the_page_start_and_spans_two_cells() {
+        let failed = [failed_page(1, PageFailure::Timeout)];
+        let panels = page_error_panels(0, PAGE_SIZE * 2, PAGE_SIZE * 3, 4, &failed);
+        assert_eq!(
+            panels,
+            vec![super::PageErrorPanel {
+                photo_index: PAGE_SIZE,
+                page: 1,
+                span: 2,
+                failure: PageFailure::Timeout,
+                retrying: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn page_error_panel_anchors_at_the_first_visible_cell() {
+        let failed = [failed_page(1, PageFailure::ReadError)];
+        let panels = page_error_panels(PAGE_SIZE + 2, PAGE_SIZE + 6, PAGE_SIZE * 3, 4, &failed);
+        assert_eq!(panels.len(), 1);
+        assert_eq!(panels[0].photo_index, PAGE_SIZE + 2);
+        assert_eq!(panels[0].span, 2);
+    }
+
+    #[test]
+    fn page_error_panel_does_not_cross_a_page_boundary_or_hide_a_card() {
+        // The only photo on the last page gets a one-column panel.
+        let failed = [failed_page(1, PageFailure::ReadError)];
+        let panels = page_error_panels(PAGE_SIZE, PAGE_SIZE + 1, PAGE_SIZE + 1, 4, &failed);
+        assert_eq!(panels.len(), 1);
+        assert_eq!(panels[0].span, 1);
+
+        // A page starting in the last column cannot span into the next row,
+        // so the panel takes one column and leaves the next page's card in
+        // place.
+        let failed = [failed_page(4, PageFailure::Timeout)];
+        let start = PAGE_SIZE * 4;
+        let panels = page_error_panels(start, start + 8, PAGE_SIZE * 6, 5, &failed);
+        assert_eq!(panels.len(), 1);
+        assert_eq!(panels[0].photo_index, start);
+        assert_eq!(panels[0].span, 1);
+
+        // A failure outside the rendered range produces no panel.
+        let failed = [failed_page(1, PageFailure::ReadError)];
+        assert!(page_error_panels(0, 8, PAGE_SIZE * 3, 4, &failed).is_empty());
+    }
+
+    #[test]
+    fn page_error_panel_keeps_the_retrying_state_for_the_loading_label() {
+        let failed = [FailedPage {
+            page: 1,
+            failure: PageFailure::Timeout,
+            retrying: true,
+        }];
+        let panels = page_error_panels(0, PAGE_SIZE * 2, PAGE_SIZE * 3, 4, &failed);
+        assert_eq!(panels.len(), 1);
+        assert!(panels[0].retrying);
+    }
 
     #[test]
     fn filter_chips_match_the_design_set() {
