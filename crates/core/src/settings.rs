@@ -43,6 +43,14 @@ pub struct AppSettings {
     /// Optional folder for imported photos.
     #[serde(default)]
     pub managed_dir: Option<String>,
+    /// Whether folder imports recreate the source hierarchy. Defaults to the
+    /// historical flat layout.
+    #[serde(default)]
+    pub import_preserve_folder_structure: bool,
+    /// Whether a preserved hierarchy starts with the selected folder's name.
+    /// Stored verbatim even when it has no effect (`preserve` is off).
+    #[serde(default)]
+    pub import_include_root_folder: bool,
     pub language: String,
     pub autostart: bool,
     pub tray: bool,
@@ -198,6 +206,8 @@ impl Default for AppSettings {
             photo_roots: Vec::new(),
             log_dir: None,
             managed_dir: None,
+            import_preserve_folder_structure: false,
+            import_include_root_folder: false,
             language: "ja".to_string(),
             autostart: true,
             tray: true,
@@ -336,6 +346,17 @@ impl AppSettings {
             .map(PathBuf::from)
             .or_else(|| crate::data_dir().map(|dir| dir.join("imported")))
             .unwrap_or_else(|| PathBuf::from("imported"))
+    }
+
+    /// Import options for the next folder import.
+    ///
+    /// The raw include-root flag is kept in settings, but it only takes effect
+    /// together with structure preservation.
+    pub fn import_options(&self) -> crate::importer::ImportOptions {
+        crate::importer::ImportOptions {
+            preserve_structure: self.import_preserve_folder_structure,
+            include_root: self.import_include_root_folder && self.import_preserve_folder_structure,
+        }
     }
 }
 
@@ -1012,6 +1033,86 @@ mod tests {
         assert_eq!(loaded.ai_tagging_backend, "vulkan");
         assert_eq!(loaded.ai_tagging_idle_timeout_sec, 120);
         assert_eq!(loaded.ai_model_license_consent_at, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn import_structure_settings_default_to_flat() {
+        let settings = AppSettings::default();
+        assert!(!settings.import_preserve_folder_structure);
+        assert!(!settings.import_include_root_folder);
+        assert_eq!(
+            settings.import_options(),
+            crate::importer::ImportOptions::default()
+        );
+    }
+
+    #[test]
+    fn import_structure_settings_roundtrip() {
+        let db = Db::open_in_memory().unwrap();
+        let settings = AppSettings {
+            import_preserve_folder_structure: true,
+            import_include_root_folder: true,
+            ..Default::default()
+        };
+        settings.save(&db).unwrap();
+        let loaded = AppSettings::load(&db).unwrap();
+        assert!(loaded.import_preserve_folder_structure);
+        assert!(loaded.import_include_root_folder);
+        assert_eq!(
+            loaded.import_options(),
+            crate::importer::ImportOptions {
+                preserve_structure: true,
+                include_root: true,
+            }
+        );
+    }
+
+    #[test]
+    fn import_include_root_is_persisted_but_ignored_without_preserve() {
+        let db = Db::open_in_memory().unwrap();
+        let settings = AppSettings {
+            import_preserve_folder_structure: false,
+            import_include_root_folder: true,
+            ..Default::default()
+        };
+        settings.save(&db).unwrap();
+
+        let loaded = AppSettings::load(&db).unwrap();
+        assert!(
+            loaded.import_include_root_folder,
+            "the raw flag must survive even when it has no effect"
+        );
+        assert_eq!(
+            loaded.import_options(),
+            crate::importer::ImportOptions {
+                preserve_structure: false,
+                include_root: false,
+            }
+        );
+    }
+
+    #[test]
+    fn old_settings_json_defaults_import_structure_off() {
+        let json = r#"{
+            "photo_roots": [],
+            "log_dir": null,
+            "managed_dir": null,
+            "language": "ja",
+            "autostart": true,
+            "tray": true,
+            "auto_compress": true,
+            "auto_compress_backlog": false,
+            "estimated_link": true,
+            "thumbnail_cache_mb": 2048,
+            "compression_workers": 1
+        }"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+        assert!(!settings.import_preserve_folder_structure);
+        assert!(!settings.import_include_root_folder);
+        assert_eq!(
+            settings.import_options(),
+            crate::importer::ImportOptions::default()
+        );
     }
 
     #[test]

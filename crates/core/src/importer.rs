@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::{CoreError, Result};
@@ -10,6 +10,19 @@ use crate::photo_filename::is_source_photo;
 pub enum ImportMode {
     Copy,
     Move,
+}
+
+/// How folder imports map source paths into the destination.
+///
+/// The default is a flat import, matching [`import_files`] and
+/// [`import_files_observed`]. `include_root` only applies when
+/// `preserve_structure` is set and a source root is supplied.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ImportOptions {
+    /// Recreate the source folder hierarchy below the destination.
+    pub preserve_structure: bool,
+    /// Prefix the hierarchy with the selected source folder's name.
+    pub include_root: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,10 +103,46 @@ pub fn import_files(files: &[PathBuf], dest: &Path, mode: ImportMode) -> Result<
 /// attempted file. Cancellation is checked before each source; the current
 /// file finishes, already imported files stay in place, and the result reports
 /// `cancelled = true` with the sources after `processed` left untouched.
+///
+/// This is the flat variant; use
+/// [`import_files_observed_with_options`] to preserve a folder hierarchy.
 pub fn import_files_observed<F>(
     files: &[PathBuf],
     dest: &Path,
     mode: ImportMode,
+    cancel: Option<&AtomicBool>,
+    observe: F,
+) -> Result<ImportResult>
+where
+    F: FnMut(ImportProgress),
+{
+    import_files_observed_with_options(
+        files,
+        dest,
+        mode,
+        ImportOptions::default(),
+        None,
+        cancel,
+        observe,
+    )
+}
+
+/// Copies or moves source photos with folder-structure options.
+///
+/// With `preserve_structure` and a `source_root`, each target is
+/// `dest/[root name]/relative(path, root)`. Relative paths are validated:
+/// absolute paths, `..` components, and files outside `source_root` become
+/// per-file failures and are never written. Nested parent directories are
+/// created before publication, and name collisions inside a target directory
+/// still receive the usual numeric suffix.
+///
+/// Without a `source_root` (file-only imports) the layout stays flat.
+pub fn import_files_observed_with_options<F>(
+    files: &[PathBuf],
+    dest: &Path,
+    mode: ImportMode,
+    options: ImportOptions,
+    source_root: Option<&Path>,
     cancel: Option<&AtomicBool>,
     mut observe: F,
 ) -> Result<ImportResult>
@@ -120,7 +169,7 @@ where
             break;
         }
         let issues_before = result.issues.len();
-        import_one(source, dest, mode, &mut result);
+        import_one(source, dest, mode, options, source_root, &mut result);
         result.processed += 1;
         for issue in &result.issues[issues_before..] {
             match issue.kind {
@@ -266,7 +315,23 @@ fn walk_folder(dir: &Path, exclude: Option<&Path>, scan: &mut FolderScan) {
     }
 }
 
-fn import_one(source: &Path, dest: &Path, mode: ImportMode, result: &mut ImportResult) {
+fn import_one(
+    source: &Path,
+    dest: &Path,
+    mode: ImportMode,
+    options: ImportOptions,
+    source_root: Option<&Path>,
+    result: &mut ImportResult,
+) {
+    let target_dir = match target_directory(source, dest, options, source_root) {
+        Ok(target_dir) => target_dir,
+        Err(message) => {
+            result
+                .issues
+                .push(failed_issue(source, None, message, false));
+            return;
+        }
+    };
     match fs::metadata(source) {
         Ok(metadata) if metadata.is_file() => {}
         Ok(metadata) if metadata.is_dir() => {
@@ -310,10 +375,77 @@ fn import_one(source: &Path, dest: &Path, mode: ImportMode, result: &mut ImportR
         result.skipped += 1;
         return;
     }
-    match mode {
-        ImportMode::Copy => copy_file(source, dest, result),
-        ImportMode::Move => move_file(source, dest, result),
+    if let Err(error) = fs::create_dir_all(&target_dir) {
+        result.issues.push(failed_issue(
+            source,
+            Some(target_candidate(&target_dir, source, 0)),
+            format!("取り込み先フォルダを作成できませんでした: {error}"),
+            true,
+        ));
+        return;
     }
+    match mode {
+        ImportMode::Copy => copy_file(source, &target_dir, result),
+        ImportMode::Move => move_file(source, &target_dir, result),
+    }
+}
+
+/// Resolves the directory that should receive `source`.
+///
+/// Only the preserve-with-root case nests; every other combination keeps the
+/// historical flat layout. A path that cannot be safely mapped below `dest`
+/// returns a message instead of a target directory.
+fn target_directory(
+    source: &Path,
+    dest: &Path,
+    options: ImportOptions,
+    source_root: Option<&Path>,
+) -> std::result::Result<PathBuf, String> {
+    if !options.preserve_structure {
+        return Ok(dest.to_path_buf());
+    }
+    let Some(root) = source_root else {
+        return Ok(dest.to_path_buf());
+    };
+    let relative = source
+        .strip_prefix(root)
+        .map_err(|_| "取り込み元フォルダの外にあるファイルは取り込めません".to_string())?;
+    if relative.as_os_str().is_empty() {
+        return Err("取り込み元フォルダ自体はファイルとして取り込めません".to_string());
+    }
+    validate_relative_path(relative)?;
+
+    let mut target_dir = dest.to_path_buf();
+    if options.include_root
+        && let Some(name) = root.file_name()
+    {
+        target_dir.push(name);
+    }
+    if let Some(parent) = relative.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        target_dir.push(parent);
+    }
+    Ok(target_dir)
+}
+
+/// Rejects relative paths that could escape the destination directory.
+fn validate_relative_path(relative: &Path) -> std::result::Result<(), String> {
+    if relative.is_absolute() {
+        return Err("取り込み元からの相対パスが絶対パスになっています".to_string());
+    }
+    for component in relative.components() {
+        match component {
+            Component::Normal(_) | Component::CurDir => {}
+            Component::ParentDir => {
+                return Err("取り込み元からの相対パスに `..` が含まれています".to_string());
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err("取り込み元からの相対パスが不正です".to_string());
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Copies `source` to the first destination name that can be claimed
@@ -1163,5 +1295,289 @@ mod tests {
 
         assert_eq!(result.imported.len(), 1);
         assert!(result.renamed.is_empty());
+    }
+
+    fn make_folder_tree(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        let root = dir.join("Trip");
+        fs::create_dir_all(root.join("Day1")).unwrap();
+        fs::create_dir_all(root.join("Day2")).unwrap();
+        let day1 = root.join("Day1/a.png");
+        let day2 = root.join("Day2/b.png");
+        write_png(&day1);
+        write_png(&day2);
+        (root, day1, day2)
+    }
+
+    fn import_with_options(
+        files: &[PathBuf],
+        dest: &Path,
+        mode: ImportMode,
+        options: ImportOptions,
+        root: Option<&Path>,
+    ) -> ImportResult {
+        import_files_observed_with_options(files, dest, mode, options, root, None, |_| {}).unwrap()
+    }
+
+    #[test]
+    fn preserve_off_keeps_the_flat_layout_even_with_a_source_root() {
+        let dir = tempdir().unwrap();
+        let (root, day1, day2) = make_folder_tree(dir.path());
+        let dest = dir.path().join("dest");
+        let options = ImportOptions {
+            preserve_structure: false,
+            include_root: true,
+        };
+
+        let result = import_with_options(
+            &[day1.clone(), day2.clone()],
+            &dest,
+            ImportMode::Copy,
+            options,
+            Some(&root),
+        );
+
+        assert_eq!(
+            result.imported,
+            vec![
+                dest.join(day1.file_name().unwrap()),
+                dest.join(day2.file_name().unwrap()),
+            ]
+        );
+        assert!(result.issues.is_empty());
+        assert!(result.renamed.is_empty());
+    }
+
+    #[test]
+    fn preserve_structure_without_a_source_root_stays_flat() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("a.png");
+        write_png(&source);
+        let dest = dir.path().join("dest");
+        let options = ImportOptions {
+            preserve_structure: true,
+            include_root: true,
+        };
+
+        let result = import_files_observed_with_options(
+            std::slice::from_ref(&source),
+            &dest,
+            ImportMode::Copy,
+            options,
+            None,
+            None,
+            |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(result.imported, vec![dest.join("a.png")]);
+    }
+
+    #[test]
+    fn preserve_structure_nests_subfolders_without_the_root_name() {
+        let dir = tempdir().unwrap();
+        let (root, day1, day2) = make_folder_tree(dir.path());
+        let dest = dir.path().join("dest");
+        let options = ImportOptions {
+            preserve_structure: true,
+            include_root: false,
+        };
+
+        let result =
+            import_with_options(&[day1, day2], &dest, ImportMode::Copy, options, Some(&root));
+
+        assert_eq!(
+            result.imported,
+            vec![dest.join("Day1/a.png"), dest.join("Day2/b.png")]
+        );
+        assert!(result.issues.is_empty());
+        assert!(result.renamed.is_empty());
+    }
+
+    #[test]
+    fn preserve_structure_can_include_the_selected_root_name() {
+        let dir = tempdir().unwrap();
+        let (root, day1, day2) = make_folder_tree(dir.path());
+        let dest = dir.path().join("dest");
+        let options = ImportOptions {
+            preserve_structure: true,
+            include_root: true,
+        };
+
+        let result =
+            import_with_options(&[day1, day2], &dest, ImportMode::Copy, options, Some(&root));
+
+        assert_eq!(
+            result.imported,
+            vec![dest.join("Trip/Day1/a.png"), dest.join("Trip/Day2/b.png"),]
+        );
+        assert!(result.issues.is_empty());
+        assert!(result.renamed.is_empty());
+    }
+
+    #[test]
+    fn nested_same_named_files_in_different_subfolders_do_not_collide() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Trip");
+        fs::create_dir_all(root.join("Day1")).unwrap();
+        fs::create_dir_all(root.join("Day2")).unwrap();
+        let first = root.join("Day1/same.png");
+        let second = root.join("Day2/same.png");
+        write_png(&first);
+        write_png(&second);
+        let dest = dir.path().join("dest");
+
+        let result = import_with_options(
+            &[first, second],
+            &dest,
+            ImportMode::Copy,
+            ImportOptions {
+                preserve_structure: true,
+                include_root: false,
+            },
+            Some(&root),
+        );
+
+        assert_eq!(
+            result.imported,
+            vec![dest.join("Day1/same.png"), dest.join("Day2/same.png")]
+        );
+        assert!(result.renamed.is_empty());
+    }
+
+    #[test]
+    fn collisions_inside_a_nested_target_still_get_a_suffix() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Trip");
+        fs::create_dir_all(root.join("Day1")).unwrap();
+        let source = root.join("Day1/same.png");
+        write_png(&source);
+        let dest = dir.path().join("dest");
+        let existing = dest.join("Day1/same.png");
+        fs::create_dir_all(existing.parent().unwrap()).unwrap();
+        write_png(&existing);
+
+        let result = import_with_options(
+            std::slice::from_ref(&source),
+            &dest,
+            ImportMode::Copy,
+            ImportOptions {
+                preserve_structure: true,
+                include_root: false,
+            },
+            Some(&root),
+        );
+
+        let expected = dest.join("Day1/same-1.png");
+        assert_eq!(result.imported, vec![expected.clone()]);
+        assert_eq!(result.renamed.len(), 1);
+        assert_eq!(result.renamed[0].source, source);
+        assert_eq!(result.renamed[0].target, expected);
+        assert!(existing.is_file(), "the existing file must not be replaced");
+    }
+
+    #[test]
+    fn files_outside_the_source_root_are_per_file_failures() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Trip");
+        fs::create_dir_all(&root).unwrap();
+        let inside = root.join("a.png");
+        write_png(&inside);
+        let outside = dir.path().join("outside.png");
+        write_png(&outside);
+        let traversal = root.join("..").join("outside.png");
+        let dest = dir.path().join("dest");
+
+        let result = import_with_options(
+            &[outside.clone(), traversal.clone(), inside],
+            &dest,
+            ImportMode::Copy,
+            ImportOptions {
+                preserve_structure: true,
+                include_root: false,
+            },
+            Some(&root),
+        );
+
+        assert_eq!(result.imported, vec![dest.join("a.png")]);
+        assert_eq!(result.issues.len(), 2);
+        assert!(result.issues.iter().all(|issue| {
+            issue.kind == ImportIssueKind::Failed && !issue.retryable && issue.target.is_none()
+        }));
+        assert_eq!(result.issues[0].source, outside);
+        assert_eq!(result.issues[1].source, traversal);
+        assert!(
+            result.issues[0].message.contains("外"),
+            "unexpected message: {}",
+            result.issues[0].message
+        );
+        assert!(
+            result.issues[1].message.contains(".."),
+            "unexpected message: {}",
+            result.issues[1].message
+        );
+        assert!(!dest.join("outside.png").exists());
+        assert!(
+            !dir.path().join("outside-1.png").exists(),
+            "nothing may be written outside the destination"
+        );
+    }
+
+    #[test]
+    fn nested_parent_creation_failure_reports_the_nested_target() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("Trip");
+        fs::create_dir_all(root.join("Day1")).unwrap();
+        let source = root.join("Day1/a.png");
+        write_png(&source);
+        let dest = dir.path().join("dest");
+        fs::create_dir_all(&dest).unwrap();
+        // A file where the nested directory should be makes create_dir_all fail.
+        fs::write(dest.join("Day1"), b"blocker").unwrap();
+
+        let result = import_with_options(
+            &[source],
+            &dest,
+            ImportMode::Copy,
+            ImportOptions {
+                preserve_structure: true,
+                include_root: false,
+            },
+            Some(&root),
+        );
+
+        assert!(result.imported.is_empty());
+        assert_eq!(result.issues.len(), 1);
+        assert_eq!(result.issues[0].kind, ImportIssueKind::Failed);
+        assert_eq!(
+            result.issues[0].target.as_deref(),
+            Some(dest.join("Day1/a.png").as_path())
+        );
+        assert!(result.issues[0].retryable);
+    }
+
+    #[test]
+    fn moving_a_folder_import_preserves_structure() {
+        let dir = tempdir().unwrap();
+        let (root, day1, day2) = make_folder_tree(dir.path());
+        let dest = dir.path().join("dest");
+
+        let result = import_with_options(
+            &[day1.clone(), day2.clone()],
+            &dest,
+            ImportMode::Move,
+            ImportOptions {
+                preserve_structure: true,
+                include_root: true,
+            },
+            Some(&root),
+        );
+
+        assert_eq!(
+            result.imported,
+            vec![dest.join("Trip/Day1/a.png"), dest.join("Trip/Day2/b.png"),]
+        );
+        assert!(!day1.exists());
+        assert!(!day2.exists());
+        assert!(result.imported.iter().all(|path| path.is_file()));
     }
 }

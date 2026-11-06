@@ -15,7 +15,8 @@ use std::time::{Duration, Instant};
 use gpui_kit::component::notification::NotificationType;
 use gpui_kit::*;
 use vrc_photon_core::importer::{
-    self, ImportIssue, ImportIssueKind, ImportMode, ImportProgress, ImportRename, ImportResult,
+    self, ImportIssue, ImportIssueKind, ImportMode, ImportOptions, ImportProgress, ImportRename,
+    ImportResult,
 };
 use vrc_photon_core::linker;
 use vrc_photon_core::scanner;
@@ -31,6 +32,11 @@ use crate::ui::import::retryable_sources;
 pub(crate) struct ImportReportView {
     pub(crate) mode: ImportMode,
     pub(crate) dest: PathBuf,
+    /// Folder selected as the import source. `None` for file-only imports.
+    pub(crate) source_root: Option<PathBuf>,
+    /// Folder-structure options used by this run. File imports use the flat
+    /// default.
+    pub(crate) options: ImportOptions,
     pub(crate) total: usize,
     pub(crate) processed: usize,
     pub(crate) imported: usize,
@@ -164,6 +170,9 @@ pub(crate) struct ImportDialogState {
     pub(crate) origin: ImportDialogOrigin,
     pub(crate) mode: ImportMode,
     pub(crate) dest: PathBuf,
+    /// Folder source and structure options captured when the run starts.
+    pub(crate) source_root: Option<PathBuf>,
+    pub(crate) options: ImportOptions,
     pub(crate) source: Option<ImportSource>,
     pub(crate) error: Option<ImportDialogError>,
     pub(crate) phase: ImportDialogPhase,
@@ -193,6 +202,8 @@ impl App {
             origin: ImportDialogOrigin::New,
             mode,
             dest: self.settings.import_dir(),
+            source_root: None,
+            options: ImportOptions::default(),
             source: None,
             error: None,
             phase: ImportDialogPhase::Ready,
@@ -274,14 +285,23 @@ impl App {
     }
 
     pub(crate) fn start_import_from_source(&mut self, cx: &mut Context<Self>) {
-        let Some(files) = self
-            .import_dialog
-            .as_ref()
-            .and_then(|dialog| dialog.source.as_ref())
-            .map(|source| source.files().to_vec())
-        else {
+        let folder_options = self.settings.import_options();
+        let Some(dialog) = self.import_dialog.as_mut() else {
             return;
         };
+        if !matches!(&dialog.phase, ImportDialogPhase::Ready) {
+            return;
+        }
+        let Some(source) = dialog.source.as_ref() else {
+            return;
+        };
+        let files = source.files().to_vec();
+        let (options, source_root) = match source {
+            ImportSource::Files(_) => (ImportOptions::default(), None),
+            ImportSource::Folder { folder, .. } => (folder_options, Some(folder.clone())),
+        };
+        dialog.options = options;
+        dialog.source_root = source_root;
         self.start_import_run(files, cx);
     }
 
@@ -314,6 +334,8 @@ impl App {
         };
         let dest = dialog.dest.clone();
         let mode = dialog.mode;
+        let options = dialog.options;
+        let source_root = dialog.source_root.clone();
         let task_cancel = cancel.clone();
         let observe_cancel = cancel.clone();
         let (tx, rx) = async_channel::unbounded();
@@ -324,10 +346,12 @@ impl App {
                         observe_cancel.store(true, Ordering::Relaxed);
                     }
                 };
-                let result = importer::import_files_observed(
+                let result = importer::import_files_observed_with_options(
                     &files,
                     &dest,
                     mode,
+                    options,
+                    source_root.as_deref(),
                     Some(&task_cancel),
                     &mut observe,
                 )
@@ -394,6 +418,8 @@ impl App {
                         origin: ImportDialogOrigin::New,
                         mode: dialog.mode,
                         dest: dialog.dest,
+                        source_root: dialog.source_root,
+                        options: dialog.options,
                         source: dialog.source,
                         error: Some(ImportDialogError::Failed(error.to_string())),
                         phase: ImportDialogPhase::Ready,
@@ -429,6 +455,8 @@ impl App {
                         ImportReportView {
                             mode: dialog.mode,
                             dest: dialog.dest.clone(),
+                            source_root: dialog.source_root.clone(),
+                            options: dialog.options,
                             total: files.len(),
                             processed: result.processed,
                             imported,
@@ -604,6 +632,8 @@ impl App {
             },
             mode: report.mode,
             dest: report.dest.clone(),
+            source_root: report.source_root.clone(),
+            options: report.options,
             source: None,
             error: None,
             phase: ImportDialogPhase::Ready,
@@ -634,6 +664,8 @@ impl App {
             },
             mode: report.mode,
             dest: report.dest.clone(),
+            source_root: report.source_root.clone(),
+            options: report.options,
             source: None,
             error: None,
             phase: ImportDialogPhase::Ready,
@@ -811,7 +843,7 @@ mod tests {
     use std::rc::Rc;
     use std::time::{Duration, Instant};
     use vrc_photon_core::importer::{
-        ImportIssue, ImportIssueKind, ImportMode, ImportRename, ImportResult,
+        ImportIssue, ImportIssueKind, ImportMode, ImportOptions, ImportRename, ImportResult,
     };
     use vrc_photon_core::scanner::ScanFailure;
     use vrc_photon_core::settings::AppSettings;
@@ -921,6 +953,8 @@ mod tests {
         ImportReportView {
             mode: ImportMode::Copy,
             dest: PathBuf::from("/dest"),
+            source_root: None,
+            options: ImportOptions::default(),
             total: 0,
             processed: 0,
             imported: 0,
@@ -969,6 +1003,8 @@ mod tests {
             origin: ImportDialogOrigin::New,
             mode: ImportMode::Copy,
             dest: PathBuf::from("/dest"),
+            source_root: None,
+            options: ImportOptions::default(),
             source: None,
             error: None,
             phase: ImportDialogPhase::Ready,
@@ -1155,6 +1191,51 @@ mod tests {
         assert_eq!(merged.imported, 2);
         assert!(merged.remaining.is_empty());
         assert!(!merged.cancelled);
+    }
+
+    #[test]
+    fn retry_and_resume_reports_keep_folder_structure_options() {
+        let options = ImportOptions {
+            preserve_structure: true,
+            include_root: true,
+        };
+        let source_root = PathBuf::from("/photos/Trip");
+        let previous = ImportReportView {
+            source_root: Some(source_root.clone()),
+            options,
+            remaining: vec![PathBuf::from("/photos/Trip/Day1/a.png")],
+            ..import_report_fixture()
+        };
+
+        let retried = merge_retry_report(
+            &previous,
+            &[PathBuf::from("/photos/Trip/Day1/a.png")],
+            ImportResult {
+                processed: 1,
+                imported: vec![PathBuf::from("/dest/Trip/Day1/a.png")],
+                ..ImportResult::default()
+            },
+        );
+        assert_eq!(retried.source_root, Some(source_root.clone()));
+        assert_eq!(retried.options, options);
+
+        let resumed = merge_resume_report(
+            &previous,
+            ImportResult {
+                processed: 1,
+                imported: vec![PathBuf::from("/dest/Trip/Day1/a.png")],
+                ..ImportResult::default()
+            },
+        );
+        assert_eq!(resumed.source_root, Some(source_root));
+        assert_eq!(resumed.options, options);
+    }
+
+    #[test]
+    fn file_import_reports_use_the_flat_default_options() {
+        let report = import_report_fixture();
+        assert_eq!(report.source_root, None);
+        assert_eq!(report.options, ImportOptions::default());
     }
 
     #[test]
