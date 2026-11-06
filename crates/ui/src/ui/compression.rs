@@ -4,14 +4,17 @@
 //! dispatch lives in `ui::shell`.
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
+use gpui_kit::base::v_virtual_list;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::Input;
-use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::scroll::{ScrollableElement as _, Scrollbar};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
+use gpui_kit::{Size as VirtualRowSize, size as virtual_row_size};
 use vrc_photon_core::model::{
     CompressionFormat, CompressionJob, CompressionProfile, MAX_JOB_RETRIES, MAX_PROFILE_NAME_CHARS,
     QueueStatus, ResizeMode,
@@ -75,6 +78,67 @@ fn job_retry_label(job: &CompressionJob) -> String {
         )
     } else {
         tr_args!("compression.retry_limit", max = MAX_JOB_RETRIES)
+    }
+}
+
+/// One row of the virtualized queue. Waiting jobs are capped at 20; every
+/// loaded failed job gets a row after them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum QueueRow {
+    FailedHint,
+    Waiting(usize),
+    Failed(usize),
+    Empty,
+}
+
+/// Row heights preserve the previous natural heights (padding + one line at
+/// the default golden-ratio line height, plus the bottom border on job rows).
+/// The failed error line is truncated to one line so the list can pass fixed
+/// sizes without measuring text; the old widget let long errors wrap and grow
+/// the row.
+const QUEUE_HINT_ROW_HEIGHT: f32 = 32.0;
+const QUEUE_WAITING_ROW_HEIGHT: f32 = 41.0;
+const QUEUE_FAILED_ROW_HEIGHT: f32 = 93.0;
+const QUEUE_FAILED_ROW_HEIGHT_NO_RETRY: f32 = 85.0;
+const QUEUE_EMPTY_ROW_HEIGHT: f32 = 43.0;
+
+/// Builds the queue's display order: failed-count hint, waiting rows (max
+/// 20), then failed rows, with the empty state last when the queue is empty.
+pub(crate) fn queue_rows(
+    waiting_count: usize,
+    failed_count: usize,
+    failed_job_count: i64,
+    is_empty: bool,
+) -> Vec<QueueRow> {
+    let waiting = waiting_count.min(20);
+    let mut rows = Vec::with_capacity(
+        waiting + failed_count + usize::from(failed_job_count > 100) + usize::from(is_empty),
+    );
+    if failed_job_count > 100 {
+        rows.push(QueueRow::FailedHint);
+    }
+    rows.extend((0..waiting).map(QueueRow::Waiting));
+    rows.extend((0..failed_count).map(QueueRow::Failed));
+    if is_empty {
+        rows.push(QueueRow::Empty);
+    }
+    rows
+}
+
+/// Fixed row height for the virtual list. A failed row without a retry
+/// button is shorter, matching the previous layout.
+pub(crate) fn queue_row_height(row: QueueRow, failed_jobs: &[CompressionJob]) -> f32 {
+    match row {
+        QueueRow::FailedHint => QUEUE_HINT_ROW_HEIGHT,
+        QueueRow::Waiting(_) => QUEUE_WAITING_ROW_HEIGHT,
+        QueueRow::Failed(index) => {
+            if failed_jobs.get(index).is_some_and(job_retry_available) {
+                QUEUE_FAILED_ROW_HEIGHT
+            } else {
+                QUEUE_FAILED_ROW_HEIGHT_NO_RETRY
+            }
+        }
+        QueueRow::Empty => QUEUE_EMPTY_ROW_HEIGHT,
     }
 }
 
@@ -1046,167 +1110,212 @@ impl App {
                         )
                     }),
             )
-            .child(
+            .child({
+                let queue_is_empty = self.waiting_jobs.is_empty()
+                    && self.jobs.is_empty()
+                    && self.failed_jobs.is_empty();
+                let rows = queue_rows(
+                    self.waiting_jobs.len(),
+                    self.failed_jobs.len(),
+                    self.failed_job_count,
+                    queue_is_empty,
+                );
+                let item_sizes: Rc<Vec<VirtualRowSize<Pixels>>> = Rc::new(
+                    rows.iter()
+                        .map(|row| {
+                            virtual_row_size(px(0.), px(queue_row_height(*row, &self.failed_jobs)))
+                        })
+                        .collect(),
+                );
+                let queue_scroll = self.queue_scroll.clone();
                 v_flex()
+                    .relative()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scrollbar()
-                    .when(self.failed_job_count > 100, |this| {
-                        this.child(
-                            div()
-                                .px(px(GALLERY_PAD_X))
-                                .py(px(8.))
-                                .text_size(px(10.))
-                                .text_color(rgb(p.muted_2))
-                                .child(tr!("compression.queue.failed_hint")),
+                    .w_full()
+                    .child(
+                        v_virtual_list(
+                            cx.entity(),
+                            "compression-queue",
+                            item_sizes,
+                            move |app, range: std::ops::Range<usize>, _window, cx| {
+                                range
+                                    .filter_map(|index| {
+                                        rows.get(index).map(|row| render_queue_row(app, *row, cx))
+                                    })
+                                    .collect::<Vec<_>>()
+                            },
                         )
-                    })
-                    .children(self.waiting_jobs.iter().take(20).map(|job| {
-                        let status = queue_status_badge(&job.status, &p);
-                        let profile_name = self
-                            .profiles
-                            .iter()
-                            .find(|profile| profile.id == job.profile_id)
-                            .map(|profile| profile.name.clone())
-                            .unwrap_or_else(|| tr!("compression.unknown_profile"));
-                        h_flex()
-                            .px(px(16.))
-                            .py(px(10.))
-                            .gap(px(8.))
-                            .items_center()
-                            .border_b_1()
-                            .border_color(rgb(p.border))
-                            .child(self.badge(status.0, status.1, status.2))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_size(px(12.))
-                                    .text_color(rgb(p.text))
-                                    .truncate()
-                                    .child(tr_args!("compression.job.photo", id = job.photo_id)),
-                            )
-                            .child(
+                        .track_scroll(&queue_scroll),
+                    )
+                    .child(Scrollbar::vertical(&queue_scroll).viewport_from_layout())
+            })
+    }
+}
+
+/// Renders one virtual queue row. The virtual list calls this only for the
+/// rows intersecting its viewport, so a 120+ job queue builds a bounded
+/// number of widgets per frame.
+fn render_queue_row(app: &mut App, row: QueueRow, cx: &mut Context<App>) -> AnyElement {
+    let p = app.palette;
+    match row {
+        QueueRow::FailedHint => div()
+            .w_full()
+            .h(px(QUEUE_HINT_ROW_HEIGHT))
+            .px(px(GALLERY_PAD_X))
+            .py(px(8.))
+            .text_size(px(10.))
+            .text_color(rgb(p.muted_2))
+            .child(tr!("compression.queue.failed_hint"))
+            .into_any_element(),
+        QueueRow::Empty => div()
+            .w_full()
+            .h(px(QUEUE_EMPTY_ROW_HEIGHT))
+            .p(px(GALLERY_PAD_X))
+            .text_size(px(12.))
+            .text_color(rgb(p.muted_2))
+            .child(tr!("compression.queue.empty"))
+            .into_any_element(),
+        QueueRow::Waiting(index) => {
+            let Some(job) = app.waiting_jobs.get(index) else {
+                return div().into_any_element();
+            };
+            let status = queue_status_badge(&job.status, &p);
+            let profile_name = app
+                .profiles
+                .iter()
+                .find(|profile| profile.id == job.profile_id)
+                .map(|profile| profile.name.clone())
+                .unwrap_or_else(|| tr!("compression.unknown_profile"));
+            h_flex()
+                .w_full()
+                .h(px(QUEUE_WAITING_ROW_HEIGHT))
+                .px(px(16.))
+                .py(px(10.))
+                .gap(px(8.))
+                .items_center()
+                .border_b_1()
+                .border_color(rgb(p.border))
+                .child(app.badge(status.0, status.1, status.2))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(12.))
+                        .text_color(rgb(p.text))
+                        .truncate()
+                        .child(tr_args!("compression.job.photo", id = job.photo_id)),
+                )
+                .child(
+                    div()
+                        .max_w(px(160.))
+                        .truncate()
+                        .text_size(px(10.))
+                        .text_color(rgb(p.muted_2))
+                        .child(profile_name),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(rgb(p.muted_2))
+                        .child(format!("{:.0}%", job.progress * 100.0)),
+                )
+                .into_any_element()
+        }
+        QueueRow::Failed(index) => {
+            let Some(job) = app.failed_jobs.get(index) else {
+                return div().into_any_element();
+            };
+            let name = app
+                .failed_job_names
+                .get(&job.photo_id)
+                .cloned()
+                .unwrap_or_else(|| tr_args!("compression.job.photo", id = job.photo_id));
+            let profile_name = app
+                .profiles
+                .iter()
+                .find(|profile| profile.id == job.profile_id)
+                .map(|profile| profile.name.clone());
+            let error = job_error_label(job);
+            let retryable = job_retry_available(job);
+            let id = job.id.clone();
+            v_flex()
+                .w_full()
+                .h(px(queue_row_height(row, &app.failed_jobs)))
+                .px(px(16.))
+                .py(px(10.))
+                .gap(px(6.))
+                .border_b_1()
+                .border_color(rgb(p.border))
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(app.badge(tr!("compression.status.failed"), p.red, p.red_soft))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(12.))
+                                .text_color(rgb(p.text))
+                                .truncate()
+                                .child(name),
+                        )
+                        .when_some(profile_name, |this, name| {
+                            this.child(
                                 div()
                                     .max_w(px(160.))
                                     .truncate()
                                     .text_size(px(10.))
                                     .text_color(rgb(p.muted_2))
-                                    .child(profile_name),
+                                    .child(name),
                             )
-                            .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(p.muted_2))
-                                    .child(format!("{:.0}%", job.progress * 100.0)),
-                            )
-                    }))
-                    .children(self.failed_jobs.iter().map(|job| {
-                        let name = self
-                            .failed_job_names
-                            .get(&job.photo_id)
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                tr_args!("compression.job.photo", id = job.photo_id)
-                            });
-                        let profile_name = self
-                            .profiles
-                            .iter()
-                            .find(|profile| profile.id == job.profile_id)
-                            .map(|profile| profile.name.clone());
-                        let error = job_error_label(job);
-                        let retryable = job_retry_available(job);
-                        let id = job.id.clone();
-                        v_flex()
-                            .px(px(16.))
-                            .py(px(10.))
-                            .gap(px(6.))
-                            .border_b_1()
-                            .border_color(rgb(p.border))
-                            .child(
-                                h_flex()
-                                    .items_center()
-                                    .gap(px(8.))
-                                    .child(self.badge(
-                                        tr!("compression.status.failed"),
-                                        p.red,
-                                        p.red_soft,
-                                    ))
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .text_size(px(12.))
-                                            .text_color(rgb(p.text))
-                                            .truncate()
-                                            .child(name),
-                                    )
-                                    .when_some(profile_name, |this, name| {
-                                        this.child(
-                                            div()
-                                                .max_w(px(160.))
-                                                .truncate()
-                                                .text_size(px(10.))
-                                                .text_color(rgb(p.muted_2))
-                                                .child(name),
-                                        )
-                                    }),
-                            )
-                            .when(!error.is_empty(), |this| {
-                                this.child(
-                                    div()
-                                        .w_full()
-                                        .text_size(px(10.))
-                                        .text_color(rgb(p.red))
-                                        .child(error),
-                                )
-                            })
-                            .child(
-                                h_flex()
-                                    .items_center()
-                                    .gap(px(8.))
-                                    .child(
-                                        div()
-                                            .text_size(px(10.))
-                                            .text_color(rgb(p.muted_2))
-                                            .child(job_retry_label(job)),
-                                    )
-                                    .when(retryable, |this| {
-                                        this.child(
-                                            Button::new(SharedString::from(format!(
-                                                "retry-job-{}",
-                                                job.id
-                                            )))
-                                            .label(tr!("common.retry"))
-                                            .small()
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.retry_job(id.clone(), cx)
-                                            })),
-                                        )
-                                    }),
-                            )
-                    }))
-                    .when(
-                        self.waiting_jobs.is_empty()
-                            && self.jobs.is_empty()
-                            && self.failed_jobs.is_empty(),
-                        |this| {
+                        }),
+                )
+                .when(!error.is_empty(), |this| {
+                    // Fixed-height virtualization: one truncated line instead
+                    // of a wrapping error that would change the row height.
+                    this.child(
+                        div()
+                            .w_full()
+                            .truncate()
+                            .text_size(px(10.))
+                            .text_color(rgb(p.red))
+                            .child(error),
+                    )
+                })
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(rgb(p.muted_2))
+                                .child(job_retry_label(job)),
+                        )
+                        .when(retryable, |this| {
                             this.child(
-                                div()
-                                    .p(px(GALLERY_PAD_X))
-                                    .text_size(px(12.))
-                                    .text_color(rgb(p.muted_2))
-                                    .child(tr!("compression.queue.empty")),
+                                Button::new(SharedString::from(format!("retry-job-{}", job.id)))
+                                    .label(tr!("common.retry"))
+                                    .small()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.retry_job(id.clone(), cx)
+                                    })),
                             )
-                        },
-                    ),
-            )
+                        }),
+                )
+                .into_any_element()
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{job_error_label, job_retry_available, job_retry_label, queue_status_badge};
+    use super::{
+        QueueRow, job_error_label, job_retry_available, job_retry_label, queue_row_height,
+        queue_rows, queue_status_badge,
+    };
     use vrc_photon_core::model::{CompressionJob, QueueStatus};
 
     fn test_job(status: QueueStatus, retry_count: i64) -> CompressionJob {
@@ -1261,5 +1370,79 @@ mod tests {
         assert_eq!(queue_status_badge(&QueueStatus::Failed, &p).0, "失敗");
         assert_eq!(queue_status_badge(&QueueStatus::Cancelled, &p).0, "取消");
         assert_eq!(queue_status_badge(&QueueStatus::Unknown, &p).0, "不明");
+    }
+
+    #[test]
+    fn queue_rows_order_waiting_before_failed_and_cap_waiting_at_twenty() {
+        let rows = queue_rows(25, 3, 3, false);
+        let expected: Vec<QueueRow> = (0..20)
+            .map(QueueRow::Waiting)
+            .chain((0..3).map(QueueRow::Failed))
+            .collect();
+        assert_eq!(rows, expected);
+    }
+
+    #[test]
+    fn queue_rows_show_the_failed_hint_only_past_one_hundred_failures() {
+        let hinted = queue_rows(1, 1, 101, false);
+        assert_eq!(hinted.first(), Some(&QueueRow::FailedHint));
+        assert_eq!(hinted[1], QueueRow::Waiting(0));
+        assert_eq!(hinted[2], QueueRow::Failed(0));
+
+        let normal = queue_rows(1, 1, 100, false);
+        assert!(!normal.contains(&QueueRow::FailedHint));
+    }
+
+    #[test]
+    fn queue_rows_empty_queue_shows_the_empty_state() {
+        assert_eq!(queue_rows(0, 0, 0, true), vec![QueueRow::Empty]);
+        assert!(queue_rows(0, 0, 0, false).is_empty());
+    }
+
+    #[test]
+    fn queue_rows_over_one_hundred_twenty_only_builds_a_bounded_window() {
+        let rows = queue_rows(20, 200, 200, false);
+        assert_eq!(rows.first(), Some(&QueueRow::FailedHint));
+        assert_eq!(rows.len(), 221);
+
+        let failures = vec![test_job(QueueStatus::Failed, 0); 200];
+        let heights: Vec<f32> = rows
+            .iter()
+            .map(|row| queue_row_height(*row, &failures))
+            .collect();
+        assert_eq!(heights.len(), rows.len());
+
+        // Simulate the dashboard's queue viewport: only the rows whose
+        // cumulative height intersects the window are built.
+        let viewport = 420.0;
+        let mut bottom = 0.0;
+        let mut visible = 0;
+        for height in &heights {
+            if bottom >= viewport {
+                break;
+            }
+            visible += 1;
+            bottom += height;
+        }
+        assert!(visible <= 12, "visible rows: {visible}");
+        assert!(visible < rows.len());
+    }
+
+    #[test]
+    fn queue_row_height_matches_the_retry_affordance() {
+        let retryable = test_job(QueueStatus::Failed, 0);
+        let capped = test_job(QueueStatus::Failed, 3);
+        assert_eq!(
+            queue_row_height(QueueRow::Failed(0), &[retryable]),
+            super::QUEUE_FAILED_ROW_HEIGHT
+        );
+        assert_eq!(
+            queue_row_height(QueueRow::Failed(0), &[capped]),
+            super::QUEUE_FAILED_ROW_HEIGHT_NO_RETRY
+        );
+        assert!(
+            queue_row_height(QueueRow::Waiting(0), &[]) > 0.0,
+            "waiting rows keep a fixed height"
+        );
     }
 }

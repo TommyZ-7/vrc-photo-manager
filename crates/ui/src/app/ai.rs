@@ -7,6 +7,7 @@
 //! `ui::library`.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::Duration;
 
 use gpui_kit::*;
@@ -987,9 +988,9 @@ pub(crate) fn ai_empty_state_labels(has_ai: bool) -> (String, String) {
 /// The presentation of one AI tag chip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AiTagView {
-    pub(crate) label: String,
-    pub(crate) tooltip: String,
-    pub(crate) probability_label: String,
+    pub(crate) label: SharedString,
+    pub(crate) tooltip: SharedString,
+    pub(crate) probability_label: SharedString,
 }
 
 /// Chooses the catalog name for the active language and formats the
@@ -1031,9 +1032,9 @@ pub(crate) fn ai_tag_view_with_context(
         ),
     };
     AiTagView {
-        label,
-        tooltip,
-        probability_label: format!("{:.1}%", tag.probability * 100.0),
+        label: label.into(),
+        tooltip: tooltip.into(),
+        probability_label: format!("{:.1}%", tag.probability * 100.0).into(),
     }
 }
 
@@ -1053,6 +1054,102 @@ pub(crate) fn ai_tag_views_with_context(
     tags.iter()
         .map(|tag| ai_tag_view_with_context(tag, language, model, time))
         .collect()
+}
+
+/// Inputs that determine the inspector/Quick Look AI metadata block.
+///
+/// `revision` advances whenever the selected photo's AI rows are reloaded
+/// (selection, tagging result, threshold edit, or tag edit). The remaining
+/// fields are compared as well so a language change or a different stored
+/// result cannot reuse an older block even if a refresh is missed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AiMetaKey {
+    pub(crate) photo_id: i64,
+    pub(crate) language: String,
+    pub(crate) revision: u64,
+    pub(crate) tagged_at: Option<String>,
+    pub(crate) model_version: Option<String>,
+}
+
+impl AiMetaKey {
+    pub(crate) fn new(photo_id: i64, language: &str, revision: u64, ai: Option<&PhotoAi>) -> Self {
+        Self {
+            photo_id,
+            language: language.to_string(),
+            revision,
+            tagged_at: ai.map(|ai| ai.tagged_at.clone()),
+            model_version: ai.map(|ai| ai.model_version.clone()),
+        }
+    }
+}
+
+/// Render-ready labels for one AI result. `tags` is shared so the inspector
+/// and Quick Look can mount the same chips without rebuilding their strings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AiMetaView {
+    pub(crate) tags: Rc<Vec<AiTagView>>,
+    pub(crate) people: String,
+    pub(crate) place: String,
+    pub(crate) foot: Option<String>,
+}
+
+/// Caches the AI metadata block until its key changes.
+///
+/// The expensive part is formatting every chip and parsing
+/// `place_probabilities_json`; the key is rebuilt cheaply on each render from
+/// the selected id, language, reload revision, and stored result.
+#[derive(Debug, Default)]
+pub(crate) struct AiMetaCache {
+    key: Option<AiMetaKey>,
+    view: Option<AiMetaView>,
+    /// Number of rebuilds. Tests use this to prove repeated renders reuse the
+    /// parsed place probabilities.
+    computations: u64,
+}
+
+impl AiMetaCache {
+    /// Returns the block for `key`, rebuilding it only when the key changes.
+    pub(crate) fn view(
+        &mut self,
+        key: AiMetaKey,
+        language: &str,
+        ai: Option<&PhotoAi>,
+        tags: &[PhotoAiTagView],
+    ) -> &AiMetaView {
+        if self.key.as_ref() != Some(&key) {
+            let tagged_at = ai.map(|ai| format_tagged_at(&ai.tagged_at));
+            self.view = Some(AiMetaView {
+                tags: Rc::new(ai_tag_views_with_context(
+                    tags,
+                    language,
+                    ai.map(|ai| ai.model_version.as_str()),
+                    tagged_at.as_deref(),
+                )),
+                people: ai
+                    .map(|ai| people_label_in(language, ai.people_min, ai.people_max))
+                    .unwrap_or_else(|| "—".to_string()),
+                place: ai
+                    .map(|ai| {
+                        place_label_with_confidence(
+                            ai.place_branch.as_deref(),
+                            ai.place_probabilities_json.as_deref(),
+                        )
+                    })
+                    .unwrap_or_else(|| "—".to_string()),
+                foot: ai.map(|ai| {
+                    format!(
+                        "{} · {} · {}",
+                        ai.model_version,
+                        ai.variant,
+                        tagged_at.as_deref().unwrap_or(&ai.tagged_at)
+                    )
+                }),
+            });
+            self.key = Some(key);
+            self.computations = self.computations.wrapping_add(1);
+        }
+        self.view.as_ref().expect("AI meta view")
+    }
 }
 
 /// Loads the stored AI result and the applied tag chips for one photo.
@@ -1903,19 +2000,23 @@ impl App {
         self.selected_ai = ai;
         self.selected_ai_tags = tags;
         self.ai_tag_focused = None;
+        // The inspector and Quick Look share this cache. Any reload (a
+        // selection change, a tagging result, or a threshold/tag edit that
+        // refreshes the selected photo) must invalidate it.
+        self.ai_meta_revision = self.ai_meta_revision.wrapping_add(1);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AI_PLUGIN_ID, AiDashboardState, AiErrorInfo, AiErrorKind, AiPluginAction,
-        AiPluginCardState, AiPluginCardView, AiResponseOutcome, AiUiState, ManualRetagOutcome,
-        ModelDownloadView, TaggingLiveRefresh, UninstallTarget, active_job_photo_label,
-        ai_dashboard_view, ai_empty_state_labels, ai_error_code_is_stable, ai_error_detail_in,
-        ai_error_label_in, ai_error_summary_in, ai_error_toast_in, ai_job_error_is_notifiable,
-        ai_manifest_view, ai_plugin_card_state, ai_response_outcome, ai_tag_view,
-        ai_tag_view_with_context, ai_tag_views, apply_install_event, backend_options,
+        AI_PLUGIN_ID, AiDashboardState, AiErrorInfo, AiErrorKind, AiMetaCache, AiMetaKey,
+        AiPluginAction, AiPluginCardState, AiPluginCardView, AiResponseOutcome, AiUiState,
+        ManualRetagOutcome, ModelDownloadView, TaggingLiveRefresh, UninstallTarget,
+        active_job_photo_label, ai_dashboard_view, ai_empty_state_labels, ai_error_code_is_stable,
+        ai_error_detail_in, ai_error_label_in, ai_error_summary_in, ai_error_toast_in,
+        ai_job_error_is_notifiable, ai_manifest_view, ai_plugin_card_state, ai_response_outcome,
+        ai_tag_view, ai_tag_view_with_context, ai_tag_views, apply_install_event, backend_options,
         backend_selection_is_disabled_when_not_ready, collect_ai_snapshot,
         download_progress_bar_ratio, enqueue_manual_retag, format_tagged_at,
         install_event_applies_to_ai, installation_row_id, is_active_installation, load_photo_ai,
@@ -1928,7 +2029,7 @@ mod tests {
         TaggingJobStatus,
     };
     use vrc_photon_core::ai::{
-        NewPhotoAi, PhotoAiTagView, PluginInstallation, PluginState, TaggingJob,
+        NewPhotoAi, PhotoAi, PhotoAiTagView, PluginInstallation, PluginState, TaggingJob,
     };
     use vrc_photon_core::db::Db;
     use vrc_photon_core::model::{JobStatusCounts, NewPhoto};
@@ -2747,6 +2848,113 @@ mod tests {
             local.format("%Y-%m-%d %H:%M").to_string()
         );
         assert_eq!(format_tagged_at("not a timestamp"), "not a timestamp");
+    }
+
+    fn meta_ai() -> PhotoAi {
+        PhotoAi {
+            photo_id: 7,
+            plugin_id: AI_PLUGIN_ID.to_string(),
+            variant: "linux-vulkan".to_string(),
+            sidecar_version: "1.0.0".to_string(),
+            model_version: "d1-2B Q8_0".to_string(),
+            model_revision: "rev".to_string(),
+            catalog_version: "2026-11-03.1".to_string(),
+            source: "auto".to_string(),
+            presence_threshold: 0.5,
+            character_present: true,
+            presence_probability: 0.94,
+            people_min: Some(1),
+            people_max: Some(1),
+            people_median: Some(1),
+            place_branch: Some("indoor".to_string()),
+            place_probabilities_json: Some(r#"{"indoor":0.87,"outdoor":0.13}"#.to_string()),
+            tagged_at: "2026-11-04T12:45:01+00:00".to_string(),
+        }
+    }
+
+    fn meta_tags() -> Vec<PhotoAiTagView> {
+        vec![PhotoAiTagView {
+            tag_key: "sea".to_string(),
+            name: "海".to_string(),
+            name_en: Some("Sea".to_string()),
+            probability: 0.969,
+            applied: true,
+        }]
+    }
+
+    #[test]
+    fn ai_meta_cache_reuses_the_parsed_place_until_the_key_changes() {
+        let ai = meta_ai();
+        let tags = meta_tags();
+        let mut cache = AiMetaCache::default();
+        let key = AiMetaKey::new(7, "ja", 1, Some(&ai));
+
+        let expected_place = place_label_with_confidence(
+            ai.place_branch.as_deref(),
+            ai.place_probabilities_json.as_deref(),
+        );
+        {
+            let view = cache.view(key.clone(), "ja", Some(&ai), &tags);
+            assert_eq!(view.place, expected_place);
+            assert_eq!(view.people, "1人");
+            assert_eq!(view.tags.len(), 1);
+            assert_eq!(view.tags[0].label, "海");
+            let foot = view.foot.as_deref().unwrap_or_default();
+            assert!(foot.contains("d1-2B Q8_0"));
+            assert!(foot.contains("linux-vulkan"));
+        }
+        assert_eq!(cache.computations, 1);
+
+        // A repeated render with the same key must reuse the view, including
+        // the already-parsed place probabilities.
+        {
+            let view = cache.view(key.clone(), "ja", Some(&ai), &tags);
+            assert_eq!(view.place, expected_place);
+        }
+        assert_eq!(cache.computations, 1);
+    }
+
+    #[test]
+    fn ai_meta_cache_invalidates_on_selection_result_and_language_changes() {
+        let ai = meta_ai();
+        let tags = meta_tags();
+        let mut cache = AiMetaCache::default();
+
+        let base = AiMetaKey::new(7, "ja", 1, Some(&ai));
+        cache.view(base.clone(), "ja", Some(&ai), &tags);
+        assert_eq!(cache.computations, 1);
+
+        let other_photo = AiMetaKey::new(8, "ja", 1, Some(&ai));
+        cache.view(other_photo, "ja", Some(&ai), &tags);
+        assert_eq!(cache.computations, 2);
+
+        let english = AiMetaKey::new(8, "en", 1, Some(&ai));
+        {
+            let view = cache.view(english, "en", Some(&ai), &tags);
+            assert_eq!(view.tags[0].label, "Sea");
+        }
+        assert_eq!(cache.computations, 3);
+
+        let refreshed = AiMetaKey::new(8, "en", 2, Some(&ai));
+        cache.view(refreshed, "en", Some(&ai), &tags);
+        assert_eq!(cache.computations, 4);
+
+        let mut retagged = ai.clone();
+        retagged.tagged_at = "2026-11-05T09:00:00+00:00".to_string();
+        let timed = AiMetaKey::new(8, "en", 2, Some(&retagged));
+        cache.view(timed, "en", Some(&retagged), &tags);
+        assert_eq!(cache.computations, 5);
+
+        let mut replayed = retagged.clone();
+        replayed.model_version = "d1-2B Q4_K_M".to_string();
+        let modeled = AiMetaKey::new(8, "en", 2, Some(&replayed));
+        cache.view(modeled, "en", Some(&replayed), &tags);
+        assert_eq!(cache.computations, 6);
+
+        // Returning to the first key rebuilds rather than serving a stale
+        // block from another photo.
+        cache.view(base, "ja", Some(&ai), &tags);
+        assert_eq!(cache.computations, 7);
     }
 
     #[test]
