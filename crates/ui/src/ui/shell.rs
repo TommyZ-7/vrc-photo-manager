@@ -1113,7 +1113,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
     use vrc_photon_core::importer::{
-        ImportIssue, ImportIssueKind, ImportMode, ImportProgress, ImportRename,
+        ImportIssue, ImportIssueKind, ImportMode, ImportOptions, ImportProgress, ImportRename,
     };
     use vrc_photon_core::scanner::ScanFailure;
     use vrc_photon_ipc::ScanPhase as IpcScanPhase;
@@ -1202,6 +1202,8 @@ mod tests {
         ImportReportView {
             mode: ImportMode::Copy,
             dest: PathBuf::from("/dest"),
+            source_root: None,
+            options: ImportOptions::default(),
             total: 0,
             processed: 0,
             imported: 0,
@@ -1220,6 +1222,8 @@ mod tests {
             origin: ImportDialogOrigin::New,
             mode: ImportMode::Copy,
             dest: PathBuf::from("/dest"),
+            source_root: None,
+            options: ImportOptions::default(),
             source: None,
             error: None,
             phase: ImportDialogPhase::Ready,
