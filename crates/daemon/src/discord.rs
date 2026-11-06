@@ -38,6 +38,16 @@ const SEND_HISTORY_LIMIT: i64 = 500;
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 /// Minimum spacing between two successful webhook requests.
 const SUCCESS_INTERVAL: Duration = Duration::from_millis(400);
+/// Automatic retryable failures stop after this many attempts.
+const MAX_SEND_ATTEMPTS: i64 = 10;
+/// A rate-limited row is failed once it has been retried for this long.
+///
+/// `send_outbox` has no column for the first 429, so the window starts at
+/// `created_at`. A row that waited a long time before its first attempt can
+/// therefore hit this bound earlier than a fresh row; this is a safety net
+/// only, and the attempt cap above remains the primary bound for 5xx and
+/// network failures.
+const MAX_RATE_LIMIT_AGE_SECS: i64 = 24 * 60 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProcessOutcome {
@@ -683,6 +693,35 @@ fn record_outcome(
             })
         }
         SendOutcome::RateLimited { retry_after } => {
+            // 429s do not consume the attempt budget (Discord already told us
+            // when to retry), so a wall-clock bound keeps a permanently
+            // rate-limited row from staying `pending` forever.
+            let rate_limit_expired = send_age_seconds(&entry.created_at, now)
+                .is_some_and(|age| age >= MAX_RATE_LIMIT_AGE_SECS);
+            if rate_limit_expired {
+                db.fail_send_after_attempts(
+                    entry.id,
+                    entry.attempts,
+                    SendErrorCode::RateLimited,
+                    Some("HTTP 429 retry window exhausted"),
+                    source,
+                    profile_id.as_deref(),
+                    Some(destination),
+                )?;
+                tracing::warn!(
+                    outbox_id = entry.id,
+                    photo_id = ?entry.photo_id,
+                    status = "failed",
+                    attempts = entry.attempts,
+                    error_code = SendErrorCode::RateLimited.as_str(),
+                    "Discord send exceeded the rate-limit retry window"
+                );
+                return Ok(SendUpdate {
+                    outcome: ProcessOutcome::Failed,
+                    status: SendStatus::Failed,
+                    error_code: Some(SendErrorCode::RateLimited.as_str()),
+                });
+            }
             let next_attempt_at = now.saturating_add(retry_after.as_secs() as i64);
             db.reschedule_send(
                 entry.id,
@@ -706,13 +745,37 @@ fn record_outcome(
         }
         SendOutcome::Retryable { detail } => {
             let attempts = entry.attempts.saturating_add(1);
-            let next_attempt_at = now.saturating_add(retry_delay_seconds(attempts));
             let code = if detail.starts_with("HTTP ") {
                 SendErrorCode::Http5xx
             } else {
                 SendErrorCode::Network
             };
             let detail = truncate_chars(&detail, MAX_ERROR_DETAIL_CHARS);
+            if attempts >= MAX_SEND_ATTEMPTS {
+                db.fail_send_after_attempts(
+                    entry.id,
+                    attempts,
+                    code,
+                    Some(&detail),
+                    source,
+                    profile_id.as_deref(),
+                    Some(destination),
+                )?;
+                tracing::warn!(
+                    outbox_id = entry.id,
+                    photo_id = ?entry.photo_id,
+                    status = "failed",
+                    attempts,
+                    error_code = code.as_str(),
+                    "Discord send retry budget exhausted"
+                );
+                return Ok(SendUpdate {
+                    outcome: ProcessOutcome::Failed,
+                    status: SendStatus::Failed,
+                    error_code: Some(code.as_str()),
+                });
+            }
+            let next_attempt_at = now.saturating_add(retry_delay_seconds(attempts));
             db.reschedule_send(entry.id, attempts, next_attempt_at, code, Some(&detail))?;
             tracing::warn!(
                 outbox_id = entry.id,
@@ -791,6 +854,16 @@ fn retry_delay_seconds(attempts: i64) -> i64 {
     (2i64.saturating_pow(exponent)).saturating_mul(2).min(300)
 }
 
+/// Whole seconds between an RFC 3339 `created_at` value and `now`.
+///
+/// Returns `None` when the stored value cannot be parsed; callers then fall
+/// back to the attempt cap instead of failing a row on bad metadata.
+fn send_age_seconds(created_at: &str, now: i64) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(created_at)
+        .ok()
+        .map(|created| now.saturating_sub(created.timestamp()))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -801,7 +874,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use vrc_photon_core::model::{
-        NewPhoto, SendErrorCode, SendKind, SendOrigin, SendSource, SendStatus,
+        DeletionReason, NewPhoto, SendErrorCode, SendKind, SendOrigin, SendSource, SendStatus,
     };
     use vrc_photon_core::settings::{
         AppSettings, DiscordAutoMode, clear_discord_webhook, save_discord_webhook,
@@ -901,6 +974,35 @@ mod tests {
             .unwrap()
             .unwrap()
         })
+    }
+
+    fn retryable(detail: &str) -> SendOutcome {
+        SendOutcome::Retryable {
+            detail: detail.to_string(),
+        }
+    }
+
+    /// Drives a photo send through every automatic retry and returns the `now`
+    /// used for the terminal attempt.
+    fn exhaust_retry_budget(db: &Arc<Mutex<Db>>, transport: &FakeTransport, id: i64) -> i64 {
+        let events = EventBus::default();
+        let mut now = 100;
+        for attempt in 1..MAX_SEND_ATTEMPTS {
+            assert!(matches!(
+                process_next_send(db, transport, &events, now).unwrap(),
+                ProcessOutcome::Rescheduled
+            ));
+            let entry = with_db(db, |db| db.send_entry_by_id(id).unwrap().unwrap());
+            assert_eq!(entry.attempts, attempt);
+            now = entry
+                .next_attempt_at
+                .expect("a rescheduled row must have a due time");
+        }
+        assert!(matches!(
+            process_next_send(db, transport, &events, now).unwrap(),
+            ProcessOutcome::Failed
+        ));
+        now
     }
 
     fn seed_photo_at(db: &Db, captured_at_utc: i64, name: &str) -> i64 {
@@ -1170,6 +1272,87 @@ mod tests {
     }
 
     #[test]
+    fn rate_limit_keeps_the_attempt_budget_across_many_retries() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, photo) = discord_db(&dir);
+        enable_discord(&db, "https://discord.com/api/webhooks/1/t");
+        let id = enqueue_photo(&db, photo);
+        let transport = FakeTransport::default();
+        for _ in 0..MAX_SEND_ATTEMPTS {
+            transport
+                .outcomes
+                .lock()
+                .unwrap()
+                .push_back(SendOutcome::RateLimited {
+                    retry_after: Duration::from_secs(2),
+                });
+        }
+        transport.outcomes.lock().unwrap().push_back(sent_outcome());
+        let events = EventBus::default();
+        let mut now = 100;
+        for _ in 0..MAX_SEND_ATTEMPTS {
+            assert!(matches!(
+                process_next_send(&db, &transport, &events, now).unwrap(),
+                ProcessOutcome::RateLimited { .. }
+            ));
+            let entry = with_db(&db, |db| db.send_entry_by_id(id).unwrap().unwrap());
+            assert_eq!(entry.attempts, 0);
+            assert_eq!(entry.status, SendStatus::Pending);
+            now = entry.next_attempt_at.unwrap();
+        }
+        assert!(matches!(
+            process_next_send(&db, &transport, &events, now).unwrap(),
+            ProcessOutcome::Sent
+        ));
+        let entry = with_db(&db, |db| db.send_entry_by_id(id).unwrap().unwrap());
+        assert_eq!(entry.status, SendStatus::Sent);
+        assert_eq!(entry.attempts, 0);
+    }
+
+    #[test]
+    fn rate_limit_past_the_retry_window_marks_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, photo) = discord_db(&dir);
+        enable_discord(&db, "https://discord.com/api/webhooks/1/t");
+        let id = enqueue_photo(&db, photo);
+        let now = chrono::Utc::now().timestamp();
+        let stale =
+            chrono::DateTime::<chrono::Utc>::from_timestamp(now - MAX_RATE_LIMIT_AGE_SECS - 1, 0)
+                .unwrap()
+                .to_rfc3339();
+        with_db(&db, |db| {
+            db.connection()
+                .execute(
+                    "UPDATE send_outbox SET created_at = ?1 WHERE id = ?2",
+                    (stale.as_str(), id),
+                )
+                .unwrap();
+        });
+        let transport = FakeTransport::default();
+        transport
+            .outcomes
+            .lock()
+            .unwrap()
+            .push_back(SendOutcome::RateLimited {
+                retry_after: Duration::from_secs(2),
+            });
+        assert!(matches!(
+            process_next_send(&db, &transport, &EventBus::default(), now).unwrap(),
+            ProcessOutcome::Failed
+        ));
+        let entry = with_db(&db, |db| db.send_entry_by_id(id).unwrap().unwrap());
+        assert_eq!(entry.status, SendStatus::Failed);
+        assert_eq!(entry.attempts, 0, "429s do not consume the attempt budget");
+        assert_eq!(entry.error_code.as_deref(), Some("rate_limited"));
+        assert_eq!(entry.next_attempt_at, None);
+        assert!(matches!(
+            process_next_send(&db, &transport, &EventBus::default(), now + 86_400).unwrap(),
+            ProcessOutcome::Idle
+        ));
+        assert_eq!(transport.requests.lock().unwrap().len(), 1);
+    }
+
+    #[test]
     fn rate_limit_pauses_every_send_until_retry_after() {
         let dir = tempfile::tempdir().unwrap();
         let (db, photo) = discord_db(&dir);
@@ -1242,6 +1425,153 @@ mod tests {
             process_next_send(&db, &transport, &events, 101).unwrap(),
             ProcessOutcome::Idle
         ));
+    }
+
+    #[test]
+    fn retry_budget_marks_the_tenth_retryable_failure_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, photo) = discord_db(&dir);
+        enable_discord(&db, "https://discord.com/api/webhooks/1/t");
+        let id = enqueue_photo(&db, photo);
+        let transport = FakeTransport::default();
+        for _ in 0..MAX_SEND_ATTEMPTS {
+            transport
+                .outcomes
+                .lock()
+                .unwrap()
+                .push_back(retryable("network error: ConnectionRefused"));
+        }
+        let now = exhaust_retry_budget(&db, &transport, id);
+        let entry = with_db(&db, |db| db.send_entry_by_id(id).unwrap().unwrap());
+        assert_eq!(entry.status, SendStatus::Failed);
+        assert_eq!(entry.attempts, MAX_SEND_ATTEMPTS);
+        assert_eq!(entry.error_code.as_deref(), Some("network"));
+        assert_eq!(
+            entry.error_detail.as_deref(),
+            Some("network error: ConnectionRefused")
+        );
+        assert!(entry.finished_at.is_some());
+        assert_eq!(
+            transport.requests.lock().unwrap().len(),
+            MAX_SEND_ATTEMPTS as usize
+        );
+        assert!(matches!(
+            process_next_send(&db, &transport, &EventBus::default(), now + 86_400).unwrap(),
+            ProcessOutcome::Idle
+        ));
+    }
+
+    #[test]
+    fn manual_retry_after_retry_budget_resets_and_can_succeed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, photo) = discord_db(&dir);
+        enable_discord(&db, "https://discord.com/api/webhooks/1/t");
+        let id = enqueue_photo(&db, photo);
+        let transport = FakeTransport::default();
+        for _ in 0..MAX_SEND_ATTEMPTS {
+            transport
+                .outcomes
+                .lock()
+                .unwrap()
+                .push_back(retryable("network error: timeout"));
+        }
+        transport.outcomes.lock().unwrap().push_back(sent_outcome());
+        let now = exhaust_retry_budget(&db, &transport, id);
+        assert_eq!(
+            with_db(&db, |db| db.send_entry_by_id(id).unwrap().unwrap().status),
+            SendStatus::Failed
+        );
+
+        assert!(with_db(&db, |db| db.retry_send(id).unwrap()));
+        let pending = with_db(&db, |db| db.send_entry_by_id(id).unwrap().unwrap());
+        assert_eq!(pending.status, SendStatus::Pending);
+        assert_eq!(pending.attempts, 0);
+        assert_eq!(pending.next_attempt_at, None);
+        assert_eq!(pending.error_code, None);
+        assert_eq!(pending.error_detail, None);
+        assert_eq!(pending.finished_at, None);
+
+        assert!(matches!(
+            process_next_send(&db, &transport, &EventBus::default(), now).unwrap(),
+            ProcessOutcome::Sent
+        ));
+        let sent = with_db(&db, |db| db.send_entry_by_id(id).unwrap().unwrap());
+        assert_eq!(sent.status, SendStatus::Sent);
+        assert_eq!(sent.attempts, 0);
+    }
+
+    #[test]
+    fn failed_send_at_retry_cap_does_not_block_deletion_but_active_send_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let (db, failed_manual) = discord_db(&dir);
+        let photo_dir = dir.path().join("photos");
+        let failed_auto = with_db(&db, |db| seed_photo_file(db, &photo_dir, "second.png"));
+        let active = with_db(&db, |db| seed_photo_file(db, &photo_dir, "third.png"));
+        enable_discord(&db, "https://discord.com/api/webhooks/1/t");
+
+        let transport = FakeTransport::default();
+        for photo in [failed_manual, failed_auto] {
+            let id = enqueue_photo(&db, photo);
+            for _ in 0..MAX_SEND_ATTEMPTS {
+                transport
+                    .outcomes
+                    .lock()
+                    .unwrap()
+                    .push_back(retryable("network error: timeout"));
+            }
+            exhaust_retry_budget(&db, &transport, id);
+            assert_eq!(
+                with_db(&db, |db| db.deletion_blockers(photo).unwrap().active),
+                0,
+                "a send failed at the retry cap must not block deletion"
+            );
+        }
+
+        let active_send = enqueue_photo(&db, active);
+        with_db(&db, |db| {
+            let claimed = db.claim_next_send(100).unwrap().unwrap();
+            assert_eq!(claimed.id, active_send);
+        });
+        assert_eq!(
+            with_db(&db, |db| db.deletion_blockers(active).unwrap().active),
+            1
+        );
+
+        let (manual_request, auto_request, blocked_request) = with_db(&db, |db| {
+            (
+                db.request_deletion(&[failed_manual], DeletionReason::Manual, false)
+                    .unwrap()[0],
+                db.request_deletion(&[failed_auto], DeletionReason::AutoReplace, false)
+                    .unwrap()[0],
+                db.request_deletion(&[active], DeletionReason::Manual, false)
+                    .unwrap()[0],
+            )
+        });
+        let pending_ids: Vec<i64> = with_db(&db, |db| {
+            db.pending_deletion_requests(10)
+                .unwrap()
+                .into_iter()
+                .map(|request| request.id)
+                .collect()
+        });
+        assert!(pending_ids.contains(&manual_request));
+        assert!(pending_ids.contains(&auto_request));
+        assert!(
+            !pending_ids.contains(&blocked_request),
+            "an active send must keep its deletion request out of the queue"
+        );
+        assert!(with_db(&db, |db| db
+            .claim_deletion(manual_request)
+            .unwrap()
+            .is_some()));
+        assert!(with_db(&db, |db| db
+            .claim_deletion(auto_request)
+            .unwrap()
+            .is_some()));
+        assert!(with_db(&db, |db| db
+            .claim_deletion(blocked_request)
+            .unwrap()
+            .is_none()));
     }
 
     #[test]
