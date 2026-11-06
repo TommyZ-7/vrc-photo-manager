@@ -24,6 +24,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use gpui_kit::base::VirtualListScrollHandle;
 use gpui_kit::component::WindowExt;
 use gpui_kit::component::input::{InputEvent, InputState, TextareaState};
 use gpui_kit::component::notification::NotificationType;
@@ -198,6 +199,11 @@ pub struct App {
     pub(crate) selected_tags: Vec<String>,
     pub(crate) selected_ai: Option<PhotoAi>,
     pub(crate) selected_ai_tags: Vec<PhotoAiTagView>,
+    /// Bumped whenever the selected AI rows are reloaded. Keeps the cached
+    /// inspector block from surviving a tagging result or tag edit.
+    pub(crate) ai_meta_revision: u64,
+    /// Cached AI metadata block shared by the inspector and Quick Look.
+    pub(crate) ai_meta_cache: ai::AiMetaCache,
     pub(crate) selected_derivatives: Vec<Derivative>,
     pub(crate) compressed_ids: HashSet<i64>,
     pub(crate) duplicate_ids: HashSet<i64>,
@@ -311,6 +317,9 @@ pub struct App {
     pub(crate) update: update_view::UpdateState,
     pub(crate) jobs: Vec<CompressionJob>,
     pub(crate) waiting_jobs: Vec<CompressionJob>,
+    /// Scroll offset of the virtualized compression queue, shared by the
+    /// compression screen and the dashboard panel.
+    pub(crate) queue_scroll: VirtualListScrollHandle,
     pub(crate) active_job_count: i64,
     pub(crate) waiting_job_count: i64,
     pub(crate) daemon_errors: Vec<DaemonError>,
@@ -988,6 +997,8 @@ impl App {
             selected_tags: Vec::new(),
             selected_ai: None,
             selected_ai_tags: Vec::new(),
+            ai_meta_revision: 0,
+            ai_meta_cache: ai::AiMetaCache::default(),
             selected_derivatives: Vec::new(),
             compressed_ids: HashSet::new(),
             duplicate_ids: HashSet::new(),
@@ -1093,6 +1104,7 @@ impl App {
             update: update_view::UpdateState::new(health_token, database_ok, demo, db_path),
             jobs: Vec::new(),
             waiting_jobs: Vec::new(),
+            queue_scroll: VirtualListScrollHandle::new(),
             active_job_count: 0,
             waiting_job_count: 0,
             daemon_errors: Vec::new(),

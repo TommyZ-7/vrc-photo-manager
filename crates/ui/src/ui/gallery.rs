@@ -43,7 +43,91 @@ pub(crate) struct GalleryShared {
     /// Frame counter for card bounds. Updated here instead of App's render
     /// epoch because scrolling repaints cards without re-rendering App.
     pub(crate) bounds_epoch: Rc<Cell<u64>>,
+    /// Display strings for the cards this gallery has painted. A scroll
+    /// repaint reuses them instead of rebuilding the world and meta lines.
+    pub(crate) card_strings: RefCell<CardStringsCache>,
     pub(crate) search: bool,
+}
+
+/// Display strings for one card. These depend only on the photo row and the
+/// card display settings, never on the selection, thumbnail, or palette.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CardStrings {
+    pub(crate) world: SharedString,
+    pub(crate) meta: Option<SharedString>,
+}
+
+/// Everything that can change a card's display strings between renders.
+///
+/// `generation` is the photo-browser generation: it advances whenever the
+/// index or page cache is replaced, so strings cached for an old copy of a
+/// photo cannot survive a reload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CardStringsKey {
+    pub(crate) generation: u64,
+    pub(crate) language: SharedString,
+    pub(crate) show_world: bool,
+    pub(crate) show_date: bool,
+    pub(crate) show_size: bool,
+}
+
+impl CardStringsKey {
+    fn new(app: &App, generation: u64) -> Self {
+        Self {
+            generation,
+            language: app.settings.language.clone().into(),
+            show_world: app.settings.ui_card_show_world,
+            show_date: app.settings.ui_card_show_date,
+            show_size: app.settings.ui_card_show_size,
+        }
+    }
+}
+
+/// Upper bound on cards kept per gallery. A session that scrolls the whole
+/// library would otherwise retain one string pair per visited photo.
+const MAX_CACHED_CARD_STRINGS: usize = 4096;
+
+#[derive(Default)]
+pub(crate) struct CardStringsCache {
+    key: Option<CardStringsKey>,
+    entries: HashMap<i64, Rc<CardStrings>>,
+    computations: u64,
+}
+
+impl CardStringsCache {
+    /// Returns the strings for `photo`, computing them only on a miss.
+    ///
+    /// A changed key (language, display flags, or browser generation) drops
+    /// every entry, so a reloaded photo row is never shown with stale text.
+    pub(crate) fn strings_for(&mut self, key: &CardStringsKey, photo: &Photo) -> Rc<CardStrings> {
+        if self.key.as_ref() != Some(key) {
+            self.key = Some(key.clone());
+            self.entries.clear();
+        }
+        if let Some(strings) = self.entries.get(&photo.id) {
+            return strings.clone();
+        }
+        let strings = Rc::new(CardStrings {
+            world: photo_world_label(photo).into(),
+            meta: card_meta_line(
+                key.show_date,
+                key.show_size,
+                &photo.captured_at_local,
+                if key.show_size {
+                    format_bytes(photo.effective_file_size())
+                } else {
+                    String::new()
+                },
+            )
+            .map(Into::into),
+        });
+        if self.entries.len() >= MAX_CACHED_CARD_STRINGS {
+            self.entries.clear();
+        }
+        self.entries.insert(photo.id, strings.clone());
+        self.computations = self.computations.wrapping_add(1);
+        strings
+    }
 }
 
 pub(crate) struct GalleryView {
@@ -67,6 +151,7 @@ impl GalleryView {
             thumbnails,
             bounds,
             bounds_epoch,
+            card_strings: RefCell::new(CardStringsCache::default()),
             search,
         });
         // P09 keeps the App-wide observation: the gallery reads the index,
@@ -444,6 +529,7 @@ fn render_grid(
         return container.child(empty).into_any_element();
     }
 
+    let card_strings_key = CardStringsKey::new(app, generation);
     let list_index = index.clone();
     let list_shared = shared.clone();
     let list = uniform_list(
@@ -505,8 +591,8 @@ fn render_grid(
                                     list_shared.as_ref(),
                                     frame,
                                     &photo,
-                                    image_height,
-                                    card_width,
+                                    &metrics,
+                                    &card_strings_key,
                                     &mut missing_thumbnails,
                                 ));
                                 column += 1;
@@ -805,10 +891,12 @@ fn render_card(
     shared: &GalleryShared,
     bounds_frame: u64,
     photo: &Arc<Photo>,
-    image_height: f32,
-    card_width: Option<f32>,
+    metrics: &GridMetrics,
+    card_strings_key: &CardStringsKey,
     missing_thumbnails: &mut Vec<Arc<Photo>>,
 ) -> AnyElement {
+    let image_height = metrics.image_height;
+    let card_width = Some(metrics.card_width);
     let p = app.palette;
     let id = photo.id;
     let selected = app.selected_ids.contains(id);
@@ -818,9 +906,10 @@ fn render_card(
     let replaced = photo.is_replaced();
     let show_status = app.settings.ui_card_show_status;
     let show_world = app.settings.ui_card_show_world;
-    let show_date = app.settings.ui_card_show_date;
-    let show_size = app.settings.ui_card_show_size;
-    let world = photo_world_label(photo);
+    let card_strings = shared
+        .card_strings
+        .borrow_mut()
+        .strings_for(card_strings_key, photo);
     let thumbnail = shared.thumbnails.borrow_mut().get(id);
     if thumbnail.is_none() {
         missing_thumbnails.push(photo.clone());
@@ -832,12 +921,7 @@ fn render_card(
         .unwrap_or_else(|| p.scene_color(photo_scene_key(photo)));
     let card_radius = 13.0;
     let image_radius = inner_corner_radius(card_radius, 1.0);
-    let meta_line = card_meta_line(
-        show_date,
-        show_size,
-        &photo.captured_at_local,
-        format_bytes(photo.effective_file_size()),
-    );
+    let meta_line = card_strings.meta.clone();
     let has_info = show_world || meta_line.is_some();
 
     let mut thumb = div()
@@ -969,7 +1053,7 @@ fn render_card(
                 .font_semibold()
                 .text_color(rgb(p.text))
                 .truncate()
-                .child(world),
+                .child(card_strings.world.clone()),
         );
     }
     if let Some(meta) = meta_line {
@@ -1085,7 +1169,11 @@ fn grid_placeholder(palette: &Palette, image_height: f32, card_width: Option<f32
 
 #[cfg(test)]
 mod tests {
-    use super::{FailedPage, PAGE_SIZE, PageFailure, error_span, filter_chips, page_error_panels};
+    use super::{
+        CardStringsCache, CardStringsKey, FailedPage, PAGE_SIZE, PageFailure, error_span,
+        filter_chips, page_error_panels,
+    };
+    use crate::state::test_support::test_photo;
     use vrc_photon_i18n::MISSING;
 
     fn failed_page(page: usize, failure: PageFailure) -> FailedPage {
@@ -1191,5 +1279,83 @@ mod tests {
         labels.sort_unstable();
         labels.dedup();
         assert_eq!(labels.len(), 4);
+    }
+
+    fn card_key(
+        generation: u64,
+        language: &str,
+        show_world: bool,
+        show_date: bool,
+        show_size: bool,
+    ) -> CardStringsKey {
+        CardStringsKey {
+            generation,
+            language: language.into(),
+            show_world,
+            show_date,
+            show_size,
+        }
+    }
+
+    #[test]
+    fn card_strings_cache_reuses_the_same_inputs() {
+        let mut cache = CardStringsCache::default();
+        let mut photo = test_photo(1);
+        photo.world_name = Some("Midnight Rooftop".to_string());
+        let key = card_key(0, "ja", true, true, true);
+
+        let first = cache.strings_for(&key, &photo);
+        let second = cache.strings_for(&key, &photo);
+        assert!(std::rc::Rc::ptr_eq(&first, &second));
+        assert_eq!(cache.computations, 1);
+        assert_eq!(first.world, "Midnight Rooftop");
+        assert_eq!(first.meta.as_deref(), Some("10-21 21:14:03 · 1.0 B"));
+    }
+
+    #[test]
+    fn card_strings_cache_invalidates_on_language_or_show_flags() {
+        let mut cache = CardStringsCache::default();
+        let photo = test_photo(1);
+        let key = card_key(0, "ja", true, true, true);
+
+        let first = cache.strings_for(&key, &photo);
+        assert_eq!(cache.computations, 1);
+
+        let language = card_key(0, "en", true, true, true);
+        let second = cache.strings_for(&language, &photo);
+        assert_eq!(cache.computations, 2);
+        assert_eq!(first.world, second.world);
+
+        let flags = card_key(0, "en", true, true, false);
+        let third = cache.strings_for(&flags, &photo);
+        assert_eq!(cache.computations, 3);
+        assert_eq!(third.meta.as_deref(), Some("10-21 21:14:03"));
+    }
+
+    #[test]
+    fn card_strings_cache_does_not_collide_between_photo_ids() {
+        let mut cache = CardStringsCache::default();
+        let mut first = test_photo(1);
+        first.world_name = Some("World A".to_string());
+        let mut second = test_photo(2);
+        second.world_name = Some("World B".to_string());
+        let key = card_key(0, "ja", true, true, true);
+
+        assert_eq!(cache.strings_for(&key, &first).world, "World A");
+        assert_eq!(cache.strings_for(&key, &second).world, "World B");
+        assert_eq!(cache.computations, 2);
+    }
+
+    #[test]
+    fn card_strings_cache_clears_when_the_browser_generation_changes() {
+        let mut cache = CardStringsCache::default();
+        let photo = test_photo(1);
+        let key = card_key(0, "ja", true, true, true);
+        cache.strings_for(&key, &photo);
+        assert_eq!(cache.computations, 1);
+
+        let reloaded = card_key(1, "ja", true, true, true);
+        cache.strings_for(&reloaded, &photo);
+        assert_eq!(cache.computations, 2);
     }
 }

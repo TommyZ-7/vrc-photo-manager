@@ -19,10 +19,7 @@ use vrc_photon_core::model::Photo;
 use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::App;
-use crate::app::ai::{
-    ai_empty_state_labels, ai_tag_views_with_context, format_tagged_at, people_label_in,
-    place_label_with_confidence,
-};
+use crate::app::ai::{AiMetaKey, ai_empty_state_labels};
 use crate::app::cli::log_timing;
 use crate::app::daemon::open_path;
 use crate::state::photo_browser::{PAGE_SIZE, PageFailure, PhotoIndex};
@@ -677,34 +674,21 @@ impl App {
         let p = self.palette;
         let language = self.settings.language.clone();
         let ai = self.selected_ai.clone();
-        let tagged_at = ai.as_ref().map(|ai| format_tagged_at(&ai.tagged_at));
-        let tags = ai_tag_views_with_context(
-            &self.selected_ai_tags,
-            &language,
-            ai.as_ref().map(|ai| ai.model_version.as_str()),
-            tagged_at.as_deref(),
-        );
-        let people = ai
-            .as_ref()
-            .map(|ai| people_label_in(&language, ai.people_min, ai.people_max))
-            .unwrap_or_else(|| "—".to_string());
-        let place = ai
-            .as_ref()
-            .map(|ai| {
-                place_label_with_confidence(
-                    ai.place_branch.as_deref(),
-                    ai.place_probabilities_json.as_deref(),
-                )
-            })
-            .unwrap_or_else(|| "—".to_string());
-        let foot = ai.as_ref().map(|ai| {
-            format!(
-                "{} · {} · {}",
-                ai.model_version,
-                ai.variant,
-                tagged_at.as_deref().unwrap_or(&ai.tagged_at)
+        let key = AiMetaKey::new(id, &language, self.ai_meta_revision, ai.as_ref());
+        // The identifier, language, reload revision, and stored result form the
+        // key, so switching photos or reloading AI rows rebuilds this once
+        // instead of formatting every chip and parsing the place JSON per frame.
+        let (tags, people, place, foot) = {
+            let view = self
+                .ai_meta_cache
+                .view(key, &language, ai.as_ref(), &self.selected_ai_tags);
+            (
+                view.tags.clone(),
+                view.people.clone(),
+                view.place.clone(),
+                view.foot.clone(),
             )
-        });
+        };
         let focus_states: Vec<Entity<AiTagFocusState>> = (0..tags.len())
             .map(|index| {
                 let app_entity = cx.entity();
@@ -806,35 +790,41 @@ impl App {
                     ),
             );
         } else {
-            tag_row = tag_row.children(focus_handles.into_iter().zip(tags).enumerate().map(
-                |(index, (focus, view))| {
-                    let tooltip = view.tooltip.clone();
-                    h_flex()
-                        .id(SharedString::from(format!("ai-tag-{id}-{index}")))
-                        .items_center()
-                        .gap(px(3.))
-                        .px(px(7.))
-                        .py(px(2.))
-                        .rounded_full()
-                        .bg(rgba(with_alpha(p.green, 0x14)))
-                        .border_1()
-                        .border_color(rgba(with_alpha(p.green, 0x38)))
-                        .text_size(px(10.))
-                        .text_color(rgb(p.green))
-                        .track_focus(&focus)
-                        .focus(move |this| this.border_color(rgb(p.green)))
-                        .aria_description(tooltip.clone())
-                        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-                        .child("✦")
-                        .child(view.label)
-                        .child(
-                            div()
-                                .text_size(px(9.))
-                                .text_color(rgb(p.muted))
-                                .child(view.probability_label),
-                        )
-                },
-            ));
+            tag_row = tag_row.children(
+                focus_handles
+                    .into_iter()
+                    .zip(tags.iter().cloned())
+                    .enumerate()
+                    .map(|(index, (focus, view))| {
+                        let tooltip = view.tooltip.clone();
+                        h_flex()
+                            .id(SharedString::from(format!("ai-tag-{id}-{index}")))
+                            .items_center()
+                            .gap(px(3.))
+                            .px(px(7.))
+                            .py(px(2.))
+                            .rounded_full()
+                            .bg(rgba(with_alpha(p.green, 0x14)))
+                            .border_1()
+                            .border_color(rgba(with_alpha(p.green, 0x38)))
+                            .text_size(px(10.))
+                            .text_color(rgb(p.green))
+                            .track_focus(&focus)
+                            .focus(move |this| this.border_color(rgb(p.green)))
+                            .aria_description(tooltip.clone())
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(tooltip.clone()).build(window, cx)
+                            })
+                            .child("✦")
+                            .child(view.label)
+                            .child(
+                                div()
+                                    .text_size(px(9.))
+                                    .text_color(rgb(p.muted))
+                                    .child(view.probability_label),
+                            )
+                    }),
+            );
         }
 
         let header = h_flex()
