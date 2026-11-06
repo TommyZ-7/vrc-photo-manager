@@ -6,7 +6,7 @@
 //! through a read-only connection on the background executor, and the UI only
 //! re-renders when a value it displays actually changed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
@@ -26,11 +26,55 @@ use crate::ui::notifications::{FailureNotice, deletion_blocked_transition, failu
 
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
 
+/// Coalescing gate shared by the three-second poller and event-driven
+/// refreshes.
+///
+/// A request either starts the only background pass or marks that one more
+/// pass is needed after it. Repeated requests while a pass is in flight are
+/// folded into that single follow-up, so an event burst cannot build an
+/// unbounded queue of snapshots.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LiveRefreshGate {
+    in_flight: bool,
+    follow_up: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LiveRefreshRequest {
+    /// No pass was running; the caller must start one.
+    StartNow,
+    /// A pass was already running and one follow-up has been recorded.
+    FollowUpQueued,
+}
+
+impl LiveRefreshGate {
+    pub(crate) fn request(&mut self) -> LiveRefreshRequest {
+        if self.in_flight {
+            self.follow_up = true;
+            LiveRefreshRequest::FollowUpQueued
+        } else {
+            self.in_flight = true;
+            LiveRefreshRequest::StartNow
+        }
+    }
+
+    /// Marks the current pass finished. Returns `true` exactly once when a
+    /// follow-up was requested while it was running.
+    pub(crate) fn finish(&mut self) -> bool {
+        self.in_flight = false;
+        std::mem::take(&mut self.follow_up)
+    }
+}
+
 #[derive(Default)]
 struct LiveSnapshot {
     revision: Option<i64>,
     photo_count: Option<i64>,
     stats: Option<LibraryStats>,
+    /// Recomputed only when the revision moved; the asset badges follow the
+    /// derivative and content-hash sets.
+    compressed_ids: Option<HashSet<i64>>,
+    duplicate_ids: Option<HashSet<i64>>,
     jobs: JobSnapshot,
     ai: AiLiveSnapshot,
     deletions: Option<DeletionSnapshot>,
@@ -52,6 +96,7 @@ struct JobSnapshot {
     active_job_count: i64,
     waiting_job_count: i64,
     failed_job_count: Option<i64>,
+    retryable_failed_count: Option<i64>,
     daemon_errors: Option<Vec<DaemonError>>,
 }
 
@@ -66,50 +111,64 @@ struct MonitorSnapshot {
 
 impl App {
     pub(crate) fn start_auto_refresh(&mut self, cx: &mut Context<Self>) {
-        let Some(path) = self.db.path().map(Path::to_path_buf) else {
-            // In-memory demo databases have no second handle to open and hold
-            // only a handful of rows; keep the simple synchronous loop.
-            cx.spawn(async move |this, cx| {
-                loop {
-                    cx.background_executor().timer(POLL_INTERVAL).await;
-                    if this.update(cx, |this, cx| this.refresh_live(cx)).is_err() {
-                        break;
-                    }
-                }
-            })
-            .detach();
-            return;
-        };
-
+        // The poller and event-driven refreshes share the same gate, so a
+        // timer tick and an IPC burst can never collect two snapshots at once.
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(POLL_INTERVAL).await;
-                let stats_revision = match this.update(cx, |this, _| this.stats_revision) {
-                    Ok(value) => value,
-                    Err(_) => break,
-                };
-                let tick_path = path.clone();
-                let snapshot = cx
-                    .background_executor()
-                    .spawn(async move {
-                        let db = Db::open_read_only(&tick_path).ok()?;
-                        Some(collect_live_snapshot(&db, stats_revision))
-                    })
-                    .await;
-                let Some(snapshot) = snapshot else {
-                    tracing::warn!(
-                        path = %path.display(),
-                        "cannot open the library for the live refresh"
-                    );
-                    continue;
-                };
                 if this
-                    .update(cx, |this, cx| this.apply_live_snapshot(snapshot, cx))
+                    .update(cx, |this, cx| this.refresh_live_async(cx))
                     .is_err()
                 {
                     break;
                 }
             }
+        })
+        .detach();
+    }
+
+    /// Refreshes the live state through a read-only connection on the
+    /// background executor.
+    ///
+    /// Event handlers used to call [`Self::refresh_live`] directly, which ran
+    /// stats, the compressed-id scan, the job queries, and the monitor reads on
+    /// the UI thread for every scan or job completion. Requests are coalesced
+    /// into at most one running pass plus one follow-up.
+    ///
+    /// In-memory demo databases have no second handle to open and hold only a
+    /// handful of rows, so they keep the simple synchronous path.
+    pub(crate) fn refresh_live_async(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = self.db.path().map(Path::to_path_buf) else {
+            self.refresh_live(cx);
+            return;
+        };
+        if self.live_refresh.request() == LiveRefreshRequest::FollowUpQueued {
+            return;
+        }
+        let stats_revision = self.stats_revision;
+        cx.spawn(async move |this, cx| {
+            let open_path = path.clone();
+            let snapshot = cx
+                .background_executor()
+                .spawn(async move {
+                    let db = Db::open_read_only(&open_path).ok()?;
+                    Some(collect_live_snapshot(&db, stats_revision))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                let follow_up = this.live_refresh.finish();
+                match snapshot {
+                    Some(snapshot) => this.apply_live_snapshot(snapshot, cx),
+                    None => tracing::warn!(
+                        path = %path.display(),
+                        "cannot open the library for the live refresh"
+                    ),
+                }
+                if follow_up {
+                    this.refresh_live_async(cx);
+                }
+            })
+            .ok();
         })
         .detach();
     }
@@ -132,6 +191,7 @@ impl App {
         }
 
         let failed_count = snapshot.jobs.failed_job_count;
+        let retryable_count = snapshot.jobs.retryable_failed_count;
         let daemon_count = snapshot.jobs.daemon_errors.as_ref().map(Vec::len);
         let jobs_changed = self.jobs != snapshot.jobs.jobs
             || self.waiting_jobs != snapshot.jobs.waiting_jobs
@@ -140,6 +200,7 @@ impl App {
             || self.active_job_count != snapshot.jobs.active_job_count
             || self.waiting_job_count != snapshot.jobs.waiting_job_count
             || failed_count.is_some_and(|count| count != self.failed_job_count)
+            || retryable_count.is_some_and(|count| count != self.retryable_failed_count)
             || snapshot
                 .jobs
                 .daemon_errors
@@ -155,9 +216,34 @@ impl App {
             if let Some(count) = failed_count {
                 self.failed_job_count = count;
             }
+            if let Some(count) = retryable_count {
+                self.retryable_failed_count = count;
+            }
             if let Some(errors) = snapshot.jobs.daemon_errors {
                 self.daemon_errors = errors;
             }
+            notify = true;
+        }
+
+        // The compressed and duplicate badges and the derivative totals move
+        // together with the revision. The id sets were collected on the
+        // background executor; never rescan them here.
+        if let Some(ids) = snapshot.compressed_ids
+            && snapshot
+                .revision
+                .is_none_or(|revision| revision >= self.stats_revision)
+            && ids != self.compressed_ids
+        {
+            self.compressed_ids = ids;
+            notify = true;
+        }
+        if let Some(ids) = snapshot.duplicate_ids
+            && snapshot
+                .revision
+                .is_none_or(|revision| revision >= self.stats_revision)
+            && ids != self.duplicate_ids
+        {
+            self.duplicate_ids = ids;
             notify = true;
         }
 
@@ -237,13 +323,25 @@ impl App {
 fn collect_live_snapshot(db: &Db, stats_revision: i64) -> LiveSnapshot {
     let revision = db.library_revision().ok();
     let photo_count = db.count_photos().ok();
-    let stats = revision
-        .filter(|revision| *revision != stats_revision)
-        .and_then(|_| db.stats().ok());
+    // Stats and the compressed/duplicate badge sets only change when the
+    // revision moves. All three aggregates run here, on the background
+    // executor, instead of on the UI thread.
+    let aggregates_needed = revision.is_some_and(|revision| revision != stats_revision);
+    let stats = aggregates_needed.then(|| db.stats().ok()).flatten();
+    let compressed_ids = aggregates_needed
+        .then(|| db.compressed_photo_ids().ok())
+        .flatten()
+        .map(|ids| ids.into_iter().collect());
+    let duplicate_ids = aggregates_needed
+        .then(|| db.duplicate_photo_ids().ok())
+        .flatten()
+        .map(|ids| ids.into_iter().collect());
     LiveSnapshot {
         revision,
         photo_count,
         stats,
+        compressed_ids,
+        duplicate_ids,
         jobs: collect_jobs(db),
         ai: collect_ai_live_snapshot(db),
         deletions: collect_deletions(db),
@@ -318,6 +416,7 @@ fn collect_jobs(db: &Db) -> JobSnapshot {
         active_job_count: db.count_active_jobs().unwrap_or(0),
         waiting_job_count: db.count_jobs(QueueStatus::Waiting).unwrap_or(0),
         failed_job_count: db.count_jobs(QueueStatus::Failed).ok(),
+        retryable_failed_count: db.count_retryable_failed_jobs().ok(),
         daemon_errors: db.daemon_errors().ok(),
     }
 }
@@ -361,7 +460,8 @@ fn collect_monitor(db: &Db) -> MonitorSnapshot {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeletionSnapshot, apply_deletion_snapshot, collect_live_snapshot, deletion_update,
+        DeletionSnapshot, LiveRefreshGate, LiveRefreshRequest, apply_deletion_snapshot,
+        collect_live_snapshot, deletion_update,
     };
     use vrc_photon_core::db::Db;
     use vrc_photon_core::model::{
@@ -495,5 +595,56 @@ mod tests {
         let revision = db.library_revision().unwrap();
         let snapshot = collect_live_snapshot(&db, revision);
         assert!(snapshot.stats.is_none());
+        assert!(snapshot.compressed_ids.is_none());
+        assert!(snapshot.duplicate_ids.is_none());
+    }
+
+    #[test]
+    fn snapshot_collects_badge_ids_with_the_revision() {
+        let db = Db::open_in_memory().unwrap();
+        let id = seed_photo(&db);
+        db.add_derivative(id, "/photos/a.webp", "webp", 16, 10, 8, "p", "keep")
+            .unwrap();
+        let revision = db.library_revision().unwrap();
+        let snapshot = collect_live_snapshot(&db, revision - 1);
+        let ids = snapshot.compressed_ids.expect("compressed ids");
+        assert!(ids.contains(&id));
+        assert!(
+            snapshot.duplicate_ids.expect("duplicate ids").is_empty(),
+            "a single photo is not a duplicate"
+        );
+    }
+
+    #[test]
+    fn live_refresh_gate_starts_once_and_queues_at_most_one_follow_up() {
+        let mut gate = LiveRefreshGate::default();
+
+        assert_eq!(gate.request(), LiveRefreshRequest::StartNow);
+        assert_eq!(gate.request(), LiveRefreshRequest::FollowUpQueued);
+        assert_eq!(
+            gate.request(),
+            LiveRefreshRequest::FollowUpQueued,
+            "repeated requests while in flight fold into one follow-up"
+        );
+
+        assert!(gate.finish(), "the queued follow-up starts exactly once");
+        assert_eq!(gate.request(), LiveRefreshRequest::StartNow);
+        assert!(
+            !gate.finish(),
+            "finishing a pass without a queued request starts nothing"
+        );
+    }
+
+    #[test]
+    fn live_refresh_gate_consumes_the_follow_up_before_a_new_pass() {
+        let mut gate = LiveRefreshGate::default();
+        assert_eq!(gate.request(), LiveRefreshRequest::StartNow);
+        assert_eq!(gate.request(), LiveRefreshRequest::FollowUpQueued);
+
+        // The caller starts the follow-up from `finish`. That pass must not
+        // inherit the already consumed follow-up flag.
+        assert!(gate.finish());
+        assert_eq!(gate.request(), LiveRefreshRequest::StartNow);
+        assert!(!gate.finish());
     }
 }

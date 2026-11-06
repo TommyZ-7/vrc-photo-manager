@@ -47,6 +47,7 @@ use crate::app::daemon::start_daemon;
 use crate::app::demo::{DemoAssets, open_database};
 use crate::app::import::{ImportDialogState, ImportReportView};
 use crate::app::lifecycle::ScanProgressView;
+use crate::app::live::LiveRefreshGate;
 use crate::state::motion::ToggleMotion;
 use crate::state::photo_browser::{CountDebounce, PhotoBrowser, PhotoIndex};
 use crate::state::preview::{PreviewKey, PreviewQueue};
@@ -337,6 +338,9 @@ pub struct App {
     pub(crate) compression_refresh_scheduled: bool,
     /// The pending compression refresh must also invalidate library pages.
     pub(crate) compression_library_refresh_pending: bool,
+    /// Coalescing gate for the background live refresh. The three-second
+    /// poller and IPC-triggered refreshes share it.
+    pub(crate) live_refresh: LiveRefreshGate,
     pub(crate) monitor_world: Option<String>,
     pub(crate) monitor_instance: Option<String>,
     pub(crate) monitor_players: Vec<String>,
@@ -1103,6 +1107,7 @@ impl App {
             last_import_progress_notify: None,
             compression_refresh_scheduled: false,
             compression_library_refresh_pending: false,
+            live_refresh: LiveRefreshGate::default(),
             monitor_world: None,
             monitor_instance: None,
             monitor_players: Vec::new(),

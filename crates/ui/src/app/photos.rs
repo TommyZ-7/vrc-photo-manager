@@ -923,12 +923,15 @@ impl App {
         if self.note_edit_id.is_some_and(|id| removed.contains(&id)) {
             self.note_edit_id = None;
         }
-        self.reload_aux(cx);
         if let Some(revision) = revision {
             // The local snapshot already reflects the deletions; claim the
             // revision so the next poll does not re-query 100k rows.
             self.last_library_revision = revision;
         }
+        // Stats, compressed ids, and the job queue are collected by the
+        // background live snapshot; the visible index was already updated
+        // above.
+        self.refresh_live_async(cx);
     }
 
     /// Moves one photo to the OS trash and updates its row. Side panels and
