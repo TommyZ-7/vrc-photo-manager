@@ -489,11 +489,22 @@ const PHOTO_FROM: &str = " FROM photos p \
 /// so tags and context survive a restore, but they are not displayed.
 const VISIBLE_STATUS: &str = "p.status IN ('present', 'replaced')";
 
-/// Safety cap for the UI's text-search index. The product target is 100k
-/// photos; this bound prevents a pathological filter from building an
-/// unbounded result vector. `photo_index_text_limited` exists for tests and
-/// callers that need a smaller page.
-const MAX_TEXT_INDEX_ROWS: i64 = 200_000;
+/// Hard cap for any caller-supplied row limit. The product target is 100k
+/// photos; 200k leaves headroom while preventing a buggy or hostile request
+/// from materializing an unbounded result vector. This is also the cap for a
+/// full text-index snapshot.
+const MAX_ROW_LIMIT: i64 = 200_000;
+
+/// Normalizes a caller-supplied row limit.
+///
+/// Non-positive requests clamp to 1 so a missing limit never implies
+/// "unlimited", and requests above [`MAX_ROW_LIMIT`] clamp to that safe
+/// maximum. Methods whose zero has a distinct meaning (for example
+/// [`Db::prune_send_history`], where zero removes all terminal rows) must not
+/// use this helper and must document their policy instead.
+fn clamp_limit(requested: i64) -> i64 {
+    requested.clamp(1, MAX_ROW_LIMIT)
+}
 
 /// Local capture month as YYYYMM, falling back to the UTC capture time and
 /// finally to 0 when neither can be parsed.
@@ -1132,10 +1143,10 @@ impl Db {
 
     /// Returns an ordered index snapshot matching the text filters.
     ///
-    /// The result is capped at [`MAX_TEXT_INDEX_ROWS`] so a broad filter cannot
+    /// The result is capped at [`MAX_ROW_LIMIT`] so a broad filter cannot
     /// allocate without bound.
     pub fn photo_index_text(&self, filter: &PhotoTextFilter) -> Result<Vec<PhotoIndexEntry>> {
-        self.photo_index_text_limited(filter, MAX_TEXT_INDEX_ROWS)
+        self.photo_index_text_limited(filter, MAX_ROW_LIMIT)
     }
 
     /// Same as [`Self::photo_index_text`] with an explicit row limit.
@@ -1149,7 +1160,7 @@ impl Db {
             "SELECT p.id, p.captured_at_utc, {PHOTO_MONTH}{PHOTO_FROM} WHERE {where_sql} \
              ORDER BY p.captured_at_utc DESC, p.id DESC LIMIT ?"
         );
-        values.push(Value::Integer(limit.max(1)));
+        values.push(Value::Integer(clamp_limit(limit)));
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(params_from_iter(values), row_to_photo_index)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -1182,15 +1193,18 @@ impl Db {
              ORDER BY {order} LIMIT ?1 OFFSET ?2"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![limit.max(1), offset.max(0)], row_to_photo)?;
+        let rows = stmt.query_map(params![clamp_limit(limit), offset.max(0)], row_to_photo)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Legacy `PhotoFilter` search retained as an oracle for tests and demo
+    /// data. Production UI search uses [`Self::photo_index_text`].
+    /// `filter.limit` follows [`clamp_limit`].
     pub fn search_photos(&self, filter: &PhotoFilter) -> Result<Vec<Photo>> {
         let (where_sql, values) = build_photo_filter(filter);
         let sort = filter.sort.unwrap_or(PhotoSort::Newest);
         let order = photo_order(sort);
-        let limit = if filter.limit > 0 { filter.limit } else { 500 };
+        let limit = clamp_limit(filter.limit);
         let offset = filter.offset.max(0);
         let sql = format!(
             "SELECT {PHOTO_SELECT}{PHOTO_FROM} WHERE {where_sql} \
@@ -1204,6 +1218,9 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Counts rows matching a legacy `PhotoFilter` query. Retained together
+    /// with [`Self::search_photos`] as a test/demo oracle; production search
+    /// uses [`Self::photo_index_text`].
     pub fn count_search(&self, filter: &PhotoFilter) -> Result<i64> {
         let (where_sql, values) = build_photo_filter(filter);
         let sql = format!("SELECT COUNT(*){PHOTO_FROM} WHERE {where_sql}");
@@ -1212,47 +1229,13 @@ impl Db {
         Ok(count)
     }
 
-    /// Text search used by the UI. Empty filters are ignored; categories are
-    /// combined with AND.
-    #[allow(clippy::too_many_arguments)]
-    pub fn search_photos_text(
-        &self,
-        world: Option<&str>,
-        player: Option<&str>,
-        tag: Option<&str>,
-        favorite: bool,
-        from_utc: Option<i64>,
-        to_utc: Option<i64>,
-        limit: i64,
-    ) -> Result<Vec<Photo>> {
-        let filter = PhotoTextFilter {
-            world: world.map(str::to_string),
-            player: player.map(str::to_string),
-            tag: tag.map(str::to_string),
-            favorite,
-            from_utc,
-            to_utc,
-            ai: AiPhotoFilter::default(),
-        };
-        let (where_sql, mut values) = build_text_filter(&filter);
-
-        let sql = format!(
-            "SELECT {PHOTO_SELECT}{PHOTO_FROM} WHERE {where_sql} \
-             ORDER BY p.captured_at_utc DESC, p.id DESC LIMIT ?"
-        );
-        values.push(Value::Integer(limit.max(1)));
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_from_iter(values), row_to_photo)?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
-    }
-
     pub fn unlinked_photos(&self, limit: i64) -> Result<Vec<Photo>> {
         let sql = format!(
             "SELECT {PHOTO_SELECT}{PHOTO_FROM} WHERE c.photo_id IS NULL \
              AND {VISIBLE_STATUS} ORDER BY p.captured_at_utc DESC LIMIT ?1"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![limit.max(1)], row_to_photo)?;
+        let rows = stmt.query_map(params![clamp_limit(limit)], row_to_photo)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -1267,7 +1250,7 @@ impl Db {
              ORDER BY p.link_attempts ASC, p.captured_at_utc ASC LIMIT ?2"
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![now, limit.max(1)], row_to_photo)?;
+        let rows = stmt.query_map(params![now, clamp_limit(limit)], row_to_photo)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -1532,7 +1515,9 @@ impl Db {
             "SELECT id, abs_path FROM photos \
              WHERE status = 'present' AND blake3 IS NULL ORDER BY id LIMIT ?1",
         )?;
-        let rows = stmt.query_map(params![limit.max(1)], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let rows = stmt.query_map(params![clamp_limit(limit)], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -1549,7 +1534,7 @@ impl Db {
              JOIN library_roots r ON r.id = p.root_id \
              WHERE p.status = 'replaced' ORDER BY p.id LIMIT ?1",
         )?;
-        let rows = stmt.query_map(params![limit.max(1)], |row| {
+        let rows = stmt.query_map(params![clamp_limit(limit)], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -2715,7 +2700,7 @@ impl Db {
              WHERE dr.status IN ('pending', 'blocked', 'running') \
              ORDER BY dr.requested_at, dr.id LIMIT ?1";
         let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt.query_map(params![limit.max(1)], row_to_deletion_request)?;
+        let rows = stmt.query_map(params![clamp_limit(limit)], row_to_deletion_request)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -2919,7 +2904,7 @@ impl Db {
                ) \
              ORDER BY (dr.reason = 'manual') DESC, dr.requested_at, dr.id LIMIT ?1";
         let mut stmt = self.conn.prepare(sql)?;
-        let rows = stmt.query_map(params![limit.max(1)], row_to_deletion_request)?;
+        let rows = stmt.query_map(params![clamp_limit(limit)], row_to_deletion_request)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -3481,20 +3466,22 @@ impl Db {
     const JOB_COLUMNS: &str = "id, photo_id, profile_id, status, progress, error, \
         output_path, policy, output_dir, retry_count, created_at, started_at, finished_at";
 
-    /// Lists the newest jobs first. `limit` is clamped to at least 1, so a
-    /// non-positive limit returns the single newest job.
+    /// Lists the newest jobs first. `limit` is normalized by
+    /// [`clamp_limit`], so a non-positive limit returns the single newest job
+    /// and an oversized limit is capped at [`MAX_ROW_LIMIT`].
     pub fn list_jobs(&self, limit: i64) -> Result<Vec<CompressionJob>> {
         let sql = format!(
             "SELECT {} FROM compression_jobs ORDER BY created_at DESC LIMIT ?1",
             Self::JOB_COLUMNS
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![limit.max(1)], row_to_job)?;
+        let rows = stmt.query_map(params![clamp_limit(limit)], row_to_job)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Lists the newest jobs with `status` first. `limit` is clamped to at
-    /// least 1, so a non-positive limit returns the single newest match.
+    /// Lists the newest jobs with `status` first. `limit` is normalized by
+    /// [`clamp_limit`], so a non-positive limit returns the single newest
+    /// match and an oversized limit is capped at [`MAX_ROW_LIMIT`].
     pub fn list_jobs_by_status(
         &self,
         status: QueueStatus,
@@ -3506,7 +3493,7 @@ impl Db {
             Self::JOB_COLUMNS
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![status.as_str(), limit.max(1)], row_to_job)?;
+        let rows = stmt.query_map(params![status.as_str(), clamp_limit(limit)], row_to_job)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -3934,7 +3921,8 @@ impl Db {
         Ok(changed)
     }
 
-    /// Newest-first send history joined with the photo file name and world name.
+    /// Newest-first send history joined with the photo file name and world
+    /// name. `limit` is normalized by [`clamp_limit`].
     pub fn send_history(&self, limit: i64) -> Result<Vec<SendHistoryEntry>> {
         let sql = format!(
             "SELECT {}, p.file_name, c.world_name \
@@ -3945,7 +3933,7 @@ impl Db {
             Self::SEND_COLUMNS_QUALIFIED
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![limit.max(0)], |row| {
+        let rows = stmt.query_map(params![clamp_limit(limit)], |row| {
             Ok(SendHistoryEntry {
                 entry: row_to_send_outbox(row)?,
                 photo_name: row.get(18)?,
@@ -3966,6 +3954,10 @@ impl Db {
 
     /// Deletes terminal send rows older than the newest `keep` ones. Active
     /// rows are never pruned.
+    ///
+    /// `keep` deliberately does not use [`clamp_limit`]: zero means "keep no
+    /// terminal rows", and negative values behave the same way. This is the
+    /// prune operation's existing explicit policy, not a list limit.
     pub fn prune_send_history(&self, keep: i64) -> Result<usize> {
         let changed = self.conn.execute(
             "DELETE FROM send_outbox WHERE status IN ('sent', 'failed', 'cancelled') \
@@ -4960,7 +4952,7 @@ impl Db {
     }
 
     /// Newest unfinished jobs, for the settings/integrations status card.
-    /// `limit` is clamped to at least 1. The partial index keeps this bounded
+    /// `limit` is normalized by [`clamp_limit`]. The partial index keeps this bounded
     /// even when the backlog holds six figures of waiting rows, and the
     /// explicit `INDEXED BY` prevents SQLite from falling back to a temp
     /// B-tree over every active job.
@@ -4972,7 +4964,7 @@ impl Db {
             TAGGING_JOB_COLUMNS
         );
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params![limit.max(1)], row_to_tagging_job)?;
+        let rows = stmt.query_map(params![clamp_limit(limit)], row_to_tagging_job)?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
@@ -4982,7 +4974,7 @@ impl Db {
     /// backlog is excluded: the card never shows waiting rows, so including
     /// them in the limited snapshot only hides real work.
     pub fn active_tagging_jobs_for_ui(&self, limit: i64) -> Result<Vec<TaggingJob>> {
-        let limit = limit.max(1);
+        let limit = clamp_limit(limit);
         let mut jobs = self.tagging_jobs_with_status(
             TaggingJobStatus::Processing,
             "COALESCE(started_at, created_at), created_at, rowid",
@@ -9682,6 +9674,18 @@ mod tests {
         rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
     }
 
+    /// Asserts the shared limit contract against a three-row fixture.
+    fn assert_limit_contract(label: &str, mut count: impl FnMut(i64) -> usize) {
+        assert_eq!(count(0), 1, "{label}: zero must clamp to one");
+        assert_eq!(count(-7), 1, "{label}: negative must clamp to one");
+        assert_eq!(count(2), 2, "{label}: an in-range limit is honored");
+        assert_eq!(
+            count(i64::MAX),
+            3,
+            "{label}: an oversized limit must not hide rows"
+        );
+    }
+
     #[test]
     fn ai_tags_never_touch_manual_tags() {
         let db = Db::open_in_memory().unwrap();
@@ -12612,5 +12616,164 @@ mod tests {
 
         let stored = db.photo_by_id(photo).unwrap().unwrap();
         assert_eq!(stored.world_id.as_deref(), Some("wrld_test"));
+    }
+
+    #[test]
+    fn clamp_limit_uses_one_documented_policy() {
+        assert_eq!(clamp_limit(i64::MIN), 1);
+        assert_eq!(clamp_limit(-1), 1);
+        assert_eq!(clamp_limit(0), 1);
+        assert_eq!(clamp_limit(1), 1);
+        assert_eq!(clamp_limit(42), 42);
+        assert_eq!(clamp_limit(MAX_ROW_LIMIT), MAX_ROW_LIMIT);
+        assert_eq!(clamp_limit(MAX_ROW_LIMIT + 1), MAX_ROW_LIMIT);
+        assert_eq!(clamp_limit(i64::MAX), MAX_ROW_LIMIT);
+    }
+
+    #[test]
+    fn photo_list_and_search_limits_agree() {
+        let db = Db::open_in_memory().unwrap();
+        seed_photos(&db, 3);
+        assert_limit_contract("list_photos", |limit| {
+            db.list_photos(limit, 0, PhotoSort::Newest).unwrap().len()
+        });
+        assert_limit_contract("photo_index_text_limited", |limit| {
+            db.photo_index_text_limited(&PhotoTextFilter::default(), limit)
+                .unwrap()
+                .len()
+        });
+        assert_limit_contract("search_photos", |limit| {
+            db.search_photos(&PhotoFilter {
+                limit,
+                ..Default::default()
+            })
+            .unwrap()
+            .len()
+        });
+
+        // The legacy filter search and the production index search must agree
+        // for every normalized limit, including the old zero default.
+        for limit in [0, -3, MAX_ROW_LIMIT + 1, i64::MAX, 2] {
+            let indexed = db
+                .photo_index_text_limited(&PhotoTextFilter::default(), limit)
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect::<Vec<_>>();
+            let searched = db
+                .search_photos(&PhotoFilter {
+                    limit,
+                    ..Default::default()
+                })
+                .unwrap()
+                .into_iter()
+                .map(|photo| photo.id)
+                .collect::<Vec<_>>();
+            assert_eq!(indexed, searched, "limit={limit}");
+        }
+    }
+
+    #[test]
+    fn unlinked_hash_and_derivative_limits_use_the_shared_policy() {
+        let db = Db::open_in_memory().unwrap();
+        let photos = seed_photos(&db, 3);
+        assert_limit_contract("unlinked_photos", |limit| {
+            db.unlinked_photos(limit).unwrap().len()
+        });
+        assert_limit_contract("unlinked_photos_due", |limit| {
+            db.unlinked_photos_due(limit, 1_000).unwrap().len()
+        });
+        assert_limit_contract("photos_without_hash", |limit| {
+            db.photos_without_hash(limit).unwrap().len()
+        });
+
+        for (index, photo) in photos.into_iter().enumerate() {
+            let derivative = db
+                .add_derivative(
+                    photo,
+                    &format!("/photos/derivative-{index}.webp"),
+                    "webp",
+                    1280,
+                    800,
+                    1_000,
+                    "profile",
+                    "keep",
+                )
+                .unwrap();
+            assert!(db.set_replaced(photo, derivative).unwrap());
+        }
+        assert_limit_contract("display_derivative_paths", |limit| {
+            db.display_derivative_paths(limit).unwrap().len()
+        });
+    }
+
+    #[test]
+    fn deletion_request_limits_use_the_shared_policy() {
+        let db = Db::open_in_memory().unwrap();
+        for photo in seed_photos(&db, 3) {
+            insert_deletion_request(&db, photo, "manual", "pending");
+        }
+        assert_limit_contract("active_deletion_requests", |limit| {
+            db.active_deletion_requests(limit).unwrap().len()
+        });
+        assert_limit_contract("pending_deletion_requests", |limit| {
+            db.pending_deletion_requests(limit).unwrap().len()
+        });
+    }
+
+    #[test]
+    fn compression_job_limits_use_the_shared_policy() {
+        let db = Db::open_in_memory().unwrap();
+        for photo in seed_photos(&db, 3) {
+            db.enqueue_job(photo, "profile", "keep").unwrap();
+        }
+        assert_limit_contract("list_jobs", |limit| db.list_jobs(limit).unwrap().len());
+        assert_limit_contract("list_jobs_by_status", |limit| {
+            db.list_jobs_by_status(QueueStatus::Pending, limit)
+                .unwrap()
+                .len()
+        });
+    }
+
+    #[test]
+    fn send_history_and_tagging_limits_use_the_shared_policy() {
+        let db = Db::open_in_memory().unwrap();
+        for _ in 0..3 {
+            db.enqueue_test_send().unwrap();
+        }
+        assert_limit_contract("send_history", |limit| {
+            db.send_history(limit).unwrap().len()
+        });
+
+        let db = Db::open_in_memory().unwrap();
+        for photo in seed_photos(&db, 3) {
+            assert_eq!(
+                db.enqueue_tagging_jobs(&[photo], AI_PLUGIN, TaggingJobStatus::Pending)
+                    .unwrap(),
+                1
+            );
+        }
+        assert_limit_contract("active_tagging_jobs", |limit| {
+            db.active_tagging_jobs(limit).unwrap().len()
+        });
+        assert_limit_contract("active_tagging_jobs_for_ui", |limit| {
+            db.active_tagging_jobs_for_ui(limit).unwrap().len()
+        });
+    }
+
+    #[test]
+    fn prune_send_history_zero_stays_an_explicit_clear_all() {
+        let db = Db::open_in_memory().unwrap();
+        for _ in 0..3 {
+            db.connection()
+                .execute(
+                    "INSERT INTO send_outbox(photo_id, kind, origin, status, created_at) \
+                     VALUES (NULL, 'test', 'manual', 'sent', ?1)",
+                    params!["2026-11-06T00:00:00+00:00"],
+                )
+                .unwrap();
+        }
+        assert_eq!(db.prune_send_history(0).unwrap(), 3);
+        assert!(db.send_history(10).unwrap().is_empty());
     }
 }
