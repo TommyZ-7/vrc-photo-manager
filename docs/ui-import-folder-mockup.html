@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VRC PhotoN — フォルダ取り込み 階層維持モック (#404)</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --font: "Inter", "Noto Sans JP", "Hiragino Sans", "Yu Gothic UI", system-ui, -apple-system, sans-serif;
+    --mono: "SFMono-Regular", "Cascadia Code", Consolas, "Liberation Mono", monospace;
+    --text: #eef4ff;
+    --muted: #a8b4ca;
+    --dim: #7f8ba3;
+    --faint: #5e6a81;
+    --accent: #8bcbff;
+    --accent-2: #7f92ff;
+    --accent-3: #70e4d2;
+    --amber: #f4c878;
+    --rose: #ff94a8;
+    --green: #7ee2b8;
+    --line: rgba(255, 255, 255, 0.105);
+    --line-strong: rgba(255, 255, 255, 0.17);
+    --line-soft: rgba(255, 255, 255, 0.065);
+    --panel-header: #101725;
+    --panel-card: #0d1420;
+    --panel-inner: #111927;
+    --panel-inner-deep: #0c1320;
+    --panel-deep: #0a1019;
+    --panel-raised: #172132;
+    --r-card: 22px;
+    --r-inner: 17px;
+    --ease: cubic-bezier(0.22, 0.8, 0.24, 1);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    background:
+      radial-gradient(1100px 580px at 16% -10%, rgba(84, 120, 190, 0.22), transparent 62%),
+      radial-gradient(900px 500px at 100% 0%, rgba(112, 228, 210, 0.08), transparent 60%),
+      #05070d;
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 12px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+  }
+  button { font: inherit; color: inherit; cursor: pointer; }
+  .icon { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .icon-sm { width: 14px; height: 14px; }
+
+  .review { width: min(1200px, calc(100% - 48px)); margin: 0 auto; padding: 40px 0 80px; }
+  .review-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; padding-bottom: 22px; border-bottom: 1px solid var(--line); }
+  .review-head h1 { margin: 0; font-size: 25px; letter-spacing: -0.02em; font-weight: 650; }
+  .review-head p { margin: 6px 0 0; color: var(--muted); max-width: 720px; }
+  .review-meta { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border-radius: 99px; border: 1px solid var(--line); background: rgba(255,255,255,.03); color: var(--muted); font-size: 10px; white-space: nowrap; }
+  .pill b { color: var(--text); font-weight: 600; }
+  .pill.accent { border-color: rgba(139,203,255,.28); color: var(--accent); }
+
+  .spec { margin-top: 38px; }
+  .spec-head { display: grid; grid-template-columns: 64px 1fr auto; gap: 16px; align-items: start; margin-bottom: 14px; }
+  .unit { display: inline-flex; align-items: center; justify-content: center; height: 28px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--panel-raised); font-family: var(--mono); font-size: 11px; color: var(--accent); }
+  .spec-head h2 { margin: 0; font-size: 17px; font-weight: 620; }
+  .spec-head p { margin: 5px 0 0; color: var(--muted); max-width: 780px; }
+  .decision { margin-top: 10px; padding: 10px 12px; border-left: 2px solid rgba(139,203,255,.5); background: rgba(139,203,255,.045); color: var(--muted); border-radius: 0 8px 8px 0; }
+  .decision b { color: var(--text); font-weight: 600; }
+
+  .stage { display: flex; justify-content: center; padding: 26px; border: 1px solid var(--line); border-radius: var(--r-card); background: rgba(10,16,28,.5); }
+  .scrim { width: 100%; display: flex; justify-content: center; padding: 26px 0; }
+  .dialog { width: min(560px, 100%); border: 1px solid var(--line-strong); border-radius: var(--r-card); background: var(--panel-header); box-shadow: 0 26px 80px rgba(0,0,0,.55); overflow: hidden; }
+  .dialog-head { display: flex; align-items: center; gap: 10px; padding: 20px 22px 12px; }
+  .dialog-head h3 { margin: 0; font-size: 20px; font-weight: 620; }
+  .badge { display: inline-flex; align-items: center; height: 20px; padding: 0 7px; border-radius: 99px; border: 1px solid rgba(139,203,255,.3); background: rgba(139,203,255,.1); color: var(--accent); font-size: 9px; }
+  .dialog-body { padding: 0 22px 6px; display: flex; flex-direction: column; gap: 10px; }
+  .section-label { margin-top: 2px; color: var(--faint); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
+  .source-actions { display: flex; gap: 8px; }
+  .btn { height: 28px; padding: 0 10px; border-radius: 8px; border: 1px solid var(--line-strong); background: var(--panel-raised); color: var(--text); display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 560; }
+  .btn.primary { border-color: rgba(139,203,255,.45); background: linear-gradient(180deg, rgba(139,203,255,.22), rgba(127,146,255,.14)); color: #dff3ff; }
+  .btn.ghost { background: transparent; color: var(--muted); }
+  .hint { color: var(--faint); font-size: 10px; }
+  .source-summary { color: var(--muted); font-size: 11px; }
+  .dest-path { color: var(--muted); font-size: 11px; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .divider { height: 1px; background: var(--line); margin: 4px 0; }
+  .option-block { border: 1px solid var(--line); border-radius: var(--r-inner); background: var(--panel-inner-deep); padding: 11px 12px; display: flex; flex-direction: column; gap: 10px; }
+  .option { display: grid; grid-template-columns: 1fr auto; gap: 12px; align-items: start; }
+  .option.off { opacity: .45; }
+  .option b { display: block; font-size: 11px; font-weight: 600; color: var(--text); }
+  .option p { margin: 2px 0 0; color: var(--muted); font-size: 10px; }
+  .option code { color: var(--accent-3); font-family: var(--mono); font-size: 9px; }
+  .switch { width: 32px; height: 18px; border-radius: 99px; background: rgba(255,255,255,.12); border: 1px solid var(--line-strong); position: relative; flex: 0 0 auto; margin-top: 1px; }
+  .switch::after { content: ""; position: absolute; width: 12px; height: 12px; border-radius: 50%; background: var(--dim); top: 2px; left: 2px; transition: transform .16s var(--ease), background .16s; }
+  .switch.on { background: rgba(139,203,255,.28); border-color: rgba(139,203,255,.5); }
+  .switch.on::after { transform: translateX(14px); background: var(--accent); }
+  .example { display: flex; gap: 8px; flex-wrap: wrap; color: var(--faint); font-size: 9px; }
+  .example span { font-family: var(--mono); }
+  .dialog-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 22px 18px; }
+  .note { display: flex; gap: 8px; padding: 9px 11px; border-radius: 9px; border: 1px solid var(--line); background: rgba(255,255,255,.02); color: var(--muted); font-size: 10px; }
+  .note .icon { margin-top: 1px; }
+
+  .variants { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
+  .variant { border: 1px solid var(--line); border-radius: var(--r-inner); background: var(--panel-card); padding: 13px 14px; }
+  .variant h4 { margin: 0 0 8px; font-size: 11px; font-weight: 600; }
+  .variant .state { color: var(--faint); font-size: 9px; margin-bottom: 8px; }
+  .tree { margin: 0; padding: 0; list-style: none; font-family: var(--mono); font-size: 9px; color: var(--muted); line-height: 1.8; }
+  .tree .folder { color: var(--accent); }
+  .tree .new { color: var(--accent-3); }
+  .variant.current { border-color: rgba(139,203,255,.35); box-shadow: inset 0 0 0 1px rgba(139,203,255,.08); }
+
+  .approval { margin-top: 34px; padding: 16px 18px; border: 1px solid var(--line); border-radius: var(--r-inner); background: var(--panel-deep); }
+  .approval h3 { margin: 0 0 8px; font-size: 13px; }
+  .approval ol { margin: 0; padding-left: 20px; color: var(--muted); }
+  .approval li { margin: 5px 0; }
+  .approval code { color: var(--accent); font-family: var(--mono); font-size: 11px; }
+
+  @media (max-width: 900px) {
+    .variants { grid-template-columns: 1fr; }
+    .spec-head { grid-template-columns: 52px 1fr; }
+    .review-meta { justify-content: flex-start; }
+    .review-head { flex-direction: column; align-items: flex-start; }
+  }
+</style>
+</head>
+<body>
+<main class="review">
+  <header class="review-head">
+    <div>
+      <h1>フォルダ取り込み — 階層維持モック</h1>
+      <p>Issue #404 の実装前モック。取り込みダイアログに「階層を維持」「指定フォルダ名を含める」の2つを追加し、既定は現行どおり平坦配置にします。</p>
+    </div>
+    <div class="review-meta">
+      <span class="pill accent"><b>2026-11-06</b></span>
+      <span class="pill">#404</span>
+      <span class="pill">承認後に実装</span>
+    </div>
+  </header>
+
+  <section class="spec">
+    <div class="spec-head">
+      <span class="unit">#404</span>
+      <div>
+        <h2>取り込みダイアログ（フォルダ選択時）</h2>
+        <p>設定は取り込みダイアログ内に置き、次回以降の既定として <code>AppSettings</code> に保存します。ファイルを個別に選んだ場合はセクション自体を表示しません。</p>
+        <div class="decision"><b>推奨:</b> ダイアログ内の2トグルで per-import に変更し、その値を既定として保存する。設定画面には別セクションを追加しない（設定の二重管理を避ける）。</div>
+      </div>
+      <span class="pill">モック</span>
+    </div>
+
+    <div class="stage">
+      <div class="scrim">
+        <section class="dialog" aria-label="取り込みダイアログ">
+          <div class="dialog-head">
+            <h3>写真を取り込む</h3>
+            <span class="badge">コピー</span>
+          </div>
+          <div class="dialog-body">
+            <div class="section-label">取り込み元</div>
+            <div class="source-actions">
+              <button class="btn"><svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M4 7.5A2.5 2.5 0 0 1 6.5 5h11A2.5 2.5 0 0 1 20 7.5v9a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 16.5z"/><path d="m5 17 4.2-4.2a2 2 0 0 1 2.8 0L17 17"/></svg>ファイルを選択</button>
+              <button class="btn"><svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>フォルダを選択</button>
+            </div>
+            <div class="hint">フォルダを選ぶと、配下の対応画像を再帰的に取り込みます。</div>
+            <div class="source-summary">Trip — 128枚 / 3サブフォルダ</div>
+
+            <div class="section-label">取り込み先</div>
+            <div class="dest-path">~/Pictures/VRChat/Imported</div>
+            <div class="hint">取り込み先はライブラリの管理フォルダです。</div>
+
+            <div class="divider"></div>
+
+            <div class="section-label">フォルダ構造</div>
+            <div class="option-block">
+              <div class="option">
+                <div>
+                  <b>フォルダ階層を維持する</b>
+                  <p>サブフォルダをライブラリ内でも再現します。オフの場合は従来どおり直下へ平坦に配置します。</p>
+                </div>
+                <span class="switch on" role="switch" aria-checked="true" aria-label="フォルダ階層を維持する"></span>
+              </div>
+              <div class="option">
+                <div>
+                  <b>指定したフォルダ名も含める</b>
+                  <p>選択したフォルダ自体を階層の先頭に含めます。</p>
+                  <div class="example">
+                    <span>オン: Imported/Trip/Day1/a.jpg</span>
+                    <span>オフ: Imported/Day1/a.jpg</span>
+                  </div>
+                </div>
+                <span class="switch on" role="switch" aria-checked="true" aria-label="指定したフォルダ名も含める"></span>
+              </div>
+              <div class="hint">既定は両方オフ。「フォルダ階層を維持する」がオフのとき、この項目は無効になります。</div>
+            </div>
+
+            <div class="note">
+              <svg class="icon icon-sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 8v4"/><circle cx="12" cy="16" r=".7" fill="currentColor" stroke="none"/></svg>
+              既存ファイルと同名になる場合は、従来どおり連番サフィックスで保存します。上書きはしません。
+            </div>
+          </div>
+          <div class="dialog-foot">
+            <button class="btn ghost">キャンセル</button>
+            <button class="btn primary">取り込む</button>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <div class="variants">
+      <article class="variant">
+        <h4>既定（両方オフ）</h4>
+        <div class="state">現行と同じ平坦配置</div>
+        <ul class="tree">
+          <li><span class="folder">Imported/</span></li>
+          <li>├─ a.jpg</li>
+          <li>└─ b.jpg</li>
+        </ul>
+      </article>
+      <article class="variant current">
+        <h4>階層維持オン / ルート含めない</h4>
+        <div class="state">サブフォルダだけを再現</div>
+        <ul class="tree">
+          <li><span class="folder">Imported/</span></li>
+          <li>├─ <span class="folder">Day1/</span></li>
+          <li>│  └─ a.jpg</li>
+          <li>└─ <span class="folder">Day2/</span></li>
+          <li>&nbsp;&nbsp;&nbsp;└─ b.jpg</li>
+        </ul>
+      </article>
+      <article class="variant">
+        <h4>階層維持オン / ルート含める</h4>
+        <div class="state">選択フォルダ名も再現</div>
+        <ul class="tree">
+          <li><span class="folder">Imported/</span></li>
+          <li>└─ <span class="folder">Trip/</span></li>
+          <li>&nbsp;&nbsp;&nbsp;├─ <span class="folder">Day1/</span></li>
+          <li>&nbsp;&nbsp;&nbsp;│  └─ a.jpg</li>
+          <li>&nbsp;&nbsp;&nbsp;└─ <span class="folder">Day2/</span></li>
+          <li>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;└─ b.jpg</li>
+        </ul>
+      </article>
+    </div>
+  </section>
+
+  <section class="spec">
+    <div class="spec-head">
+      <span class="unit">補足</span>
+      <div>
+        <h2>ファイル個別指定・再取り込み</h2>
+        <p>ファイルを個別に選んだ場合は「フォルダ構造」セクションを出さず、従来どおり直下へ配置します。再取り込みは既存の衝突処理（連番サフィックス、上書き禁止）を維持します。</p>
+      </div>
+    </div>
+    <div class="variants">
+      <article class="variant">
+        <h4>ファイル個別指定</h4>
+        <div class="state">セクション非表示</div>
+        <ul class="tree">
+          <li>a.jpg → Imported/a.jpg</li>
+          <li>b.jpg → Imported/b.jpg</li>
+        </ul>
+      </article>
+      <article class="variant">
+        <h4>再取り込み（階層維持オン）</h4>
+        <div class="state">既存を上書きしない</div>
+        <ul class="tree">
+          <li>Day1/a.jpg</li>
+          <li>Day1/a-1.jpg（衝突時）</li>
+        </ul>
+      </article>
+      <article class="variant">
+        <h4>圧縮派生</h4>
+        <div class="state">compressed は従来どおり除外</div>
+        <ul class="tree">
+          <li>Day1/compressed/… は走査対象外</li>
+          <li>階層付きでも scanner は再帰対応済み</li>
+        </ul>
+      </article>
+    </div>
+  </section>
+
+  <section class="approval">
+    <h3>承認チェック</h3>
+    <ol>
+      <li>取り込みダイアログ内の2トグル（階層維持 / ルート含める）でよいか。既定は両方オフ。</li>
+      <li>2つ目は1つ目がオフのとき無効化し、設定画面には別セクションを追加しない方針でよいか。</li>
+      <li>個別ファイル取り込みではセクションを出さず、再取り込みは連番サフィックスで非上書きのままでよいか。</li>
+      <li>承認後、設定保存・import コア・UI・回帰テストを1つの PR にまとめる。</li>
+    </ol>
+    <p style="margin:10px 0 0;color:var(--faint);font-size:10px">このページは <code>docs/ui-import-folder-mockup.html</code>。実装時は既存の GPUI コンポーネントと i18n キーに合わせる。</p>
+  </section>
+</main>
+</body>
+</html>
