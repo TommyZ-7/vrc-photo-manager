@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::{ScrollStrategy, UniformListScrollHandle};
+use vrc_photon_core::error::CoreError;
 use vrc_photon_core::model::{Photo, PhotoIndexEntry};
 
 use crate::state::year_rail::{YearBucket, build_year_buckets};
@@ -35,6 +36,9 @@ pub(crate) struct PhotoIndex {
     /// count for the month at the top of the viewport on every scroll-driven
     /// render; scanning the 100k-entry index there was measurable work.
     months: HashMap<i32, usize>,
+    /// Row of every photo id, built with the snapshot. Arrow-key repeats ask
+    /// for this on every key event, so it must not scan the 100k-entry list.
+    rows: HashMap<i64, usize>,
 }
 
 impl PhotoIndex {
@@ -42,14 +46,19 @@ impl PhotoIndex {
         let total = entries.len();
         let years = build_year_buckets(&entries);
         let mut months: HashMap<i32, usize> = HashMap::new();
-        for entry in &entries {
+        let mut rows: HashMap<i64, usize> = HashMap::with_capacity(entries.len());
+        for (row, entry) in entries.iter().enumerate() {
             *months.entry(entry.captured_month).or_insert(0) += 1;
+            // The linear lookup this replaces returned the first occurrence,
+            // so a duplicated id keeps its earliest row.
+            rows.entry(entry.id).or_insert(row);
         }
         Self {
             entries,
             total,
             years,
             months,
+            rows,
         }
     }
 
@@ -72,7 +81,7 @@ impl PhotoIndex {
 
     /// Position of `id` in the ordered snapshot, if it is still present.
     pub(crate) fn row_of_id(&self, id: i64) -> Option<usize> {
-        self.entries.iter().position(|entry| entry.id == id)
+        self.rows.get(&id).copied()
     }
 }
 
@@ -147,6 +156,39 @@ pub(crate) fn search_anchor_after_result(
         .or_else(|| index.entries.first().map(|entry| entry.id))
 }
 
+/// Why a grid page failed, in a form the UI can present without leaking
+/// internal paths or database error text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PageFailure {
+    Timeout,
+    ReadError,
+}
+
+impl PageFailure {
+    pub(crate) fn from_core_error(error: &CoreError) -> Self {
+        match error {
+            CoreError::Io(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                Self::Timeout
+            }
+            _ => Self::ReadError,
+        }
+    }
+}
+
+/// One failed page in the rendered range, including whether an explicit retry
+/// is already in flight.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FailedPage {
+    pub(crate) page: usize,
+    pub(crate) failure: PageFailure,
+    pub(crate) retrying: bool,
+}
+
 /// Bounded access-order LRU cache for grid photo pages.
 ///
 /// `get_page` moves the page to the back of the order; `insert_page` evicts
@@ -157,7 +199,11 @@ pub(crate) struct PhotoPageCache {
     pages: HashMap<usize, Arc<Vec<Arc<Photo>>>>,
     order: VecDeque<usize>,
     pending: HashSet<usize>,
-    failed: HashSet<usize>,
+    failed: HashMap<usize, PageFailure>,
+    /// Pages whose inline retry button was pressed. Their failure marker stays
+    /// in place until the reload succeeds so the panel does not blink back to
+    /// placeholders and no automatic reload loop can pick them up.
+    retrying: HashSet<usize>,
 }
 
 impl PhotoPageCache {
@@ -170,6 +216,7 @@ impl PhotoPageCache {
         self.order.clear();
         self.pending.clear();
         self.failed.clear();
+        self.retrying.clear();
     }
 
     pub(crate) fn get_page(&mut self, page: usize) -> Option<Arc<Vec<Arc<Photo>>>> {
@@ -181,6 +228,7 @@ impl PhotoPageCache {
     fn insert_page(&mut self, page: usize, photos: Vec<Photo>) {
         self.pending.remove(&page);
         self.failed.remove(&page);
+        self.retrying.remove(&page);
         let page_photos = photos.into_iter().map(Arc::new).collect::<Vec<_>>();
         self.pages.insert(page, Arc::new(page_photos));
         self.touch(page);
@@ -212,7 +260,7 @@ impl PhotoPageCache {
             }
             if self.pages.contains_key(&page)
                 || self.pending.contains(&page)
-                || self.failed.contains(&page)
+                || self.failed.contains_key(&page)
             {
                 continue;
             }
@@ -222,9 +270,51 @@ impl PhotoPageCache {
         planned
     }
 
-    fn fail_page(&mut self, page: usize) {
+    fn mark_pending(&mut self, page: usize) {
+        self.pending.insert(page);
+    }
+
+    fn fail_page(&mut self, page: usize, reason: PageFailure) {
         self.pending.remove(&page);
-        self.failed.insert(page);
+        self.retrying.remove(&page);
+        self.failed.insert(page, reason);
+    }
+
+    pub(crate) fn is_failed(&self, page: usize) -> bool {
+        self.failed.contains_key(&page)
+    }
+
+    /// Failed pages whose photo range overlaps `[start, end)`, in page order.
+    pub(crate) fn failed_pages_in_range(&self, start: usize, end: usize) -> Vec<FailedPage> {
+        if end <= start {
+            return Vec::new();
+        }
+        let first = start / PAGE_SIZE;
+        let last = (end - 1) / PAGE_SIZE;
+        let mut failed: Vec<FailedPage> = self
+            .failed
+            .iter()
+            .filter(|(page, _)| **page >= first && **page <= last)
+            .map(|(page, reason)| FailedPage {
+                page: *page,
+                failure: *reason,
+                retrying: self.retrying.contains(page),
+            })
+            .collect();
+        failed.sort_unstable_by_key(|state| state.page);
+        failed
+    }
+
+    /// Marks exactly one failed page for an explicit retry. The failure marker
+    /// is kept until the reload reports success or failure, so the inline panel
+    /// stays mounted with its loading label and `plan_pages` cannot schedule a
+    /// duplicate load. Returns `false` for an unknown or already-retrying page.
+    pub(crate) fn retry_page(&mut self, page: usize) -> bool {
+        if !self.is_failed(page) || self.retrying.contains(&page) {
+            return false;
+        }
+        self.retrying.insert(page);
+        true
     }
 }
 
@@ -345,12 +435,54 @@ impl PhotoBrowser {
         self.pages.insert_page(page, photos);
     }
 
-    pub(crate) fn fail_page(&mut self, page: usize, generation: u64) {
+    pub(crate) fn fail_page(&mut self, page: usize, reason: PageFailure, generation: u64) {
         if generation != self.generation {
             return;
         }
-        self.pages.fail_page(page);
+        self.pages.fail_page(page, reason);
     }
+
+    /// Marks a page as requested immediately before `load_pages` starts, so a
+    /// render between an explicit retry and the page result cannot request a
+    /// duplicate load.
+    pub(crate) fn mark_page_pending(&mut self, page: usize) {
+        self.pages.mark_pending(page);
+    }
+}
+
+/// Marks one failed page as retrying for an explicit user retry.
+///
+/// `expected_generation` comes from the render that displayed the failure. A
+/// stale render must not revive a failure recorded against a newer index/page
+/// cache. The failure marker stays until [`PhotoBrowser::insert_page`] or
+/// [`PhotoBrowser::fail_page`] settles the reload. Returns the generation/page
+/// the caller should load.
+pub(crate) fn plan_page_retry(
+    browser: &mut PhotoBrowser,
+    expected_generation: u64,
+    page: usize,
+) -> Option<PageRetry> {
+    if browser.generation != expected_generation {
+        return None;
+    }
+    let start = page.checked_mul(PAGE_SIZE)?;
+    if start >= browser.index.total {
+        return None;
+    }
+    if !browser.pages.retry_page(page) {
+        return None;
+    }
+    Some(PageRetry {
+        generation: browser.generation,
+        page,
+    })
+}
+
+/// A retry request that has already claimed its page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PageRetry {
+    pub(crate) generation: u64,
+    pub(crate) page: usize,
 }
 
 /// Keeps the no-query search mirror on the current library snapshot.
@@ -485,6 +617,229 @@ mod tests {
     }
 
     #[test]
+    fn failed_page_is_not_planned_again_until_its_retry_succeeds() {
+        let mut cache = PhotoPageCache::new();
+        cache.fail_page(0, PageFailure::Timeout);
+
+        assert!(cache.is_failed(0));
+        assert!(cache.plan_pages(0, PAGE_SIZE, 4).is_empty());
+        assert!(cache.retry_page(0));
+        // A double click cannot requeue the page while the first retry runs.
+        assert!(!cache.retry_page(0));
+        // The panel stays mounted (and `plan_pages` stays away) until the
+        // reload settles.
+        assert!(cache.is_failed(0));
+        assert!(cache.plan_pages(0, PAGE_SIZE, 4).is_empty());
+        assert_eq!(
+            cache.failed_pages_in_range(0, PAGE_SIZE),
+            vec![FailedPage {
+                page: 0,
+                failure: PageFailure::Timeout,
+                retrying: true,
+            }]
+        );
+
+        cache.insert_page(0, vec![test_photo(0)]);
+        assert!(!cache.is_failed(0));
+        assert!(cache.get_page(0).is_some());
+        assert!(cache.plan_pages(0, PAGE_SIZE, 4).is_empty());
+        assert!(cache.failed_pages_in_range(0, PAGE_SIZE).is_empty());
+    }
+
+    #[test]
+    fn a_failed_retry_keeps_the_panel_and_reenables_the_action() {
+        let mut cache = PhotoPageCache::new();
+        cache.fail_page(0, PageFailure::Timeout);
+        assert!(cache.retry_page(0));
+
+        cache.fail_page(0, PageFailure::ReadError);
+
+        assert_eq!(
+            cache.failed_pages_in_range(0, PAGE_SIZE),
+            vec![FailedPage {
+                page: 0,
+                failure: PageFailure::ReadError,
+                retrying: false,
+            }]
+        );
+        assert!(cache.retry_page(0), "a failed retry can be retried again");
+    }
+
+    #[test]
+    fn retrying_one_page_leaves_other_failures_and_reports_their_range() {
+        let mut cache = PhotoPageCache::new();
+        cache.fail_page(1, PageFailure::Timeout);
+        cache.fail_page(3, PageFailure::ReadError);
+
+        assert_eq!(
+            cache.failed_pages_in_range(0, PAGE_SIZE * 2),
+            vec![FailedPage {
+                page: 1,
+                failure: PageFailure::Timeout,
+                retrying: false,
+            }]
+        );
+        assert_eq!(
+            cache.failed_pages_in_range(PAGE_SIZE, PAGE_SIZE * 4),
+            vec![
+                FailedPage {
+                    page: 1,
+                    failure: PageFailure::Timeout,
+                    retrying: false,
+                },
+                FailedPage {
+                    page: 3,
+                    failure: PageFailure::ReadError,
+                    retrying: false,
+                },
+            ]
+        );
+        assert!(cache.failed_pages_in_range(0, 0).is_empty());
+        assert!(
+            cache
+                .failed_pages_in_range(PAGE_SIZE * 4, PAGE_SIZE * 5)
+                .is_empty()
+        );
+
+        assert!(cache.retry_page(1));
+        assert!(cache.is_failed(1));
+        assert!(cache.is_failed(3));
+        assert_eq!(
+            cache.failed_pages_in_range(0, PAGE_SIZE * 2),
+            vec![FailedPage {
+                page: 1,
+                failure: PageFailure::Timeout,
+                retrying: true,
+            }]
+        );
+
+        cache.insert_page(1, vec![test_photo(1)]);
+        assert!(!cache.is_failed(1));
+        assert_eq!(
+            cache.failed_pages_in_range(0, PAGE_SIZE * 4),
+            vec![FailedPage {
+                page: 3,
+                failure: PageFailure::ReadError,
+                retrying: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn a_successful_page_insert_clears_its_failure_and_retry_state() {
+        let mut cache = PhotoPageCache::new();
+        cache.fail_page(2, PageFailure::ReadError);
+        assert!(cache.retry_page(2));
+        assert!(cache.is_failed(2));
+
+        cache.insert_page(2, vec![test_photo(2)]);
+        assert!(!cache.is_failed(2));
+        assert!(cache.failed_pages_in_range(0, PAGE_SIZE * 3).is_empty());
+        assert!(cache.get_page(2).is_some());
+    }
+
+    #[test]
+    fn page_failure_classifies_timeouts_without_leaking_error_text() {
+        let timeout = CoreError::Io(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "private path /home/user/secret.db",
+        ));
+        assert_eq!(PageFailure::from_core_error(&timeout), PageFailure::Timeout);
+
+        let read_error = CoreError::Invalid("/home/user/secret.db is corrupt".to_string());
+        assert_eq!(
+            PageFailure::from_core_error(&read_error),
+            PageFailure::ReadError
+        );
+    }
+
+    #[test]
+    fn retry_plan_ignores_a_stale_generation_and_keeps_other_pages_failed() {
+        let entries = (1..=PAGE_SIZE as i64 * 3)
+            .map(|id| index_entry(id, 202601))
+            .collect();
+        let mut browser = PhotoBrowser::new(Arc::new(PhotoIndex::new(entries)), TEST_ROW_HEIGHT);
+        let generation = browser.generation;
+        browser.fail_page(1, PageFailure::Timeout, generation);
+        browser.fail_page(2, PageFailure::ReadError, generation);
+
+        assert_eq!(
+            plan_page_retry(&mut browser, generation.wrapping_add(1), 1),
+            None
+        );
+        assert!(browser.pages.is_failed(1));
+
+        assert_eq!(
+            plan_page_retry(&mut browser, generation, 1),
+            Some(PageRetry {
+                generation,
+                page: 1
+            })
+        );
+        assert!(browser.pages.is_failed(1));
+        assert_eq!(
+            browser
+                .pages
+                .failed_pages_in_range(PAGE_SIZE, PAGE_SIZE + 1),
+            vec![FailedPage {
+                page: 1,
+                failure: PageFailure::Timeout,
+                retrying: true,
+            }]
+        );
+        assert!(browser.pages.is_failed(2));
+        assert_eq!(
+            plan_page_retry(&mut browser, generation, 1),
+            None,
+            "a page that is already retrying must not be requested twice"
+        );
+
+        // A successful retry clears that page and leaves the other failure.
+        browser.insert_page(1, vec![test_photo(1)], generation);
+        assert!(!browser.pages.is_failed(1));
+        assert!(browser.pages.is_failed(2));
+
+        // A page beyond the snapshot has no photos to load.
+        assert_eq!(plan_page_retry(&mut browser, generation, 99), None);
+        assert_eq!(
+            plan_page_retry(&mut browser, generation, 0),
+            None,
+            "a page without a failure is not a retry target"
+        );
+    }
+
+    #[test]
+    fn row_of_id_tracks_rebuilds_and_photo_removal() {
+        let mut browser = PhotoBrowser::new(
+            Arc::new(PhotoIndex::new(vec![
+                index_entry(10, 202601),
+                index_entry(11, 202512),
+                index_entry(12, 202511),
+            ])),
+            TEST_ROW_HEIGHT,
+        );
+        assert_eq!(browser.index.row_of_id(11), Some(1));
+
+        browser.remove_photos(&HashSet::from([11]));
+        assert_eq!(browser.index.row_of_id(11), None);
+        assert_eq!(browser.index.row_of_id(12), Some(1));
+
+        browser.replace_index(Arc::new(PhotoIndex::new(vec![
+            index_entry(12, 202511),
+            index_entry(10, 202601),
+        ])));
+        assert_eq!(browser.index.row_of_id(12), Some(0));
+        assert_eq!(browser.index.row_of_id(10), Some(1));
+        assert_eq!(browser.index.row_of_id(11), None);
+    }
+
+    #[test]
+    fn row_of_id_keeps_the_first_row_for_a_duplicated_id() {
+        let index = PhotoIndex::new(vec![index_entry(7, 202601), index_entry(7, 202512)]);
+        assert_eq!(index.row_of_id(7), Some(0));
+    }
+
+    #[test]
     fn count_debounce_waits_for_a_quiet_period() {
         let mut debounce = CountDebounce::default();
         let quiet = Duration::from_secs(2);
@@ -532,15 +887,15 @@ mod tests {
 
         browser.insert_page(0, vec![test_photo(1)], stale);
         assert!(browser.pages.get_page(0).is_none());
-        browser.fail_page(0, stale);
-        assert!(!browser.pages.failed.contains(&0));
+        browser.fail_page(0, PageFailure::ReadError, stale);
+        assert!(!browser.pages.is_failed(0));
 
         let current = browser.generation;
-        browser.fail_page(0, current);
-        assert!(browser.pages.failed.contains(&0));
+        browser.fail_page(0, PageFailure::ReadError, current);
+        assert!(browser.pages.is_failed(0));
         browser.insert_page(0, vec![test_photo(2)], current);
         assert!(browser.pages.get_page(0).is_some());
-        assert!(!browser.pages.failed.contains(&0));
+        assert!(!browser.pages.is_failed(0));
     }
 
     #[test]

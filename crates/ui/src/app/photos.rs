@@ -21,7 +21,7 @@ use vrc_photon_ipc::Request as IpcRequest;
 use crate::app::cli::log_timing;
 use crate::app::demo::demo_thumb_path;
 use crate::app::{App, Screen};
-use crate::state::photo_browser::{PhotoBrowser, row_for_photo};
+use crate::state::photo_browser::{PhotoBrowser, plan_page_retry, row_for_photo};
 use crate::state::preview::{
     preview_cache_dir, preview_key, should_apply_preview, should_request_preview,
 };
@@ -562,6 +562,36 @@ impl App {
         } else {
             self.library.borrow_mut()
         }
+    }
+
+    /// Marks one failed page as retrying and immediately loads only it again.
+    ///
+    /// `expected_generation` is the grid generation that rendered the error
+    /// panel. If the snapshot or page cache changed in the meantime the click
+    /// is ignored instead of reviving a stale page. Loaded cards, selection,
+    /// and scroll position are untouched; the inline panel stays mounted with
+    /// its loading label until the request succeeds or fails.
+    pub(crate) fn retry_failed_page(
+        &mut self,
+        search: bool,
+        page: usize,
+        expected_generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(retry) = plan_page_retry(&mut self.browser_mut(search), expected_generation, page)
+        else {
+            return;
+        };
+        self.load_pages(search, retry.generation, vec![retry.page], cx);
+        cx.notify();
+    }
+
+    /// Returns the active grid to its first row without clearing selection.
+    pub(crate) fn scroll_grid_to_first_page(&mut self, search: bool, cx: &mut Context<Self>) {
+        self.browser_mut(search)
+            .scroll
+            .scroll_to_item_strict(0, ScrollStrategy::Top);
+        cx.notify();
     }
 
     /// Selects every photo in the active grid. The current primary photo stays

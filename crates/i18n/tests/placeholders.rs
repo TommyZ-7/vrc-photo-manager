@@ -160,6 +160,11 @@ const CALL_SITES: &[(&str, &[&str])] = &[
     ("photos.jobs.processing", &["count"]),
     ("photos.jobs.waiting", &["count"]),
     ("photos.note.save_error", &["error"]),
+    (
+        "photos.page_load_failed_detail",
+        &["count", "page", "reason"],
+    ),
+    ("photos.page_load_failed_range", &["end", "start"]),
     ("photos.selected_count", &["count"]),
     ("photos.tags.load_error", &["error"]),
     ("photos.tags.save_error", &["error"]),
