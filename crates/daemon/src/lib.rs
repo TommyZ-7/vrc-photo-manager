@@ -1614,18 +1614,46 @@ impl Daemon {
         )
     }
 
-    /// Closes sessions left open by a previous daemon. Only the owner of the
-    /// single-instance lock may repair them: a maintenance run must not close
-    /// the live daemon's active session.
+    /// Closes sessions left open by a previous daemon, except the session that
+    /// still belongs to the latest log while VRChat is running: that one is
+    /// resumed by the log ingestor instead. Only the owner of the
+    /// single-instance lock may repair sessions: a maintenance run must not
+    /// close the live daemon's active session.
     fn repair_open_sessions(&mut self) -> Result<usize> {
+        self.repair_open_sessions_with_running(vrchat_process::is_running())
+    }
+
+    fn repair_open_sessions_with_running(&mut self, vrchat_running: Option<bool>) -> Result<usize> {
         if !self.owns_deletion_executor {
             return Ok(0);
         }
+        let latest_log = self
+            .settings
+            .log_dir()
+            .and_then(|dir| match latest_log_file(&dir) {
+                Ok(path) => path,
+                Err(error) => {
+                    tracing::warn!(%error, "cannot resolve the latest log for session repair");
+                    None
+                }
+            });
         let db = self.db.lock().unwrap();
         let sessions = db.open_sessions()?;
         let now = chrono::Utc::now().timestamp();
         let mut repaired = 0;
         for session in sessions {
+            if should_resume_open_session(
+                Path::new(&session.log_file),
+                latest_log.as_deref(),
+                vrchat_running,
+            ) {
+                tracing::info!(
+                    session_id = session.id,
+                    log_file = %session.log_file,
+                    "resuming open session at startup"
+                );
+                continue;
+            }
             let ended_at =
                 session_end_time(&db, Path::new(&session.log_file), session.started_at, now);
             db.close_session(session.id, ended_at)?;
@@ -1778,13 +1806,23 @@ impl Daemon {
                 let finish_at = session_end_time(&db, &previous.path, started_at, now);
                 previous.ingestor.finish(&db, finish_at)?;
             }
-            let offset = {
+            let (offset, ingestor) = {
                 let db = self.db.lock().unwrap();
-                db.log_offset(&path_string)?.unwrap_or(0)
+                let offset = db.log_offset(&path_string)?.unwrap_or(0);
+                let open_session = db
+                    .open_sessions()?
+                    .into_iter()
+                    .find(|session| session.log_file == path_string);
+                let ingestor = match open_session {
+                    Some(session) => LogIngestor::resume_from_db(&db, &path_string, session.id)?
+                        .unwrap_or_else(|| LogIngestor::new(&path_string)),
+                    None => LogIngestor::new(&path_string),
+                };
+                (offset, ingestor)
             };
             self.log_tail = Some(LogTail {
                 path: path.to_path_buf(),
-                ingestor: LogIngestor::new(&path_string),
+                ingestor,
                 offset,
                 failed_offset: None,
                 failed_attempts: 0,
@@ -3506,6 +3544,17 @@ fn session_end_time(db: &Db, log_file: &Path, started_at: i64, now: i64) -> i64 
     candidate.clamp(started_at.min(now), now)
 }
 
+/// An open session may only survive startup when it belongs to the newest log
+/// and VRChat is still running. A missing or unknown process state is treated
+/// as "not running" so repair keeps its conservative close behavior.
+fn should_resume_open_session(
+    open_log: &Path,
+    latest_log: Option<&Path>,
+    vrchat_running: Option<bool>,
+) -> bool {
+    vrchat_running == Some(true) && latest_log.is_some_and(|latest| latest == open_log)
+}
+
 fn latest_log_file(dir: &Path) -> Result<Option<PathBuf>> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -4745,12 +4794,115 @@ mod tests {
         }
 
         let mut daemon = Daemon::open(&db_path, Some(photo_dir), Some(log_dir)).unwrap();
-        daemon.run_once().unwrap();
+        // Inject the process state so this test is deterministic on a machine
+        // that happens to have VRChat running.
+        assert_eq!(
+            daemon
+                .repair_open_sessions_with_running(Some(false))
+                .unwrap(),
+            1
+        );
 
         let db = Db::open(&db_path).unwrap();
         assert!(db.open_sessions().unwrap().is_empty());
         let session = db.session_at(mtime - 60).unwrap().unwrap();
         assert_eq!(session.ended_at, Some(mtime));
+    }
+
+    #[test]
+    fn resume_decision_requires_the_latest_log_and_a_live_vrchat() {
+        let latest = Path::new("/logs/output_log_2026-10-21_21-00-00.txt");
+
+        assert!(should_resume_open_session(latest, Some(latest), Some(true)));
+        assert!(!should_resume_open_session(
+            Path::new("/logs/output_log_2026-10-20_21-00-00.txt"),
+            Some(latest),
+            Some(true)
+        ));
+        assert!(!should_resume_open_session(
+            latest,
+            Some(latest),
+            Some(false)
+        ));
+        assert!(!should_resume_open_session(latest, Some(latest), None));
+        assert!(!should_resume_open_session(latest, None, Some(true)));
+    }
+
+    #[test]
+    fn restart_mid_session_resumes_and_applies_a_later_player_leave() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("logs/output_log_2026-10-21_21-00-00.txt");
+        let join =
+            "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)";
+        let name =
+            "2026.10.21 21:23:13 Debug      -  [Behaviour] Joining or Creating Room: Test World";
+        let player = "2026.10.21 21:23:20 Debug      -  [Behaviour] OnPlayerJoined Mio (usr_a)";
+        let leave =
+            "2026.10.21 21:25:00 Debug      -  [Behaviour] OnPlayerLeft Mio Renamed (usr_a)";
+
+        let mut first = test_daemon(&dir);
+        std::fs::write(&log_path, format!("{join}\n{name}\n{player}\n")).unwrap();
+        let log_file = log_path.to_str().unwrap();
+        first.ingest_logs().unwrap();
+        let session_id = {
+            let db = first.db.lock().unwrap();
+            let session = db
+                .session_at(
+                    vrc_photon_core::log_parser::parse_line(join)
+                        .unwrap()
+                        .timestamp_utc()
+                        + 1,
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(db.open_sessions().unwrap().len(), 1);
+            session.id
+        };
+        let offset_before_restart = {
+            let db = first.db.lock().unwrap();
+            db.log_offset(log_file).unwrap().unwrap()
+        };
+        // Simulate a crash: dropping the daemon must not close the session.
+        drop(first);
+
+        let mut file = File::options().append(true).open(&log_path).unwrap();
+        writeln!(file, "{leave}").unwrap();
+        drop(file);
+
+        let mut second = test_daemon(&dir);
+        assert_eq!(
+            second
+                .repair_open_sessions_with_running(Some(true))
+                .unwrap(),
+            0,
+            "the live session must be kept open"
+        );
+        assert_eq!(
+            second.db.lock().unwrap().open_sessions().unwrap()[0].id,
+            session_id
+        );
+        assert!(second.log_tail.is_none(), "repair must not replay the log");
+
+        second.ingest_logs().unwrap();
+
+        let left_at = vrc_photon_core::log_parser::parse_line(leave)
+            .unwrap()
+            .timestamp_utc();
+        let db = second.db.lock().unwrap();
+        let players = db.players_at(session_id, left_at - 1).unwrap();
+        assert_eq!(players.len(), 1);
+        assert_eq!(players[0].display_name, "Mio Renamed");
+        assert_eq!(players[0].left_at, Some(left_at));
+        assert_eq!(db.open_sessions().unwrap()[0].id, session_id);
+        assert_eq!(
+            db.log_offset(log_file).unwrap(),
+            Some(offset_before_restart + leave.len() as i64 + 1),
+            "ingestion resumes after the persisted offset"
+        );
+        assert_eq!(
+            second.log_tail.as_ref().unwrap().ingestor.session_id(),
+            Some(session_id)
+        );
     }
 
     #[test]

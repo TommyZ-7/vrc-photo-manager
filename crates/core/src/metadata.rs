@@ -86,10 +86,13 @@ pub fn parse_xmp(xml: &str) -> Option<XmpMetadata> {
                 for attribute in element.attributes().flatten() {
                     let key = attribute.key.local_name();
                     let key = Some(key.as_ref());
-                    let value = attribute
-                        .normalized_value(quick_xml::XmlVersion::Implicit1_0)
-                        .ok()?
-                        .into_owned();
+                    // One undecodable attribute must not discard the fields
+                    // already parsed from the rest of the packet.
+                    let Ok(value) = attribute.normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                    else {
+                        continue;
+                    };
+                    let value = value.into_owned();
                     match key {
                         Some("WorldDisplayName") => metadata.world_name = Some(value),
                         Some("WorldId") => metadata.world_id = Some(value),
@@ -99,7 +102,7 @@ pub fn parse_xmp(xml: &str) -> Option<XmpMetadata> {
                 }
             }
             Ok(Event::Eof) => break,
-            Err(_) => return None,
+            Err(_) => return (!metadata.is_empty()).then_some(metadata),
             _ => {}
         }
     }
@@ -132,6 +135,35 @@ mod tests {
         assert_eq!(metadata.world_name.as_deref(), Some("Midnight Rooftop"));
         assert_eq!(metadata.world_id.as_deref(), Some("wrld_test"));
         assert_eq!(metadata.author.as_deref(), Some("TommyZ"));
+    }
+
+    #[test]
+    fn invalid_attribute_value_does_not_discard_the_other_fields() {
+        let xmp = r#"<rdf:Description xmlns:vrc="https://vrchat.com/xmp/1.0/"
+      vrc:WorldDisplayName="&bogus;"
+      vrc:WorldId="wrld_test"
+      Author="TommyZ" />"#;
+
+        let metadata = parse_xmp(xmp).expect("metadata from valid attributes");
+        assert_eq!(metadata.world_name, None);
+        assert_eq!(metadata.world_id.as_deref(), Some("wrld_test"));
+        assert_eq!(metadata.author.as_deref(), Some("TommyZ"));
+    }
+
+    #[test]
+    fn malformed_packet_returns_the_fields_parsed_before_the_error() {
+        let xmp = r#"<rdf:Description xmlns:vrc="https://vrchat.com/xmp/1.0/"
+      vrc:WorldId="wrld_test"
+      Author="TommyZ"><unclosed"#;
+
+        let metadata = parse_xmp(xmp).expect("partial metadata");
+        assert_eq!(metadata.world_id.as_deref(), Some("wrld_test"));
+        assert_eq!(metadata.author.as_deref(), Some("TommyZ"));
+    }
+
+    #[test]
+    fn malformed_packet_without_fields_returns_none() {
+        assert!(parse_xmp("<rdf:Description broken").is_none());
     }
 
     #[test]
