@@ -1141,7 +1141,7 @@ impl App {
             search_refresh_pending: false,
             search_refresh_dirty: false,
             search_favorite: false,
-            search_days: Some(7),
+            search_days: crate::app::search::DEFAULT_SEARCH_DAYS,
             search_ai_tags: Vec::new(),
             search_people_input,
             daemon_shutdown_armed: false,

@@ -320,6 +320,10 @@ impl App {
     }
 }
 
+/// Default date window for the search screen. `None` means "all dates" so a
+/// new search does not silently hide photos outside the last week.
+pub(crate) const DEFAULT_SEARCH_DAYS: Option<i64> = None;
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -328,6 +332,11 @@ mod tests {
     };
     use crate::app::Screen;
     use vrc_photon_core::model::{AiPhotoFilter, PhotoTextFilter};
+
+    #[test]
+    fn search_starts_with_all_dates_selected() {
+        assert_eq!(super::DEFAULT_SEARCH_DAYS, None);
+    }
 
     #[test]
     fn search_refresh_requires_a_non_empty_tag_filter() {
