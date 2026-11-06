@@ -63,6 +63,39 @@ pub(crate) fn is_stale_revision(observed: Option<i64>, current: i64) -> bool {
 /// whole index. Import bursts bump both several times per second.
 const LIBRARY_QUIET_PERIOD: Duration = Duration::from_secs(2);
 
+/// Collapses the per-message repaint decisions of one drained IPC batch into a
+/// single notification. Progress events arrive several times per second, so
+/// notifying once per message used to rebuild the whole window each time.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct IpcBatchNotify {
+    needed: bool,
+}
+
+impl IpcBatchNotify {
+    pub(crate) fn record(&mut self, needed: bool) {
+        self.needed |= needed;
+    }
+
+    pub(crate) fn needed(self) -> bool {
+        self.needed
+    }
+}
+
+/// Pulls the first message from the bridge and then every message that is
+/// already queued, preserving arrival order. The caller handles the whole
+/// batch in one UI update and repaints once.
+pub(crate) fn drain_ipc_batch(
+    first: ipc_bridge::Incoming,
+    rx: &async_channel::Receiver<ipc_bridge::Incoming>,
+) -> Vec<ipc_bridge::Incoming> {
+    let mut batch = Vec::new();
+    batch.push(first);
+    while let Ok(next) = rx.try_recv() {
+        batch.push(next);
+    }
+    batch
+}
+
 /// What a finished scan should refresh, based on the mounted screen and
 /// whether anything actually changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,8 +162,9 @@ impl App {
         ipc_bridge::start(endpoint, tx);
         cx.spawn(async move |this, cx| {
             while let Ok(incoming) = rx.recv().await {
+                let batch = drain_ipc_batch(incoming, &rx);
                 if this
-                    .update(cx, |this, cx| this.handle_ipc_incoming(incoming, cx))
+                    .update(cx, |this, cx| this.handle_ipc_batch(batch, cx))
                     .is_err()
                 {
                     break;
@@ -140,7 +174,25 @@ impl App {
         .detach();
     }
 
-    fn handle_ipc_incoming(&mut self, incoming: ipc_bridge::Incoming, cx: &mut Context<Self>) {
+    /// Handles one drained batch and repaints at most once, after every
+    /// message in it has been applied.
+    fn handle_ipc_batch(&mut self, batch: Vec<ipc_bridge::Incoming>, cx: &mut Context<Self>) {
+        let mut notify = IpcBatchNotify::default();
+        for incoming in batch {
+            notify.record(self.handle_ipc_incoming(incoming, cx));
+        }
+        if notify.needed() {
+            cx.notify();
+        }
+    }
+
+    /// Applies one bridge message. Returns whether the window needs a repaint;
+    /// the batch caller folds those decisions into one notification.
+    fn handle_ipc_incoming(
+        &mut self,
+        incoming: ipc_bridge::Incoming,
+        cx: &mut Context<Self>,
+    ) -> bool {
         match incoming {
             ipc_bridge::Incoming::Connected { status, daemon_pid } => {
                 self.ipc_connected = true;
@@ -158,6 +210,7 @@ impl App {
                 self.refresh_selected_ai(cx);
                 // A batch held while disconnected can now be reported.
                 self.flush_thumbnail_notice(cx);
+                true
             }
             ipc_bridge::Incoming::Disconnected(error) => {
                 let was_connected = self.ipc_connected;
@@ -177,13 +230,13 @@ impl App {
                 if was_connected {
                     self.refresh_monitor();
                 }
+                true
             }
             ipc_bridge::Incoming::Event(event) => self.handle_ipc_event(event, cx),
         }
-        cx.notify();
     }
 
-    fn handle_ipc_event(&mut self, event: IpcEvent, cx: &mut Context<Self>) {
+    fn handle_ipc_event(&mut self, event: IpcEvent, cx: &mut Context<Self>) -> bool {
         match event {
             IpcEvent::ScanStarted { roots, .. } => {
                 self.scan_progress = Some(ScanProgressView {
@@ -194,6 +247,7 @@ impl App {
                     root: usize::from(roots > 0),
                     roots,
                 });
+                true
             }
             IpcEvent::ScanProgress {
                 phase,
@@ -211,6 +265,7 @@ impl App {
                     root,
                     roots,
                 });
+                true
             }
             IpcEvent::ScanFinished {
                 auto_enqueued,
@@ -227,8 +282,8 @@ impl App {
                     self.import_auto_compress_enqueued = count;
                 }
                 self.scan_progress = None;
-                self.refresh_live(cx);
                 self.refresh_library_after_scan(cx);
+                true
             }
             IpcEvent::CompressionProgress {
                 photo_id, status, ..
@@ -252,14 +307,19 @@ impl App {
                     }
                 }
                 self.schedule_compression_refresh(library_changed, cx);
+                true
             }
             IpcEvent::DaemonErrorChanged { .. } => {
-                self.reload_job_state(cx);
+                // Daemon errors are part of the background live snapshot; the
+                // failure toast transition runs when it is applied.
+                self.refresh_live_async(cx);
+                true
             }
             IpcEvent::SendProgress { .. } => {
                 // A send moved between waiting / pending / processing /
                 // terminal; the history page and the waiting badge follow it.
                 self.reload_send_history(cx);
+                true
             }
             IpcEvent::StatusChanged { status } => {
                 if crate::app::daemon::status_snapshot_is_newer(
@@ -269,15 +329,17 @@ impl App {
                     self.last_status_version = self.last_status_version.max(status.version);
                     self.apply_daemon_status(status);
                     self.refresh_monitor();
+                    true
+                } else {
+                    false
                 }
             }
-            // AI tagging state is owned by `app::ai`.
+            // AI tagging state is owned by `app::ai`. Events for other
+            // plugins do not repaint this window.
             event @ (IpcEvent::TaggingProgress { .. }
             | IpcEvent::PluginInstallProgress { .. }
             | IpcEvent::PluginStateChanged { .. }
-            | IpcEvent::ModelDownloadProgress { .. }) => {
-                self.handle_ai_event(event, cx);
-            }
+            | IpcEvent::ModelDownloadProgress { .. }) => self.handle_ai_event(event, cx),
         }
     }
 
@@ -365,8 +427,9 @@ impl App {
                     this.compression_library_refresh_pending = false;
                     this.refresh_after_compression(cx);
                 } else {
-                    this.reload_job_state(cx);
-                    cx.notify();
+                    // Progress-only ticks move the job rows; collect them in
+                    // the same background pass as the terminal path.
+                    this.refresh_live_async(cx);
                 }
             })
             .ok();
@@ -379,8 +442,8 @@ impl App {
     /// Invalidate the page cache and refresh the side panels instead of
     /// re-querying the 100k-row index.
     fn refresh_after_compression(&mut self, cx: &mut Context<Self>) {
-        // Claim the revision before the (short) metadata reload so a poll
-        // that lands mid-refresh does not start a full index reload.
+        // Claim the revision before the (background) metadata refresh so a
+        // poll that lands mid-refresh does not start a full index reload.
         if let Ok(revision) = self.db.library_revision() {
             self.last_library_revision = revision;
         }
@@ -388,33 +451,6 @@ impl App {
         self.count_debounce.reset();
         self.library.borrow_mut().invalidate_pages();
         self.search_view.borrow_mut().invalidate_pages();
-        self.reload_compression_aux(cx);
-        if self.screen != Screen::Photos {
-            self.mark_library_dirty();
-        }
-        cx.notify();
-    }
-
-    /// The subset of `reload_aux` that compression can change. Duplicate
-    /// hashes, settings, and the session monitor are untouched by a job.
-    fn reload_compression_aux(&mut self, cx: &mut Context<Self>) {
-        match self.db.stats() {
-            Ok(stats) => {
-                self.stats = stats;
-                self.stats_revision = self.db.library_revision().unwrap_or(-1);
-            }
-            Err(error) => tracing::warn!(%error, "cannot load library stats"),
-        }
-        self.compressed_ids = self
-            .db
-            .compressed_photo_ids()
-            .unwrap_or_else(|error| {
-                tracing::warn!(%error, "cannot load compressed photo ids");
-                Vec::new()
-            })
-            .into_iter()
-            .collect();
-        self.reload_job_state(cx);
         if let Some(id) = self.selected {
             self.load_selected_meta(id);
             self.refresh_stale_preview(cx);
@@ -424,18 +460,35 @@ impl App {
                 self.request_thumbnail(&photo, cx);
             }
         }
+        if self.screen != Screen::Photos {
+            self.mark_library_dirty();
+        }
+        // Stats, the compressed-id scan, and the job counters moved to the
+        // background snapshot; this path used to run them on the UI thread
+        // after every 250 ms compression burst.
+        self.refresh_live_async(cx);
+        cx.notify();
     }
 
+    /// Synchronous live refresh used only by in-memory/demo databases, which
+    /// have no second handle for the background snapshot.
     pub(crate) fn refresh_live(&mut self, cx: &mut Context<Self>) {
         let count = self.db.count_photos();
         let revision = self.db.library_revision();
         let revision_value = revision.as_ref().ok().copied();
         if let Some(revision) = revision_value
             && revision != self.stats_revision
-            && let Ok(stats) = self.db.stats()
         {
-            self.stats = stats;
-            self.stats_revision = revision;
+            if let Ok(stats) = self.db.stats() {
+                self.stats = stats;
+                self.stats_revision = revision;
+            }
+            if let Ok(ids) = self.db.compressed_photo_ids() {
+                self.compressed_ids = ids.into_iter().collect();
+            }
+            if let Ok(ids) = self.db.duplicate_photo_ids() {
+                self.duplicate_ids = ids.into_iter().collect();
+            }
         }
         self.reload_job_state(cx);
         self.refresh_monitor();
@@ -580,7 +633,14 @@ impl App {
         );
         match action {
             ScanRefresh::Snapshot => {
-                self.apply_library_snapshot(revision, cx);
+                // A full index rebuild already reloads stats, jobs, and the
+                // monitor through `reload_aux`; scheduling a second snapshot
+                // here would duplicate those queries. A failed rebuild still
+                // needs the side panels refreshed.
+                if !self.apply_library_snapshot(revision, cx) {
+                    self.refresh_live_async(cx);
+                }
+                return;
             }
             ScanRefresh::Search => {
                 if let Some(revision) = revision {
@@ -601,6 +661,13 @@ impl App {
                 self.count_debounce.reset();
             }
         }
+        // The index did not need a rebuild, but the scan can still have moved
+        // job counters and the monitor. Collect those off the UI thread.
+        if let Some(id) = self.selected {
+            self.load_selected_meta(id);
+            self.refresh_stale_preview(cx);
+        }
+        self.refresh_live_async(cx);
     }
 
     pub(crate) fn reload_job_state(&mut self, cx: &mut Context<Self>) {
@@ -999,10 +1066,11 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{
-        ScanRefresh, import_scan_enqueued_count, is_stale_revision, scan_refresh_action,
-        settings_after_reload,
+        IpcBatchNotify, ScanRefresh, drain_ipc_batch, import_scan_enqueued_count,
+        is_stale_revision, scan_refresh_action, settings_after_reload,
     };
     use crate::app::Screen;
+    use crate::ipc_bridge::Incoming;
     use vrc_photon_core::settings::AppSettings;
 
     #[test]
@@ -1063,6 +1131,52 @@ mod tests {
         assert!(!is_stale_revision(Some(5), 5));
         assert!(!is_stale_revision(Some(6), 5));
         assert!(!is_stale_revision(None, 5));
+    }
+
+    #[test]
+    fn ipc_batch_drains_every_queued_message_in_order() {
+        let (tx, rx) = async_channel::bounded(8);
+        for id in 0..4 {
+            tx.try_send(Incoming::Disconnected(id.to_string())).unwrap();
+        }
+
+        let first = rx.try_recv().unwrap();
+        let batch = drain_ipc_batch(first, &rx);
+
+        assert_eq!(batch.len(), 4);
+        for (id, incoming) in batch.iter().enumerate() {
+            assert_eq!(incoming, &Incoming::Disconnected(id.to_string()));
+        }
+        assert!(rx.is_empty());
+    }
+
+    #[test]
+    fn an_ipc_batch_with_several_visible_events_repaints_once() {
+        let (tx, rx) = async_channel::bounded(8);
+        for id in 0..4 {
+            tx.try_send(Incoming::Disconnected(id.to_string())).unwrap();
+        }
+        let first = rx.try_recv().unwrap();
+        let batch = drain_ipc_batch(first, &rx);
+
+        let mut notify = IpcBatchNotify::default();
+        for _ in &batch {
+            notify.record(true);
+        }
+
+        assert!(notify.needed());
+        // The batch caller emits one `cx.notify()` for the whole batch, not
+        // one per message.
+        assert_eq!(usize::from(notify.needed()), 1);
+    }
+
+    #[test]
+    fn an_ipc_batch_with_no_visible_change_skips_the_repaint() {
+        let mut notify = IpcBatchNotify::default();
+        notify.record(false);
+        notify.record(false);
+
+        assert!(!notify.needed());
     }
 
     #[test]

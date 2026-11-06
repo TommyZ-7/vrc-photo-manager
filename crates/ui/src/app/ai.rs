@@ -1278,6 +1278,15 @@ pub(crate) fn apply_install_event(
     ai.apply_install_progress(status, error)
 }
 
+/// Library refresh chosen for one tagging event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TaggingLiveRefresh {
+    /// Progress only; the debounced AI-card read is enough.
+    None,
+    /// Terminal event: schedule the coalesced background live snapshot.
+    Background,
+}
+
 impl App {
     pub(crate) fn refresh_ai_state(&mut self, cx: &mut Context<Self>) {
         let snapshot = collect_ai_snapshot(&self.db);
@@ -1720,6 +1729,18 @@ impl App {
         cx.notify();
     }
 
+    /// Which library refresh a tagging event requires. Terminal events can
+    /// move the library revision (applied tags) and the job queue, so they
+    /// schedule the coalesced background pass. Progress events stay on the
+    /// debounced AI-card read.
+    fn tagging_live_refresh(terminal: bool) -> TaggingLiveRefresh {
+        if terminal {
+            TaggingLiveRefresh::Background
+        } else {
+            TaggingLiveRefresh::None
+        }
+    }
+
     /// Handles the four AI daemon events. Returns true when the event belongs
     /// to AI tagging.
     pub(crate) fn handle_ai_event(&mut self, event: IpcEvent, cx: &mut Context<Self>) -> bool {
@@ -1757,11 +1778,12 @@ impl App {
                         | TaggingJobStatus::Cancelled
                 );
                 // Progress events can arrive several times per photo. Coalesce
-                // the database read and inspector refresh; the live poller
-                // picks up the library revision after a terminal job.
+                // the database read and inspector refresh; a terminal job
+                // schedules the background live snapshot instead of running
+                // the ~20-query refresh on the UI thread.
                 self.schedule_ai_refresh(terminal, cx);
-                if terminal {
-                    self.refresh_live(cx);
+                if Self::tagging_live_refresh(terminal) == TaggingLiveRefresh::Background {
+                    self.refresh_live_async(cx);
                 }
                 true
             }
@@ -1889,11 +1911,11 @@ mod tests {
     use super::{
         AI_PLUGIN_ID, AiDashboardState, AiErrorInfo, AiErrorKind, AiPluginAction,
         AiPluginCardState, AiPluginCardView, AiResponseOutcome, AiUiState, ManualRetagOutcome,
-        ModelDownloadView, UninstallTarget, active_job_photo_label, ai_dashboard_view,
-        ai_empty_state_labels, ai_error_code_is_stable, ai_error_detail_in, ai_error_label_in,
-        ai_error_summary_in, ai_error_toast_in, ai_job_error_is_notifiable, ai_manifest_view,
-        ai_plugin_card_state, ai_response_outcome, ai_tag_view, ai_tag_view_with_context,
-        ai_tag_views, apply_install_event, backend_options,
+        ModelDownloadView, TaggingLiveRefresh, UninstallTarget, active_job_photo_label,
+        ai_dashboard_view, ai_empty_state_labels, ai_error_code_is_stable, ai_error_detail_in,
+        ai_error_label_in, ai_error_summary_in, ai_error_toast_in, ai_job_error_is_notifiable,
+        ai_manifest_view, ai_plugin_card_state, ai_response_outcome, ai_tag_view,
+        ai_tag_view_with_context, ai_tag_views, apply_install_event, backend_options,
         backend_selection_is_disabled_when_not_ready, collect_ai_snapshot,
         download_progress_bar_ratio, enqueue_manual_retag, format_tagged_at,
         install_event_applies_to_ai, installation_row_id, is_active_installation, load_photo_ai,
@@ -2976,5 +2998,18 @@ mod tests {
         assert_eq!(view.state, AiDashboardState::Active);
         assert!(view.jobs.is_empty());
         assert_eq!(view.more, 4);
+    }
+
+    #[test]
+    fn tagging_completion_schedules_the_background_live_refresh() {
+        assert_eq!(
+            super::App::tagging_live_refresh(false),
+            TaggingLiveRefresh::None
+        );
+        assert_eq!(
+            super::App::tagging_live_refresh(true),
+            TaggingLiveRefresh::Background,
+            "terminal jobs must use the coalesced background pass"
+        );
     }
 }

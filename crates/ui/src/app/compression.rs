@@ -494,7 +494,9 @@ impl App {
                 ),
                 cx,
             );
-            self.reload_aux(cx);
+            // Only the job queue changed; profiles, settings, and the session
+            // monitor did not. Collect the job rows off the UI thread.
+            self.refresh_live_async(cx);
             self.send_wake_jobs(cx);
         } else {
             self.toast_error(tr!("compression.enqueue.error"), cx);

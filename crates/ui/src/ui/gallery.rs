@@ -68,6 +68,14 @@ impl GalleryView {
             bounds_epoch,
             search,
         });
+        // P09 keeps the App-wide observation: the gallery reads the index,
+        // page cache, selection, compressed/duplicate badges, settings, and
+        // palette from `App`, so a narrower subscription needs a state split
+        // that is out of scope here. IPC bursts now coalesce into one App
+        // notify per drained batch (and the three-second live pass notifies
+        // only on an actual change), so the gallery repaints once per batch
+        // instead of once per message. A dedicated gallery revision remains a
+        // follow-up.
         let observe = cx.observe(&app, |_, _, cx| cx.notify());
         Self {
             shared,

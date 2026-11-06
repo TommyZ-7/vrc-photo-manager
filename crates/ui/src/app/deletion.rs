@@ -75,8 +75,11 @@ impl App {
                     tracing::warn!(%error, "cannot bump library revision after deletion cancel");
                 }
                 let revision = self.db.library_revision().ok();
-                self.apply_library_snapshot(revision, cx);
-                self.reload_aux(cx);
+                // The full snapshot already reloads the side panels. Only a
+                // failed rebuild needs the background aux pass.
+                if !self.apply_library_snapshot(revision, cx) {
+                    self.refresh_live_async(cx);
+                }
                 self.toast_success(tr!("deletion.cancel.success"), cx);
             }
             Ok(false) => self.toast_warning(tr!("deletion.cancel.not_possible"), cx),
@@ -91,7 +94,7 @@ impl App {
     pub(crate) fn retry_deletion(&mut self, id: i64, cx: &mut Context<Self>) {
         match self.db.retry_deletion(id) {
             Ok(true) => {
-                self.reload_job_state(cx);
+                self.refresh_live_async(cx);
                 self.send_wake_jobs(cx);
                 self.toast_success(tr!("deletion.retry.success"), cx);
             }
@@ -135,10 +138,11 @@ impl App {
                 if let Err(error) = self.db.bump_library_revision() {
                     tracing::warn!(%error, "cannot bump library revision after force deletion");
                 }
-                self.reload_job_state(cx);
                 let revision = self.db.library_revision().ok();
-                self.apply_library_snapshot(revision, cx);
-                self.reload_aux(cx);
+                // `apply_library_snapshot` includes the job-state reload.
+                if !self.apply_library_snapshot(revision, cx) {
+                    self.refresh_live_async(cx);
+                }
                 self.send_wake_jobs(cx);
                 self.toast_success(tr!("deletion.force.started"), cx);
             }
