@@ -10,7 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -130,6 +130,9 @@ pub(crate) struct TaggingWorker {
     plugin: PluginService,
     events: EventBus,
     running: Arc<AtomicBool>,
+    /// Pause gate read before claiming the next job. A job already running
+    /// finishes; pause only stops new dequeues.
+    paused: Arc<AtomicBool>,
     signal: Arc<JobSignal>,
     control: Arc<TaggingControl>,
     config: TaggingWorkerConfig,
@@ -154,6 +157,7 @@ impl TaggingWorker {
             plugin,
             events,
             running,
+            paused: Arc::new(AtomicBool::new(false)),
             signal,
             control,
             config,
@@ -161,10 +165,17 @@ impl TaggingWorker {
         }
     }
 
+    /// Binds the shared pause gate. The default is unpaused so test workers
+    /// and maintenance callers keep their existing behavior.
+    pub(crate) fn with_paused(mut self, paused: Arc<AtomicBool>) -> Self {
+        self.paused = paused;
+        self
+    }
+
     /// Claims and processes one pending job. Returns `false` when the queue is
-    /// empty (and performs the idle sidecar check).
+    /// empty (and performs the idle sidecar check) or when the daemon paused.
     pub(crate) fn process_once(&self) -> Result<bool> {
-        if self.is_stopping() {
+        if self.is_stopping() || self.is_paused() {
             return Ok(false);
         }
         let job = self.db().next_pending_tagging_job()?;
@@ -184,6 +195,15 @@ impl TaggingWorker {
 
     fn is_stopping(&self) -> bool {
         !self.running.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    /// Waits for a wakeup or the poll interval before the next dequeue attempt.
+    fn wait_for_next_poll(&self, seen: &mut u64) {
+        self.signal.wait(seen, self.config.poll_interval);
     }
 
     fn db(&self) -> MutexGuard<'_, Db> {
@@ -633,27 +653,27 @@ impl Drop for JobCleanup<'_> {
     }
 }
 
-/// Spawns the worker loop. The loop polls the queue as a safety net even when
-/// `WakeTagging` is lost.
-pub(crate) fn start_tagging_worker(worker: TaggingWorker) -> JoinHandle<()> {
-    thread::Builder::new()
-        .name("tagging".to_string())
-        .spawn(move || {
-            let mut seen = 0;
-            while !worker.is_stopping() {
-                match worker.process_once() {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        worker.signal.wait(&mut seen, worker.config.poll_interval);
-                    }
-                    Err(error) => {
-                        tracing::error!(%error, "tagging worker failed");
-                        worker.signal.wait(&mut seen, worker.config.poll_interval);
-                    }
-                }
+/// Runs the tagging loop until the daemon stops. The supervisor in
+/// [`crate::supervisor`] wraps this in `catch_unwind` and restarts it, so a
+/// panic leaves the job recoverable as `processing` and the daemon alive.
+pub(crate) fn run_worker_loop(worker: &TaggingWorker) {
+    let mut seen = 0;
+    while !worker.is_stopping() {
+        if worker.is_paused() {
+            worker.wait_for_next_poll(&mut seen);
+            continue;
+        }
+        match worker.process_once() {
+            Ok(true) => {}
+            Ok(false) => {
+                worker.wait_for_next_poll(&mut seen);
             }
-        })
-        .expect("cannot spawn tagging worker")
+            Err(error) => {
+                tracing::error!(%error, "tagging worker failed");
+                worker.wait_for_next_poll(&mut seen);
+            }
+        }
+    }
 }
 
 enum RetryWait {
@@ -811,6 +831,59 @@ mod tests {
     const MMPROJ_BYTES: &[u8] = b"mmproj";
     const MODEL_FILE: &str = "d1-2B-Q8_0.gguf";
     const MMPROJ_FILE: &str = "mmproj-d1-2B-Q8_0.gguf";
+
+    #[test]
+    fn paused_worker_does_not_claim_a_pending_job() {
+        let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+        {
+            let db = db.lock().unwrap();
+            let root = db.add_root("/photos", "reference").unwrap();
+            let photo_id = db
+                .upsert_photo(&NewPhoto {
+                    root_id: root,
+                    rel_path: "a.png".to_string(),
+                    abs_path: "/photos/a.png".to_string(),
+                    file_name: "a.png".to_string(),
+                    captured_at_utc: 1_700_000_000,
+                    captured_at_local: "2026-10-21 21:14:03".to_string(),
+                    tz_offset_sec: 9 * 3600,
+                    width: 16,
+                    height: 10,
+                    file_size: 10,
+                    mtime: 1_700_000_000,
+                    blake3: None,
+                })
+                .unwrap();
+            db.enqueue_tagging_jobs(&[photo_id], AI_PLUGIN_ID, TaggingJobStatus::Pending)
+                .unwrap();
+        }
+        let events = EventBus::default();
+        let data_dir = PathBuf::from("/tmp/vrc-photon-tagging-pause-test");
+        let plugin = PluginService::new(
+            db.clone(),
+            data_dir.clone(),
+            events.clone(),
+            Vec::new(),
+            Arc::new(UreqModelClient::new()),
+        );
+        let signal = Arc::new(JobSignal::default());
+        let worker = TaggingWorker::new(
+            db.clone(),
+            data_dir,
+            plugin,
+            events,
+            Arc::new(AtomicBool::new(true)),
+            signal.clone(),
+            Arc::new(TaggingControl::new(signal)),
+            TaggingWorkerConfig::default(),
+        )
+        .with_paused(Arc::new(AtomicBool::new(true)));
+
+        assert!(!worker.process_once().unwrap());
+        let counts = db.lock().unwrap().tagging_job_counts(AI_PLUGIN_ID).unwrap();
+        assert_eq!(counts.pending, 1, "pause must not claim the queued job");
+        assert_eq!(counts.processing, 0);
+    }
 
     #[test]
     fn cancel_only_affects_registered_jobs() {

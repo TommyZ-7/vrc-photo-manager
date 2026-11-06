@@ -183,6 +183,7 @@ pub fn worker_loop(
     running: Arc<AtomicBool>,
     enabled: Arc<AtomicBool>,
     wake: Arc<JobSignal>,
+    paused: Arc<AtomicBool>,
     transport: Arc<dyn WorldNameTransport>,
 ) {
     let mut seen_generation = 0;
@@ -201,6 +202,10 @@ pub fn worker_loop(
     };
 
     while running.load(Ordering::Relaxed) {
+        if paused.load(Ordering::Relaxed) {
+            wake.wait(&mut seen_generation, IDLE_INTERVAL);
+            continue;
+        }
         if !enabled.load(Ordering::Relaxed) {
             wake.wait(&mut seen_generation, IDLE_INTERVAL);
             continue;
@@ -309,6 +314,17 @@ mod tests {
                 .pop_front()
                 .unwrap_or(WorldNameOutcome::NotFound)
         }
+    }
+
+    fn spawn_test_worker(
+        db: Arc<Mutex<Db>>,
+        running: Arc<AtomicBool>,
+        enabled: Arc<AtomicBool>,
+        wake: Arc<JobSignal>,
+        transport: Arc<FakeTransport>,
+    ) -> std::thread::JoinHandle<()> {
+        let paused = Arc::new(AtomicBool::new(false));
+        std::thread::spawn(move || worker_loop(db, running, enabled, wake, paused, transport))
     }
 
     #[test]
@@ -469,7 +485,7 @@ mod tests {
             let enabled = enabled.clone();
             let wake = wake.clone();
             let transport = transport.clone();
-            std::thread::spawn(move || worker_loop(db, running, enabled, wake, transport))
+            spawn_test_worker(db, running, enabled, wake, transport)
         };
         std::thread::sleep(Duration::from_millis(150));
         assert!(
@@ -513,7 +529,7 @@ mod tests {
             let enabled = enabled.clone();
             let wake = wake.clone();
             let transport = transport.clone();
-            std::thread::spawn(move || worker_loop(db, running, enabled, wake, transport))
+            spawn_test_worker(db, running, enabled, wake, transport)
         };
         let deadline = Instant::now() + Duration::from_secs(2);
         while transport.calls.lock().unwrap().is_empty() && Instant::now() < deadline {
@@ -556,7 +572,7 @@ mod tests {
             let enabled = enabled.clone();
             let wake = wake.clone();
             let transport = transport.clone();
-            std::thread::spawn(move || worker_loop(db, running, enabled, wake, transport))
+            spawn_test_worker(db, running, enabled, wake, transport)
         };
         std::thread::sleep(Duration::from_millis(250));
         assert!(
@@ -597,7 +613,7 @@ mod tests {
             let enabled = enabled.clone();
             let wake = wake.clone();
             let transport = transport.clone();
-            std::thread::spawn(move || worker_loop(db, running, enabled, wake, transport))
+            spawn_test_worker(db, running, enabled, wake, transport)
         };
         std::thread::sleep(Duration::from_millis(150));
         assert!(
@@ -607,5 +623,52 @@ mod tests {
         running.store(false, Ordering::Relaxed);
         wake.notify();
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn paused_worker_keeps_a_due_lookup_queued_until_resumed() {
+        let db = Arc::new(Mutex::new(Db::open_in_memory().unwrap()));
+        let world = {
+            let db = db.lock().unwrap();
+            db.upsert_world("wrld_test", None, None).unwrap()
+        };
+        db.lock().unwrap().enqueue_world_name_lookup(world).unwrap();
+        let running = Arc::new(AtomicBool::new(true));
+        let enabled = Arc::new(AtomicBool::new(true));
+        let paused = Arc::new(AtomicBool::new(true));
+        let wake = Arc::new(JobSignal::default());
+        let transport = Arc::new(FakeTransport {
+            outcomes: Mutex::new(VecDeque::from([WorldNameOutcome::Found(
+                "API World".to_string(),
+            )])),
+            ..Default::default()
+        });
+        let handle = {
+            let db = db.clone();
+            let running = running.clone();
+            let enabled = enabled.clone();
+            let paused = paused.clone();
+            let wake = wake.clone();
+            let transport = transport.clone();
+            std::thread::spawn(move || worker_loop(db, running, enabled, wake, paused, transport))
+        };
+
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            transport.calls.lock().unwrap().is_empty(),
+            "pause must stop the dequeue, not the worker loop"
+        );
+
+        paused.store(false, Ordering::Relaxed);
+        wake.notify();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while transport.calls.lock().unwrap().is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        running.store(false, Ordering::Relaxed);
+        wake.notify();
+        handle.join().unwrap();
+
+        assert_eq!(transport.calls.lock().unwrap().len(), 1);
     }
 }

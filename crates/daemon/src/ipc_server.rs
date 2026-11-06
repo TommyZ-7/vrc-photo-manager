@@ -116,9 +116,13 @@ impl Drop for ConnectionSlot {
 pub(crate) struct IpcControl {
     pub(crate) running: Arc<AtomicBool>,
     pub(crate) status: Arc<Mutex<DaemonStatus>>,
+    /// Mirrors `status.paused` so workers can gate queued work without
+    /// taking the status lock at every dequeue.
+    pub(crate) paused: Arc<AtomicBool>,
     pub(crate) wake: Arc<WakeSignal>,
     pub(crate) jobs: Arc<JobSignal>,
     pub(crate) sends: Arc<JobSignal>,
+    pub(crate) world_names: Arc<JobSignal>,
     pub(crate) events: EventBus,
     pub(crate) thumbnail_dir: PathBuf,
     pub(crate) thumbnail_cache_epoch: Arc<AtomicU64>,
@@ -139,6 +143,11 @@ impl IpcControl {
             let mut status = self.status.lock().unwrap();
             status.paused = paused;
         }
+        self.paused.store(paused, Ordering::Relaxed);
+        self.jobs.notify();
+        self.sends.notify();
+        self.world_names.notify();
+        self.tagging.notify();
         self.wake.notify();
         self.events.publish(Event::StatusChanged {
             status: self.snapshot(),
@@ -713,9 +722,11 @@ mod tests {
         let control = IpcControl {
             running: Arc::new(AtomicBool::new(true)),
             status: Arc::new(Mutex::new(DaemonStatus::default())),
+            paused: Arc::new(AtomicBool::new(false)),
             wake: Arc::new(WakeSignal::default()),
             jobs: Arc::new(JobSignal::default()),
             sends: Arc::new(JobSignal::default()),
+            world_names: Arc::new(JobSignal::default()),
             events,
             thumbnail_dir: dir.path().join("thumbnails"),
             thumbnail_cache_epoch: Arc::new(AtomicU64::new(0)),
@@ -871,6 +882,7 @@ mod tests {
         .unwrap();
         assert!(matches!(response, Response::Ok));
         assert!(control.status.lock().unwrap().paused);
+        assert!(control.paused.load(Ordering::Relaxed));
         assert!(matches!(
             subscription.next_event().unwrap(),
             Some(Event::StatusChanged { .. })

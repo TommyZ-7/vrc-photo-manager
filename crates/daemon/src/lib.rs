@@ -37,6 +37,7 @@ mod discord_http;
 mod ipc_server;
 pub(crate) mod plugin;
 mod signals;
+mod supervisor;
 pub(crate) mod tagging;
 mod tray;
 mod vrchat_process;
@@ -55,6 +56,9 @@ const PARSER_VERSION: &str = "1";
 /// Number of skipped-line sentences kept in one log error detail.
 const MAX_SKIPPED_DETAILS: usize = 5;
 const SCAN_INTERVAL: Duration = Duration::from_millis(500);
+/// How often a paused worker rechecks its gate at a dequeue point. Resume also
+/// notifies the worker signals, so this is only a fallback.
+const PAUSED_WORKER_POLL: Duration = Duration::from_millis(500);
 const LOG_INTERVAL: Duration = Duration::from_millis(750);
 /// Complete log lines one poll may return. The next poll continues from the
 /// last committed offset.
@@ -101,6 +105,13 @@ pub struct DaemonStatus {
     /// this under the status lock, so a snapshot's version orders it
     /// against every other snapshot of this status.
     pub version: u64,
+    /// Supervised worker/main-loop restarts since startup. Kept out of
+    /// [`vrc_photon_ipc::StatusSnapshot`] so the wire shape stays stable;
+    /// the daemon exposes it through [`Daemon::status`] for diagnostics.
+    pub worker_restarts: u64,
+    /// The last worker panic, spawn failure, or main-loop panic, for
+    /// diagnostics. Not part of the IPC status snapshot.
+    pub last_worker_error: Option<String>,
 }
 
 /// A user-facing daemon error summary that can be rendered in any locale.
@@ -231,7 +242,12 @@ pub struct Daemon {
     settings: AppSettings,
     status: Arc<Mutex<DaemonStatus>>,
     running: Arc<AtomicBool>,
+    /// Fast pause gate read by workers at their dequeue points. Mirrors
+    /// `DaemonStatus::paused`, which remains the status-snapshot source.
+    paused: Arc<AtomicBool>,
     wake: Arc<WakeSignal>,
+    /// Wakes supervised workers out of a restart backoff during shutdown.
+    supervisor_wake: Arc<WakeSignal>,
     jobs: Arc<JobSignal>,
     sends: Arc<JobSignal>,
     /// Wakes the world name worker when lookups are queued.
@@ -258,6 +274,9 @@ pub struct Daemon {
     vrchat_session_id: Option<i64>,
     workers: Vec<JoinHandle<()>>,
     dirty_paths: Vec<PathBuf>,
+    /// Commands consumed from the database while paused. They run in order
+    /// once the daemon resumes, so pausing never loses an explicit request.
+    deferred_commands: Vec<DaemonCommand>,
     last_log_poll: std::time::Instant,
     tray: Option<Tray>,
     tray_enabled: bool,
@@ -445,7 +464,9 @@ impl Daemon {
             settings,
             status: Arc::new(Mutex::new(DaemonStatus::default())),
             running: Arc::new(AtomicBool::new(true)),
+            paused: Arc::new(AtomicBool::new(false)),
             wake: Arc::new(WakeSignal::default()),
+            supervisor_wake: Arc::new(WakeSignal::default()),
             jobs: Arc::new(JobSignal::default()),
             sends: Arc::new(JobSignal::default()),
             world_names: Arc::new(JobSignal::default()),
@@ -463,6 +484,7 @@ impl Daemon {
             vrchat_session_id: None,
             workers: Vec::new(),
             dirty_paths: Vec::new(),
+            deferred_commands: Vec::new(),
             last_log_poll: std::time::Instant::now() - LOG_INTERVAL,
             tray: None,
             tray_enabled,
@@ -549,6 +571,14 @@ impl Daemon {
         self.ipc_endpoint = endpoint;
     }
 
+    /// Pauses or resumes heavy/queued work: photo scanning and indexing,
+    /// replaced-asset verification, and the compression, tagging, world-name,
+    /// deletion, and hash workers. Observation keeps running while paused:
+    /// heartbeat writes, status snapshots, tray updates, IPC, watcher event
+    /// collection, log ingestion, and periodic settings checks. Scan progress
+    /// and recorded daemon errors are left untouched. Thumbnail generation and
+    /// Discord delivery stay active: the former serves UI browsing and the
+    /// latter is an outbound queue independent of library processing.
     pub fn set_paused(&self, paused: bool) {
         let changed = match self.status.lock() {
             Ok(mut status) => {
@@ -561,10 +591,30 @@ impl Daemon {
             }
             Err(_) => false,
         };
+        self.paused.store(paused, Ordering::Relaxed);
         if changed {
+            self.notify_workers();
             self.wake.notify();
             self.publish_status();
         }
+    }
+
+    fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    /// Wakes every queued-work worker so a pause or resume takes effect at the
+    /// next dequeue instead of after the worker's poll timeout.
+    fn notify_workers(&self) {
+        self.jobs.notify();
+        self.sends.notify();
+        self.world_names.notify();
+        self.tagging.notify();
+    }
+
+    /// Records a supervised restart without changing the IPC status shape.
+    fn record_supervised_restart(&self, worker: &str, message: &str) {
+        supervisor::record_restart(&self.status, worker, message);
     }
 
     fn publish_status(&self) {
@@ -663,15 +713,22 @@ impl Daemon {
     /// before full rescans. An import into an empty library must be indexed as
     /// new work before the startup scan can classify it as backlog.
     fn poll_commands_with_initial(&mut self, initial_scan: Option<bool>) -> Result<()> {
-        let mut commands = {
+        let mut commands = std::mem::take(&mut self.deferred_commands);
+        {
             let db = self.db.lock().unwrap();
-            db.take_daemon_commands()?
-        };
+            commands.extend(db.take_daemon_commands()?);
+        }
         if commands.is_empty() {
             return Ok(());
         }
         self.reload_settings()?;
         self.restart_watchers();
+        if self.is_paused() {
+            // Settings and watchers above still apply while paused, but the
+            // scan/relink work these commands represent waits for resume.
+            self.deferred_commands = commands;
+            return Ok(());
+        }
         if initial_scan == Some(true) {
             commands.sort_by_key(|command| !matches!(command, DaemonCommand::ScanRoot { .. }));
         }
@@ -1009,59 +1066,79 @@ impl Daemon {
             "daemon running"
         );
 
+        let mut backoff = supervisor::RestartBackoff::new();
         while self.running.load(Ordering::Relaxed) {
-            if let Err(error) = self.poll_commands() {
-                tracing::error!(%error, "cannot handle daemon commands");
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.run_loop_iteration()
+            })) {
+                Ok(()) => backoff.reset(),
+                Err(payload) => {
+                    let message = supervisor::panic_message(payload.as_ref());
+                    self.record_supervised_restart("daemon-loop", &message);
+                    let delay = backoff.next_delay();
+                    tracing::error!(
+                        panic = %message,
+                        restart_in_ms = delay.as_millis(),
+                        "daemon main loop panicked; continuing after backoff"
+                    );
+                    supervisor::wait_while_running(&self.running, delay);
+                }
             }
-            self.refresh_periodic_settings();
-            if self
-                .status
-                .lock()
-                .map(|status| status.paused)
-                .unwrap_or(false)
-            {
+            if self.running.load(Ordering::Relaxed) {
                 self.wake.wait(SCAN_INTERVAL);
-                continue;
             }
-            self.poll_watchers();
-            if !self.dirty_paths.is_empty()
-                && let Err(error) = self.index_dirty_paths()
-            {
-                tracing::error!(%error, "incremental photo scan failed");
-                if let Err(report_error) = self.report_localized_error(
-                    DaemonOperation::Scan,
-                    LocalizedError::new("daemon.diff_scan_failed"),
-                    Some(&error.to_string()),
-                ) {
-                    tracing::error!(%report_error, "cannot record scan error");
-                }
-            }
-            if self.last_log_poll.elapsed() >= LOG_INTERVAL {
-                if let Err(error) = self.ingest_logs() {
-                    tracing::error!(%error, "log ingestion failed");
-                }
-                if let Err(error) = self.poll_vrchat_presence() {
-                    tracing::error!(%error, "VRChat process check failed");
-                }
-                self.last_log_poll = std::time::Instant::now();
-            }
-            if let Err(error) = self.refresh_status() {
-                tracing::warn!(%error, "cannot refresh daemon status");
-            }
-            if self.last_asset_check.elapsed() >= Duration::from_secs(30) {
-                if let Err(error) = self.verify_replaced_assets() {
-                    tracing::warn!(%error, "cannot verify replaced photo assets");
-                }
-                self.last_asset_check = Instant::now();
-            }
-            if self.last_heartbeat.elapsed() >= Duration::from_secs(10) {
-                self.write_heartbeat();
-            }
-            self.poll_tray();
-            self.wake.wait(SCAN_INTERVAL);
         }
         self.shutdown();
         Ok(())
+    }
+
+    /// One supervised iteration of the background loop. Pause gates only the
+    /// heavy work below; heartbeat, status, tray, log ingestion, watcher event
+    /// collection, settings refreshes, and IPC keep running so a paused daemon
+    /// stays observable and resumes without losing queued events.
+    fn run_loop_iteration(&mut self) {
+        if let Err(error) = self.poll_commands() {
+            tracing::error!(%error, "cannot handle daemon commands");
+        }
+        self.refresh_periodic_settings();
+        self.poll_watchers();
+
+        let paused = self.is_paused();
+        if !paused
+            && !self.dirty_paths.is_empty()
+            && let Err(error) = self.index_dirty_paths()
+        {
+            tracing::error!(%error, "incremental photo scan failed");
+            if let Err(report_error) = self.report_localized_error(
+                DaemonOperation::Scan,
+                LocalizedError::new("daemon.diff_scan_failed"),
+                Some(&error.to_string()),
+            ) {
+                tracing::error!(%report_error, "cannot record scan error");
+            }
+        }
+        if self.last_log_poll.elapsed() >= LOG_INTERVAL {
+            if let Err(error) = self.ingest_logs() {
+                tracing::error!(%error, "log ingestion failed");
+            }
+            if let Err(error) = self.poll_vrchat_presence() {
+                tracing::error!(%error, "VRChat process check failed");
+            }
+            self.last_log_poll = std::time::Instant::now();
+        }
+        if let Err(error) = self.refresh_status() {
+            tracing::warn!(%error, "cannot refresh daemon status");
+        }
+        if !paused && self.last_asset_check.elapsed() >= Duration::from_secs(30) {
+            if let Err(error) = self.verify_replaced_assets() {
+                tracing::warn!(%error, "cannot verify replaced photo assets");
+            }
+            self.last_asset_check = Instant::now();
+        }
+        if self.last_heartbeat.elapsed() >= Duration::from_secs(10) {
+            self.write_heartbeat();
+        }
+        self.poll_tray();
     }
 
     fn stopping(&self) -> bool {
@@ -1078,9 +1155,11 @@ impl Daemon {
         let control = IpcControl {
             running: self.running.clone(),
             status: self.status.clone(),
+            paused: self.paused.clone(),
             wake: self.wake.clone(),
             jobs: self.jobs.clone(),
             sends: self.sends.clone(),
+            world_names: self.world_names.clone(),
             events: self.events.clone(),
             thumbnail_dir: self.thumbnail_dir.clone(),
             thumbnail_cache_epoch: self.thumbnail_cache_epoch.clone(),
@@ -2292,6 +2371,32 @@ impl Daemon {
         }
     }
 
+    fn spawn_supervised_worker<F>(&self, name: &str, task: F) -> Option<JoinHandle<()>>
+    where
+        F: FnMut() + Send + 'static,
+    {
+        match supervisor::spawn(
+            name.to_string(),
+            self.running.clone(),
+            self.supervisor_wake.clone(),
+            self.status.clone(),
+            task,
+        ) {
+            Ok(handle) => Some(handle),
+            Err(error) => {
+                tracing::error!(
+                    worker = name,
+                    %error,
+                    "cannot spawn long-lived worker; daemon continues without it"
+                );
+                if let Ok(mut status) = self.status.lock() {
+                    status.last_worker_error = Some(format!("{name}: {error}"));
+                }
+                None
+            }
+        }
+    }
+
     fn start_tagging_worker(&mut self) {
         if self.tagging_handle.is_some() {
             return;
@@ -2309,8 +2414,10 @@ impl Daemon {
             self.tagging.clone(),
             self.tagging_control.clone(),
             config,
-        );
-        self.tagging_handle = Some(tagging::start_tagging_worker(worker));
+        )
+        .with_paused(self.paused.clone());
+        self.tagging_handle =
+            self.spawn_supervised_worker("tagging", move || tagging::run_worker_loop(&worker));
     }
 
     fn start_workers(&mut self) {
@@ -2323,78 +2430,77 @@ impl Daemon {
             let spec = self.thumbnail_spec.clone();
             let cache_epoch = self.thumbnail_cache_epoch.clone();
             let external_bytes = self.thumbnail_external_bytes.clone();
-            let handle = thread::Builder::new()
-                .name("thumbnails".to_string())
-                .spawn(move || {
-                    thumbnail_loop(
-                        db,
-                        running,
-                        rx,
-                        cache_dir,
-                        cache_limit,
-                        spec,
-                        cache_epoch,
-                        external_bytes,
-                    )
-                })
-                .expect("cannot spawn thumbnail worker");
-            self.thumbnail_tx = Some(tx.clone());
-            self.thumbnail_handle = Some(handle);
-            if let Ok(db) = self.db.lock()
-                && let Ok(photos) =
-                    db.list_photos(5000, 0, vrc_photon_core::model::PhotoSort::Newest)
-            {
-                for photo in photos {
-                    if let Err(error) = tx.send(photo.id) {
-                        tracing::debug!(
-                            %error,
-                            photo_id = photo.id,
-                            "thumbnail worker is unavailable; dropping request"
-                        );
+            let handle = self.spawn_supervised_worker("thumbnails", move || {
+                thumbnail_loop(
+                    db.clone(),
+                    running.clone(),
+                    &rx,
+                    cache_dir.clone(),
+                    cache_limit.clone(),
+                    spec.clone(),
+                    cache_epoch.clone(),
+                    external_bytes.clone(),
+                )
+            });
+            if let Some(handle) = handle {
+                self.thumbnail_tx = Some(tx.clone());
+                self.thumbnail_handle = Some(handle);
+                if let Ok(db) = self.db.lock()
+                    && let Ok(photos) =
+                        db.list_photos(5000, 0, vrc_photon_core::model::PhotoSort::Newest)
+                {
+                    for photo in photos {
+                        if let Err(error) = tx.send(photo.id) {
+                            tracing::debug!(
+                                %error,
+                                photo_id = photo.id,
+                                "thumbnail worker is unavailable; dropping request"
+                            );
+                        }
                     }
                 }
-            }
-            for id in std::mem::take(&mut self.deferred_thumbnail_ids) {
-                if let Err(error) = tx.send(id) {
-                    tracing::debug!(
-                        %error,
-                        photo_id = id,
-                        "thumbnail worker is unavailable; dropping deferred request"
-                    );
+                for id in std::mem::take(&mut self.deferred_thumbnail_ids) {
+                    if let Err(error) = tx.send(id) {
+                        tracing::debug!(
+                            %error,
+                            photo_id = id,
+                            "thumbnail worker is unavailable; dropping deferred request"
+                        );
+                    }
                 }
             }
         }
         if self.hash_handle.is_none() {
             let db = self.db.clone();
             let running = self.running.clone();
-            let handle = thread::Builder::new()
-                .name("photo-hashes".to_string())
-                .spawn(move || hash_loop(db, running))
-                .expect("cannot spawn photo hash worker");
-            self.hash_handle = Some(handle);
+            let paused = self.paused.clone();
+            self.hash_handle = self.spawn_supervised_worker("photo-hashes", move || {
+                hash_loop(db.clone(), running.clone(), paused.clone())
+            });
         }
         if self.owns_deletion_executor && self.deletion_handle.is_none() {
             let db = self.db.clone();
             let running = self.running.clone();
             let jobs = self.jobs.clone();
-            let handle = thread::Builder::new()
-                .name("deletion-executor".to_string())
-                .spawn(move || deletion_loop(db, running, jobs))
-                .expect("cannot spawn deletion worker");
-            self.deletion_handle = Some(handle);
+            let paused = self.paused.clone();
+            self.deletion_handle = self.spawn_supervised_worker("deletion-executor", move || {
+                deletion_loop(db.clone(), running.clone(), jobs.clone(), paused.clone())
+            });
         }
         if self.send_handle.is_none() {
             let db = self.db.clone();
             let running = self.running.clone();
             let sends = self.sends.clone();
             let events = self.events.clone();
-            let handle = thread::Builder::new()
-                .name("discord-send".to_string())
-                .spawn(move || {
-                    discord::worker_loop(db, running, sends, events, Arc::new(UreqTransport::new()))
-                })
-                .expect("cannot spawn Discord send worker");
-            self.send_handle = Some(handle);
+            self.send_handle = self.spawn_supervised_worker("discord-send", move || {
+                discord::worker_loop(
+                    db.clone(),
+                    running.clone(),
+                    sends.clone(),
+                    events.clone(),
+                    Arc::new(UreqTransport::new()),
+                )
+            });
         }
         if self.world_name_handle.is_none() {
             if self.world_name_resolution_enabled.load(Ordering::Relaxed) {
@@ -2404,28 +2510,42 @@ impl Daemon {
             let running = self.running.clone();
             let enabled = self.world_name_resolution_enabled.clone();
             let wake = self.world_names.clone();
+            let paused = self.paused.clone();
             let transport = Arc::new(UreqWorldNameTransport::new());
-            let handle = thread::Builder::new()
-                .name("world-name".to_string())
-                .spawn(move || world_names::worker_loop(db, running, enabled, wake, transport))
-                .expect("cannot spawn world name worker");
-            self.world_name_handle = Some(handle);
+            self.world_name_handle = self.spawn_supervised_worker("world-name", move || {
+                world_names::worker_loop(
+                    db.clone(),
+                    running.clone(),
+                    enabled.clone(),
+                    wake.clone(),
+                    paused.clone(),
+                    transport.clone(),
+                )
+            });
         }
         self.start_tagging_worker();
-        if !self.workers.is_empty() {
-            return;
-        }
         let count = self.settings.compression_workers.clamp(1, 4);
-        for index in 0..count {
+        while self.workers.len() < count {
+            let index = self.workers.len();
             let db = self.db.clone();
             let running = self.running.clone();
             let jobs = self.jobs.clone();
             let events = self.events.clone();
             let thumbnail_dir = self.thumbnail_dir.clone();
-            let handle = thread::Builder::new()
-                .name(format!("compress-{index}"))
-                .spawn(move || worker_loop(db, running, jobs, events, thumbnail_dir))
-                .expect("cannot spawn compression worker");
+            let paused = self.paused.clone();
+            let name = format!("compress-{index}");
+            let Some(handle) = self.spawn_supervised_worker(&name, move || {
+                worker_loop(
+                    db.clone(),
+                    running.clone(),
+                    jobs.clone(),
+                    events.clone(),
+                    thumbnail_dir.clone(),
+                    paused.clone(),
+                )
+            }) else {
+                break;
+            };
             self.workers.push(handle);
         }
     }
@@ -2439,6 +2559,7 @@ impl Daemon {
         self.sends.notify();
         self.world_names.notify();
         self.tagging.notify();
+        self.supervisor_wake.notify();
         self.thumbnail_tx = None;
         if let Some(handle) = self.thumbnail_handle.take()
             && handle.join().is_err()
@@ -2477,7 +2598,26 @@ impl Daemon {
         }
     }
 
+    /// Puts commands consumed while paused back into the database so a
+    /// graceful shutdown does not drop an explicit user request.
+    fn persist_deferred_commands(&mut self) {
+        if self.deferred_commands.is_empty() {
+            return;
+        }
+        let commands = std::mem::take(&mut self.deferred_commands);
+        let db = match self.db.lock() {
+            Ok(db) => db,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        for command in commands {
+            if let Err(error) = db.request_daemon_command(command) {
+                tracing::warn!(%error, "cannot requeue daemon command deferred while paused");
+            }
+        }
+    }
+
     fn shutdown(&mut self) {
+        self.persist_deferred_commands();
         self.ipc = None;
         self.running.store(false, Ordering::Relaxed);
         self.wake.notify();
@@ -2500,8 +2640,14 @@ impl Daemon {
 
 impl Drop for Daemon {
     fn drop(&mut self) {
+        self.persist_deferred_commands();
         self.ipc = None;
         self.running.store(false, Ordering::Relaxed);
+        self.jobs.notify();
+        self.sends.notify();
+        self.world_names.notify();
+        self.tagging.notify();
+        self.supervisor_wake.notify();
         self.wake.notify();
     }
 }
@@ -2867,7 +3013,7 @@ fn refresh_thumbnail_budget_and_prune(
 fn thumbnail_loop(
     db: Arc<Mutex<Db>>,
     running: Arc<AtomicBool>,
-    rx: Receiver<i64>,
+    rx: &Receiver<i64>,
     cache_dir: PathBuf,
     cache_limit: Arc<AtomicU64>,
     spec: Arc<AtomicU32>,
@@ -2965,9 +3111,13 @@ fn thumbnail_loop(
 /// Fills `photos.blake3` for rows indexed before hashing was introduced.
 /// The worker is deliberately low-frequency so a large first run does not
 /// starve compression or watcher work.
-fn hash_loop(db: Arc<Mutex<Db>>, running: Arc<AtomicBool>) {
+fn hash_loop(db: Arc<Mutex<Db>>, running: Arc<AtomicBool>, paused: Arc<AtomicBool>) {
     let mut hashed_since_idle = false;
     while running.load(Ordering::Relaxed) {
+        if paused.load(Ordering::Relaxed) {
+            thread::sleep(PAUSED_WORKER_POLL);
+            continue;
+        }
         let rows = {
             let Ok(db) = db.lock() else { break };
             match db.photos_without_hash(16) {
@@ -3016,9 +3166,18 @@ fn hash_loop(db: Arc<Mutex<Db>>, running: Arc<AtomicBool>) {
     }
 }
 
-fn deletion_loop(db: Arc<Mutex<Db>>, running: Arc<AtomicBool>, jobs: Arc<JobSignal>) {
+fn deletion_loop(
+    db: Arc<Mutex<Db>>,
+    running: Arc<AtomicBool>,
+    jobs: Arc<JobSignal>,
+    paused: Arc<AtomicBool>,
+) {
     let mut seen_generation = 0;
     while running.load(Ordering::Relaxed) {
+        if paused.load(Ordering::Relaxed) {
+            jobs.wait(&mut seen_generation, PAUSED_WORKER_POLL);
+            continue;
+        }
         if let Err(error) = run_deletions_once(&db) {
             tracing::error!(%error, "deletion executor failed");
         }
@@ -3177,10 +3336,15 @@ fn worker_loop(
     jobs: Arc<JobSignal>,
     events: EventBus,
     thumbnail_dir: PathBuf,
+    paused: Arc<AtomicBool>,
 ) {
     let mut seen_generation = 0;
     let mut last_poll_error: Option<String> = None;
     while running.load(Ordering::Relaxed) {
+        if paused.load(Ordering::Relaxed) {
+            jobs.wait(&mut seen_generation, PAUSED_WORKER_POLL);
+            continue;
+        }
         let batch = {
             let db = db.lock().unwrap();
             match db.next_pending_photo_jobs() {
@@ -7788,6 +7952,200 @@ mod tests {
             Event::StatusChanged { .. }
         ));
         assert!(daemon.wake.is_pending());
+        assert!(daemon.paused.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn supervised_restart_updates_daemon_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let daemon = test_daemon(&dir);
+        daemon.record_supervised_restart("compress-0", "worker boom");
+        let status = daemon.status.lock().unwrap();
+        assert_eq!(status.worker_restarts, 1);
+        assert_eq!(
+            status.last_worker_error.as_deref(),
+            Some("compress-0: worker boom")
+        );
+    }
+
+    #[test]
+    fn paused_loop_keeps_heartbeat_status_and_log_ingestion() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        daemon.set_tray_enabled(false);
+        let log_path = dir.path().join("logs/output_log_2026-10-21_21-00-00.txt");
+        std::fs::write(
+            &log_path,
+            concat!(
+                "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)\n",
+                "2026.10.21 21:23:13 Debug      -  [Behaviour] Joining or Creating Room: Test World\n",
+                "2026.10.21 21:23:20 Debug      -  [Behaviour] OnPlayerJoined Mio (usr_a)\n",
+            ),
+        )
+        .unwrap();
+        {
+            let db = daemon.db.lock().unwrap();
+            db.set_setting("daemon_heartbeat", "1").unwrap();
+        }
+
+        daemon.set_paused(true);
+        daemon.last_log_poll = Instant::now() - LOG_INTERVAL;
+        daemon.last_heartbeat = Instant::now() - Duration::from_secs(11);
+        daemon.run_loop_iteration();
+
+        let db = daemon.db.lock().unwrap();
+        assert!(
+            db.log_offset(log_path.to_str().unwrap()).unwrap().is_some(),
+            "log ingestion must continue while paused"
+        );
+        assert_ne!(
+            db.get_setting("daemon_heartbeat").unwrap().as_deref(),
+            Some("1"),
+            "heartbeat must continue while paused"
+        );
+        drop(db);
+        let status = daemon.status.lock().unwrap();
+        assert!(status.paused, "pause must stay visible in status");
+        assert_eq!(
+            status.last_log,
+            Some(log_path.to_string_lossy().to_string())
+        );
+        assert!(status.watching);
+    }
+
+    #[test]
+    fn paused_loop_collects_watcher_events_and_indexes_them_after_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        daemon.set_tray_enabled(false);
+        let (tx, rx) = mpsc::channel();
+        daemon.watcher_rx = Some(rx);
+        let path = dir
+            .path()
+            .join("photos/VRChat_2026-10-21_21-24-00.000_4x3.png");
+        write_photo(&path);
+        tx.send(Ok(notify::Event::new(notify::EventKind::Create(
+            notify::event::CreateKind::File,
+        ))
+        .add_path(path.clone())))
+            .unwrap();
+
+        daemon.set_paused(true);
+        daemon.run_loop_iteration();
+
+        // The watcher event is collected, but indexing is heavy work that
+        // waits for resume.
+        assert_eq!(daemon.dirty_paths, vec![path.clone()]);
+        assert_eq!(daemon.db.lock().unwrap().count_photos().unwrap(), 0);
+
+        daemon.set_paused(false);
+        daemon.run_loop_iteration();
+
+        assert!(
+            daemon.dirty_paths.is_empty(),
+            "the buffered event must be indexed, not lost"
+        );
+        assert_eq!(daemon.db.lock().unwrap().count_photos().unwrap(), 1);
+        assert_eq!(daemon.status.lock().unwrap().photo_count, 1);
+    }
+
+    #[test]
+    fn paused_loop_defers_queued_commands_until_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        daemon.set_tray_enabled(false);
+        write_photo(
+            &dir.path()
+                .join("photos/VRChat_2026-10-21_21-24-00.000_4x3.png"),
+        );
+        {
+            let db = daemon.db.lock().unwrap();
+            assert!(db.request_daemon_command(DaemonCommand::Rescan).unwrap());
+        }
+
+        daemon.set_paused(true);
+        daemon.run_loop_iteration();
+        assert_eq!(daemon.db.lock().unwrap().count_photos().unwrap(), 0);
+        assert_eq!(daemon.deferred_commands.len(), 1);
+
+        daemon.set_paused(false);
+        daemon.run_loop_iteration();
+        assert_eq!(daemon.db.lock().unwrap().count_photos().unwrap(), 1);
+        assert!(daemon.deferred_commands.is_empty());
+    }
+
+    #[test]
+    fn shutdown_requeues_commands_deferred_while_paused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        daemon.set_tray_enabled(false);
+        {
+            let db = daemon.db.lock().unwrap();
+            assert!(db.request_daemon_command(DaemonCommand::Rescan).unwrap());
+        }
+        daemon.set_paused(true);
+        daemon.run_loop_iteration();
+        assert_eq!(daemon.deferred_commands.len(), 1);
+
+        daemon.shutdown();
+
+        let commands = daemon.db.lock().unwrap().take_daemon_commands().unwrap();
+        assert_eq!(commands, vec![DaemonCommand::Rescan]);
+        assert!(daemon.deferred_commands.is_empty());
+    }
+
+    #[test]
+    fn toggling_pause_keeps_scan_progress_and_daemon_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        {
+            let mut status = daemon.status.lock().unwrap();
+            status.scanning = true;
+            status.scan_phase = Some(IpcScanPhase::Walking);
+            status.scan_processed = 7;
+            status.scan_total = Some(10);
+            status.scan_indexed = 3;
+        }
+        daemon
+            .report_daemon_error(DaemonOperation::Scan, "boom", Some("detail"))
+            .unwrap();
+
+        for paused in [true, false] {
+            daemon.set_paused(paused);
+            let status = daemon.status.lock().unwrap();
+            assert!(status.scanning);
+            assert_eq!(status.scan_processed, 7);
+            assert_eq!(status.scan_total, Some(10));
+            assert_eq!(status.scan_indexed, 3);
+            drop(status);
+            let db = daemon.db.lock().unwrap();
+            assert_eq!(db.daemon_errors().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn paused_daemon_serves_status_over_ipc() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let endpoint = Endpoint::for_tests(dir.path());
+        daemon.set_ipc_endpoint(Some(endpoint.clone()));
+        daemon.start_ipc();
+        daemon.set_paused(true);
+
+        let response = vrc_photon_ipc::client::request(
+            &endpoint,
+            vrc_photon_ipc::Request::Status,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        match response {
+            vrc_photon_ipc::Response::Status { status } => {
+                assert!(status.paused);
+                assert_eq!(status.version, daemon.status.lock().unwrap().version);
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+        daemon.ipc = None;
     }
 
     #[test]
