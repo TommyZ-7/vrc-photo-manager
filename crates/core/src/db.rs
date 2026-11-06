@@ -2011,6 +2011,28 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    pub fn session_by_id(&self, id: i64) -> Result<Option<Session>> {
+        let session = self
+            .conn
+            .query_row(
+                "SELECT id, log_file, started_at, ended_at, world_id, instance_id \
+                 FROM sessions WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok(Session {
+                        id: row.get(0)?,
+                        log_file: row.get(1)?,
+                        started_at: row.get(2)?,
+                        ended_at: row.get(3)?,
+                        world_id: row.get(4)?,
+                        instance_id: row.get(5)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(session)
+    }
+
     pub fn session_at(&self, timestamp: i64) -> Result<Option<Session>> {
         let session = self
             .conn
@@ -2074,6 +2096,23 @@ impl Db {
             "UPDATE session_players SET left_at = ?1 \
              WHERE session_id = ?2 AND user_id = ?3 AND left_at IS NULL",
             params![left_at, session_id, user_id],
+        )?;
+        Ok(())
+    }
+
+    /// Closes the open player row and stores the name reported by the leave
+    /// line, so a rename during the session is visible on the player's row.
+    pub fn close_session_player_with_name(
+        &self,
+        session_id: i64,
+        user_id: &str,
+        display_name: &str,
+        left_at: i64,
+    ) -> Result<()> {
+        self.conn.execute(
+            "UPDATE session_players SET display_name = ?1, left_at = ?2 \
+             WHERE session_id = ?3 AND user_id = ?4 AND left_at IS NULL",
+            params![display_name, left_at, session_id, user_id],
         )?;
         Ok(())
     }

@@ -493,6 +493,55 @@ mod tests {
         assert_eq!(players[0].display_name, "Mio");
     }
 
+    #[test]
+    fn player_renames_on_leave_and_rejoin_reach_photo_players() {
+        let db = Db::open_in_memory().unwrap();
+        let mut ingestor = LogIngestor::new("log.txt");
+        for line in [
+            "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)",
+            "2026.10.21 21:23:13 Debug      -  [Behaviour] Joining or Creating Room: Test World",
+            "2026.10.21 21:23:20 Debug      -  [Behaviour] OnPlayerJoined Mio (usr_a)",
+        ] {
+            ingestor.ingest_line(&db, line).unwrap();
+        }
+        let session_id = ingestor.session_id().unwrap();
+        let left_at = super::super::log_parser::parse_line(
+            "2026.10.21 21:25:00 Debug      -  [Behaviour] OnPlayerLeft Mio Renamed (usr_a)",
+        )
+        .unwrap()
+        .timestamp_utc();
+        ingestor
+            .ingest_line(
+                &db,
+                "2026.10.21 21:25:00 Debug      -  [Behaviour] OnPlayerLeft Mio Renamed (usr_a)",
+            )
+            .unwrap();
+
+        let players = db.players_at(session_id, left_at - 1).unwrap();
+        assert_eq!(players.len(), 1);
+        assert_eq!(players[0].display_name, "Mio Renamed");
+        assert_eq!(players[0].left_at, Some(left_at));
+
+        let rejoin_at = super::super::log_parser::parse_line(
+            "2026.10.21 21:26:00 Debug      -  [Behaviour] OnPlayerJoined Mio Final (usr_a)",
+        )
+        .unwrap()
+        .timestamp_utc();
+        ingestor
+            .ingest_line(
+                &db,
+                "2026.10.21 21:26:00 Debug      -  [Behaviour] OnPlayerJoined Mio Final (usr_a)",
+            )
+            .unwrap();
+
+        let photo_id = insert_photo(&db, rejoin_at + 1);
+        let photo = db.photo_by_id(photo_id).unwrap().unwrap();
+        assert!(link_photo(&db, &photo).unwrap());
+        let players = db.photo_players(photo_id).unwrap();
+        assert_eq!(players.len(), 1);
+        assert_eq!(players[0].display_name, "Mio Final");
+    }
+
     fn link_state(db: &Db, photo_id: i64) -> (i64, Option<i64>) {
         db.connection()
             .query_row(

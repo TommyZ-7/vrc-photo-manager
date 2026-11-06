@@ -148,6 +148,32 @@ impl LogIngestor {
         }
     }
 
+    /// Restores the log cursor from an open session so ingestion can continue
+    /// at the persisted log offset after a daemon restart instead of dropping
+    /// player events until the next world join.
+    pub fn resume_from_db(
+        db: &Db,
+        log_file: impl Into<String>,
+        session_id: i64,
+    ) -> Result<Option<Self>> {
+        let Some(session) = db.session_by_id(session_id)? else {
+            return Ok(None);
+        };
+        if session.ended_at.is_some() {
+            return Ok(None);
+        }
+        let world_id = db
+            .world_by_id(session.world_id)?
+            .map(|world| world.world_id);
+        Ok(Some(Self {
+            log_file: log_file.into(),
+            session_id: Some(session.id),
+            session_started_at: Some(session.started_at),
+            world_db_id: Some(session.world_id),
+            world_id,
+        }))
+    }
+
     pub fn session_id(&self) -> Option<i64> {
         self.session_id
     }
@@ -204,10 +230,15 @@ impl LogIngestor {
             LogEvent::PlayerLeft {
                 timestamp_utc,
                 user_id,
-                ..
+                display_name,
             } => {
                 if let Some(session_id) = self.session_id {
-                    db.close_session_player(session_id, &user_id, timestamp_utc)?;
+                    db.close_session_player_with_name(
+                        session_id,
+                        &user_id,
+                        &display_name,
+                        timestamp_utc,
+                    )?;
                 }
             }
             LogEvent::WorldLeave { timestamp_utc } => {
@@ -260,6 +291,8 @@ mod tests {
         "2026.10.21 21:24:00 Debug      -  [Behaviour] OnPlayerJoined Kenta (usr_c19d-77e)";
     const PLEFT: &str =
         "2026.10.21 21:25:00 Debug      -  [Behaviour] OnPlayerLeft Mio (usr_3b7c-a02)";
+    const PLEFT_RENAMED: &str =
+        "2026.10.21 21:25:00 Debug      -  [Behaviour] OnPlayerLeft Mio Renamed (usr_3b7c-a02)";
     const LEAVE: &str = "2026.10.21 21:26:00 Debug      -  [Behaviour] Unloading scenes";
 
     #[test]
@@ -331,6 +364,59 @@ mod tests {
 
         ingestor.ingest_line(&db, LEAVE).unwrap();
         assert!(ingestor.session_id().is_none());
+    }
+
+    #[test]
+    fn resumes_an_open_session_from_db() {
+        let db = Db::open_in_memory().unwrap();
+        let mut ingestor = LogIngestor::new("log.txt");
+        for line in [JOIN, P1] {
+            ingestor.ingest_line(&db, line).unwrap();
+        }
+        let session_id = ingestor.session_id().unwrap();
+        let started = ingestor.session_started_at().unwrap();
+        drop(ingestor);
+
+        let mut resumed = LogIngestor::resume_from_db(&db, "log.txt", session_id)
+            .unwrap()
+            .expect("open session resumes");
+        assert_eq!(resumed.session_id(), Some(session_id));
+        assert_eq!(resumed.session_started_at(), Some(started));
+
+        // The restored world id accepts a name hint that arrives after restart.
+        resumed.ingest_line(&db, NAME).unwrap();
+        let world = db
+            .world_by_id(db.session_by_id(session_id).unwrap().unwrap().world_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(world.name.as_deref(), Some("Midnight Rooftop"));
+
+        let left_at = parse_line(PLEFT_RENAMED).unwrap().timestamp_utc();
+        resumed.ingest_line(&db, PLEFT_RENAMED).unwrap();
+        let players = db.players_at(session_id, left_at - 1).unwrap();
+        assert_eq!(players.len(), 1);
+        assert_eq!(players[0].display_name, "Mio Renamed");
+        assert_eq!(players[0].left_at, Some(left_at));
+        assert_eq!(resumed.session_id(), Some(session_id));
+    }
+
+    #[test]
+    fn resume_from_db_rejects_missing_and_closed_sessions() {
+        let db = Db::open_in_memory().unwrap();
+        assert!(
+            LogIngestor::resume_from_db(&db, "log.txt", 999)
+                .unwrap()
+                .is_none()
+        );
+
+        let world = db.upsert_world("wrld_test", None, None).unwrap();
+        let session = db.create_session("log.txt", 100, world, None).unwrap();
+        db.close_session(session, 200).unwrap();
+        assert!(
+            LogIngestor::resume_from_db(&db, "log.txt", session)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
