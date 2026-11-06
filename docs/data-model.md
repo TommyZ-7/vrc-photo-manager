@@ -5,8 +5,8 @@
 - DB: ユーザーデータディレクトリ配下 `vrc-photon/library.db`
   - Linux: `~/.local/share/vrc-photon/library.db`
   - Windows: `%LOCALAPPDATA%\vrc-photon\library.db`
-- サムネイル: 同ディレクトリの `thumbnails/<photo_id>.webp`
-- プレビュー: 同ディレクトリの `previews/<photo_id>-<variant>.webp`（`variant` は表示derivative ID、元画像は `0`）
+- サムネイル: 同ディレクトリの `thumbnails/<photo_id>-q<quality>-s<size>.webp`（旧 `<photo_id>.webp` も読める）。隣に元ファイルの `mtime + size` を記録した `.meta` を置く。
+- プレビュー: 同ディレクトリの `previews/<photo_id>-<variant>.webp`（`variant` は表示derivative ID、元画像は `0`）。同じく `.meta` で鮮度を判定する。
 - AI プラグイン: 同ディレクトリの `plugins/<plugin_id>/<variant>/<version>/`
 - AI モデル: 同ディレクトリの `plugins/<plugin_id>/models/<revision>/`
 - タグ付け用スナップショット: 同ディレクトリの `cache/tagging/<job_id>.jpg`（一時ファイル）
@@ -30,8 +30,8 @@ PRAGMA busy_timeout = 5000;
 ```
 
 - `user_version` でスキーマバージョンを管理する。
-- 現在のバージョンは **14**。このビルドが理解できる最大値でもあり、
-  `user_version` が 15 以上の DB は `Db::open` / `Db::open_read_only` の
+- 現在のバージョンは **15**。このビルドが理解できる最大値でもあり、
+  `user_version` が 16 以上の DB は `Db::open` / `Db::open_read_only` の
   どちらでも型付きエラーで拒否する（古いアプリで新スキーマを書き換えない）。
 - マイグレーションは `Db::migrate` で起動時に自動実行する。
 
@@ -77,6 +77,8 @@ PRAGMA busy_timeout = 5000;
 | is_favorite | INTEGER | 0/1 |
 | note | TEXT | メモ |
 | display_derivative_id | INTEGER FK | `replaced` のとき表示に使う `derivatives.id` |
+| link_attempts | INTEGER | リンク失敗回数。成功で0に戻る（V15） |
+| link_next_retry_at | INTEGER | 次回リンク再試行時刻（UTC epoch秒、NULLは即時）（V15） |
 | created_at / updated_at | TEXT | RFC3339 |
 
 制約:
@@ -765,6 +767,7 @@ Discord 関連の既定値:
 | 12 | `world_name_lookups` と due インデックス追加（VRChat API ワールド名解決） |
 | 13 | AI プラグイン・カタログ・AI 結果・タグ付けジョブのテーブル追加（`plugin_installations`、`plugin_state`、`ai_tag_definitions`、`ai_tag_thresholds`、`photo_ai`、`photo_ai_tags`、`tagging_jobs`） |
 | 14 | 取得・一覧用インデックス追加（`idx_jobs_claim`、`idx_jobs_created`、`idx_sessions_started`、`idx_sessions_ended`） |
+| 15 | `photos.link_attempts` / `photos.link_next_retry_at` と `idx_photos_link_retry` 追加（未リンク写真の再試行バックオフ） |
 
 V4以降は `IMMEDIATE` トランザクションで適用する。UIとデーモンが同時に起動しても、書き込みロックで直列化し、`user_version` と列・テーブルの存在を再確認してから進めるため、中断後の再実行でも安全。
 
@@ -772,9 +775,16 @@ v11 の `send_outbox`、v12 の `world_name_lookups`、v13 の AI テーブル�
 `CREATE TABLE IF NOT EXISTS` とインデックス追加だけで、既存データを変更しない。
 v13 は `plugin_state.probe_json` を含めて新規テーブルとして作成する。
 v14 はインデックス追加だけで、テーブル・行・既存インデックスを変更しない。
+v15 は `link_attempts`（既定 0）と `link_next_retry_at`（NULL）を追加し、
+`status IN ('present','replaced')` の部分インデックス `idx_photos_link_retry` を作る。
+既存行は「未試行・即時再試行可能」として移行される。
+
+v9 は fresh DB では v1 で作成済みの `idx_jobs_photo_profile` を
+`CREATE INDEX IF NOT EXISTS` で再確認するだけで実質 no-op になる。古い DB で
+インデックスが欠けている場合だけ補う。
 ロールバック時はテーブルやインデックスを残しても既存機能は動く。
 
-`user_version` がこのビルドの最大値（14）より大きい DB は、書き込みを始める前に
+`user_version` がこのビルドの最大値（15）より大きい DB は、書き込みを始める前に
 `CoreError::Invalid` で拒否する。読み取り専用の `open_read_only` も同じ検査を行う。
 
 追加手順:
