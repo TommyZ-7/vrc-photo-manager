@@ -28,8 +28,8 @@ pub use manifest::{
     PluginManifest, model_file_role, parse_manifest, validate_manifest,
 };
 pub use model::{
-    ModelCheck, check_model, delete_model, delete_model_revision, download_model,
-    import_model_files, model_dir,
+    DEFAULT_DOWNLOAD_DEADLINE, ModelCheck, check_model, delete_model, delete_model_revision,
+    download_model, download_model_with_deadline, import_model_files, model_dir,
 };
 pub use sidecar::{
     CancelToken, ModelPaths, ProbeExpectations, SidecarClient, SidecarConfig, SidecarPaths,

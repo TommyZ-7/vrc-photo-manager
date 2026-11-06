@@ -2493,7 +2493,7 @@ impl Daemon {
             }
         }
         self.stop_workers();
-        self.plugin.stop_sidecar();
+        self.plugin.shutdown(plugin::SHUTDOWN_TIMEOUT);
         self.tray = None;
     }
 }

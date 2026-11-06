@@ -2,6 +2,8 @@
 
 use vrc_photon_ai_protocol::SidecarError;
 
+use std::time::Duration;
+
 /// Result alias for plugin host operations.
 pub type Result<T> = std::result::Result<T, AiHostError>;
 
@@ -30,6 +32,8 @@ pub enum AiHostError {
     Integrity(String),
     #[error("model download failed: {0}")]
     Network(String),
+    #[error("model download timed out after {} seconds", .0.as_secs())]
+    DownloadTimeout(Duration),
     #[error("install limit exceeded: {0}")]
     LimitExceeded(String),
     #[error("model files split into parts are not supported")]
@@ -106,6 +110,10 @@ mod tests {
         assert_eq!(
             AiHostError::Network("timed out".to_string()).to_string(),
             "model download failed: timed out"
+        );
+        assert_eq!(
+            AiHostError::DownloadTimeout(std::time::Duration::from_secs(42)).to_string(),
+            "model download timed out after 42 seconds"
         );
         assert_eq!(
             AiHostError::SidecarRejected(SidecarError {

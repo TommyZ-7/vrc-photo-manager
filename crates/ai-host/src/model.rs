@@ -3,14 +3,17 @@
 //! Model files live under `<data_dir>/plugins/<plugin_id>/models/<revision>/`
 //! and are shared by every installed variant of a plugin. Downloads and
 //! imports are verified against the signed manifest before the final file name
-//! is created. Readiness checks deliberately inspect only existence and size:
-//! hashing a multi-gigabyte model on every startup would be too expensive.
+//! is created. A verification stamp records the size, mtime, and SHA-256 of
+//! both final files, so a startup check only rehashes a multi-gigabyte model
+//! when the stamp is missing or no longer matches.
 
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::Builder;
 
@@ -20,6 +23,14 @@ use crate::manifest::{ManifestModelFile, ModelFileRole, PluginManifest, model_fi
 use crate::sidecar::ModelPaths;
 
 const BUFFER_BYTES: usize = 64 * 1024;
+
+/// Version of the on-disk verification stamp schema.
+const VERIFICATION_SCHEMA: u32 = 1;
+
+/// A complete model download (both files) must finish within this wall-clock
+/// deadline. The per-read HTTP timeout still catches a completely stalled
+/// connection; this bounds a server that keeps trickling bytes forever.
+pub const DEFAULT_DOWNLOAD_DEADLINE: Duration = Duration::from_secs(30 * 60);
 
 /// Result of checking whether a plugin's model files are usable.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,7 +53,12 @@ pub fn model_dir(data_dir: &Path, plugin_id: &str, revision: &str) -> PathBuf {
         .join(revision)
 }
 
-/// Checks the installed model files without hashing them.
+/// Checks the installed model files.
+///
+/// Existence and size are always checked. The SHA-256 of both files is only
+/// re-read when the verification stamp is absent or its size/mtime entries no
+/// longer match the files on disk; after a successful rehash the stamp is
+/// rewritten atomically.
 pub fn check_model(manifest: &PluginManifest, data_dir: &Path) -> ModelCheck {
     let (model, mmproj) = match model_files(manifest) {
         Ok(files) => files,
@@ -54,21 +70,26 @@ pub fn check_model(manifest: &PluginManifest, data_dir: &Path) -> ModelCheck {
     };
     let paths = model_paths(&directory, model, mmproj);
     let mut missing = false;
+    let mut metadata = [None, None];
 
-    for (file, path) in [(model, &paths.model), (mmproj, &paths.mmproj)] {
+    for (index, (file, path)) in [(model, &paths.model), (mmproj, &paths.mmproj)]
+        .into_iter()
+        .enumerate()
+    {
         match fs::metadata(path) {
-            Ok(metadata) => {
-                if !metadata.is_file() {
+            Ok(found) => {
+                if !found.is_file() {
                     return ModelCheck::Invalid(format!("{}: not a regular file", path.display()));
                 }
-                if metadata.len() != file.size {
+                if found.len() != file.size {
                     return ModelCheck::Invalid(format!(
                         "{}: expected {} bytes, found {}",
                         path.display(),
                         file.size,
-                        metadata.len()
+                        found.len()
                     ));
                 }
+                metadata[index] = Some(found);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => missing = true,
             Err(error) => {
@@ -78,10 +99,49 @@ pub fn check_model(manifest: &PluginManifest, data_dir: &Path) -> ModelCheck {
     }
 
     if missing {
-        ModelCheck::Missing
-    } else {
-        ModelCheck::Ready(paths)
+        return ModelCheck::Missing;
     }
+
+    let manifest_hash = manifest_fingerprint(manifest);
+    let expected = [
+        (model, paths.model.as_path(), metadata[0].as_ref()),
+        (mmproj, paths.mmproj.as_path(), metadata[1].as_ref()),
+    ];
+    if stamp_matches(manifest, &directory, &manifest_hash, &expected) {
+        return ModelCheck::Ready(paths);
+    }
+
+    for (file, path, _) in expected {
+        match hash_file(path) {
+            Ok(digest) if digest.eq_ignore_ascii_case(&file.sha256) => {}
+            Ok(_) => {
+                return ModelCheck::Invalid(format!(
+                    "{}: SHA-256 does not match the manifest",
+                    path.display()
+                ));
+            }
+            Err(error) => {
+                return ModelCheck::Invalid(format!("{}: {error}", path.display()));
+            }
+        }
+    }
+
+    match verification_stamp(manifest, &manifest_hash, model, mmproj, &paths)
+        .and_then(|stamp| write_verification_stamp(&directory, manifest, &stamp))
+    {
+        Ok(()) => {}
+        Err(error) => {
+            // Failing to persist the stamp must not make a valid model
+            // unusable; the next check simply hashes it again.
+            tracing::warn!(
+                %error,
+                directory = %directory.display(),
+                "cannot write the AI model verification stamp"
+            );
+        }
+    }
+
+    ModelCheck::Ready(paths)
 }
 
 /// Downloads both model files into `data_dir` and verifies size and SHA-256
@@ -97,13 +157,46 @@ pub fn download_model(
     progress: &mut dyn FnMut(u64, Option<u64>),
     cancel: &AtomicBool,
 ) -> Result<ModelPaths> {
+    download_model_with_deadline(
+        manifest,
+        data_dir,
+        client,
+        progress,
+        cancel,
+        DEFAULT_DOWNLOAD_DEADLINE,
+    )
+}
+
+/// [`download_model`] with an explicit total wall-clock deadline.
+///
+/// The deadline covers both files. A server that keeps sending slowly still
+/// fails with [`AiHostError::DownloadTimeout`] once it is reached, and the
+/// partial files are removed.
+pub fn download_model_with_deadline(
+    manifest: &PluginManifest,
+    data_dir: &Path,
+    client: &dyn ModelHttpClient,
+    progress: &mut dyn FnMut(u64, Option<u64>),
+    cancel: &AtomicBool,
+    deadline: Duration,
+) -> Result<ModelPaths> {
     let (model, mmproj) = model_files(manifest)?;
     let directory = checked_model_dir(manifest, data_dir)?;
     let total = total_size(model, mmproj)?;
+    let started = Instant::now();
+    let deadline = started
+        .checked_add(deadline)
+        .unwrap_or_else(|| started + Duration::from_secs(24 * 60 * 60));
+    let control = DownloadControl {
+        cancel,
+        deadline,
+        started,
+    };
 
     if cancel.load(Ordering::SeqCst) {
         return Err(AiHostError::Cancelled);
     }
+    control.ensure_active()?;
     fs::create_dir_all(&directory)?;
 
     let model_destination = directory.join(&model.path);
@@ -122,11 +215,24 @@ pub fn download_model(
             if let Some(parent) = destination.parent() {
                 fs::create_dir_all(parent)?;
             }
-            download_one(file, part, client, &mut downloaded, total, progress, cancel)?;
+            download_one(
+                file,
+                part,
+                client,
+                &mut downloaded,
+                total,
+                progress,
+                &control,
+            )?;
         }
         Ok(())
     })();
     if let Err(error) = staged {
+        let _ = fs::remove_file(&model_part);
+        let _ = fs::remove_file(&mmproj_part);
+        return Err(error);
+    }
+    if let Err(error) = control.ensure_active() {
         let _ = fs::remove_file(&model_part);
         let _ = fs::remove_file(&mmproj_part);
         return Err(error);
@@ -137,14 +243,18 @@ pub fn download_model(
         (&mmproj_part, &mmproj_destination),
     ])?;
 
-    Ok(model_paths(&directory, model, mmproj))
+    let paths = model_paths(&directory, model, mmproj);
+    record_verified_model(manifest, &directory, model, mmproj, &paths);
+    Ok(paths)
 }
 
 /// Imports full model files selected by the user.
 ///
 /// Selected files are matched to the manifest by file name. Each file is
-/// verified against its declared size and SHA-256 before a hard link (when the
-/// file system supports it) or a copy is committed to the model directory.
+/// verified against its declared size and SHA-256 while it is copied to a
+/// private part file, and only the verified copy is renamed into place. Using
+/// a copy instead of a hard link keeps the source from changing the verified
+/// inode after the hash was taken.
 pub fn import_model_files(
     manifest: &PluginManifest,
     selected: &[PathBuf],
@@ -223,7 +333,9 @@ pub fn import_model_files(
         (&mmproj_part, &mmproj_destination),
     ])?;
 
-    Ok(model_paths(&directory, model, mmproj))
+    let paths = model_paths(&directory, model, mmproj);
+    record_verified_model(manifest, &directory, model, mmproj, &paths);
+    Ok(paths)
 }
 
 /// Deletes the model directory of the manifest's revision.
@@ -335,6 +447,218 @@ fn part_path(destination: &Path) -> PathBuf {
     destination.with_file_name(name)
 }
 
+/// Cancellation and total wall-clock deadline shared by both files.
+struct DownloadControl<'a> {
+    cancel: &'a AtomicBool,
+    deadline: Instant,
+    started: Instant,
+}
+
+impl DownloadControl<'_> {
+    fn ensure_active(&self) -> Result<()> {
+        if Instant::now() >= self.deadline {
+            Err(AiHostError::DownloadTimeout(self.started.elapsed()))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
+    }
+}
+
+/// On-disk record that both final model files were hashed successfully.
+///
+/// `manifest` is a fingerprint of the model section of the signed manifest;
+/// a different manifest (even for the same revision directory) cannot reuse
+/// this stamp. `mtime` entries let [`check_model`] trust a file only when it
+/// is byte-for-byte the one that was hashed, without reading gigabytes again.
+#[derive(Debug, Serialize, Deserialize)]
+struct VerificationStamp {
+    schema: u32,
+    revision: String,
+    manifest: String,
+    files: Vec<VerifiedFile>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct VerifiedFile {
+    path: String,
+    size: u64,
+    sha256: String,
+    mtime_secs: i64,
+    mtime_nanos: u32,
+}
+
+type ExpectedModelFile<'a> = (
+    &'a ManifestModelFile,
+    &'a Path,
+    Option<&'a std::fs::Metadata>,
+);
+
+fn verification_stamp_path(directory: &Path, revision: &str) -> PathBuf {
+    directory.join(format!(".verified-{revision}.json"))
+}
+
+fn manifest_fingerprint(manifest: &PluginManifest) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(manifest.plugin_id.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(manifest.model.revision.as_bytes());
+    hasher.update([0u8]);
+    match serde_json::to_vec(&manifest.model) {
+        Ok(model) => hasher.update(model),
+        Err(_) => hasher.update(b"unserializable-model"),
+    }
+    hex::encode(hasher.finalize())
+}
+
+fn stamp_matches(
+    manifest: &PluginManifest,
+    directory: &Path,
+    manifest_hash: &str,
+    expected: &[ExpectedModelFile<'_>; 2],
+) -> bool {
+    let stamp_path = verification_stamp_path(directory, &manifest.model.revision);
+    let Ok(bytes) = fs::read(&stamp_path) else {
+        return false;
+    };
+    let Ok(stamp) = serde_json::from_slice::<VerificationStamp>(&bytes) else {
+        return false;
+    };
+    if stamp.schema != VERIFICATION_SCHEMA
+        || stamp.revision != manifest.model.revision
+        || stamp.manifest != manifest_hash
+        || stamp.files.len() != expected.len()
+    {
+        return false;
+    }
+
+    expected.iter().all(|(file, _, metadata)| {
+        let Some(metadata) = metadata else {
+            return false;
+        };
+        let Some(entry) = stamp.files.iter().find(|entry| entry.path == file.path) else {
+            return false;
+        };
+        if entry.size != file.size || !entry.sha256.eq_ignore_ascii_case(&file.sha256) {
+            return false;
+        }
+        match metadata.modified().ok().map(mtime_parts) {
+            Some((secs, nanos)) => entry.mtime_secs == secs && entry.mtime_nanos == nanos,
+            None => false,
+        }
+    })
+}
+
+fn verification_stamp(
+    manifest: &PluginManifest,
+    manifest_hash: &str,
+    model: &ManifestModelFile,
+    mmproj: &ManifestModelFile,
+    paths: &ModelPaths,
+) -> Result<VerificationStamp> {
+    let mut files = Vec::with_capacity(2);
+    for (file, path) in [(model, &paths.model), (mmproj, &paths.mmproj)] {
+        let metadata = fs::metadata(path)?;
+        if !metadata.is_file() || metadata.len() != file.size {
+            return Err(AiHostError::Integrity(format!(
+                "{}: expected {} bytes, found {}",
+                path.display(),
+                file.size,
+                metadata.len()
+            )));
+        }
+        let (mtime_secs, mtime_nanos) = metadata
+            .modified()
+            .map(mtime_parts)
+            .map_err(AiHostError::Io)?;
+        files.push(VerifiedFile {
+            path: file.path.clone(),
+            size: file.size,
+            sha256: file.sha256.to_ascii_lowercase(),
+            mtime_secs,
+            mtime_nanos,
+        });
+    }
+
+    Ok(VerificationStamp {
+        schema: VERIFICATION_SCHEMA,
+        revision: manifest.model.revision.clone(),
+        manifest: manifest_hash.to_string(),
+        files,
+    })
+}
+
+fn write_verification_stamp(
+    directory: &Path,
+    manifest: &PluginManifest,
+    stamp: &VerificationStamp,
+) -> Result<()> {
+    let bytes = serde_json::to_vec(stamp)?;
+    let mut temp = Builder::new()
+        .prefix(".verified-")
+        .suffix(".tmp")
+        .tempfile_in(directory)?;
+    temp.write_all(&bytes)?;
+    temp.flush()?;
+    let destination = verification_stamp_path(directory, &manifest.model.revision);
+    #[cfg(windows)]
+    if destination.exists() {
+        // Windows `rename` does not replace an existing file.
+        let _ = fs::remove_file(&destination);
+    }
+    temp.persist(&destination)
+        .map_err(|error| AiHostError::Io(error.error))?;
+    Ok(())
+}
+
+/// Best-effort stamp refresh after a download or import already verified the
+/// bytes. A failure only costs one extra hash on the next check.
+fn record_verified_model(
+    manifest: &PluginManifest,
+    directory: &Path,
+    model: &ManifestModelFile,
+    mmproj: &ManifestModelFile,
+    paths: &ModelPaths,
+) {
+    let manifest_hash = manifest_fingerprint(manifest);
+    let result = verification_stamp(manifest, &manifest_hash, model, mmproj, paths)
+        .and_then(|stamp| write_verification_stamp(directory, manifest, &stamp));
+    if let Err(error) = result {
+        tracing::warn!(
+            %error,
+            directory = %directory.display(),
+            "cannot write the AI model verification stamp"
+        );
+    }
+}
+
+fn mtime_parts(time: SystemTime) -> (i64, u32) {
+    match time.duration_since(UNIX_EPOCH) {
+        Ok(duration) => (duration.as_secs() as i64, duration.subsec_nanos()),
+        Err(error) => {
+            let duration = error.duration();
+            (-(duration.as_secs() as i64), duration.subsec_nanos())
+        }
+    }
+}
+
+fn hash_file(path: &Path) -> Result<String> {
+    let mut file = File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; BUFFER_BYTES];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
 fn download_one(
     file: &ManifestModelFile,
     part: &Path,
@@ -342,9 +666,10 @@ fn download_one(
     downloaded: &mut u64,
     total: u64,
     progress: &mut dyn FnMut(u64, Option<u64>),
-    cancel: &AtomicBool,
+    control: &DownloadControl<'_>,
 ) -> Result<()> {
-    if cancel.load(Ordering::SeqCst) {
+    control.ensure_active()?;
+    if control.is_cancelled() {
         return Err(AiHostError::Cancelled);
     }
 
@@ -353,7 +678,8 @@ fn download_one(
     let mut file_bytes = 0u64;
     let result = {
         let mut on_chunk = |chunk: &[u8]| -> Result<()> {
-            if cancel.load(Ordering::SeqCst) {
+            control.ensure_active()?;
+            if control.is_cancelled() {
                 return Err(AiHostError::Cancelled);
             }
             file_bytes = file_bytes
@@ -409,31 +735,24 @@ fn stage_import(
     }
     remove_file_if_exists(part)?;
 
-    // A hard link avoids copying multi-gigabyte files when the selection and
-    // the data directory live on the same file system. The linked file is
-    // still hashed before any file is committed.
-    let hard_linked = fs::hard_link(source, part).is_ok();
-    let verified = if hard_linked {
-        let mut input = File::open(part)?;
-        import_stream(&mut input, None, file, imported, total, progress)
-    } else {
-        let mut input = File::open(source)?;
-        let mut output = create_part(part)?;
-        let result = import_stream(
-            &mut input,
-            Some(&mut output),
-            file,
-            imported,
-            total,
-            progress,
-        )
-        .and_then(|()| {
-            output.flush()?;
-            Ok(())
-        });
-        drop(output);
-        result
-    };
+    // Always copy into the private part file: the copied bytes are what get
+    // hashed and renamed into place, so changing the selected source after the
+    // hash cannot alter the installed model.
+    let mut input = File::open(source)?;
+    let mut output = create_part(part)?;
+    let verified = import_stream(
+        &mut input,
+        Some(&mut output),
+        file,
+        imported,
+        total,
+        progress,
+    )
+    .and_then(|()| {
+        output.flush()?;
+        Ok(())
+    });
+    drop(output);
 
     if let Err(error) = verified {
         let _ = fs::remove_file(part);
@@ -645,6 +964,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use tempfile::tempdir;
 
@@ -662,6 +982,7 @@ mod tests {
     struct FakeClient {
         files: HashMap<String, Vec<u8>>,
         chunk_size: usize,
+        chunk_delay: Duration,
         cancel_after_chunk: Option<(Arc<AtomicBool>, usize)>,
         calls: Mutex<Vec<String>>,
     }
@@ -683,6 +1004,7 @@ mod tests {
             Self {
                 files,
                 chunk_size: 64 * 1024,
+                chunk_delay: Duration::ZERO,
                 cancel_after_chunk: None,
                 calls: Mutex::new(Vec::new()),
             }
@@ -690,6 +1012,11 @@ mod tests {
 
         fn with_chunk_size(mut self, chunk_size: usize) -> Self {
             self.chunk_size = chunk_size;
+            self
+        }
+
+        fn with_chunk_delay(mut self, delay: Duration) -> Self {
+            self.chunk_delay = delay;
             self
         }
 
@@ -712,6 +1039,9 @@ mod tests {
                     && index == *after
                 {
                     cancel.store(true, Ordering::SeqCst);
+                }
+                if !self.chunk_delay.is_zero() {
+                    std::thread::sleep(self.chunk_delay);
                 }
                 on_chunk(chunk)?;
             }
@@ -909,9 +1239,16 @@ mod tests {
         assert_eq!(paths.mmproj, directory.join(MMPROJ_PATH));
         assert_eq!(fs::read(&paths.model).unwrap(), MODEL_BYTES);
         assert_eq!(fs::read(&paths.mmproj).unwrap(), MMPROJ_BYTES);
+        // The installed copy must not share an inode with the user's source.
+        fs::write(&model, b"changed").unwrap();
+        assert_eq!(fs::read(&paths.model).unwrap(), MODEL_BYTES);
         assert_eq!(progress.last(), Some(&(11, Some(11))));
         assert!(!directory.join(format!("{MODEL_PATH}.part")).exists());
         assert!(!directory.join(format!("{MMPROJ_PATH}.part")).exists());
+        assert!(
+            verification_stamp_path(&directory, &manifest.model.revision).is_file(),
+            "an import must write the verification stamp"
+        );
     }
 
     #[test]
@@ -1103,14 +1440,26 @@ mod tests {
     }
 
     #[test]
-    fn check_model_detects_size_mismatch_without_hashing() {
+    fn check_model_rejects_wrong_content_and_size() {
         let manifest = sample_manifest();
         let data_dir = tempdir().unwrap();
         let directory = model_directory(&manifest, data_dir.path());
         fs::create_dir_all(&directory).unwrap();
-        // Correct size, wrong content: readiness must not hash.
+        // Correct size, wrong content: the first check has no stamp, so the
+        // file is hashed and the mismatch is caught.
         fs::write(directory.join(MODEL_PATH), b"xxxxx").unwrap();
         fs::write(directory.join(MMPROJ_PATH), MMPROJ_BYTES).unwrap();
+        match check_model(&manifest, data_dir.path()) {
+            ModelCheck::Invalid(message) => {
+                assert!(
+                    message.contains(MODEL_PATH) && message.contains("SHA-256"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+
+        fs::write(directory.join(MODEL_PATH), MODEL_BYTES).unwrap();
         assert!(matches!(
             check_model(&manifest, data_dir.path()),
             ModelCheck::Ready(_)
@@ -1126,6 +1475,168 @@ mod tests {
             }
             other => panic!("expected Invalid, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn check_model_detects_tampering_after_a_verified_stamp() {
+        let manifest = sample_manifest();
+        let data_dir = tempdir().unwrap();
+        let directory = model_directory(&manifest, data_dir.path());
+        fs::create_dir_all(&directory).unwrap();
+        let model = directory.join(MODEL_PATH);
+        let mmproj = directory.join(MMPROJ_PATH);
+        fs::write(&model, MODEL_BYTES).unwrap();
+        fs::write(&mmproj, MMPROJ_BYTES).unwrap();
+
+        // The first successful check creates the stamp.
+        assert!(matches!(
+            check_model(&manifest, data_dir.path()),
+            ModelCheck::Ready(_)
+        ));
+        assert!(
+            verification_stamp_path(&directory, &manifest.model.revision).is_file(),
+            "a successful hash must write the verification stamp"
+        );
+
+        // Same-size content change: mtime no longer matches, so the file is
+        // rehashed and the mismatch is reported.
+        fs::write(&model, b"xxxxx").unwrap();
+        match check_model(&manifest, data_dir.path()) {
+            ModelCheck::Invalid(message) => {
+                assert!(
+                    message.contains(MODEL_PATH) && message.contains("SHA-256"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+
+        // A size change is still caught by the cheap metadata check.
+        fs::write(&model, b"too long").unwrap();
+        match check_model(&manifest, data_dir.path()) {
+            ModelCheck::Invalid(message) => {
+                assert!(message.contains("expected 5 bytes"), "{message}");
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn matching_stamp_is_trusted_without_rehashing() {
+        let manifest = sample_manifest();
+        let data_dir = tempdir().unwrap();
+        let directory = model_directory(&manifest, data_dir.path());
+        fs::create_dir_all(&directory).unwrap();
+        let model = directory.join(MODEL_PATH);
+        let mmproj = directory.join(MMPROJ_PATH);
+        fs::write(&model, MODEL_BYTES).unwrap();
+        fs::write(&mmproj, MMPROJ_BYTES).unwrap();
+        assert!(matches!(
+            check_model(&manifest, data_dir.path()),
+            ModelCheck::Ready(_)
+        ));
+
+        // Corrupt the content but restore the recorded mtime. The stamp must
+        // be trusted solely on size + mtime, so this check does not rehash.
+        let modified = fs::metadata(&model).unwrap().modified().unwrap();
+        fs::write(&model, b"xxxxx").unwrap();
+        let file = fs::OpenOptions::new().write(true).open(&model).unwrap();
+        file.set_modified(modified).unwrap();
+        drop(file);
+
+        assert!(matches!(
+            check_model(&manifest, data_dir.path()),
+            ModelCheck::Ready(_)
+        ));
+    }
+
+    #[test]
+    fn stamp_from_a_different_manifest_is_not_trusted() {
+        let manifest = sample_manifest();
+        let data_dir = tempdir().unwrap();
+        let directory = model_directory(&manifest, data_dir.path());
+        fs::create_dir_all(&directory).unwrap();
+        let model = directory.join(MODEL_PATH);
+        let mmproj = directory.join(MMPROJ_PATH);
+        fs::write(&model, MODEL_BYTES).unwrap();
+        fs::write(&mmproj, MMPROJ_BYTES).unwrap();
+        assert!(matches!(
+            check_model(&manifest, data_dir.path()),
+            ModelCheck::Ready(_)
+        ));
+
+        // Same revision directory, different signed manifest: the stamp must
+        // not hide the changed hash.
+        let mut changed = manifest.clone();
+        changed.model.files[0].sha256 = "00".repeat(32);
+        match check_model(&changed, data_dir.path()) {
+            ModelCheck::Invalid(message) => {
+                assert!(
+                    message.contains(MODEL_PATH) && message.contains("SHA-256"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn download_global_deadline_fails_and_removes_the_partial_file() {
+        let manifest = sample_manifest();
+        let data_dir = tempdir().unwrap();
+        // The client keeps sending one byte at a time; the total deadline is
+        // shorter than the time needed to finish.
+        let client = FakeClient::new(&manifest, MODEL_BYTES, MMPROJ_BYTES)
+            .with_chunk_size(1)
+            .with_chunk_delay(Duration::from_millis(20));
+
+        let error = download_model_with_deadline(
+            &manifest,
+            data_dir.path(),
+            &client,
+            &mut |_, _| {},
+            &AtomicBool::new(false),
+            Duration::from_millis(40),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(error, AiHostError::DownloadTimeout(_)),
+            "{error:?}"
+        );
+        let directory = model_directory(&manifest, data_dir.path());
+        assert!(!directory.join(MODEL_PATH).exists());
+        assert!(!directory.join(MMPROJ_PATH).exists());
+        assert!(!directory.join(format!("{MODEL_PATH}.part")).exists());
+        assert!(!directory.join(format!("{MMPROJ_PATH}.part")).exists());
+    }
+
+    #[test]
+    fn download_and_import_write_a_verification_stamp() {
+        let manifest = sample_manifest();
+        let data_dir = tempdir().unwrap();
+        let client = FakeClient::new(&manifest, MODEL_BYTES, MMPROJ_BYTES);
+        download_model(
+            &manifest,
+            data_dir.path(),
+            &client,
+            &mut |_, _| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let directory = model_directory(&manifest, data_dir.path());
+        let stamp = verification_stamp_path(&directory, &manifest.model.revision);
+        assert!(stamp.is_file());
+        let parsed: VerificationStamp = serde_json::from_slice(&fs::read(&stamp).unwrap()).unwrap();
+        assert_eq!(parsed.schema, VERIFICATION_SCHEMA);
+        assert_eq!(parsed.revision, manifest.model.revision);
+        assert_eq!(parsed.files.len(), 2);
+
+        // A later check reuses it instead of hashing again.
+        assert!(matches!(
+            check_model(&manifest, data_dir.path()),
+            ModelCheck::Ready(_)
+        ));
     }
 
     #[test]
