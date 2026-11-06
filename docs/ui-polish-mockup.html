@@ -1,0 +1,609 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VRC PhotoN — UI polish mock (P19 / P20 / P21)</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --font: "Inter", "Noto Sans JP", "Hiragino Sans", "Yu Gothic UI", system-ui, -apple-system, sans-serif;
+    --mono: "SFMono-Regular", "Cascadia Code", Consolas, "Liberation Mono", monospace;
+
+    --text: #eef4ff;
+    --muted: #a8b4ca;
+    --dim: #7f8ba3;
+    --faint: #5e6a81;
+
+    --accent: #8bcbff;
+    --accent-2: #7f92ff;
+    --accent-3: #70e4d2;
+    --amber: #f4c878;
+    --rose: #ff94a8;
+    --green: #7ee2b8;
+
+    --line: rgba(255, 255, 255, 0.105);
+    --line-strong: rgba(255, 255, 255, 0.17);
+    --line-soft: rgba(255, 255, 255, 0.065);
+
+    --panel-sidebar: #0b111b;
+    --panel-sidebar-deep: #080d15;
+    --panel-header: #101725;
+    --panel-card: #0d1420;
+    --panel-inner: #111927;
+    --panel-inner-deep: #0c1320;
+    --panel-deep: #0a1019;
+    --panel-raised: #172132;
+
+    --r-window: 28px;
+    --r-card: 22px;
+    --r-inner: 17px;
+    --ease: cubic-bezier(0.22, 0.8, 0.24, 1);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    background:
+      radial-gradient(1200px 620px at 18% -10%, rgba(84, 120, 190, 0.22), transparent 62%),
+      radial-gradient(1000px 520px at 100% 0%, rgba(112, 228, 210, 0.08), transparent 60%),
+      #05070d;
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 12px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
+  }
+
+  button, input { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  a { color: inherit; }
+
+  .icon {
+    width: 18px; height: 18px; flex: 0 0 auto;
+    fill: none; stroke: currentColor; stroke-width: 1.8;
+    stroke-linecap: round; stroke-linejoin: round;
+  }
+  .icon-sm { width: 14px; height: 14px; }
+  .icon-xs { width: 11px; height: 11px; }
+
+  kbd {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 17px; height: 17px; padding: 0 4px;
+    border: 1px solid var(--line); border-radius: 4px;
+    background: rgba(255, 255, 255, 0.035);
+    color: var(--faint); font-family: var(--mono); font-size: 8px; line-height: 1;
+  }
+
+  /* ---------- review page chrome ---------- */
+  .review {
+    width: min(1440px, calc(100% - 48px));
+    margin: 0 auto;
+    padding: 40px 0 80px;
+  }
+  .review-head {
+    display: flex; align-items: flex-end; justify-content: space-between;
+    gap: 24px; padding-bottom: 22px; border-bottom: 1px solid var(--line);
+  }
+  .review-head h1 {
+    margin: 0; font-size: 26px; letter-spacing: -0.02em; font-weight: 650;
+  }
+  .review-head p { margin: 6px 0 0; color: var(--muted); max-width: 680px; }
+  .review-meta { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    height: 24px; padding: 0 9px; border-radius: 99px;
+    border: 1px solid var(--line); background: rgba(255, 255, 255, 0.03);
+    color: var(--muted); font-size: 10px; white-space: nowrap;
+  }
+  .pill b { color: var(--text); font-weight: 600; }
+  .pill.accent { border-color: rgba(139, 203, 255, 0.28); color: var(--accent); }
+
+  .spec { margin-top: 44px; }
+  .spec-head {
+    display: grid; grid-template-columns: 64px 1fr auto; gap: 16px;
+    align-items: start; margin-bottom: 14px;
+  }
+  .unit {
+    display: inline-flex; align-items: center; justify-content: center;
+    height: 28px; border-radius: 8px; border: 1px solid var(--line-strong);
+    background: var(--panel-raised); font-family: var(--mono); font-size: 11px;
+    color: var(--accent); letter-spacing: 0.04em;
+  }
+  .spec-head h2 { margin: 0; font-size: 17px; font-weight: 620; letter-spacing: -0.01em; }
+  .spec-head p { margin: 5px 0 0; color: var(--muted); max-width: 760px; }
+  .spec-tags { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+
+  .decision {
+    margin-top: 10px; padding: 10px 12px;
+    border-left: 2px solid rgba(139, 203, 255, 0.5);
+    background: rgba(139, 203, 255, 0.045);
+    color: var(--muted); border-radius: 0 8px 8px 0;
+  }
+  .decision b { color: var(--text); font-weight: 600; }
+
+  /* ---------- app shell used by the specimens ---------- */
+  .app {
+    position: relative; overflow: hidden;
+    display: grid; grid-template-columns: 64px 1fr;
+    min-height: 520px;
+    border: 1px solid var(--line-strong); border-radius: var(--r-window);
+    background: rgba(10, 16, 28, 0.55);
+    box-shadow: 0 28px 80px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  }
+  .app.dimmed::after {
+    content: ""; position: absolute; inset: 0; z-index: 3;
+    background: rgba(5, 8, 14, 0.62); backdrop-filter: blur(1px);
+  }
+  .rail {
+    display: flex; flex-direction: column; align-items: center; gap: 4px;
+    padding: 14px 0; background: linear-gradient(180deg, var(--panel-sidebar), var(--panel-sidebar-deep));
+    border-right: 1px solid var(--line);
+  }
+  .rail .brand {
+    width: 30px; height: 30px; border-radius: 9px; margin-bottom: 12px;
+    display: grid; place-items: center;
+    background: linear-gradient(145deg, rgba(139, 203, 255, 0.22), rgba(127, 146, 255, 0.12));
+    border: 1px solid rgba(139, 203, 255, 0.26); color: var(--accent);
+  }
+  .rail button {
+    width: 38px; height: 38px; border: 0; border-radius: 10px; background: transparent;
+    display: grid; place-items: center; color: var(--faint);
+  }
+  .rail button.active { background: rgba(139, 203, 255, 0.12); color: var(--accent); }
+  .rail .spacer { flex: 1; }
+
+  .main { min-width: 0; display: flex; flex-direction: column; }
+  .ribbon {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 18px; border-bottom: 1px solid var(--line);
+    background: linear-gradient(180deg, rgba(16, 23, 37, 0.92), rgba(13, 20, 32, 0.88));
+  }
+  .search {
+    flex: 1; height: 32px; display: flex; align-items: center; gap: 8px;
+    padding: 0 11px; border: 1px solid var(--line); border-radius: 9px;
+    background: var(--panel-inner-deep); color: var(--dim);
+  }
+  .search span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ribbon .chip {
+    height: 28px; display: inline-flex; align-items: center; gap: 6px;
+    padding: 0 9px; border: 1px solid var(--line); border-radius: 8px;
+    background: rgba(255, 255, 255, 0.025); color: var(--muted);
+  }
+  .content { padding: 18px; min-height: 0; }
+  .content-head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 12px; margin-bottom: 12px;
+  }
+  .content-head h3 { margin: 0; font-size: 13px; font-weight: 600; }
+  .content-head p { margin: 0; color: var(--faint); font-size: 10px; }
+
+  /* ---------- P19 grid ---------- */
+  .grid {
+    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px;
+  }
+  .card {
+    overflow: hidden; border: 1px solid var(--line); border-radius: var(--r-inner);
+    background: var(--panel-card);
+  }
+  .thumb {
+    aspect-ratio: 3 / 2; position: relative;
+    background: linear-gradient(160deg, var(--scene-a), var(--scene-b));
+  }
+  .thumb::after {
+    content: ""; position: absolute; inset: 0;
+    background: linear-gradient(180deg, transparent 50%, rgba(0, 0, 0, 0.34));
+  }
+  .thumb .badge {
+    position: absolute; left: 8px; top: 8px; z-index: 1;
+    padding: 2px 6px; border-radius: 5px; font-size: 9px;
+    background: rgba(5, 8, 14, 0.62); border: 1px solid rgba(255, 255, 255, 0.14);
+    color: var(--muted);
+  }
+  .card-meta { padding: 8px 9px 9px; }
+  .card-meta b {
+    display: block; font-size: 10px; font-weight: 560;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .card-meta span { display: block; margin-top: 2px; color: var(--faint); font-size: 9px; }
+
+  .load-error {
+    grid-column: span 2; grid-row: span 1;
+    display: flex; flex-direction: column; justify-content: center; gap: 9px;
+    padding: 18px 20px; border-radius: var(--r-inner);
+    border: 1px solid rgba(255, 148, 168, 0.35);
+    background:
+      radial-gradient(420px 160px at 100% 0%, rgba(255, 148, 168, 0.10), transparent 70%),
+      var(--panel-inner-deep);
+  }
+  .load-error .eyebrow {
+    display: flex; align-items: center; gap: 7px;
+    color: var(--rose); font-size: 10px; font-weight: 600;
+  }
+  .load-error h4 { margin: 0; font-size: 14px; font-weight: 620; }
+  .load-error p { margin: 0; color: var(--muted); max-width: 46ch; }
+  .load-error .meta { color: var(--faint); font-size: 10px; }
+  .actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
+  .btn {
+    height: 30px; padding: 0 12px; border-radius: 8px;
+    border: 1px solid var(--line-strong); background: var(--panel-raised);
+    color: var(--text); display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11px; font-weight: 560;
+  }
+  .btn.primary {
+    border-color: rgba(139, 203, 255, 0.45);
+    background: linear-gradient(180deg, rgba(139, 203, 255, 0.22), rgba(127, 146, 255, 0.14));
+    color: #dff3ff;
+  }
+  .btn.ghost { background: transparent; color: var(--muted); }
+  .btn.danger {
+    border-color: rgba(255, 148, 168, 0.4);
+    background: linear-gradient(180deg, rgba(255, 148, 168, 0.2), rgba(255, 148, 168, 0.08));
+    color: #ffd9df;
+  }
+  .btn:disabled { opacity: 0.36; cursor: not-allowed; }
+
+  /* ---------- P20 dialogs ---------- */
+  .dialog-row {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px;
+  }
+  .dialog {
+    border: 1px solid var(--line-strong); border-radius: var(--r-card);
+    background: var(--panel-header); overflow: hidden;
+    box-shadow: 0 22px 60px rgba(0, 0, 0, 0.45);
+  }
+  .dialog-head {
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
+    padding: 16px 18px 12px;
+  }
+  .dialog-head h4 { margin: 0; font-size: 15px; font-weight: 620; }
+  .dialog-head p { margin: 5px 0 0; color: var(--muted); }
+  .dialog-body { padding: 0 18px 14px; }
+  .summary {
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px;
+    margin: 4px 0 12px;
+  }
+  .stat {
+    padding: 9px 10px; border: 1px solid var(--line); border-radius: 9px;
+    background: var(--panel-inner-deep);
+  }
+  .stat b { display: block; font-size: 16px; font-weight: 620; }
+  .stat span { color: var(--faint); font-size: 9px; }
+  .note {
+    display: flex; gap: 9px; padding: 10px 11px; border-radius: 9px;
+    border: 1px solid var(--line); background: rgba(255, 255, 255, 0.025);
+    color: var(--muted);
+  }
+  .note.warn {
+    border-color: rgba(244, 200, 120, 0.32);
+    background: rgba(244, 200, 120, 0.07);
+    color: #f5dfb3;
+  }
+  .note .icon { margin-top: 1px; }
+  .dialog-foot {
+    display: flex; justify-content: flex-end; gap: 8px;
+    padding: 12px 18px; border-top: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.015);
+  }
+  .dialog-foot .left { margin-right: auto; color: var(--faint); font-size: 10px; align-self: center; }
+
+  /* ---------- P21 dashboard ---------- */
+  .dash { display: grid; grid-template-columns: 1.6fr 1fr; gap: 12px; }
+  .panel {
+    border: 1px solid var(--line); border-radius: var(--r-inner);
+    background: var(--panel-card); overflow: hidden;
+  }
+  .panel-head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    padding: 12px 14px; border-bottom: 1px solid var(--line);
+  }
+  .panel-head b { font-size: 12px; font-weight: 600; }
+  .panel-head span { color: var(--faint); font-size: 10px; }
+  .rows { padding: 4px 0; }
+  .row {
+    display: grid; grid-template-columns: 1fr auto 96px; gap: 10px;
+    align-items: center; padding: 8px 14px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .row:last-child { border-bottom: 0; }
+  .row .name { min-width: 0; }
+  .row .name b { display: block; font-size: 10px; font-weight: 560; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .name span { color: var(--faint); font-size: 9px; }
+  .status {
+    height: 20px; padding: 0 7px; border-radius: 99px;
+    display: inline-flex; align-items: center; gap: 5px;
+    border: 1px solid var(--line); color: var(--muted); font-size: 9px;
+  }
+  .status.run { color: var(--accent); border-color: rgba(139, 203, 255, 0.3); }
+  .status.ok { color: var(--green); border-color: rgba(126, 226, 184, 0.3); }
+  .status.wait { color: var(--amber); border-color: rgba(244, 200, 120, 0.3); }
+  .bar { height: 4px; border-radius: 99px; background: rgba(255, 255, 255, 0.08); overflow: hidden; }
+  .bar i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--accent), var(--accent-3)); }
+  .side-note { padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .side-note h4 { margin: 0; font-size: 12px; font-weight: 600; }
+  .side-note p { margin: 0; color: var(--muted); }
+  .side-note ul { margin: 0; padding-left: 16px; color: var(--muted); }
+  .side-note li { margin: 4px 0; }
+  .same {
+    display: grid; place-items: center; min-height: 96px; border-radius: 10px;
+    border: 1px dashed var(--line-strong); color: var(--faint); text-align: center;
+    background: rgba(255, 255, 255, 0.015); padding: 12px;
+  }
+
+  .approval {
+    margin-top: 40px; padding: 16px 18px; border: 1px solid var(--line);
+    border-radius: var(--r-inner); background: var(--panel-deep);
+  }
+  .approval h3 { margin: 0 0 8px; font-size: 13px; }
+  .approval ol { margin: 0; padding-left: 20px; color: var(--muted); }
+  .approval li { margin: 5px 0; }
+  .approval code { color: var(--accent); font-family: var(--mono); font-size: 11px; }
+
+  @media (max-width: 1080px) {
+    .dialog-row { grid-template-columns: 1fr; margin-top: 14px !important; padding: 0 !important; }
+    .dash { grid-template-columns: 1fr; }
+    .grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  }
+  @media (max-width: 760px) {
+    .review { width: calc(100% - 24px); padding-top: 22px; }
+    .app { grid-template-columns: 48px 1fr; }
+    .spec-head { grid-template-columns: 52px 1fr; }
+    .spec-tags { grid-column: 2; justify-content: flex-start; }
+    .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .load-error { grid-column: span 2; }
+    .summary { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<main class="review">
+  <header class="review-head">
+    <div>
+      <h1>VRC PhotoN — UI polish mock</h1>
+      <p>P19 / P20 / P21 の実装前モック。既存の Glass Backdrop Ribbon のトークンとレイアウトをそのまま使い、追加する状態だけを確認するためのレビュー用ページです。</p>
+    </div>
+    <div class="review-meta">
+      <span class="pill accent"><b>2026-11-06</b></span>
+      <span class="pill">対象 <b>P19 / P20 / P21</b></span>
+      <span class="pill">承認後に実装</span>
+    </div>
+  </header>
+
+  <!-- ================= P19 ================= -->
+  <section class="spec" id="p19">
+    <div class="spec-head">
+      <span class="unit">P19</span>
+      <div>
+        <h2>グリッドのページ読込失敗と再試行</h2>
+        <p>読み込みに失敗したページだけをエラー状態にし、読み込み済みの写真とスクロール位置はそのまま残します。</p>
+        <div class="decision"><b>決定:</b> 失敗したページはグリッド内にインライン表示し、全体を空にしない。「再試行」でそのページだけを再要求し、成功したら同じ位置に差し替える。</div>
+      </div>
+      <div class="spec-tags">
+        <span class="pill">#356 M-17</span>
+        <span class="pill">#377 L-12</span>
+      </div>
+    </div>
+    <div class="app">
+      <aside class="rail">
+        <div class="brand">
+          <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M4 7.5A2.5 2.5 0 0 1 6.5 5h11A2.5 2.5 0 0 1 20 7.5v9a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 16.5z"/><path d="m5 17 4.2-4.2a2 2 0 0 1 2.8 0L17 17"/><circle cx="15.5" cy="9" r="1.2"/></svg>
+        </div>
+        <button class="active" title="ライブラリ"><svg class="icon" viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg></button>
+        <button title="検索"><svg class="icon" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 4.5 4.5"/></svg></button>
+        <button title="圧縮"><svg class="icon" viewBox="0 0 24 24"><path d="M7 4v8m0 0 3-3m-3 3L4 9"/><path d="M17 20v-8m0 0 3 3m-3-3-3 3"/><path d="M4 4h6M14 20h6"/></svg></button>
+        <button title="ダッシュボード"><svg class="icon" viewBox="0 0 24 24"><path d="M4 18V9m5 9V5m5 13v-6m5 6V7"/></svg></button>
+        <div class="spacer"></div>
+        <button title="設定"><svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1l2-1.5-2-3.4-2.4 1a7 7 0 0 0-1.7-1L14.5 3h-5l-.3 3.1a7 7 0 0 0-1.7 1l-2.4-1-2 3.4L5.1 11a7 7 0 0 0 0 2l-2 1.5 2 3.4 2.4-1a7 7 0 0 0 1.7 1l.3 3.1h5l.3-3.1a7 7 0 0 0 1.7-1l2.4 1 2-3.4-2-1.5a7 7 0 0 0 .1-1Z"/></svg></button>
+      </aside>
+      <div class="main">
+        <div class="ribbon">
+          <div class="search">
+            <svg class="icon icon-sm" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 4.5 4.5"/></svg>
+            <span>ワールド、プレイヤー、タグを検索</span>
+          </div>
+          <span class="chip"><svg class="icon icon-xs" viewBox="0 0 24 24"><path d="M4 6h16M7 12h10M10 18h4"/></svg>すべて</span>
+          <span class="chip">2026</span>
+          <span class="chip"><svg class="icon icon-xs" viewBox="0 0 24 24"><path d="m12 4 2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.5-4.8 2.5.9-5.4L4.2 9.7l5.4-.8Z"/></svg>お気に入り</span>
+        </div>
+        <div class="content">
+          <div class="content-head">
+            <h3>ライブラリ</h3>
+            <p>1,284枚 · 2026年11月 · ページ 4 / 54</p>
+          </div>
+          <div class="grid">
+            <article class="card"><div class="thumb" style="--scene-a:#22314f;--scene-b:#7f92ff"><span class="badge">21:24</span></div><div class="card-meta"><b>Midnight Rooftop</b><span>Mio · Kenta</span></div></article>
+            <article class="card"><div class="thumb" style="--scene-a:#2d1b4e;--scene-b:#ff94a8"><span class="badge">21:19</span></div><div class="card-meta"><b>Neon Garden</b><span>Mio</span></div></article>
+            <article class="card"><div class="thumb" style="--scene-a:#0f3a3a;--scene-b:#70e4d2"><span class="badge">20:58</span></div><div class="card-meta"><b>Deep Sea Lab</b><span>Haru</span></div></article>
+            <article class="card"><div class="thumb" style="--scene-a:#3f2a1b;--scene-b:#f4c878"><span class="badge">20:41</span></div><div class="card-meta"><b>Sunset Platform</b><span>Mio · Haru</span></div></article>
+
+            <article class="card"><div class="thumb" style="--scene-a:#1b2a3a;--scene-b:#8bcbff"><span class="badge">20:12</span></div><div class="card-meta"><b>Glass Atrium</b><span>Kenta</span></div></article>
+            <article class="card"><div class="thumb" style="--scene-a:#2a1b36;--scene-b:#c75a4a"><span class="badge">19:55</span></div><div class="card-meta"><b>Red Room</b><span>Mio</span></div></article>
+
+            <div class="load-error" role="alert" aria-live="polite">
+              <div class="eyebrow">
+                <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M12 4 3.5 19h17Z"/><path d="M12 9v4"/><circle cx="12" cy="16.2" r=".7" fill="currentColor" stroke="none"/></svg>
+                ページを読み込めませんでした
+              </div>
+              <h4>写真 73–96 を表示できません</h4>
+              <p>ライブラリの索引は最新です。再試行すると、このページだけを読み直します。読み込み済みの写真はそのまま残ります。</p>
+              <div class="meta">ページ 4 · 24枚 · タイムアウト</div>
+              <div class="actions">
+                <button class="btn primary"><svg class="icon icon-xs" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>再試行</button>
+                <button class="btn ghost">最初のページへ</button>
+                <span class="meta">または <kbd>R</kbd></span>
+              </div>
+            </div>
+
+            <article class="card"><div class="thumb" style="--scene-a:#1b3a28;--scene-b:#7ee2b8"><span class="badge">19:32</span></div><div class="card-meta"><b>Forest Shrine</b><span>Haru</span></div></article>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="decision"><b>失敗時の挙動:</b> エラーはそのページのスロットにだけ表示。再試行中はボタンを「再読み込み中…」にし、成功したらカードへ差し替える。自動リトライは行わない（無限ループを避ける）。</div>
+  </section>
+
+  <!-- ================= P20 ================= -->
+  <section class="spec" id="p20">
+    <div class="spec-head">
+      <span class="unit">P20</span>
+      <div>
+        <h2>削除確認のジョブ集計失敗</h2>
+        <p>ジョブ集計に失敗したとき、「依存ジョブなし」と誤認せず、未確認であることを明示して削除を止めます。</p>
+        <div class="decision"><b>決定:</b> 集計失敗時は削除ボタンを無効化し、「再確認」と「キャンセル」だけを出す。再確認が成功したら通常の確認状態へ戻る。危険を承知の強制削除はこの画面では出さない。</div>
+      </div>
+      <div class="spec-tags">
+        <span class="pill">#358 M-19</span>
+        <span class="pill">#373 L-08</span>
+      </div>
+    </div>
+    <div class="app dimmed" style="min-height: 430px">
+      <aside class="rail">
+        <div class="brand"><svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M4 7.5A2.5 2.5 0 0 1 6.5 5h11A2.5 2.5 0 0 1 20 7.5v9a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 16.5z"/><path d="m5 17 4.2-4.2a2 2 0 0 1 2.8 0L17 17"/></svg></div>
+        <button class="active"><svg class="icon" viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg></button>
+        <div class="spacer"></div>
+      </aside>
+      <div class="main">
+        <div class="ribbon"><div class="search"><span>検索</span></div></div>
+        <div class="content">
+          <div class="grid" style="grid-template-columns:repeat(4,minmax(0,1fr))">
+            <article class="card"><div class="thumb" style="--scene-a:#22314f;--scene-b:#7f92ff"></div></article>
+            <article class="card"><div class="thumb" style="--scene-a:#2d1b4e;--scene-b:#ff94a8"></div></article>
+            <article class="card"><div class="thumb" style="--scene-a:#0f3a3a;--scene-b:#70e4d2"></div></article>
+            <article class="card"><div class="thumb" style="--scene-a:#3f2a1b;--scene-b:#f4c878"></div></article>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="dialog-row" style="margin-top: -300px; position: relative; z-index: 4; padding: 0 26px 26px;">
+      <section class="dialog" aria-label="削除確認（集計成功）">
+        <div class="dialog-head">
+          <div>
+            <h4>3枚をゴミ箱へ移動しますか？</h4>
+            <p>圧縮・送信・AIタグ付けの状態を確認しました。</p>
+          </div>
+          <span class="pill">集計済み</span>
+        </div>
+        <div class="dialog-body">
+          <div class="summary">
+            <div class="stat"><b>1</b><span>圧縮ジョブ</span></div>
+            <div class="stat"><b>1</b><span>Discord 送信</span></div>
+            <div class="stat"><b>0</b><span>AI タグ付け</span></div>
+          </div>
+          <div class="note">
+            <svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M12 4 3.5 19h17Z"/><path d="M12 9v4"/><circle cx="12" cy="16.2" r=".7" fill="currentColor" stroke="none"/></svg>
+            処理中のジョブは完了を待ってから削除します。失敗したジョブは削除をブロックしません。
+          </div>
+        </div>
+        <div class="dialog-foot">
+          <button class="btn ghost">キャンセル</button>
+          <button class="btn danger">ゴミ箱へ移動</button>
+        </div>
+      </section>
+
+      <section class="dialog" aria-label="削除確認（集計失敗）">
+        <div class="dialog-head">
+          <div>
+            <h4>3枚をゴミ箱へ移動しますか？</h4>
+            <p>削除前の安全確認が必要です。</p>
+          </div>
+          <span class="pill" style="color:var(--amber);border-color:rgba(244,200,120,.35)">未確認</span>
+        </div>
+        <div class="dialog-body">
+          <div class="summary">
+            <div class="stat"><b>?</b><span>圧縮ジョブ</span></div>
+            <div class="stat"><b>?</b><span>Discord 送信</span></div>
+            <div class="stat"><b>?</b><span>AI タグ付け</span></div>
+          </div>
+          <div class="note warn">
+            <svg class="icon icon-sm" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 8v4"/><circle cx="12" cy="16" r=".7" fill="currentColor" stroke="none"/></svg>
+            <div><b>ジョブの集計に失敗しました。</b><br>圧縮・送信・AIタグ付けの状態を確認できません。処理中のジョブがある可能性があるため、集計できるまで削除できません。</div>
+          </div>
+        </div>
+        <div class="dialog-foot">
+          <span class="left">時間をおいて再試行してください</span>
+          <button class="btn ghost">キャンセル</button>
+          <button class="btn primary"><svg class="icon icon-xs" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>再確認</button>
+          <button class="btn danger" disabled>ゴミ箱へ移動</button>
+        </div>
+      </section>
+    </div>
+    <div class="decision"><b>再確認後:</b> 集計が成功したら左の通常状態へ遷移する。失敗が続く場合は「未確認」のまま削除不可。ジョブ状態を確認できないまま削除しない。</div>
+  </section>
+
+  <!-- ================= P21 ================= -->
+  <section class="spec" id="p21">
+    <div class="spec-head">
+      <span class="unit">P21</span>
+      <div>
+        <h2>圧縮・ダッシュボードの描画コスト削減</h2>
+        <p>120行を超えるリストの仮想化と、カードごとの文字列生成・AIメタ JSON パースの削減。見た目・行の高さ・スクロール位置は変えません。</p>
+        <div class="decision"><b>決定:</b> P21 は見た目の変更なし。モックは「変更しない」ことの確認用で、行の密度・ステータス色・進捗バーの表現を維持する。</div>
+      </div>
+      <div class="spec-tags">
+        <span class="pill">#374 L-09</span>
+        <span class="pill">#375 L-10</span>
+      </div>
+    </div>
+    <div class="app" style="min-height: 380px">
+      <aside class="rail">
+        <div class="brand"><svg class="icon icon-sm" viewBox="0 0 24 24"><path d="M4 7.5A2.5 2.5 0 0 1 6.5 5h11A2.5 2.5 0 0 1 20 7.5v9a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 16.5z"/><path d="m5 17 4.2-4.2a2 2 0 0 1 2.8 0L17 17"/></svg></div>
+        <button title="ライブラリ"><svg class="icon" viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg></button>
+        <button class="active" title="圧縮"><svg class="icon" viewBox="0 0 24 24"><path d="M7 4v8m0 0 3-3m-3 3L4 9"/><path d="M17 20v-8m0 0 3 3m-3-3-3 3"/><path d="M4 4h6M14 20h6"/></svg></button>
+        <div class="spacer"></div>
+      </aside>
+      <div class="main">
+        <div class="ribbon">
+          <div class="search"><span>圧縮キューを検索</span></div>
+          <span class="chip">すべて</span>
+          <span class="chip">実行中</span>
+          <span class="chip">待機</span>
+        </div>
+        <div class="content">
+          <div class="content-head">
+            <h3>圧縮キュー</h3>
+            <p>128件 · 実行中 2 · 待機 14</p>
+          </div>
+          <div class="dash">
+            <div class="panel">
+              <div class="panel-head"><b>ジョブ</b><span>新しい順</span></div>
+              <div class="rows">
+                <div class="row"><div class="name"><b>Midnight Rooftop</b><span>WebP · Q80 · 2560×1440</span></div><span class="status run">実行中</span><div class="bar"><i style="width:64%"></i></div></div>
+                <div class="row"><div class="name"><b>Neon Garden</b><span>WebP · Q80 · 2560×1440</span></div><span class="status run">実行中</span><div class="bar"><i style="width:28%"></i></div></div>
+                <div class="row"><div class="name"><b>Deep Sea Lab</b><span>JPEG · Q88 · 原寸</span></div><span class="status wait">待機</span><div class="bar"><i style="width:0%"></i></div></div>
+                <div class="row"><div class="name"><b>Sunset Platform</b><span>AVIF · Q60 · 1920×1080</span></div><span class="status wait">待機</span><div class="bar"><i style="width:0%"></i></div></div>
+                <div class="row"><div class="name"><b>Glass Atrium</b><span>WebP · Q80 · 2560×1440</span></div><span class="status ok">完了</span><div class="bar"><i style="width:100%"></i></div></div>
+                <div class="row"><div class="name"><b>Red Room</b><span>WebP · Q80 · 2560×1440</span></div><span class="status ok">完了</span><div class="bar"><i style="width:100%"></i></div></div>
+                <div class="row"><div class="name"><b>Forest Shrine</b><span>JPEG XL · Q90 · 原寸</span></div><span class="status ok">完了</span><div class="bar"><i style="width:100%"></i></div></div>
+                <div class="row"><div class="name"><b>… 120件以上</b><span>スクロールで続きを表示</span></div><span class="status">—</span><div class="bar"><i style="width:0%"></i></div></div>
+              </div>
+            </div>
+            <div class="panel side-note">
+              <h4>変更しないもの</h4>
+              <div class="same">行の高さ / 密度 / ステータス色<br>スクロール位置 / 選択状態</div>
+              <ul>
+                <li>表示する行だけを構築する（120行超）</li>
+                <li>カードの文字列を毎フレーム再生成しない</li>
+                <li>AI メタ JSON を毎フレームパースしない</li>
+              </ul>
+              <p style="color:var(--faint);font-size:10px">体感の変化は「重いライブラリでもスクロールが引っかからない」ことだけ。見た目の差分はありません。</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="approval">
+    <h3>承認チェック</h3>
+    <ol>
+      <li>P19: 失敗ページのインライン表示・再試行・読み込み済みカードの維持でよいか。</li>
+      <li>P20: 集計失敗時は削除を無効化し、「再確認」のみで復帰する方針でよいか（強制削除は出さない）。</li>
+      <li>P21: 見た目を変えず、仮想化と描画コスト削減だけを行うことでよいか。</li>
+      <li>承認後、P19 → P20 → P21 の順に実装し、各PRで回帰テストを追加する。</li>
+    </ol>
+    <p style="margin:10px 0 0;color:var(--faint);font-size:10px">このページは <code>docs/ui-polish-mockup.html</code>。実装時は既存の GPUI コンポーネントと i18n キーに合わせる。</p>
+  </section>
+</main>
+</body>
+</html>
