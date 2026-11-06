@@ -11,11 +11,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use assert_cmd::cargo::cargo_bin;
 use tempfile::TempDir;
 use vrc_photon_ai_host::test_support::{
     TEST_CATALOG_VERSION, TEST_ENTRYPOINT, TEST_VARIANT, TestEntry, TestKey, TestPackage,
@@ -30,6 +29,7 @@ use vrc_photon_ipc::{Event, PluginInstallStatus};
 use crate::Daemon;
 use crate::plugin::AI_PLUGIN_ID;
 use crate::tagging::{TaggingWorker, TaggingWorkerConfig};
+use crate::test_support::mock_sidecar;
 
 const PLUGIN: &str = AI_PLUGIN_ID;
 const MODEL_BYTES: &[u8] = b"model";
@@ -401,21 +401,6 @@ impl DaemonAiE2e {
     fn resume_processing_jobs(&self) -> usize {
         self.db().resume_interrupted_tagging_jobs().unwrap()
     }
-}
-
-fn mock_sidecar() -> PathBuf {
-    static MOCK: OnceLock<PathBuf> = OnceLock::new();
-    MOCK.get_or_init(|| {
-        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-        let status = std::process::Command::new(cargo)
-            .args(["build", "--package", "vrc-photon-ai-mock-sidecar"])
-            .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .status()
-            .expect("build the mock sidecar");
-        assert!(status.success(), "cargo build failed for the mock sidecar");
-        cargo_bin("mock-sidecar")
-    })
-    .clone()
 }
 
 fn shell_quote(value: &str) -> String {

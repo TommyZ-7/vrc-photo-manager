@@ -1480,6 +1480,82 @@ mod tests {
     }
 
     #[test]
+    fn quick_look_notification_and_dialogs_compose_as_overlays() {
+        let all_open = any_overlay_open(true, true, true, true, true);
+        assert!(all_open);
+        // Only quick look paints over the shell. `should_render_shell` takes
+        // that single flag, so the other dialogs must not be folded into it.
+        assert!(!should_render_shell(true));
+        assert!(should_render_shell(false));
+
+        // The notification modal and the other dialogs still own the input
+        // tree even though only quick look hides the shell underneath.
+        let dialogs_only = any_overlay_open(false, true, true, true, true);
+        assert!(dialogs_only);
+        assert!(should_render_shell(false));
+        assert!(global_shortcut_blocked(dialogs_only, false));
+        assert!(global_shortcut_blocked(
+            any_overlay_open(false, false, false, false, true),
+            false
+        ));
+        assert!(global_shortcut_blocked(
+            any_overlay_open(true, false, false, false, false),
+            true
+        ));
+    }
+
+    #[test]
+    fn every_ai_modal_feeds_the_global_overlay_guard() {
+        for ai_open in [
+            ai_overlay_open(true, false, false, false),
+            ai_overlay_open(false, true, false, false),
+            ai_overlay_open(false, false, true, false),
+            ai_overlay_open(false, false, false, true),
+        ] {
+            assert!(ai_open);
+            let overlay = any_overlay_open(false, false, false, ai_open, false);
+            assert!(overlay);
+            assert!(global_shortcut_blocked(overlay, false));
+        }
+        assert!(!any_overlay_open(
+            false,
+            false,
+            false,
+            ai_overlay_open(false, false, false, false),
+            false
+        ));
+    }
+
+    #[test]
+    fn every_screen_has_a_distinct_localized_title() {
+        let screens = [
+            Screen::Photos,
+            Screen::Compression,
+            Screen::Search,
+            Screen::Dashboard,
+            Screen::Integrations,
+            Screen::Settings,
+        ];
+        for locale in ["ja", "en"] {
+            let titles: Vec<_> = screens
+                .iter()
+                .map(|screen| screen.title_in(locale))
+                .collect();
+            for title in &titles {
+                assert!(!title.is_empty(), "empty title in {locale}");
+            }
+            let mut unique = titles.clone();
+            unique.sort();
+            unique.dedup();
+            assert_eq!(
+                unique.len(),
+                titles.len(),
+                "screen titles must stay distinct in {locale}"
+            );
+        }
+    }
+
+    #[test]
     fn should_notify_library_error_only_reports_changes() {
         assert!(should_notify_library_error(None, "boom"));
         assert!(!should_notify_library_error(Some("boom"), "boom"));

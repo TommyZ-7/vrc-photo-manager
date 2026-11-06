@@ -39,6 +39,8 @@ pub(crate) mod plugin;
 mod signals;
 mod supervisor;
 pub(crate) mod tagging;
+#[cfg(test)]
+mod test_support;
 mod tray;
 mod vrchat_process;
 mod world_name_http;
@@ -6602,6 +6604,194 @@ mod tests {
         assert_eq!(resumed.status, QueueStatus::Pending);
         assert_eq!(resumed.retry_count, 0);
         assert!(resumed.started_at.is_none());
+    }
+
+    #[test]
+    fn startup_recovers_an_interrupted_compression_job_with_an_open_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = manual_test_daemon(&dir);
+        daemon.run_once().unwrap();
+        drop(daemon);
+
+        let db_path = dir.path().join("library.db");
+        let log_path = dir.path().join("logs/output_log_2026-10-21_21-00-00.txt");
+        std::fs::write(&log_path, "").unwrap();
+        let mtime: i64 = 1_700_000_500;
+        let file = File::options().write(true).open(&log_path).unwrap();
+        file.set_modified(std::time::UNIX_EPOCH + Duration::from_secs(mtime as u64))
+            .unwrap();
+        drop(file);
+
+        let (job_id, session_id) = {
+            let db = Db::open(&db_path).unwrap();
+            let photo = db
+                .photo_by_path(original_path(&dir).to_str().unwrap())
+                .unwrap()
+                .unwrap();
+            let job_id = db.enqueue_job(photo.id, "p", "keep").unwrap();
+            let claimed = db.next_pending_job().unwrap().unwrap();
+            assert_eq!(claimed.id, job_id);
+            assert_eq!(claimed.status, QueueStatus::Processing);
+
+            let world = db
+                .upsert_world("wrld_test", Some("Test World"), Some("log"))
+                .unwrap();
+            let session_id = db
+                .create_session(log_path.to_str().unwrap(), mtime - 120, world, None)
+                .unwrap();
+            (job_id, session_id)
+        };
+
+        let mut reopened = Daemon::open(
+            &db_path,
+            Some(dir.path().join("photos")),
+            Some(dir.path().join("logs")),
+        )
+        .unwrap();
+        assert_eq!(
+            reopened
+                .repair_open_sessions_with_running(Some(false))
+                .unwrap(),
+            1
+        );
+
+        let db = Db::open(&db_path).unwrap();
+        let resumed = db
+            .list_jobs(10)
+            .unwrap()
+            .into_iter()
+            .find(|job| job.id == job_id)
+            .expect("compression job");
+        assert_eq!(resumed.status, QueueStatus::Pending);
+        assert_eq!(resumed.retry_count, 0);
+        assert!(resumed.started_at.is_none());
+        assert!(
+            db.open_sessions().unwrap().is_empty(),
+            "startup must close the stale session in the same pass"
+        );
+        let session = db.session_by_id(session_id).unwrap().unwrap();
+        assert_eq!(session.ended_at, Some(mtime));
+    }
+
+    #[test]
+    fn concurrent_polling_log_ingestion_and_thumbnails_do_not_deadlock() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut daemon = test_daemon(&dir);
+        let photo_path = original_path(&dir);
+        write_photo(&photo_path);
+        let log_path = dir.path().join("logs/output_log_2026-10-21_21-00-00.txt");
+        let join =
+            "2026.10.21 21:23:12 Debug      -  [Behaviour] Joining wrld_test:12345~region(jp)";
+        let name =
+            "2026.10.21 21:23:13 Debug      -  [Behaviour] Joining or Creating Room: Test World";
+        std::fs::write(&log_path, format!("{join}\n{name}\n")).unwrap();
+        daemon.run_once().unwrap();
+
+        let db_path = dir.path().join("library.db");
+        let (photo_id, thumbnail_spec) = {
+            let db = daemon.db.lock().unwrap();
+            let photo = db
+                .photo_by_path(photo_path.to_str().unwrap())
+                .unwrap()
+                .unwrap();
+            (photo.id, daemon.settings.thumbnail_spec())
+        };
+        let cache = dir.path().join("thumbnails");
+        std::fs::create_dir_all(&cache).unwrap();
+        let db = Arc::clone(&daemon.db);
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let poller_db = Arc::clone(&db);
+        let poller_barrier = Arc::clone(&barrier);
+        let poller_tx = tx.clone();
+        let poller = thread::spawn(move || {
+            poller_barrier.wait();
+            let result = (|| -> std::result::Result<(), String> {
+                for _ in 0..200 {
+                    let db = poller_db.lock().map_err(|error| error.to_string())?;
+                    db.stats().map_err(|error| error.to_string())?;
+                    db.list_photos(10, 0, vrc_photon_core::model::PhotoSort::Newest)
+                        .map_err(|error| error.to_string())?;
+                    db.library_revision().map_err(|error| error.to_string())?;
+                    drop(db);
+                    thread::yield_now();
+                }
+                Ok(())
+            })();
+            let _ = poller_tx.send(result);
+        });
+
+        let thumbnail_db = Arc::clone(&db);
+        let thumbnail_barrier = Arc::clone(&barrier);
+        let thumbnail_tx = tx.clone();
+        let thumbnail_cache = cache.clone();
+        let thumbnail_source = photo_path.clone();
+        let thumbnail = thread::spawn(move || {
+            thumbnail_barrier.wait();
+            let result = (|| -> std::result::Result<(), String> {
+                for _ in 0..16 {
+                    let source = {
+                        let db = thumbnail_db.lock().map_err(|error| error.to_string())?;
+                        let photo = db
+                            .photo_by_id(photo_id)
+                            .map_err(|error| error.to_string())?
+                            .ok_or_else(|| "photo disappeared".to_string())?;
+                        PathBuf::from(photo.effective_path())
+                    };
+                    assert_eq!(source, thumbnail_source);
+                    let thumbnail = thumbnail::ensure_thumbnail_in(
+                        photo_id,
+                        &source,
+                        &thumbnail_cache,
+                        thumbnail_spec,
+                    )
+                    .map_err(|error| error.to_string())?;
+                    if thumbnail.is_none() {
+                        return Err("thumbnail was not generated".to_string());
+                    }
+                }
+                Ok(())
+            })();
+            let _ = thumbnail_tx.send(result);
+        });
+
+        barrier.wait();
+        let mut file = File::options().append(true).open(&log_path).unwrap();
+        for index in 0..16 {
+            writeln!(
+                file,
+                "2026.10.21 21:24:{index:02} Debug      -  [Behaviour] OnPlayerJoined Player {index} (usr_{index})"
+            )
+            .unwrap();
+            if index % 4 == 0 {
+                daemon.ingest_logs().unwrap();
+            }
+        }
+        daemon.ingest_logs().unwrap();
+
+        for _ in 0..2 {
+            match rx.recv_timeout(Duration::from_secs(20)) {
+                Ok(result) => result.unwrap(),
+                Err(error) => panic!("concurrent worker did not finish: {error}"),
+            }
+        }
+        poller.join().unwrap();
+        thumbnail.join().unwrap();
+
+        // The shared database must still be usable after all three paths ran.
+        let db = Db::open(&db_path).unwrap();
+        assert_eq!(db.count_photos().unwrap(), 1);
+        assert_eq!(db.stats().unwrap().photo_count, 1);
+        assert_eq!(
+            db.list_photos(10, 0, vrc_photon_core::model::PhotoSort::Newest)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(db.open_sessions().unwrap().len(), 1);
+        let thumbnail = thumbnail::thumbnail_path_in(&cache, photo_id, thumbnail_spec);
+        assert!(thumbnail.is_file(), "thumbnail must survive the race");
     }
 
     #[test]

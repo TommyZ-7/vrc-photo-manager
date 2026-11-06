@@ -145,6 +145,20 @@ mod tests {
     }
 
     #[test]
+    fn replacing_the_selection_after_a_root_change_drops_old_members() {
+        let mut selection = PhotoSelection::default();
+        selection.replace([10, 20, 30]);
+        // A root change swaps the whole library snapshot, so none of the old
+        // ids may remain selected or keep their old ordering.
+        selection.replace([42, 41]);
+        assert_eq!(selection.to_vec(), vec![42, 41]);
+        assert_eq!(selection.last(), Some(41));
+        for old in [10, 20, 30] {
+            assert!(!selection.contains(old));
+        }
+    }
+
+    #[test]
     fn insert_reports_whether_the_selection_changed() {
         let mut selection = PhotoSelection::default();
         assert!(selection.insert(5));
