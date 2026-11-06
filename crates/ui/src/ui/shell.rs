@@ -286,7 +286,7 @@ impl App {
             self.waiting_job_count,
             self.failed_job_count,
         );
-        let import = import_card_status(import_progress, self.import_report.as_ref());
+        let import = import_card_status(import_progress, self.import_report.as_deref());
         let scan = scan_card_status(
             self.scan_progress.as_ref(),
             self.daemon_active,
@@ -297,7 +297,7 @@ impl App {
             self.waiting_job_count,
             self.failed_job_count,
         );
-        let import_attention = import_attention(import_progress, self.import_report.as_ref());
+        let import_attention = import_attention(import_progress, self.import_report.as_deref());
         let scan_attention = scan_attention(
             self.scan_progress.as_ref(),
             self.daemon_active,

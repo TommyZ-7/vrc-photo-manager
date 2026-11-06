@@ -7,6 +7,7 @@
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -106,11 +107,11 @@ impl ImportSource {
 pub(crate) enum ImportDialogOrigin {
     New,
     Retry {
-        report: ImportReportView,
+        report: Rc<ImportReportView>,
         sources: Vec<PathBuf>,
     },
     Resume {
-        report: ImportReportView,
+        report: Rc<ImportReportView>,
         sources: Vec<PathBuf>,
     },
 }
@@ -468,7 +469,7 @@ impl App {
                     NotificationType::Warning
                 };
                 self.toast_actionable(tone, summary, cx);
-                self.import_report = Some(report);
+                self.import_report = Some(Rc::new(report));
                 self.import_report_expanded = false;
                 self.import_dialog = None;
                 cx.notify();
@@ -807,6 +808,7 @@ mod tests {
     use crate::ui::import::retryable_sources;
     use std::cell::Cell;
     use std::path::{Path, PathBuf};
+    use std::rc::Rc;
     use std::time::{Duration, Instant};
     use vrc_photon_core::importer::{
         ImportIssue, ImportIssueKind, ImportMode, ImportRename, ImportResult,
@@ -859,6 +861,29 @@ mod tests {
         report.issues.push(non_retryable_issue("/c.png"));
         report.invalidate_issue_counts();
         assert_eq!(report.issue_counts(), (2, 1));
+    }
+
+    #[test]
+    fn rc_wrapped_report_keeps_counts_and_retryable_sources() {
+        let report = Rc::new(ImportReportView {
+            issues: vec![
+                retryable_issue("/a.png"),
+                partial_issue("/b.png"),
+                retryable_issue("/c.png"),
+            ],
+            renamed: vec![rename_fixture("/old.png", "/dest/old-1.png")],
+            ..import_report_fixture()
+        });
+
+        // `App` now clones the Rc per render instead of the whole report.
+        let shared = Rc::clone(&report);
+        assert_eq!(shared.issue_counts(), (2, 1));
+        assert_eq!(
+            retryable_sources(&shared.issues),
+            vec![PathBuf::from("/a.png"), PathBuf::from("/c.png")]
+        );
+        assert_eq!(shared.renamed.len(), 1);
+        assert_eq!(Rc::strong_count(&report), 2);
     }
 
     #[test]
