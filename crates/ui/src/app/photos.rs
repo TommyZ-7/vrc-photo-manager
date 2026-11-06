@@ -10,11 +10,12 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use gpui_kit::component::WindowExt;
-use gpui_kit::component::button::ButtonVariant;
+use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants};
+use gpui_kit::component::dialog::DialogFooter;
 use gpui_kit::component::*;
 use gpui_kit::*;
 use vrc_photon_core::model::{DeletionJobSummary, DeletionReason, Photo};
-use vrc_photon_core::{preview, thumbnail};
+use vrc_photon_core::{CoreError, preview, thumbnail};
 use vrc_photon_i18n::{tr, tr_args};
 use vrc_photon_ipc::Request as IpcRequest;
 
@@ -749,70 +750,257 @@ impl App {
         if ids.is_empty() {
             return;
         }
+        let confirmation = DeletionConfirmation::from_result(self.db.deletion_job_summary(&ids));
+        self.open_deletion_confirmation(ids, confirmation, window, cx);
+    }
+
+    /// Opens the delete confirmation for a freshly checked summary. A retry
+    /// re-enters here, so success follows the normal path and a repeated
+    /// failure stays in the unavailable state.
+    fn open_deletion_confirmation(
+        &mut self,
+        ids: Vec<i64>,
+        confirmation: DeletionConfirmation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let count = ids.len();
-        let summary = self.db.deletion_job_summary(&ids).unwrap_or_default();
-        let warning_lines = deletion_warning_lines(&summary);
-        let heading = deletion_warning_heading(summary.affected_photos, count);
-        let description = if count == 1 {
+        if count == 0 {
+            return;
+        }
+        let description = self.deletion_confirmation_description(count);
+        let panel_deep = self.palette.panel_deep;
+        match confirmation {
+            DeletionConfirmation::Simple => {
+                let entity = cx.entity();
+                window.open_alert_dialog(cx, move |alert, _, _| {
+                    let entity = entity.clone();
+                    let ids = ids.clone();
+                    alert
+                        .title(tr!("photos.delete.title"))
+                        .bg(rgb(panel_deep))
+                        .description(description.clone())
+                        .confirm()
+                        .ok_text(tr!("photos.delete.ok"))
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text(tr!("common.cancel"))
+                        .on_ok(move |_, _, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.request_trash_photos(ids.clone(), cx);
+                            });
+                            true
+                        })
+                });
+            }
+            DeletionConfirmation::Warning(summary) => {
+                let warning_lines = deletion_warning_lines(&summary);
+                let heading = deletion_warning_heading(summary.affected_photos, count);
+                let entity = cx.entity();
+                window.open_alert_dialog(cx, move |alert, _, _| {
+                    let entity = entity.clone();
+                    let ids = ids.clone();
+                    let lines = warning_lines.clone();
+                    let content = v_flex()
+                        .gap(px(6.))
+                        .child(div().text_size(px(12.)).child(heading.clone()))
+                        .children(
+                            lines
+                                .into_iter()
+                                .map(|line| div().text_size(px(11.)).child(line)),
+                        );
+                    alert
+                        .title(tr!("photos.jobs.title"))
+                        .bg(rgb(panel_deep))
+                        .description(content)
+                        .confirm()
+                        .ok_text(tr!("photos.delete.ok"))
+                        .ok_variant(ButtonVariant::Danger)
+                        .cancel_text(tr!("common.cancel"))
+                        .on_ok(move |_, _, cx| {
+                            entity.update(cx, |this, cx| {
+                                this.request_trash_photos(ids.clone(), cx);
+                            });
+                            true
+                        })
+                });
+            }
+            DeletionConfirmation::Unavailable(reason) => {
+                self.open_deletion_unavailable(ids, count, reason, window, cx);
+            }
+        }
+    }
+
+    fn deletion_confirmation_description(&self, count: usize) -> String {
+        if count == 1 {
             self.selected_photo
                 .as_ref()
                 .map(|photo| tr_args!("photos.delete.confirm_one", name = photo.captured_at_local))
                 .unwrap_or_else(|| tr!("photos.delete.confirm_none"))
         } else {
             tr_args!("photos.delete.confirm_count", count = count)
-        };
-        let entity = cx.entity();
-        let panel_deep = self.palette.panel_deep;
+        }
+    }
 
-        if warning_lines.is_empty() {
-            window.open_alert_dialog(cx, move |alert, _, _| {
-                let entity = entity.clone();
-                let ids = ids.clone();
-                alert
-                    .title(tr!("photos.delete.title"))
-                    .bg(rgb(panel_deep))
-                    .description(description.clone())
-                    .confirm()
-                    .ok_text(tr!("photos.delete.ok"))
-                    .ok_variant(ButtonVariant::Danger)
-                    .cancel_text(tr!("common.cancel"))
-                    .on_ok(move |_, _, cx| {
-                        entity.update(cx, |this, cx| {
-                            this.request_trash_photos(ids.clone(), cx);
-                        });
-                        true
-                    })
-            });
+    /// The job-count query failed, so absence of jobs is unproven. Keep the
+    /// delete action disabled and offer only Cancel and a user-triggered
+    /// re-check; never fall through to `request_trash_photos`.
+    fn open_deletion_unavailable(
+        &mut self,
+        ids: Vec<i64>,
+        count: usize,
+        reason: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::warn!(reason = %reason, count, "cannot check deletion jobs");
+        let entity = cx.entity();
+        let p = self.palette;
+        let panel_deep = p.panel_deep;
+        window.open_alert_dialog(cx, move |alert, _, _| {
+            let retry_entity = entity.clone();
+            let retry_ids = ids.clone();
+            let unknown = tr!("photos.delete.unavailable.count_unknown");
+            let stat = |label: String| {
+                v_flex()
+                    .flex_1()
+                    .p(px(9.))
+                    .gap(px(2.))
+                    .rounded(px(9.))
+                    .border_1()
+                    .border_color(rgb(p.line_soft))
+                    .bg(rgb(p.panel_2))
+                    .child(
+                        div()
+                            .text_size(px(16.))
+                            .font_semibold()
+                            .text_color(rgb(p.text))
+                            .child(unknown.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(9.))
+                            .text_color(rgb(p.muted_2))
+                            .child(label),
+                    )
+            };
+            let title = if count == 1 {
+                tr!("photos.delete.unavailable.title_one")
+            } else {
+                tr_args!("photos.delete.unavailable.title_count", count = count)
+            };
+            alert
+                .title(title)
+                .bg(rgb(panel_deep))
+                .description(
+                    v_flex()
+                        .gap(px(10.))
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(rgb(p.muted))
+                                        .child(tr!("photos.delete.unavailable.intro")),
+                                )
+                                .child(
+                                    div()
+                                        .px(px(8.))
+                                        .py(px(1.))
+                                        .rounded_full()
+                                        .border_1()
+                                        .border_color(rgb(p.amber))
+                                        .bg(rgb(p.amber_soft))
+                                        .text_size(px(9.))
+                                        .text_color(rgb(p.amber))
+                                        .child(tr!("photos.delete.unavailable.badge")),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .gap(px(8.))
+                                .child(stat(tr!("photos.jobs.compression")))
+                                .child(stat(tr!("photos.jobs.send")))
+                                .child(stat(tr!("photos.jobs.ai_tagging"))),
+                        )
+                        .child(
+                            v_flex()
+                                .gap(px(2.))
+                                .p(px(10.))
+                                .rounded(px(9.))
+                                .border_1()
+                                .border_color(rgb(p.amber))
+                                .bg(rgb(p.amber_soft))
+                                .child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .font_semibold()
+                                        .text_color(rgb(p.amber))
+                                        .child(tr!("photos.delete.unavailable.headline")),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(10.))
+                                        .text_color(rgb(p.muted))
+                                        .child(tr!("photos.delete.unavailable.body")),
+                                ),
+                        ),
+                )
+                .footer(
+                    DialogFooter::new()
+                        .items_center()
+                        .child(
+                            div()
+                                .mr_auto()
+                                .text_size(px(10.))
+                                .text_color(rgb(p.muted_2))
+                                .child(tr!("photos.delete.unavailable.hint")),
+                        )
+                        .child(
+                            Button::new("deletion-unavailable-cancel")
+                                .label(tr!("common.cancel"))
+                                .ghost()
+                                .on_click(|_, window, cx| {
+                                    window.close_dialog(cx);
+                                }),
+                        )
+                        .child(
+                            Button::new("deletion-unavailable-retry")
+                                .label(tr!("photos.delete.unavailable.retry"))
+                                .primary()
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    let entity = retry_entity.clone();
+                                    let ids = retry_ids.clone();
+                                    window.defer(cx, move |window, cx| {
+                                        entity.update(cx, |this, cx| {
+                                            this.retry_deletion_confirmation(ids, window, cx);
+                                        });
+                                    });
+                                }),
+                        )
+                        .child(
+                            Button::new("deletion-unavailable-disabled")
+                                .label(tr!("photos.delete.unavailable.disabled_action"))
+                                .danger()
+                                .disabled(true),
+                        ),
+                )
+        });
+    }
+
+    fn retry_deletion_confirmation(
+        &mut self,
+        ids: Vec<i64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if ids.is_empty() {
             return;
         }
-
-        window.open_alert_dialog(cx, move |alert, _, _| {
-            let entity = entity.clone();
-            let ids = ids.clone();
-            let lines = warning_lines.clone();
-            let content = v_flex()
-                .gap(px(6.))
-                .child(div().text_size(px(12.)).child(heading.clone()))
-                .children(
-                    lines
-                        .into_iter()
-                        .map(|line| div().text_size(px(11.)).child(line)),
-                );
-            alert
-                .title(tr!("photos.jobs.title"))
-                .bg(rgb(panel_deep))
-                .description(content)
-                .confirm()
-                .ok_text(tr!("photos.delete.ok"))
-                .ok_variant(ButtonVariant::Danger)
-                .cancel_text(tr!("common.cancel"))
-                .on_ok(move |_, _, cx| {
-                    entity.update(cx, |this, cx| {
-                        this.request_trash_photos(ids.clone(), cx);
-                    });
-                    true
-                })
-        });
+        let confirmation = DeletionConfirmation::from_result(self.db.deletion_job_summary(&ids));
+        self.open_deletion_confirmation(ids, confirmation, window, cx);
     }
 
     /// Demo-only direct trash path. Real deletions go through the daemon
@@ -1068,6 +1256,44 @@ impl App {
     }
 }
 
+/// The outcome of checking pending jobs before a manual deletion.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DeletionConfirmation {
+    /// No jobs to warn about; the simple confirmation still deletes.
+    Simple,
+    /// Jobs are still pending; warn and keep the danger action available.
+    Warning(DeletionJobSummary),
+    /// The query failed, so "no jobs" is unproven. Deletion must stay blocked.
+    Unavailable(String),
+}
+
+impl DeletionConfirmation {
+    fn from_result(result: Result<DeletionJobSummary, CoreError>) -> Self {
+        match result {
+            Ok(summary) if summary.needs_warning() => Self::Warning(summary),
+            Ok(_) => Self::Simple,
+            Err(error) => Self::Unavailable(error.to_string()),
+        }
+    }
+
+    /// The action the primary button takes. An unverified summary can only
+    /// re-run the query; it must never reach the trash request.
+    #[cfg(test)]
+    fn primary_action(&self) -> DeletionPrimaryAction {
+        match self {
+            Self::Simple | Self::Warning(_) => DeletionPrimaryAction::RequestTrash,
+            Self::Unavailable(_) => DeletionPrimaryAction::RetrySummary,
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeletionPrimaryAction {
+    RequestTrash,
+    RetrySummary,
+}
+
 /// Warning heading for a manual deletion that still has jobs. The first count
 /// is the number of selected photos with jobs, not the whole selection.
 fn deletion_warning_heading(affected: i64, selected: usize) -> String {
@@ -1176,9 +1402,10 @@ fn grid_move_target(current: Option<usize>, delta: isize, len: usize) -> Option<
 #[cfg(test)]
 mod tests {
     use super::{
-        deletion_warning_heading, deletion_warning_lines, grid_move_target, normalize_note,
-        with_tag, without_tag,
+        DeletionConfirmation, DeletionPrimaryAction, deletion_warning_heading,
+        deletion_warning_lines, grid_move_target, normalize_note, with_tag, without_tag,
     };
+    use vrc_photon_core::CoreError;
     use vrc_photon_core::model::{DeletionJobSummary, JobStatusCounts};
 
     #[test]
@@ -1197,6 +1424,56 @@ mod tests {
         assert_eq!(grid_move_target(None, -1, 10), Some(0));
         assert_eq!(grid_move_target(Some(0), 1, 0), None);
         assert_eq!(grid_move_target(None, 1, 0), None);
+    }
+
+    #[test]
+    fn deletion_confirmation_never_forgets_a_failed_job_query() {
+        let unavailable =
+            DeletionConfirmation::from_result(Err(CoreError::Invalid("database is locked".into())));
+        assert!(
+            matches!(&unavailable, DeletionConfirmation::Unavailable(reason) if reason.contains("database is locked")),
+            "{unavailable:?}"
+        );
+        assert!(!matches!(
+            &unavailable,
+            DeletionConfirmation::Simple | DeletionConfirmation::Warning(_)
+        ));
+        assert_eq!(
+            unavailable.primary_action(),
+            DeletionPrimaryAction::RetrySummary,
+            "a failed query must only re-check, never request the trash"
+        );
+        assert_ne!(
+            unavailable.primary_action(),
+            DeletionPrimaryAction::RequestTrash
+        );
+    }
+
+    #[test]
+    fn deletion_confirmation_keeps_successful_summaries_on_the_trash_path() {
+        assert_eq!(
+            DeletionConfirmation::from_result(Ok(DeletionJobSummary::default())),
+            DeletionConfirmation::Simple
+        );
+        let with_jobs = DeletionJobSummary {
+            compression: JobStatusCounts {
+                pending: 1,
+                ..JobStatusCounts::default()
+            },
+            ..DeletionJobSummary::default()
+        };
+        assert_eq!(
+            DeletionConfirmation::from_result(Ok(with_jobs)),
+            DeletionConfirmation::Warning(with_jobs)
+        );
+        assert_eq!(
+            DeletionConfirmation::Simple.primary_action(),
+            DeletionPrimaryAction::RequestTrash
+        );
+        assert_eq!(
+            DeletionConfirmation::Warning(with_jobs).primary_action(),
+            DeletionPrimaryAction::RequestTrash
+        );
     }
 
     #[test]

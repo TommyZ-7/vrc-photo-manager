@@ -24,6 +24,27 @@ pub(crate) fn import_progress_ratio(progress: &ImportProgress) -> f32 {
     }
 }
 
+/// Reports can carry thousands of issues. The modal is a summary, so each
+/// section renders at most this many rows and folds the remainder into one
+/// "N more" line. This keeps a large report from building thousands of GPUI
+/// children on every frame it is visible.
+pub(crate) const IMPORT_REPORT_ROW_LIMIT: usize = 100;
+
+/// Rows to render and the number folded into the trailing "N more" line.
+pub(crate) fn import_report_row_window(total: usize) -> (usize, usize) {
+    let shown = total.min(IMPORT_REPORT_ROW_LIMIT);
+    (shown, total - shown)
+}
+
+fn import_more_row(hidden: usize, p: &Palette) -> AnyElement {
+    div()
+        .pt(px(2.))
+        .text_size(px(10.))
+        .text_color(rgb(p.muted_2))
+        .child(tr_args!("import.section.more", count = hidden))
+        .into_any_element()
+}
+
 impl App {
     pub(crate) fn import_modal_overlay(
         &mut self,
@@ -293,19 +314,17 @@ impl App {
 
     pub(crate) fn import_report_details(&self, report: &ImportReportView) -> AnyElement {
         let p = self.palette;
-        let failed_issues: Vec<&ImportIssue> = report
-            .issues
-            .iter()
-            .filter(|issue| issue.kind == ImportIssueKind::Failed)
-            .collect();
-        let partial_issues: Vec<&ImportIssue> = report
-            .issues
-            .iter()
-            .filter(|issue| issue.kind == ImportIssueKind::PartialMove)
-            .collect();
+        let (failed, partial) = report.issue_counts();
 
         let mut body = v_flex().w_full();
-        if !failed_issues.is_empty() {
+        if failed > 0 {
+            let (shown_limit, hidden) = import_report_row_window(failed);
+            let shown: Vec<&ImportIssue> = report
+                .issues
+                .iter()
+                .filter(|issue| issue.kind == ImportIssueKind::Failed)
+                .take(shown_limit)
+                .collect();
             body = body.child(
                 v_flex()
                     .px(px(16.))
@@ -319,7 +338,7 @@ impl App {
                             .gap(px(6.))
                             .max_h(px(150.))
                             .overflow_y_scrollbar()
-                            .children(failed_issues.iter().map(|issue| {
+                            .children(shown.iter().map(|issue| {
                                 let source = issue.source.to_string_lossy().to_string();
                                 v_flex()
                                     .gap(px(2.))
@@ -336,12 +355,20 @@ impl App {
                                             .text_color(rgb(p.muted))
                                             .child(issue.message.clone()),
                                     )
-                            })),
+                            }))
+                            .when(hidden > 0, |this| this.child(import_more_row(hidden, &p))),
                     ),
             );
         }
 
-        if !partial_issues.is_empty() {
+        if partial > 0 {
+            let (shown_limit, hidden) = import_report_row_window(partial);
+            let shown: Vec<&ImportIssue> = report
+                .issues
+                .iter()
+                .filter(|issue| issue.kind == ImportIssueKind::PartialMove)
+                .take(shown_limit)
+                .collect();
             body = body.child(
                 v_flex()
                     .px(px(16.))
@@ -350,7 +377,7 @@ impl App {
                     .border_t_1()
                     .border_color(rgb(p.border))
                     .child(self.section_label(tr!("import.section.partial_files")))
-                    .children(partial_issues.iter().map(|issue| {
+                    .children(shown.iter().map(|issue| {
                         let source = issue.source.to_string_lossy().to_string();
                         let target = issue
                             .target
@@ -385,11 +412,13 @@ impl App {
                                     .text_color(rgb(p.muted))
                                     .child(issue.message.clone()),
                             )
-                    })),
+                    }))
+                    .when(hidden > 0, |this| this.child(import_more_row(hidden, &p))),
             );
         }
 
         if !report.renamed.is_empty() {
+            let (shown_limit, hidden) = import_report_row_window(report.renamed.len());
             body = body.child(
                 v_flex()
                     .px(px(16.))
@@ -403,7 +432,7 @@ impl App {
                             .gap(px(6.))
                             .max_h(px(150.))
                             .overflow_y_scrollbar()
-                            .children(report.renamed.iter().map(|rename| {
+                            .children(report.renamed.iter().take(shown_limit).map(|rename| {
                                 v_flex()
                                     .gap(px(2.))
                                     .child(
@@ -423,12 +452,14 @@ impl App {
                                                 rename.target.to_string_lossy()
                                             )),
                                     )
-                            })),
+                            }))
+                            .when(hidden > 0, |this| this.child(import_more_row(hidden, &p))),
                     ),
             );
         }
 
         if !report.scan_failures.is_empty() {
+            let (shown_limit, hidden) = import_report_row_window(report.scan_failures.len());
             body = body.child(
                 v_flex()
                     .px(px(16.))
@@ -437,27 +468,35 @@ impl App {
                     .border_t_1()
                     .border_color(rgb(p.border))
                     .child(self.section_label(tr!("import.section.scan_failed_files")))
-                    .children(report.scan_failures.iter().map(|failure| {
-                        v_flex()
-                            .gap(px(2.))
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(p.red))
-                                    .child(failure.path.to_string_lossy().to_string()),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(rgb(p.muted))
-                                    .child(failure.message.clone()),
-                            )
-                    })),
+                    .children(
+                        report
+                            .scan_failures
+                            .iter()
+                            .take(shown_limit)
+                            .map(|failure| {
+                                v_flex()
+                                    .gap(px(2.))
+                                    .child(
+                                        div()
+                                            .truncate()
+                                            .text_size(px(10.))
+                                            .text_color(rgb(p.red))
+                                            .child(failure.path.to_string_lossy().to_string()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(10.))
+                                            .text_color(rgb(p.muted))
+                                            .child(failure.message.clone()),
+                                    )
+                            }),
+                    )
+                    .when(hidden > 0, |this| this.child(import_more_row(hidden, &p))),
             );
         }
 
         if !report.scan_errors.is_empty() {
+            let (shown_limit, hidden) = import_report_row_window(report.scan_errors.len());
             body = body.child(
                 v_flex()
                     .mx(px(16.))
@@ -474,8 +513,10 @@ impl App {
                         report
                             .scan_errors
                             .iter()
+                            .take(shown_limit)
                             .map(|error| div().child(error.clone())),
-                    ),
+                    )
+                    .when(hidden > 0, |this| this.child(import_more_row(hidden, &p))),
             );
         }
         body.into_any_element()
@@ -489,6 +530,14 @@ pub(crate) fn retryable_sources(issues: &[ImportIssue]) -> Vec<PathBuf> {
         .filter(|issue| issue.kind == ImportIssueKind::Failed && issue.retryable)
         .map(|issue| issue.source.clone())
         .collect()
+}
+
+/// Whether the report has any source a retry can try. This avoids cloning
+/// every retryable path just to decide whether the button is shown.
+pub(crate) fn has_retryable_sources(issues: &[ImportIssue]) -> bool {
+    issues
+        .iter()
+        .any(|issue| issue.kind == ImportIssueKind::Failed && issue.retryable)
 }
 
 pub(crate) fn import_mode_label(mode: ImportMode) -> String {
@@ -511,10 +560,29 @@ pub(crate) fn import_progress_label(progress: &ImportProgress) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{import_progress_label, import_progress_ratio, retryable_sources};
+    use super::{
+        IMPORT_REPORT_ROW_LIMIT, has_retryable_sources, import_progress_label,
+        import_progress_ratio, import_report_row_window, retryable_sources,
+    };
     use crate::app::import::import_issue_counts;
     use std::path::PathBuf;
     use vrc_photon_core::importer::{ImportIssue, ImportIssueKind, ImportProgress};
+
+    #[test]
+    fn large_report_sections_render_only_the_documented_row_cap() {
+        assert_eq!(import_report_row_window(0), (0, 0));
+        assert_eq!(import_report_row_window(3), (3, 0));
+        assert_eq!(
+            import_report_row_window(IMPORT_REPORT_ROW_LIMIT),
+            (IMPORT_REPORT_ROW_LIMIT, 0)
+        );
+
+        let (shown, hidden) = import_report_row_window(1_000);
+        assert_eq!(shown, IMPORT_REPORT_ROW_LIMIT);
+        assert_eq!(hidden, 1_000 - IMPORT_REPORT_ROW_LIMIT);
+        assert_eq!(shown, 100);
+        assert_eq!(hidden, 900);
+    }
 
     #[test]
     fn import_issue_counts_separate_failures_and_partial_moves() {
@@ -536,6 +604,8 @@ mod tests {
         ];
         assert_eq!(import_issue_counts(&issues), (1, 1));
         assert_eq!(retryable_sources(&issues), vec![PathBuf::from("/a.png")]);
+        assert!(has_retryable_sources(&issues));
+        assert!(!has_retryable_sources(&issues[1..]));
     }
     fn progress_fixture(processed: usize, total: usize) -> ImportProgress {
         ImportProgress {

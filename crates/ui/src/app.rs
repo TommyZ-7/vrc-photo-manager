@@ -324,7 +324,7 @@ pub struct App {
     pub(crate) deletion_requests: Vec<DeletionRequest>,
     pub(crate) deletion_counts: DeletionCounts,
     pub(crate) deletion_baseline: Option<(i64, i64)>,
-    pub(crate) import_report: Option<ImportReportView>,
+    pub(crate) import_report: Option<Rc<ImportReportView>>,
     /// The import root whose targeted scan is still waiting for its
     /// `ScanFinished` event.
     pub(crate) import_scan_target: Option<String>,

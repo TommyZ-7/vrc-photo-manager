@@ -18,9 +18,9 @@ use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::App;
 use crate::app::Screen;
-use crate::app::import::{ImportReportView, import_issue_counts};
+use crate::app::import::ImportReportView;
 use crate::ui::components::{ButtonState, ButtonTone};
-use crate::ui::import::{import_mode_label, retryable_sources};
+use crate::ui::import::{has_retryable_sources, import_mode_label};
 use crate::ui::theme::*;
 
 #[derive(Clone, Debug)]
@@ -303,6 +303,9 @@ impl App {
             self.failed_job_count,
             self.daemon_errors.len(),
         );
+        // `App` stores the report behind an Rc so this is a pointer clone, not
+        // a copy of every issue. The import card only needs a shared borrow
+        // while it builds the sections.
         let import_report = self.import_report.clone();
         let library_error = self.library_error;
         let failed_jobs = self.failed_job_count;
@@ -439,8 +442,8 @@ impl App {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let p = self.palette;
-        let (failed, partial) = import_issue_counts(&report.issues);
-        let retryable = retryable_sources(&report.issues);
+        let (failed, partial) = report.issue_counts();
+        let retryable = has_retryable_sources(&report.issues);
         let scan_failed = report.scan_failures.len() + report.scan_errors.len();
         let mode = import_mode_label(report.mode);
         let dest = report.dest.to_string_lossy().to_string();
@@ -501,7 +504,7 @@ impl App {
         }
 
         let mut actions = h_flex().flex_wrap().gap(px(6.));
-        if !retryable.is_empty() {
+        if retryable {
             actions = actions.child(
                 Button::new("notification-import-retry")
                     .label(tr!("notifications.import.retry_failed"))
