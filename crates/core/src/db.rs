@@ -3835,6 +3835,42 @@ impl Db {
         Ok(())
     }
 
+    /// Marks a send as failed after the automatic retry budget is exhausted.
+    ///
+    /// Unlike [`Db::fail_send`], this stores the final attempt count so the
+    /// history can show how many automatic retries were spent, and clears the
+    /// pending retry timestamp because no further attempt is scheduled.
+    #[allow(clippy::too_many_arguments)]
+    pub fn fail_send_after_attempts(
+        &self,
+        id: i64,
+        attempts: i64,
+        error_code: SendErrorCode,
+        error_detail: Option<&str>,
+        source: Option<SendSource>,
+        profile_id: Option<&str>,
+        destination: Option<&str>,
+    ) -> Result<()> {
+        let source = source.map(SendSource::as_str);
+        self.conn.execute(
+            "UPDATE send_outbox SET status = 'failed', attempts = ?1, error_code = ?2, \
+                error_detail = ?3, source = ?4, profile_id = ?5, destination = ?6, \
+                next_attempt_at = NULL, finished_at = ?7 \
+             WHERE id = ?8",
+            params![
+                attempts,
+                error_code.as_str(),
+                error_detail,
+                source,
+                profile_id,
+                destination,
+                now_string(),
+                id,
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Returns a failed send to the queue with a clean slate. Refuses when the
     /// same photo already has another active row, since that would violate the
     /// partial `idx_send_outbox_active_photo` index.
@@ -11318,6 +11354,45 @@ mod tests {
         assert_eq!(entry.profile_id.as_deref(), Some("profile-a"));
         assert_eq!(entry.destination.as_deref(), Some("My server"));
         assert!(entry.finished_at.is_some());
+    }
+
+    #[test]
+    fn fail_send_after_attempts_stores_the_exhausted_count() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        let id = db
+            .enqueue_send(
+                photo,
+                SendKind::Photo,
+                SendOrigin::Manual,
+                SendStatus::Pending,
+            )
+            .unwrap()
+            .unwrap();
+        db.claim_next_send(100).unwrap();
+        db.reschedule_send(id, 9, 300, SendErrorCode::Network, Some("timeout"))
+            .unwrap();
+        db.claim_next_send(300).unwrap();
+        db.fail_send_after_attempts(
+            id,
+            10,
+            SendErrorCode::Network,
+            Some("timeout"),
+            Some(SendSource::Original),
+            None,
+            Some("My server"),
+        )
+        .unwrap();
+        let entry = db.send_entry_by_id(id).unwrap().unwrap();
+        assert_eq!(entry.status, SendStatus::Failed);
+        assert_eq!(entry.attempts, 10);
+        assert_eq!(entry.next_attempt_at, None);
+        assert_eq!(entry.error_code.as_deref(), Some("network"));
+        assert_eq!(entry.error_detail.as_deref(), Some("timeout"));
+        assert_eq!(entry.source, Some(SendSource::Original));
+        assert_eq!(entry.destination.as_deref(), Some("My server"));
+        assert!(entry.finished_at.is_some());
+        assert!(db.claim_next_send(10_000).unwrap().is_none());
     }
 
     #[test]
