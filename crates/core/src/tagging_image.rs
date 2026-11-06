@@ -4,8 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use image::metadata::Orientation;
-use image::{DynamicImage, ImageDecoder as _, ImageReader};
+use image::DynamicImage;
 
 use crate::error::{CoreError, Result};
 
@@ -46,7 +45,7 @@ pub fn prepare_tagging_snapshot(
             source.display()
         )));
     }
-    let image = decode_for_tagging(source).ok_or_else(|| {
+    let image = crate::image_decode::decode_image(source).ok_or_else(|| {
         CoreError::Invalid(format!("cannot decode tagging source {}", source.display()))
     })?;
     let image = apply_tagging_transform(image);
@@ -120,40 +119,16 @@ fn snapshot_paths(cache_dir: &Path, job_id: &str) -> Result<(PathBuf, PathBuf)> 
     ))
 }
 
-/// AVIF and JXL have no orientation metadata in their decode paths; the
-/// remaining formats are decoded through `image` so the EXIF orientation can
-/// be applied before downscaling.
-fn decode_for_tagging(source: &Path) -> Option<DynamicImage> {
-    let extension = source
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| extension.to_ascii_lowercase());
-    if matches!(extension.as_deref(), Some("avif") | Some("jxl")) {
-        return crate::image_decode::decode_image(source);
-    }
-    decode_with_orientation(source).or_else(|| crate::image_decode::decode_image(source))
-}
-
-fn decode_with_orientation(source: &Path) -> Option<DynamicImage> {
-    let mut decoder = ImageReader::open(source)
-        .ok()?
-        .with_guessed_format()
-        .ok()?
-        .into_decoder()
-        .ok()?;
-    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
-    let mut image = DynamicImage::from_decoder(decoder).ok()?;
-    image.apply_orientation(orientation);
-    Some(image)
-}
-
 fn encode_jpeg(image: &DynamicImage) -> Result<Vec<u8>> {
     let mut output = Vec::new();
     let mut encoder =
         image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, TAGGING_JPEG_QUALITY);
-    encoder
-        .encode_image(&image.to_rgb8())
-        .map_err(|error| CoreError::Invalid(format!("JPEG encode failed: {error}")))?;
+    match image {
+        DynamicImage::ImageRgb8(rgb) => encoder.encode_image(rgb),
+        DynamicImage::ImageRgba8(rgba) => encoder.encode_image(rgba),
+        _ => encoder.encode_image(&image.to_rgb8()),
+    }
+    .map_err(|error| CoreError::Invalid(format!("JPEG encode failed: {error}")))?;
     Ok(output)
 }
 
