@@ -20,7 +20,7 @@
 
 | ADR | タイトル | Status |
 |---|---|---|
-| [0001](0001-gpui-kit.md) | UIにgpui-kit 0.8を採用する | Accepted |
+| [0001](0001-gpui-kit.md) | UIにgpui-kit 0.8を採用する（現在は 0.9.0） | Accepted |
 | [0002](0002-sqlite-shared-state.md) | UIとデーモンはSQLiteを共有する | Accepted（ADR-0011で補完） |
 | [0003](0003-log-and-xmp.md) | 文脈取得はログ監視＋XMP補完とする | Accepted（ワールド名解決の認証前提はADR-0018で更新） |
 | [0004](0004-compression-policy.md) | 自動圧縮は元画像保持、手動置換はゴミ箱 | Superseded by ADR-0013 |

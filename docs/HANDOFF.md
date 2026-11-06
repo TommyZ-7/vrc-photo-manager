@@ -1,6 +1,6 @@
 # 引き継ぎメモ
 
-最終更新: 2026-11-02
+最終更新: 2026-11-06
 
 > 詳細な開発ドキュメントは [docs/README.md](README.md) を参照。
 > このファイルは短期引き継ぎ用の要約。
@@ -8,7 +8,7 @@
 ## リポジトリ
 
 - GitHub: https://github.com/TommyZ-7/vrc-photon
-- ローカル: `/home/takedatomoya/gh_projects/vrc-photon`
+- ローカル: `/home/tommyz7/work/vrc-photo-manager`
 - ブランチ運用: `AGENTS.md` の通り。`main` へ直接pushしない。
 - 作業は `git worktree` を切って別セッションで行う。
 - リリースは `v*.*.*` タグ。タグ作成・Release公開はユーザーの明示指示があるまで行わない。
@@ -17,7 +17,7 @@
 
 写真管理の縦切りMVPが動作する。
 
-- gpui-kit 0.8のUI
+- gpui-kit 0.9のUI
   - 写真一覧（可変列の仮想グリッド、100k索引＋256枚ページ、年レール、非同期サムネイル・1200pxプレビュー、3秒自動更新）
   - 写真詳細（プレビュー、ワールド、インスタンス、撮影者、同接者、タグの追加・削除、メモの表示・編集、圧縮履歴）
   - 圧縮設定（プロファイルの追加・編集・並び替え・複製・削除確認、形式、品質、ロスレス、リサイズ、自動ON/OFF）
@@ -50,11 +50,17 @@
 - 署名付き自動アップデート（AppImage / Windows current-user NSIS。deb/pacmanはpolkit経由、ADR-0012 / ADR-0016）
 - 外部削除された写真の `missing` 検出
 - notifyによる増分スキャン
+- DBスキーマV15（未リンク写真の再試行バックオフ）
+- 単一インスタンスは DB パス単位（daemon）＋同じ DB に対する UI ガード
+- セッション途中の daemon 再起動で open session を復元し、プレイヤーの退出・改名を反映
+- pause 中も heartbeat・status・watcher・ログ取り込みを継続し、worker は panic 後にバックオフ再起動
+- サムネイル/プレビューの mtime+size 検証、96 MiB のメモリ予算、破損キャッシュの1回修復
+- IPC の in-flight/接続/イベントキュー上限と購読ハートビート
 
 ## 実行
 
 ```bash
-cd /home/takedatomoya/gh_projects/vrc-photon
+cd /home/tommyz7/work/vrc-photo-manager
 
 # UIデモ
 cargo run -p vrc-photon-ui -- --demo
@@ -68,7 +74,7 @@ cargo run -p vrc-photon-daemon -- \
 cargo run -p vrc-photon-ui
 ```
 
-`cargo check`/`build` はWSLで負荷が高いため並列実行しない。
+`cargo check`/`build` は負荷が高いため、必要に応じて並列数を調整する。
 
 ## 検証
 
@@ -78,7 +84,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-2026-10-23時点: core 37件（36成功、1件はignoredの100kベンチマーク）、daemon 7件、ui 48件が成功。Clippy成功。
+テスト件数は変更ごとに増減するため、このファイルには固定値を書かない。PR作成時は `cargo test --workspace` の出力（`test result: ok. N passed; 0 failed`）を確認する。Clippyは `-D warnings` で成功していること。
 
 ## Linux配布
 
@@ -110,7 +116,7 @@ cargo packager --release
 
 ## 重要な設計メモ
 
-- GPUI本体は `gpui-kit = "=0.8.0"` が固定する `gpui-pre` 0.3.9。直接 `gpui` クレートを追加しない。
+- GPUI本体は `gpui-kit = "=0.9.0"` が固定する `gpui-pre` 0.3.11。直接 `gpui` クレートを追加しない。
 - 画像表示は `crates/core/src/preview.rs`（1200 pxプレビュー）と `decode_thumbnail`（256 pxサムネイル）が背景でデコードする。UIスレッドはBGRA変換と `RenderImage` 化だけを行う。
 - 圧縮ジョブの取得はSQLiteの単一UPDATEで原子的に行う。
 - 自動圧縮の元画像ポリシーは `AppSettings.auto_compress_keep_original`（既定は保持）。手動圧縮は実行ダイアログの `policy` を使い、`replace` はOSゴミ箱のみで、出力検証に成功した場合だけ実行する。手動の指定フォルダは `compression_jobs.output_dir` で上書きする。
