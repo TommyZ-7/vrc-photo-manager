@@ -76,7 +76,8 @@ fn main() -> Result<()> {
         .or_else(vrc_photon_core::default_db_path)
         .unwrap_or_else(|| PathBuf::from("vrc-photon.db"));
     let maintenance = args.once || args.compress_pending;
-    let instance = match single_instance::SingleInstance::new("vrc-photon-daemon") {
+    let instance_name = vrc_photon_core::instance::instance_name("daemon", &db_path);
+    let instance = match single_instance::SingleInstance::new(&instance_name) {
         Ok(instance) if instance.is_single() => Some(instance),
         Ok(_) if maintenance => {
             tracing::info!(
@@ -147,6 +148,17 @@ mod tests {
             .unwrap()[0];
         assert!(db.claim_deletion(request).unwrap().is_some());
         photo
+    }
+
+    #[test]
+    fn instance_name_is_scoped_to_the_database_path() {
+        use std::path::Path;
+
+        let first = vrc_photon_core::instance::instance_name("daemon", Path::new("/tmp/a.db"));
+        let same = vrc_photon_core::instance::instance_name("daemon", Path::new("/tmp/a.db"));
+        let other = vrc_photon_core::instance::instance_name("daemon", Path::new("/tmp/b.db"));
+        assert_eq!(first, same);
+        assert_ne!(first, other);
     }
 
     #[test]
