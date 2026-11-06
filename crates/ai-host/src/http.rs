@@ -10,8 +10,8 @@ use crate::error::{AiHostError, Result};
 const BUFFER_BYTES: usize = 64 * 1024;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
-/// A stalled body read must not hang the daemon forever, but there is no
-/// overall limit: model files are hundreds of megabytes.
+/// A stalled body read must not hang the daemon forever. The model downloader
+/// additionally enforces a total wall-clock deadline for both files.
 const READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The HTTP operations the model downloader needs. Test doubles implement

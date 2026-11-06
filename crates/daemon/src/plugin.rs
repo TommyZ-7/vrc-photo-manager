@@ -10,7 +10,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
@@ -35,6 +35,12 @@ pub(crate) use vrc_photon_core::ai::AI_PLUGIN_ID;
 
 /// How often model progress is written to the database and event bus.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Total time the daemon waits for accepted plugin work during shutdown.
+pub(crate) const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How often a bounded shutdown re-checks whether a worker finished.
+const WORKER_JOIN_POLL: Duration = Duration::from_millis(10);
 
 /// Operation key held by a plugin ZIP install (the plugin id is unknown until
 /// the signed manifest is read).
@@ -89,10 +95,45 @@ struct PluginServiceInner {
     events: EventBus,
     keys: Vec<String>,
     http: Arc<dyn ModelHttpClient>,
-    sidecar: Mutex<Option<CachedSidecar>>,
+    sidecar: Mutex<SidecarSlot>,
+    /// Serialises the slow probe/spawn path without holding [`Self::sidecar`],
+    /// so a stop can always proceed.
+    sidecar_start: Mutex<()>,
     operations: Arc<Mutex<HashSet<String>>>,
     model_cancel: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// Set once shutdown starts; no new sidecar may be started afterwards.
+    shutdown: AtomicBool,
+    workers: Mutex<Vec<WorkerEntry>>,
     host_version: String,
+}
+
+/// The lazily started sidecar plus the generation that guards its startup.
+///
+/// A stop bumps `generation` and resets the state to [`SidecarState::Stopped`].
+/// A concurrent starter compares the generation after the slow probe/spawn
+/// work and must kill its child instead of installing it when it no longer
+/// matches.
+#[derive(Default)]
+struct SidecarSlot {
+    state: SidecarState,
+    generation: u64,
+}
+
+#[derive(Default)]
+enum SidecarState {
+    #[default]
+    Stopped,
+    Starting {
+        generation: u64,
+    },
+    Running(CachedSidecar),
+}
+
+/// One spawned plugin worker and a flag that is set when its closure returns.
+struct WorkerEntry {
+    name: String,
+    handle: Option<JoinHandle<()>>,
+    finished: Arc<AtomicBool>,
 }
 
 /// Identifies the package and model revision a cached sidecar was started for.
@@ -141,9 +182,12 @@ impl PluginService {
                 events,
                 keys,
                 http,
-                sidecar: Mutex::new(None),
+                sidecar: Mutex::new(SidecarSlot::default()),
+                sidecar_start: Mutex::new(()),
                 operations: Arc::new(Mutex::new(HashSet::new())),
                 model_cancel: Mutex::new(HashMap::new()),
+                shutdown: AtomicBool::new(false),
+                workers: Mutex::new(Vec::new()),
                 host_version: env!("CARGO_PKG_VERSION").to_string(),
             }),
         }
@@ -154,47 +198,46 @@ impl PluginService {
         let guard = self.inner.begin_install()?;
         let inner = self.inner.clone();
         let zip_path = zip_path.to_path_buf();
-        thread::Builder::new()
-            .name("plugin-install".to_string())
-            .spawn(move || {
-                let result = inner.install(&zip_path);
-                // Publish the terminal event only after the operation keys are
-                // released, so a client reacting to `installed` can start the
-                // next operation immediately.
-                drop(guard);
-                match result {
-                    Ok(install) => {
-                        tracing::info!(
-                            plugin_id = %install.plugin_id,
-                            variant = %install.variant,
-                            version = %install.version,
-                            "installed AI plugin"
-                        );
-                        inner.events.publish(Event::PluginInstallProgress {
-                            plugin_id: install.plugin_id,
-                            variant: install.variant,
-                            version: Some(install.version),
-                            status: PluginInstallStatus::Installed,
-                            error: None,
-                        });
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            %error,
-                            zip = %zip_path.display(),
-                            "AI plugin install failed"
-                        );
-                        inner.events.publish(Event::PluginInstallProgress {
-                            plugin_id: String::new(),
-                            variant: String::new(),
-                            version: None,
-                            status: PluginInstallStatus::Failed,
-                            error: Some(error.to_string()),
-                        });
-                    }
+        if let Err(error) = self.inner.spawn_worker("plugin-install", move || {
+            let result = inner.install(&zip_path);
+            // Publish the terminal event only after the operation keys are
+            // released, so a client reacting to `installed` can start the
+            // next operation immediately.
+            drop(guard);
+            match result {
+                Ok(install) => {
+                    tracing::info!(
+                        plugin_id = %install.plugin_id,
+                        variant = %install.variant,
+                        version = %install.version,
+                        "installed AI plugin"
+                    );
+                    inner.events.publish(Event::PluginInstallProgress {
+                        plugin_id: install.plugin_id,
+                        variant: install.variant,
+                        version: Some(install.version),
+                        status: PluginInstallStatus::Installed,
+                        error: None,
+                    });
                 }
-            })
-            .map_err(PluginError::Io)?;
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        zip = %zip_path.display(),
+                        "AI plugin install failed"
+                    );
+                    inner.events.publish(Event::PluginInstallProgress {
+                        plugin_id: String::new(),
+                        variant: String::new(),
+                        version: None,
+                        status: PluginInstallStatus::Failed,
+                        error: Some(error.to_string()),
+                    });
+                }
+            }
+        }) {
+            return Err(PluginError::Io(error));
+        }
         Ok(())
     }
 
@@ -243,9 +286,8 @@ impl PluginService {
         let plugin_id = plugin_id.to_string();
         let variant = variant.map(str::to_string);
         let version = version.map(str::to_string);
-        thread::Builder::new()
-            .name("plugin-uninstall".to_string())
-            .spawn(move || {
+        self.inner
+            .spawn_worker("plugin-uninstall", move || {
                 let result = {
                     let _guard = guard;
                     inner.uninstall(
@@ -288,9 +330,8 @@ impl PluginService {
         let guard = self.inner.begin_lifecycle(plugin_id)?;
         let install = self.inner.active_install(plugin_id)?;
         let inner = self.inner.clone();
-        thread::Builder::new()
-            .name("plugin-probe".to_string())
-            .spawn(move || {
+        self.inner
+            .spawn_worker("plugin-probe", move || {
                 let result = {
                     let _guard = guard;
                     inner.run_probe(&install)
@@ -354,9 +395,8 @@ impl PluginService {
 
         let inner = self.inner.clone();
         let plugin_id = plugin_id.to_string();
-        thread::Builder::new()
-            .name("plugin-variant".to_string())
-            .spawn(move || {
+        self.inner
+            .spawn_worker("plugin-variant", move || {
                 let result = {
                     let _guard = guard;
                     inner.stop_sidecar();
@@ -398,20 +438,17 @@ impl PluginService {
         lock_unpoisoned(&self.inner.model_cancel).insert(plugin_id.to_string(), cancel.clone());
         let inner = self.inner.clone();
         let thread_plugin_id = plugin_id.to_string();
-        let spawned = thread::Builder::new()
-            .name("plugin-model-download".to_string())
-            .spawn(move || {
-                let _guard = guard;
-                if let Err(error) = inner.download_model_files(&thread_plugin_id, &manifest, cancel)
-                {
-                    tracing::warn!(
-                        %error,
-                        plugin_id = %thread_plugin_id,
-                        "model download failed"
-                    );
-                }
-                lock_unpoisoned(&inner.model_cancel).remove(&thread_plugin_id);
-            });
+        let spawned = self.inner.spawn_worker("plugin-model-download", move || {
+            let _guard = guard;
+            if let Err(error) = inner.download_model_files(&thread_plugin_id, &manifest, cancel) {
+                tracing::warn!(
+                    %error,
+                    plugin_id = %thread_plugin_id,
+                    "model download failed"
+                );
+            }
+            lock_unpoisoned(&inner.model_cancel).remove(&thread_plugin_id);
+        });
         if let Err(error) = spawned {
             lock_unpoisoned(&self.inner.model_cancel).remove(plugin_id);
             return Err(PluginError::Io(error));
@@ -441,9 +478,8 @@ impl PluginService {
         let inner = self.inner.clone();
         let plugin_id = plugin_id.to_string();
         let paths = paths.to_vec();
-        thread::Builder::new()
-            .name("plugin-model-import".to_string())
-            .spawn(move || {
+        self.inner
+            .spawn_worker("plugin-model-import", move || {
                 let _guard = guard;
                 if let Err(error) = inner.import_model_files(&plugin_id, &manifest, &paths) {
                     tracing::warn!(%error, plugin_id = %plugin_id, "model import failed");
@@ -477,9 +513,8 @@ impl PluginService {
         self.inner.invalidate_readiness(plugin_id)?;
         let inner = self.inner.clone();
         let plugin_id = plugin_id.to_string();
-        thread::Builder::new()
-            .name("plugin-model-delete".to_string())
-            .spawn(move || {
+        self.inner
+            .spawn_worker("plugin-model-delete", move || {
                 let result = {
                     let _guard = guard;
                     inner.delete_model_files(&plugin_id, &revision)
@@ -500,6 +535,19 @@ impl PluginService {
     /// Shuts the sidecar down and waits up to its shutdown timeout.
     pub(crate) fn stop_sidecar(&self) {
         self.inner.stop_sidecar();
+    }
+
+    /// Cancels accepted work, stops the sidecar, and joins the workers within
+    /// `timeout`.
+    ///
+    /// Returns the names of workers that were still running at the deadline;
+    /// they are logged and left detached instead of blocking shutdown forever.
+    pub(crate) fn shutdown(&self, timeout: Duration) -> Vec<String> {
+        let deadline = Instant::now() + timeout;
+        self.inner.request_shutdown();
+        self.inner.stop_sidecar_bounded(deadline);
+        self.inner
+            .join_workers(deadline.saturating_duration_since(Instant::now()))
     }
 
     /// Returns the running sidecar, spawning it when necessary.
@@ -529,6 +577,17 @@ impl PluginService {
         operations.contains(INSTALL_OPERATION)
             || operations.contains(&lifecycle_operation(plugin_id))
             || operations.contains(&model_operation(plugin_id))
+    }
+
+    /// Test-only: reports whether a started sidecar process is still cached
+    /// and alive.
+    #[cfg(test)]
+    pub(crate) fn sidecar_is_running(&self) -> bool {
+        let slot = lock_unpoisoned(&self.inner.sidecar);
+        match &slot.state {
+            SidecarState::Running(cached) => cached.client.is_alive(),
+            SidecarState::Starting { .. } | SidecarState::Stopped => false,
+        }
     }
 }
 
@@ -997,10 +1056,148 @@ impl PluginServiceInner {
             || operations.contains(&lifecycle_operation(plugin_id))
     }
 
+    fn take_sidecar(&self) -> Option<Arc<SidecarClient>> {
+        let mut slot = lock_unpoisoned(&self.sidecar);
+        // Invalidate a startup that already reserved `Starting`; it must
+        // kill its child instead of installing it.
+        slot.generation = slot.generation.wrapping_add(1);
+        match std::mem::replace(&mut slot.state, SidecarState::Stopped) {
+            SidecarState::Running(cached) => Some(cached.client),
+            SidecarState::Starting { .. } | SidecarState::Stopped => None,
+        }
+    }
+
     fn stop_sidecar(&self) {
-        let client = lock_unpoisoned(&self.sidecar).take();
-        if let Some(client) = client {
-            shutdown_sidecar(&client.client);
+        if let Some(client) = self.take_sidecar() {
+            shutdown_sidecar(&client);
+        }
+    }
+
+    /// Stops the sidecar without letting a wedged request exceed `deadline`.
+    ///
+    /// A graceful shutdown can wait for the request lock (up to the request
+    /// timeout), so it runs on a helper thread. At the deadline the child is
+    /// force-killed and the helper is detached; it only waits for its own
+    /// shutdown timeout after that.
+    fn stop_sidecar_bounded(&self, deadline: Instant) {
+        let Some(client) = self.take_sidecar() else {
+            return;
+        };
+        let stopper = client.clone();
+        let handle = thread::Builder::new()
+            .name("plugin-sidecar-stop".to_string())
+            .spawn(move || shutdown_sidecar(&stopper));
+        let handle = match handle {
+            Ok(handle) => handle,
+            Err(error) => {
+                tracing::warn!(%error, "cannot spawn the AI sidecar shutdown helper; killing it");
+                client.kill();
+                return;
+            }
+        };
+        while !handle.is_finished() {
+            if Instant::now() >= deadline {
+                tracing::warn!("AI sidecar did not stop within the shutdown timeout; killing it");
+                client.kill();
+                return;
+            }
+            thread::sleep(WORKER_JOIN_POLL);
+        }
+        if handle.join().is_err() {
+            tracing::error!("AI sidecar shutdown helper panicked");
+        }
+    }
+
+    fn request_shutdown(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        let cancels: Vec<_> = lock_unpoisoned(&self.model_cancel)
+            .values()
+            .cloned()
+            .collect();
+        for cancel in cancels {
+            cancel.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn spawn_worker<F>(&self, name: &str, work: F) -> io::Result<()>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.reap_finished_workers();
+        let finished = Arc::new(AtomicBool::new(false));
+        let done = finished.clone();
+        let handle = thread::Builder::new()
+            .name(name.to_string())
+            .spawn(move || {
+                struct Finished(Arc<AtomicBool>);
+                impl Drop for Finished {
+                    fn drop(&mut self) {
+                        self.0.store(true, Ordering::SeqCst);
+                    }
+                }
+                let _finished = Finished(done);
+                work();
+            })?;
+        lock_unpoisoned(&self.workers).push(WorkerEntry {
+            name: name.to_string(),
+            handle: Some(handle),
+            finished,
+        });
+        Ok(())
+    }
+
+    /// Joins workers that already returned, so long-lived daemons do not
+    /// accumulate one handle per completed operation.
+    fn reap_finished_workers(&self) {
+        let finished = {
+            let mut workers = lock_unpoisoned(&self.workers);
+            let mut pending = Vec::with_capacity(workers.len());
+            let mut finished = Vec::new();
+            for mut worker in workers.drain(..) {
+                if worker.finished.load(Ordering::SeqCst) {
+                    if let Some(handle) = worker.handle.take() {
+                        finished.push((worker.name, handle));
+                    }
+                } else {
+                    pending.push(worker);
+                }
+            }
+            *workers = pending;
+            finished
+        };
+        for (name, handle) in finished {
+            if handle.join().is_err() {
+                tracing::error!(worker = %name, "AI plugin worker panicked");
+            }
+        }
+    }
+
+    /// Waits for running workers until `timeout` expires. Unfinished workers
+    /// are reported (and logged) but not joined, so a wedged operation cannot
+    /// block daemon shutdown forever.
+    fn join_workers(&self, timeout: Duration) -> Vec<String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            self.reap_finished_workers();
+            let pending: Vec<String> = lock_unpoisoned(&self.workers)
+                .iter()
+                .filter(|worker| !worker.finished.load(Ordering::SeqCst))
+                .map(|worker| worker.name.clone())
+                .collect();
+            if pending.is_empty() {
+                return Vec::new();
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                for name in &pending {
+                    tracing::warn!(
+                        worker = %name,
+                        "AI plugin operation did not finish within the shutdown timeout"
+                    );
+                }
+                return pending;
+            }
+            thread::sleep(WORKER_JOIN_POLL.min(deadline.saturating_duration_since(now)));
         }
     }
 
@@ -1087,69 +1284,152 @@ impl PluginServiceInner {
         Ok((install, manifest, model, requested_backend, identity))
     }
 
+    fn reusable_sidecar(&self, plugin_id: &str) -> Result<Option<Arc<SidecarClient>>> {
+        let active_identity = self.cached_sidecar_identity(plugin_id)?;
+        let slot = lock_unpoisoned(&self.sidecar);
+        let SidecarState::Running(cached) = &slot.state else {
+            return Ok(None);
+        };
+        if cached.client.is_alive() && active_identity.as_ref() == Some(&cached.identity) {
+            return Ok(Some(cached.client.clone()));
+        }
+        Ok(None)
+    }
+
+    fn install_started_sidecar(&self, generation: u64, cached: CachedSidecar) -> bool {
+        let mut slot = lock_unpoisoned(&self.sidecar);
+        if slot.generation != generation
+            || !matches!(
+                &slot.state,
+                SidecarState::Starting { generation: started } if *started == generation
+            )
+        {
+            return false;
+        }
+        slot.state = SidecarState::Running(cached);
+        true
+    }
+
+    fn clear_starting(&self, generation: u64) {
+        let mut slot = lock_unpoisoned(&self.sidecar);
+        if slot.generation == generation
+            && matches!(
+                &slot.state,
+                SidecarState::Starting { generation: started } if *started == generation
+            )
+        {
+            slot.state = SidecarState::Stopped;
+        }
+    }
+
     fn sidecar(&self) -> Result<Arc<SidecarClient>> {
         let plugin_id = AI_PLUGIN_ID;
+        if self.shutdown.load(Ordering::SeqCst) {
+            return Err(PluginError::NotReady(
+                "the AI plugin service is shutting down".to_string(),
+            ));
+        }
         if self.operations_block_readiness(plugin_id) {
             return Err(PluginError::NotReady(
                 "a plugin operation is running".to_string(),
             ));
         }
 
-        let active_identity = self.cached_sidecar_identity(plugin_id)?;
-        let mut slot = lock_unpoisoned(&self.sidecar);
-        if let Some(cached) = slot.as_ref()
-            && cached.client.is_alive()
-            && active_identity.as_ref() == Some(&cached.identity)
-            && !self.operations_block_readiness(plugin_id)
-        {
-            return Ok(cached.client.clone());
+        if let Some(client) = self.reusable_sidecar(plugin_id)? {
+            return Ok(client);
         }
 
-        if let Some(stale) = slot.take() {
-            shutdown_sidecar(&stale.client);
+        // The probe (up to 30 s) and hello handshake (up to 60 s) must never
+        // run under the sidecar state lock: a stop has to be able to invalidate
+        // this startup immediately.
+        let _start = lock_unpoisoned(&self.sidecar_start);
+        if self.shutdown.load(Ordering::SeqCst) {
+            return Err(PluginError::NotReady(
+                "the AI plugin service is shutting down".to_string(),
+            ));
         }
-
         if self.operations_block_readiness(plugin_id) {
             return Err(PluginError::NotReady(
                 "a plugin operation is running".to_string(),
             ));
         }
+        // Another caller may have started it while we waited for the start
+        // lock.
+        if let Some(client) = self.reusable_sidecar(plugin_id)? {
+            return Ok(client);
+        }
+
+        // Drop a stale client and invalidate any startup that raced this one.
+        self.stop_sidecar();
 
         let (install, manifest, model, requested_backend, identity) =
             self.sidecar_target(plugin_id)?;
-        let paths = sidecar_paths(&install, &manifest);
-        let log_path = self.log_path()?;
-        let expectations = ProbeExpectations::new(&install.plugin_id, &install.variant)
-            .with_catalog_version(&manifest.catalog_version);
-        let probe = SidecarClient::probe_with_expectations(&paths, &expectations, &log_path)?;
-        let backend = choose_backend(&manifest.backend, &requested_backend, &probe);
-        let config = SidecarConfig {
-            paths,
-            model,
-            variant: install.variant.clone(),
-            backend,
-            plugin_id: install.plugin_id.clone(),
-            catalog_version: Some(manifest.catalog_version.clone()),
-            log_path,
-            env: Vec::new(),
+        let generation = {
+            let mut slot = lock_unpoisoned(&self.sidecar);
+            let generation = slot.generation;
+            slot.state = SidecarState::Starting { generation };
+            generation
         };
-        let client = Arc::new(SidecarClient::spawn(config)?);
-        self.sync_catalog_from_hello(client.hello())?;
 
-        // The package can change while the process starts. Never hand out a
-        // client that belongs to a package replaced during startup.
-        if self.operations_block_readiness(plugin_id)
-            || self.cached_sidecar_identity(plugin_id)?.as_ref() != Some(&identity)
-        {
+        let startup = (|| -> Result<Arc<SidecarClient>> {
+            let paths = sidecar_paths(&install, &manifest);
+            let log_path = self.log_path()?;
+            let expectations = ProbeExpectations::new(&install.plugin_id, &install.variant)
+                .with_catalog_version(&manifest.catalog_version);
+            let probe = SidecarClient::probe_with_expectations(&paths, &expectations, &log_path)?;
+            let backend = choose_backend(&manifest.backend, &requested_backend, &probe);
+            let config = SidecarConfig {
+                paths,
+                model,
+                variant: install.variant.clone(),
+                backend,
+                plugin_id: install.plugin_id.clone(),
+                catalog_version: Some(manifest.catalog_version.clone()),
+                log_path,
+                env: Vec::new(),
+            };
+            let client = Arc::new(SidecarClient::spawn(config)?);
+            self.sync_catalog_from_hello(client.hello())?;
+            Ok(client)
+        })();
+
+        let client = match startup {
+            Ok(client) => client,
+            Err(error) => {
+                self.clear_starting(generation);
+                return Err(error);
+            }
+        };
+
+        // A stop or shutdown may have happened while probing or spawning. A
+        // package operation may also have replaced the active installation.
+        let current_identity = match self.cached_sidecar_identity(plugin_id) {
+            Ok(identity) => identity,
+            Err(error) => {
+                shutdown_sidecar(&client);
+                self.clear_starting(generation);
+                return Err(error);
+            }
+        };
+        let accepted = !self.shutdown.load(Ordering::SeqCst)
+            && !self.operations_block_readiness(plugin_id)
+            && current_identity.as_ref() == Some(&identity)
+            && self.install_started_sidecar(
+                generation,
+                CachedSidecar {
+                    identity,
+                    client: client.clone(),
+                },
+            );
+        if !accepted {
+            // A stop requested during startup leaves the service stopped; the
+            // freshly spawned child must not survive as an orphan.
             shutdown_sidecar(&client);
+            self.clear_starting(generation);
             return Err(PluginError::NotReady(
-                "the active AI plugin changed while starting the sidecar".to_string(),
+                "the AI plugin service changed while starting the sidecar".to_string(),
             ));
         }
-        *slot = Some(CachedSidecar {
-            identity,
-            client: client.clone(),
-        });
         Ok(client)
     }
 
@@ -1553,6 +1833,7 @@ mod tests {
     use std::collections::HashMap;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{Receiver, RecvTimeoutError};
     use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
     use std::thread;
@@ -1635,6 +1916,11 @@ mod tests {
                 chunk_delay: Duration::from_millis(5),
             }
         }
+
+        fn with_chunk_delay(mut self, delay: Duration) -> Self {
+            self.chunk_delay = delay;
+            self
+        }
     }
 
     impl ModelHttpClient for MockModelClient {
@@ -1650,6 +1936,31 @@ mod tests {
             for chunk in bytes.chunks(self.chunk_size) {
                 thread::sleep(self.chunk_delay);
                 on_chunk(chunk)?;
+            }
+            Ok(())
+        }
+    }
+
+    /// A download that ignores cancellation errors from `on_chunk` and keeps
+    /// running until the test releases it. Used to prove shutdown is bounded
+    /// even when an operation does not cooperate.
+    struct UncancellableModelClient {
+        started: Arc<AtomicBool>,
+        release: Arc<AtomicBool>,
+    }
+
+    impl ModelHttpClient for UncancellableModelClient {
+        fn download(
+            &self,
+            _url: &str,
+            on_chunk: &mut dyn FnMut(&[u8]) -> vrc_photon_ai_host::Result<()>,
+        ) -> vrc_photon_ai_host::Result<()> {
+            self.started.store(true, Ordering::SeqCst);
+            while !self.release.load(Ordering::SeqCst) {
+                // The error is deliberately discarded: this client models an
+                // operation that never observes the shutdown token.
+                let _ = on_chunk(&[]);
+                thread::sleep(Duration::from_millis(10));
             }
             Ok(())
         }
@@ -1729,6 +2040,10 @@ mod tests {
 
     impl TestContext {
         fn new() -> Self {
+            Self::with_http(Arc::new(MockModelClient::new()))
+        }
+
+        fn with_http(http: Arc<dyn ModelHttpClient>) -> Self {
             let dir = tempfile::tempdir().expect("create the test directory");
             let mock = mock_sidecar();
             let key = TestKey::generate();
@@ -1745,7 +2060,7 @@ mod tests {
                 data_dir.clone(),
                 events.clone(),
                 vec![key.public_key()],
-                Arc::new(MockModelClient::new()),
+                http,
             );
             let install_rx = events.subscribe();
             Self {
@@ -2813,6 +3128,167 @@ mod tests {
             }
         }
         assert!(ctx.db().ai_tag_definitions(PLUGIN).unwrap().is_empty());
+    }
+
+    #[test]
+    fn shutdown_cancels_and_joins_an_in_flight_download() {
+        let ctx = TestContext::with_http(Arc::new(
+            MockModelClient::new().with_chunk_delay(Duration::from_millis(50)),
+        ));
+        ctx.install_default();
+        ctx.set_consent();
+        ctx.service.start_model_download(PLUGIN).unwrap();
+        ctx.wait_for("the download to start", || {
+            ctx.service.operation_active(PLUGIN)
+        });
+
+        let started = Instant::now();
+        let timed_out = ctx.service.shutdown(Duration::from_secs(2));
+
+        assert!(timed_out.is_empty(), "unexpected workers: {timed_out:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "shutdown took {:?}",
+            started.elapsed()
+        );
+        assert!(
+            !ctx.service.operation_active(PLUGIN),
+            "shutdown must join a cancelled download"
+        );
+        let directory = model_dir(&ctx.data_dir, PLUGIN, &sample_manifest().model.revision);
+        if let Ok(entries) = fs::read_dir(&directory) {
+            let parts: Vec<_> = entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.extension()
+                        .is_some_and(|extension| extension == "part")
+                })
+                .collect();
+            assert!(parts.is_empty(), "partial files must be removed: {parts:?}");
+        }
+    }
+
+    #[test]
+    fn shutdown_reports_workers_that_exceed_the_timeout() {
+        let started = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let ctx = TestContext::with_http(Arc::new(UncancellableModelClient {
+            started: started.clone(),
+            release: release.clone(),
+        }));
+        ctx.install_default();
+        ctx.set_consent();
+        ctx.service.start_model_download(PLUGIN).unwrap();
+        ctx.wait_for("the download to enter the client", || {
+            started.load(Ordering::SeqCst)
+        });
+
+        let before_shutdown = Instant::now();
+        let timed_out = ctx.service.shutdown(Duration::from_millis(100));
+
+        assert!(
+            before_shutdown.elapsed() < Duration::from_secs(2),
+            "shutdown took {:?}",
+            before_shutdown.elapsed()
+        );
+        assert!(
+            timed_out.iter().any(|name| name == "plugin-model-download"),
+            "the blocked worker must be reported: {timed_out:?}"
+        );
+        assert!(
+            ctx.service.operation_active(PLUGIN),
+            "the test client is expected to ignore cancellation"
+        );
+
+        release.store(true, Ordering::SeqCst);
+        ctx.wait_for("the blocked download to finish", || {
+            !ctx.service.operation_active(PLUGIN)
+        });
+    }
+
+    #[test]
+    fn stop_during_sidecar_startup_kills_the_child() {
+        let ctx = TestContext::new();
+        ctx.install_default();
+        ctx.make_model_ready();
+        let marker = ctx._dir.path().join("spawned");
+        let script = format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = \"--probe\" ]; then\n\
+               exec \"{mock}\" \"$@\"\n\
+             fi\n\
+             echo started > \"{marker}\"\n\
+             sleep 1\n\
+             exec \"{mock}\" \"$@\"\n",
+            mock = ctx.mock.display(),
+            marker = marker.display(),
+        );
+        replace_entrypoint(&ctx, &script);
+
+        let service = ctx.service.clone();
+        let handle = thread::spawn(move || service.sidecar());
+        ctx.wait_for("the sidecar child to start", || marker.exists());
+
+        let started = Instant::now();
+        ctx.service.stop_sidecar();
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "stop waited for the startup: {:?}",
+            started.elapsed()
+        );
+
+        let result = handle.join().unwrap();
+        assert!(
+            result.is_err(),
+            "a stopped startup must not return a client"
+        );
+        assert!(
+            !ctx.service.sidecar_is_running(),
+            "the child spawned during a stopped startup must be shut down"
+        );
+    }
+
+    #[test]
+    fn stop_does_not_wait_for_a_slow_probe() {
+        let ctx = TestContext::new();
+        ctx.install_default();
+        ctx.make_model_ready();
+        let marker = ctx._dir.path().join("probing");
+        let script = format!(
+            "#!/bin/sh\n\
+             echo probing > \"{marker}\"\n\
+             sleep 3\n\
+             exit 1\n",
+            marker = marker.display(),
+        );
+        replace_entrypoint(&ctx, &script);
+
+        let service = ctx.service.clone();
+        let handle = thread::spawn(move || service.sidecar());
+        ctx.wait_for("the slow probe to start", || marker.exists());
+
+        let started = Instant::now();
+        ctx.service.stop_sidecar();
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "stop waited for the probe: {:?}",
+            started.elapsed()
+        );
+
+        let result = handle.join().unwrap();
+        assert!(result.is_err(), "a stopped probe must not return a client");
+        assert!(!ctx.service.sidecar_is_running());
+    }
+
+    fn replace_entrypoint(ctx: &TestContext, script: &str) {
+        let install = ctx
+            .db()
+            .active_plugin_installation(PLUGIN)
+            .unwrap()
+            .unwrap();
+        let executable = Path::new(&install.path).join(TEST_ENTRYPOINT);
+        fs::write(executable, script).expect("replace the sidecar entrypoint");
     }
 
     fn catalog_with_version(version: &str) -> Catalog {
