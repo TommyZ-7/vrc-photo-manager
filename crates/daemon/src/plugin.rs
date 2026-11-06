@@ -1835,11 +1835,10 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{Receiver, RecvTimeoutError};
-    use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+    use std::sync::{Arc, Mutex, MutexGuard};
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use assert_cmd::cargo::cargo_bin;
     use tempfile::TempDir;
     use vrc_photon_ai_host::test_support::{
         TEST_ENTRYPOINT, TEST_PLUGIN_ID, TestEntry, TestKey, TestPackage, sample_manifest,
@@ -1856,6 +1855,7 @@ mod tests {
 
     use super::{PluginError, PluginService};
     use crate::ipc_server::EventBus;
+    use crate::test_support::mock_sidecar;
 
     const PLUGIN: &str = TEST_PLUGIN_ID;
     const CATALOG_VERSION: &str = "2026-11-03.1";
@@ -1964,21 +1964,6 @@ mod tests {
             }
             Ok(())
         }
-    }
-
-    fn mock_sidecar() -> PathBuf {
-        static MOCK: OnceLock<PathBuf> = OnceLock::new();
-        MOCK.get_or_init(|| {
-            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-            let status = std::process::Command::new(cargo)
-                .args(["build", "--package", "vrc-photon-ai-mock-sidecar"])
-                .current_dir(env!("CARGO_MANIFEST_DIR"))
-                .status()
-                .expect("build the mock sidecar");
-            assert!(status.success(), "cargo build failed for the mock sidecar");
-            cargo_bin("mock-sidecar")
-        })
-        .clone()
     }
 
     fn package_with(

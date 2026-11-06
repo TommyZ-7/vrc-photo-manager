@@ -639,9 +639,8 @@ fn write_response(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use assert_cmd::cargo::cargo_bin;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
     use vrc_photon_ai_host::ManifestFile;
     use vrc_photon_ai_host::UreqModelClient;
@@ -657,21 +656,7 @@ mod tests {
 
     use crate::plugin::{AI_PLUGIN_ID, PluginService};
     use crate::tagging::TaggingControl;
-
-    fn mock_sidecar() -> std::path::PathBuf {
-        static MOCK: OnceLock<std::path::PathBuf> = OnceLock::new();
-        MOCK.get_or_init(|| {
-            let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-            let status = std::process::Command::new(cargo)
-                .args(["build", "--package", "vrc-photon-ai-mock-sidecar"])
-                .current_dir(env!("CARGO_MANIFEST_DIR"))
-                .status()
-                .expect("build the mock sidecar");
-            assert!(status.success(), "cargo build failed for the mock sidecar");
-            cargo_bin("mock-sidecar")
-        })
-        .clone()
-    }
+    use crate::test_support::mock_sidecar;
 
     /// Replaces the inert test entrypoint with the mock sidecar so the install
     /// probe succeeds the same way it does in the daemon's other tests.
