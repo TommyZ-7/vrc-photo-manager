@@ -284,6 +284,16 @@ impl App {
         .detach();
     }
 
+    /// Persists the folder-structure toggles as the default for the next
+    /// folder import. The dialog reads `AppSettings::import_options()` when
+    /// the user starts the run.
+    pub(crate) fn save_import_structure_settings(&mut self, cx: &mut Context<Self>) {
+        if let Err(error) = self.settings.save(&self.db) {
+            self.toast_error(tr_args!("settings.save_failed", error = error), cx);
+        }
+        cx.notify();
+    }
+
     pub(crate) fn start_import_from_source(&mut self, cx: &mut Context<Self>) {
         let folder_options = self.settings.import_options();
         let Some(dialog) = self.import_dialog.as_mut() else {

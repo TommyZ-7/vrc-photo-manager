@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use gpui_kit::base::FocusTrapElement as _;
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::scroll::ScrollableElement as _;
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -12,7 +13,7 @@ use vrc_photon_core::importer::{ImportIssue, ImportIssueKind, ImportMode, Import
 use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::App;
-use crate::app::import::{ImportDialogOrigin, ImportDialogPhase, ImportReportView};
+use crate::app::import::{ImportDialogOrigin, ImportDialogPhase, ImportReportView, ImportSource};
 use crate::ui::components::dialog_panel;
 use crate::ui::theme::*;
 
@@ -34,6 +35,18 @@ pub(crate) const IMPORT_REPORT_ROW_LIMIT: usize = 100;
 pub(crate) fn import_report_row_window(total: usize) -> (usize, usize) {
     let shown = total.min(IMPORT_REPORT_ROW_LIMIT);
     (shown, total - shown)
+}
+
+/// Folder-structure controls are only meaningful for a folder source. File
+/// imports keep the current flat behavior and hide the section.
+pub(crate) fn shows_folder_structure(source: Option<&ImportSource>) -> bool {
+    matches!(source, Some(ImportSource::Folder { .. }))
+}
+
+/// "Include the selected folder name" only has an effect when the parent
+/// toggle is on.
+pub(crate) fn include_root_enabled(preserve_structure: bool) -> bool {
+    preserve_structure
 }
 
 fn import_more_row(hidden: usize, p: &Palette) -> AnyElement {
@@ -178,6 +191,121 @@ impl App {
                                     .child(tr!("import.destination_hint")),
                             ),
                     );
+
+                if shows_folder_structure(source) {
+                    let preserve = self.settings.import_preserve_folder_structure;
+                    let include_root = preserve && self.settings.import_include_root_folder;
+                    body = body
+                        .child(self.section_label(tr!("import.section.structure")))
+                        .child(
+                            v_flex()
+                                .gap(px(10.))
+                                .p(px(11.))
+                                .rounded(px(12.))
+                                .bg(rgb(p.panel_inner))
+                                .border_1()
+                                .border_color(rgb(p.border))
+                                .child(
+                                    h_flex()
+                                        .items_start()
+                                        .gap(px(12.))
+                                        .child(
+                                            v_flex()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .gap(px(2.))
+                                                .child(
+                                                    div()
+                                                        .text_size(px(11.))
+                                                        .font_semibold()
+                                                        .text_color(rgb(p.text))
+                                                        .child(tr!("import.structure.preserve")),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_size(px(10.))
+                                                        .text_color(rgb(p.muted))
+                                                        .child(tr!(
+                                                            "import.structure.preserve_hint"
+                                                        )),
+                                                ),
+                                        )
+                                        .child(
+                                            Switch::new("import-preserve-structure")
+                                                .checked(preserve)
+                                                .on_click(cx.listener(|this, value, _, cx| {
+                                                    this.settings
+                                                        .import_preserve_folder_structure = *value;
+                                                    if !*value {
+                                                        this.settings.import_include_root_folder =
+                                                            false;
+                                                    }
+                                                    this.save_import_structure_settings(cx);
+                                                })),
+                                        ),
+                                )
+                                .child(
+                                    h_flex()
+                                        .items_start()
+                                        .gap(px(12.))
+                                        .child(
+                                            v_flex()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .gap(px(2.))
+                                                .child(
+                                                    div()
+                                                        .text_size(px(11.))
+                                                        .font_semibold()
+                                                        .text_color(if preserve {
+                                                            rgb(p.text)
+                                                        } else {
+                                                            rgb(p.muted_2)
+                                                        })
+                                                        .child(tr!(
+                                                            "import.structure.include_root"
+                                                        )),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_size(px(10.))
+                                                        .text_color(rgb(p.muted))
+                                                        .child(tr!(
+                                                            "import.structure.include_root_hint"
+                                                        )),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_size(px(9.))
+                                                        .text_color(rgb(p.muted_2))
+                                                        .child(tr!("import.structure.example_on")),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_size(px(9.))
+                                                        .text_color(rgb(p.muted_2))
+                                                        .child(tr!("import.structure.example_off")),
+                                                ),
+                                        )
+                                        .child(
+                                            Switch::new("import-include-root")
+                                                .checked(include_root)
+                                                .disabled(!include_root_enabled(preserve))
+                                                .on_click(cx.listener(|this, value, _, cx| {
+                                                    this.settings.import_include_root_folder =
+                                                        *value;
+                                                    this.save_import_structure_settings(cx);
+                                                })),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(9.))
+                                        .text_color(rgb(p.muted_2))
+                                        .child(tr!("import.structure.default_hint")),
+                                ),
+                        );
+                }
                 panel = panel.child(body).child(
                     h_flex()
                         .justify_end()
@@ -562,11 +690,31 @@ pub(crate) fn import_progress_label(progress: &ImportProgress) -> String {
 mod tests {
     use super::{
         IMPORT_REPORT_ROW_LIMIT, has_retryable_sources, import_progress_label,
-        import_progress_ratio, import_report_row_window, retryable_sources,
+        import_progress_ratio, import_report_row_window, include_root_enabled, retryable_sources,
+        shows_folder_structure,
     };
-    use crate::app::import::import_issue_counts;
+    use crate::app::import::{ImportSource, import_issue_counts};
     use std::path::PathBuf;
     use vrc_photon_core::importer::{ImportIssue, ImportIssueKind, ImportProgress};
+
+    #[test]
+    fn folder_structure_section_only_appears_for_folder_sources() {
+        assert!(!shows_folder_structure(None));
+        assert!(!shows_folder_structure(Some(&ImportSource::Files(vec![
+            PathBuf::from("/photos/a.png"),
+        ]))));
+        assert!(shows_folder_structure(Some(&ImportSource::Folder {
+            folder: PathBuf::from("/photos/Trip"),
+            files: vec![PathBuf::from("/photos/Trip/Day1/a.png")],
+            issues: Vec::new(),
+        })));
+    }
+
+    #[test]
+    fn include_root_switch_requires_preserve_structure() {
+        assert!(!include_root_enabled(false));
+        assert!(include_root_enabled(true));
+    }
 
     #[test]
     fn large_report_sections_render_only_the_documented_row_cap() {
