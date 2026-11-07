@@ -41,8 +41,11 @@ pub struct PluginState {
 pub struct AiTagDefinition {
     pub plugin_id: String,
     pub tag_key: String,
-    /// `indoor` or `outdoor`.
+    /// `indoor`, `outdoor`, or `atmosphere`.
     pub branch: String,
+    /// Atmosphere section such as `weather`, `light`, `mood`, or `scene`.
+    /// Empty for place tags.
+    pub tag_group: String,
     pub name: String,
     pub name_en: Option<String>,
     pub description: String,
@@ -100,6 +103,8 @@ pub struct PhotoAiTag {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PhotoAiTagView {
     pub tag_key: String,
+    pub branch: String,
+    pub tag_group: String,
     pub name: String,
     pub name_en: Option<String>,
     pub probability: f32,
