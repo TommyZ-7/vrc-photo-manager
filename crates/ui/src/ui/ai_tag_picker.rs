@@ -12,6 +12,7 @@ use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::App;
 use crate::app::ai_tag_picker::{AiTagPickerRow, ai_tag_picker_rows, branch_label};
+use crate::app::ai_thresholds::threshold_group_label;
 use crate::ui::components::dialog_panel;
 use crate::ui::theme::*;
 
@@ -62,9 +63,28 @@ impl App {
             .on_click(cx.listener(|this, _, _, cx| {
                 this.set_ai_tag_picker_branch(Some(TagBranch::Indoor), cx)
             }));
+        let atmosphere_tab = tab_button(
+            "ai-tag-picker-atmosphere",
+            tr!("ai.tags.picker.atmosphere"),
+            self.ai_tag_picker.branch == Some(TagBranch::Atmosphere),
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.set_ai_tag_picker_branch(Some(TagBranch::Atmosphere), cx)
+        }));
 
         let mut list = Vec::with_capacity(rows.len());
+        let mut current_group = String::new();
         for row in rows {
+            if row.branch == TagBranch::Atmosphere {
+                if row.group != current_group {
+                    if !row.group.is_empty() {
+                        list.push(picker_group_header(&p, threshold_group_label(&row.group)));
+                    }
+                    current_group = row.group.clone();
+                }
+            } else {
+                current_group.clear();
+            }
             list.push(picker_row(&p, row, cx));
         }
         let list = if list.is_empty() {
@@ -144,7 +164,8 @@ impl App {
                             .gap(px(4.))
                             .child(all_tab)
                             .child(outdoor_tab)
-                            .child(indoor_tab),
+                            .child(indoor_tab)
+                            .child(atmosphere_tab),
                     ),
             )
             .child(
@@ -227,6 +248,26 @@ fn tab_button(id: &'static str, label: String, active: bool) -> Button {
     } else {
         button.secondary()
     }
+}
+
+fn picker_group_header(p: &Palette, label: String) -> AnyElement {
+    h_flex()
+        .items_center()
+        .gap(px(7.))
+        .px(px(10.))
+        .py(px(6.))
+        .border_b_1()
+        .border_color(rgb(p.line_soft))
+        .bg(rgb(p.panel_2))
+        .child(div().w(px(2.)).h(px(10.)).rounded_full().bg(rgb(p.green)))
+        .child(
+            div()
+                .text_size(px(9.))
+                .font_medium()
+                .text_color(rgb(p.muted))
+                .child(label),
+        )
+        .into_any_element()
 }
 
 fn picker_row(p: &Palette, row: AiTagPickerRow, cx: &mut Context<App>) -> AnyElement {

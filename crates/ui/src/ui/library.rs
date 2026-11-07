@@ -19,7 +19,7 @@ use vrc_photon_core::model::Photo;
 use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::App;
-use crate::app::ai::{AiMetaKey, ai_empty_state_labels};
+use crate::app::ai::{AiMetaKey, AiTagView, ai_empty_state_labels};
 use crate::app::cli::log_timing;
 use crate::app::daemon::open_path;
 use crate::state::photo_browser::{PAGE_SIZE, PageFailure, PhotoIndex};
@@ -770,62 +770,106 @@ impl App {
         };
 
         let (empty_title, empty_hint) = ai_empty_state_labels(ai.is_some());
-        let mut tag_row = h_flex().flex_wrap().gap(px(4.));
-        if tags.is_empty() {
-            tag_row = tag_row.child(
-                v_flex()
-                    .gap(px(1.))
-                    .child(
-                        div()
-                            .text_size(px(10.))
-                            .font_medium()
-                            .text_color(rgb(p.text))
-                            .child(empty_title),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(9.))
-                            .text_color(rgb(p.muted_2))
-                            .child(empty_hint),
-                    ),
-            );
+        let place_tags: Vec<(usize, AiTagView)> = tags
+            .iter()
+            .cloned()
+            .enumerate()
+            .filter(|(_, view)| view.branch != "atmosphere")
+            .collect();
+        let atmosphere_tags: Vec<(usize, AiTagView)> = tags
+            .iter()
+            .cloned()
+            .enumerate()
+            .filter(|(_, view)| view.branch == "atmosphere")
+            .collect();
+
+        let section_label = |label: String| -> AnyElement {
+            h_flex()
+                .items_center()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .w(px(2.))
+                        .h(px(9.))
+                        .rounded_full()
+                        .bg(rgba(with_alpha(p.green, 0x66))),
+                )
+                .child(
+                    div()
+                        .text_size(px(9.))
+                        .font_medium()
+                        .text_color(rgb(p.muted))
+                        .child(label),
+                )
+                .into_any_element()
+        };
+
+        let chip_row = |entries: &[(usize, AiTagView)]| -> AnyElement {
+            h_flex()
+                .flex_wrap()
+                .gap(px(4.))
+                .children(entries.iter().map(|(index, view)| {
+                    let focus = focus_handles[*index].clone();
+                    let tooltip = view.tooltip.clone();
+                    h_flex()
+                        .id(SharedString::from(format!("ai-tag-{id}-{index}")))
+                        .items_center()
+                        .gap(px(3.))
+                        .px(px(7.))
+                        .py(px(2.))
+                        .rounded_full()
+                        .bg(rgba(with_alpha(p.green, 0x14)))
+                        .border_1()
+                        .border_color(rgba(with_alpha(p.green, 0x38)))
+                        .text_size(px(10.))
+                        .text_color(rgb(p.green))
+                        .track_focus(&focus)
+                        .focus(move |this| this.border_color(rgb(p.green)))
+                        .aria_description(tooltip.clone())
+                        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+                        .child("✦")
+                        .child(view.label.clone())
+                        .child(
+                            div()
+                                .text_size(px(9.))
+                                .text_color(rgb(p.muted))
+                                .child(view.probability_label.clone()),
+                        )
+                }))
+                .into_any_element()
+        };
+
+        let tag_block: AnyElement = if tags.is_empty() {
+            v_flex()
+                .gap(px(1.))
+                .child(
+                    div()
+                        .text_size(px(10.))
+                        .font_medium()
+                        .text_color(rgb(p.text))
+                        .child(empty_title),
+                )
+                .child(
+                    div()
+                        .text_size(px(9.))
+                        .text_color(rgb(p.muted_2))
+                        .child(empty_hint),
+                )
+                .into_any_element()
         } else {
-            tag_row = tag_row.children(
-                focus_handles
-                    .into_iter()
-                    .zip(tags.iter().cloned())
-                    .enumerate()
-                    .map(|(index, (focus, view))| {
-                        let tooltip = view.tooltip.clone();
-                        h_flex()
-                            .id(SharedString::from(format!("ai-tag-{id}-{index}")))
-                            .items_center()
-                            .gap(px(3.))
-                            .px(px(7.))
-                            .py(px(2.))
-                            .rounded_full()
-                            .bg(rgba(with_alpha(p.green, 0x14)))
-                            .border_1()
-                            .border_color(rgba(with_alpha(p.green, 0x38)))
-                            .text_size(px(10.))
-                            .text_color(rgb(p.green))
-                            .track_focus(&focus)
-                            .focus(move |this| this.border_color(rgb(p.green)))
-                            .aria_description(tooltip.clone())
-                            .tooltip(move |window, cx| {
-                                Tooltip::new(tooltip.clone()).build(window, cx)
-                            })
-                            .child("✦")
-                            .child(view.label)
-                            .child(
-                                div()
-                                    .text_size(px(9.))
-                                    .text_color(rgb(p.muted))
-                                    .child(view.probability_label),
-                            )
-                    }),
-            );
-        }
+            let mut block = v_flex().gap(px(5.));
+            if !place_tags.is_empty() {
+                block = block
+                    .child(section_label(tr!("photos.ai.place_section")))
+                    .child(chip_row(&place_tags));
+            }
+            if !atmosphere_tags.is_empty() {
+                block = block
+                    .child(section_label(tr!("photos.ai.atmosphere")))
+                    .child(chip_row(&atmosphere_tags));
+            }
+            block.into_any_element()
+        };
 
         let header = h_flex()
             .items_center()
@@ -854,7 +898,7 @@ impl App {
             .border_1()
             .border_color(rgba(with_alpha(p.green, 0x33)))
             .child(header)
-            .child(tag_row);
+            .child(tag_block);
         if let Some(tooltip) = focused_tooltip {
             panel = panel.child(
                 div()

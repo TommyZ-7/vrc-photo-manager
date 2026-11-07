@@ -991,6 +991,8 @@ pub(crate) struct AiTagView {
     pub(crate) label: SharedString,
     pub(crate) tooltip: SharedString,
     pub(crate) probability_label: SharedString,
+    pub(crate) branch: String,
+    pub(crate) tag_group: String,
 }
 
 /// Chooses the catalog name for the active language and formats the
@@ -1035,6 +1037,8 @@ pub(crate) fn ai_tag_view_with_context(
         label: label.into(),
         tooltip: tooltip.into(),
         probability_label: format!("{:.1}%", tag.probability * 100.0).into(),
+        branch: tag.branch.clone(),
+        tag_group: tag.tag_group.clone(),
     }
 }
 
@@ -2148,6 +2152,7 @@ mod tests {
                     name_en: Some("Sea".to_string()),
                     description: "海辺".to_string(),
                     default_threshold: 0.5,
+                    group: String::new(),
                 },
                 TagDefinition {
                     key: "park".to_string(),
@@ -2155,9 +2160,18 @@ mod tests {
                     name_en: None,
                     description: "公園".to_string(),
                     default_threshold: 0.5,
+                    group: String::new(),
                 },
             ],
             indoor: Vec::new(),
+            atmosphere: vec![TagDefinition {
+                key: "weather_clear".to_string(),
+                name: "晴れ".to_string(),
+                name_en: Some("Clear / sunny".to_string()),
+                description: "晴れ".to_string(),
+                default_threshold: 0.5,
+                group: "weather".to_string(),
+            }],
         }
     }
 
@@ -2814,6 +2828,8 @@ mod tests {
     fn ai_tag_chip_shows_probability() {
         let tag = PhotoAiTagView {
             tag_key: "sea".to_string(),
+            branch: "outdoor".to_string(),
+            tag_group: String::new(),
             name: "海".to_string(),
             name_en: Some("Sea".to_string()),
             probability: 0.969,
@@ -2835,6 +2851,22 @@ mod tests {
 
         let without_context = ai_tag_view_with_context(&tag, "ja", None, None);
         assert_eq!(without_context.tooltip, ja.tooltip);
+    }
+
+    #[test]
+    fn ai_tag_view_propagates_branch_and_group() {
+        let tag = PhotoAiTagView {
+            tag_key: "weather_clear".to_string(),
+            branch: "atmosphere".to_string(),
+            tag_group: "weather".to_string(),
+            name: "晴れ".to_string(),
+            name_en: Some("Clear / sunny".to_string()),
+            probability: 0.93,
+            applied: true,
+        };
+        let view = ai_tag_view(&tag, "ja");
+        assert_eq!(view.branch, "atmosphere");
+        assert_eq!(view.tag_group, "weather");
     }
 
     #[test]
@@ -2875,6 +2907,8 @@ mod tests {
     fn meta_tags() -> Vec<PhotoAiTagView> {
         vec![PhotoAiTagView {
             tag_key: "sea".to_string(),
+            branch: "outdoor".to_string(),
+            tag_group: String::new(),
             name: "海".to_string(),
             name_en: Some("Sea".to_string()),
             probability: 0.969,
@@ -2973,6 +3007,8 @@ mod tests {
         let tags = [
             PhotoAiTagView {
                 tag_key: "sea".to_string(),
+                branch: "outdoor".to_string(),
+                tag_group: String::new(),
                 name: "海".to_string(),
                 name_en: Some("Sea".to_string()),
                 probability: 0.969,
@@ -2980,6 +3016,8 @@ mod tests {
             },
             PhotoAiTagView {
                 tag_key: "park".to_string(),
+                branch: "outdoor".to_string(),
+                tag_group: String::new(),
                 name: "公園".to_string(),
                 name_en: None,
                 probability: 0.61,

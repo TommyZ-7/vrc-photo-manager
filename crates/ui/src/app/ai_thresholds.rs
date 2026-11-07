@@ -28,6 +28,7 @@ pub(crate) enum ThresholdTab {
     #[default]
     Outdoor,
     Indoor,
+    Atmosphere,
 }
 
 impl ThresholdTab {
@@ -35,6 +36,7 @@ impl ThresholdTab {
         match self {
             Self::Outdoor => TagBranch::Outdoor,
             Self::Indoor => TagBranch::Indoor,
+            Self::Atmosphere => TagBranch::Atmosphere,
         }
     }
 }
@@ -44,6 +46,7 @@ impl ThresholdTab {
 pub(crate) struct AiThresholdRow {
     pub(crate) tag_key: String,
     pub(crate) name: String,
+    pub(crate) group: String,
     pub(crate) default_threshold: f32,
     pub(crate) threshold: f32,
     pub(crate) overridden: bool,
@@ -136,12 +139,24 @@ pub(crate) fn threshold_rows(
             AiThresholdRow {
                 tag_key: definition.tag_key.clone(),
                 name: ai_tag_display_name(definition, language),
+                group: definition.tag_group.clone(),
                 default_threshold: definition.default_threshold,
                 threshold: effective.unwrap_or(definition.default_threshold),
                 overridden: effective.is_some(),
             }
         })
         .collect()
+}
+
+/// Localized section heading for an atmosphere tag group.
+pub(crate) fn threshold_group_label(group: &str) -> String {
+    match group {
+        "weather" => tr!("settings.ai.thresholds.group.weather"),
+        "light" => tr!("settings.ai.thresholds.group.light"),
+        "mood" => tr!("settings.ai.thresholds.group.mood"),
+        "scene" => tr!("settings.ai.thresholds.group.scene"),
+        _ => String::new(),
+    }
 }
 
 /// Returns only the overrides that differ from the saved state. `None` means
@@ -422,9 +437,10 @@ impl App {
 mod tests {
     use super::{
         AiThresholdRow, ThresholdTab, normalize_presence_draft, normalize_threshold_draft,
-        threshold_marker_ratio, threshold_rows, threshold_updates,
+        threshold_group_label, threshold_marker_ratio, threshold_rows, threshold_updates,
     };
     use std::collections::HashMap;
+    use vrc_photon_ai_protocol::TagBranch;
     use vrc_photon_core::ai::AiTagDefinition;
 
     fn definition(
@@ -438,6 +454,7 @@ mod tests {
             plugin_id: "vrc-photon-autotag".into(),
             tag_key: tag_key.into(),
             branch: branch.into(),
+            tag_group: String::new(),
             name: name.into(),
             name_en: name_en.map(str::to_string),
             description: String::new(),
@@ -510,6 +527,7 @@ mod tests {
             AiThresholdRow {
                 tag_key: "sea".into(),
                 name: "Sea".into(),
+                group: String::new(),
                 default_threshold: 0.5,
                 threshold: 0.7,
                 overridden: true,
@@ -517,5 +535,71 @@ mod tests {
         );
         assert!(threshold_marker_ratio(0.05) <= f32::EPSILON);
         assert!(threshold_marker_ratio(0.99) >= 1.0 - f32::EPSILON);
+    }
+
+    #[test]
+    fn atmosphere_tab_uses_atmosphere_branch_and_groups_rows() {
+        let mut clear = definition(
+            "weather_clear",
+            "晴れ",
+            Some("Clear / sunny"),
+            "atmosphere",
+            0,
+        );
+        clear.tag_group = "weather".into();
+        let mut neon = definition(
+            "light_neon",
+            "ネオンの光",
+            Some("Neon light"),
+            "atmosphere",
+            1,
+        );
+        neon.tag_group = "light".into();
+        let mut sunset = definition("sunset", "夕景", Some("Sunset"), "atmosphere", 2);
+        sunset.tag_group = "scene".into();
+        let definitions = vec![clear, neon, sunset];
+        let rows = threshold_rows(
+            &definitions,
+            &HashMap::new(),
+            &HashMap::new(),
+            ThresholdTab::Atmosphere,
+            "",
+            "ja",
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.group.as_str())
+                .collect::<Vec<_>>(),
+            ["weather", "light", "scene"]
+        );
+        assert_eq!(ThresholdTab::Atmosphere.branch(), TagBranch::Atmosphere);
+    }
+
+    #[test]
+    fn threshold_group_labels_cover_every_atmosphere_group() {
+        assert_eq!(threshold_group_label("weather"), "天候");
+        assert_eq!(threshold_group_label("light"), "光");
+        assert_eq!(threshold_group_label("mood"), "ムード");
+        assert_eq!(threshold_group_label("scene"), "時間・情景");
+        assert_eq!(threshold_group_label(""), "");
+    }
+
+    #[test]
+    fn threshold_updates_keep_atmosphere_overrides() {
+        let mut clear = definition(
+            "weather_clear",
+            "晴れ",
+            Some("Clear / sunny"),
+            "atmosphere",
+            0,
+        );
+        clear.tag_group = "weather".into();
+        let definitions = vec![clear];
+        let overrides = HashMap::new();
+        let draft = HashMap::from([("weather_clear".to_string(), Some(0.72))]);
+        assert_eq!(
+            threshold_updates(&definitions, &overrides, &draft),
+            vec![("weather_clear".to_string(), Some(0.72))]
+        );
     }
 }

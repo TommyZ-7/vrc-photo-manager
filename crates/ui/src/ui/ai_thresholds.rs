@@ -12,8 +12,8 @@ use vrc_photon_i18n::{tr, tr_args};
 
 use crate::app::App;
 use crate::app::ai_thresholds::{
-    AiThresholdRow, PRESENCE_DEFAULT, PRESENCE_SLIDER_KEY, ThresholdTab, threshold_marker_ratio,
-    threshold_rows,
+    AiThresholdRow, PRESENCE_DEFAULT, PRESENCE_SLIDER_KEY, ThresholdTab, threshold_group_label,
+    threshold_marker_ratio, threshold_rows,
 };
 use crate::ui::components::dialog_panel;
 use crate::ui::theme::*;
@@ -62,9 +62,27 @@ impl App {
         .on_click(
             cx.listener(|this, _, _, cx| this.set_ai_threshold_tab(ThresholdTab::Indoor, cx)),
         );
+        let atmosphere_tab = threshold_tab_button(
+            "ai-thresholds-atmosphere",
+            tr!("settings.ai.thresholds.atmosphere"),
+            selected_tab == ThresholdTab::Atmosphere,
+        )
+        .on_click(
+            cx.listener(|this, _, _, cx| this.set_ai_threshold_tab(ThresholdTab::Atmosphere, cx)),
+        );
 
         let mut list = Vec::with_capacity(rows.len());
+        let mut current_group = String::new();
         for row in rows {
+            if row.group != current_group {
+                if !row.group.is_empty() {
+                    list.push(threshold_group_header(
+                        &p,
+                        threshold_group_label(&row.group),
+                    ));
+                }
+                current_group = row.group.clone();
+            }
             if let Some(slider) = self.ai_thresholds.sliders.get(&row.tag_key).cloned() {
                 list.push(threshold_row(&p, row, slider, cx));
             }
@@ -225,7 +243,13 @@ impl App {
                             .min_w(px(180.))
                             .child(Input::new(&self.ai_thresholds.query)),
                     )
-                    .child(h_flex().gap(px(4.)).child(outdoor_tab).child(indoor_tab)),
+                    .child(
+                        h_flex()
+                            .gap(px(4.))
+                            .child(outdoor_tab)
+                            .child(indoor_tab)
+                            .child(atmosphere_tab),
+                    ),
             )
             .child(
                 h_flex()
@@ -351,6 +375,26 @@ fn threshold_tab_button(id: &'static str, label: String, active: bool) -> Button
     } else {
         button.secondary()
     }
+}
+
+fn threshold_group_header(p: &Palette, label: String) -> AnyElement {
+    h_flex()
+        .items_center()
+        .gap(px(7.))
+        .px(px(10.))
+        .py(px(6.))
+        .border_b_1()
+        .border_color(rgb(p.line_soft))
+        .bg(rgb(p.panel_2))
+        .child(div().w(px(2.)).h(px(10.)).rounded_full().bg(rgb(p.green)))
+        .child(
+            div()
+                .text_size(px(9.))
+                .font_medium()
+                .text_color(rgb(p.muted))
+                .child(label),
+        )
+        .into_any_element()
 }
 
 fn threshold_slider(
