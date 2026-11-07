@@ -14,7 +14,9 @@ use gpui_kit::*;
 use vrc_photon_i18n::{tr, tr_args};
 
 use super::{App as PhotoApp, Screen};
+use crate::app::discord::discord_send_guard;
 use crate::state::selection::PhotoSelection;
+use crate::ui::actions::TrashSelectedPhotos;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ContextMenuSnapshot {
@@ -41,6 +43,29 @@ pub(crate) struct PhotoContextMenuState {
     snapshot: ContextMenuSnapshot,
     source_focus: FocusHandle,
     _dismiss: Subscription,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ContextMenuEnablement {
+    compress_clipboard: bool,
+    discord: bool,
+    ai: bool,
+}
+
+impl ContextMenuEnablement {
+    fn new(
+        selection_len: usize,
+        clipboard_enabled: bool,
+        discord_ready: bool,
+        ai_enabled: bool,
+        ai_ready: bool,
+    ) -> Self {
+        Self {
+            compress_clipboard: selection_len == 1 && clipboard_enabled,
+            discord: selection_len == 1 && discord_ready,
+            ai: ai_enabled && ai_ready,
+        }
+    }
 }
 
 impl PhotoApp {
@@ -105,22 +130,115 @@ impl PhotoApp {
         if snapshot.selection.is_empty() {
             return;
         }
+        let selection_len = snapshot.selection.len();
+        let clipboard_enabled = self.settings.clipboard_enabled;
+        let discord_ready = discord_send_guard(&self.settings, self.discord_url.as_deref()).is_ok();
+        let enablement = ContextMenuEnablement::new(
+            selection_len,
+            clipboard_enabled,
+            discord_ready,
+            self.settings.ai_tagging_enabled,
+            self.ai.ready(),
+        );
+        let clipboard_label = if selection_len != 1 {
+            tr!("photos.context_menu.compress_clipboard_single_only")
+        } else if !clipboard_enabled {
+            tr!("photos.context_menu.compress_clipboard_setting_off")
+        } else {
+            tr!("photos.context_menu.compress_clipboard")
+        };
+        let discord_label = if selection_len != 1 {
+            tr!("photos.context_menu.discord_single_only")
+        } else if !discord_ready {
+            tr!("photos.context_menu.discord_unavailable")
+        } else {
+            tr!("photos.action.discord_send")
+        };
+        let ai_label = if enablement.ai {
+            tr!("photos.ai.tag_selected")
+        } else {
+            tr!("photos.context_menu.ai_unavailable")
+        };
         let selection = snapshot.selection.clone();
         let app = cx.entity().downgrade();
         let action_context = source_focus.clone();
-        let menu = PopupMenu::build(window, cx, move |menu, _window, _cx| {
+        let menu = PopupMenu::build(window, cx, move |menu, window, cx| {
+            let app_for_folder = app.clone();
+            let app_for_clipboard = app.clone();
+            let app_for_discord = app.clone();
+            let app_for_ai = app.clone();
             let app_for_copy = app.clone();
-            let app_for_folder = app;
-            let ids = selection;
+            let app_for_open = app;
+            let copy_ids = selection.clone();
+            let ai_ids = selection;
             menu.action_context(action_context)
-                .min_w(px(238.))
+                .min_w(px(252.))
+                .submenu_with_icon(
+                    Some(IconName::Minimize.into()),
+                    tr!("photos.compress"),
+                    window,
+                    cx,
+                    move |menu, _window, _cx| {
+                        let app_for_folder = app_for_folder.clone();
+                        let app_for_clipboard = app_for_clipboard.clone();
+                        let clipboard_label = clipboard_label.clone();
+                        menu.item(
+                            PopupMenuItem::new(tr!("photos.context_menu.compress_folder"))
+                                .icon(IconName::FolderOpen)
+                                .on_click(move |_, window, cx| {
+                                    if let Some(app) = app_for_folder.upgrade() {
+                                        app.update(cx, |app, cx| {
+                                            app.compress_selection_to_folder(window, cx);
+                                        });
+                                    }
+                                }),
+                        )
+                        .item(
+                            PopupMenuItem::new(clipboard_label)
+                                .icon(IconName::Copy)
+                                .disabled(!enablement.compress_clipboard)
+                                .on_click(move |_, _window, cx| {
+                                    if let Some(app) = app_for_clipboard.upgrade() {
+                                        app.update(cx, |app, cx| {
+                                            app.compress_selection_to_clipboard(cx);
+                                        });
+                                    }
+                                }),
+                        )
+                    },
+                )
+                .item(
+                    PopupMenuItem::new(discord_label)
+                        .icon(IconName::Globe)
+                        .disabled(!enablement.discord)
+                        .on_click(move |_, _window, cx| {
+                            if let Some(app) = app_for_discord.upgrade() {
+                                app.update(cx, |app, cx| {
+                                    app.enqueue_photo_send(anchor_photo, cx);
+                                });
+                            }
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new(ai_label)
+                        .icon(IconName::Bot)
+                        .disabled(!enablement.ai)
+                        .on_click(move |_, _window, cx| {
+                            if let Some(app) = app_for_ai.upgrade() {
+                                app.update(cx, |app, cx| {
+                                    app.enqueue_ai_tagging(&ai_ids, cx);
+                                });
+                            }
+                        }),
+                )
+                .separator()
                 .item(
                     PopupMenuItem::new(tr!("photos.context_menu.copy_path"))
                         .icon(IconName::Copy)
                         .on_click(move |_, _window, cx| {
                             if let Some(app) = app_for_copy.upgrade() {
                                 app.update(cx, |app, cx| {
-                                    app.copy_selected_paths(&ids, cx);
+                                    app.copy_selected_paths(&copy_ids, cx);
                                 });
                             }
                         }),
@@ -129,12 +247,18 @@ impl PhotoApp {
                     PopupMenuItem::new(tr!("photos.action.open_folder"))
                         .icon(IconName::FolderOpen)
                         .on_click(move |_, _window, cx| {
-                            if let Some(app) = app_for_folder.upgrade() {
+                            if let Some(app) = app_for_open.upgrade() {
                                 app.update(cx, |app, cx| {
                                     app.open_folder_for_photo(anchor_photo, cx);
                                 });
                             }
                         }),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new(tr!("photos.action.trash"))
+                        .icon(IconName::Delete)
+                        .action(Box::new(TrashSelectedPhotos)),
                 )
         });
 
@@ -379,12 +503,43 @@ fn menu_position_from_bounds(
 #[cfg(test)]
 mod tests {
     use super::{
-        ContextMenuSnapshot, Screen, clipboard_path_text, context_menu_snapshot_is_stale,
-        menu_position_from_bounds, parent_folder, right_click_replaces_selection,
+        ContextMenuEnablement, ContextMenuSnapshot, Screen, clipboard_path_text,
+        context_menu_snapshot_is_stale, menu_position_from_bounds, parent_folder,
+        right_click_replaces_selection,
     };
     use crate::state::selection::PhotoSelection;
     use gpui_kit::{Bounds, point, px, size};
     use std::path::Path;
+
+    #[test]
+    fn context_menu_enablement_follows_the_issue_table() {
+        let single = ContextMenuEnablement::new(1, true, true, true, true);
+        assert!(single.compress_clipboard);
+        assert!(single.discord);
+        assert!(single.ai);
+
+        let multi = ContextMenuEnablement::new(3, true, true, true, true);
+        assert!(!multi.compress_clipboard);
+        assert!(!multi.discord);
+        assert!(multi.ai);
+
+        assert!(
+            !ContextMenuEnablement::new(1, false, true, true, true).compress_clipboard,
+            "the clipboard setting disables clipboard compression"
+        );
+        assert!(
+            !ContextMenuEnablement::new(1, true, false, true, true).discord,
+            "the Discord guard disables sending"
+        );
+        assert!(
+            !ContextMenuEnablement::new(1, true, true, false, true).ai,
+            "the AI setting disables tagging"
+        );
+        assert!(
+            !ContextMenuEnablement::new(1, true, true, true, false).ai,
+            "an unready AI plugin disables tagging"
+        );
+    }
 
     #[test]
     fn right_click_replaces_only_an_unselected_card() {
