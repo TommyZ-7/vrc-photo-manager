@@ -15,6 +15,7 @@ pub(crate) mod lifecycle;
 pub(crate) mod live;
 pub(crate) mod photos;
 pub(crate) mod search;
+pub(crate) mod tag_edit;
 pub(crate) mod viewer;
 
 pub(crate) use cli::LaunchOptions;
@@ -361,6 +362,7 @@ pub struct App {
     pub(crate) player_input: Entity<InputState>,
     pub(crate) tag_input: Entity<InputState>,
     pub(crate) tag_edit_input: Entity<InputState>,
+    pub(crate) tag_edit: tag_edit::TagEditState,
     pub(crate) note_edit_input: Entity<TextareaState>,
     pub(crate) note_edit_id: Option<i64>,
     pub(crate) photo_root_input: Entity<InputState>,
@@ -518,7 +520,7 @@ impl App {
                 self.ai_thresholds.open,
             ),
             self.notification_modal_open,
-        )
+        ) || self.tag_edit.open
     }
 
     /// Whether global shortcuts must stay inert right now: a full-window
@@ -568,6 +570,7 @@ impl App {
             (&self.player_input, "input.player"),
             (&self.tag_input, "input.tag"),
             (&self.tag_edit_input, "input.tag_add"),
+            (&self.tag_edit.input, "input.tag_add"),
             (&self.photo_root_input, "input.photo_root"),
             (&self.log_dir_input, "input.log_dir"),
             (&self.import_dir_input, "input.import_dir"),
@@ -657,6 +660,9 @@ impl App {
             ai_thresholds::AiThresholdEditorState::new(ai_threshold_query, ai_threshold_focus);
         let tag_edit_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(tr!("input.tag_add")));
+        let tag_edit_dialog_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr!("input.tag_add")));
+        let tag_edit = tag_edit::TagEditState::new(tag_edit_dialog_input, cx.focus_handle());
         let note_edit_input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder(tr!("input.note"))
@@ -1144,6 +1150,7 @@ impl App {
             player_input,
             tag_input,
             tag_edit_input,
+            tag_edit,
             note_edit_input,
             note_edit_id: None,
             photo_root_input,
@@ -1394,6 +1401,9 @@ impl Render for App {
             }
             if self.ai_thresholds.open {
                 root = root.child(self.ai_thresholds_overlay(window, cx));
+            }
+            if self.tag_edit.open {
+                root = root.child(self.tag_edit_overlay(window, cx));
             }
         } else {
             root = root.child(self.quick_look(window, cx));

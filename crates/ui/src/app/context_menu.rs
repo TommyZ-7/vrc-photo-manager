@@ -45,6 +45,12 @@ pub(crate) struct PhotoContextMenuState {
     _dismiss: Subscription,
 }
 
+impl PhotoContextMenuState {
+    pub(crate) fn source_focus(&self) -> FocusHandle {
+        self.source_focus.clone()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ContextMenuEnablement {
     compress_clipboard: bool,
@@ -167,6 +173,7 @@ impl PhotoApp {
             let app_for_clipboard = app.clone();
             let app_for_discord = app.clone();
             let app_for_ai = app.clone();
+            let app_for_tag = app.clone();
             let app_for_copy = app.clone();
             let app_for_open = app;
             let copy_ids = selection.clone();
@@ -232,6 +239,17 @@ impl PhotoApp {
                         }),
                 )
                 .separator()
+                .item(
+                    PopupMenuItem::new(tr!("photos.tag_edit.menu"))
+                        .icon(IconName::Asterisk)
+                        .on_click(move |_, window, cx| {
+                            if let Some(app) = app_for_tag.upgrade() {
+                                app.update(cx, |app, cx| {
+                                    app.open_tag_edit(window, cx);
+                                });
+                            }
+                        }),
+                )
                 .item(
                     PopupMenuItem::new(tr!("photos.context_menu.copy_path"))
                         .icon(IconName::Copy)

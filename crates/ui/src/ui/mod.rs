@@ -18,6 +18,7 @@ pub(crate) mod palette;
 pub(crate) mod search;
 pub(crate) mod settings;
 pub(crate) mod shell;
+pub(crate) mod tag_edit;
 pub(crate) mod theme;
 pub(crate) mod viewer;
 pub(crate) mod year_rail;

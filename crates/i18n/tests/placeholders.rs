@@ -172,6 +172,7 @@ const CALL_SITES: &[(&str, &[&str])] = &[
     ("photos.selected_count", &["count"]),
     ("photos.tags.load_error", &["error"]),
     ("photos.tags.save_error", &["error"]),
+    ("photos.tag_edit.subtitle_multi", &["count"]),
     ("photos.trash.error", &["detail"]),
     ("photos.trash.failures", &["count"]),
     ("photos.trash.move_error", &["error"]),
