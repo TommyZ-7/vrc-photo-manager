@@ -136,6 +136,8 @@ const CALL_SITES: &[(&str, &[&str])] = &[
     ("notifications.import.scan_failed", &["count"]),
     ("notifications.import.skipped", &["count"]),
     ("photos.action.open_folder_error", &["error"]),
+    ("photos.context_menu.copy_path_done_count", &["count"]),
+    ("photos.context_menu.copy_path_error", &["error"]),
     ("photos.ai.people.at_least", &["min"]),
     ("photos.ai.people.at_most", &["max"]),
     ("photos.ai.people.exact", &["count"]),

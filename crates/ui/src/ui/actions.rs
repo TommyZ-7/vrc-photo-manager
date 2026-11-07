@@ -25,6 +25,7 @@ gpui_kit::actions!(
         ToggleInspector,
         FocusSearch,
         OpenQuickLook,
+        OpenPhotoContextMenu,
         CloseQuickLook,
         ViewerPreviousPhoto,
         ViewerNextPhoto,

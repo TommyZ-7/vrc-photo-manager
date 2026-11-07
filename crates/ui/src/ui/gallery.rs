@@ -662,6 +662,16 @@ fn render_grid(
             rendered
         },
     )
+    .on_scroll({
+        let app = shared.app.clone();
+        move |_, window, cx| {
+            if let Some(app_entity) = app.upgrade() {
+                app_entity.update(cx, |app, cx| {
+                    app.close_photo_context_menu_for_lifecycle(window, cx);
+                });
+            }
+        }
+    })
     .track_scroll(&scroll)
     .flex_1()
     .w_full()
@@ -677,7 +687,12 @@ fn render_grid(
         .w_full()
         .min_w_0()
         .min_h_0();
-    if !search {
+    if search {
+        wrapper = wrapper
+            .track_focus(&app.search_grid_focus)
+            .key_context("search_grid")
+            .tab_stop(true);
+    } else {
         wrapper = wrapper
             .track_focus(&app.photo_grid_focus)
             .key_context("photo_grid")
@@ -1100,6 +1115,7 @@ fn render_card(
     }
 
     let app_down = shared.app.clone();
+    let app_right = shared.app.clone();
     let app_click = shared.app.clone();
     let card = card
         .on_mouse_down(
@@ -1109,6 +1125,17 @@ fn render_card(
                     app_entity.update(cx, |app, cx| {
                         app.handle_photo_press(id, event.modifiers, cx);
                         focus_grid_or_search(app, window, cx);
+                    });
+                }
+            },
+        )
+        .on_mouse_down(
+            MouseButton::Right,
+            move |event: &MouseDownEvent, window, cx| {
+                cx.stop_propagation();
+                if let Some(app_entity) = app_right.upgrade() {
+                    app_entity.update(cx, |app, cx| {
+                        app.open_photo_context_menu_at(id, event.position, window, cx);
                     });
                 }
             },
@@ -1143,9 +1170,10 @@ fn focus_grid_or_search(app: &App, window: &mut Window, cx: &mut Context<App>) {
         window.focus(&app.photo_grid_focus, cx);
     } else {
         // Search cards reuse the library card widget, but its grid is
-        // Photos-only. Keep focus on a handle that is actually mounted.
-        let handle = app.world_input.read(cx).focus_handle(cx);
-        window.focus(&handle, cx);
+        // Photos-only. Focus the search grid so Menu / Shift+F10 can open
+        // the same context menu without stealing focus from filter inputs
+        // until a result card is clicked.
+        window.focus(&app.search_grid_focus, cx);
     }
 }
 
