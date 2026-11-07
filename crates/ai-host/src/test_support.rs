@@ -24,7 +24,7 @@ pub const TEST_BACKEND: &str = "vulkan";
 pub const TEST_VARIANT: &str = "linux-vulkan";
 pub const TEST_HOST_VERSION_MIN: &str = "0.10.0";
 pub const TEST_HOST_VERSION_MAX: &str = "0.99.99";
-pub const TEST_CATALOG_VERSION: &str = "2026-11-03.1";
+pub const TEST_CATALOG_VERSION: &str = "2026-11-07.1";
 pub const TEST_ENTRYPOINT: &str = "d1-sidecar";
 
 /// A throwaway minisign key pair for signing test packages.
@@ -95,7 +95,7 @@ impl TestEntry {
 pub fn sample_entries() -> Vec<TestEntry> {
     vec![
         TestEntry::with_mode(TEST_ENTRYPOINT, b"#!/bin/sh\nexit 0\n", 0o644),
-        TestEntry::new("catalog.json", br#"{"version":"2026-11-03.1"}"#),
+        TestEntry::new("catalog.json", br#"{"version":"2026-11-07.1"}"#),
         TestEntry::new("calibration.json", br#"{"thresholds":{}}"#),
     ]
 }

@@ -431,7 +431,26 @@ impl TaggingWorker {
         if self.is_cancelled(job, cancel) {
             return Ok(Completion::Cancelled);
         }
-        let tags = tags.into_iter().map(|tag| (tag.key, tag.p_yes)).collect();
+        let mut tags: Vec<(String, f32)> =
+            tags.into_iter().map(|tag| (tag.key, tag.p_yes)).collect();
+
+        if hello.supports_atmosphere() {
+            self.record_progress(job, 0.8, TaggingStage::AtmosphereTags);
+            if self.is_cancelled(job, cancel) {
+                return Ok(Completion::Cancelled);
+            }
+            let result = self.request(&client, Op::AtmosphereTags, &image, None, cancel)?;
+            let SidecarResult::AtmosphereTags {
+                tags: atmosphere_tags,
+            } = result
+            else {
+                return Err(JobFailure::non_retryable(TaggingErrorCode::SidecarProtocol));
+            };
+            if self.is_cancelled(job, cancel) {
+                return Ok(Completion::Cancelled);
+            }
+            tags.extend(atmosphere_tags.into_iter().map(|tag| (tag.key, tag.p_yes)));
+        }
 
         self.record_progress(job, 0.9, TaggingStage::Write);
         let result = NewPhotoAi {
@@ -807,7 +826,7 @@ mod tests {
     use crate::plugin::{AI_PLUGIN_ID, PluginService};
 
     const CATALOG_JSON: &str = r#"{
-  "version": "2026-11-03.1",
+  "version": "2026-11-07.1",
   "outdoor": [
     {
       "key": "sea",
@@ -824,6 +843,16 @@ mod tests {
       "name_en": "Japanese room",
       "description": "畳・障子のある和室",
       "default_threshold": 0.5
+    }
+  ],
+  "atmosphere": [
+    {
+      "key": "weather_clear",
+      "name": "晴れ",
+      "name_en": "Clear / sunny",
+      "description": "晴れている",
+      "default_threshold": 0.5,
+      "group": "weather"
     }
   ]
 }"#;
@@ -965,9 +994,13 @@ mod tests {
         people: PeopleResponse,
         place: &str,
         delay_ms: Option<u64>,
+        no_atmosphere: bool,
     ) -> Vec<u8> {
         let delay = delay_ms
             .map(|delay| format!("export MOCK_SIDECAR_DELAY_MS={delay}\n"))
+            .unwrap_or_default();
+        let no_atmosphere = no_atmosphere
+            .then_some("export MOCK_SIDECAR_NO_ATMOSPHERE=1\n")
             .unwrap_or_default();
         format!(
             "#!/bin/sh\n\
@@ -977,6 +1010,7 @@ mod tests {
              export MOCK_SIDECAR_PEOPLE_COUNT={count}\n\
              export MOCK_SIDECAR_PEOPLE_INTERVAL='{low},{high}'\n\
              export MOCK_SIDECAR_PLACE_BRANCH={place}\n\
+             {no_atmosphere}\
              {delay}\
              exec {mock} \"$@\"\n",
             present = presence.present,
@@ -1122,6 +1156,37 @@ mod tests {
             ready: bool,
             config: TaggingWorkerConfig,
         ) -> Self {
+            Self::with_scenario_options(
+                mode, presence, people, place, delay_ms, ready, false, config,
+            )
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn with_scenario_no_atmosphere(
+            mode: &str,
+            presence: PresenceResponse,
+            people: PeopleResponse,
+            place: &str,
+            delay_ms: Option<u64>,
+            ready: bool,
+            config: TaggingWorkerConfig,
+        ) -> Self {
+            Self::with_scenario_options(
+                mode, presence, people, place, delay_ms, ready, true, config,
+            )
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn with_scenario_options(
+            mode: &str,
+            presence: PresenceResponse,
+            people: PeopleResponse,
+            place: &str,
+            delay_ms: Option<u64>,
+            ready: bool,
+            no_atmosphere: bool,
+            config: TaggingWorkerConfig,
+        ) -> Self {
             let dir = tempfile::tempdir().expect("create the test directory");
             let mock = mock_sidecar();
             let key = TestKey::generate();
@@ -1139,7 +1204,15 @@ mod tests {
             );
 
             if ready {
-                let entrypoint = wrapper_entrypoint(&mock, mode, presence, people, place, delay_ms);
+                let entrypoint = wrapper_entrypoint(
+                    &mock,
+                    mode,
+                    presence,
+                    people,
+                    place,
+                    delay_ms,
+                    no_atmosphere,
+                );
                 let package = package_with_entrypoint(&key, entrypoint);
                 let zip = dir.path().join("plugin.zip");
                 package.write_zip(&zip).expect("write the test package");
@@ -1290,7 +1363,7 @@ mod tests {
     }
 
     #[test]
-    fn presence_true_runs_all_four_ops_and_publishes_progress() {
+    fn presence_true_runs_all_five_ops_and_publishes_progress() {
         let ctx = TaggingTestContext::with_scenario(
             "normal",
             presence_response(true, 0.99),
@@ -1316,8 +1389,10 @@ mod tests {
         assert_eq!(ai.variant, "linux-vulkan");
         assert_eq!(ai.sidecar_version, "1.0.0-mock");
         assert_eq!(ai.model_revision, "mock");
-        assert_eq!(ai.catalog_version, "2026-11-03.1");
+        assert_eq!(ai.catalog_version, "2026-11-07.1");
         assert!((ai.presence_threshold - 0.9).abs() < 1e-6);
+        let tags = ctx.db().photo_ai_tags(ctx.photo_id, true).unwrap();
+        assert!(tags.iter().any(|tag| tag.tag_key == "weather_clear"));
 
         let events = progress_events(&events, &job_id);
         let has_stage = |progress: f64, stage: TaggingStage| {
@@ -1331,6 +1406,37 @@ mod tests {
         assert!(has_stage(0.3, TaggingStage::PeopleCount));
         assert!(has_stage(0.5, TaggingStage::PlaceClass));
         assert!(has_stage(0.7, TaggingStage::PlaceTags));
+        assert!(has_stage(0.8, TaggingStage::AtmosphereTags));
+        assert!(events.iter().any(|(status, value, _)| {
+            *status == TaggingJobStatus::Completed && (*value - 1.0).abs() < 1e-9
+        }));
+    }
+
+    #[test]
+    fn missing_atmosphere_capability_skips_the_stage_and_completes() {
+        let ctx = TaggingTestContext::with_scenario_no_atmosphere(
+            "normal",
+            presence_response(true, 0.99),
+            people_response(3, [2, 4]),
+            "other",
+            None,
+            true,
+            test_config(),
+        );
+        let job_id = ctx.enqueue_one();
+        let events = ctx.events.subscribe();
+        assert!(ctx.worker.process_once().unwrap());
+
+        let ai = ctx.db().photo_ai(ctx.photo_id).unwrap().unwrap();
+        assert_eq!(ai.catalog_version, "2026-11-07.1");
+        let tags = ctx.db().photo_ai_tags(ctx.photo_id, true).unwrap();
+        assert!(tags.iter().any(|tag| tag.tag_key == "sea"));
+        assert!(!tags.iter().any(|tag| tag.tag_key == "weather_clear"));
+
+        let events = progress_events(&events, &job_id);
+        assert!(!events.iter().any(|(_, value, stage)| {
+            (*value - 0.8).abs() < 1e-9 && *stage == Some(TaggingStage::AtmosphereTags)
+        }));
         assert!(events.iter().any(|(status, value, _)| {
             *status == TaggingJobStatus::Completed && (*value - 1.0).abs() < 1e-9
         }));
