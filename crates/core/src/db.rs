@@ -2305,20 +2305,27 @@ impl Db {
         if photo_ids.is_empty() || tags.is_empty() {
             return Ok(());
         }
+        self.in_transaction(|db| db.add_tags_in_transaction(&photo_ids, &tags))
+    }
+
+    /// Applies additions and removals to every selected photo in one
+    /// transaction. The dialog uses this so a mixed edit cannot leave a
+    /// partial result.
+    pub fn update_tags_for_photos(
+        &self,
+        photo_ids: &[i64],
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()> {
+        let photo_ids = Self::unique_photo_ids(photo_ids);
+        let add = Self::normalized_tag_names(add);
+        let remove = Self::normalized_tag_names(remove);
+        if photo_ids.is_empty() || (add.is_empty() && remove.is_empty()) {
+            return Ok(());
+        }
         self.in_transaction(|db| {
-            db.ensure_photos_exist(&photo_ids)?;
-            let mut tag_ids = Vec::with_capacity(tags.len());
-            for name in &tags {
-                tag_ids.push(db.add_tag(name)?);
-            }
-            for photo_id in &photo_ids {
-                for tag_id in &tag_ids {
-                    db.conn.execute(
-                        "INSERT OR IGNORE INTO photo_tags(photo_id, tag_id) VALUES (?1, ?2)",
-                        params![*photo_id, *tag_id],
-                    )?;
-                }
-            }
+            db.add_tags_in_transaction(&photo_ids, &add)?;
+            db.remove_tags_in_transaction(&photo_ids, &remove)?;
             Ok(())
         })
     }
@@ -2333,29 +2340,54 @@ impl Db {
         if photo_ids.is_empty() || tags.is_empty() {
             return Ok(());
         }
-        self.in_transaction(|db| {
-            db.ensure_photos_exist(&photo_ids)?;
-            for name in &tags {
-                let tag_id: Option<i64> = db
-                    .conn
-                    .query_row(
-                        "SELECT id FROM tags WHERE name = ?1",
-                        params![name],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                let Some(tag_id) = tag_id else {
-                    continue;
-                };
-                for photo_id in &photo_ids {
-                    db.conn.execute(
-                        "DELETE FROM photo_tags WHERE photo_id = ?1 AND tag_id = ?2",
-                        params![*photo_id, tag_id],
-                    )?;
-                }
+        self.in_transaction(|db| db.remove_tags_in_transaction(&photo_ids, &tags))
+    }
+
+    fn add_tags_in_transaction(&self, photo_ids: &[i64], tags: &[String]) -> Result<()> {
+        if tags.is_empty() {
+            return Ok(());
+        }
+        self.ensure_photos_exist(photo_ids)?;
+        let mut tag_ids = Vec::with_capacity(tags.len());
+        for name in tags {
+            tag_ids.push(self.add_tag(name)?);
+        }
+        for photo_id in photo_ids {
+            for tag_id in &tag_ids {
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO photo_tags(photo_id, tag_id) VALUES (?1, ?2)",
+                    params![*photo_id, *tag_id],
+                )?;
             }
-            Ok(())
-        })
+        }
+        Ok(())
+    }
+
+    fn remove_tags_in_transaction(&self, photo_ids: &[i64], tags: &[String]) -> Result<()> {
+        if tags.is_empty() {
+            return Ok(());
+        }
+        self.ensure_photos_exist(photo_ids)?;
+        for name in tags {
+            let tag_id: Option<i64> = self
+                .conn
+                .query_row(
+                    "SELECT id FROM tags WHERE name = ?1",
+                    params![name],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(tag_id) = tag_id else {
+                continue;
+            };
+            for photo_id in photo_ids {
+                self.conn.execute(
+                    "DELETE FROM photo_tags WHERE photo_id = ?1 AND tag_id = ?2",
+                    params![*photo_id, tag_id],
+                )?;
+            }
+        }
+        Ok(())
     }
 
     /// Returns the manual tags present on every selected photo, sorted by
@@ -7725,6 +7757,48 @@ mod tests {
             vec!["keep".to_string(), "other".to_string()]
         );
         assert!(db.photo_tags(photos[2]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn update_tags_for_photos_adds_and_removes_in_one_call() {
+        let db = Db::open_in_memory().unwrap();
+        let photos = seed_photos(&db, 2);
+        for id in &photos {
+            db.set_photo_tags(*id, &["keep".to_string(), "remove".to_string()])
+                .unwrap();
+        }
+
+        db.update_tags_for_photos(
+            &photos,
+            &[" add ".to_string(), "add".to_string()],
+            &["remove".to_string()],
+        )
+        .unwrap();
+
+        for id in &photos {
+            assert_eq!(
+                db.photo_tags(*id).unwrap(),
+                vec!["add".to_string(), "keep".to_string()]
+            );
+        }
+    }
+
+    #[test]
+    fn update_tags_for_photos_rolls_back_when_a_photo_is_missing() {
+        let db = Db::open_in_memory().unwrap();
+        let photos = seed_photos(&db, 2);
+        db.set_photo_tags(photos[0], &["keep".to_string()]).unwrap();
+        let missing = photos[1] + 10_000;
+
+        assert!(
+            db.update_tags_for_photos(
+                &[photos[0], missing],
+                &["add".to_string()],
+                &["keep".to_string()],
+            )
+            .is_err()
+        );
+        assert_eq!(db.photo_tags(photos[0]).unwrap(), vec!["keep".to_string()]);
     }
 
     #[test]
