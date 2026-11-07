@@ -2294,6 +2294,141 @@ impl Db {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    /// Adds each normalized tag to every selected photo in one transaction.
+    ///
+    /// Empty tags are ignored, duplicate tags are collapsed, and photos that
+    /// already carry a tag are left unchanged. A missing photo ID aborts the
+    /// whole operation so a bulk edit never leaves a partial result.
+    pub fn add_tags_to_photos(&self, photo_ids: &[i64], tags: &[String]) -> Result<()> {
+        let photo_ids = Self::unique_photo_ids(photo_ids);
+        let tags = Self::normalized_tag_names(tags);
+        if photo_ids.is_empty() || tags.is_empty() {
+            return Ok(());
+        }
+        self.in_transaction(|db| {
+            db.ensure_photos_exist(&photo_ids)?;
+            let mut tag_ids = Vec::with_capacity(tags.len());
+            for name in &tags {
+                tag_ids.push(db.add_tag(name)?);
+            }
+            for photo_id in &photo_ids {
+                for tag_id in &tag_ids {
+                    db.conn.execute(
+                        "INSERT OR IGNORE INTO photo_tags(photo_id, tag_id) VALUES (?1, ?2)",
+                        params![*photo_id, *tag_id],
+                    )?;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Removes each tag from every selected photo in one transaction.
+    ///
+    /// Unknown tags are ignored. A missing photo ID aborts the whole
+    /// operation, matching [`Self::add_tags_to_photos`].
+    pub fn remove_tags_from_photos(&self, photo_ids: &[i64], tags: &[String]) -> Result<()> {
+        let photo_ids = Self::unique_photo_ids(photo_ids);
+        let tags = Self::normalized_tag_names(tags);
+        if photo_ids.is_empty() || tags.is_empty() {
+            return Ok(());
+        }
+        self.in_transaction(|db| {
+            db.ensure_photos_exist(&photo_ids)?;
+            for name in &tags {
+                let tag_id: Option<i64> = db
+                    .conn
+                    .query_row(
+                        "SELECT id FROM tags WHERE name = ?1",
+                        params![name],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let Some(tag_id) = tag_id else {
+                    continue;
+                };
+                for photo_id in &photo_ids {
+                    db.conn.execute(
+                        "DELETE FROM photo_tags WHERE photo_id = ?1 AND tag_id = ?2",
+                        params![*photo_id, tag_id],
+                    )?;
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Returns the manual tags present on every selected photo, sorted by
+    /// name. An empty selection has no common tags.
+    pub fn common_manual_tags(&self, photo_ids: &[i64]) -> Result<Vec<String>> {
+        let photo_ids = Self::unique_photo_ids(photo_ids);
+        if photo_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.ensure_photos_exist(&photo_ids)?;
+
+        let placeholders = (2..=photo_ids.len() + 1)
+            .map(|index| format!("?{index}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT t.name FROM tags t JOIN photo_tags pt ON pt.tag_id = t.id \
+             WHERE pt.photo_id IN ({placeholders}) \
+             GROUP BY t.id, t.name \
+             HAVING COUNT(DISTINCT pt.photo_id) = ?1 \
+             ORDER BY t.name COLLATE NOCASE"
+        );
+        let mut values = Vec::with_capacity(photo_ids.len() + 1);
+        values.push(photo_ids.len() as i64);
+        values.extend(photo_ids.iter().copied());
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(values), |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    fn unique_photo_ids(photo_ids: &[i64]) -> Vec<i64> {
+        let mut seen = HashSet::with_capacity(photo_ids.len());
+        photo_ids
+            .iter()
+            .copied()
+            .filter(|id| seen.insert(*id))
+            .collect()
+    }
+
+    fn normalized_tag_names(tags: &[String]) -> Vec<String> {
+        let mut seen = HashSet::with_capacity(tags.len());
+        let mut normalized = Vec::with_capacity(tags.len());
+        for tag in tags {
+            let tag = tag.trim();
+            if tag.is_empty() {
+                continue;
+            }
+            if seen.insert(tag.to_string()) {
+                normalized.push(tag.to_string());
+            }
+        }
+        normalized
+    }
+
+    fn ensure_photos_exist(&self, photo_ids: &[i64]) -> Result<()> {
+        for chunk in photo_ids.chunks(500) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!("SELECT COUNT(*) FROM photos WHERE id IN ({placeholders})");
+            let count: i64 =
+                self.conn
+                    .query_row(&sql, params_from_iter(chunk.iter().copied()), |row| {
+                        row.get(0)
+                    })?;
+            if count as usize != chunk.len() {
+                let missing = chunk.len() - count as usize;
+                return Err(CoreError::NotFound(format!(
+                    "{missing} photo(s) in a bulk tag operation"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     // ---------- compression profiles ----------
 
     pub fn save_profile(&self, profile: &CompressionProfile) -> Result<()> {
@@ -7528,6 +7663,158 @@ mod tests {
         db.set_photo_tags(id, &["keep".to_string()]).unwrap();
         assert!(db.photo_index_text(&filter).unwrap().is_empty());
         assert_eq!(db.photo_tags(id).unwrap(), vec!["keep".to_string()]);
+    }
+
+    #[test]
+    fn add_tags_to_photos_updates_every_selected_photo_once() {
+        let db = Db::open_in_memory().unwrap();
+        let photos = seed_photos(&db, 3);
+
+        db.add_tags_to_photos(
+            &[photos[0], photos[0], photos[1], photos[2]],
+            &[
+                " keep ".to_string(),
+                String::new(),
+                "keep".to_string(),
+                "new".to_string(),
+            ],
+        )
+        .unwrap();
+
+        for id in &photos {
+            assert_eq!(
+                db.photo_tags(*id).unwrap(),
+                vec!["keep".to_string(), "new".to_string()]
+            );
+        }
+
+        db.add_tags_to_photos(&photos, &["keep".to_string(), "other".to_string()])
+            .unwrap();
+        for id in &photos {
+            assert_eq!(
+                db.photo_tags(*id).unwrap(),
+                vec!["keep".to_string(), "new".to_string(), "other".to_string()]
+            );
+        }
+    }
+
+    #[test]
+    fn remove_tags_from_photos_keeps_other_tags_and_ignores_unknown_tags() {
+        let db = Db::open_in_memory().unwrap();
+        let photos = seed_photos(&db, 3);
+        db.set_photo_tags(photos[0], &["keep".to_string(), "remove".to_string()])
+            .unwrap();
+        db.set_photo_tags(
+            photos[1],
+            &[
+                "keep".to_string(),
+                "remove".to_string(),
+                "other".to_string(),
+            ],
+        )
+        .unwrap();
+        db.set_photo_tags(photos[2], &["remove".to_string()])
+            .unwrap();
+
+        db.remove_tags_from_photos(&photos, &[" remove ".to_string(), "missing".to_string()])
+            .unwrap();
+
+        assert_eq!(db.photo_tags(photos[0]).unwrap(), vec!["keep".to_string()]);
+        assert_eq!(
+            db.photo_tags(photos[1]).unwrap(),
+            vec!["keep".to_string(), "other".to_string()]
+        );
+        assert!(db.photo_tags(photos[2]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn common_manual_tags_are_the_intersection_in_name_order() {
+        let db = Db::open_in_memory().unwrap();
+        let photos = seed_photos(&db, 3);
+        db.set_photo_tags(
+            photos[0],
+            &["shared".to_string(), "a".to_string(), "b".to_string()],
+        )
+        .unwrap();
+        db.set_photo_tags(
+            photos[1],
+            &["shared".to_string(), "a".to_string(), "c".to_string()],
+        )
+        .unwrap();
+        db.set_photo_tags(
+            photos[2],
+            &["shared".to_string(), "a".to_string(), "d".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            db.common_manual_tags(&photos).unwrap(),
+            vec!["a".to_string(), "shared".to_string()]
+        );
+        assert!(
+            db.common_manual_tags(&[]).unwrap().is_empty(),
+            "an empty selection has no common tags"
+        );
+        assert_eq!(
+            db.common_manual_tags(&photos[..1]).unwrap(),
+            vec!["a".to_string(), "b".to_string(), "shared".to_string()]
+        );
+    }
+
+    #[test]
+    fn bulk_tag_writes_leave_no_partial_update_when_a_photo_is_missing() {
+        let db = Db::open_in_memory().unwrap();
+        let photos = seed_photos(&db, 2);
+        let missing = photos[1] + 10_000;
+
+        assert!(
+            db.add_tags_to_photos(&[photos[0], missing], &["new".to_string()])
+                .is_err()
+        );
+        assert!(db.photo_tags(photos[0]).unwrap().is_empty());
+        assert!(db.photo_tags(photos[1]).unwrap().is_empty());
+
+        db.set_photo_tags(photos[0], &["keep".to_string()]).unwrap();
+        assert!(
+            db.remove_tags_from_photos(&[photos[0], missing], &["keep".to_string()])
+                .is_err()
+        );
+        assert_eq!(db.photo_tags(photos[0]).unwrap(), vec!["keep".to_string()]);
+        assert!(
+            db.common_manual_tags(&[photos[0], missing]).is_err(),
+            "common tags must not silently ignore a missing photo"
+        );
+    }
+
+    #[test]
+    fn bulk_tag_writes_do_not_touch_ai_tags() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        install_test_catalog(&db);
+        db.save_photo_ai(
+            photo,
+            AI_PLUGIN,
+            &test_ai_result(&[("sea", 0.97), ("park", 0.42)]),
+        )
+        .unwrap();
+        let before = db.photo_ai_tags(photo, false).unwrap();
+
+        db.add_tags_to_photos(&[photo], &["manual".to_string()])
+            .unwrap();
+        db.remove_tags_from_photos(&[photo], &["manual".to_string()])
+            .unwrap();
+
+        assert_eq!(db.photo_ai_tags(photo, false).unwrap(), before);
+    }
+
+    #[test]
+    fn bulk_tag_writes_and_common_tags_accept_empty_inputs() {
+        let db = Db::open_in_memory().unwrap();
+        db.add_tags_to_photos(&[], &["new".to_string()]).unwrap();
+        db.add_tags_to_photos(&[seed_photo(&db)], &[]).unwrap();
+        db.remove_tags_from_photos(&[], &["remove".to_string()])
+            .unwrap();
+        assert!(db.common_manual_tags(&[]).unwrap().is_empty());
     }
 
     #[test]
