@@ -10,5 +10,15 @@ pub use client::{IpcError, SubscriptionInfo};
 pub use endpoint::Endpoint;
 pub use protocol::*;
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[cfg(test)]
+mod tests {
+    use super::PROTOCOL_VERSION;
+
+    #[test]
+    fn protocol_version_is_six() {
+        assert_eq!(PROTOCOL_VERSION, 6);
+    }
+}

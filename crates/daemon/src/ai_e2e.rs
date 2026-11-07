@@ -40,7 +40,7 @@ const MMPROJ_FILE: &str = "mmproj-d1-2B-Q8_0.gguf";
 const SLOW_DELAY_MS: u64 = 30_000;
 
 const CATALOG_JSON: &str = r#"{
-  "version": "2026-11-03.1",
+  "version": "2026-11-07.1",
   "outdoor": [
     {
       "key": "sea",
@@ -57,6 +57,16 @@ const CATALOG_JSON: &str = r#"{
       "name_en": "Japanese room",
       "description": "畳・障子のある和室",
       "default_threshold": 0.5
+    }
+  ],
+  "atmosphere": [
+    {
+      "key": "weather_clear",
+      "name": "晴れ",
+      "name_en": "Clear / sunny",
+      "description": "晴れている",
+      "default_threshold": 0.5,
+      "group": "weather"
     }
   ]
 }"#;
@@ -87,6 +97,7 @@ fn install_import_tag_cancel_and_resume() {
     assert_eq!(ai.catalog_version, TEST_CATALOG_VERSION);
     let tags = ctx.db().photo_ai_tags(photo, true).unwrap();
     assert!(tags.iter().any(|tag| tag.tag_key == "sea"));
+    assert!(tags.iter().any(|tag| tag.tag_key == "weather_clear"));
 
     let events = progress_events(&events, &job);
     let has_stage = |progress: f64, stage: TaggingStage| {
@@ -100,6 +111,7 @@ fn install_import_tag_cancel_and_resume() {
     assert!(has_stage(0.3, TaggingStage::PeopleCount));
     assert!(has_stage(0.5, TaggingStage::PlaceClass));
     assert!(has_stage(0.7, TaggingStage::PlaceTags));
+    assert!(has_stage(0.8, TaggingStage::AtmosphereTags));
     assert!(events.iter().any(|(status, value, _)| {
         *status == TaggingJobStatus::Completed && (*value - 1.0).abs() < 1e-9
     }));
@@ -231,7 +243,7 @@ impl DaemonAiE2e {
             .unwrap()
             .expect("the install was activated");
         assert_eq!(install.variant, TEST_VARIANT);
-        assert_eq!(self.db().ai_tag_definitions(PLUGIN).unwrap().len(), 2);
+        assert_eq!(self.db().ai_tag_definitions(PLUGIN).unwrap().len(), 3);
         assert!(
             self.db()
                 .plugin_state(PLUGIN)

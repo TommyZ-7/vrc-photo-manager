@@ -31,7 +31,7 @@ use crate::world_name::{
 
 /// Highest schema version this build understands. A database with a newer
 /// `user_version` was written by a future release and must not be opened.
-const SCHEMA_VERSION: i64 = 15;
+const SCHEMA_VERSION: i64 = 16;
 
 const SCHEMA_V1: &str = r#"
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -641,6 +641,9 @@ impl Db {
         if version < 15 {
             self.migrate_v15()?;
         }
+        if version < 16 {
+            self.migrate_v16()?;
+        }
         Ok(())
     }
 
@@ -1028,6 +1031,38 @@ impl Db {
             params![now_string()],
         )?;
         tx.pragma_update(None, "user_version", 15)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Adds the atmosphere tag group to the catalog definitions. The column
+    /// check makes the step safe to retry after a crash between the DDL and
+    /// `user_version`.
+    fn migrate_v16(&self) -> Result<()> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version >= 16 {
+            tx.commit()?;
+            return Ok(());
+        }
+
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('ai_tag_definitions') \
+             WHERE name = 'tag_group')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            tx.execute_batch(
+                "ALTER TABLE ai_tag_definitions \
+                 ADD COLUMN tag_group TEXT NOT NULL DEFAULT '';",
+            )?;
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO schema_migrations(version, applied_at) VALUES (16, ?1)",
+            params![now_string()],
+        )?;
+        tx.pragma_update(None, "user_version", 16)?;
         tx.commit()?;
         Ok(())
     }
@@ -4573,6 +4608,7 @@ impl Db {
         for (branch, definitions) in [
             (TagBranch::Outdoor, &catalog.outdoor),
             (TagBranch::Indoor, &catalog.indoor),
+            (TagBranch::Atmosphere, &catalog.atmosphere),
         ] {
             for (sort_order, definition) in definitions.iter().enumerate() {
                 let previous: Option<f32> = tx
@@ -4587,11 +4623,13 @@ impl Db {
                     defaults_changed = true;
                 }
                 tx.execute(
-                    "INSERT INTO ai_tag_definitions(plugin_id, tag_key, branch, name, name_en, \
-                        description, default_threshold, sort_order, catalog_version, updated_at) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+                    "INSERT INTO ai_tag_definitions(plugin_id, tag_key, branch, tag_group, name, \
+                        name_en, description, default_threshold, sort_order, catalog_version, \
+                        updated_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
                      ON CONFLICT(plugin_id, tag_key) DO UPDATE SET \
                         branch = excluded.branch, \
+                        tag_group = excluded.tag_group, \
                         name = excluded.name, \
                         name_en = excluded.name_en, \
                         description = excluded.description, \
@@ -4603,6 +4641,7 @@ impl Db {
                         plugin_id,
                         definition.key,
                         branch.as_str(),
+                        definition.group,
                         definition.name,
                         definition.name_en,
                         definition.description,
@@ -4628,7 +4667,7 @@ impl Db {
 
     pub fn ai_tag_definitions(&self, plugin_id: &str) -> Result<Vec<AiTagDefinition>> {
         let mut stmt = self.conn.prepare(
-            "SELECT plugin_id, tag_key, branch, name, name_en, description, \
+            "SELECT plugin_id, tag_key, branch, tag_group, name, name_en, description, \
                 default_threshold, sort_order, catalog_version, updated_at \
              FROM ai_tag_definitions WHERE plugin_id = ?1 \
              ORDER BY branch, sort_order, tag_key",
@@ -4807,22 +4846,24 @@ impl Db {
     /// no longer in the catalog fall back to the raw key.
     pub fn photo_ai_tags_with_names(&self, photo_id: i64) -> Result<Vec<PhotoAiTagView>> {
         let mut stmt = self.conn.prepare(
-            "SELECT t.tag_key, COALESCE(d.name, t.tag_key), d.name_en, t.probability, \
-                t.applied \
+            "SELECT t.tag_key, COALESCE(d.branch, ''), COALESCE(d.tag_group, ''), \
+                COALESCE(d.name, t.tag_key), d.name_en, t.probability, t.applied \
              FROM photo_ai_tags t \
              LEFT JOIN ai_tag_definitions d \
                ON d.plugin_id = t.plugin_id AND d.tag_key = t.tag_key \
              WHERE t.photo_id = ?1 \
-             ORDER BY COALESCE(d.branch, ''), COALESCE(d.sort_order, 9223372036854775807), \
-                t.tag_key",
+             ORDER BY COALESCE(d.branch, ''), COALESCE(d.tag_group, ''), \
+                COALESCE(d.sort_order, 9223372036854775807), t.tag_key",
         )?;
         let rows = stmt.query_map(params![photo_id], |row| {
             Ok(PhotoAiTagView {
                 tag_key: row.get(0)?,
-                name: row.get(1)?,
-                name_en: row.get(2)?,
-                probability: row.get(3)?,
-                applied: row.get::<_, i64>(4)? != 0,
+                branch: row.get(1)?,
+                tag_group: row.get(2)?,
+                name: row.get(3)?,
+                name_en: row.get(4)?,
+                probability: row.get(5)?,
+                applied: row.get::<_, i64>(6)? != 0,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -5723,13 +5764,14 @@ fn row_to_ai_tag_definition(row: &Row<'_>) -> rusqlite::Result<AiTagDefinition> 
         plugin_id: row.get(0)?,
         tag_key: row.get(1)?,
         branch: row.get(2)?,
-        name: row.get(3)?,
-        name_en: row.get(4)?,
-        description: row.get(5)?,
-        default_threshold: row.get(6)?,
-        sort_order: row.get(7)?,
-        catalog_version: row.get(8)?,
-        updated_at: row.get(9)?,
+        tag_group: row.get(3)?,
+        name: row.get(4)?,
+        name_en: row.get(5)?,
+        description: row.get(6)?,
+        default_threshold: row.get(7)?,
+        sort_order: row.get(8)?,
+        catalog_version: row.get(9)?,
+        updated_at: row.get(10)?,
     })
 }
 
@@ -5952,6 +5994,7 @@ mod tests {
             name_en: name_en.map(str::to_string),
             description: format!("{name} description"),
             default_threshold,
+            group: String::new(),
         }
     }
 
@@ -5968,7 +6011,18 @@ mod tests {
                 Some("Japanese room"),
                 room_threshold,
             )],
+            atmosphere: Vec::new(),
         }
+    }
+
+    fn ai_catalog_with_atmosphere(version: &str) -> Catalog {
+        let mut catalog = ai_catalog(version, 0.5, 0.5);
+        let mut sunset = tag("sunset", "夕景", Some("Sunset"), 0.5);
+        sunset.group = "scene".to_string();
+        let mut weather_clear = tag("weather_clear", "晴れ", Some("Clear / sunny"), 0.5);
+        weather_clear.group = "weather".to_string();
+        catalog.atmosphere = vec![sunset, weather_clear];
+        catalog
     }
 
     fn seed_ai_tag(
@@ -6078,7 +6132,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
     }
 
     #[test]
@@ -6124,7 +6178,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
         let author_columns: i64 = db
             .conn
             .query_row(
@@ -6176,7 +6230,7 @@ mod tests {
             }
             for handle in handles {
                 let opened = handle.join().unwrap();
-                assert_eq!(opened.unwrap().unwrap(), 15);
+                assert_eq!(opened.unwrap().unwrap(), 16);
             }
         }
     }
@@ -6188,7 +6242,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
         let has_output_dir: bool = db
             .conn
             .query_row(
@@ -6208,7 +6262,7 @@ mod tests {
             .connection()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
         let table: i64 = db
             .connection()
             .query_row(
@@ -7284,7 +7338,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
 
         let recorded: i64 = db
             .conn
@@ -7327,7 +7381,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
         let retry_column: i64 = db
             .conn
             .query_row(
@@ -7394,7 +7448,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
 
         let jobs = db.list_jobs(10).unwrap();
         assert_eq!(jobs.len(), 1);
@@ -7427,7 +7481,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
         assert_eq!(db.list_jobs(10).unwrap()[0].retry_count, 2);
 
         let tables: i64 = db
@@ -8850,7 +8904,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
         let exists: bool = db
             .conn
             .query_row(
@@ -8882,7 +8936,7 @@ mod tests {
             .conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
         let table: i64 = db
             .conn
             .query_row(
@@ -9000,7 +9054,7 @@ mod tests {
             .connection()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
         let abs_path: String = db
             .connection()
             .query_row("SELECT abs_path FROM photos WHERE id = 42", [], |row| {
@@ -9051,13 +9105,13 @@ mod tests {
     }
 
     #[test]
-    fn fresh_database_is_v15_and_has_the_link_retry_columns() {
+    fn fresh_database_is_v16_and_has_the_link_retry_columns() {
         let db = Db::open_in_memory().unwrap();
         let version: i64 = db
             .connection()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
         for index in [
             "idx_jobs_claim",
             "idx_jobs_created",
@@ -9105,6 +9159,7 @@ mod tests {
                  PRAGMA user_version = 14;",
             )
             .unwrap();
+            conn.execute_batch(SCHEMA_V13_AI_TAGGING).unwrap();
         }
 
         let db = Db::open(&path).unwrap();
@@ -9112,7 +9167,7 @@ mod tests {
             .connection()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
         let (attempts, next_retry, status): (i64, Option<i64>, String) = db
             .connection()
             .query_row(
@@ -9212,6 +9267,69 @@ mod tests {
             )
             .unwrap();
         assert!(index_exists);
+    }
+
+    #[test]
+    fn schema_v16_adds_ai_tag_group_and_keeps_rows() {
+        let db = Db::open_in_memory().unwrap();
+        let version: i64 = db
+            .connection()
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 16);
+        let columns: Vec<String> = db
+            .connection()
+            .prepare("SELECT name FROM pragma_table_info('ai_tag_definitions')")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert!(columns.iter().any(|name| name == "tag_group"));
+    }
+
+    #[test]
+    fn migration_v16_is_retryable_and_keeps_existing_rows() {
+        let db = Db::open_in_memory().unwrap();
+        db.sync_ai_catalog(AI_PLUGIN, &ai_catalog("2026-11-03.1", 0.5, 0.5))
+            .unwrap();
+
+        // Simulate a v15 database that already has catalog rows.
+        db.connection()
+            .execute_batch(
+                "ALTER TABLE ai_tag_definitions DROP COLUMN tag_group;\
+                 DELETE FROM schema_migrations WHERE version = 16;",
+            )
+            .unwrap();
+        db.connection()
+            .pragma_update(None, "user_version", 15)
+            .unwrap();
+
+        db.migrate_v16().unwrap();
+        db.migrate_v16().unwrap();
+
+        let version: i64 = db
+            .conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 16);
+        let column_exists: bool = db
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('ai_tag_definitions') \
+                 WHERE name = 'tag_group')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(column_exists);
+        let definitions = db.ai_tag_definitions(AI_PLUGIN).unwrap();
+        assert_eq!(definitions.len(), 3);
+        let sea = definitions
+            .iter()
+            .find(|definition| definition.tag_key == "sea")
+            .unwrap();
+        assert_eq!(sea.tag_group, "");
     }
 
     #[test]
@@ -9427,6 +9545,7 @@ mod tests {
                  PRAGMA user_version = 13;",
             )
             .unwrap();
+            conn.execute_batch(SCHEMA_V13_AI_TAGGING).unwrap();
         }
 
         let db = Db::open(&path).unwrap();
@@ -9434,7 +9553,7 @@ mod tests {
             .connection()
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 15);
+        assert_eq!(version, 16);
         for index in [
             "idx_jobs_claim",
             "idx_jobs_created",
@@ -9494,25 +9613,25 @@ mod tests {
         let path = dir.path().join("library.db");
         let db = Db::open(&path).unwrap();
         db.connection()
-            .pragma_update(None, "user_version", 16)
+            .pragma_update(None, "user_version", 17)
             .unwrap();
         drop(db);
 
         match Db::open(&path) {
             Err(CoreError::Invalid(message)) => {
+                assert!(message.contains("17"), "{message}");
                 assert!(message.contains("16"), "{message}");
-                assert!(message.contains("15"), "{message}");
             }
             Err(error) => panic!("expected a typed future-version error, got {error}"),
-            Ok(_) => panic!("expected Db::open to reject schema version 16"),
+            Ok(_) => panic!("expected Db::open to reject schema version 17"),
         }
         match Db::open_read_only(&path) {
             Err(CoreError::Invalid(message)) => {
+                assert!(message.contains("17"), "{message}");
                 assert!(message.contains("16"), "{message}");
-                assert!(message.contains("15"), "{message}");
             }
             Err(error) => panic!("expected a typed future-version error, got {error}"),
-            Ok(_) => panic!("expected Db::open_read_only to reject schema version 16"),
+            Ok(_) => panic!("expected Db::open_read_only to reject schema version 17"),
         }
     }
 
@@ -9798,6 +9917,41 @@ mod tests {
         assert_eq!(applied("sea"), 0);
         assert_eq!(applied("park"), 1);
         assert!(db.ai_tag_thresholds(AI_PLUGIN).unwrap().is_empty());
+    }
+
+    #[test]
+    fn catalog_sync_stores_atmosphere_group_and_moves_scene_tags() {
+        let db = Db::open_in_memory().unwrap();
+        let mut old = ai_catalog("2026-11-03.1", 0.5, 0.5);
+        old.outdoor.push(tag("sunset", "夕景", Some("Sunset"), 0.5));
+        db.sync_ai_catalog(AI_PLUGIN, &old).unwrap();
+
+        let new = ai_catalog_with_atmosphere("2026-11-07.1");
+        db.sync_ai_catalog(AI_PLUGIN, &new).unwrap();
+        let definitions = db.ai_tag_definitions(AI_PLUGIN).unwrap();
+        let sunset = definitions
+            .iter()
+            .find(|definition| definition.tag_key == "sunset")
+            .unwrap();
+        assert_eq!(sunset.branch, "atmosphere");
+        assert_eq!(sunset.tag_group, "scene");
+        let clear = definitions
+            .iter()
+            .find(|definition| definition.tag_key == "weather_clear")
+            .unwrap();
+        assert_eq!(clear.branch, "atmosphere");
+        assert_eq!(clear.tag_group, "weather");
+    }
+
+    #[test]
+    fn catalog_sync_does_not_enqueue_tagging_jobs() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        db.sync_ai_catalog(AI_PLUGIN, &ai_catalog_with_atmosphere("2026-11-07.1"))
+            .unwrap();
+        assert!(db.tagging_jobs_for_photo(photo).unwrap().is_empty());
+        // The existing photo has no new atmosphere tag rows.
+        assert!(db.photo_ai_tags(photo, false).unwrap().is_empty());
     }
 
     #[test]
@@ -10369,12 +10523,32 @@ mod tests {
         let sea = views.iter().find(|view| view.tag_key == "sea").unwrap();
         assert_eq!(sea.name, "海");
         assert_eq!(sea.name_en.as_deref(), Some("Sea"));
+        assert_eq!(sea.branch, "outdoor");
+        assert_eq!(sea.tag_group, "");
         assert!((sea.probability - 0.97).abs() < f32::EPSILON);
         assert!(sea.applied);
         let park = views.iter().find(|view| view.tag_key == "park").unwrap();
         assert_eq!(park.name, "公園");
         assert_eq!(park.name_en, None);
         assert!(!park.applied);
+    }
+
+    #[test]
+    fn photo_ai_tags_with_names_include_atmosphere_branch_and_group() {
+        let db = Db::open_in_memory().unwrap();
+        let photo = seed_photo(&db);
+        db.sync_ai_catalog(AI_PLUGIN, &ai_catalog_with_atmosphere("2026-11-07.1"))
+            .unwrap();
+        db.save_photo_ai(photo, AI_PLUGIN, &test_ai_result(&[("weather_clear", 0.8)]))
+            .unwrap();
+
+        let views = db.photo_ai_tags_with_names(photo).unwrap();
+        let clear = views
+            .iter()
+            .find(|view| view.tag_key == "weather_clear")
+            .unwrap();
+        assert_eq!(clear.branch, "atmosphere");
+        assert_eq!(clear.tag_group, "weather");
     }
 
     #[test]

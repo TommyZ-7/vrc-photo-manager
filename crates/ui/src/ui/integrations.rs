@@ -838,7 +838,24 @@ pub(crate) fn ai_stage_label(stage: Option<TaggingStage>) -> String {
         Some(TaggingStage::PeopleCount) => tr!("integrations.ai.jobs.stage.people_count"),
         Some(TaggingStage::PlaceClass) => tr!("integrations.ai.jobs.stage.place_class"),
         Some(TaggingStage::PlaceTags) => tr!("integrations.ai.jobs.stage.place_tags"),
+        Some(TaggingStage::AtmosphereTags) => {
+            tr!("integrations.ai.jobs.stage.atmosphere_tags")
+        }
         Some(TaggingStage::Write) => tr!("integrations.ai.jobs.stage.write"),
         None => tr!("integrations.ai.jobs.stage.queued"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ai_stage_label;
+    use vrc_photon_ai_protocol::TaggingStage;
+
+    #[test]
+    fn atmosphere_stage_has_a_label() {
+        assert_eq!(
+            ai_stage_label(Some(TaggingStage::AtmosphereTags)),
+            "雰囲気タグを生成中"
+        );
     }
 }

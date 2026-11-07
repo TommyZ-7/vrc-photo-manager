@@ -972,7 +972,7 @@ mod tests {
         assert!(installed.manifest_json.contains("\"plugin_id\""));
         assert_eq!(
             fs::read(installed.path.join("catalog.json")).unwrap(),
-            br#"{"version":"2026-11-03.1"}"#
+            br#"{"version":"2026-11-07.1"}"#
         );
         assert!(installed.path.join(TEST_ENTRYPOINT).is_file());
         assert!(staging_entries(data_dir.path()).is_empty());

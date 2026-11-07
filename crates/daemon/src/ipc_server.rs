@@ -674,7 +674,7 @@ mod tests {
             .iter_mut()
             .find(|entry| entry.path == "catalog.json")
             .expect("the test package has a catalog");
-        catalog.data = br#"{"version":"2026-11-03.1","outdoor":[],"indoor":[]}"#.to_vec();
+        catalog.data = br#"{"version":"2026-11-07.1","outdoor":[],"indoor":[]}"#.to_vec();
         let files = package
             .entries()
             .iter()

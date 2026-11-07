@@ -1858,14 +1858,14 @@ mod tests {
     use crate::test_support::mock_sidecar;
 
     const PLUGIN: &str = TEST_PLUGIN_ID;
-    const CATALOG_VERSION: &str = "2026-11-03.1";
+    const CATALOG_VERSION: &str = "2026-11-07.1";
     const MODEL_BYTES: &[u8] = b"model";
     const MMPROJ_BYTES: &[u8] = b"mmproj";
     const MODEL_FILE: &str = "d1-2B-Q8_0.gguf";
     const MMPROJ_FILE: &str = "mmproj-d1-2B-Q8_0.gguf";
 
     const CATALOG_JSON: &str = r#"{
-  "version": "2026-11-03.1",
+  "version": "2026-11-07.1",
   "outdoor": [
     {
       "key": "sea",
@@ -1882,6 +1882,16 @@ mod tests {
       "name_en": "Japanese room",
       "description": "畳・障子のある和室",
       "default_threshold": 0.5
+    }
+  ],
+  "atmosphere": [
+    {
+      "key": "weather_clear",
+      "name": "晴れ",
+      "name_en": "Clear / sunny",
+      "description": "晴れている",
+      "default_threshold": 0.5,
+      "group": "weather"
     }
   ]
 }"#;
@@ -2169,6 +2179,26 @@ mod tests {
             settings.save(&db).expect("save the settings");
         }
 
+        fn seed_photo(&self) -> i64 {
+            let db = self.db();
+            let root = db.add_root("/photos", "reference").unwrap();
+            db.upsert_photo(&vrc_photon_core::model::NewPhoto {
+                root_id: root,
+                rel_path: "existing.png".to_string(),
+                abs_path: "/photos/existing.png".to_string(),
+                file_name: "existing.png".to_string(),
+                captured_at_utc: 1_700_000_000,
+                captured_at_local: "2026-11-04 12:00:00".to_string(),
+                tz_offset_sec: 9 * 3600,
+                width: 32,
+                height: 24,
+                file_size: 10,
+                mtime: 1_700_000_000,
+                blake3: None,
+            })
+            .unwrap()
+        }
+
         fn make_model_ready(&self) {
             let manifest = sample_manifest();
             let directory = model_dir(&self.data_dir, PLUGIN, &manifest.model.revision);
@@ -2226,6 +2256,7 @@ mod tests {
     #[test]
     fn install_probes_and_syncs_the_catalog() {
         let ctx = TestContext::new();
+        let photo = ctx.seed_photo();
         let events = ctx.events.subscribe();
         ctx.service.install_from_zip(&ctx.zip).unwrap();
         ctx.wait_for_install();
@@ -2237,7 +2268,9 @@ mod tests {
             .unwrap();
         assert_eq!(install.variant, "linux-cpu");
         assert_eq!(install.catalog_version.as_deref(), Some(CATALOG_VERSION));
-        assert_eq!(ctx.db().ai_tag_definitions(PLUGIN).unwrap().len(), 2);
+        assert_eq!(ctx.db().ai_tag_definitions(PLUGIN).unwrap().len(), 3);
+        assert!(ctx.db().tagging_jobs_for_photo(photo).unwrap().is_empty());
+        assert!(ctx.db().photo_ai_tags(photo, false).unwrap().is_empty());
 
         let state = ctx.db().plugin_state(PLUGIN).unwrap().unwrap();
         let probe: Probe =
@@ -2277,9 +2310,12 @@ mod tests {
                 .unwrap()
                 .path,
         );
+        let photo = ctx.seed_photo();
 
         ctx.service.install_from_zip(&ctx.zip).unwrap();
         ctx.wait_for_install();
+        assert!(ctx.db().tagging_jobs_for_photo(photo).unwrap().is_empty());
+        assert!(ctx.db().photo_ai_tags(photo, false).unwrap().is_empty());
 
         let root = plugins_root(&ctx.data_dir);
         let backups: Vec<_> = fs::read_dir(&root)
@@ -2528,7 +2564,7 @@ mod tests {
     fn uninstall_keeps_or_deletes_ai_tags() {
         let ctx = TestContext::new();
         ctx.install_default();
-        assert_eq!(ctx.db().ai_tag_definitions(PLUGIN).unwrap().len(), 2);
+        assert_eq!(ctx.db().ai_tag_definitions(PLUGIN).unwrap().len(), 3);
 
         let install_path = PathBuf::from(
             &ctx.db()
@@ -2547,7 +2583,7 @@ mod tests {
         );
         assert_eq!(
             ctx.db().ai_tag_definitions(PLUGIN).unwrap().len(),
-            2,
+            3,
             "uninstall without deleting AI tags must keep the catalog"
         );
         assert!(!install_path.exists());

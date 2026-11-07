@@ -13,6 +13,7 @@ pub enum Op {
     PeopleCount,
     PlaceClass,
     PlaceTags,
+    AtmosphereTags,
 }
 
 impl Op {
@@ -22,6 +23,7 @@ impl Op {
             Self::PeopleCount => "people_count",
             Self::PlaceClass => "place_class",
             Self::PlaceTags => "place_tags",
+            Self::AtmosphereTags => "atmosphere_tags",
         }
     }
 
@@ -31,6 +33,7 @@ impl Op {
             "people_count" => Some(Self::PeopleCount),
             "place_class" => Some(Self::PlaceClass),
             "place_tags" => Some(Self::PlaceTags),
+            "atmosphere_tags" => Some(Self::AtmosphereTags),
             _ => None,
         }
     }
@@ -72,6 +75,12 @@ pub struct Hello {
     pub catalog: Catalog,
 }
 
+impl Hello {
+    pub fn supports_atmosphere(&self) -> bool {
+        self.capabilities.iter().any(|c| c == "atmosphere_tags")
+    }
+}
+
 /// The sidecar's `--probe` output, printed without loading the model.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Probe {
@@ -101,6 +110,11 @@ pub enum SidecarRequest {
 }
 
 /// A message sent from the sidecar to the host.
+///
+/// `Hello` carries the full catalog and is the largest variant by design.
+/// Messages are parsed one line at a time, so boxing it would add allocation
+/// and match noise without a meaningful runtime benefit.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SidecarMessage {
@@ -141,6 +155,9 @@ pub enum SidecarResult {
     },
     PlaceTags {
         branch: TagBranch,
+        tags: Vec<TagProbability>,
+    },
+    AtmosphereTags {
         tags: Vec<TagProbability>,
     },
 }
@@ -187,6 +204,7 @@ mod tests {
             (Op::PeopleCount, "people_count"),
             (Op::PlaceClass, "place_class"),
             (Op::PlaceTags, "place_tags"),
+            (Op::AtmosphereTags, "atmosphere_tags"),
         ];
         for (op, text) in cases {
             assert_eq!(op.as_str(), text);
@@ -366,6 +384,35 @@ mod tests {
                 ],
             })
         );
+    }
+
+    #[test]
+    fn atmosphere_op_and_result_round_trip() {
+        let request = round_trip_request(
+            r#"{"type":"request","id":"r5","op":"atmosphere_tags","image":{"path":"/tmp/a.jpg","mtime_ms":1,"bytes":2}}"#,
+        );
+        let SidecarRequest::Request { op, branch, .. } = request else {
+            panic!("expected request");
+        };
+        assert_eq!(op, Op::AtmosphereTags);
+        assert_eq!(branch, None);
+
+        let result: SidecarResult = serde_json::from_str(
+            r#"{"op":"atmosphere_tags","tags":[{"key":"weather_clear","p_yes":0.9}]}"#,
+        )
+        .unwrap();
+        assert!(
+            matches!(result, SidecarResult::AtmosphereTags { tags } if tags[0].key == "weather_clear")
+        );
+    }
+
+    #[test]
+    fn hello_reports_atmosphere_capability() {
+        let json = r#"{"type":"hello","protocol_version":1,"sidecar_version":"0.4.0","plugin_id":"vrc-photon-autotag","variant":"linux-vulkan","model":{"id":"d1-2B","quantization":"Q8_0","revision":"rev","catalog_version":"2026-11-07.1"},"backend":{"kind":"vulkan","device":"Vulkan0"},"capabilities":["presence","atmosphere_tags"],"defaults":{"presence_threshold":0.9,"multiple_threshold":0.5},"catalog":{"version":"2026-11-07.1","outdoor":[],"indoor":[],"atmosphere":[{"key":"weather_clear","name":"晴れ","description":"晴れ","default_threshold":0.5,"group":"weather"}]}}"#;
+        let SidecarMessage::Hello(hello) = serde_json::from_str(json).unwrap() else {
+            panic!("expected hello");
+        };
+        assert!(hello.supports_atmosphere());
     }
 
     #[test]

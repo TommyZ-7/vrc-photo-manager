@@ -44,6 +44,7 @@ pub(crate) struct AiTagPickerRow {
     pub(crate) tag_key: String,
     pub(crate) name: String,
     pub(crate) branch: TagBranch,
+    pub(crate) group: String,
     pub(crate) selected: bool,
 }
 
@@ -87,6 +88,7 @@ pub(crate) fn ai_tag_picker_rows(
                 tag_key: definition.tag_key.clone(),
                 name,
                 branch: definition_branch,
+                group: definition.tag_group.clone(),
                 selected: selected.contains(&definition.tag_key),
             })
         })
@@ -202,12 +204,13 @@ pub(crate) fn branch_label(branch: TagBranch) -> String {
     match branch {
         TagBranch::Outdoor => tr!("ai.tags.picker.outdoor"),
         TagBranch::Indoor => tr!("ai.tags.picker.indoor"),
+        TagBranch::Atmosphere => tr!("ai.tags.picker.atmosphere"),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::ai_tag_picker_rows;
+    use super::{AiTagPickerRow, ai_tag_picker_rows, branch_label};
     use std::collections::BTreeSet;
     use vrc_photon_ai_protocol::TagBranch;
     use vrc_photon_core::ai::AiTagDefinition;
@@ -223,6 +226,7 @@ mod tests {
             plugin_id: "vrc-photon-autotag".into(),
             tag_key: tag_key.into(),
             branch: branch.into(),
+            tag_group: String::new(),
             name: name.into(),
             name_en: name_en.map(str::to_string),
             description: String::new(),
@@ -271,5 +275,36 @@ mod tests {
             1
         );
         assert!(ai_tag_picker_rows(&definitions, &selected, None, "mountain", "ja").is_empty());
+    }
+
+    #[test]
+    fn atmosphere_picker_filters_and_labels_the_branch() {
+        let mut clear = definition(
+            "weather_clear",
+            "晴れ",
+            Some("Clear / sunny"),
+            "atmosphere",
+            0,
+        );
+        clear.tag_group = "weather".into();
+        let definitions = vec![definition("sea", "海", Some("Sea"), "outdoor", 0), clear];
+        let rows = ai_tag_picker_rows(
+            &definitions,
+            &BTreeSet::new(),
+            Some(TagBranch::Atmosphere),
+            "",
+            "ja",
+        );
+        assert_eq!(
+            rows,
+            vec![AiTagPickerRow {
+                tag_key: "weather_clear".into(),
+                name: "晴れ".into(),
+                branch: TagBranch::Atmosphere,
+                group: "weather".into(),
+                selected: false,
+            }]
+        );
+        assert_eq!(branch_label(TagBranch::Atmosphere), "雰囲気");
     }
 }
