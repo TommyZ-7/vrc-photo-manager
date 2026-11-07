@@ -1,0 +1,1082 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,">
+<title>VRC PhotoN — 雰囲気タグ UI モック</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --font: "Inter", "Noto Sans JP", "Hiragino Sans", "Yu Gothic UI", system-ui, -apple-system, sans-serif;
+    --mono: "SFMono-Regular", "Cascadia Code", "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+
+    --text: #eef4ff;
+    --muted: #a8b4ca;
+    --dim: #7f8ba3;
+    --faint: #5e6a81;
+
+    --accent: #8bcbff;
+    --accent-2: #7f92ff;
+    --amber: #f4c878;
+    --rose: #ff94a8;
+    --green: #7ee2b8;
+    --ai: #70e4d2;
+    --ai-ink: #c9fff3;
+    --ai-soft: rgba(112, 228, 210, 0.075);
+    --ai-border: rgba(112, 228, 210, 0.23);
+
+    --line: rgba(255, 255, 255, 0.105);
+    --line-strong: rgba(255, 255, 255, 0.17);
+    --line-soft: rgba(255, 255, 255, 0.065);
+
+    --panel-header: #101725;
+    --panel-card: #0d1420;
+    --panel-inner: #111927;
+    --panel-deep: #0a1019;
+    --glass-window: rgba(10, 16, 28, 0.40);
+
+    --r-window: 28px;
+    --r-card: 22px;
+    --r-inner: 17px;
+    --ease: cubic-bezier(0.22, 0.8, 0.24, 1);
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    min-width: 320px;
+    overflow-x: hidden;
+    background: #05070d;
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 13px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -2;
+    background:
+      radial-gradient(ellipse 58% 54% at 10% 2%, rgba(54, 107, 255, 0.26), transparent 66%),
+      radial-gradient(ellipse 46% 52% at 92% 6%, rgba(255, 86, 181, 0.11), transparent 68%),
+      radial-gradient(ellipse 52% 48% at 64% 104%, rgba(30, 202, 178, 0.11), transparent 68%),
+      linear-gradient(140deg, #04060c 0%, #0a0f1e 44%, #060811 100%);
+  }
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    opacity: 0.03;
+    pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.55'/%3E%3C/svg%3E");
+    mix-blend-mode: overlay;
+  }
+
+  button, input { font: inherit; color: inherit; }
+  button { cursor: default; }
+  a { color: inherit; }
+  ::selection { background: rgba(139, 203, 255, 0.28); }
+  :focus-visible { outline: 2px solid rgba(139, 203, 255, 0.78); outline-offset: 2px; }
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 99px; background: rgba(255,255,255,.15); background-clip: padding-box; }
+
+  .page { width: min(1440px, calc(100% - 48px)); margin: 0 auto; padding: 38px 0 80px; }
+
+  /* ---------- header ---------- */
+  .page-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 28px;
+    align-items: end;
+    padding-bottom: 24px;
+  }
+  .eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 10px;
+    color: var(--accent);
+    font-size: 11px;
+    font-weight: 650;
+    letter-spacing: 0.02em;
+  }
+  .eyebrow::before {
+    content: "";
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 12px rgba(139,203,255,.8);
+  }
+  h1 {
+    margin: 0;
+    font-size: clamp(32px, 3.8vw, 48px);
+    line-height: 1.1;
+    letter-spacing: -0.04em;
+    font-weight: 680;
+  }
+  h1 span {
+    background: linear-gradient(110deg, #d8efff 8%, #8bcbff 46%, #9f9dff 92%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .lede { max-width: 760px; margin: 13px 0 0; color: var(--muted); font-size: 13px; line-height: 1.75; }
+  .lede b { color: var(--text); font-weight: 550; }
+  .head-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 10px; }
+  .chips { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 4px 9px;
+    border: 1px solid var(--line-soft);
+    border-radius: 999px;
+    background: rgba(255,255,255,.028);
+    color: var(--dim);
+    font-family: var(--mono);
+    font-size: 9.5px;
+    letter-spacing: .01em;
+    white-space: nowrap;
+  }
+  .chip b { color: var(--muted); font-weight: 500; }
+  .chip .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px rgba(126,226,184,.7); }
+  .approval-note {
+    display: flex;
+    gap: 11px;
+    max-width: 720px;
+    margin-top: 20px;
+    padding: 12px 14px;
+    border: 1px solid rgba(244, 200, 120, .18);
+    border-radius: 12px;
+    background: rgba(244, 200, 120, .045);
+    color: #e9d6af;
+    font-size: 11.5px;
+    line-height: 1.65;
+  }
+  .approval-note b { color: #f9e4b9; font-weight: 600; }
+  .approval-note .mark { color: var(--amber); font-size: 15px; line-height: 1.2; }
+
+  /* ---------- sections ---------- */
+  .showcase { margin-top: 46px; scroll-margin-top: 24px; }
+  .section-head {
+    display: flex;
+    align-items: flex-end;
+    gap: 14px;
+    margin-bottom: 15px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--line);
+  }
+  .section-index {
+    display: grid; place-items: center;
+    width: 38px; height: 38px;
+    flex: 0 0 38px;
+    border: 1px solid rgba(139,203,255,.19);
+    border-radius: 11px;
+    background: rgba(139,203,255,.075);
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+  .section-head h2 { margin: 0; font-size: 21px; font-weight: 640; letter-spacing: -.025em; }
+  .section-head p { max-width: 860px; margin: 4px 0 0; color: var(--dim); font-size: 12px; line-height: 1.65; }
+  .screen-chip {
+    margin-left: auto;
+    flex: 0 0 auto;
+    padding: 4px 8px;
+    border: 1px solid var(--line-soft);
+    border-radius: 6px;
+    background: rgba(255,255,255,.028);
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+  }
+
+  /* ---------- stage ---------- */
+  .stage {
+    position: relative;
+    display: grid;
+    place-items: center;
+    padding: 34px 26px;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: var(--r-card);
+    background:
+      radial-gradient(ellipse 70% 55% at 18% 0%, rgba(139,203,255,.10), transparent 68%),
+      radial-gradient(ellipse 55% 55% at 94% 94%, rgba(112,228,210,.07), transparent 72%),
+      rgba(4,8,15,.62);
+  }
+  .stage::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    opacity: .17;
+    pointer-events: none;
+    background-image:
+      linear-gradient(rgba(255,255,255,.07) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.07) 1px, transparent 1px);
+    background-size: 34px 34px;
+    mask-image: radial-gradient(ellipse at center, black, transparent 78%);
+  }
+  .stage-inner { position: relative; width: 100%; display: grid; place-items: center; }
+
+  /* ---------- modal shell ---------- */
+  .modal {
+    width: min(860px, 100%);
+    overflow: hidden;
+    border: 1px solid rgba(255,255,255,.18);
+    border-radius: 19px;
+    background: linear-gradient(180deg, var(--panel-header), var(--panel-card));
+    box-shadow: 0 34px 100px rgba(0,0,0,.58), inset 0 1px 0 rgba(255,255,255,.10);
+  }
+  .modal.picker { width: min(790px, 100%); }
+  .modal-head {
+    display: flex;
+    align-items: flex-start;
+    gap: 11px;
+    padding: 17px 18px 13px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .modal-icon {
+    display: grid; place-items: center;
+    width: 36px; height: 36px;
+    flex: 0 0 36px;
+    border: 1px solid var(--ai-border);
+    border-radius: 10px;
+    background: linear-gradient(145deg, rgba(112,228,210,.18), rgba(139,203,255,.06));
+    color: var(--ai-ink);
+    font-size: 17px;
+  }
+  .modal-title { flex: 1; min-width: 0; }
+  .modal-title h3 { margin: 0; font-size: 16px; font-weight: 650; letter-spacing: -.015em; }
+  .modal-title p { margin: 2px 0 0; color: var(--dim); font-size: 10.5px; line-height: 1.5; }
+  .icon-button {
+    display: grid; place-items: center;
+    width: 30px; height: 30px;
+    border: 1px solid var(--line-soft);
+    border-radius: 8px;
+    background: rgba(255,255,255,.03);
+    color: var(--dim);
+    font-size: 16px;
+  }
+  .icon-button:hover { border-color: var(--line-strong); background: rgba(255,255,255,.06); color: var(--text); }
+  .modal-body { display: flex; flex-direction: column; gap: 12px; padding: 15px 18px 17px; }
+
+  /* ---------- presence ---------- */
+  .presence {
+    padding: 11px 12px;
+    border: 1px solid rgba(139,203,255,.22);
+    border-radius: 11px;
+    background: rgba(139,203,255,.055);
+  }
+  .presence-top { display: flex; align-items: baseline; gap: 9px; }
+  .presence-top b { flex: 1; color: var(--text); font-size: 11.5px; font-weight: 600; }
+  .presence-top .next { color: var(--amber); font-size: 9.5px; }
+  .presence-top .value { color: var(--accent); font-family: var(--mono); font-size: 14px; font-weight: 600; }
+  .presence-hint { margin-top: 3px; color: var(--dim); font-size: 9.5px; }
+  .presence .track { margin-top: 9px; }
+  .presence-foot { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+  .presence-foot span { flex: 1; color: var(--faint); font-size: 9px; }
+  .presence-foot button { height: 24px; padding: 0 8px; }
+
+  /* ---------- toolbar / tabs ---------- */
+  .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .search {
+    flex: 1;
+    min-width: 200px;
+    display: flex; align-items: center; gap: 8px;
+    height: 33px;
+    padding: 0 10px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: rgba(3,7,14,.26);
+    color: var(--faint);
+    font-size: 11px;
+  }
+  .search .lens { color: var(--dim); font-size: 12px; }
+  .tabs { display: inline-flex; gap: 3px; padding: 3px; border: 1px solid var(--line-soft); border-radius: 9px; background: rgba(3,7,14,.22); }
+  .tab {
+    display: inline-flex; align-items: center; gap: 5px;
+    height: 27px; padding: 0 9px;
+    border: 0; border-radius: 7px;
+    background: transparent;
+    color: var(--faint);
+    font-size: 10.5px;
+    white-space: nowrap;
+  }
+  .tab b { color: var(--faint); font-family: var(--mono); font-size: 8.5px; font-weight: 500; }
+  .tab.active { background: rgba(112,228,210,.13); color: var(--ai-ink); box-shadow: inset 0 1px 0 rgba(255,255,255,.07); }
+  .tab.active b { color: #8edfd2; }
+  .tab:hover { color: var(--muted); }
+
+  .legend { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; }
+  .legend-item { display: inline-flex; align-items: center; gap: 5px; color: var(--dim); font-size: 9px; }
+  .legend-default { width: 2px; height: 12px; border-radius: 99px; background: var(--amber); }
+  .legend-current { width: 16px; height: 2px; border-radius: 99px; background: var(--accent); }
+
+  /* ---------- threshold list ---------- */
+  .list {
+    max-height: 900px;
+    overflow: auto;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: rgba(17,25,39,.62);
+  }
+  .group-head {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 12px 6px;
+    border-top: 1px solid var(--line-soft);
+    border-bottom: 1px solid var(--line-soft);
+    background: #0e1624;
+    color: var(--dim);
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: .08em;
+  }
+  .group-head:first-child { border-top: 0; }
+  .group-head b { color: var(--muted); font-weight: 500; letter-spacing: 0; }
+  .group-head .count { margin-left: auto; color: var(--faint); letter-spacing: 0; }
+  .group-head .bar { width: 2px; height: 10px; border-radius: 99px; background: var(--ai); }
+  .row {
+    display: grid;
+    grid-template-columns: 178px minmax(120px, 1fr) 44px 52px;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    border-top: 1px solid var(--line-soft);
+  }
+  .row:first-of-type { border-top: 0; }
+  .row.override { background: rgba(244,200,120,.055); }
+  .row-name { min-width: 0; }
+  .row-name b { display: block; overflow: hidden; color: var(--text); font-size: 11px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+  .row-name span { display: block; overflow: hidden; margin-top: 1px; color: var(--muted); font-family: var(--mono); font-size: 8.5px; text-overflow: ellipsis; white-space: nowrap; }
+  .row.override .row-name span { color: var(--amber); }
+  .track { position: relative; height: 18px; }
+  .track::before { content: ""; position: absolute; left: 0; right: 0; top: 8px; height: 3px; border-radius: 99px; background: rgba(255,255,255,.075); }
+  .fill { position: absolute; left: 0; top: 8px; height: 3px; border-radius: 99px; background: linear-gradient(90deg, #6ec8ff, #7b8dff); box-shadow: 0 0 10px rgba(110,200,255,.35); }
+  .default-mark { position: absolute; top: 2px; width: 2px; height: 14px; border-radius: 99px; background: var(--amber); }
+  .thumb { position: absolute; top: 3px; width: 12px; height: 12px; margin-left: -6px; border: 2px solid #eaf7ff; border-radius: 50%; background: #5b83ff; box-shadow: 0 0 0 3px rgba(91,131,255,.16); }
+  .row-value { color: var(--text); font-family: var(--mono); font-size: 10.5px; text-align: right; }
+  .reset { height: 24px; padding: 0 7px; border: 1px solid var(--line-soft); border-radius: 6px; background: transparent; color: var(--faint); font-size: 9px; }
+  .reset:hover { border-color: var(--line); color: var(--muted); }
+  .reset:disabled { opacity: .35; }
+
+  .modal-foot { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+  .foot-note { flex: 1; color: var(--faint); font-size: 9px; line-height: 1.5; }
+  .foot-note b { color: var(--muted); font-weight: 500; }
+
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    height: 30px; padding: 0 11px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: rgba(255,255,255,.042);
+    color: var(--muted);
+    font-size: 10.5px;
+    font-weight: 520;
+    white-space: nowrap;
+  }
+  .btn:hover { border-color: var(--line-strong); background: rgba(255,255,255,.07); color: var(--text); }
+  .btn.primary { border-color: rgba(158,214,255,.33); background: linear-gradient(180deg, #7dc3ff, #5b83ff); color: #fff; box-shadow: 0 5px 16px rgba(78,124,255,.22), inset 0 1px 0 rgba(255,255,255,.32); }
+  .btn.primary:hover { background: linear-gradient(180deg, #8ccdff, #688eff); }
+  .btn.ghost { border-color: transparent; background: transparent; color: var(--dim); }
+  .btn.ghost:hover { border-color: var(--line-soft); background: rgba(255,255,255,.045); color: var(--text); }
+  .btn.sm { height: 26px; padding: 0 8px; font-size: 9.5px; }
+
+  /* ---------- picker ---------- */
+  .picker-list { max-height: 590px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; background: rgba(17,25,39,.62); }
+  .picker-row {
+    display: flex; align-items: center; gap: 9px;
+    padding: 7px 10px;
+    border-top: 1px solid var(--line-soft);
+  }
+  .picker-row:first-of-type { border-top: 0; }
+  .picker-row.selected { background: rgba(112,228,210,.045); }
+  .check {
+    display: grid; place-items: center;
+    width: 15px; height: 15px;
+    flex: 0 0 15px;
+    border: 1px solid var(--line-strong);
+    border-radius: 4px;
+    background: transparent;
+    color: #071018;
+    font-size: 10px;
+  }
+  .check.on { border-color: var(--ai); background: var(--ai); }
+  .picker-copy { flex: 1; min-width: 0; }
+  .picker-copy b { display: block; color: var(--text); font-size: 11px; font-weight: 500; }
+  .picker-copy span { display: block; margin-top: 1px; color: var(--muted); font-family: var(--mono); font-size: 8.5px; }
+  .picker-group { flex: 0 0 auto; padding: 2px 6px; border: 1px solid var(--line-soft); border-radius: 999px; color: var(--dim); font-size: 8.5px; }
+  .picker-count { flex: 0 0 auto; color: var(--faint); font-family: var(--mono); font-size: 9px; }
+
+  /* ---------- inspector ---------- */
+  .inspector-wrap { display: grid; grid-template-columns: 390px minmax(0, 1fr); gap: 20px; width: min(1080px, 100%); align-items: start; }
+  .inspector-card {
+    padding: 13px;
+    border: 1px solid rgba(255,255,255,.13);
+    border-radius: 20px;
+    background: linear-gradient(160deg, #1a2a3f, #0b1320 55%, #090f18);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.075), 0 24px 60px rgba(0,0,0,.34);
+  }
+  .inspector-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 9px; color: var(--dim); font-size: 9.5px; }
+  .inspector-top .mono { font-family: var(--mono); font-size: 9px; }
+  .photo {
+    position: relative;
+    aspect-ratio: 16 / 10;
+    overflow: hidden;
+    border: 1px solid rgba(255,255,255,.15);
+    border-radius: 12px;
+    background:
+      radial-gradient(circle at 74% 25%, rgba(255,248,220,.98) 0 2.6%, rgba(255,244,205,.30) 3.4% 8%, transparent 21%),
+      radial-gradient(ellipse 70% 32% at 50% 103%, rgba(112,228,210,.16), transparent 70%),
+      linear-gradient(180deg, #081226 0%, #102445 42%, #0a2034 56%, #061018 100%);
+    box-shadow: inset 0 0 60px rgba(4,8,16,.55);
+  }
+  .star { position: absolute; width: 2px; height: 2px; border-radius: 50%; background: rgba(230,244,255,.85); box-shadow: 0 0 7px rgba(230,244,255,.65); }
+  .star.a { left: 18%; top: 18%; } .star.b { left: 36%; top: 10%; opacity: .6; } .star.c { left: 54%; top: 22%; opacity: .5; } .star.d { left: 88%; top: 14%; opacity: .7; }
+  .horizon { position: absolute; left: 0; right: 0; top: 58%; height: 1px; background: linear-gradient(90deg, transparent, rgba(177,216,255,.34), transparent); }
+  .shore { position: absolute; left: -5%; right: -5%; bottom: -12%; height: 32%; border-radius: 50% 50% 0 0 / 70% 70% 0 0; background: linear-gradient(180deg, rgba(7,17,27,.35), rgba(3,8,14,.92)); }
+  .photo-caption { position: absolute; left: 10px; bottom: 9px; padding: 3px 7px; border: 1px solid rgba(255,255,255,.13); border-radius: 5px; background: rgba(2,6,12,.46); color: var(--muted); font-family: var(--mono); font-size: 8.5px; backdrop-filter: blur(8px); }
+  .inspector-title { margin-top: 11px; }
+  .inspector-title h4 { margin: 0; color: var(--text); font-size: 16px; font-weight: 620; letter-spacing: -.02em; }
+  .inspector-title .date { display: block; margin-top: 2px; color: var(--dim); font-family: var(--mono); font-size: 9px; }
+  .badge-row { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 9px; }
+  .badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border: 1px solid var(--line-soft); border-radius: 999px; background: rgba(255,255,255,.035); color: var(--muted); font-size: 9.5px; white-space: nowrap; }
+  .badge.blue { border-color: rgba(139,203,255,.20); background: rgba(139,203,255,.08); color: #b9e4ff; }
+  .badge.ai { border-color: var(--ai-border); background: var(--ai-soft); color: var(--ai-ink); }
+
+  .ai-panel {
+    position: relative;
+    padding: 12px;
+    border: 1px solid var(--ai-border);
+    border-radius: 14px;
+    background:
+      linear-gradient(160deg, rgba(112,228,210,.075), rgba(139,203,255,.035) 58%, rgba(127,146,255,.025)),
+      rgba(5,13,20,.32);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.06);
+  }
+  .ai-panel::before { content: ""; position: absolute; left: -1px; top: 14px; bottom: 14px; width: 2px; border-radius: 99px; background: linear-gradient(180deg, var(--ai), rgba(127,146,255,.2)); box-shadow: 0 0 10px rgba(112,228,210,.35); }
+  .ai-head { display: flex; align-items: center; gap: 7px; }
+  .ai-head b { color: var(--ai-ink); font-size: 10.5px; font-weight: 650; }
+  .ai-head span { color: var(--faint); font-size: 9px; }
+  .ai-head .spark { color: var(--ai); font-size: 11px; }
+  .ai-section { margin-top: 11px; }
+  .ai-label { display: flex; align-items: center; gap: 6px; color: var(--dim); font-family: var(--mono); font-size: 8.5px; letter-spacing: .08em; }
+  .ai-label .rule { flex: 1; height: 1px; background: var(--line-soft); }
+  .ai-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+  .ai-chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border: 1px solid var(--ai-border); border-radius: 999px; background: var(--ai-soft); color: #d8fff8; font-size: 10px; }
+  .ai-chip .spark { color: var(--ai); font-size: 8.5px; }
+  .ai-chip .prob { color: #8edfd2; font-family: var(--mono); font-size: 8.5px; }
+  .ai-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 12px; }
+  .ai-fact { display: flex; align-items: center; gap: 8px; padding: 8px 9px; border: 1px solid rgba(112,228,210,.13); border-radius: 9px; background: rgba(3,7,14,.22); }
+  .ai-fact .fact-icon { display: grid; place-items: center; width: 25px; height: 25px; flex: 0 0 25px; border-radius: 7px; background: rgba(112,228,210,.09); color: var(--ai); font-size: 12px; }
+  .ai-fact label { display: block; color: var(--dim); font-size: 8.5px; }
+  .ai-fact b { display: block; margin-top: 1px; color: var(--text); font-size: 11px; font-weight: 550; }
+  .ai-foot { margin: 10px 0 0; color: var(--faint); font-family: var(--mono); font-size: 8.5px; line-height: 1.55; }
+  .retag { width: 100%; margin-top: 11px; }
+
+  .side-notes { display: flex; flex-direction: column; gap: 12px; }
+  .note-card { padding: 14px 15px; border: 1px solid var(--line); border-radius: 15px; background: linear-gradient(160deg, rgba(17,25,39,.82), rgba(10,16,25,.88)); box-shadow: inset 0 1px 0 rgba(255,255,255,.05); }
+  .note-card h4 { margin: 0; font-size: 12.5px; font-weight: 620; }
+  .note-card p { margin: 5px 0 0; color: var(--dim); font-size: 10.5px; line-height: 1.65; }
+  .note-card ul { display: grid; gap: 6px; margin: 9px 0 0; padding: 0; list-style: none; }
+  .note-card li { display: flex; gap: 7px; color: var(--muted); font-size: 10px; line-height: 1.55; }
+  .note-card li::before { content: "·"; color: var(--ai); font-weight: 700; }
+  .note-card li b { color: var(--text); font-weight: 550; }
+
+  /* ---------- job ---------- */
+  .job-wrap { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, .95fr); gap: 18px; width: min(1120px, 100%); align-items: start; }
+  .job-card { padding: 16px; border: 1px solid var(--line); border-radius: var(--r-card); background: linear-gradient(155deg, rgba(31,44,66,.55), rgba(10,16,25,.25) 38%, rgba(8,13,21,.55)), linear-gradient(180deg, var(--panel-card), #0a111b); box-shadow: inset 0 1px 0 rgba(255,255,255,.065), 0 20px 46px rgba(0,0,0,.26); }
+  .job-head { display: flex; align-items: flex-start; gap: 10px; }
+  .job-icon { display: grid; place-items: center; width: 36px; height: 36px; flex: 0 0 36px; border: 1px solid var(--ai-border); border-radius: 11px; background: linear-gradient(145deg, rgba(112,228,210,.16), rgba(127,146,255,.075)); color: var(--ai-ink); font-size: 16px; }
+  .job-head h4 { margin: 0; font-size: 14px; font-weight: 620; }
+  .job-head p { margin: 2px 0 0; color: var(--dim); font-size: 10px; }
+  .job-stat { margin-left: auto; padding: 3px 8px; border: 1px solid rgba(139,203,255,.2); border-radius: 999px; background: rgba(139,203,255,.08); color: #b9e4ff; font-family: var(--mono); font-size: 8.5px; }
+  .job-box { margin-top: 13px; padding: 11px; border: 1px solid var(--line-soft); border-radius: 11px; background: rgba(3,7,14,.22); }
+  .job-top { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; font-size: 10px; }
+  .job-top b { min-width: 0; overflow: hidden; color: var(--muted); font-family: var(--mono); font-size: 9px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+  .job-top .stage { flex: 0 0 auto; color: var(--ai-ink); font-size: 9.5px; }
+  .job-top .pct { margin-left: auto; flex: 0 0 auto; color: var(--accent); font-family: var(--mono); font-size: 10px; }
+  .bar { height: 7px; overflow: hidden; border-radius: 99px; background: rgba(255,255,255,.07); }
+  .bar i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #5fd8bd, #7ee2b8); box-shadow: 0 0 14px rgba(126,226,184,.35); }
+  .job-foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 5px 12px; margin-top: 8px; color: var(--dim); font-family: var(--mono); font-size: 8.5px; }
+  .job-foot .now { color: var(--ai); }
+  .steps { display: flex; flex-direction: column; gap: 1px; margin-top: 12px; overflow: hidden; border: 1px solid var(--line-soft); border-radius: 10px; background: rgba(3,7,14,.20); }
+  .step { display: grid; grid-template-columns: 16px 1fr auto; align-items: center; gap: 8px; padding: 7px 10px; border-top: 1px solid var(--line-soft); }
+  .step:first-child { border-top: 0; }
+  .step .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
+  .step.done .dot { background: var(--green); box-shadow: 0 0 8px rgba(126,226,184,.6); }
+  .step.active .dot { background: var(--ai); box-shadow: 0 0 10px rgba(112,228,210,.8); }
+  .step span { color: var(--dim); font-size: 9.5px; }
+  .step.active span { color: var(--ai-ink); }
+  .step b { color: var(--faint); font-family: var(--mono); font-size: 8.5px; font-weight: 500; }
+  .step.active b { color: #8edfd2; }
+
+  .behavior { padding: 16px; border: 1px solid var(--line); border-radius: var(--r-card); background: linear-gradient(155deg, rgba(31,44,66,.40), rgba(10,16,25,.22) 38%, rgba(8,13,21,.50)), linear-gradient(180deg, var(--panel-card), #0a111b); box-shadow: inset 0 1px 0 rgba(255,255,255,.055); }
+  .behavior h4 { margin: 0; font-size: 14px; font-weight: 620; }
+  .behavior > p { margin: 4px 0 0; color: var(--dim); font-size: 10.5px; line-height: 1.6; }
+  .behavior ul { display: grid; gap: 7px; margin: 12px 0 0; padding: 0; list-style: none; }
+  .behavior li { display: flex; gap: 8px; color: var(--muted); font-size: 10px; line-height: 1.55; }
+  .behavior li .tick { color: var(--green); font-size: 11px; }
+  .behavior li b { color: var(--text); font-weight: 550; }
+  .behavior .foot { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line-soft); color: var(--faint); font-size: 9px; line-height: 1.6; }
+
+  /* ---------- tag table ---------- */
+  .tag-table { width: 100%; border-collapse: collapse; overflow: hidden; margin-top: 14px; border: 1px solid var(--line-soft); border-radius: 12px; background: rgba(3,7,14,.2); }
+  .tag-table th { padding: 8px 10px; border-bottom: 1px solid var(--line-soft); color: var(--faint); font-family: var(--mono); font-size: 8.5px; font-weight: 500; letter-spacing: .06em; text-align: left; }
+  .tag-table td { padding: 7px 10px; border-top: 1px solid var(--line-soft); color: var(--muted); font-size: 10px; }
+  .tag-table td:first-child { color: var(--text); }
+  .tag-table .key { color: var(--dim); font-family: var(--mono); font-size: 9px; }
+  .tag-table .grp { color: var(--ai); font-size: 9px; }
+  .tag-table .moved { color: var(--amber); font-size: 9px; }
+
+  /* ---------- notes ---------- */
+  .notes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+  .notes .note-card { min-width: 0; }
+  .notes .note-card h4 { font-size: 11.5px; }
+  .notes .note-card p { font-size: 10px; }
+
+  @media (max-width: 980px) {
+    .page-head { grid-template-columns: 1fr; }
+    .head-meta { align-items: flex-start; }
+    .chips { justify-content: flex-start; }
+    .inspector-wrap, .job-wrap { grid-template-columns: 1fr; }
+    .notes { grid-template-columns: 1fr; }
+    .row { grid-template-columns: 150px minmax(90px, 1fr) 40px 48px; }
+  }
+  @media (max-width: 720px) {
+    .page { width: min(100% - 24px, 1440px); padding-top: 24px; }
+    .stage { padding: 16px 8px; }
+    .modal-body { padding: 12px; }
+    .row { grid-template-columns: minmax(0, 1fr) 44px 48px; }
+    .row .track { grid-column: 1 / -1; }
+    .row .reset { display: none; }
+    .section-head .screen-chip { display: none; }
+    .toolbar { align-items: stretch; }
+    .tabs { width: 100%; overflow-x: auto; }
+    .foot-note { display: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    * { transition: none !important; }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <header class="page-head">
+    <div>
+      <div class="eyebrow">VRC PhotoN · 0.12.0 設計確認</div>
+      <h1>雰囲気タグを、<span>場所とは別の軸</span>で。</h1>
+      <p class="lede">
+        天候・光・ムード・時間帯の情景を <b>16 タグ</b>として返し、場所タグと同じ写真に並べる。
+        このモックでは、しきい値・検索ピッカー・インスペクタ・ジョブ進捗の 4 画面を確認する。
+      </p>
+    </div>
+    <div class="head-meta">
+      <div class="chips">
+        <span class="chip"><span class="dot"></span> catalog <b>2026-11-07.1</b></span>
+        <span class="chip">雰囲気 <b>16</b></span>
+        <span class="chip">屋外 <b>24</b> / 屋内 <b>26</b></span>
+        <span class="chip">IPC <b>v6</b></span>
+        <span class="chip">schema <b>v16</b></span>
+      </div>
+    </div>
+  </header>
+
+  <div class="approval-note">
+    <span class="mark">◐</span>
+    <div><b>承認用モックです。</b> 実装は承認後。数値は暫定の既定値 50% で、品質検証・推論時間の実測は行いません。移設 3 タグ（夕景・夜景・星空）の既存データは削除せず、branch だけを atmosphere に更新します。</div>
+  </div>
+
+  <section class="showcase" id="thresholds">
+    <div class="section-head">
+      <div class="section-index">01</div>
+      <div>
+        <h2>しきい値モーダル — 「雰囲気」タブ</h2>
+        <p>既存の「屋外」「屋内」の隣に「雰囲気」を追加。16 件を group ごとの見出しで区切り、1 つのスクロール領域に並べる。モックでは全体を確認できるよう全件を展開して表示。</p>
+      </div>
+      <span class="screen-chip">settings / ai thresholds</span>
+    </div>
+    <div class="stage">
+      <div class="stage-inner">
+        <div class="modal" role="dialog" aria-label="AIタグのしきい値">
+          <div class="modal-head">
+            <div class="modal-icon">✦</div>
+            <div class="modal-title">
+              <h3>AIタグのしきい値</h3>
+              <p>タグごとの適用ラインを調整します。変更は保存後、既存のタグ行にすぐ反映されます。</p>
+            </div>
+            <button class="icon-button" aria-label="閉じる">×</button>
+          </div>
+          <div class="modal-body">
+            <div class="presence">
+              <div class="presence-top">
+                <b>キャラクターの存在</b>
+                <span class="next">次回のタグ付けから適用</span>
+                <span class="value">90%</span>
+              </div>
+              <div class="presence-hint">この値以上で「キャラクターが写っている」と判定します。</div>
+              <div class="track" aria-hidden="true">
+                <div class="fill" style="width:90%"></div>
+                <div class="default-mark" style="left:90%"></div>
+                <div class="thumb" style="left:90%"></div>
+              </div>
+              <div class="presence-foot">
+                <span>既定 90% · 保存済みの値</span>
+                <button class="reset" disabled>既定に戻す</button>
+              </div>
+            </div>
+
+            <div class="toolbar">
+              <div class="search"><span class="lens">⌕</span><span>タグ名・キーで絞り込む</span></div>
+              <div class="tabs" role="tablist" aria-label="タグの種類">
+                <button class="tab" role="tab">屋外 <b>24</b></button>
+                <button class="tab" role="tab">屋内 <b>26</b></button>
+                <button class="tab active" role="tab" aria-selected="true">雰囲気 <b>16</b></button>
+              </div>
+            </div>
+
+            <div class="legend">
+              <span class="legend-item"><span class="legend-default"></span> カタログ既定値</span>
+              <span class="legend-item"><span class="legend-current"></span> 現在のしきい値</span>
+            </div>
+
+            <div class="list" role="list">
+              <div class="group-head"><span class="bar"></span><b>天候</b><span class="count">6 tags · weather</span></div>
+              <div class="row" role="listitem">
+                <div class="row-name"><b>晴れ</b><span>weather_clear · 既定 50%</span></div>
+                <div class="track" aria-hidden="true"><div class="fill" style="width:50%"></div><div class="default-mark" style="left:50%"></div><div class="thumb" style="left:50%"></div></div>
+                <div class="row-value">50%</div>
+                <button class="reset" disabled>戻す</button>
+              </div>
+              <div class="row" role="listitem">
+                <div class="row-name"><b>曇り</b><span>weather_cloudy · 既定 50%</span></div>
+                <div class="track" aria-hidden="true"><div class="fill" style="width:50%"></div><div class="default-mark" style="left:50%"></div><div class="thumb" style="left:50%"></div></div>
+                <div class="row-value">50%</div>
+                <button class="reset" disabled>戻す</button>
+              </div>
+              <div class="row" role="listitem">
+                <div class="row-name"><b>雨</b><span>weather_rain · 既定 50%</span></div>
+                <div class="track" aria-hidden="true"><div class="fill" style="width:50%"></div><div class="default-mark" style="left:50%"></div><div class="thumb" style="left:50%"></div></div>
+                <div class="row-value">50%</div>
+                <button class="reset" disabled>戻す</button>
+              </div>
+              <div class="row" role="listitem">
+                <div class="row-name"><b>雪</b><span>weather_snow · 既定 50%</span></div>
+                <div class="track" aria-hidden="true"><div class="fill" style="width:50%"></div><div class="default-mark" style="left:50%"></div><div class="thumb" style="left:50%"></div></div>
+                <div class="row-value">50%</div>
+                <button class="reset" disabled>戻す</button>
+              </div>
+              <div class="row" role="listitem">
+                <div class="row-name"><b>霧</b><span>weather_fog · 既定 50%</span></div>
+                <div class="track" aria-hidden="true"><div class="fill" style="width:50%"></div><div class="default-mark" style="left:50%"></div><div class="thumb" style="left:50%"></div></div>
+                <div class="row-value">50%</div>
+                <button class="reset" disabled>戻す</button>
+              </div>
+              <div class="row" role="listitem">
+                <div class="row-name"><b>雷雨</b><span>weather_thunderstorm · 既定 50%</span></div>
+                <div class="track" aria-hidden="true"><div class="fill" style="width:50%"></div><div class="default-mark" style="left:50%"></div><div class="thumb" style="left:50%"></div></div>
+                <div class="row-value">50%</div>
+                <button class="reset" disabled>戻す</button>
+              </div>
+
+              <div class="group-head"><span class="bar"></span><b>光</b><span class="count">5 tags · light</span></div>
+              <div class="row" role="listitem">
+                <div class="row-name"><b>薄暗い</b><span>light_dim · 既定 50%</span></div>
+                <div class="track" aria-hidden="true"><div class="fill" style="width:50%"></div><div class="default-mark" style="left:50%"></div><div class="thumb" style="left:50%"></div></div>
+                <div class="row-value">50%</div>
+                <button class="reset" disabled>戻す</button>
+              </div>
+              <div class="row" role="listitem">
+                <div class="row-name"><b>暗い</b><span>light_dark · 既定 50%</span></div>
+                <div class="track" aria-hidden="true"><div class="fill" style="width:50%"></div><div class="default-mark" style="left:50%"></div><div class="thumb" style="left:50%"></div></div>
+                <div class="row-value">50%</div>
+                <button class="reset" disabled>戻す</button>
+              </div>
+              <div class="row" role="listitem">
+                <div class="row-name"><b>逆光</b><span>light_backlit · 既定 50%</span></div>
+                <div class="track" aria-hidden="true"><div class="fill" style="width:50%"></div><div class="default-mark" style="left:50%"></div><div class="thumb" style="left:50%"></div></div>
+                <div class="row-value">50%</div>
+                <button class="reset" disabled>戻す</button>
+              </div>
+              <div class="row override" role="listitem">
+                <div class="row-name"><b>ネオンの光</b><span>light_neon · 既定 50% · 上書き</span></div>
+                <div class="track" aria-hidden="true"><div class="fill" style="width:72%"></div><div class="default-mark" style="left:50%"></div><div class="thumb" style="left:72%"></div></div>
+                <div class="row-value">72%</div>
+                <button class="reset">戻す</button>
+              </div>
+              <div class="row" role="listitem">
+                <div class="row-name"><b>まぶしい</b><span>light_bright · 既定 50%</span></div>
+                <div class="track" aria-hidden="true"><div class="fill" style="width:50%"></div><div class="default-mark" style="left:50%"></div><div class="thumb" style="left:50%"></div></div>
+                <div class="row-value">50%</div>
+                <button class="reset" disabled>戻す</button>
+              </div>
+
+              <div class="group-head"><span class="bar"></span><b>ムード</b><span class="count">2 tags · mood</span></div>
+              <div class="row" role="listitem">
+                <div class="row-name"><b>幻想的</b><span>mood_ethereal · 既定 50%</span></div>
+                <div class="track" aria-hidden="true"><div class="fill" style="width:50%"></div><div class="default-mark" style="left:50%"></div><div class="thumb" style="left:50%"></div></div>
+                <div class="row-value">50%</div>
+                <button class="reset" disabled>戻す</button>
+              </div>
+              <div class="row" role="listitem">
+                <div class="row-name"><b>静か</b><span>mood_quiet · 既定 50%</span></div>
+                <div class="track" aria-hidden="true"><div class="fill" style="width:50%"></div><div class="default-mark" style="left:50%"></div><div class="thumb" style="left:50%"></div></div>
+                <div class="row-value">50%</div>
+                <button class="reset" disabled>戻す</button>
+              </div>
+
+              <div class="group-head"><span class="bar"></span><b>時間・情景</b><span class="count">3 tags · scene · 屋外から移設</span></div>
+              <div class="row" role="listitem">
+                <div class="row-name"><b>夕景</b><span>sunset · 既定 50% · 屋外から移設</span></div>
+                <div class="track" aria-hidden="true"><div class="fill" style="width:50%"></div><div class="default-mark" style="left:50%"></div><div class="thumb" style="left:50%"></div></div>
+                <div class="row-value">50%</div>
+                <button class="reset" disabled>戻す</button>
+              </div>
+              <div class="row" role="listitem">
+                <div class="row-name"><b>夜景</b><span>night_view · 既定 50% · 屋外から移設</span></div>
+                <div class="track" aria-hidden="true"><div class="fill" style="width:50%"></div><div class="default-mark" style="left:50%"></div><div class="thumb" style="left:50%"></div></div>
+                <div class="row-value">50%</div>
+                <button class="reset" disabled>戻す</button>
+              </div>
+              <div class="row" role="listitem">
+                <div class="row-name"><b>星空</b><span>starry_sky · 既定 50% · 屋外から移設</span></div>
+                <div class="track" aria-hidden="true"><div class="fill" style="width:50%"></div><div class="default-mark" style="left:50%"></div><div class="thumb" style="left:50%"></div></div>
+                <div class="row-value">50%</div>
+                <button class="reset" disabled>戻す</button>
+              </div>
+            </div>
+
+            <div class="modal-foot">
+              <span class="foot-note">雰囲気タグの既定値は <b>品質検証前の暫定値</b>です。移設タグのユーザー閾値は tag_key 単位でそのまま維持されます。</span>
+              <button class="btn ghost sm">すべて戻す</button>
+              <button class="btn secondary sm">キャンセル</button>
+              <button class="btn primary sm">保存</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="showcase" id="picker">
+    <div class="section-head">
+      <div class="section-index">02</div>
+      <div>
+        <h2>検索の AI タグピッカー — 「雰囲気」タブ</h2>
+        <p>既存の「すべて」「屋外」「屋内」は維持。雰囲気タブでは group を見出しにし、検索語は日本語名・英語名・tag_key のどれでも一致させる。モックでは全件を展開して表示。</p>
+      </div>
+      <span class="screen-chip">library / search filter</span>
+    </div>
+    <div class="stage">
+      <div class="stage-inner">
+        <div class="modal picker" role="dialog" aria-label="AIタグで絞り込む">
+          <div class="modal-head">
+            <div class="modal-icon">⌕</div>
+            <div class="modal-title">
+              <h3>AIタグで絞り込む</h3>
+              <p>選択したタグをすべて含む写真だけを表示します。</p>
+            </div>
+            <button class="icon-button" aria-label="閉じる">×</button>
+          </div>
+          <div class="modal-body">
+            <div class="toolbar">
+              <div class="search"><span class="lens">⌕</span><span>タグ名・キーで絞り込む</span></div>
+              <div class="tabs" role="tablist" aria-label="タグの種類">
+                <button class="tab" role="tab">すべて</button>
+                <button class="tab" role="tab">屋外</button>
+                <button class="tab" role="tab">屋内</button>
+                <button class="tab active" role="tab" aria-selected="true">雰囲気 <b>16</b></button>
+              </div>
+            </div>
+
+            <div class="picker-list">
+              <div class="group-head"><span class="bar"></span><b>天候</b><span class="count">6 tags · weather</span></div>
+              <div class="picker-row selected">
+                <span class="check on" aria-hidden="true">✓</span>
+                <div class="picker-copy"><b>晴れ</b><span>weather_clear</span></div>
+                <span class="picker-group">天候</span>
+              </div>
+              <div class="picker-row">
+                <span class="check" aria-hidden="true"></span>
+                <div class="picker-copy"><b>曇り</b><span>weather_cloudy</span></div>
+                <span class="picker-group">天候</span>
+              </div>
+              <div class="picker-row">
+                <span class="check" aria-hidden="true"></span>
+                <div class="picker-copy"><b>雨</b><span>weather_rain</span></div>
+                <span class="picker-group">天候</span>
+              </div>
+              <div class="picker-row">
+                <span class="check" aria-hidden="true"></span>
+                <div class="picker-copy"><b>雪</b><span>weather_snow</span></div>
+                <span class="picker-group">天候</span>
+              </div>
+              <div class="group-head"><span class="bar"></span><b>光</b><span class="count">5 tags · light</span></div>
+              <div class="picker-row">
+                <span class="check" aria-hidden="true"></span>
+                <div class="picker-copy"><b>薄暗い</b><span>light_dim</span></div>
+                <span class="picker-group">光</span>
+              </div>
+              <div class="picker-row">
+                <span class="check" aria-hidden="true"></span>
+                <div class="picker-copy"><b>暗い</b><span>light_dark</span></div>
+                <span class="picker-group">光</span>
+              </div>
+              <div class="picker-row">
+                <span class="check" aria-hidden="true"></span>
+                <div class="picker-copy"><b>逆光</b><span>light_backlit</span></div>
+                <span class="picker-group">光</span>
+              </div>
+              <div class="picker-row">
+                <span class="check on" aria-hidden="true">✓</span>
+                <div class="picker-copy"><b>ネオンの光</b><span>light_neon</span></div>
+                <span class="picker-group">光</span>
+              </div>
+              <div class="group-head"><span class="bar"></span><b>ムード</b><span class="count">2 tags · mood</span></div>
+              <div class="picker-row">
+                <span class="check" aria-hidden="true"></span>
+                <div class="picker-copy"><b>幻想的</b><span>mood_ethereal</span></div>
+                <span class="picker-group">ムード</span>
+              </div>
+              <div class="picker-row">
+                <span class="check" aria-hidden="true"></span>
+                <div class="picker-copy"><b>静か</b><span>mood_quiet</span></div>
+                <span class="picker-group">ムード</span>
+              </div>
+              <div class="group-head"><span class="bar"></span><b>時間・情景</b><span class="count">3 tags · scene</span></div>
+              <div class="picker-row selected">
+                <span class="check on" aria-hidden="true">✓</span>
+                <div class="picker-copy"><b>夕景</b><span>sunset</span></div>
+                <span class="picker-group">時間・情景</span>
+              </div>
+              <div class="picker-row">
+                <span class="check" aria-hidden="true"></span>
+                <div class="picker-copy"><b>夜景</b><span>night_view</span></div>
+                <span class="picker-group">時間・情景</span>
+              </div>
+              <div class="picker-row">
+                <span class="check" aria-hidden="true"></span>
+                <div class="picker-copy"><b>星空</b><span>starry_sky</span></div>
+                <span class="picker-group">時間・情景</span>
+              </div>
+            </div>
+
+            <div class="modal-foot">
+              <span class="foot-note"><b>3 件を選択</b> · 屋外/屋内のタグと同時に指定できます。</span>
+              <button class="btn ghost sm">クリア</button>
+              <button class="btn secondary sm">キャンセル</button>
+              <button class="btn primary sm">この条件で検索</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="showcase" id="inspector">
+    <div class="section-head">
+      <div class="section-index">03</div>
+      <div>
+        <h2>インスペクタ — 場所と雰囲気を分ける</h2>
+        <p>AI タグは 1 つの塊ではなく、「場所」と「雰囲気」の 2 行に分ける。読み取り専用の位置づけは変えない。</p>
+      </div>
+      <span class="screen-chip">library / inspector</span>
+    </div>
+    <div class="stage">
+      <div class="stage-inner">
+        <div class="inspector-wrap">
+          <div class="inspector-card">
+            <div class="inspector-top"><span>PHOTO</span><span class="mono">1200 × 800 · 2026-11-07</span></div>
+            <div class="photo">
+              <span class="star a"></span><span class="star b"></span><span class="star c"></span><span class="star d"></span>
+              <div class="horizon"></div>
+              <div class="shore"></div>
+              <span class="photo-caption">VRChat · 2026-11-07 19:42</span>
+            </div>
+            <div class="inspector-title">
+              <h4>夕暮れの海辺</h4>
+              <span class="date">2026-11-07 19:42 · 神奈川</span>
+            </div>
+            <div class="badge-row">
+              <span class="badge blue">#VRChat</span>
+              <span class="badge">#夕暮れ</span>
+              <span class="badge">#海</span>
+              <span class="badge ai">✦ AI</span>
+            </div>
+          </div>
+
+          <div class="side-notes">
+            <div class="ai-panel">
+              <div class="ai-head"><span class="spark">✦</span><b>AI タグ</b><span>読み取り専用</span></div>
+
+              <div class="ai-section">
+                <div class="ai-label">場所 <span class="rule"></span><span>2</span></div>
+                <div class="ai-chips">
+                  <span class="ai-chip"><span class="spark">✦</span>海 <span class="prob">96%</span></span>
+                  <span class="ai-chip"><span class="spark">✦</span>公園 <span class="prob">62%</span></span>
+                </div>
+              </div>
+
+              <div class="ai-section">
+                <div class="ai-label">雰囲気 <span class="rule"></span><span>4</span></div>
+                <div class="ai-chips">
+                  <span class="ai-chip"><span class="spark">✦</span>晴れ <span class="prob">93%</span></span>
+                  <span class="ai-chip"><span class="spark">✦</span>夕景 <span class="prob">81%</span></span>
+                  <span class="ai-chip"><span class="spark">✦</span>幻想的 <span class="prob">64%</span></span>
+                  <span class="ai-chip"><span class="spark">✦</span>静か <span class="prob">58%</span></span>
+                </div>
+              </div>
+
+              <div class="ai-facts">
+                <div class="ai-fact"><span class="fact-icon">◉</span><div><label>人数</label><b>2 – 4</b></div></div>
+                <div class="ai-fact"><span class="fact-icon">⌖</span><div><label>場所</label><b>屋外</b></div></div>
+              </div>
+
+              <p class="ai-foot">d1-2B-Q8_0 · catalog 2026-11-07.1 · 2026-11-07 19:48</p>
+              <button class="btn primary sm retag">この写真を再タグ付け</button>
+            </div>
+
+            <div class="note-card">
+              <h4>移動したタグの見え方</h4>
+              <p>夕景・夜景・星空は場所タグから雰囲気タグへ移るが、tag_key は変えない。既存の写真・ユーザー閾値はそのまま残る。</p>
+              <ul>
+                <li><b>既存写真:</b> photo_ai_tags の行は削除しない</li>
+                <li><b>閾値:</b> tag_key 単位なので移設後も同じ値が適用される</li>
+                <li><b>再解釈:</b> 既存写真の表示は別計画で扱う</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="showcase" id="jobs">
+    <div class="section-head">
+      <div class="section-index">04</div>
+      <div>
+        <h2>タグ付けジョブ — 雰囲気タグを生成中</h2>
+        <p>場所タグの後に 0.8 で雰囲気ステージを記録。旧 sidecar で capability が無い場合は、このステージを出さずに完了する。</p>
+      </div>
+      <span class="screen-chip">settings / integrations</span>
+    </div>
+    <div class="stage">
+      <div class="stage-inner">
+        <div class="job-wrap">
+          <div class="job-card">
+            <div class="job-head">
+              <div class="job-icon">✦</div>
+              <div>
+                <h4>AI タグ付け</h4>
+                <p>1 パスで 5 つの操作を処理中</p>
+              </div>
+              <span class="job-stat">PROCESSING</span>
+            </div>
+            <div class="job-box">
+              <div class="job-top">
+                <b>job_01J9K3…</b>
+                <span class="stage">雰囲気タグを生成中</span>
+                <span class="pct">80%</span>
+              </div>
+              <div class="bar"><i style="width:80%"></i></div>
+              <div class="job-foot"><span>presence → people_count → place_class → place_tags</span><span class="now">0.8 / atmosphere_tags</span></div>
+            </div>
+            <div class="steps">
+              <div class="step done"><span class="dot"></span><span>キャラクターの存在</span><b>0.1</b></div>
+              <div class="step done"><span class="dot"></span><span>人数</span><b>0.3</b></div>
+              <div class="step done"><span class="dot"></span><span>場所の分類</span><b>0.5</b></div>
+              <div class="step done"><span class="dot"></span><span>場所タグ</span><b>0.7</b></div>
+              <div class="step active"><span class="dot"></span><span>雰囲気タグ</span><b>0.8</b></div>
+              <div class="step"><span class="dot"></span><span>保存</span><b>0.9</b></div>
+            </div>
+          </div>
+
+          <div class="behavior">
+            <h4>この段階で守ること</h4>
+            <p>雰囲気タグは既存写真へ自動で配らない。更新時に enqueue もしない。</p>
+            <ul>
+              <li><span class="tick">✓</span><span><b>capability あり:</b> 場所タグの後に 1 回だけ atmosphere_tags を要求</span></li>
+              <li><span class="tick">✓</span><span><b>capability なし:</b> 0.8 を記録せず、場所タグだけで Completed</span></li>
+              <li><span class="tick">✓</span><span><b>保存:</b> 場所タグと雰囲気タグを同じ photo_ai_tags に書く</span></li>
+              <li><span class="tick">✓</span><span><b>失敗時:</b> 既存の retry / cancel の扱いを変えない</span></li>
+            </ul>
+            <div class="foot">進捗は 0.1 → 0.3 → 0.5 → 0.7 → 0.8 → 0.9 → 1.0。6 シーケンスでも画像エンコードは 1 回。</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="showcase" id="catalog">
+    <div class="section-head">
+      <div class="section-index">05</div>
+      <div>
+        <h2>カタログと移設の扱い</h2>
+        <p>新規 13 タグと移設 3 タグ。calibration は新規のみ恒等写像の multiple:atmosphere、移設は既存の multiple を維持する。</p>
+      </div>
+      <span class="screen-chip">catalog 2026-11-07.1</span>
+    </div>
+    <table class="tag-table">
+      <thead>
+        <tr><th>表示名</th><th>key</th><th>group</th><th>calibration</th><th>由来</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>晴れ</td><td class="key">weather_clear</td><td class="grp">weather</td><td class="key">multiple:atmosphere</td><td>新規</td></tr>
+        <tr><td>曇り</td><td class="key">weather_cloudy</td><td class="grp">weather</td><td class="key">multiple:atmosphere</td><td>新規</td></tr>
+        <tr><td>雨</td><td class="key">weather_rain</td><td class="grp">weather</td><td class="key">multiple:atmosphere</td><td>新規</td></tr>
+        <tr><td>雪</td><td class="key">weather_snow</td><td class="grp">weather</td><td class="key">multiple:atmosphere</td><td>新規</td></tr>
+        <tr><td>霧</td><td class="key">weather_fog</td><td class="grp">weather</td><td class="key">multiple:atmosphere</td><td>新規</td></tr>
+        <tr><td>雷雨</td><td class="key">weather_thunderstorm</td><td class="grp">weather</td><td class="key">multiple:atmosphere</td><td>新規</td></tr>
+        <tr><td>薄暗い</td><td class="key">light_dim</td><td class="grp">light</td><td class="key">multiple:atmosphere</td><td>新規</td></tr>
+        <tr><td>暗い</td><td class="key">light_dark</td><td class="grp">light</td><td class="key">multiple:atmosphere</td><td>新規</td></tr>
+        <tr><td>逆光</td><td class="key">light_backlit</td><td class="grp">light</td><td class="key">multiple:atmosphere</td><td>新規</td></tr>
+        <tr><td>ネオンの光</td><td class="key">light_neon</td><td class="grp">light</td><td class="key">multiple:atmosphere</td><td>新規</td></tr>
+        <tr><td>まぶしい</td><td class="key">light_bright</td><td class="grp">light</td><td class="key">multiple:atmosphere</td><td>新規</td></tr>
+        <tr><td>幻想的</td><td class="key">mood_ethereal</td><td class="grp">mood</td><td class="key">multiple:atmosphere</td><td>新規</td></tr>
+        <tr><td>静か</td><td class="key">mood_quiet</td><td class="grp">mood</td><td class="key">multiple:atmosphere</td><td>新規</td></tr>
+        <tr><td>夕景</td><td class="key">sunset</td><td class="grp">scene</td><td class="key">multiple</td><td class="moved">屋外から移設</td></tr>
+        <tr><td>夜景</td><td class="key">night_view</td><td class="grp">scene</td><td class="key">multiple</td><td class="moved">屋外から移設</td></tr>
+        <tr><td>星空</td><td class="key">starry_sky</td><td class="grp">scene</td><td class="key">multiple</td><td class="moved">屋外から移設</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="showcase" id="notes">
+    <div class="section-head">
+      <div class="section-index">06</div>
+      <div>
+        <h2>実装時の注意</h2>
+        <p>見た目以外の契約は設計書と実装計画に従う。ここでは画面に関わる点だけを再確認する。</p>
+      </div>
+    </div>
+    <div class="notes">
+      <div class="note-card">
+        <h4>しきい値のキー</h4>
+        <p>ユーザー閾値は tag_key 単位。夕景・夜景・星空の branch が変わっても、保存済みの値は同じタグに適用される。</p>
+      </div>
+      <div class="note-card">
+        <h4>既存写真への遡及なし</h4>
+        <p>プラグイン更新やカタログ同期で tagging_jobs を一括 enqueue しない。雰囲気タグは手動の再タグ付けでのみ付く。</p>
+      </div>
+      <div class="note-card">
+        <h4>旧 sidecar との互換</h4>
+        <p>capability が無い場合は雰囲気要求をスキップして完了。新 sidecar は host_version_min 0.12.0 で旧ホストからの取込を拒否する。</p>
+      </div>
+    </div>
+  </section>
+</div>
+</body>
+</html>
