@@ -1,0 +1,1124 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VRC PhotoN — 右クリックメニュー UI モック</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%230d1420'/%3E%3Ccircle cx='16' cy='16' r='7' fill='none' stroke='%238bcbff' stroke-width='2'/%3E%3C/svg%3E">
+<style>
+  :root {
+    color-scheme: dark;
+    --font: "Inter", "Noto Sans JP", "Hiragino Sans", "Yu Gothic UI", system-ui, -apple-system, sans-serif;
+    --mono: "SFMono-Regular", "Cascadia Code", "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+
+    --text: #eef4ff;
+    --muted: #a8b4ca;
+    --dim: #7f8ba3;
+    --faint: #5e6a81;
+    --accent: #8bcbff;
+    --accent-2: #7f92ff;
+    --blue: #5aa9ff;
+    --amber: #f4c878;
+    --rose: #ff94a8;
+    --green: #7ee2b8;
+
+    --line: rgba(255, 255, 255, 0.105);
+    --line-strong: rgba(255, 255, 255, 0.17);
+    --line-soft: rgba(255, 255, 255, 0.065);
+
+    --panel-sidebar: #0b111b;
+    --panel-sidebar-deep: #080d15;
+    --panel-header: #101725;
+    --panel-card: #0d1420;
+    --panel-inner: #111927;
+    --panel-inner-deep: #0c1320;
+    --panel-deep: #0a1019;
+    --panel-raised: #172132;
+
+    --r-window: 28px;
+    --r-card: 22px;
+    --r-inner: 17px;
+    --ease: cubic-bezier(0.22, 0.8, 0.24, 1);
+  }
+
+  * { box-sizing: border-box; }
+  html { overflow-x: hidden; }
+  body {
+    margin: 0;
+    min-width: 320px;
+    background: #05070d;
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 13px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -2;
+    background:
+      radial-gradient(ellipse 58% 54% at 10% 2%, rgba(54, 107, 255, 0.28), transparent 66%),
+      radial-gradient(ellipse 46% 52% at 92% 6%, rgba(255, 86, 181, 0.12), transparent 68%),
+      radial-gradient(ellipse 52% 48% at 64% 104%, rgba(30, 202, 178, 0.10), transparent 68%),
+      linear-gradient(140deg, #04060c 0%, #0a0f1e 44%, #060811 100%);
+  }
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    opacity: 0.03;
+    pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.82' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.55'/%3E%3C/svg%3E");
+    mix-blend-mode: overlay;
+  }
+
+  button, input { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  a { color: inherit; }
+  ::selection { background: rgba(139, 203, 255, 0.28); }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 99px; background: rgba(255,255,255,.14); background-clip: padding-box; }
+  :focus-visible { outline: 2px solid rgba(139, 203, 255, 0.78); outline-offset: 2px; }
+
+  .icon {
+    width: 18px; height: 18px; flex: 0 0 auto;
+    fill: none; stroke: currentColor; stroke-width: 1.8;
+    stroke-linecap: round; stroke-linejoin: round;
+  }
+  .icon-sm { width: 15px; height: 15px; }
+  .icon-xs { width: 12px; height: 12px; }
+  kbd {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 18px; height: 17px; padding: 0 4px;
+    border: 1px solid var(--line); border-radius: 4px;
+    background: rgba(255,255,255,.035); color: var(--faint);
+    font-family: var(--mono); font-size: 8px; line-height: 1; white-space: nowrap;
+  }
+
+  /* ---------- page ---------- */
+  .page { width: min(1504px, calc(100% - 48px)); margin: 0 auto; padding: 38px 0 64px; }
+  .page-head {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto;
+    gap: 28px; align-items: end; padding-bottom: 24px;
+  }
+  .eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    color: var(--accent); font-size: 11px; font-weight: 650;
+    letter-spacing: 0.02em; margin-bottom: 10px;
+  }
+  .eyebrow::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 12px rgba(139,203,255,.8); }
+  h1 { margin: 0; font-size: clamp(30px, 3.6vw, 46px); line-height: 1.12; letter-spacing: -0.035em; font-weight: 680; }
+  .lede { margin: 12px 0 0; max-width: 690px; color: var(--muted); font-size: 13px; line-height: 1.75; }
+  .head-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 10px; }
+  .issue-stack { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+  .issue-chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    height: 25px; padding: 0 9px; border: 1px solid var(--line);
+    border-radius: 999px; background: rgba(255,255,255,.025);
+    color: var(--muted); font-family: var(--mono); font-size: 9px;
+  }
+  .issue-chip b { color: var(--text); font-weight: 600; }
+  .head-note { color: var(--faint); font-size: 10px; }
+
+  .stage-toolbar {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 10px 0 12px;
+  }
+  .state-switch { display: inline-flex; padding: 3px; border: 1px solid var(--line); border-radius: 999px; background: rgba(8,13,21,.72); }
+  .state-btn {
+    height: 29px; padding: 0 13px; border: 0; border-radius: 999px;
+    background: transparent; color: var(--dim); font-size: 10px; font-weight: 550;
+    transition: background .18s var(--ease), color .18s var(--ease);
+  }
+  .state-btn span { margin-left: 5px; color: var(--faint); font-family: var(--mono); font-size: 8px; }
+  .state-btn:hover { color: var(--text); }
+  .state-btn.active { background: rgba(90,169,255,.16); color: #dceeff; box-shadow: inset 0 0 0 1px rgba(90,169,255,.24); }
+  .state-btn.active span { color: #9bcfff; }
+  .stage-note { display: inline-flex; align-items: center; gap: 7px; margin-left: auto; color: var(--faint); font-size: 10px; }
+  .stage-note::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 10px rgba(126,226,184,.65); }
+  .toolbar-btn {
+    display: inline-flex; align-items: center; gap: 6px; height: 29px; padding: 0 10px;
+    border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.025);
+    color: var(--muted); font-size: 10px;
+  }
+  .toolbar-btn:hover { border-color: var(--line-strong); color: var(--text); background: rgba(255,255,255,.05); }
+
+  .stage-scroll { overflow-x: auto; padding: 0 0 10px; }
+  .app-window {
+    position: relative; display: grid; grid-template-columns: 238px minmax(0, 1fr);
+    width: 1440px; height: 900px; margin: 0 auto; overflow: hidden;
+    border: 1px solid rgba(255,255,255,.13); border-radius: var(--r-window);
+    background: #05080e;
+    box-shadow: 0 50px 130px rgba(0,0,0,.62), 0 12px 36px rgba(0,0,0,.38), inset 0 1px 0 rgba(255,255,255,.08);
+  }
+
+  /* ---------- sidebar ---------- */
+  .sidebar {
+    display: flex; flex-direction: column; gap: 12px;
+    padding: 16px 12px 12px;
+    background: linear-gradient(180deg, var(--panel-sidebar), var(--panel-sidebar-deep));
+    border-right: 1px solid var(--line-soft);
+  }
+  .brand { display: flex; align-items: center; gap: 9px; padding: 2px 7px 12px; }
+  .brand-glyph {
+    display: grid; place-items: center; width: 27px; height: 27px; border-radius: 9px;
+    background: linear-gradient(145deg, rgba(139,203,255,.26), rgba(127,146,255,.14));
+    border: 1px solid rgba(139,203,255,.28); color: #cfeaff;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.12);
+  }
+  .brand-copy { min-width: 0; }
+  .brand-name { font-size: 11px; font-weight: 650; letter-spacing: .01em; }
+  .brand-sub { color: var(--faint); font-family: var(--mono); font-size: 7.5px; letter-spacing: .08em; }
+  .nav { display: flex; flex-direction: column; gap: 3px; }
+  .nav-item {
+    display: flex; align-items: center; gap: 9px; height: 34px; padding: 0 9px;
+    border: 1px solid transparent; border-radius: 9px; color: var(--dim);
+    font-size: 10.5px; text-decoration: none; position: relative;
+  }
+  .nav-item:hover { color: var(--text); background: rgba(255,255,255,.035); }
+  .nav-item.active { color: #e7f4ff; background: rgba(90,169,255,.13); border-color: rgba(90,169,255,.18); }
+  .nav-item.active::before { content: ""; position: absolute; left: -12px; top: 8px; bottom: 8px; width: 2px; border-radius: 0 2px 2px 0; background: var(--blue); }
+  .nav-item .icon { width: 16px; height: 16px; }
+  .nav-count { margin-left: auto; color: var(--faint); font-family: var(--mono); font-size: 8px; }
+  .nav-status { width: 6px; height: 6px; margin-left: auto; border-radius: 50%; background: var(--amber); box-shadow: 0 0 8px rgba(244,200,120,.5); }
+  .sidebar-section { margin-top: 4px; padding: 10px; border: 1px solid var(--line-soft); border-radius: 12px; background: rgba(255,255,255,.018); }
+  .sidebar-label { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; color: var(--faint); font-size: 8px; letter-spacing: .07em; }
+  .sidebar-label b { color: var(--muted); font-weight: 500; }
+  .mini-progress { display: flex; flex-direction: column; gap: 6px; }
+  .mini-progress-row { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 9px; }
+  .mini-progress-row .dot { width: 5px; height: 5px; border-radius: 50%; background: var(--blue); }
+  .mini-progress-row .dot.amber { background: var(--amber); }
+  .mini-progress-row .bar { flex: 1; height: 4px; overflow: hidden; border-radius: 99px; background: rgba(255,255,255,.07); }
+  .mini-progress-row .bar i { display: block; width: 62%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--accent-2), var(--accent)); }
+  .mini-progress-row .num { color: var(--faint); font-family: var(--mono); font-size: 8px; }
+  .storage-card { margin-top: auto; }
+  .storage-row { display: flex; justify-content: space-between; color: var(--muted); font-size: 9px; }
+  .storage-row + .storage-row { margin-top: 4px; color: var(--faint); font-size: 8px; }
+  .daemon-pill { display: flex; align-items: center; gap: 6px; margin-top: 9px; color: var(--faint); font-size: 8px; }
+  .daemon-pill::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px rgba(126,226,184,.65); }
+  .version { color: var(--faint); font-family: var(--mono); font-size: 7.5px; text-align: right; }
+
+  /* ---------- main / header ---------- */
+  .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: #070b12; }
+  .header-card {
+    margin: 12px 12px 0; overflow: hidden; border: 1px solid var(--line);
+    border-radius: var(--r-card); background: var(--panel-header);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.04);
+  }
+  .titlebar {
+    display: flex; align-items: center; gap: 10px; height: 46px; padding: 0 15px;
+    border-bottom: 1px solid var(--line-soft); background: rgba(255,255,255,.012);
+  }
+  .titlebar .brand-glyph { width: 22px; height: 22px; border-radius: 7px; }
+  .titlebar-title { color: var(--muted); font-size: 10px; font-weight: 550; }
+  .titlebar-sep { width: 1px; height: 16px; background: var(--line); }
+  .titlebar-screen { color: var(--text); font-size: 10.5px; font-weight: 600; }
+  .titlebar-spacer { flex: 1; }
+  .titlebar-icon {
+    display: grid; place-items: center; width: 27px; height: 27px; border: 0; border-radius: 7px;
+    background: transparent; color: var(--faint);
+  }
+  .titlebar-icon:hover { background: rgba(255,255,255,.05); color: var(--text); }
+  .titlebar-icon .bell-dot { position: absolute; width: 5px; height: 5px; margin: -12px 0 0 12px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 8px rgba(244,200,120,.7); }
+  .window-buttons { display: flex; gap: 2px; margin-left: 4px; }
+  .window-buttons span { width: 28px; height: 27px; display: grid; place-items: center; color: var(--faint); font-family: var(--mono); font-size: 10px; border-radius: 6px; }
+  .window-buttons span:hover { background: rgba(255,255,255,.05); color: var(--text); }
+
+  .ribbon {
+    display: flex; align-items: center; gap: 2px; height: 68px; padding: 0 10px;
+    background: var(--panel-card); overflow: hidden;
+  }
+  .ribbon-group { display: flex; align-items: center; gap: 3px; height: 48px; padding: 0 9px; border-right: 1px solid var(--line-soft); }
+  .ribbon-group:last-child { border-right: 0; }
+  .ribbon-btn {
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+    min-width: 46px; height: 42px; padding: 0 5px; border: 1px solid transparent; border-radius: 8px;
+    background: transparent; color: var(--dim); font-size: 8.5px; line-height: 1; text-align: center;
+  }
+  .ribbon-btn .icon { width: 16px; height: 16px; color: var(--muted); }
+  .ribbon-btn:hover { color: var(--text); background: rgba(255,255,255,.04); border-color: var(--line-soft); }
+  .ribbon-btn.primary { color: #dff1ff; background: rgba(90,169,255,.13); border-color: rgba(90,169,255,.18); }
+  .ribbon-btn.primary .icon { color: var(--accent); }
+  .ribbon-btn.disabled { color: var(--faint); opacity: .45; }
+  .ribbon-label { margin-top: 3px; color: var(--faint); font-size: 7px; letter-spacing: .05em; }
+
+  .content { flex: 1; min-height: 0; padding: 12px; }
+  .photo-layout { display: grid; grid-template-columns: minmax(0, 1fr) 298px; gap: 12px; height: 100%; min-height: 0; }
+  .panel { overflow: hidden; border: 1px solid var(--line); border-radius: var(--r-card); background: var(--panel-card); box-shadow: inset 0 1px 0 rgba(255,255,255,.035); }
+  .gallery { display: flex; flex-direction: column; min-height: 0; position: relative; }
+  .gallery-head { display: flex; align-items: center; gap: 8px; height: 42px; padding: 0 13px; border-bottom: 1px solid var(--line-soft); color: var(--muted); font-size: 9.5px; }
+  .gallery-head b { color: var(--text); font-size: 11px; font-weight: 600; }
+  .gallery-head .count { color: var(--faint); font-family: var(--mono); font-size: 8px; }
+  .gallery-head .spacer { flex: 1; }
+  .tiny-btn { display: inline-flex; align-items: center; gap: 5px; height: 23px; padding: 0 8px; border: 1px solid var(--line); border-radius: 6px; background: rgba(255,255,255,.02); color: var(--dim); font-size: 8.5px; }
+  .tiny-btn:hover { color: var(--text); border-color: var(--line-strong); }
+  .tiny-btn .icon { width: 11px; height: 11px; }
+  .selection-bar {
+    display: none; align-items: center; gap: 8px; height: 31px; margin: 0 13px 9px; padding: 0 9px;
+    border: 1px solid rgba(90,169,255,.22); border-radius: 9px;
+    background: rgba(90,169,255,.09); color: #cbe9ff; font-size: 9px;
+  }
+  .selection-bar.show { display: flex; }
+  .selection-bar .spacer { flex: 1; }
+  .selection-bar .tiny-btn { height: 21px; background: rgba(90,169,255,.13); border-color: rgba(90,169,255,.25); color: #d8efff; }
+  .grid-wrap { flex: 1; min-height: 0; padding: 13px; position: relative; background: radial-gradient(ellipse 80% 60% at 50% 0%, rgba(90,169,255,.035), transparent 68%); }
+  .photo-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; align-content: start; }
+  .photo-card {
+    position: relative; min-width: 0; overflow: hidden; border: 1px solid var(--line-soft);
+    border-radius: 13px; background: var(--panel-inner); cursor: pointer;
+    transition: border-color .18s var(--ease), box-shadow .18s var(--ease), transform .18s var(--ease);
+  }
+  .photo-card:hover { transform: translateY(-1px); border-color: rgba(255,255,255,.16); }
+  .photo-card.selected { border-color: rgba(139,203,255,.5); box-shadow: 0 0 0 1px rgba(139,203,255,.38); }
+  .photo-card.primary { border-color: var(--blue); box-shadow: 0 0 0 1px var(--blue), 0 10px 26px rgba(90,169,255,.16); }
+  .thumb { position: relative; aspect-ratio: 3 / 2; overflow: hidden; background: #111a28; }
+  .thumb::before, .thumb::after { content: ""; position: absolute; pointer-events: none; }
+  .scene-night { background: linear-gradient(180deg, #0a1730 0%, #102b52 52%, #07101f 100%); }
+  .scene-night::before { width: 120%; height: 55%; left: -10%; bottom: -8%; background: linear-gradient(180deg, transparent, rgba(3,8,16,.88)), repeating-linear-gradient(90deg, rgba(128,196,255,.18) 0 2px, transparent 2px 17px); clip-path: polygon(0 40%, 8% 40%, 8% 20%, 16% 20%, 16% 52%, 24% 52%, 24% 8%, 33% 8%, 33% 46%, 42% 46%, 42% 26%, 50% 26%, 50% 60%, 58% 60%, 58% 14%, 67% 14%, 67% 44%, 76% 44%, 76% 22%, 85% 22%, 85% 55%, 94% 55%, 94% 30%, 100% 30%, 100% 100%, 0 100%); }
+  .scene-night::after { width: 64px; height: 64px; right: 12%; top: 12%; border-radius: 50%; background: radial-gradient(circle, rgba(139,203,255,.85), rgba(139,203,255,.15) 45%, transparent 70%); filter: blur(1px); }
+  .scene-sunset { background: linear-gradient(180deg, #301a2f 0%, #8a3e42 48%, #e08b55 72%, #1a1725 100%); }
+  .scene-sunset::before { width: 34%; aspect-ratio: 1; left: 33%; top: 27%; border-radius: 50%; background: radial-gradient(circle, rgba(255,222,174,.95), rgba(255,168,102,.45) 48%, transparent 72%); filter: blur(1px); }
+  .scene-sunset::after { width: 100%; height: 36%; left: 0; bottom: 0; background: linear-gradient(180deg, transparent, rgba(7,9,17,.92)), repeating-linear-gradient(90deg, rgba(9,12,20,.92) 0 18px, transparent 18px 32px); clip-path: polygon(0 45%, 10% 45%, 10% 22%, 20% 22%, 20% 58%, 31% 58%, 31% 34%, 44% 34%, 44% 66%, 57% 66%, 57% 18%, 69% 18%, 69% 52%, 81% 52%, 81% 30%, 91% 30%, 91% 60%, 100% 60%, 100% 100%, 0 100%); }
+  .scene-forest { background: linear-gradient(180deg, #081a1a 0%, #0d302b 46%, #06100f 100%); }
+  .scene-forest::before { width: 100%; height: 100%; left: 0; top: 0; background: radial-gradient(ellipse 44% 52% at 50% 38%, rgba(126,226,184,.26), transparent 70%), repeating-linear-gradient(102deg, rgba(5,18,17,.9) 0 7px, transparent 7px 26px); clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%, 0 50%, 8% 50%, 8% 22%, 20% 22%, 20% 48%, 33% 48%, 33% 14%, 47% 14%, 47% 52%, 61% 52%, 61% 20%, 74% 20%, 74% 46%, 87% 46%, 87% 28%, 100% 28%); opacity: .7; }
+  .scene-forest::after { width: 18%; height: 42%; left: 41%; bottom: 0; background: linear-gradient(180deg, transparent, rgba(4,9,9,.9)); border-left: 2px solid rgba(126,226,184,.28); border-right: 2px solid rgba(126,226,184,.28); }
+  .scene-aqua { background: linear-gradient(180deg, #08223a 0%, #0d4660 50%, #05131f 100%); }
+  .scene-aqua::before { width: 90%; height: 50%; left: 5%; top: 20%; border-radius: 50% 50% 12% 12%; background: radial-gradient(ellipse at 50% 25%, rgba(154,234,255,.32), transparent 66%), repeating-linear-gradient(90deg, rgba(154,234,255,.16) 0 1px, transparent 1px 22px); transform: perspective(300px) rotateX(52deg); opacity: .9; }
+  .scene-aqua::after { width: 100%; height: 34%; left: 0; bottom: 0; background: linear-gradient(180deg, transparent, rgba(3,12,20,.9)), repeating-linear-gradient(0deg, rgba(154,234,255,.1) 0 1px, transparent 1px 8px); }
+  .scene-stage { background: linear-gradient(180deg, #190e2e 0%, #3d1d58 48%, #0e0918 100%); }
+  .scene-stage::before { width: 70%; height: 52%; left: 15%; top: 10%; background: radial-gradient(ellipse at 50% 100%, rgba(255,173,225,.32), transparent 68%), conic-gradient(from 220deg at 50% 100%, transparent, rgba(139,203,255,.22), transparent 34%, rgba(255,148,168,.22), transparent 68%); filter: blur(2px); }
+  .scene-stage::after { width: 44%; height: 16%; left: 28%; bottom: 0; border-radius: 50% 50% 0 0; background: linear-gradient(180deg, rgba(255,255,255,.16), rgba(8,5,15,.8)); }
+  .scene-snow { background: linear-gradient(180deg, #12263d 0%, #31516b 55%, #0b1620 100%); }
+  .scene-snow::before { width: 100%; height: 44%; left: 0; bottom: 0; background: linear-gradient(180deg, rgba(235,248,255,.35), rgba(9,18,26,.9)); clip-path: polygon(0 62%, 18% 44%, 36% 58%, 52% 26%, 68% 52%, 84% 34%, 100% 56%, 100% 100%, 0 100%); }
+  .scene-snow::after { width: 38px; height: 38px; right: 15%; top: 16%; border-radius: 50%; background: radial-gradient(circle, rgba(225,244,255,.8), transparent 68%); box-shadow: 0 0 26px rgba(190,229,255,.3); }
+  .scene-desert { background: linear-gradient(180deg, #2d1d18 0%, #8d5a3a 48%, #1d130f 100%); }
+  .scene-desert::before { width: 100%; height: 58%; left: 0; bottom: 0; background: linear-gradient(180deg, transparent, rgba(17,11,9,.92)), repeating-linear-gradient(115deg, rgba(255,216,166,.14) 0 1px, transparent 1px 16px); clip-path: polygon(0 54%, 16% 38%, 30% 52%, 48% 28%, 64% 50%, 80% 36%, 100% 56%, 100% 100%, 0 100%); }
+  .scene-garden { background: linear-gradient(180deg, #251726 0%, #6b304d 46%, #1a101b 100%); }
+  .scene-garden::before { width: 100%; height: 100%; left: 0; top: 0; background: radial-gradient(ellipse 40% 46% at 32% 40%, rgba(255,170,210,.32), transparent 68%), radial-gradient(ellipse 36% 42% at 70% 32%, rgba(255,210,230,.2), transparent 66%); }
+  .scene-garden::after { width: 100%; height: 36%; left: 0; bottom: 0; background: linear-gradient(180deg, transparent, rgba(12,7,14,.9)), repeating-linear-gradient(78deg, rgba(255,170,210,.18) 0 2px, transparent 2px 28px); clip-path: polygon(0 58%, 22% 44%, 44% 56%, 66% 38%, 88% 54%, 100% 46%, 100% 100%, 0 100%); }
+  .scene-deep { background: linear-gradient(180deg, #071a24 0%, #0b3541 48%, #041014 100%); }
+  .scene-deep::before { width: 100%; height: 48%; left: 0; top: 20%; background: repeating-linear-gradient(168deg, rgba(126,226,220,.12) 0 1px, transparent 1px 22px), radial-gradient(ellipse 54% 50% at 50% 50%, rgba(126,226,220,.18), transparent 70%); }
+  .scene-deep::after { width: 18%; height: 18%; left: 56%; top: 46%; border-radius: 50%; border: 1px solid rgba(126,226,220,.32); box-shadow: 0 0 24px rgba(126,226,220,.12); }
+  .thumb-overlay { position: absolute; inset: 0; background: linear-gradient(180deg, transparent 50%, rgba(3,6,12,.42)); }
+  .card-top { position: absolute; inset: 8px 8px auto; display: flex; align-items: flex-start; justify-content: space-between; gap: 6px; z-index: 2; }
+  .check {
+    display: none; place-items: center; width: 17px; height: 17px; border-radius: 50%;
+    background: var(--blue); color: #07111f; box-shadow: 0 2px 8px rgba(0,0,0,.4);
+  }
+  .check .icon { width: 10px; height: 10px; stroke-width: 2.8; }
+  .photo-card.selected .check, .photo-card.primary .check { display: grid; }
+  .card-flags { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+  .flag { display: inline-flex; align-items: center; gap: 3px; height: 15px; padding: 0 5px; border-radius: 99px; font-size: 6.5px; letter-spacing: .02em; background: rgba(5,9,15,.66); border: 1px solid rgba(255,255,255,.12); color: var(--muted); backdrop-filter: blur(4px); }
+  .flag .dot { width: 4px; height: 4px; border-radius: 50%; background: var(--green); }
+  .flag.fav { color: var(--amber); border-color: rgba(244,200,120,.2); }
+  .card-body { display: flex; flex-direction: column; gap: 2px; padding: 7px 8px 8px; }
+  .card-title { overflow: hidden; color: var(--text); font-size: 9px; font-weight: 560; text-overflow: ellipsis; white-space: nowrap; }
+  .card-meta { display: flex; justify-content: space-between; gap: 6px; color: var(--faint); font-family: var(--mono); font-size: 7px; }
+  .year-rail {
+    position: absolute; top: 58px; right: 2px; bottom: 14px; width: 17px;
+    display: flex; flex-direction: column; align-items: center; justify-content: space-between;
+    color: var(--faint); font-family: var(--mono); font-size: 6.5px; opacity: .8;
+  }
+  .year-rail span { position: relative; }
+  .year-rail span::before { content: ""; position: absolute; left: 50%; top: 12px; width: 1px; height: 24px; background: var(--line-soft); }
+  .year-rail span:last-child::before { display: none; }
+
+  /* ---------- inspector ---------- */
+  .inspector { display: flex; flex-direction: column; min-height: 0; }
+  .inspector-bg { position: relative; height: 168px; overflow: hidden; border-bottom: 1px solid var(--line-soft); background: linear-gradient(180deg, rgba(11,17,27,.1), var(--panel-card)); }
+  .inspector-preview { position: absolute; inset: 0; overflow: hidden; }
+  .inspector-preview .scene-sunset { position: absolute; inset: 0; }
+  .inspector-preview::after { content: ""; position: absolute; inset: 0; background: linear-gradient(180deg, rgba(5,9,15,.02), rgba(13,20,32,.9)); }
+  .inspector-badges { position: absolute; left: 11px; bottom: 10px; display: flex; gap: 4px; z-index: 2; }
+  .inspector-body { flex: 1; min-height: 0; overflow: auto; padding: 11px 12px 12px; }
+  .inspector-title-row { display: flex; align-items: center; gap: 7px; }
+  .inspector-title { font-size: 15px; line-height: 1.2; letter-spacing: -.02em; font-weight: 650; }
+  .favorite { margin-left: auto; color: var(--amber); }
+  .inspector-date { margin: 4px 0 10px; color: var(--faint); font-family: var(--mono); font-size: 7.5px; }
+  .meta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; padding: 9px 0; border-top: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); }
+  .meta-grid label { display: block; color: var(--faint); font-size: 7px; }
+  .meta-grid b { display: block; overflow: hidden; margin-top: 2px; color: var(--muted); font-size: 8.5px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+  .inspector-section { padding-top: 10px; }
+  .section-label { margin-bottom: 6px; color: var(--faint); font-size: 7.5px; letter-spacing: .04em; }
+  .tag-row { display: flex; flex-wrap: wrap; gap: 4px; }
+  .tag { display: inline-flex; align-items: center; gap: 3px; height: 19px; padding: 0 6px; border: 1px solid rgba(255,255,255,.09); border-radius: 99px; background: rgba(255,255,255,.035); color: var(--muted); font-size: 7.5px; }
+  .tag b { color: var(--faint); font-weight: 400; }
+  .inspector-foot { display: flex; gap: 5px; padding: 9px; border-top: 1px solid var(--line-soft); background: rgba(255,255,255,.012); }
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 5px; height: 27px; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; background: rgba(255,255,255,.025); color: var(--muted); font-size: 8.5px; }
+  .btn:hover { color: var(--text); border-color: var(--line-strong); }
+  .btn.primary { background: rgba(90,169,255,.16); border-color: rgba(90,169,255,.28); color: #d9efff; }
+  .btn.primary:hover { background: rgba(90,169,255,.22); }
+  .btn.danger { color: #ffb2bf; border-color: rgba(255,148,168,.18); background: rgba(255,148,168,.06); }
+  .btn .icon { width: 12px; height: 12px; }
+
+  /* ---------- context menu ---------- */
+  .menu-layer { position: absolute; left: 618px; top: 351px; z-index: 40; }
+  .context-menu {
+    position: relative; width: 252px; padding: 6px;
+    border: 1px solid var(--line-strong); border-radius: 12px;
+    background: #121a28;
+    box-shadow: 0 28px 80px rgba(0,0,0,.66), 0 8px 24px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.06);
+    animation: menu-in .14s var(--ease) both;
+  }
+  .context-menu::before { content: ""; position: absolute; inset: 0 8px auto; height: 1px; background: linear-gradient(90deg, transparent, rgba(139,203,255,.38), transparent); }
+  @keyframes menu-in { from { opacity: 0; transform: translateY(-4px) scale(.985); } to { opacity: 1; transform: none; } }
+  .menu-item {
+    position: relative; display: flex; align-items: center; gap: 9px; height: 34px; padding: 0 9px;
+    border-radius: 8px; color: var(--text); font-size: 10.5px; cursor: pointer;
+    transition: background .12s var(--ease), color .12s var(--ease);
+  }
+  .menu-item .icon { width: 15px; height: 15px; color: var(--muted); }
+  .menu-item .label { flex: 1; min-width: 0; }
+  .menu-item .shortcut { margin-left: auto; }
+  .menu-item .chevron { width: 13px; height: 13px; margin-left: auto; color: var(--faint); }
+  .menu-item:hover, .menu-item.active { background: rgba(90,169,255,.14); color: #e9f6ff; }
+  .menu-item:hover .icon, .menu-item.active .icon { color: var(--accent); }
+  .menu-item.disabled { opacity: .34; pointer-events: none; }
+  .menu-item.disabled .icon { color: var(--faint); }
+  .menu-item.danger { color: #ffb1bd; }
+  .menu-item.danger .icon { color: #ff94a8; }
+  .menu-item.danger:hover { background: rgba(255,148,168,.11); color: #ffd3da; }
+  .menu-sep { height: 1px; margin: 5px 8px; background: var(--line); }
+  .submenu {
+    position: absolute; left: calc(100% + 4px); top: 4px; width: 232px; padding: 6px;
+    border: 1px solid var(--line-strong); border-radius: 12px; background: #121a28;
+    box-shadow: 0 24px 64px rgba(0,0,0,.6), 0 8px 22px rgba(0,0,0,.3), inset 0 1px 0 rgba(255,255,255,.06);
+    display: none; animation: menu-in .12s var(--ease) both;
+  }
+  .menu-layer.submenu-open .submenu { display: block; }
+  .menu-layer.submenu-open .menu-item[data-menu="compress"] { background: rgba(90,169,255,.14); color: #e9f6ff; }
+  .menu-layer.submenu-open .menu-item[data-menu="compress"] .icon { color: var(--accent); }
+  .menu-item .menu-note { margin-left: auto; color: var(--faint); font-size: 7px; }
+  .menu-item.disabled .menu-note { color: var(--faint); }
+
+  /* ---------- tag dialog ---------- */
+  .dialog-backdrop {
+    position: absolute; inset: 0; z-index: 60; display: none; place-items: center;
+    background: rgba(3,6,11,.62); backdrop-filter: blur(3px);
+  }
+  .dialog-backdrop.open { display: grid; animation: fade-in .16s var(--ease) both; }
+  @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+  .tag-dialog {
+    width: 520px; overflow: hidden; border: 1px solid var(--line-strong); border-radius: 18px;
+    background: #101725; box-shadow: 0 38px 110px rgba(0,0,0,.72), inset 0 1px 0 rgba(255,255,255,.07);
+    animation: dialog-in .18s var(--ease) both;
+  }
+  @keyframes dialog-in { from { opacity: 0; transform: translateY(8px) scale(.99); } to { opacity: 1; transform: none; } }
+  .dialog-head { display: flex; align-items: flex-start; gap: 12px; padding: 18px 18px 12px; }
+  .dialog-head h2 { margin: 0; font-size: 17px; line-height: 1.2; letter-spacing: -.02em; font-weight: 650; }
+  .dialog-head p { margin: 5px 0 0; color: var(--dim); font-size: 10px; }
+  .dialog-close { display: grid; place-items: center; width: 25px; height: 25px; margin-left: auto; border: 1px solid var(--line); border-radius: 7px; background: transparent; color: var(--faint); }
+  .dialog-close:hover { color: var(--text); background: rgba(255,255,255,.04); }
+  .dialog-body { padding: 0 18px 16px; }
+  .common-note { display: flex; gap: 8px; padding: 9px 10px; margin-bottom: 12px; border: 1px solid rgba(90,169,255,.16); border-radius: 9px; background: rgba(90,169,255,.06); color: #bcdfff; font-size: 9px; line-height: 1.55; }
+  .common-note .icon { width: 13px; height: 13px; margin-top: 1px; color: var(--accent); }
+  .dialog-tags { display: flex; flex-wrap: wrap; gap: 5px; min-height: 28px; margin-bottom: 12px; }
+  .dialog-tag { display: inline-flex; align-items: center; gap: 5px; height: 23px; padding: 0 6px 0 8px; border: 1px solid rgba(255,255,255,.1); border-radius: 99px; background: rgba(255,255,255,.04); color: var(--muted); font-size: 9px; }
+  .dialog-tag button { display: grid; place-items: center; width: 14px; height: 14px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--faint); font-size: 11px; line-height: 1; }
+  .dialog-tag button:hover { background: rgba(255,148,168,.16); color: #ffb1bd; }
+  .tag-input-row { display: flex; gap: 6px; }
+  .tag-input-row .btn { height: 31px; }
+  .tag-input { flex: 1; height: 31px; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; background: rgba(5,9,15,.5); color: var(--text); font-size: 10px; outline: none; }
+  .tag-input::placeholder { color: var(--faint); }
+  .tag-input:focus { border-color: rgba(90,169,255,.5); box-shadow: 0 0 0 2px rgba(90,169,255,.12); }
+  .dialog-hint { margin: 8px 0 0; color: var(--faint); font-size: 8.5px; line-height: 1.55; }
+  .dialog-foot { display: flex; align-items: center; gap: 6px; padding: 12px 18px; border-top: 1px solid var(--line-soft); background: rgba(255,255,255,.012); }
+  .dialog-foot .spacer { flex: 1; }
+  .dialog-foot .btn { height: 30px; padding: 0 13px; font-size: 9px; }
+
+  /* ---------- toast ---------- */
+  .toast {
+    position: absolute; left: 50%; bottom: 22px; z-index: 80;
+    display: flex; align-items: center; gap: 7px; height: 31px; padding: 0 12px;
+    border: 1px solid rgba(126,226,184,.22); border-radius: 8px;
+    background: rgba(9,18,24,.94); color: #c8f5e3; font-size: 9px;
+    box-shadow: 0 12px 30px rgba(0,0,0,.4); transform: translateX(-50%) translateY(8px);
+    opacity: 0; pointer-events: none; transition: opacity .18s var(--ease), transform .18s var(--ease);
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .toast::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 8px rgba(126,226,184,.65); }
+
+  /* ---------- page sections ---------- */
+  .section { margin-top: 38px; }
+  .section-head { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 14px; }
+  .section-head h2 { margin: 0; font-size: 18px; letter-spacing: -.02em; font-weight: 650; }
+  .section-head p { margin: 3px 0 0; color: var(--dim); font-size: 10.5px; }
+  .state-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+  .state-card { padding: 14px; border: 1px solid var(--line); border-radius: 15px; background: rgba(13,20,32,.76); box-shadow: inset 0 1px 0 rgba(255,255,255,.035); }
+  .state-card-head { display: flex; align-items: center; gap: 7px; margin-bottom: 9px; }
+  .state-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 8px rgba(139,203,255,.5); }
+  .state-dot.amber { background: var(--amber); box-shadow: 0 0 8px rgba(244,200,120,.5); }
+  .state-dot.rose { background: var(--rose); box-shadow: 0 0 8px rgba(255,148,168,.5); }
+  .state-card h3 { margin: 0; font-size: 11px; font-weight: 600; }
+  .state-card p { margin: 0 0 10px; color: var(--dim); font-size: 9px; line-height: 1.6; }
+  .mini-menu { overflow: hidden; border: 1px solid var(--line-soft); border-radius: 9px; background: rgba(5,9,15,.34); }
+  .mini-item { display: flex; align-items: center; gap: 6px; height: 25px; padding: 0 7px; color: var(--muted); font-size: 8.5px; }
+  .mini-item .icon { width: 12px; height: 12px; color: var(--faint); }
+  .mini-item .mini-note { margin-left: auto; color: var(--faint); font-size: 7px; }
+  .mini-item.disabled { opacity: .35; }
+  .mini-item.danger { color: #ffb1bd; }
+  .mini-sep { height: 1px; margin: 0 6px; background: var(--line-soft); }
+  .state-foot { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--line-soft); color: var(--faint); font-size: 8.5px; line-height: 1.55; }
+  .state-foot b { color: var(--muted); font-weight: 500; }
+  .key-row { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; margin-top: 8px; }
+  .key-row kbd { height: 20px; padding: 0 6px; font-size: 8px; color: var(--muted); }
+  .key-plus { color: var(--faint); font-size: 8px; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .note-card { padding: 18px; border: 1px solid var(--line); border-radius: 15px; background: rgba(13,20,32,.76); box-shadow: inset 0 1px 0 rgba(255,255,255,.035); }
+  .note-card h3 { margin: 0 0 10px; font-size: 12px; font-weight: 600; }
+  .note-card ol, .note-card ul { margin: 0; padding-left: 17px; color: var(--dim); font-size: 10px; line-height: 1.9; }
+  .note-card li::marker { color: var(--faint); font-family: var(--mono); font-size: 8px; }
+  .note-card li b { color: var(--text); font-weight: 500; }
+  .note-card code { padding: 1px 4px; border: 1px solid var(--line-soft); border-radius: 4px; background: rgba(255,255,255,.035); color: #cbe9ff; font-family: var(--mono); font-size: 8px; }
+  .page-foot { display: flex; justify-content: space-between; gap: 16px; margin-top: 30px; padding-top: 14px; border-top: 1px solid var(--line-soft); color: var(--faint); font-family: var(--mono); font-size: 8px; }
+
+  @media (max-width: 1100px) {
+    .page { width: calc(100% - 24px); padding-top: 24px; }
+    .page-head { grid-template-columns: 1fr; align-items: start; }
+    .head-meta { align-items: flex-start; }
+    .issue-stack { justify-content: flex-start; }
+    .state-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .two-col { grid-template-columns: 1fr; }
+    .stage-note { margin-left: 0; }
+  }
+  @media (max-width: 680px) {
+    .state-grid { grid-template-columns: 1fr; }
+    .stage-toolbar { align-items: flex-start; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+  <symbol id="i-photo" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2.5"/><circle cx="8.5" cy="9.5" r="1.6"/><path d="m21 15-4.5-4.5L6 21"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.5"/><path d="m16 16 4 4"/></symbol>
+  <symbol id="i-compress" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/><path d="m9 9-5-5M15 9l5-5M9 15l-5 5M15 15l5 5"/></symbol>
+  <symbol id="i-dashboard" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-1.7 2.95-.09-.03a1.7 1.7 0 0 0-1.8.2 1.7 1.7 0 0 0-.78 1.64V21h-3.4v-.1a1.7 1.7 0 0 0-1.12-1.55 1.7 1.7 0 0 0-1.86.34l-.07.06-1.7-2.95.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-1.54-1H3v-3.4h.1A1.7 1.7 0 0 0 4.65 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06 1.7-2.95.07.03a1.7 1.7 0 0 0 1.8-.2A1.7 1.7 0 0 0 8.6 2.3V2h3.4v.1A1.7 1.7 0 0 0 13.12 3.7a1.7 1.7 0 0 0 1.86-.34l.07-.06 1.7 2.95-.06.06A1.7 1.7 0 0 0 16.4 8.2a1.7 1.7 0 0 0 1.54 1H18v3.4h-.1A1.7 1.7 0 0 0 16.35 14Z"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3.5 6.5A2 2 0 0 1 5.5 4.5h4l2 2h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2Z"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6.5 7l.8 13h9.4l.8-13M10 11v5M14 11v5"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="11" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h2"/></symbol>
+  <symbol id="i-tag" viewBox="0 0 24 24"><path d="m20 13-7 7a2 2 0 0 1-2.8 0L3 12.8V4h8.8L20 12.2a2 2 0 0 1 0 2.8Z"/><circle cx="8" cy="9" r="1.4"/></symbol>
+  <symbol id="i-sparkles" viewBox="0 0 24 24"><path d="m12 3 1.5 5.5L19 10l-5.5 1.5L12 17l-1.5-5.5L5 10l5.5-1.5Z"/><path d="m19 15 .7 2.3L22 18l-2.3.7L19 21l-.7-2.3L16 18l2.3-.7Z"/></symbol>
+  <symbol id="i-discord" viewBox="0 0 24 24"><path d="M8.5 6.5c-2.2.6-3.5 1.7-4.2 3.5-.8 2.1-1 4.7-.4 7.4 1.3 1 3 1.6 4.5 1.7l.9-1.5c-.6-.2-1.2-.5-1.8-.9l.4-.3c2.5 1.2 5.7 1.2 8.2 0l.4.3c-.6.4-1.2.7-1.8.9l.9 1.5c1.5-.1 3.2-.7 4.5-1.7.6-2.7.4-5.3-.4-7.4-.7-1.8-2-2.9-4.2-3.5L15 5.4c-.3.6-.5 1.1-.6 1.6a12 12 0 0 0-4.8 0c-.1-.5-.3-1-.6-1.6Z"/><circle cx="9.2" cy="12.7" r="1"/><circle cx="14.8" cy="12.7" r="1"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.2 4.2L19 7"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></symbol>
+  <symbol id="i-filter" viewBox="0 0 24 24"><path d="M4 6h16M7 12h10M10 18h4"/></symbol>
+  <symbol id="i-sort" viewBox="0 0 24 24"><path d="M7 4v16M4 17l3 3 3-3M17 20V4M14 7l3-3 3 3"/></symbol>
+  <symbol id="i-expand" viewBox="0 0 24 24"><path d="M8 3H3v5M16 3h5v5M21 16v5h-5M3 16v5h5"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></symbol>
+  <symbol id="i-warning" viewBox="0 0 24 24"><path d="M12 3 2.5 20h19Z"/><path d="M12 9v5M12 17h.01"/></symbol>
+</svg>
+
+<div class="page">
+  <header class="page-head">
+    <div>
+      <div class="eyebrow">VRC PhotoN · UI mock</div>
+      <h1>写真の上で、右クリック。</h1>
+      <p class="lede">
+        選択した写真に、いま見ている場所から操作を届ける右クリックメニュー。
+        単一選択・複数選択・AI 未準備の状態と、タグ編集ダイアログまでを確認するためのモックです。
+      </p>
+    </div>
+    <div class="head-meta">
+      <div class="issue-stack">
+        <span class="issue-chip"><b>#415</b> メニュー基盤</span>
+        <span class="issue-chip"><b>#416</b> 既存操作</span>
+        <span class="issue-chip"><b>#418</b> タグ編集</span>
+      </div>
+      <div class="head-note">実装前レビュー用 · 写真はプレースホルダー</div>
+    </div>
+  </header>
+
+  <div class="stage-toolbar">
+    <div class="state-switch" role="group" aria-label="選択状態の切り替え">
+      <button class="state-btn active" type="button" data-state="single">単一選択</button>
+      <button class="state-btn" type="button" data-state="multi">複数選択 <span>3</span></button>
+      <button class="state-btn" type="button" data-state="ai-off">AI 未準備</button>
+    </div>
+    <button class="toolbar-btn" id="reopen-menu" type="button">
+      <svg class="icon icon-xs"><use href="#i-folder"/></svg>
+      メニューを開く
+    </button>
+    <button class="toolbar-btn" id="open-dialog" type="button">
+      <svg class="icon icon-xs"><use href="#i-tag"/></svg>
+      タグ編集を開く
+    </button>
+    <div class="stage-note">メニューは写真カードの位置に開く</div>
+  </div>
+
+  <div class="stage-scroll">
+    <div class="app-window" id="app" data-state="single">
+      <!-- sidebar -->
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-glyph"><svg class="icon icon-sm"><use href="#i-photo"/></svg></div>
+          <div class="brand-copy">
+            <div class="brand-name">VRC PhotoN</div>
+            <div class="brand-sub">LOCAL PHOTO LIBRARY</div>
+          </div>
+        </div>
+        <nav class="nav" aria-label="メイン">
+          <a class="nav-item active" href="#"><svg class="icon"><use href="#i-photo"/></svg><span>写真</span><span class="nav-count">1,284</span></a>
+          <a class="nav-item" href="#"><svg class="icon"><use href="#i-search"/></svg><span>検索</span></a>
+          <a class="nav-item" href="#"><svg class="icon"><use href="#i-compress"/></svg><span>圧縮</span><span class="nav-count">12</span></a>
+          <a class="nav-item" href="#"><svg class="icon"><use href="#i-dashboard"/></svg><span>ダッシュボード</span><span class="nav-status"></span></a>
+          <a class="nav-item" href="#"><svg class="icon"><use href="#i-settings"/></svg><span>設定</span></a>
+        </nav>
+        <div class="sidebar-section">
+          <div class="sidebar-label"><span>進行状況</span><b>圧縮</b></div>
+          <div class="mini-progress">
+            <div class="mini-progress-row"><span class="dot"></span><span>実行中</span><span class="bar"><i></i></span><span class="num">3</span></div>
+            <div class="mini-progress-row"><span class="dot amber"></span><span>未実行</span><span class="num">12</span></div>
+          </div>
+        </div>
+        <div class="sidebar-section storage-card">
+          <div class="sidebar-label"><span>ライブラリ</span><b>1,284枚</b></div>
+          <div class="storage-row"><span>合計容量</span><span>18.4 GB</span></div>
+          <div class="storage-row"><span>最終スキャン</span><span>2分前</span></div>
+          <div class="daemon-pill">デーモン監視中</div>
+        </div>
+        <div class="version">v0.11.3 · DEMO DATA</div>
+      </aside>
+
+      <!-- main -->
+      <div class="main">
+        <div class="header-card">
+          <div class="titlebar">
+            <div class="brand-glyph"><svg class="icon icon-xs"><use href="#i-photo"/></svg></div>
+            <span class="titlebar-title">VRC PhotoN</span>
+            <span class="titlebar-sep"></span>
+            <span class="titlebar-screen">写真</span>
+            <span class="titlebar-spacer"></span>
+            <button class="titlebar-icon" type="button" aria-label="リボンを折りたたむ"><svg class="icon icon-sm"><use href="#i-chevron"/></svg></button>
+            <button class="titlebar-icon" type="button" aria-label="通知"><svg class="icon icon-sm"><use href="#i-bell"/></svg><span class="bell-dot"></span></button>
+            <div class="window-buttons" aria-hidden="true"><span>—</span><span>□</span><span>×</span></div>
+          </div>
+          <div class="ribbon">
+            <div class="ribbon-group">
+              <button class="ribbon-btn primary" type="button"><svg class="icon"><use href="#i-folder"/></svg><span>コピー取込</span></button>
+              <button class="ribbon-btn" type="button"><svg class="icon"><use href="#i-folder"/></svg><span>移動取込</span></button>
+            </div>
+            <div class="ribbon-group">
+              <button class="ribbon-btn" type="button"><svg class="icon"><use href="#i-photo"/></svg><span>再読込</span></button>
+              <button class="ribbon-btn" type="button"><svg class="icon"><use href="#i-expand"/></svg><span>詳細パネル</span></button>
+            </div>
+            <div class="ribbon-group">
+              <button class="ribbon-btn" type="button"><svg class="icon"><use href="#i-check"/></svg><span>すべて選択</span></button>
+              <button class="ribbon-btn" type="button"><svg class="icon"><use href="#i-filter"/></svg><span>選択解除</span></button>
+            </div>
+            <div class="ribbon-group">
+              <button class="ribbon-btn" type="button"><svg class="icon"><use href="#i-trash"/></svg><span>ゴミ箱へ</span></button>
+              <button class="ribbon-btn primary" type="button"><svg class="icon"><use href="#i-compress"/></svg><span>圧縮</span></button>
+            </div>
+            <div class="ribbon-group">
+              <button class="ribbon-btn" type="button"><svg class="icon"><use href="#i-folder"/></svg><span>指定フォルダ</span></button>
+              <button class="ribbon-btn" type="button"><svg class="icon"><use href="#i-folder"/></svg><span>プロファイル先</span></button>
+              <button class="ribbon-btn" type="button"><svg class="icon"><use href="#i-copy"/></svg><span>クリップボード</span></button>
+            </div>
+            <div class="ribbon-label">ホーム · 写真 · 圧縮</div>
+          </div>
+        </div>
+
+        <div class="content">
+          <div class="photo-layout">
+            <section class="panel gallery" aria-label="写真グリッド">
+              <div class="gallery-head">
+                <b>2026年11月</b>
+                <span class="count">9枚 / 1,284枚</span>
+                <span class="spacer"></span>
+                <button class="tiny-btn" type="button"><svg class="icon"><use href="#i-filter"/></svg>フィルター</button>
+                <button class="tiny-btn" type="button"><svg class="icon"><use href="#i-sort"/></svg>並び: 新しい順</button>
+              </div>
+              <div class="selection-bar" id="selection-bar">
+                <svg class="icon icon-xs"><use href="#i-check"/></svg>
+                <span>3件選択中</span>
+                <span class="spacer"></span>
+                <button class="tiny-btn" type="button">選択解除</button>
+                <button class="tiny-btn" type="button">3件を圧縮</button>
+              </div>
+              <div class="grid-wrap">
+                <div class="photo-grid" id="grid">
+                  <article class="photo-card" data-photo="1">
+                    <div class="thumb scene-night"><div class="thumb-overlay"></div>
+                      <div class="card-top"><span class="check"><svg class="icon"><use href="#i-check"/></svg></span><span class="card-flags"><span class="flag"><span class="dot"></span>圧縮済</span></span></div>
+                    </div>
+                    <div class="card-body"><div class="card-title">Neon District</div><div class="card-meta"><span>2026.11.07</span><span>4.2 MB</span></div></div>
+                  </article>
+                  <article class="photo-card primary" data-photo="2">
+                    <div class="thumb scene-sunset"><div class="thumb-overlay"></div>
+                      <div class="card-top"><span class="check"><svg class="icon"><use href="#i-check"/></svg></span><span class="card-flags"><span class="flag fav">★</span><span class="flag"><span class="dot"></span>圧縮済</span></span></div>
+                    </div>
+                    <div class="card-body"><div class="card-title">Sunset Terrace</div><div class="card-meta"><span>2026.11.07</span><span>6.8 MB</span></div></div>
+                  </article>
+                  <article class="photo-card" data-photo="3">
+                    <div class="thumb scene-forest"><div class="thumb-overlay"></div>
+                      <div class="card-top"><span class="check"><svg class="icon"><use href="#i-check"/></svg></span><span class="card-flags"><span class="flag"><span class="dot"></span>圧縮済</span></span></div>
+                    </div>
+                    <div class="card-body"><div class="card-title">Forest Shrine</div><div class="card-meta"><span>2026.11.06</span><span>5.1 MB</span></div></div>
+                  </article>
+                  <article class="photo-card" data-photo="4">
+                    <div class="thumb scene-aqua"><div class="thumb-overlay"></div>
+                      <div class="card-top"><span class="check"><svg class="icon"><use href="#i-check"/></svg></span><span class="card-flags"><span class="flag">★</span></span></div>
+                    </div>
+                    <div class="card-body"><div class="card-title">Aqua Dome</div><div class="card-meta"><span>2026.11.05</span><span>3.9 MB</span></div></div>
+                  </article>
+                  <article class="photo-card" data-photo="5">
+                    <div class="thumb scene-stage"><div class="thumb-overlay"></div>
+                      <div class="card-top"><span class="check"><svg class="icon"><use href="#i-check"/></svg></span><span class="card-flags"><span class="flag"><span class="dot"></span>圧縮済</span></span></div>
+                    </div>
+                    <div class="card-body"><div class="card-title">Starlight Stage</div><div class="card-meta"><span>2026.11.04</span><span>7.4 MB</span></div></div>
+                  </article>
+                  <article class="photo-card" data-photo="6">
+                    <div class="thumb scene-snow"><div class="thumb-overlay"></div>
+                      <div class="card-top"><span class="check"><svg class="icon"><use href="#i-check"/></svg></span><span class="card-flags"><span class="flag">★</span></span></div>
+                    </div>
+                    <div class="card-body"><div class="card-title">Snow Cabin</div><div class="card-meta"><span>2026.11.03</span><span>4.6 MB</span></div></div>
+                  </article>
+                  <article class="photo-card" data-photo="7">
+                    <div class="thumb scene-desert"><div class="thumb-overlay"></div>
+                      <div class="card-top"><span class="check"><svg class="icon"><use href="#i-check"/></svg></span><span class="card-flags"><span class="flag"><span class="dot"></span>圧縮済</span></span></div>
+                    </div>
+                    <div class="card-body"><div class="card-title">Desert Ruins</div><div class="card-meta"><span>2026.11.02</span><span>8.1 MB</span></div></div>
+                  </article>
+                  <article class="photo-card" data-photo="8">
+                    <div class="thumb scene-garden"><div class="thumb-overlay"></div>
+                      <div class="card-top"><span class="check"><svg class="icon"><use href="#i-check"/></svg></span><span class="card-flags"><span class="flag">★</span></span></div>
+                    </div>
+                    <div class="card-body"><div class="card-title">Cherry Garden</div><div class="card-meta"><span>2026.11.01</span><span>5.7 MB</span></div></div>
+                  </article>
+                  <article class="photo-card" data-photo="9">
+                    <div class="thumb scene-deep"><div class="thumb-overlay"></div>
+                      <div class="card-top"><span class="check"><svg class="icon"><use href="#i-check"/></svg></span><span class="card-flags"><span class="flag"><span class="dot"></span>圧縮済</span></span></div>
+                    </div>
+                    <div class="card-body"><div class="card-title">Deep Sea</div><div class="card-meta"><span>2026.10.31</span><span>6.2 MB</span></div></div>
+                  </article>
+                </div>
+                <div class="year-rail" aria-hidden="true"><span>2026</span><span>2025</span><span>2024</span><span>2023</span></div>
+              </div>
+            </section>
+
+            <aside class="panel inspector" aria-label="写真の詳細">
+              <div class="inspector-bg">
+                <div class="inspector-preview"><div class="scene-sunset"></div></div>
+                <div class="inspector-badges"><span class="flag fav">★ お気に入り</span><span class="flag"><span class="dot"></span>圧縮済</span></div>
+              </div>
+              <div class="inspector-body">
+                <div class="inspector-title-row">
+                  <div class="inspector-title">Sunset Terrace</div>
+                  <span class="favorite">★</span>
+                </div>
+                <div class="inspector-date">2026.11.07 21:42 · Sunset Terrace</div>
+                <div class="meta-grid">
+                  <div><label>ワールド</label><b>Sunset Terrace</b></div>
+                  <div><label>インスタンス</label><b>Friends+</b></div>
+                  <div><label>撮影者</label><b>Tommy</b></div>
+                  <div><label>取得元</label><b>VRChat log</b></div>
+                </div>
+                <div class="inspector-section">
+                  <div class="section-label">撮影時のプレイヤー</div>
+                  <div class="tag-row"><span class="tag">Mika</span><span class="tag">Ren</span><span class="tag">Sora</span></div>
+                </div>
+                <div class="inspector-section">
+                  <div class="section-label">タグ</div>
+                  <div class="tag-row" id="inspector-tags">
+                    <span class="tag"><b>#</b>VRChat</span><span class="tag"><b>#</b>夜景</span><span class="tag"><b>#</b>フレンド</span>
+                  </div>
+                </div>
+              </div>
+              <div class="inspector-foot">
+                <button class="btn" type="button"><svg class="icon"><use href="#i-expand"/></svg>全画面表示</button>
+                <button class="btn" type="button"><svg class="icon"><use href="#i-discord"/></svg>Discord</button>
+                <button class="btn primary" type="button" id="inspector-compress"><svg class="icon"><use href="#i-compress"/></svg><span id="compress-label">圧縮</span></button>
+              </div>
+            </aside>
+          </div>
+        </div>
+      </div>
+
+      <!-- context menu -->
+      <div class="menu-layer submenu-open" id="menu-layer">
+        <div class="context-menu" id="context-menu" role="menu" aria-label="写真の操作">
+          <div class="menu-item active" data-menu="compress" role="menuitem" aria-haspopup="menu" tabindex="0">
+            <svg class="icon"><use href="#i-compress"/></svg><span class="label">圧縮</span><svg class="icon chevron"><use href="#i-chevron"/></svg>
+          </div>
+          <div class="submenu" role="menu" aria-label="圧縮の出力先">
+            <div class="menu-item" data-menu="compress-folder" role="menuitem" tabindex="0">
+              <svg class="icon"><use href="#i-folder"/></svg><span class="label">フォルダへ圧縮…</span>
+            </div>
+            <div class="menu-item" data-menu="compress-clipboard" id="menu-compress-clipboard" role="menuitem" tabindex="0">
+              <svg class="icon"><use href="#i-copy"/></svg><span class="label">クリップボードへ圧縮</span><span class="menu-note" id="clipboard-note">1枚のみ</span>
+            </div>
+          </div>
+          <div class="menu-item" data-menu="discord" id="menu-discord" role="menuitem" tabindex="0">
+            <svg class="icon"><use href="#i-discord"/></svg><span class="label">Discord へ送る</span><span class="menu-note" id="discord-note">1枚のみ</span>
+          </div>
+          <div class="menu-item" data-menu="ai" id="menu-ai" role="menuitem" tabindex="0">
+            <svg class="icon"><use href="#i-sparkles"/></svg><span class="label">AIタグ付け</span>
+          </div>
+          <div class="menu-sep" role="separator"></div>
+          <div class="menu-item" data-menu="tags" role="menuitem" tabindex="0">
+            <svg class="icon"><use href="#i-tag"/></svg><span class="label">タグを編集…</span>
+          </div>
+          <div class="menu-item" data-menu="copy" role="menuitem" tabindex="0">
+            <svg class="icon"><use href="#i-copy"/></svg><span class="label">パスをコピー</span>
+          </div>
+          <div class="menu-item" data-menu="folder" role="menuitem" tabindex="0">
+            <svg class="icon"><use href="#i-folder"/></svg><span class="label">フォルダを開く</span>
+          </div>
+          <div class="menu-sep" role="separator"></div>
+          <div class="menu-item danger" data-menu="trash" role="menuitem" tabindex="0">
+            <svg class="icon"><use href="#i-trash"/></svg><span class="label">ゴミ箱へ移動</span><kbd class="shortcut">Delete</kbd>
+          </div>
+        </div>
+      </div>
+
+      <!-- tag dialog -->
+      <div class="dialog-backdrop" id="dialog-backdrop">
+        <div class="tag-dialog" role="dialog" aria-modal="true" aria-labelledby="dialog-title">
+          <div class="dialog-head">
+            <div>
+              <h2 id="dialog-title">タグを編集</h2>
+              <p id="dialog-subtitle">3件の写真に共通するタグ</p>
+            </div>
+            <button class="dialog-close" type="button" id="dialog-close" aria-label="閉じる">×</button>
+          </div>
+          <div class="dialog-body">
+            <div class="common-note">
+              <svg class="icon"><use href="#i-info"/></svg>
+              <span id="dialog-note">共通タグのみ表示しています。写真ごとのタグは単一選択で編集できます。</span>
+            </div>
+            <div class="dialog-tags" id="dialog-tags"></div>
+            <div class="tag-input-row">
+              <input class="tag-input" id="tag-input" type="text" placeholder="タグを追加" aria-label="タグを追加">
+              <button class="btn" type="button" id="add-tag">追加</button>
+            </div>
+            <p class="dialog-hint">空文字と重複は保存時に正規化されます。AI タグはこの画面の対象外です。</p>
+          </div>
+          <div class="dialog-foot">
+            <span class="spacer"></span>
+            <button class="btn" type="button" id="dialog-cancel">キャンセル</button>
+            <button class="btn primary" type="button" id="dialog-save">保存</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    </div>
+  </div>
+
+  <section class="section">
+    <div class="section-head">
+      <div>
+        <h2>状態ごとの見え方</h2>
+        <p>同じメニューでも、選択と連携の状態で有効な項目が変わる。</p>
+      </div>
+      <div class="head-note">無効項目は色を落とし、クリック不可にする</div>
+    </div>
+    <div class="state-grid">
+      <article class="state-card">
+        <div class="state-card-head"><span class="state-dot"></span><h3>単一選択</h3></div>
+        <p>写真1枚。Discord 連携と AI が準備済みなら、すべての項目が使える。</p>
+        <div class="mini-menu">
+          <div class="mini-item"><svg class="icon"><use href="#i-compress"/></svg>圧縮<span class="mini-note">›</span></div>
+          <div class="mini-item"><svg class="icon"><use href="#i-discord"/></svg>Discord へ送る</div>
+          <div class="mini-item"><svg class="icon"><use href="#i-sparkles"/></svg>AIタグ付け</div>
+          <div class="mini-sep"></div>
+          <div class="mini-item"><svg class="icon"><use href="#i-tag"/></svg>タグを編集…</div>
+          <div class="mini-item"><svg class="icon"><use href="#i-copy"/></svg>パスをコピー</div>
+          <div class="mini-item"><svg class="icon"><use href="#i-folder"/></svg>フォルダを開く</div>
+          <div class="mini-sep"></div>
+          <div class="mini-item danger"><svg class="icon"><use href="#i-trash"/></svg>ゴミ箱へ移動</div>
+        </div>
+        <div class="state-foot"><b>Delete</b> は既存の Photos グリッドのキーバインドを併記。Discord は連携と Webhook が有効なときだけ。</div>
+      </article>
+      <article class="state-card">
+        <div class="state-card-head"><span class="state-dot amber"></span><h3>複数選択</h3></div>
+        <p>3枚を選択中。1枚だけを対象とする操作は無効になり、理由を短く添える。</p>
+        <div class="mini-menu">
+          <div class="mini-item"><svg class="icon"><use href="#i-compress"/></svg>圧縮<span class="mini-note">›</span></div>
+          <div class="mini-item disabled"><svg class="icon"><use href="#i-discord"/></svg>Discord へ送る<span class="mini-note">1枚のみ</span></div>
+          <div class="mini-item"><svg class="icon"><use href="#i-sparkles"/></svg>AIタグ付け</div>
+          <div class="mini-sep"></div>
+          <div class="mini-item"><svg class="icon"><use href="#i-tag"/></svg>タグを編集…<span class="mini-note">共通タグ</span></div>
+          <div class="mini-item"><svg class="icon"><use href="#i-copy"/></svg>パスをコピー</div>
+          <div class="mini-item"><svg class="icon"><use href="#i-folder"/></svg>フォルダを開く</div>
+          <div class="mini-sep"></div>
+          <div class="mini-item danger"><svg class="icon"><use href="#i-trash"/></svg>ゴミ箱へ移動</div>
+        </div>
+        <div class="state-foot">クリップボードへ圧縮も <b>1枚のみ</b>。メニューには理由を表示する。</div>
+      </article>
+      <article class="state-card">
+        <div class="state-card-head"><span class="state-dot rose"></span><h3>AI 未準備</h3></div>
+        <p>AI プラグインが未導入、モデル未準備、またはプローブ未完了。AI タグ付けだけを無効にする。</p>
+        <div class="mini-menu">
+          <div class="mini-item"><svg class="icon"><use href="#i-compress"/></svg>圧縮<span class="mini-note">›</span></div>
+          <div class="mini-item"><svg class="icon"><use href="#i-discord"/></svg>Discord へ送る</div>
+          <div class="mini-item disabled"><svg class="icon"><use href="#i-sparkles"/></svg>AIタグ付け<span class="mini-note">準備中</span></div>
+          <div class="mini-sep"></div>
+          <div class="mini-item"><svg class="icon"><use href="#i-tag"/></svg>タグを編集…</div>
+          <div class="mini-item"><svg class="icon"><use href="#i-copy"/></svg>パスをコピー</div>
+          <div class="mini-item"><svg class="icon"><use href="#i-folder"/></svg>フォルダを開く</div>
+          <div class="mini-sep"></div>
+          <div class="mini-item danger"><svg class="icon"><use href="#i-trash"/></svg>ゴミ箱へ移動</div>
+        </div>
+        <div class="state-foot">有効条件は <b>ai_tagging_enabled && ai.ready()</b>。メニュー側で推測しない。</div>
+      </article>
+      <article class="state-card">
+        <div class="state-card-head"><span class="state-dot"></span><h3>キーボード</h3></div>
+        <p>グリッドにフォーカスがあるとき、選択全体に対して同じメニューを開く。</p>
+        <div class="mini-menu">
+          <div class="mini-item"><svg class="icon"><use href="#i-photo"/></svg>主選択写真のカード位置</div>
+          <div class="mini-item"><svg class="icon"><use href="#i-check"/></svg>選択なしなら何もしない</div>
+          <div class="mini-item"><svg class="icon"><use href="#i-info"/></svg>入力フィールド中は開かない</div>
+          <div class="mini-sep"></div>
+          <div class="mini-item"><svg class="icon"><use href="#i-search"/></svg>検索結果も同じメニュー</div>
+          <div class="mini-item"><svg class="icon"><use href="#i-expand"/></svg>Esc で閉じる</div>
+        </div>
+        <div class="key-row"><kbd>Menu</kbd><span class="key-plus">/</span><kbd>Shift</kbd><span class="key-plus">+</span><kbd>F10</kbd><span class="key-plus">で起動</span></div>
+        <div class="state-foot">閉じたらキーボード起動はグリッドへ、マウス起動は元のフォーカスへ戻す。</div>
+      </article>
+    </div>
+  </section>
+
+  <section class="section two-col">
+    <div class="note-card">
+      <h3>メニュー構成</h3>
+      <ol>
+        <li><b>圧縮</b> — ホバーでサブメニュー（フォルダへ圧縮… / クリップボードへ圧縮）</li>
+        <li><b>Discord へ送る</b> — 単一選択のみ</li>
+        <li><b>AI タグ付け</b> — 複数可</li>
+        <li><b>タグを編集…</b> — 単一は全タグ、複数は共通タグ</li>
+        <li><b>パスをコピー</b> — 選択順に1行1パス</li>
+        <li><b>フォルダを開く</b> — 右クリックした写真の親フォルダ</li>
+        <li><b>ゴミ箱へ移動</b> — 赤系で区別、既存確認ダイアログ</li>
+      </ol>
+    </div>
+    <div class="note-card">
+      <h3>レビューしてほしいこと</h3>
+      <ul>
+        <li>破壊的操作の赤系は強すぎないか。通常項目との差が十分か。</li>
+        <li>無効項目の理由（1枚のみ / 準備中）をメニュー内に出すか、ツールチップに逃がすか。</li>
+        <li>圧縮サブメニューの位置と、ホバーで開く速度。</li>
+        <li>タグ編集ダイアログの「共通タグのみ」の説明量。</li>
+        <li>検索結果グリッドでも同じ見た目でよいか。</li>
+      </ul>
+    </div>
+  </section>
+
+  <footer class="page-foot">
+    <span>docs/ui-context-menu-mockup.html</span>
+    <span>#415 / #416 / #418 · UI mock for review</span>
+  </footer>
+</div>
+
+<script>
+  const app = document.getElementById('app');
+  const menuLayer = document.getElementById('menu-layer');
+  const contextMenu = document.getElementById('context-menu');
+  const dialogBackdrop = document.getElementById('dialog-backdrop');
+  const dialogTags = document.getElementById('dialog-tags');
+  const dialogSubtitle = document.getElementById('dialog-subtitle');
+  const dialogNote = document.getElementById('dialog-note');
+  const selectionBar = document.getElementById('selection-bar');
+  const compressLabel = document.getElementById('compress-label');
+  const toast = document.getElementById('toast');
+  const menuItems = {
+    discord: document.getElementById('menu-discord'),
+    ai: document.getElementById('menu-ai'),
+    clipboard: document.getElementById('menu-compress-clipboard')
+  };
+  const stateButtons = [...document.querySelectorAll('.state-btn')];
+  const cards = [...document.querySelectorAll('.photo-card')];
+
+  const tagsSingle = ['VRChat', '夜景', 'フレンド', 'Sunset Terrace', 'お気に入り'];
+  const tagsMulti = ['VRChat', '夜景', 'フレンド'];
+  const commonTagSet = new Set(tagsMulti);
+  let state = 'single';
+  let tags = [...tagsMulti];
+  let toastTimer;
+
+  function setState(next) {
+    state = next;
+    app.dataset.state = next;
+    stateButtons.forEach(button => button.classList.toggle('active', button.dataset.state === next));
+
+    const multi = next === 'multi';
+    const aiOff = next === 'ai-off';
+    selectionBar.classList.toggle('show', multi);
+    compressLabel.textContent = multi ? '3件を圧縮' : '圧縮';
+    document.querySelectorAll('.photo-card').forEach(card => {
+      const id = Number(card.dataset.photo);
+      card.classList.toggle('selected', multi && (id === 3 || id === 5));
+      card.classList.toggle('primary', id === 2);
+    });
+
+    menuItems.discord.classList.toggle('disabled', multi);
+    menuItems.discord.setAttribute('aria-disabled', String(multi));
+    menuItems.clipboard.classList.toggle('disabled', multi);
+    menuItems.clipboard.setAttribute('aria-disabled', String(multi));
+    menuItems.ai.classList.toggle('disabled', aiOff);
+    menuItems.ai.setAttribute('aria-disabled', String(aiOff));
+
+    document.querySelectorAll('[data-menu="discord"] .menu-note').forEach(note => {
+      note.textContent = multi ? '1枚のみ' : '';
+      note.style.display = multi ? '' : 'none';
+    });
+    document.querySelectorAll('[data-menu="compress-clipboard"] .menu-note').forEach(note => {
+      note.textContent = multi ? '1枚のみ' : '';
+      note.style.display = multi ? '' : 'none';
+    });
+
+    if (next === 'multi') {
+      tags = [...tagsMulti];
+    } else {
+      tags = [...tagsSingle];
+    }
+    renderTags();
+    updateDialogCopy();
+    openMenu();
+  }
+
+  function renderTags() {
+    dialogTags.innerHTML = '';
+    tags.forEach(tag => {
+      const chip = document.createElement('span');
+      chip.className = 'dialog-tag';
+      chip.innerHTML = `<span>#${tag}</span>`;
+      const remove = document.createElement('button');
+      remove.type = 'button';
+      remove.setAttribute('aria-label', `${tag} を削除`);
+      remove.textContent = '×';
+      remove.addEventListener('click', () => {
+        tags = tags.filter(value => value !== tag);
+        renderTags();
+      });
+      chip.appendChild(remove);
+      dialogTags.appendChild(chip);
+    });
+  }
+
+  function updateDialogCopy() {
+    const multi = state === 'multi';
+    dialogSubtitle.textContent = multi ? '3件の写真に共通するタグ' : '選択した写真のタグ';
+    dialogNote.textContent = multi
+      ? '共通タグのみ表示しています。写真ごとのタグは単一選択で編集できます。'
+      : 'この写真の手動タグをすべて表示しています。AI タグは対象外です。';
+  }
+
+  function openDialog() {
+    updateDialogCopy();
+    dialogBackdrop.classList.add('open');
+    document.getElementById('tag-input').focus();
+  }
+  function closeDialog() {
+    dialogBackdrop.classList.remove('open');
+  }
+  function openMenu() {
+    menuLayer.style.display = '';
+  }
+  function closeMenu() {
+    menuLayer.style.display = 'none';
+  }
+  function showToast(message) {
+    toast.textContent = message;
+    toast.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toast.classList.remove('show'), 2200);
+  }
+
+  stateButtons.forEach(button => button.addEventListener('click', () => setState(button.dataset.state)));
+  document.getElementById('reopen-menu').addEventListener('click', openMenu);
+  document.getElementById('open-dialog').addEventListener('click', openDialog);
+  document.getElementById('dialog-close').addEventListener('click', closeDialog);
+  document.getElementById('dialog-cancel').addEventListener('click', closeDialog);
+  document.getElementById('dialog-save').addEventListener('click', () => {
+    closeDialog();
+    showToast(`${tags.length}件のタグを保存しました`);
+  });
+  document.getElementById('add-tag').addEventListener('click', () => {
+    const input = document.getElementById('tag-input');
+    const value = input.value.trim();
+    if (!value) return;
+    if (!tags.includes(value)) tags.push(value);
+    input.value = '';
+    renderTags();
+  });
+  document.getElementById('tag-input').addEventListener('keydown', event => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      document.getElementById('add-tag').click();
+    }
+  });
+
+  contextMenu.addEventListener('mouseover', event => {
+    const item = event.target.closest('.menu-item');
+    if (!item || item.classList.contains('disabled')) return;
+    scheduleSubmenu(item.dataset.menu === 'compress');
+  });
+  contextMenu.addEventListener('mouseleave', event => {
+    if (event.relatedTarget && contextMenu.contains(event.relatedTarget)) return;
+    scheduleSubmenu(true);
+  });
+  let submenuTimer;
+  function scheduleSubmenu(open) {
+    clearTimeout(submenuTimer);
+    submenuTimer = setTimeout(() => menuLayer.classList.toggle('submenu-open', open), open ? 0 : 120);
+  }
+
+  document.querySelectorAll('.menu-item').forEach(item => {
+    item.addEventListener('click', () => {
+      if (item.classList.contains('disabled')) return;
+      const action = item.dataset.menu;
+      if (action === 'compress') { menuLayer.classList.add('submenu-open'); return; }
+      if (action === 'tags') { closeMenu(); openDialog(); return; }
+      if (action === 'copy') { closeMenu(); showToast(state === 'multi' ? '3件のパスをコピーしました' : 'パスをコピーしました'); return; }
+      if (action === 'folder') { closeMenu(); showToast('フォルダを開きました'); return; }
+      if (action === 'trash') { closeMenu(); showToast('ゴミ箱へ移動の確認を開きます'); return; }
+      if (action === 'discord') { closeMenu(); showToast('Discord へ送る経路を開きます'); return; }
+      if (action === 'ai') { closeMenu(); showToast('AI タグ付けを開始します'); return; }
+      if (action === 'compress-folder') { closeMenu(); showToast('フォルダへ圧縮を開きます'); return; }
+      if (action === 'compress-clipboard') { closeMenu(); showToast('クリップボードへ圧縮します'); return; }
+    });
+  });
+
+  cards.forEach(card => card.addEventListener('click', () => {
+    const id = Number(card.dataset.photo);
+    cards.forEach(other => {
+      other.classList.toggle('primary', other === card);
+      other.classList.remove('selected');
+    });
+    if (id !== 2) {
+      document.querySelector('[data-photo="2"]').classList.remove('primary');
+      card.classList.add('primary');
+    }
+    openMenu();
+  }));
+
+  document.addEventListener('click', event => {
+    if (menuLayer.style.display === 'none') return;
+    if (event.target.closest('#menu-layer') || event.target.closest('.toolbar-btn') || event.target.closest('.state-btn') || event.target.closest('.photo-card')) return;
+    closeMenu();
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape') {
+      if (dialogBackdrop.classList.contains('open')) { closeDialog(); return; }
+      closeMenu();
+    }
+  });
+  document.getElementById('dialog-backdrop').addEventListener('click', event => {
+    if (event.target === dialogBackdrop) closeDialog();
+  });
+
+  setState('single');
+</script>
+</body>
+</html>
