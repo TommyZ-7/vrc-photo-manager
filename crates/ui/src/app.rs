@@ -3,6 +3,7 @@ pub(crate) mod ai_tag_picker;
 pub(crate) mod ai_thresholds;
 pub(crate) mod cli;
 pub(crate) mod compression;
+pub(crate) mod context_menu;
 pub(crate) mod daemon;
 pub(crate) mod deletion;
 pub(crate) mod demo;
@@ -60,9 +61,9 @@ use crate::state::viewer::{
 };
 use crate::ui::actions::{
     CloseNotifications, CloseQuickLook, FocusSearch, GridAbovePhoto, GridBelowPhoto, GridNextPhoto,
-    GridPreviousPhoto, OpenQuickLook, QuickLookNextFocus, QuickLookPrevFocus, ToggleInspector,
-    ToggleSidebar, TrashSelectedPhotos, ViewerNextPhoto, ViewerPreviousPhoto, ViewerZoomIn,
-    ViewerZoomOut, ViewerZoomReset,
+    GridPreviousPhoto, OpenPhotoContextMenu, OpenQuickLook, QuickLookNextFocus, QuickLookPrevFocus,
+    ToggleInspector, ToggleSidebar, TrashSelectedPhotos, ViewerNextPhoto, ViewerPreviousPhoto,
+    ViewerZoomIn, ViewerZoomOut, ViewerZoomReset,
 };
 use crate::ui::chrome::{ChromeLayout, chrome_layout};
 use crate::ui::gallery::GalleryView;
@@ -214,6 +215,8 @@ pub struct App {
     /// A timer is already queued to flush a partial thumbnail notice batch.
     pub(crate) thumbnail_notice_scheduled: bool,
     pub(crate) photo_grid_focus: FocusHandle,
+    pub(crate) search_grid_focus: FocusHandle,
+    pub(crate) photo_context_menu: Option<context_menu::PhotoContextMenuState>,
     pub(crate) import_dialog_focus: FocusHandle,
     pub(crate) quick_look_open: bool,
     pub(crate) quick_look_epoch: u64,
@@ -410,6 +413,8 @@ pub struct App {
     /// tooltips only appear on hover.
     pub(crate) theme_focused: Option<(ThemeAxis, usize)>,
     pub(crate) _theme_focus_subscriptions: Vec<Subscription>,
+    pub(crate) _context_menu_activation: Subscription,
+    pub(crate) _context_menu_bounds: Subscription,
     pub(crate) failure_baseline: Option<(i64, usize)>,
     pub(crate) demo: bool,
     pub(crate) demo_assets: Option<DemoAssets>,
@@ -811,6 +816,7 @@ impl App {
             0
         });
         let photo_grid_focus = cx.focus_handle();
+        let search_grid_focus = cx.focus_handle();
         let import_dialog_focus = cx.focus_handle();
         let quick_look_close_focus = cx.focus_handle();
         let quick_look_prev_focus = cx.focus_handle();
@@ -888,6 +894,14 @@ impl App {
         )));
         let thumbnails = Rc::new(RefCell::new(ThumbnailCache::default()));
         let app_entity = cx.entity();
+        let context_menu_activation = cx.observe_window_activation(window, |this, window, cx| {
+            if !window.is_window_active() {
+                this.close_photo_context_menu_for_lifecycle(window, cx);
+            }
+        });
+        let context_menu_bounds = cx.observe_window_bounds(window, |this, window, cx| {
+            this.close_photo_context_menu_for_lifecycle(window, cx);
+        });
         let library_gallery = cx.new(|cx| {
             GalleryView::new(
                 app_entity.clone(),
@@ -1007,6 +1021,8 @@ impl App {
             thumbnail_notice: ThumbnailNoticeBatch::default(),
             thumbnail_notice_scheduled: false,
             photo_grid_focus,
+            search_grid_focus,
+            photo_context_menu: None,
             import_dialog_focus,
             quick_look_open: false,
             quick_look_epoch: 0,
@@ -1172,6 +1188,8 @@ impl App {
             theme_accent_focus,
             theme_focused: None,
             _theme_focus_subscriptions: theme_focus_subscriptions,
+            _context_menu_activation: context_menu_activation,
+            _context_menu_bounds: context_menu_bounds,
             deletion_requests: Vec::new(),
             deletion_counts: DeletionCounts::default(),
             deletion_baseline: None,
@@ -1253,6 +1271,7 @@ impl Render for App {
             });
         }
         self.guard_viewer_selection(window, cx);
+        self.sync_photo_context_menu(window, cx);
         let mut root = h_flex()
             .relative()
             .size_full()
@@ -1279,6 +1298,11 @@ impl Render for App {
             .on_action(cx.listener(|this, _: &OpenQuickLook, window, cx| {
                 if !this.global_shortcuts_blocked(window, cx) {
                     this.open_quick_look(window, cx, ViewerOpenSource::Auto)
+                }
+            }))
+            .on_action(cx.listener(|this, _: &OpenPhotoContextMenu, window, cx| {
+                if !this.global_shortcuts_blocked(window, cx) {
+                    this.open_photo_context_menu_from_keyboard(window, cx)
                 }
             }))
             .on_action(cx.listener(|this, _: &CloseQuickLook, window, cx| {
@@ -1375,6 +1399,11 @@ impl Render for App {
             root = root.child(self.quick_look(window, cx));
         }
         let root = root.child(self.viewer_morph_view.clone());
+        let root = if let Some(menu) = self.photo_context_menu_overlay() {
+            root.child(menu)
+        } else {
+            root
+        };
         if self.notification_modal_open {
             root.child(self.notification_modal(window, cx))
         } else {
