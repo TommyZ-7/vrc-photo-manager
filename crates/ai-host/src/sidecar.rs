@@ -1086,6 +1086,7 @@ fn validate_result(
         SidecarResult::PeopleCount { .. } => Op::PeopleCount,
         SidecarResult::PlaceClass { .. } => Op::PlaceClass,
         SidecarResult::PlaceTags { .. } => Op::PlaceTags,
+        SidecarResult::AtmosphereTags { .. } => Op::AtmosphereTags,
     };
     if actual_op != expected_op {
         return Err(AiHostError::SidecarProtocol(format!(

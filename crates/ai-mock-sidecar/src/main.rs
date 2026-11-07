@@ -18,8 +18,10 @@
 //!   (`indoor`, `outdoor`, or `other`).
 //! - `MOCK_SIDECAR_CATALOG`: fallback path to a `Catalog` JSON file when
 //!   `--catalog` is absent. A real sidecar always receives `--catalog`, so
-//!   the flag takes precedence. When neither is usable, the built-in two-tag
-//!   catalog is used.
+//!   the flag takes precedence. When neither is usable, the built-in catalog
+//!   is used.
+//! - `MOCK_SIDECAR_NO_ATMOSPHERE=1`: behave like a pre-0.4 sidecar by
+//!   omitting the `atmosphere_tags` capability and atmosphere catalog.
 
 use std::collections::VecDeque;
 use std::fs;
@@ -318,6 +320,7 @@ fn builtin_catalog() -> Catalog {
             name_en: Some("Sea".to_string()),
             description: "海が見える屋外".to_string(),
             default_threshold: 0.5,
+            group: String::new(),
         }],
         indoor: vec![TagDefinition {
             key: "japanese_room".to_string(),
@@ -325,8 +328,31 @@ fn builtin_catalog() -> Catalog {
             name_en: Some("Japanese room".to_string()),
             description: "畳・障子のある和室".to_string(),
             default_threshold: 0.5,
+            group: String::new(),
         }],
+        atmosphere: vec![
+            TagDefinition {
+                key: "weather_clear".to_string(),
+                name: "晴れ".to_string(),
+                name_en: Some("Clear / sunny".to_string()),
+                description: "晴れている".to_string(),
+                default_threshold: 0.5,
+                group: "weather".to_string(),
+            },
+            TagDefinition {
+                key: "light_neon".to_string(),
+                name: "ネオンの光".to_string(),
+                name_en: Some("Neon light".to_string()),
+                description: "ネオンに照らされている".to_string(),
+                default_threshold: 0.5,
+                group: "light".to_string(),
+            },
+        ],
     }
+}
+
+fn atmosphere_enabled() -> bool {
+    env_bool("MOCK_SIDECAR_NO_ATMOSPHERE") != Some(true)
 }
 
 fn hello(args: &Args, catalog: &Catalog, mode: Mode) -> Hello {
@@ -334,6 +360,19 @@ fn hello(args: &Args, catalog: &Catalog, mode: Mode) -> Hello {
     let variant = emitted_variant(mode, &args.variant);
     let backend = emitted_backend(mode, &args.backend);
     let catalog_version = emitted_catalog_version(mode, &catalog.version);
+    let mut capabilities = vec![
+        "presence".to_string(),
+        "people_count".to_string(),
+        "place_class".to_string(),
+        "place_tags".to_string(),
+    ];
+    let mut catalog = catalog.clone();
+    catalog.version = catalog_version.clone();
+    if atmosphere_enabled() {
+        capabilities.push("atmosphere_tags".to_string());
+    } else {
+        catalog.atmosphere.clear();
+    }
     Hello {
         protocol_version: PROTOCOL_VERSION,
         sidecar_version: SIDECAR_VERSION.to_string(),
@@ -343,26 +382,18 @@ fn hello(args: &Args, catalog: &Catalog, mode: Mode) -> Hello {
             id: "d1-2B".to_string(),
             quantization: "Q8_0".to_string(),
             revision: "mock".to_string(),
-            catalog_version: catalog_version.to_string(),
+            catalog_version,
         },
         backend: BackendInfo {
             kind: backend.clone(),
             device: device_name(&backend),
         },
-        capabilities: vec![
-            "presence".to_string(),
-            "people_count".to_string(),
-            "place_class".to_string(),
-            "place_tags".to_string(),
-        ],
+        capabilities,
         defaults: TagDefaults {
             presence_threshold: 0.9,
             multiple_threshold: 0.5,
         },
-        catalog: Catalog {
-            version: catalog_version,
-            ..catalog.clone()
-        },
+        catalog,
     }
 }
 
@@ -591,6 +622,7 @@ fn response_result(
             let wrong_branch = match branch.unwrap_or(TagBranch::Outdoor) {
                 TagBranch::Indoor => TagBranch::Outdoor,
                 TagBranch::Outdoor => TagBranch::Indoor,
+                TagBranch::Atmosphere => TagBranch::Outdoor,
             };
             mock_result(op, Some(wrong_branch), catalog)
         }
@@ -634,9 +666,10 @@ fn mock_result(op: Op, branch: Option<TagBranch>, catalog: &Catalog) -> SidecarR
         }
         Op::PlaceTags => {
             let branch = branch.unwrap_or(TagBranch::Outdoor);
-            let definitions = match branch {
+            let definitions: &[TagDefinition] = match branch {
                 TagBranch::Indoor => &catalog.indoor,
                 TagBranch::Outdoor => &catalog.outdoor,
+                TagBranch::Atmosphere => &[],
             };
             let tags = definitions
                 .iter()
@@ -647,6 +680,22 @@ fn mock_result(op: Op, branch: Option<TagBranch>, catalog: &Catalog) -> SidecarR
                 })
                 .collect();
             SidecarResult::PlaceTags { branch, tags }
+        }
+        Op::AtmosphereTags => {
+            let definitions: &[TagDefinition] = if atmosphere_enabled() {
+                &catalog.atmosphere
+            } else {
+                &[]
+            };
+            let tags = definitions
+                .iter()
+                .enumerate()
+                .map(|(index, definition)| TagProbability {
+                    key: definition.key.clone(),
+                    p_yes: (0.9 - index as f32 * 0.1).max(0.0),
+                })
+                .collect();
+            SidecarResult::AtmosphereTags { tags }
         }
     }
 }
@@ -661,6 +710,34 @@ mod tests {
         assert_eq!(catalog.version, DEFAULT_CATALOG_VERSION);
         assert_eq!(catalog.outdoor[0].key, "sea");
         assert_eq!(catalog.indoor[0].key, "japanese_room");
+        assert!(!catalog.atmosphere.is_empty());
+        assert_eq!(catalog.atmosphere[0].key, "weather_clear");
+    }
+
+    #[test]
+    fn atmosphere_tags_return_every_atmosphere_tag() {
+        let catalog = builtin_catalog();
+        let SidecarResult::AtmosphereTags { tags } =
+            mock_result(Op::AtmosphereTags, None, &catalog)
+        else {
+            panic!("expected atmosphere_tags");
+        };
+
+        assert_eq!(tags.len(), catalog.atmosphere.len());
+        assert_eq!(tags[0].key, "weather_clear");
+        assert!((tags[0].p_yes - 0.9).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn hello_reports_atmosphere_capability() {
+        let args = Args {
+            probe: false,
+            backend: "vulkan".to_string(),
+            variant: "linux-vulkan".to_string(),
+            catalog: None,
+        };
+        let hello = hello(&args, &builtin_catalog(), Mode::Normal);
+        assert!(hello.supports_atmosphere());
     }
 
     #[test]

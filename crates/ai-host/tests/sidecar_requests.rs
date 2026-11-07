@@ -40,6 +40,16 @@ const CATALOG_JSON: &str = r#"{
       "description": "畳・障子のある和室",
       "default_threshold": 0.5
     }
+  ],
+  "atmosphere": [
+    {
+      "key": "weather_clear",
+      "name": "晴れ",
+      "name_en": "Clear / sunny",
+      "description": "晴れている",
+      "default_threshold": 0.5,
+      "group": "weather"
+    }
   ]
 }"#;
 
@@ -191,6 +201,13 @@ fn each_op_maps_to_the_expected_result() {
             )
             .unwrap(),
         SidecarResult::PlaceTags { .. }
+    ));
+    assert!(matches!(
+        client
+            .request(Op::AtmosphereTags, &image, None, &CancelToken::default())
+            .unwrap(),
+        SidecarResult::AtmosphereTags { tags }
+            if tags.len() == 1 && tags[0].key == "weather_clear"
     ));
 }
 
