@@ -999,9 +999,11 @@ mod tests {
         let delay = delay_ms
             .map(|delay| format!("export MOCK_SIDECAR_DELAY_MS={delay}\n"))
             .unwrap_or_default();
-        let no_atmosphere = no_atmosphere
-            .then_some("export MOCK_SIDECAR_NO_ATMOSPHERE=1\n")
-            .unwrap_or_default();
+        let no_atmosphere = if no_atmosphere {
+            "export MOCK_SIDECAR_NO_ATMOSPHERE=1\n"
+        } else {
+            ""
+        };
         format!(
             "#!/bin/sh\n\
              export MOCK_SIDECAR_MODE={mode}\n\

@@ -110,6 +110,11 @@ pub enum SidecarRequest {
 }
 
 /// A message sent from the sidecar to the host.
+///
+/// `Hello` carries the full catalog and is the largest variant by design.
+/// Messages are parsed one line at a time, so boxing it would add allocation
+/// and match noise without a meaningful runtime benefit.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SidecarMessage {
