@@ -47,6 +47,7 @@ pub enum TaggingStage {
     PeopleCount,
     PlaceClass,
     PlaceTags,
+    AtmosphereTags,
     Write,
 }
 
@@ -57,6 +58,7 @@ impl TaggingStage {
             Self::PeopleCount => "people_count",
             Self::PlaceClass => "place_class",
             Self::PlaceTags => "place_tags",
+            Self::AtmosphereTags => "atmosphere_tags",
             Self::Write => "write",
         }
     }
@@ -67,6 +69,7 @@ impl TaggingStage {
             "people_count" => Some(Self::PeopleCount),
             "place_class" => Some(Self::PlaceClass),
             "place_tags" => Some(Self::PlaceTags),
+            "atmosphere_tags" => Some(Self::AtmosphereTags),
             "write" => Some(Self::Write),
             _ => None,
         }
@@ -221,6 +224,7 @@ mod tests {
             TaggingStage::PeopleCount,
             TaggingStage::PlaceClass,
             TaggingStage::PlaceTags,
+            TaggingStage::AtmosphereTags,
             TaggingStage::Write,
         ];
         for stage in stages {

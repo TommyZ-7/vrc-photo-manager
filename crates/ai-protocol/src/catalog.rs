@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 pub enum TagBranch {
     Indoor,
     Outdoor,
+    Atmosphere,
 }
 
 impl TagBranch {
@@ -17,6 +18,7 @@ impl TagBranch {
         match self {
             Self::Indoor => "indoor",
             Self::Outdoor => "outdoor",
+            Self::Atmosphere => "atmosphere",
         }
     }
 
@@ -24,6 +26,7 @@ impl TagBranch {
         match value {
             "indoor" => Some(Self::Indoor),
             "outdoor" => Some(Self::Outdoor),
+            "atmosphere" => Some(Self::Atmosphere),
             _ => None,
         }
     }
@@ -73,6 +76,8 @@ pub struct TagDefinition {
     pub name_en: Option<String>,
     pub description: String,
     pub default_threshold: f32,
+    #[serde(default)]
+    pub group: String,
 }
 
 /// The tag catalog announced by the sidecar in `hello`.
@@ -81,6 +86,8 @@ pub struct Catalog {
     pub version: String,
     pub outdoor: Vec<TagDefinition>,
     pub indoor: Vec<TagDefinition>,
+    #[serde(default)]
+    pub atmosphere: Vec<TagDefinition>,
 }
 
 #[cfg(test)]
@@ -114,6 +121,30 @@ mod tests {
         assert_eq!(tag.name_en, None);
         assert_eq!(tag.key, "japanese_room");
         assert_eq!(tag.default_threshold, 0.5);
+        assert_eq!(tag.group, "");
+    }
+
+    #[test]
+    fn tag_definition_group_is_read_when_present() {
+        let json = r#"{"key":"weather_clear","name":"晴れ","description":"晴れ","default_threshold":0.5,"group":"weather"}"#;
+        let tag: TagDefinition = serde_json::from_str(json).unwrap();
+        assert_eq!(tag.group, "weather");
+    }
+
+    #[test]
+    fn catalog_atmosphere_is_optional() {
+        let catalog: Catalog =
+            serde_json::from_str(r#"{"version":"v","outdoor":[],"indoor":[]}"#).unwrap();
+        assert!(catalog.atmosphere.is_empty());
+    }
+
+    #[test]
+    fn atmosphere_branch_uses_the_wire_string() {
+        assert_eq!(
+            serde_json::to_value(TagBranch::Atmosphere).unwrap(),
+            "atmosphere"
+        );
+        assert_eq!(TagBranch::parse("atmosphere"), Some(TagBranch::Atmosphere));
     }
 
     #[test]
